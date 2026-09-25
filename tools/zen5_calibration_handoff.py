@@ -164,7 +164,7 @@ def replay(plan: dict[str, Any], trusted_digest: str, captures: dict[str, dict[s
     }
 
 
-def verify_service_phase(plan: dict[str, Any], report: dict[str, Any],
+def verify_service_phase(plan: dict[str, Any], report: Any,
                          presample: Any, completion: Any, trusted: Any) -> dict[str, Any]:
     """Check a service phase handoff; never turn descriptive replay into A/B authority.
 
@@ -193,8 +193,8 @@ def verify_service_phase(plan: dict[str, Any], report: dict[str, Any],
         if not isinstance(receipt, dict) or set(receipt) != fields:
             errors.append(f"{name} receipt fields differ")
             continue
-        if (receipt["schema"], receipt["version"], receipt["phase"], receipt["status"]) != (
-            PHASE_SCHEMA, 1, phase, status
+        if (receipt["schema"], receipt["phase"], receipt["status"]) != (PHASE_SCHEMA, phase, status) or (
+            type(receipt["version"]) is not int or receipt["version"] != 1
         ):
             errors.append(f"{name} receipt phase/status differs")
         if any(receipt[field] != trusted.get(field) for field in identities):
@@ -223,23 +223,39 @@ def verify_service_phase(plan: dict[str, Any], report: dict[str, Any],
         errors.append("service exclusive lease unavailable or stale")
     if trusted.get("presample_persisted_before_timing") is not True:
         errors.append("service did not attest pre-sample persistence")
-    if (report.get("status") != "descriptive-complete" or report.get("errors") != [] or
-        report.get("plan_sha256") != plan_digest or report.get("ab_authorized") is not False or
+    expected_report = {"schema", "version", "plan_sha256", "captures", "status", "errors",
+                       "physical_admission", "candidate_decision", "ab_authorized"}
+    if not isinstance(report, dict) or set(report) != expected_report:
+        errors.append("independent raw capture replay report fields differ")
+        report = {}
+    if (report.get("schema") != REPORT_SCHEMA or type(report.get("version")) is not int or
+        report.get("version") != 1 or report.get("status") != "descriptive-complete" or
+        report.get("errors") != [] or report.get("plan_sha256") != plan_digest or
+        report.get("ab_authorized") is not False or
         report.get("physical_admission") != "not-evaluated" or
         report.get("candidate_decision") != "not-evaluated"):
         errors.append("independent raw capture replay is incomplete or invalid")
+    captures = report.get("captures")
+    if not isinstance(captures, dict) or set(captures) != {"immutable", *KINDS}:
+        errors.append("independent replay capture inventory differs")
+        captures = {}
+    capture_digests: dict[str, str] = {}
+    for key in ("immutable", *KINDS):
+        item = captures.get(key)
+        if not isinstance(item, dict) or set(item) != {"capture_sha256", "analysis_sha256", "status"} or (
+            not SHA256_RE.fullmatch(str(item.get("capture_sha256"))) or
+            not SHA256_RE.fullmatch(str(item.get("analysis_sha256"))) or
+            item.get("status") != "descriptive-complete"
+        ):
+            errors.append(f"{key} independent replay result differs")
+        else:
+            capture_digests[key] = item["capture_sha256"]
     if isinstance(completion, dict) and set(completion) == expected_post:
         if completion["presample_sha256"] != trusted.get("presample_sha256"):
             errors.append("completion does not follow authenticated pre-sample receipt")
         if completion["report_sha256"] != sha256_bytes(canonical_bytes(report)):
             errors.append("completion does not bind independent replay")
-        captures = report.get("captures")
-        if not isinstance(captures, dict) or set(captures) != {"immutable", *KINDS} or (
-            completion["capture_digests"] != {
-                key: captures[key].get("capture_sha256") if isinstance(captures[key], dict) else None
-                for key in ("immutable", *KINDS)
-            }
-        ):
+        if len(capture_digests) != 3 or completion["capture_digests"] != capture_digests:
             errors.append("completion capture digests differ from independent replay")
     return {
         "schema": PHASE_SCHEMA, "version": 1,

@@ -73,6 +73,15 @@ def run() -> None:
     mutated = deepcopy(captures)
     mutated["cross-root"]["expected_output_sha256"] = "0" * 64
     assert replay(plan, digest, mutated, hashes, hashes)["status"] == "invalid"
+    mutated = deepcopy(captures)
+    mutated["immutable"]["repository"]["revision"] = "0" * 40
+    assert replay(plan, digest, mutated, hashes, hashes)["status"] == "invalid"
+    mutated = deepcopy(captures)
+    mutated["same-root-rebuild"]["observations"].pop()
+    assert replay(plan, digest, mutated, hashes, hashes)["status"] == "invalid"
+    mutated = deepcopy(captures)
+    mutated["cross-root"]["builds"]["B"]["build_root"] = mutated["cross-root"]["builds"]["A"]["build_root"]
+    assert replay(plan, digest, mutated, hashes, hashes)["status"] == "invalid"
     # These independently sourced facts model the private service channel,
     # never a request field or a receipt copied from the result bundle.
     identity = {
@@ -105,15 +114,28 @@ def run() -> None:
         checked = verify_service_phase(plan, result, pre, post, authority)
         assert checked["status"] == "denied" and not checked["ab_authorized"], checked
     denied(presample, completion, {})
-    for key, value in (("host_id", "stale-host"), ("boot_id", "stale-boot"),
+    for key, value in (("attempt", 2), ("host_id", "stale-host"), ("boot_id", "stale-boot"),
                        ("lease_id", "stale-lease"), ("lease_state", "released"),
                        ("host_qualification_state", "invalid"),
+                       ("host_qualification_state", "unsupported"),
+                       ("profile_sha256", "0" * 64),
                        ("presample_persisted_before_timing", False)):
         altered = dict(trusted)
         altered[key] = value
         denied(presample, completion, altered)
+    altered = dict(trusted)
+    altered.pop("completion_sha256")
+    denied(presample, completion, altered)
+    altered = dict(trusted)
+    altered["presample_sha256"] = "0" * 64
+    denied(presample, completion, altered)
+    denied(presample, {}, trusted)
+    denied({}, completion, trusted)
     altered = dict(completion)
     altered["status"] = "denied"
+    denied(presample, altered, trusted)
+    altered = dict(completion)
+    altered["presample_sha256"] = "0" * 64
     denied(presample, altered, trusted)
     altered = dict(completion)
     altered["ab_authorized"] = True
@@ -127,6 +149,16 @@ def run() -> None:
     altered = dict(report)
     altered["ab_authorized"] = True
     denied(presample, completion, trusted, altered)
+    altered = dict(report)
+    altered["schema"] = "unsupported-report"
+    denied(presample, completion, trusted, altered)
+    altered = deepcopy(report)
+    altered["captures"]["immutable"]["status"] = "invalid"
+    denied(presample, completion, trusted, altered)
+    altered = deepcopy(report)
+    altered["captures"].pop("cross-root")
+    denied(presample, completion, trusted, altered)
+    assert verify_service_phase(plan, None, presample, completion, trusted)["status"] == "denied"
     altered = dict(plan)
     altered["immutable_binary_sha256"] = "0" * 64
     assert verify_service_phase(altered, report, presample, completion, trusted)["status"] == "denied"
@@ -162,7 +194,7 @@ def run() -> None:
         write_json(paths["immutable"], changed)
         checked = invoke(*command)
         assert checked.returncode == 2 and "invalid" in checked.stdout, checked.stderr
-    print("zen5_calibration_handoff integration fixture passed")
+    print("zen5_calibration_handoff synthetic offline fixture passed")
 
 
 if __name__ == "__main__":

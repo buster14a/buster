@@ -134,19 +134,15 @@ physical host result. The production A/B gate in #1022 remains closed even
 after `verified-descriptive`; #1021 and #923 must test a real private-channel
 receipt to campaign transition on their integrated heads before admission.
 
-**Reviewed policy decision still required from the #426 owner:** approve a
-versioned empirical A/A eligibility rule before any protected physical A/B
-attempt. It must state the permitted wall/RSS noise, block drift, serial,
-label/path/order and same-root/cross-root build effects; exact statistic,
-observational unit, uncertainty/family allocation, thresholds, invalid and
-inconclusive outcomes, and the specific host/profile/build scope. Review
-independently captured full raw pilots on the qualified exclusive 9700X,
-including invalid and superseded attempts, output and binary hashes, PMU event
-availability and actual build provenance, before fixing the rule. Persist its
-reviewed policy identity in the service's post-A/A decision and authenticate
-that decision before #1022 opens A/B. The current descriptive model and #619
-candidate statistics cannot choose or infer these thresholds. No empirical
-rule has been approved by this PR.
+**Reviewed policy decision still required from the #426 owner:** the
+[versioned A/A eligibility proposal](zen5-aa-eligibility-proposal.md) specifies
+the decision structure and operator evidence packet, while leaving empirical
+limits and physical qualification unresolved. Review independently captured
+full raw pilots on the qualified exclusive 9700X before fixing the rule.
+Persist its reviewed policy identity in the service's post-A/A decision and
+authenticate that decision before #1022 opens A/B. The current descriptive
+model and #619 candidate statistics cannot choose or infer these thresholds.
+No empirical rule has been approved by this PR.
 
 The real producer is an explicitly authorized, separately admitted #880 service
 qualification phase. Its A/A work must be allowed before any A/B result exists;
