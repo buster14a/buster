@@ -18756,7 +18756,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
     for (u32 assignment_index = start; assignment_index < end; assignment_index += 1)
     {
         CToken assignment_token = preprocess.tokens[assignment_index];
-        if (!c_token_is_punctuator(&assignment_token, C_PUNCTUATOR_EQUAL) || assignment_index <= start ||
+        if (!c_token_is_punctuator(&assignment_token, C_PUNCTUATOR_ASSIGN) || assignment_index <= start ||
             preprocess.tokens[assignment_index - 1].kind != C_TOKEN_IDENTIFIER)
         {
             continue;
@@ -19122,7 +19122,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
             assignment_source_typed = checked_source || assignment_source_type.value < result->type_count;
         }
         String8 assignment_conversion_message = {0};
-        bool simple_assignment = c_token_is_punctuator(&token, C_PUNCTUATOR_EQUAL);
+        bool simple_assignment = c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN);
         bool incompatible_assignment = false;
         if (assignment && assignment_typed && simple_assignment && assignment_source_typed)
         {
