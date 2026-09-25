@@ -86,7 +86,14 @@ An independently frozen earlier compiler can establish the support baseline:
   --project-include build/dependency-materialized/dependencies/project-include --out build/census-comparison
 ```
 
-Without `--baseline-ide`, the same compiler supplies its direct `none` reference.
+On the pre-cutover compiler, omitting `--baseline-ide` uses that compiler's
+direct `none` emitter. This is not a direct reference after the native MIR-only
+cutover: `none` then names the MIR stack allocator. A post-cutover
+direct-versus-MIR comparison must use an independently archived direct compiler
+with explicit `--baseline-ide` and `--baseline-revision`, and must authenticate
+the reference executable's recorded SHA-256 and source provenance. Reusing the
+candidate executable, even under a different path, is not an independent
+comparison.
 Compiler copies preserve executable permissions and are verified against their
 original byte count and fingerprint before any compilation starts. Keep the
 original build provenance with the output; the harness cannot infer which source
@@ -480,6 +487,38 @@ increasing function IDs within its single-TU invocation, and exactly as many
 attribution records as aggregate fallbacks. Missing, duplicate, malformed or
 out-of-order attribution cannot be counted as complete evidence. Older baseline
 compilers do not need the new flag; candidate compilers do.
+
+### Post-cutover v1 compatibility policy
+
+The admitted v1 telemetry and the archived census are historical direct-versus-MIR
+evidence. Keep their original row identities, `none` baseline meaning, field
+names, function/reason/opcode/stage counts, and source/function attribution.
+Readers must continue to reject missing, duplicate, corrupt, or mismatched rows
+and replay the archived evidence against its recorded byte and SHA-256 identities.
+Neither an archived `none` row nor its recorded fallback count may be relabeled
+as a post-cutover MIR result. The archive and its oracle remain external to
+ordinary compiler builds and tests.
+
+The post-cutover live CLI will retain v1 fallback telemetry for a transition.
+For a native codegen attempt that reaches telemetry output, a MIR-only compiler
+emits `CODEGEN_FALLBACK_CENSUS version=1 records=0` when the census flag is
+requested, with zero `fallback_functions` and no fallback function, reason,
+opcode, or stage rows. These zeros report that no direct fallback was taken;
+they do not prove an independent comparison or turn a failed compilation into
+a successful artifact. `-fno-machine-fallback` remains an accepted strict
+compatibility spelling, and `-fmachine-fallback` cannot restore direct native
+emission. Any future nonzero MIR-specific diagnostic needs a separately reviewed
+version and reader binding; it must not be smuggled into a v1 fallback row.
+
+Once the cutover is accepted on main, the live census and validator must require
+an explicit, independently pinned archived direct executable for every
+direct-versus-MIR comparison. Its revision claim alone is insufficient: compare
+the copied binary's authenticated SHA-256 with the archive receipt, and reject
+a candidate-identical binary. Keep the historical v1 reader for archived
+evidence while making the new CLI, option help, workflow commands, and active
+driver documentation describe `none` as MIR stack allocation. The live schema
+and tests change only on the accepted cutover's integration tree; this policy
+does not rewrite admitted evidence or generated retirement bindings.
 
 All **observed fallbacks** are attributed. A fatal frontend/verifier/encoding
 error can stop compilation before later functions are visited. Its first fatal

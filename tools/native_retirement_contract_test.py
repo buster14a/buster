@@ -1174,6 +1174,45 @@ class ContractTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.validate(require_clean=False)
 
+    def test_v1_fallback_attribution_cannot_be_missing_or_duplicated(self):
+        telemetry = ("CODEGEN_FALLBACK_FUNCTION version=1 row=5 target=x86_64-linux allocator=mir-stack "
+                     "function_id=9 reason=opcode stage=selection opcode_id=7 line=3 column=2 "
+                     "source_hex=612063 function_hex=66")
+        self.install_single_fallback(1, "5", telemetry)
+        self.validate(require_clean=False)
+        function_path = self.shards[1] / "fallback-functions.tsv"
+        function_path.unlink()
+        with self.assertRaisesRegex(AssertionError, "fallback function attribution mismatch"):
+            self.validate(require_clean=False)
+
+        result_path = self.shards[1] / "results.tsv"
+        result_fields, results = read_table(result_path)
+        next(row for row in results if row["row"] == "5")["fallbacks"] = "2"
+        write_table(result_path, result_fields, results)
+        write_table(function_path, ("row", "record_valid", "telemetry"),
+                    [{"row": "5", "record_valid": "1", "telemetry": telemetry}] * 2)
+        write_table(self.shards[1] / "fallback-counters.tsv", ("row", "telemetry"), [
+            {"row": "5", "telemetry": "CODEGEN_FALLBACK_REASON target=x86_64-linux allocator=mir-stack reason=opcode count=2 version=1 row=5"},
+            {"row": "5", "telemetry": "CODEGEN_FALLBACK opcode=7 count=2 version=1 row=5 target=x86_64-linux allocator=mir-stack"},
+        ])
+        with self.assertRaisesRegex(AssertionError, "duplicate fallback function diagnostic"):
+            self.validate(require_clean=False)
+
+    def test_v1_fallback_diagnostic_cannot_add_a_duplicate_field(self):
+        telemetry = ("CODEGEN_FALLBACK_FUNCTION version=1 row=5 target=x86_64-linux allocator=mir-stack "
+                     "function_id=9 reason=opcode stage=selection opcode_id=7 line=3 column=2 "
+                     "source_hex=612063 function_hex=66 reason=opcode")
+        self.install_single_fallback(1, "5", telemetry)
+        with self.assertRaisesRegex(AssertionError, "malformed diagnostic field"):
+            self.validate(require_clean=False)
+
+    def test_v1_zero_fallback_row_rejects_counter_telemetry(self):
+        write_table(self.shards[1] / "fallback-counters.tsv", ("row", "telemetry"), [
+            {"row": "5", "telemetry": "CODEGEN_FALLBACK_REASON target=x86_64-linux allocator=mir-stack reason=opcode count=1 version=1 row=5"},
+        ])
+        with self.assertRaisesRegex(AssertionError, "counter diagnostic has no matching fallback count"):
+            self.validate(require_clean=False)
+
     def test_function_diagnostic_inner_row_rejects_identity_reassignment(self):
         _result_fields, results = read_table(self.shards[0] / "results.tsv")
         outer = next(row for row in results if row["row"] == "9")
