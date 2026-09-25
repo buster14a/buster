@@ -2005,12 +2005,13 @@ BUSTER_GLOBAL_LOCAL void machine_fast_close_home_ranges(Arena* arena, MachineFun
 // The selector's frame objects close the same way, but only the ones the color
 // scan can share: `machine_fast_color_slots` reads the range of a slot that is
 // neither fixed nor untouched and nothing else, so a fixed slot's bits would be
-// solved and materialized only to be dropped. A large function's frame is
-// mostly fixed — every local whose address escapes, every unproven access —
-// and dense planes over all of them cost blocks times every slot where the
-// answer needs blocks times the shareable ones. Each object's bits are
-// independent and the fixed point is unique, so the shareable ranges are the
-// same either way. Returns the number of objects closed over.
+// solved and materialized only to be dropped. Where most of a frame is fixed —
+// locals whose address escapes, objects reached in unproven forms — dense
+// planes over every slot cost blocks times all of them where the answer needs
+// blocks times the shareable ones. Every plane operation is per object and the
+// worklist climbs from empty sets to the least fixed point, so an object's
+// bits, and a shareable slot's range, do not depend on which other objects are
+// closed alongside it. Returns the number of objects closed over.
 BUSTER_GLOBAL_LOCAL u32 machine_fast_close_slot_ranges(Arena* arena, MachineFunction const* function, MachineFastPrepass const* prepass,
                                                        u8 const* slot_fixed, u32* slot_starts, u32* slot_ends)
 {
@@ -2083,30 +2084,33 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_close_slot_ranges(Arena* arena, MachineFunc
 }
 
 #if BUSTER_INCLUDE_TESTS
-// A frame of many fixed slots around three shareable ones, over a chain with a
+// A frame of many fixed slots around four shareable ones, over a chain with a
 // back edge. The closure must track exactly the shareable slots — its planes
 // are as wide as that count, whatever the fixed population — and give them the
 // ranges a closure over every slot gives them. The third slot is read at the
-// loop header before the latch writes it, so its range has to open at entry.
+// loop header before the latch writes it, so its range has to open at entry;
+// the fourth is sixteen bytes written eight at a time, a store that covers
+// nothing and therefore reads, so it is live around the whole loop too.
 bool machine_fast_close_slot_ranges_test(Arena* arena)
 {
     enum
     {
         MACHINE_FAST_SLOT_RANGE_TEST_BLOCK_COUNT = 64,
         MACHINE_FAST_SLOT_RANGE_TEST_FIXED_COUNT = 1000,
-        MACHINE_FAST_SLOT_RANGE_TEST_SHAREABLE_COUNT = 3,
+        MACHINE_FAST_SLOT_RANGE_TEST_SHAREABLE_COUNT = 4,
         MACHINE_FAST_SLOT_RANGE_TEST_SLOT_COUNT = MACHINE_FAST_SLOT_RANGE_TEST_FIXED_COUNT + MACHINE_FAST_SLOT_RANGE_TEST_SHAREABLE_COUNT,
     };
     u32 const block_count = MACHINE_FAST_SLOT_RANGE_TEST_BLOCK_COUNT;
     u32 const fixed_count = MACHINE_FAST_SLOT_RANGE_TEST_FIXED_COUNT;
     u32 const slot_count = MACHINE_FAST_SLOT_RANGE_TEST_SLOT_COUNT;
     u32 const latch = block_count - 2u;
-    u32 const exit = block_count - 1u;
+    u32 const exit_block = block_count - 1u;
     MachineRef rax = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX);
     MachineRef rdx = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RDX);
     MachineRef spanning = machine_ref_make(MACHINE_REF_STACK_SLOT, fixed_count);
     MachineRef local = machine_ref_make(MACHINE_REF_STACK_SLOT, fixed_count + 1u);
     MachineRef carried = machine_ref_make(MACHINE_REF_STACK_SLOT, fixed_count + 2u);
+    MachineRef partial = machine_ref_make(MACHINE_REF_STACK_SLOT, fixed_count + 3u);
     MachineFunctionBuilder builder = machine_function_builder_begin(arena);
     for (u32 block_index = 0; block_index < block_count; block_index += 1)
     {
@@ -2126,11 +2130,19 @@ bool machine_fast_close_slot_ranges_test(Arena* arena)
             machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_FRAME, .operands = {rdx, local}});
             machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_FRAME, .operands = {rdx, carried}});
         }
+        else if (block_index == 2)
+        {
+            machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_STORE_FRAME64, .operands = {partial, rax}});
+        }
+        else if (block_index == 3)
+        {
+            machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_FRAME, .operands = {rdx, partial}});
+        }
         else if (block_index == latch)
         {
             machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_STORE_FRAME64, .operands = {carried, rax}});
         }
-        if (block_index == exit)
+        if (block_index == exit_block)
         {
             machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_FRAME, .operands = {rdx, spanning}});
             for (u32 slot = 0; slot < fixed_count; slot += 1)
@@ -2145,7 +2157,7 @@ bool machine_fast_close_slot_ranges_test(Arena* arena)
             machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_CMP64, .operands = {rax, rax}});
             machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_JCC, .payload = MACHINE_X64_CONDITION_EQUAL,
                                                                        .operands = {machine_ref_make(MACHINE_REF_BLOCK, 1),
-                                                                                    machine_ref_make(MACHINE_REF_BLOCK, exit)}});
+                                                                                    machine_ref_make(MACHINE_REF_BLOCK, exit_block)}});
         }
         else
         {
@@ -2156,9 +2168,9 @@ bool machine_fast_close_slot_ranges_test(Arena* arena)
         if (block_index == latch)
         {
             machine_builder_edge(&builder, (MachineEdge){.source_block = latch, .destination_block = 1});
-            machine_builder_edge(&builder, (MachineEdge){.source_block = latch, .destination_block = exit});
+            machine_builder_edge(&builder, (MachineEdge){.source_block = latch, .destination_block = exit_block});
         }
-        else if (block_index != exit)
+        else if (block_index != exit_block)
         {
             machine_builder_edge(&builder, (MachineEdge){.source_block = block_index, .destination_block = block_index + 1u});
         }
@@ -2172,10 +2184,12 @@ bool machine_fast_close_slot_ranges_test(Arena* arena)
         function.stack_slot_sizes[slot] = 8;
         function.stack_slot_alignments[slot] = 8;
     }
+    function.stack_slot_sizes[fixed_count + 3u] = 16;
     function.stack_slot_count = slot_count;
     function.returns_twice_absence_certified = true;
     bool result = machine_verify_function(&function).error == MACHINE_VERIFY_NONE;
     MachineFastPrepass prepass = machine_fast_prepass_build(arena, &function, false);
+    result = result && prepass.valid;
     u8* no_fixed = arena_allocate(arena, u8, slot_count);
     u8* slot_fixed = arena_allocate(arena, u8, slot_count);
     u32* reference_starts = arena_allocate(arena, u32, slot_count);
@@ -2185,8 +2199,9 @@ bool machine_fast_close_slot_ranges_test(Arena* arena)
     memset(no_fixed, 0, slot_count);
     memset(reference_starts, 0xff, (u64)slot_count * sizeof(*reference_starts));
     memset(reference_ends, 0, (u64)slot_count * sizeof(*reference_ends));
-    // The row census the placement takes: every touch widens its slot, and an
-    // escaping address fixes it.
+    // The row census the placement takes: every touch widens its slot. The
+    // leading LEA rows are what would fix the slots below `fixed_count`; the
+    // fixed flags are set from that below.
     for (u32 row = 0; row < function.instruction_count; row += 1)
     {
         MachineInstruction const* instruction = function.instructions + row;
@@ -2215,8 +2230,9 @@ bool machine_fast_close_slot_ranges_test(Arena* arena)
         result = result && actual_starts[slot] == reference_starts[slot] && actual_ends[slot] == reference_ends[slot];
     }
     MachineBlock const* latch_block = function.blocks + latch;
-    result = result && actual_starts[fixed_count + 2u] == 0 &&
-             actual_ends[fixed_count + 2u] == latch_block->first_instruction + latch_block->instruction_count - 1u;
+    u32 latch_last = latch_block->first_instruction + latch_block->instruction_count - 1u;
+    result = result && actual_starts[fixed_count + 2u] == 0 && actual_ends[fixed_count + 2u] == latch_last;
+    result = result && actual_starts[fixed_count + 3u] == 0 && actual_ends[fixed_count + 3u] == latch_last;
     return result;
 }
 #endif
