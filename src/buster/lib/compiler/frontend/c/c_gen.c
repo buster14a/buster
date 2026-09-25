@@ -17204,20 +17204,26 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         c_ir_lazy_operand_scan_step(builder, &frame->as.prepare_control.lazy, frame->as.prepare_control.start,
                                     frame->as.prepare_control.end, index);
         if (index + 1 < frame->as.prepare_control.end &&
-            c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-            c_ir_token_builtin_kind(builder, builder->preprocess.tokens[index]) == C_SYMBOL_BUILTIN_GENERIC)
+            c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
-            u32 close = c_ir_matching_delimiter_cached(builder, index + 1, frame->as.prepare_control.end, C_PUNCTUATOR_LEFT_PARENTHESIS,
-                                                       C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            if (close == UINT32_MAX)
+            CSymbolBuiltin builtin = c_ir_token_builtin_kind(builder, builder->preprocess.tokens[index]);
+            if (builtin == C_SYMBOL_BUILTIN_GENERIC || builtin == C_SYMBOL_BUILTIN_CHOOSE_EXPR)
             {
-                builder->failure_token_index = index;
-                builder->failure_message = S8("unterminated _Generic selection");
-                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                return;
+                // The selection owns preparation of its chosen expression.
+                // Preparing a group here would execute a discarded arm.
+                u32 close = c_ir_matching_delimiter_cached(builder, index + 1, frame->as.prepare_control.end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                           C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                if (close == UINT32_MAX)
+                {
+                    builder->failure_token_index = index;
+                    builder->failure_message = builtin == C_SYMBOL_BUILTIN_GENERIC ? S8("unterminated _Generic selection") :
+                                                                                     S8("unterminated __builtin_choose_expr selection");
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                frame->as.prepare_control.index = close + 1;
+                continue;
             }
-            frame->as.prepare_control.index = close + 1;
-            continue;
         }
         bool parentheses = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS);
         bool brackets = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET);
@@ -18323,7 +18329,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             .builtin_va_end = builtin_va_end,
             .builtin_va_arg = builtin_va_arg,
             .builtin_generic = builtin_generic,
-            .deferred_calls = builtin_generic,
+            .deferred_calls = builtin_generic || builtin_choose_expr,
             .builtin_atomic = builtin_atomic,
             .builtin_memory = builtin_memory,
             .builtin_math_link_name = builtin_math_link_name,
@@ -18359,9 +18365,10 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // The object-size operand is unevaluated. Preparing its nested calls
         // here would run them before the builtin emits its constant result,
         // duplicating a destination expression in fortified memory macros.
-        // _Generic likewise owns the lowering of its selected expression.
+        // _Generic and __builtin_choose_expr own their selected expression.
+        // Deferred preparation lets that expression prepare its own calls.
         // __builtin_constant_p also discards side effects in its operand.
-        if (builtin_generic || builtin_object_size || builtin_constant_p)
+        if (builtin_generic || builtin_choose_expr || builtin_object_size || builtin_constant_p)
         {
             index = close;
         }
