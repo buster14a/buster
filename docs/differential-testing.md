@@ -68,7 +68,9 @@ integers and f32/f64/f80 values to the Buster subject, checks every conversion
 against its own casts, and checks wide arguments and return values through the
 native ABI. Inputs include the signed minimum, both sides of 2^64, and the
 largest f80 value below 2^128. The three MIR allocators require zero fallback;
-NONE remains the direct reference before its separate cutover.
+NONE remains the direct reference before its separate cutover. The registered
+driver fixture covers Windows x86-64; this independent native comparison runs
+where System V x87 long double is available.
 
 On ELF AArch64, twenty-two additional relations exchange actual public `va_list`
 objects, rather than only calling variadic functions compiled by the other
