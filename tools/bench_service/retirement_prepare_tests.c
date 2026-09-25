@@ -947,8 +947,20 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
             BQ_PREP_CHECK(ok && (trial ? exit_code == 0 : exit_code == 5));
             if (ok)
             {
+                int held_root = process.build_root;
                 if ((trial == 12 && stage == 1) || (trial == 13 && stage == 3))
-                    BQ_PREP_CHECK(bq_prep_test_swap_build_root(attempt));
+                {
+                    struct stat original = {0}, replacement_stat = {0};
+                    BQ_PREP_CHECK(held_root >= 3 && fstat(held_root, &original) == 0 &&
+                        bq_prep_test_swap_build_root(attempt));
+                    int replacement = openat(attempt, "matched-build",
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                    BQ_PREP_CHECK(replacement >= 3 && fstat(replacement, &replacement_stat) == 0 &&
+                        (original.st_dev != replacement_stat.st_dev ||
+                         original.st_ino != replacement_stat.st_ino) &&
+                        fstat(held_root, &original) == 0);
+                    if (replacement >= 0) close(replacement);
+                }
                 if (trial == 4) process.command_sha256[0] ^= 1;
                 if (trial == 5)
                 {
@@ -967,6 +979,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                 BQ_PREP_CHECK(bq_retirement_matched_build_complete_pinned(queue, &job,
                     installed, workspaces, pinned, &process, candidate, &build) == expected &&
                     !process.state && !process.process);
+                if ((trial == 12 && stage == 1) || (trial == 13 && stage == 3))
+                    BQ_PREP_CHECK(fcntl(held_root, F_GETFD) < 0 && errno == EBADF);
             }
             bq_retirement_matched_build_abort(&process);
             if (trial == 4 || trial == 5 || (trial == 12 && stage == 1)) break;

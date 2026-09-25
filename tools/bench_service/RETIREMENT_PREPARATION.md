@@ -237,12 +237,13 @@ generation or any stale output before baseline build poisons the sequence;
 a successful no-op stage cannot freeze an inherited executable. The worker
 must isolate that directory and reap descendants across this check and the
 build so another process cannot replace the name during the attempt.
-The helper retains the configured build directory's device/inode identity
-before each build launch. The freeze step opens that directory by its expected
-name and verifies the same inode before reading `Release/ide` through the held
-descriptor; after copying the executable, it verifies the named directory
-again. Replacing the configured root with another directory containing even
-the same executable inode fails the stage and cannot publish binary records.
+The helper holds the configured build directory's descriptor and device/inode
+identity from each build launch through completion, preventing inode reuse.
+The freeze step verifies the expected name still resolves to that held root,
+reads `Release/ide` through the descriptor, and verifies the name again after
+copying the executable. Replacing the configured root with another directory
+containing even the same executable inode fails the stage and cannot publish
+binary records.
 The #923 worker must apply its fixed containment, separate candidate identity,
 deadlines and cancellation to the launched child. `complete` stores each
 command/exit/log as an immutable queue log plus receipt, reimports A, freezes

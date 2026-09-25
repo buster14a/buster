@@ -53,10 +53,10 @@ enum
 
 typedef struct BqRetirementBuildProcess
 {
-    int directory, writer, reader;
+    int directory, writer, reader, build_root;
     pid_t process;
     u64 directory_device, directory_inode, log_device, log_inode;
-    /* Build stages retain the configured root observed before child launch. */
+    /* Build stages hold the configured root until completion prevents inode reuse. */
     u64 build_device, build_inode;
     u64 log_bytes;
     char name[32], command_sha256[SHA256_HEX_CAPACITY];
