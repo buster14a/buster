@@ -1,0 +1,76 @@
+name: Atomic fresh-producer reductions
+on:
+  push:
+    branches: [research/atomic-compound-probe-20260925-astra]
+    paths: [.github/workflows/atomic-compound-fresh.yml]
+permissions:
+  contents: read
+jobs:
+  fresh:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    env:
+      PROBE_OUT: /tmp/buster-atomic-fresh-evidence
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 16
+      - name: Freeze source and retain producer environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROBE_OUT"
+          git rev-parse HEAD HEAD^{tree} > "$PROBE_OUT/investigation-source.txt"
+          cp tools/investigations/atomic_compound_*.py "$RUNNER_TEMP/"
+          cp tools/investigations/atomic_compound_*.py "$PROBE_OUT/"
+          python3 -m py_compile "$RUNNER_TEMP/atomic_compound_confirm.py"
+          git checkout --detach 83c5f229288ecd8e23588c11b9ad19edc8bf4be2
+          test "$(git rev-parse HEAD^{tree})" = b310e6573e6c89c618f8466941be4b995021a410
+          git diff --exit-code
+          git rev-parse HEAD HEAD^{tree} > "$PROBE_OUT/production-source.txt"
+          lscpu --json > "$PROBE_OUT/cpu.json"
+          cat /proc/cpuinfo > "$PROBE_OUT/cpuinfo.txt"
+          printf '%s\n' 'BUSTER_TEST_JOBS=2' > "$PROBE_OUT/selected-environment.txt"
+      - name: Fresh hosted Clang bootstrap and ide build
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang --version | tee "$PROBE_OUT/producer.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-fresh-build" 2>&1 | tee "$PROBE_OUT/bootstrap.log"
+          "$RUNNER_TEMP/buster-fresh-build" generate --cc clang --ci --linker DEFAULT 2>&1 | tee "$PROBE_OUT/configure.log"
+          "$RUNNER_TEMP/buster-fresh-build" build --config Release -t ide 2>&1 | tee "$PROBE_OUT/build.log"
+          cp build/compile_commands.json "$PROBE_OUT/compile_commands.json"
+          sha256sum build/Release/ide > "$PROBE_OUT/compiler.sha256"
+          cp build/Release/ide "$PROBE_OUT/compiler-ide"
+          printf '%s\n' 'Built and executed on this same runner; do not assume a -march=native producer is portable to another runner.' > "$PROBE_OUT/compiler-provenance.txt"
+      - name: Challenge producer startup and an ordinary C control first
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'int main(void) { return 0; }\n' > "$PROBE_OUT/startup-control.c"
+          timeout --signal=TERM --kill-after=5s 10s build/Release/ide --help > "$PROBE_OUT/help.stdout" 2> "$PROBE_OUT/help.stderr"
+          timeout --signal=TERM --kill-after=5s 10s build/Release/ide cc -target x86_64-linux -std=c17 -O0 -g0 -fverify-codegen -fregister-allocator=fast -ffrontend-ssa -fno-machine-fallback "$PROBE_OUT/startup-control.c" -o "$PROBE_OUT/startup-control" > "$PROBE_OUT/startup-control.stdout" 2> "$PROBE_OUT/startup-control.stderr"
+          timeout 3s "$PROBE_OUT/startup-control"
+          printf '%s\n' 'help_exit=0 compile_exit=0 run_exit=0' > "$PROBE_OUT/startup-control.status"
+      - name: Execute the unchanged standalone reduction script
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=5s 180s python3 "$RUNNER_TEMP/atomic_compound_confirm.py" | tee "$PROBE_OUT/probe.log"
+      - name: Hash complete available evidence
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          cd "$PROBE_OUT"
+          find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+      - name: Retain all observed outcomes without accepting mismatches
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: atomic-fresh-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/buster-atomic-fresh-evidence
+          retention-days: 30
+          if-no-files-found: error
