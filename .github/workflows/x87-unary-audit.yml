@@ -1,0 +1,65 @@
+name: X87 integer unary semantic probe
+on:
+  push:
+    branches: [codex/x87-integer-unary-audit-20260925-astra]
+    paths:
+      - .github/workflows/x87-unary-audit.yml
+      - tools/investigations/x87-unary-20260925/**
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      BUSTER_TEST_JOBS: 2
+    steps:
+      - name: Require enabled hosted correctness
+        env:
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: test "$CI_ENABLED" = true
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin untouched compiler in isolated worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git worktree add --detach "$RUNNER_TEMP/x87-production" ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          cd "$RUNNER_TEMP/x87-production"
+          test "$(git rev-parse HEAD)" = ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          test "$(git rev-parse HEAD^{tree})" = 4c5306221fdb22fccc929b55e333163742de17d0
+          git diff --exit-code
+          git status --porcelain > "$GITHUB_WORKSPACE/evidence/production-status.txt"
+          git rev-parse HEAD HEAD^{tree} > "$GITHUB_WORKSPACE/evidence/production.txt"
+          git show -s --format=fuller HEAD >> "$GITHUB_WORKSPACE/evidence/production.txt"
+          git -C "$GITHUB_WORKSPACE" rev-parse HEAD HEAD^{tree} > "$GITHUB_WORKSPACE/evidence/probe.txt"
+          cp src/buster/lib/compiler/frontend/c/c_gen.c "$GITHUB_WORKSPACE/evidence/c_gen.c"
+          cp tests/basic_c_long_double_static_initializer.c "$GITHUB_WORKSPACE/evidence/existing-fixture.c"
+      - name: Build compiler on this runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/x87-production"
+          {
+            clang --version
+            clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/x87-build"
+            "$RUNNER_TEMP/x87-build" generate --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF
+            "$RUNNER_TEMP/x87-build" build --config Release -t ide
+          } 2>&1 | tee "$GITHUB_WORKSPACE/evidence/build.log"
+          git diff --exit-code
+      - name: Compare grammar paths with independent observer and references
+        shell: bash
+        run: bash tools/investigations/x87-unary-20260925/run.sh "$RUNNER_TEMP/x87-production/build/Release/ide" "$GITHUB_WORKSPACE/evidence/results"
+      - name: Preserve every result including setup failures
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: x87-integer-unary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 30
+          if-no-files-found: error
