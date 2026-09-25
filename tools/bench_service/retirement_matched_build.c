@@ -543,6 +543,46 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_build_stage_evidence(BqQueue* queue,
     return result;
 }
 
+/* The held file and Release directory must still be the configured output,
+ * with stable bytes and metadata across the copy. The directory descriptors
+ * keep replacement inodes alive, so a swapped name cannot reuse their inode. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_build_output_same(struct stat const* first,
+    struct stat const* current)
+{
+    bool ok = first->st_dev == current->st_dev && first->st_ino == current->st_ino &&
+              first->st_size == current->st_size && first->st_mode == current->st_mode &&
+              first->st_nlink == current->st_nlink && first->st_uid == current->st_uid;
+#if defined(__APPLE__)
+    ok = ok && first->st_mtimespec.tv_sec == current->st_mtimespec.tv_sec &&
+         first->st_mtimespec.tv_nsec == current->st_mtimespec.tv_nsec &&
+         first->st_ctimespec.tv_sec == current->st_ctimespec.tv_sec &&
+         first->st_ctimespec.tv_nsec == current->st_ctimespec.tv_nsec;
+#else
+    ok = ok && first->st_mtim.tv_sec == current->st_mtim.tv_sec &&
+         first->st_mtim.tv_nsec == current->st_mtim.tv_nsec &&
+         first->st_ctim.tv_sec == current->st_ctim.tv_sec &&
+         first->st_ctim.tv_nsec == current->st_ctim.tv_nsec;
+#endif
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_build_output_stable(int root, int release,
+    int input, struct stat const* first)
+{
+    struct stat held_release = {0}, named_release = {0}, held = {0}, named = {0};
+    bool ok = fstat(release, &held_release) == 0 && S_ISDIR(held_release.st_mode) &&
+              fstatat(root, "Release", &named_release, AT_SYMLINK_NOFOLLOW) == 0 &&
+              S_ISDIR(named_release.st_mode) &&
+              held_release.st_dev == named_release.st_dev &&
+              held_release.st_ino == named_release.st_ino &&
+              fstat(input, &held) == 0 &&
+              fstatat(release, "ide", &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+              S_ISREG(named.st_mode) &&
+              bq_retirement_build_output_same(first, &held) &&
+              bq_retirement_build_output_same(&held, &named);
+    return ok;
+}
+
 /* Copy only the successful build's observed Release/ide. The next generate
  * may remove the shared build root only after the prior executable is frozen. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_build_freeze(BqRetirementMatchedBuild* build,
@@ -565,12 +605,13 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_build_freeze(BqRetirementMatchedBuild* bu
     if (named_root >= 0 && close(named_root) != 0) same_root = false;
     int release = same_root ? openat(root, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     int input = release >= 0 ? openat(release, "ide", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
-    struct stat first = {0}, last = {0};
+    struct stat first = {0};
     bool ok = same_root && attempt >= 0 && bq_owned_directory(attempt, true, false) && input >= 0 &&
               fstat(input, &first) == 0 && S_ISREG(first.st_mode) && first.st_nlink == 1 &&
               first.st_uid == (side ? candidate_uid : geteuid()) &&
               (first.st_mode & S_IXUSR) && first.st_size > 0 &&
-              (u64)first.st_size <= BQ_RETIREMENT_BUILD_BINARY_CAP;
+              (u64)first.st_size <= BQ_RETIREMENT_BUILD_BINARY_CAP &&
+              bq_retirement_build_output_stable(root, release, input, &first);
     if (ok && !side) ok = mkdirat(attempt, "trusted-build", 0700) == 0;
     int frozen = ok ? openat(attempt, "trusted-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     ok = ok && frozen >= 0 && bq_owned_directory(frozen, true, false);
@@ -588,16 +629,14 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_build_freeze(BqRetirementMatchedBuild* bu
         ok = count > 0 && bq_write_all(output, bytes, (u32)count);
         if (ok) offset += (u64)count;
     }
-    ok = ok && fstat(input, &last) == 0 && first.st_dev == last.st_dev &&
-         first.st_ino == last.st_ino && first.st_size == last.st_size &&
-         first.st_mode == last.st_mode && first.st_nlink == last.st_nlink &&
-         fchmod(output, 0500) == 0 && fsync(output) == 0;
+    ok = ok && fchmod(output, 0500) == 0 && fsync(output) == 0;
     if (output >= 0 && close(output) != 0) ok = false;
     if (ok) ok = fsync(frozen) == 0 && (!side || (fchmod(frozen, 0500) == 0 && fsync(frozen) == 0));
     int final_root = ok ? bq_open_absolute_directory(string_from_pointer(build->build)) : -1;
     if (ok) ok = final_root >= 3 && fstat(final_root, &named_stat) == 0 &&
                  (u64)named_stat.st_dev == process->build_device &&
-                 (u64)named_stat.st_ino == process->build_inode;
+                 (u64)named_stat.st_ino == process->build_inode &&
+                 bq_retirement_build_output_stable(root, release, input, &first);
     if (final_root >= 0 && close(final_root) != 0) ok = false;
     if (frozen >= 0 && close(frozen) != 0) ok = false;
     if (input >= 0 && close(input) != 0) ok = false;
