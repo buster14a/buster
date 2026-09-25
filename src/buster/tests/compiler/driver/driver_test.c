@@ -7326,6 +7326,225 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_link_boundaries(Unit
     scratch_end(temporary);
     return result;
 }
+
+// GCC, Clang and GNU as leave every undefined symbol STT_NOTYPE. A host object
+// that only takes a library function's address -- a table of allocator hooks,
+// a callback returned to another unit -- must still import it as a function:
+// a copy relocation copies code bytes into .bss and exports the copy under the
+// function's name, interposing libc's own definition. main.c never names those
+// functions, so no typed reference can hide the defect; direct.c does, after
+// the untyped one. The sources are generated because tracked test inputs are
+// census-bound (GitHub #1242).
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_untyped_function_imports(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_CPU_ARCH_X86_64
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 directory = buster_test_temporary_path(arena, S8("buster-elf-untyped-imports"), S8(""));
+    os_make_directory(directory);
+    ProcessSpawnOptions capture = {
+        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+        .use_process_environment = true, .search_path = true,
+    };
+    String8 hooks_source = string_format_z(arena, S8("{S8}/hooks.c"), directory);
+    String8 main_source = string_format_z(arena, S8("{S8}/main.c"), directory);
+    String8 hooks_text = S8("#include <stdlib.h>\n"
+                            "#include <string.h>\n"
+                            "typedef size_t (*LengthFunction)(char const*);\n"
+                            "struct Allocator { void* (*allocate)(size_t); void (*release)(void*); };\n"
+                            "struct Allocator const hook_allocator = {malloc, free};\n"
+                            "LengthFunction hook_length(void) { return strlen; }\n");
+    String8 main_text = S8("typedef unsigned long Size;\n"
+                           "typedef Size (*LengthFunction)(char const*);\n"
+                           "struct Allocator { void* (*allocate)(Size); void (*release)(void*); };\n"
+                           "extern struct Allocator const hook_allocator;\n"
+                           "LengthFunction hook_length(void);\n"
+                           "int main(void)\n"
+                           "{\n"
+                           "    char* buffer = hook_allocator.allocate(32);\n"
+                           "    int result = 1;\n"
+                           "    if (buffer)\n"
+                           "    {\n"
+                           "        buffer[0] = 'b';\n"
+                           "        buffer[1] = 0;\n"
+                           "        LengthFunction length = hook_length();\n"
+                           "        result = length(\"buster\") == 6 && length(buffer) == 1 ? 0 : 2;\n"
+                           "        hook_allocator.release(buffer);\n"
+                           "    }\n"
+                           "    return result;\n"
+                           "}\n");
+    bool written = file_write(hooks_source, BUSTER_SLICE_TO_BYTE_SLICE(hooks_text)) && file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(main_text));
+    BUSTER_TEST(arguments, written);
+    // -fPIE and -fPIC reach the functions through R_X86_64_64 table entries and
+    // REX_GOTPCRELX loads; the third variant takes the -fPIE object from an archive.
+    String8 models[] = {S8("-fPIE"), S8("-fPIC")};
+    String8 objects[BUSTER_ARRAY_LENGTH(models)] = {0};
+    bool compiled[BUSTER_ARRAY_LENGTH(models)] = {0};
+    for (u32 model = 0; written && model < BUSTER_ARRAY_LENGTH(models); model += 1)
+    {
+        objects[model] = string_format_z(arena, S8("{S8}/hooks-{u32}.o"), directory, model);
+        String8 command[10];
+        u64 count = 0;
+        command[count++] = S8(BUSTER_HOST_C_COMPILER);
+        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+        command[count++] = S8("-O2");
+        command[count++] = S8("-g0");
+        command[count++] = models[model];
+        command[count++] = S8("-c");
+        command[count++] = hooks_source;
+        command[count++] = S8("-o");
+        command[count++] = objects[model];
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0}, capture);
+        compiled[model] = spawn.handle && os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, compiled[model]);
+    }
+    // The host toolchain links and runs the same pair, so the fixture itself is
+    // valid under an independent linker.
+    if (compiled[0])
+    {
+        String8 reference_path = string_format_z(arena, S8("{S8}/reference"), directory);
+        String8 command[10];
+        u64 count = 0;
+        command[count++] = S8(BUSTER_HOST_C_COMPILER);
+        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+        command[count++] = S8("-fPIE");
+        command[count++] = main_source;
+        command[count++] = objects[0];
+        command[count++] = S8("-o");
+        command[count++] = reference_path;
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0}, capture);
+        bool linked = spawn.handle && os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, linked);
+        if (linked)
+        {
+            ProcessSpawnResult run = os_process_spawn((SliceString8){.pointer = &reference_path, .length = 1}, (SliceString8){0}, (SliceString8){0}, capture);
+            BUSTER_TEST(arguments, run.handle && os_process_wait_sync(arena, run).result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    String8 archive_path = string_format_z(arena, S8("{S8}/libhooks.a"), directory);
+    bool archived = false;
+    if (compiled[0])
+    {
+        ByteSlice member = file_read(arena, objects[0], (FileReadOptions){0});
+        String8 member_name = S8("hooks.o");
+        archived = member.pointer && file_write(archive_path, compiler_driver_test_archive(arena, &member, &member_name, 1));
+        BUSTER_TEST(arguments, archived);
+    }
+    // A typed reference must outrank an untyped one whichever input comes first:
+    // here the host object precedes a Buster unit that calls free directly.
+    String8 direct_source = string_format_z(arena, S8("{S8}/direct.c"), directory);
+    String8 direct_text = S8("typedef unsigned long Size;\n"
+                             "typedef Size (*LengthFunction)(char const*);\n"
+                             "struct Allocator { void* (*allocate)(Size); void (*release)(void*); };\n"
+                             "extern struct Allocator const hook_allocator;\n"
+                             "LengthFunction hook_length(void);\n"
+                             "void free(void*);\n"
+                             "int main(void)\n"
+                             "{\n"
+                             "    free(hook_allocator.allocate(8));\n"
+                             "    LengthFunction length = hook_length();\n"
+                             "    return length(\"buster\") == 6 ? 0 : 2;\n"
+                             "}\n");
+    // Buster's own assembler leaves an undeclared call target untyped too, both
+    // in memory and through its object writer and reader.
+    String8 assembly_source = string_format_z(arena, S8("{S8}/call.s"), directory);
+    String8 assembly_object = string_format_z(arena, S8("{S8}/call.o"), directory);
+    String8 assembly_text = S8("\t.text\n"
+                               "\t.globl\tmain\n"
+                               "\t.type\tmain, @function\n"
+                               "main:\n"
+                               "\tpushq\t%rbp\n"
+                               "\tmovq\t%rsp, %rbp\n"
+                               "\tleaq\tmessage(%rip), %rdi\n"
+                               "\tcall\tputs@PLT\n"
+                               "\txorl\t%eax, %eax\n"
+                               "\tpopq\t%rbp\n"
+                               "\tret\n"
+                               "\t.section\t.rodata\n"
+                               "message:\n"
+                               "\t.asciz\t\"untyped call\"\n");
+    bool direct_written = written && file_write(direct_source, BUSTER_SLICE_TO_BYTE_SLICE(direct_text));
+    bool assembly_written = written && file_write(assembly_source, BUSTER_SLICE_TO_BYTE_SLICE(assembly_text));
+    BUSTER_TEST(arguments, direct_written && assembly_written);
+    bool assembled = false;
+    if (assembly_written)
+    {
+        String8 command[] = {S8("-g0"), S8("-c"), S8("-o"), assembly_object, assembly_source};
+        CompilerDriverResult object = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        assembled = object.error == COMPILER_DRIVER_ERROR_NONE;
+        BUSTER_TEST(arguments, assembled);
+    }
+    for (u32 variant = 0; variant < 6; variant += 1)
+    {
+        bool ready = variant < 2 ? compiled[variant] : variant == 2 ? archived : variant == 3 ? compiled[0] && direct_written
+                   : variant == 4 ? assembly_written : assembled;
+        String8 executable = string_format_z(arena, S8("{S8}/untyped-{u32}"), directory, variant);
+        String8 command[8] = {S8("-g0"), S8("-o"), executable};
+        u64 count = 3;
+        if (variant < 2)
+        {
+            command[count++] = main_source;
+            command[count++] = objects[variant];
+        }
+        else if (variant == 2)
+        {
+            command[count++] = main_source;
+            command[count++] = S8("-L");
+            command[count++] = directory;
+            command[count++] = S8("-lhooks");
+        }
+        else if (variant == 3)
+        {
+            command[count++] = objects[0];
+            command[count++] = direct_source;
+        }
+        else
+        {
+            command[count++] = variant == 4 ? assembly_source : assembly_object;
+        }
+        CompilerDriverResult linked = ready ? compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command, .length = count}))
+                                            : (CompilerDriverResult){.error = COMPILER_DRIVER_ERROR_ARGUMENT};
+        if (ready && linked.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("untyped import link {u32}: {S8}\n"), variant, linked.diagnostic);
+        BUSTER_TEST(arguments, !ready || linked.error == COMPILER_DRIVER_ERROR_NONE);
+        if (ready && linked.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            // This program imports no data, so the image may carry no R_X86_64_COPY.
+            ByteSlice image = file_read(arena, executable, (FileReadOptions){0});
+            String8 relocation_sections[] = {S8(".rela.plt"), S8(".rela.dyn")};
+            u32 copies = 0;
+            for (u32 section = 0; section < BUSTER_ARRAY_LENGTH(relocation_sections); section += 1)
+            {
+                ByteSlice relocations = compiler_driver_test_elf_section(image, relocation_sections[section]);
+                for (u64 offset = 0; offset + 24 <= relocations.length; offset += 24)
+                {
+                    u64 information = 0;
+                    memcpy(&information, relocations.pointer + offset + 8, sizeof(information));
+                    copies += (u32)information == 5;
+                }
+            }
+            if (copies) arguments->show(arguments, S8("untyped import variant {u32}: {u32} copy relocations\n"), variant, copies);
+            BUSTER_TEST(arguments, copies == 0);
+            ProcessSpawnResult run = os_process_spawn((SliceString8){.pointer = &executable, .length = 1}, (SliceString8){0}, (SliceString8){0}, capture);
+            BUSTER_TEST(arguments, run.handle != 0);
+            if (run.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_sync(arena, run);
+                if (wait.result != PROCESS_RESULT_SUCCESS)
+                {
+                    String8 errors = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length};
+                    arguments->show(arguments, S8("untyped import variant {u32} run failed: {S8}\n"), variant, errors);
+                }
+                BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+    }
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
 #endif
 
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
@@ -9163,6 +9382,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_data_scaling);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_link_boundaries);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_untyped_function_imports);
 #endif
 
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_batches);

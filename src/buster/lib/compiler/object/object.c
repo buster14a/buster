@@ -11340,7 +11340,12 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64_with_capacity(Arena* arena
         // local-then-global and sh_info below counts that split: a local
         // STB_WEAK entry would contradict it.
         u8 binding = source->global ? (source->weak ? 0x20 : 0x10) : 0;
-        buffer.bytes[offset + 4] = (u8)(binding | (is_thread_local ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : 1));
+        // An undefined data symbol no input typed -- an undeclared assembly
+        // reference, or an STT_NOTYPE one read from another toolchain -- stays
+        // STT_NOTYPE: stamping STT_OBJECT would invent the claim that makes a
+        // linker copy a library function into the executable.
+        bool untyped = !is_defined && source->kind == OBJECT_SYMBOL_DATA && source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN;
+        buffer.bytes[offset + 4] = (u8)(binding | (is_thread_local ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : untyped ? 0 : 1));
         // st_other holds st_visibility in its low two bits: STV_DEFAULT 0,
         // STV_HIDDEN 2.
         buffer.bytes[offset + 5] = source->hidden ? 2 : 0;

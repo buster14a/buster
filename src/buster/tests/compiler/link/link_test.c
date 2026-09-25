@@ -6460,6 +6460,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                 .name = S8("weak_absent"),
                 .section = OBJECT_SECTION_UNDEFINED,
                 .kind = OBJECT_SYMBOL_DATA,
+                // A typed data reference, as a C declaration states it; an
+                // unknown state would mark an untyped foreign reference.
+                .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO,
                 .global = true,
                 .weak = true,
                 .hidden = true,

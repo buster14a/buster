@@ -53,7 +53,12 @@
 // describe those final copy-slot definitions too: link_elf_output_symbol uses
 // the writer's import indices and emitted dynamic values without changing the
 // input ObjectFile. The .bss section header includes the slots already covered
-// by the writable segment; no loaded bytes or program headers move.
+// by the writable segment; no loaded bytes or program headers move. Whether an
+// import is data at all is a fact about its definition: GCC, Clang and GNU as
+// leave every undefined symbol STT_NOTYPE, so before writer selection
+// link_elf_classify_untyped_imports imports an untyped reference that a library
+// defines, but publishes as no object, as a function -- a copy slot for a
+// function copies its code into .bss and interposes it (GitHub #1242).
 //
 // A third rule crosses every ELF writer: an undefined weak symbol is worth
 // address zero rather than a dynamic import, which is what a startup object
@@ -2237,6 +2242,16 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 u8 merged_thread_local_state = destination_thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN
                                                    ? destination_thread_local_state
                                                    : source_thread_local_state;
+                // An undefined symbol's kind is only what its references
+                // claim. A typed reference -- a C declaration, an ELF STT_FUNC
+                // or STT_OBJECT one -- outranks an untyped one whichever input
+                // arrives first; otherwise another toolchain's STT_NOTYPE
+                // reference, read as data, decides what a declaration knows.
+                if (!destination_defined && !source_defined && destination_thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN &&
+                    source_thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN)
+                {
+                    destination->kind = source->kind;
+                }
                 if (source_replaces)
                 {
                     if (!link_symbol_definition_set(destination, source, object, section_offsets + (u64)object_index * OBJECT_SECTION_COUNT, arena))
@@ -11827,6 +11842,48 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_elf_without_unused_got_marker(Arena* a
     return result;
 }
 
+// GCC, Clang and GNU as leave every undefined symbol STT_NOTYPE, so an
+// external reference states nothing about what it names. object_read_elf64
+// records such a reference as data unless a PLT or branch relocation proves a
+// call, and marks it untyped by leaving its thread-local state unknown, which
+// Buster's own objects never do. A reference that only takes an address -- a
+// table of `malloc` and `free` hooks, `strlen` handed to another unit --
+// therefore arrives here as a data import, and the writers would reserve a
+// copy slot for a library function: the loader copies code bytes into .bss and
+// the executable exports the copy under the function's name, interposing the
+// library's own definition for every caller, libc's included.
+//
+// A reference resolves to its definition, and the export index holds every
+// definition: an untyped import that some library defines, but that no library
+// publishes as an object with storage, is not data. Only a complete index is
+// evidence -- a library that was not read defines whatever it defines -- so an
+// incomplete link keeps the classification it had.
+BUSTER_GLOBAL_LOCAL ObjectFile link_elf_classify_untyped_imports(Arena* arena, LinkElfIndex* exports, ObjectFile* object)
+{
+    ObjectFile result = *object;
+    bool copied = false;
+    for (u32 index = 0; exports->exports_complete && index < object->symbol_count; index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + index;
+        if (symbol->section == OBJECT_SECTION_UNDEFINED && symbol->global && symbol->kind == OBJECT_SYMBOL_DATA &&
+            symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN)
+        {
+            LinkElfName* name = link_elf_name(exports, symbol->name, false);
+            if (name && name->version && name->data == UINT32_MAX)
+            {
+                if (!copied)
+                {
+                    result.symbols = arena_allocate(arena, ObjectSymbol, object->symbol_count);
+                    memcpy(result.symbols, object->symbols, sizeof(*object->symbols) * object->symbol_count);
+                    copied = true;
+                }
+                result.symbols[index].kind = OBJECT_SYMBOL_FUNCTION;
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scratch(Arena* arena, Arena* temporary, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
@@ -11855,6 +11912,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
         result.error = normalized.error;
         if (result.error == LINK_ERROR_NONE)
         {
+            normalized.object = link_elf_classify_untyped_imports(arena, exports, &normalized.object);
             object = &normalized.object;
             bool dynamic_image = options.dynamic_library_count || object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ||
                                  object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
