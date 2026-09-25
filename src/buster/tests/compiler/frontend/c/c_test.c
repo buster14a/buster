@@ -11697,6 +11697,189 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_body_sizeof_expression(UnitTe
     return result;
 }
 
+// Control groups inside a non-VLA sizeof operand are not evaluated, even
+// when the containing object is a VLA. The sizeof owner re-enters expression
+// lowering for VLA-typed operands; fixed-size rows and scalar elements stay
+// unevaluated. The contexts observe completed full expressions and avoid
+// imposing an order on unrelated calls.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_control_preparation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 setup;
+        u32 size;
+    } layouts[] = {
+        {S8("int a[3][3];"), 12},
+        {S8("int n = 3; int a[n][3];"), 12},
+        {S8("int n = 3; int a[n];"), 4},
+    };
+    struct
+    {
+        String8 expression;
+        bool nested_sizeof;
+    } expressions[] = {
+        {S8("sizeof(a[(choose ? index++ : tick())])"), false},
+        {S8("sizeof(a[(choose ? tick() : index++)])"), false},
+        {S8("sizeof a[choose ? index++ : tick()]"), false},
+        {S8("sizeof(a[choose && (index++, 1)])"), false},
+        {S8("sizeof(a[(index = tick())])"), false},
+        {S8("sizeof(sizeof(a[index++]))"), true},
+    };
+    enum { CONTEXT_COUNT = 6, PROBE_COUNT = BUSTER_ARRAY_LENGTH(layouts) * BUSTER_ARRAY_LENGTH(expressions) * CONTEXT_COUNT };
+    String8 source = S8("static volatile unsigned index; static volatile unsigned hits; static volatile unsigned choose;\n"
+                        "static unsigned tick(void) { hits += 1; return 0; }\n"
+                        "static unsigned long identity(unsigned long value) { return value; }\n"
+                        "static unsigned long ordinary_control(void) { return (unsigned long)(index++ + tick()); }\n");
+    String8 checks = S8("int main(void) { unsigned failures = 0; unsigned long value;\n");
+    u32 probe_count = 0;
+    for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(layouts); layout += 1)
+    {
+        for (u32 expression_index = 0; expression_index < BUSTER_ARRAY_LENGTH(expressions); expression_index += 1)
+        {
+            for (u32 context = 0; context < CONTEXT_COUNT; context += 1)
+            {
+                u32 expected = expressions[expression_index].nested_sizeof ? 8 : layouts[layout].size;
+                String8 expression = expressions[expression_index].expression;
+                String8 body = {0};
+                switch (context)
+                {
+                case 0:
+                    body = string_format(arguments->arena, S8("unsigned long value = ({S8}); return value;"), expression);
+                    break;
+                case 1:
+                    body = string_format(arguments->arena, S8("return identity({S8});"), expression);
+                    break;
+                case 2:
+                    body = string_format(arguments->arena, S8("return ({S8});"), expression);
+                    break;
+                case 3:
+                    body = string_format(arguments->arena,
+                        S8("unsigned long value = {u32}ul + 1ul; if (({S8}) == {u32}ul) value = {u32}ul; return value;"),
+                        expected, expression, expected, expected);
+                    break;
+                case 4:
+                    body = string_format(arguments->arena, S8("(void)({S8}); return {u32}ul;"), expression, expected);
+                    break;
+                case 5:
+                    body = string_format(arguments->arena,
+                        S8("return ({ unsigned long value = ({S8}); value; });"), expression);
+                    break;
+                }
+                u32 probe = probe_count++;
+                String8 function = string_format(arguments->arena, S8("probe_{u32}"), probe);
+                source = string_format(arguments->arena, S8("{S8}static unsigned long {S8}(void) {{ {S8} {S8} }}\n"),
+                                       source, function, layouts[layout].setup, body);
+                for (u32 selected = 0; selected < 2; selected += 1)
+                {
+                    checks = string_format(arguments->arena,
+                        S8("{S8}index = 0; hits = 0; choose = {u32}u; value = {S8}(); "
+                           "failures |= (value != {u32}ul) | (index != 0u) | (hits != 0u);\n"),
+                        checks, selected, function, expected);
+                }
+            }
+        }
+    }
+    BUSTER_TEST(arguments, probe_count == PROBE_COUNT);
+    checks = string_format(arguments->arena,
+        S8("{S8}index = 0; hits = 0; value = ordinary_control(); "
+           "failures |= (value != 0ul) | (index != 1u) | (hits != 1u); return (int)failures; }\n"),
+        checks);
+    String8 source_text = string_format(arguments->arena, S8("{S8}{S8}"), source, checks);
+
+    Target targets[6] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        targets[target_index].cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[target_index].os = target_index < 2 ? OPERATING_SYSTEM_LINUX
+                               : target_index < 4 ? OPERATING_SYSTEM_WINDOWS
+                                                  : OPERATING_SYSTEM_MACOS;
+    }
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            Arena* conflicts[] = {arguments->arena};
+            TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source_text,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("sizeof-control-preparation.c"), tokens, parsed, target,
+                (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+            if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                for (u32 probe = 0; probe < PROBE_COUNT; probe += 1)
+                {
+                    String8 function_name = string_format(temporary.arena, S8("probe_{u32}"), probe);
+                    IrFunction* function = c_test_find_ir_function(module, function_name);
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        u32 volatile_accesses = 0;
+                        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                        {
+                            volatile_accesses += function->instructions[instruction_index].volatile_access;
+                        }
+                        u32 calls = c_test_ir_direct_call_count(lowered.program, function, S8("tick"));
+                        String8 observation = string_format(temporary.arena,
+                            S8("layout/expression/context={u32}/{u32}/{u32} volatile={u32} tick-calls={u32}"),
+                            probe / (BUSTER_ARRAY_LENGTH(expressions) * CONTEXT_COUNT),
+                            (probe / CONTEXT_COUNT) % BUSTER_ARRAY_LENGTH(expressions), probe % CONTEXT_COUNT,
+                            volatile_accesses, calls);
+                        BUSTER_TEST_RAW(arguments, volatile_accesses == 0, observation);
+                        BUSTER_TEST_RAW(arguments, calls == 0, observation);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("sizeof-control-preparation"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                Arena* conflicts[] = {arguments->arena};
+                TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                String8 output = buster_test_temporary_path(temporary.arena, S8("sizeof-control-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), output, source_path};
+                CompilerDriverInvocation invocation =
+                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0},
+                        (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena,
+                                S8("sizeof control {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[frontend], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -21282,6 +21465,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_member_call_arity_ownership);
     BUSTER_TEST_FIXTURE(arguments, c_test_function_body_sizeof_expression);
+    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_control_preparation);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_control_flow);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);

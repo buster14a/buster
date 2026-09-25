@@ -17158,6 +17158,18 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
     while (frame->as.prepare_control.index < frame->as.prepare_control.end)
     {
         u32 index = frame->as.prepare_control.index++;
+        CToken token = builder->preprocess.tokens[index];
+        // The sizeof owner decides whether a VLA expression must run. When it
+        // does, it lowers the operand in a child expression frame, which runs
+        // its own preparation pass. This scan must not hoist control groups
+        // from a fixed-size sizeof or unevaluated _Alignof operand.
+        if (token.kind == C_TOKEN_IDENTIFIER &&
+            c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_IR_UNEVALUATED_OPERAND_WORDS))
+        {
+            frame->as.prepare_control.index =
+                c_ir_unevaluated_operand_end(builder, index + 1, frame->as.prepare_control.end);
+            continue;
+        }
         c_ir_lazy_operand_scan_step(builder, &frame->as.prepare_control.lazy, frame->as.prepare_control.start,
                                     frame->as.prepare_control.end, index);
         if (index + 1 < frame->as.prepare_control.end &&
