@@ -494,6 +494,11 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_reject_gpu_native_options(Arena* arena,
         compiler_driver_argument_error(arena, invocation, S8("the native C dialect option is not used by GPU target: {S8}"),
                                        gpu_target_to_string(arena, invocation->gpu_target));
     }
+    else if (invocation->plain_char_policy_explicit)
+    {
+        compiler_driver_argument_error(arena, invocation, S8("plain-char signedness options are not supported for external GPU target: {S8}"),
+                                       gpu_target_to_string(arena, invocation->gpu_target));
+    }
     else if (invocation->source_metrics_path.length)
     {
         compiler_driver_argument_error(arena, invocation, S8("source metrics are not supported for GPU target: {S8}"), invocation->source_metrics_path);
@@ -1332,6 +1337,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.verify_codegen = true;
             continue;
         }
+        if (string_equal(argument, S8("-funsigned-char")) || string_equal(argument, S8("-fsigned-char")))
+        {
+            invocation.plain_char_policy = string_equal(argument, S8("-funsigned-char")) ?
+                                               TARGET_PLAIN_CHAR_POLICY_UNSIGNED : TARGET_PLAIN_CHAR_POLICY_SIGNED;
+            invocation.plain_char_policy_explicit = true;
+            continue;
+        }
         if (string_starts_with_sequence(argument, S8("-fsysv-unnamed-bitfields=")))
         {
             value = compiler_driver_option_value(argument, S8("-fsysv-unnamed-bitfields="));
@@ -1653,6 +1665,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         invocation.target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(invocation.target) == OBJECT_FORMAT_ELF64)
     {
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), position_independent_executable_option);
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.plain_char_policy_explicit)
+    {
+        invocation.target.plain_char_policy = invocation.plain_char_policy;
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.emit_llvm_bitcode &&
         (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ||

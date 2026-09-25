@@ -2389,6 +2389,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembler_language(UnitT
     BUSTER_TEST(arguments, gpu_option.error == COMPILER_DRIVER_ERROR_ARGUMENT &&
                                string_starts_with_sequence(gpu_option.diagnostic, S8("GPU option requires a GPU target")));
 
+    String8 gpu_plain_char_arguments[] = {
+        S8("-target"), S8("nvptx64-nvidia-cuda"), S8("-funsigned-char"), invalid_input,
+    };
+    CompilerDriverInvocation gpu_plain_char_option =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(gpu_plain_char_arguments));
+    BUSTER_TEST(arguments, gpu_plain_char_option.error == COMPILER_DRIVER_ERROR_ARGUMENT &&
+                               string_starts_with_sequence(gpu_plain_char_option.diagnostic,
+                                                           S8("plain-char signedness options are not supported")));
+
     String8 input = buster_test_temporary_path(arena, S8("buster-issue535-assembly"), S8(".input"));
     String8 output = buster_test_temporary_path(arena, S8("buster-issue535-assembly"), S8(".o"));
     String8 source = S8(".text\n.globl issue535_entry\n.type issue535_entry,@function\nissue535_entry:\n    ret\n.size issue535_entry, .-issue535_entry\n");
@@ -9688,6 +9697,27 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !register_allocator_default.register_allocator_explicit);
     BUSTER_TEST(arguments, !register_allocator_default.verify_codegen);
     BUSTER_TEST(arguments, !register_allocator_default.record_codegen_fallbacks);
+    String8 signed_char_wins[] = {S8("-funsigned-char"), S8("-fsigned-char"), S8("source.c")};
+    CompilerDriverInvocation signed_char_policy = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(signed_char_wins));
+    BUSTER_TEST(arguments, signed_char_policy.error == COMPILER_DRIVER_ERROR_NONE && signed_char_policy.plain_char_policy_explicit &&
+                             signed_char_policy.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_SIGNED &&
+                             signed_char_policy.target.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_SIGNED);
+    String8 unsigned_char_wins[] = {S8("-fsigned-char"), S8("-funsigned-char"), S8("source.c")};
+    CompilerDriverInvocation unsigned_char_policy = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unsigned_char_wins));
+    BUSTER_TEST(arguments, unsigned_char_policy.error == COMPILER_DRIVER_ERROR_NONE && unsigned_char_policy.plain_char_policy_explicit &&
+                             unsigned_char_policy.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_UNSIGNED &&
+                             unsigned_char_policy.target.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_UNSIGNED);
+    String8 target_char_policy_arguments[] = {
+        S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-fsigned-char"), S8("source.c"),
+    };
+    CompilerDriverInvocation target_char_policy = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(target_char_policy_arguments));
+    BUSTER_TEST(arguments, target_char_policy.error == COMPILER_DRIVER_ERROR_NONE &&
+                             target_char_policy.target.cpu_arch == CPU_ARCH_AARCH64 &&
+                             target_char_policy.target.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_SIGNED &&
+                             target_data_layout(target_char_policy.target).plain_char_is_signed);
     String8 census_command[] = {S8("-fcodegen-fallback-census"), S8("source.c")};
     CompilerDriverInvocation census_enabled = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(census_command));
     BUSTER_TEST(arguments, census_enabled.error == COMPILER_DRIVER_ERROR_NONE && census_enabled.record_codegen_fallbacks);
@@ -12624,6 +12654,66 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
         scratch_end(c_shape_temporary);
+    }
+    String8 plain_char_policies[] = {S8("-funsigned-char"), S8("-fsigned-char")};
+    String8 plain_char_allocators[] = {
+        S8("-fregister-allocator=none"),
+        S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"),
+        S8("-fregister-allocator=quality"),
+    };
+    String8 plain_char_frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    for (u32 policy = 0; policy < BUSTER_ARRAY_LENGTH(plain_char_policies); policy += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(plain_char_allocators); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(plain_char_frontends); frontend += 1)
+            {
+                TemporalArena plain_char_temporary = scratch_begin(&arguments->arena, 1);
+                String8 output_suffix;
+#if BUSTER_ANDROID || BUSTER_IOS
+                output_suffix = string_format(plain_char_temporary.arena, S8("-{u32}-{u32}-{u32}.o"), policy, mode, frontend);
+#elif BUSTER_WINDOWS
+                output_suffix = string_format(plain_char_temporary.arena, S8("-{u32}-{u32}-{u32}.exe"), policy, mode, frontend);
+#else
+                output_suffix = string_format(plain_char_temporary.arena, S8("-{u32}-{u32}-{u32}"), policy, mode, frontend);
+#endif
+                String8 output = buster_test_temporary_path(plain_char_temporary.arena, S8("buster-c-plain-char"), output_suffix);
+                String8 plain_char_command_line[12];
+                u32 command_count = 0;
+                plain_char_command_line[command_count++] = plain_char_policies[policy];
+                plain_char_command_line[command_count++] = plain_char_allocators[mode];
+                plain_char_command_line[command_count++] = plain_char_frontends[frontend];
+                if (mode != 0)
+                {
+                    plain_char_command_line[command_count++] = S8("-fverify-codegen");
+                    plain_char_command_line[command_count++] = S8("-fno-machine-fallback");
+                }
+#if BUSTER_ANDROID || BUSTER_IOS
+                plain_char_command_line[command_count++] = S8("-c");
+#endif
+                plain_char_command_line[command_count++] = S8("-o");
+                plain_char_command_line[command_count++] = output;
+                plain_char_command_line[command_count++] = S8("tests/basic_c_plain_char_literal_sign.c");
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    plain_char_temporary.arena,
+                    compiler_driver_parse_arguments(plain_char_temporary.arena,
+                        (SliceString8){.pointer = plain_char_command_line, .length = command_count}));
+                if (compiled.error != COMPILER_DRIVER_ERROR_NONE)
+                {
+                    arguments->show(arguments, S8("plain-char fixture {S8} mode={u32} frontend={u32} failed: {S8}\n"),
+                                    plain_char_policies[policy], mode, frontend, compiled.diagnostic);
+                }
+                BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+#if !BUSTER_ANDROID && !BUSTER_IOS
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST(arguments, compiler_driver_test_process_success(plain_char_temporary.arena, output));
+                }
+#endif
+                scratch_end(plain_char_temporary);
+            }
+        }
     }
     // asm-goto behavior is a strict MIR acceptance gate, not merely one
     // default-allocator smoke run. Every successor (including fallthrough and

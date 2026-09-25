@@ -7462,6 +7462,54 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
         scratch_end(temporary);
     }
 
+    Target plain_char_targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_ANDROID},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_ANDROID},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_IOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_BPFEL, .os = OPERATING_SYSTEM_LINUX},
+    };
+    TargetPlainCharPolicy plain_char_policies[] = {
+        TARGET_PLAIN_CHAR_POLICY_TARGET_DEFAULT,
+        TARGET_PLAIN_CHAR_POLICY_SIGNED,
+        TARGET_PLAIN_CHAR_POLICY_UNSIGNED,
+    };
+    String8 plain_char_source = S8(
+        "#if defined(__CHAR_UNSIGNED__)\n"
+        "_Static_assert((char)255 == 255, \"unsigned plain char cast\");\n"
+        "_Static_assert('\\x80' == 128, \"unsigned plain character constant\");\n"
+        "#else\n"
+        "_Static_assert((char)255 == -1, \"signed plain char cast\");\n"
+        "_Static_assert('\\x80' == -128, \"signed plain character constant\");\n"
+        "#endif\n"
+        "_Static_assert((signed char)255 == -1, \"signed char remains signed\");\n"
+        "_Static_assert((unsigned char)255 == 255, \"unsigned char remains unsigned\");\n"
+        "_Static_assert(sizeof((char)255 + 0) == sizeof(int), \"plain char integer promotion\");\n"
+        "int main(void) { return 0; }\n");
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(plain_char_targets); target_index += 1)
+    {
+        for (u32 policy_index = 0; policy_index < BUSTER_ARRAY_LENGTH(plain_char_policies); policy_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = plain_char_targets[target_index];
+            target.plain_char_policy = plain_char_policies[policy_index];
+            TargetDataLayout layout = target_data_layout(target);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, plain_char_source,
+                (CPreprocessOptions){.source_path = S8("plain-char-policy.c"), .target = target, .data_layout = layout});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CIRLowerResult lowered = c_analyze(temporary.arena, S8("plain-char-policy.c"), tokens, syntax, target);
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lowered.program != 0);
+            scratch_end(temporary);
+        }
+    }
+
     {
         u64 arena_position = arguments->arena->position;
         u64 boundary_capacity = 192;

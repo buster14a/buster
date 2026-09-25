@@ -176,15 +176,13 @@ sanitizer runs remain separate, unchanged obligations.
 
 Supply a reviewed, standard-C11 source using the native Windows ABI. GNU
 extensions, compiler builtins, signed-overflow-dependent behavior and
-incompatible aliasing semantics are outside this subset. Use explicit
-`unsigned char` for high-bit byte values: Buster currently accepts
-`-funsigned-char` without promoting plain `char` as unsigned on Windows
-([#1000](https://github.com/buster14a/buster/issues/1000)). `/J` sets the
-reference's intended plain-`char` policy, but such dependent sources are not
-admitted until that compiler defect is repaired. `/Od` and `/O2` are separate
-reference controls. The optional fixed `--host` translation unit is compiled
-independently for each reference and once for all Buster configurations. A
-successful custom reference must exit zero in both optimization variants.
+incompatible aliasing semantics are outside this subset. The mixed-object
+fixture checks high-bit plain `char` under Buster's `-funsigned-char` and
+MSVC's `/J`, plus explicit signed- and unsigned-char controls. `/Od` and `/O2`
+are separate reference controls. The optional fixed `--host` translation unit
+is compiled independently for each reference and once for all Buster
+configurations. A successful custom reference must exit zero in both
+optimization variants.
 The included fixture checks scalar and aggregate values and calls in both
 compiler directions, including an aggregate returned through the Windows ABI.
 
