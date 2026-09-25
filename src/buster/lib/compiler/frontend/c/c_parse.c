@@ -5481,8 +5481,10 @@ struct CParseInitializerInferenceFrame
     u32 cursor;
     u32 limit;
     u64 next_index;
+    u64 slots;
     bool borrowed;
     bool root;
+    bool slots_known;
 };
 
 typedef struct CParseInitializerInferenceDesignator CParseInitializerInferenceDesignator;
@@ -6010,8 +6012,8 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
     }
     else
     {
-        u64 slots = 0;
-        if (!c_parse_initializer_type_slots(machine, arena, preprocess, result, scope, frame, &slots) || frame->next_index >= slots ||
+        u64 slots = frame->slots;
+        if ((!frame->slots_known && !c_parse_initializer_type_slots(machine, arena, preprocess, result, scope, frame, &slots)) || frame->next_index >= slots ||
             frame->type.value >= result->type_count)
         {
             return false;
@@ -6256,11 +6258,15 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             designated = frame->cursor < frame->limit && (c_token_is_punctuator(&preprocess.tokens[frame->cursor], C_PUNCTUATOR_LEFT_BRACKET) ||
                                                           c_token_is_punctuator(&preprocess.tokens[frame->cursor], C_PUNCTUATOR_DOT));
         }
-        u64 slots = 0;
-        if (!c_parse_initializer_type_slots(machine, result_arena, preprocess, result, scope, frame, &slots))
+        if (!frame->slots_known)
         {
-            return false;
+            frame->slots_known = c_parse_initializer_type_slots(machine, result_arena, preprocess, result, scope, frame, &frame->slots);
+            if (!frame->slots_known)
+            {
+                return false;
+            }
         }
+        u64 slots = frame->slots;
         if (!slots && frame->borrowed && frame->cursor < frame->limit)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[frame->cursor]),

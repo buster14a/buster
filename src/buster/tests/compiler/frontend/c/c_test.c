@@ -11981,6 +11981,108 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_values_gate(UnitTestArguments* a
 // Member names live in their aggregate's namespace. They must not bind to
 // an unrelated ordinary function during the named-call arity prepass; the
 // type-driven member-call path remains responsible for their diagnostics.
+// Array bounds are constant expressions evaluated once per initializer frame;
+// element counts, nested members, designators and target data models must keep
+// their diagnostics in syntax-only and ordinary compilation.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_frame_bounds(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 excess = S8("initializer has more elements than the aggregate can hold");
+    struct
+    {
+        String8 source;
+        String8 lp64_message;
+        String8 llp64_message;
+    } cases[] = {
+        {S8("enum { N = 3 };\nstatic const int t[N] = {1, 2, 3};\nint main(void) { return t[2]; }\n"), {0}, {0}},
+        {S8("enum { N = 3 };\nstatic const int t[N] = {1, 2, 3, 4};\nint main(void) { return t[2]; }\n"), excess, excess},
+        {S8("struct row { int v[sizeof(long) / 4]; int k; };\nstatic const struct row rows[2] = {{{1, 2}, 3}, {{4, 5}, 6}};\n"
+            "int main(void) { return rows[1].k; }\n"), {0}, excess},
+        {S8("struct row { int v[2]; int k; };\nstatic const struct row rows[1] = {{{1, 2, 3}, 3}};\nint main(void) { return rows[0].k; }\n"),
+         excess, excess},
+        {S8("int main(void) { struct p { int x[1 + 1]; int y; } a[2] = {1, 2, 3, 4, 5, 6}; int b[2 + 1] = {1, 2, 3}; return a[1].y + b[2]; }\n"),
+         {0}, {0}},
+        {S8("int main(void) { struct p { int x[1 + 1]; int y; } a[2] = {1, 2, 3, 4, 5, 6, 7}; return a[1].y; }\n"),
+         S8("in function 'main': could not lower initializer expression for local 'a'"),
+         S8("in function 'main': could not lower initializer expression for local 'a'")},
+        {S8("static int d[2 * 2] = {[3] = 1, [0] = 2, 5};\nint main(void) { return d[1]; }\n"), {0}, {0}},
+        {S8("static int d[2 * 2] = {[4] = 1};\nint main(void) { return d[0]; }\n"),
+         S8("array designator index is outside the array bounds"), S8("array designator index is outside the array bounds")},
+        {S8("struct s { int x; int y; };\nstatic const int b[__builtin_offsetof(struct s, y) / sizeof(int) + 1] = {1, 2};\n"
+            "int main(void) { return b[1]; }\n"), {0}, {0}},
+        {S8("struct s { int x; int y; };\nstatic const int b[__builtin_offsetof(struct s, y) / sizeof(int) + 1] = {1, 2, 3};\n"
+            "int main(void) { return b[1]; }\n"), excess, excess},
+        {S8("int main(void) { return sizeof((int[1 + 1]){1, 2}) == 2 * sizeof(int) ? 0 : 1; }\n"), {0}, {0}},
+    };
+    Target targets[] = {
+        target_native,
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        bool llp64 = target_uses_llp64_data_model(targets[target_index]);
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            String8 message = llp64 ? cases[case_index].llp64_message : cases[case_index].lp64_message;
+            for (u32 mode = 0; mode < 3; mode += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                                                        (CPreprocessOptions){
+                                                            .target = targets[target_index],
+                                                            .data_layout = target_data_layout(targets[target_index]),
+                                                            .dialect = C_PREPROCESS_DIALECT_GNU17,
+                                                        });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0);
+                u32 diagnostic_count = 0;
+                String8 first = {0};
+                bool certified = false;
+                if (mode == 2)
+                {
+#if BUSTER_BENCH_ALLOCATIONS
+                    IrConstructionCounters before = ir_construction_counters();
+#endif
+                    CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+#if BUSTER_BENCH_ALLOCATIONS
+                    IrConstructionCounters after = ir_construction_counters();
+                    BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+                    for (u32 counter = 0; counter < IR_CONSTRUCTION_COUNT; counter += 1)
+                    {
+                        BUSTER_TEST(arguments, before.values[counter] == after.values[counter]);
+                    }
+#endif
+                    BUSTER_TEST(arguments, analysis.analysis_complete);
+                    diagnostic_count = analysis.diagnostic_count;
+                    first = diagnostic_count ? analysis.diagnostics[0].message : (String8){0};
+                    certified = !diagnostic_count;
+                }
+                else
+                {
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("initializer-frame-bounds.c"), tokens, syntax,
+                                                                    targets[target_index],
+                                                                    (CIRLowerOptions){.disable_direct_ssa = mode != 0});
+                    diagnostic_count = lowered.diagnostic_count;
+                    first = diagnostic_count ? lowered.diagnostics[0].message : (String8){0};
+                    certified = lowered.program != 0 && lowered.canonical_ir_certified;
+                }
+                BUSTER_TEST_RAW(arguments, diagnostic_count == (message.length ? 1u : 0u), cases[case_index].source);
+                if (message.length && diagnostic_count)
+                {
+                    BUSTER_TEST_RAW(arguments, string_ends_with_sequence(first, message), cases[case_index].source);
+                }
+                else
+                {
+                    BUSTER_TEST_RAW(arguments, certified, cases[case_index].source);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_call_arity_ownership(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -22474,6 +22576,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);
     BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
+    BUSTER_TEST_FIXTURE(arguments, c_test_initializer_frame_bounds);
     BUSTER_TEST_FIXTURE(arguments, c_test_label_values_gate);
     BUSTER_TEST_FIXTURE(arguments, c_test_member_call_arity_ownership);
     BUSTER_TEST_FIXTURE(arguments, c_test_function_body_sizeof_expression);
