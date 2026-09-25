@@ -11,13 +11,22 @@
 #define BQ_RETIREMENT_SUPPORT_BYTES_CAP (128u * 1024u)
 #define BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT (12u * 2u * 2u * 4u)
 
+/* #508 nrc_targets iteration order mapped to the TARGETS order used by the
+ * correctness gate, code reader and performance schema. The row ordinal is
+ * in census order; its target field is in performance order. */
+BUSTER_GLOBAL_LOCAL u8 const bq_retirement_census_target_ids[12] = {
+    11, 5, 10, 4, 8, 2, 9, 3, 7, 1, 12, 6
+};
+
 /* The profile pins the complete #508 support declaration, including every
  * subject and control. Copy it once through a held read-only descriptor before
  * counting; neither a request nor a B declaration can choose the population.
  * The matrix dimensions are the current #508 target/frontend/PIC/allocator
- * axes. The independent rows/validator replay remains the importer's job. */
-BUSTER_GLOBAL_LOCAL bool bq_retirement_support_object_rows(int file, String8 profile,
-    BqRetirementPrepared const* prepared)
+ * axes. Object rows are also joined to the reviewed source digest and target
+ * for their #508 census ordinal. The independent rows/validator replay remains
+ * the importer's job. The null-row form is only a cardinality test seam. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_support_projection(int file, String8 profile,
+    BqRetirementPrepared const* prepared, BqRetirementTrustedRow const* rows)
 {
     char pinned[SHA256_HEX_CAPACITY] = {0}, actual[SHA256_HEX_CAPACITY] = {0};
     struct stat before = {0}, after = {0};
@@ -50,6 +59,9 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_support_object_rows(int file, String8 pro
     }
     u64 length = offset;
     offset = 0;
+    char (*subject_sha256)[SHA256_HEX_CAPACITY] = rows ?
+        calloc(BQ_RETIREMENT_INVENTORY_CAP, SHA256_HEX_CAPACITY) : NULL;
+    if (rows) ok = ok && subject_sha256 != NULL;
     u32 subjects = 0, inputs = 0;
     String8 remaining = {(char8*)bytes, length}, line = {0}, previous = {0};
     ok = ok && bq_next_line(remaining, &offset, &line) &&
@@ -86,18 +98,56 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_support_object_rows(int file, String8 pro
                 string_equal(fields[2], S8("preserved-not-active"))) ||
                (string_equal(fields[1], S8("negative-diagnostic-fixture")) &&
                 string_equal(fields[2], S8("registered-rejection-control")))));
+        if (ok) ok = inputs < BQ_RETIREMENT_INVENTORY_CAP &&
+                     (!subject || subjects < BQ_RETIREMENT_INVENTORY_CAP);
         if (ok)
         {
             previous = fields[0];
+            if (subject && subject_sha256)
+            {
+                memcpy(subject_sha256[subjects], fields[4].pointer, 64);
+                subject_sha256[subjects][64] = 0;
+            }
             subjects += subject;
             inputs += 1;
-            ok = inputs <= BQ_RETIREMENT_INVENTORY_CAP;
         }
     }
     if (ok) ok = subjects && subjects <= BQ_RETIREMENT_CORRECTNESS_ROWS_CAP /
                                        BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT &&
                   prepared->object_rows == subjects * BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT &&
-                  prepared->rows >= prepared->object_rows + 2u;
+                  prepared->rows >= prepared->object_rows + 2u &&
+                  prepared->rows <= BQ_RETIREMENT_CORRECTNESS_ROWS_CAP;
+    u8* seen = ok && rows ? calloc(prepared->object_rows, 1) : NULL;
+    if (ok && rows) ok = seen != NULL;
+    u32 object_count = 0, stage_kinds = 0;
+    for (u32 i = 0; ok && rows && i < prepared->rows; i += 1)
+    {
+        BqRetirementTrustedRow const* row = rows + i;
+        ok = row->row == i && row->census_row < prepared->object_rows &&
+             row->stage >= BQ_RETIREMENT_STAGE_OBJECT && row->stage <= BQ_RETIREMENT_STAGE_SELF_HOST;
+        if (ok && row->stage == BQ_RETIREMENT_STAGE_OBJECT)
+        {
+            u32 ordinal = row->census_row;
+            u32 subject = ordinal / BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT;
+            u32 target_index = (ordinal % BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT) / (2u * 2u * 4u);
+            u32 target = bq_retirement_census_target_ids[target_index];
+            ok = !seen[ordinal] && row->target == target &&
+                 !memcmp(row->source_sha256, subject_sha256[subject], SHA256_HEX_CAPACITY);
+            if (ok)
+            {
+                seen[ordinal] = 1;
+                object_count += 1;
+            }
+        }
+        if (ok) stage_kinds |= 1u << row->stage;
+    }
+    if (ok && rows)
+        ok = object_count == prepared->object_rows &&
+             stage_kinds == ((1u << BQ_RETIREMENT_STAGE_OBJECT) |
+                             (1u << BQ_RETIREMENT_STAGE_LINK) |
+                             (1u << BQ_RETIREMENT_STAGE_SELF_HOST));
+    free(seen);
+    free(subject_sha256);
     free(bytes);
     return ok;
 }
@@ -181,7 +231,7 @@ BqError bq_retirement_correctness_begin_service(BqQueue* queue, BqJob const* job
     String8 profile = job ? bq_recipe_profile(bq_request_recipe(&job->request)) : (String8){0};
     bool fresh = gate && !gate->check_count && !gate->failed && !gate->finished;
     BqError result = !fresh ? BQ_RECIPE_MISMATCH :
-        bq_retirement_support_object_rows(support_declaration, profile, prepared) ?
+        rows && bq_retirement_support_projection(support_declaration, profile, prepared, rows) ?
         bq_retirement_correctness_begin_service_built_pinned(queue, job,
             installed, workspaces, workspace_root, profile, BQ_RETIREMENT_BUILD_DRIVER,
             BQ_RETIREMENT_TOOLCHAIN_ROOT, preparation_sha256, record_sha256, build_record_sha256,
