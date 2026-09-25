@@ -537,6 +537,7 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .clobber_mask = 1u << MACHINE_X64_RAX,
     },
     [MACHINE_X64_F80_NEGATE] = {
         .operand_count = 2,
@@ -3649,7 +3650,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
             bool bridge = instruction->opcode == MACHINE_X64_F80_RESULT_LOAD || instruction->opcode == MACHINE_X64_F80_RESULT_STORE;
             bool bridge_f64 = bridge && (instruction->payload == 8 || instruction->payload == 24);
             u32 bridge_offset = bridge ? instruction->payload & ~8u : 0;
-            valid = binary ? instruction->payload < 4u : compare || convert ? instruction->payload < 6u :
+            valid = binary ? instruction->payload < MACHINE_X64_F80_BINARY_MODE_COUNT : compare || convert ? instruction->payload < 6u :
                     bridge ? instruction->payload == 0 || instruction->payload == 8 || instruction->payload == 16 || instruction->payload == 24
                            : instruction->payload == 0;
             for (u32 operand = compare ? 1u : 0u; operand < count && valid; operand += 1)

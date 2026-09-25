@@ -13,7 +13,8 @@ From the repository root, build `ide` normally and use a **new** output director
 ./build.sh test_differential --ide build/Release/ide --cc clang --out build/differential-release --sanitize-oracle
 ```
 
-The defaults use thirteen permanent cases and four generated cases, seed 1, a
+On desktop SysV x86-64, the defaults use fourteen successful permanent cases,
+two rejection controls, and four generated cases, seed 1, a
 10-second deadline per child, and at most 64 reduction trials for the first
 runtime mismatch in each case. A reference compiler must be available; its
 absence is a failure, not a skip. `--cc` accepts one executable, not a shell
@@ -60,6 +61,16 @@ checks; writing a Darwin or Windows object on another host is not native
 execution evidence. The former direct emitter has independently reproduced
 public-list and Darwin named-stack ABI defects, so agreement with it does not
 serve as the oracle for these new public-ABI cases.
+
+The `x64-i128-float` case crosses the compiler boundary in both directions:
+an independently compiled Clang or GCC caller supplies signed/unsigned 128-bit
+integers and f32/f64/f80 values to the Buster subject, checks every conversion
+against its own casts, and checks wide arguments and return values through the
+native ABI. Inputs include the signed minimum, both sides of 2^64, and the
+largest f80 value below 2^128. The three MIR allocators require zero fallback;
+NONE remains the direct reference before its separate cutover. The registered
+driver fixture covers Windows x86-64; this independent native comparison runs
+where System V x87 long double is available.
 
 On ELF AArch64, twenty-two additional relations exchange actual public `va_list`
 objects, rather than only calling variadic functions compiled by the other

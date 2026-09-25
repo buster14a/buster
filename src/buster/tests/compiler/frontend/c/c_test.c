@@ -7021,6 +7021,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_ffs"), all_targets},
         {S8("__builtin_ffsl"), all_targets},
         {S8("__builtin_ffsll"), all_targets},
+        {S8("__builtin_clz"), all_targets},
+        {S8("__builtin_clzl"), all_targets},
+        {S8("__builtin_clzll"), all_targets},
+        {S8("__builtin_ctz"), all_targets},
+        {S8("__builtin_ctzl"), all_targets},
+        {S8("__builtin_ctzll"), all_targets},
+        {S8("__builtin_popcount"), all_targets},
+        {S8("__builtin_popcountl"), all_targets},
+        {S8("__builtin_popcountll"), all_targets},
         {S8("__is_target_arch"), all_targets},
         {S8("not_a_builtin"), 0},
         {S8("__atomic_"), 0},
@@ -7136,6 +7145,89 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_ffs_sources[index], (CPreprocessOptions){.target = targets[0]});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count != 0);
+        scratch_end(temporary);
+    }
+
+    // The nine fixed-signature bit-count spellings take unsigned
+    // int/long/long long and return signed int. The target-dependent long
+    // width must be visible in canonical IR on both frontend forms.
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            String8 source = S8(
+                "_Static_assert(sizeof(__builtin_clz(1u)) == sizeof(int), \"clz result\");\n"
+                "_Static_assert(sizeof(__builtin_clzl(1ul)) == sizeof(int), \"clzl result\");\n"
+                "_Static_assert(sizeof(__builtin_clzll(1ull)) == sizeof(int), \"clzll result\");\n"
+                "_Static_assert(sizeof(__builtin_ctz(1u)) == sizeof(int), \"ctz result\");\n"
+                "_Static_assert(sizeof(__builtin_ctzl(1ul)) == sizeof(int), \"ctzl result\");\n"
+                "_Static_assert(sizeof(__builtin_ctzll(1ull)) == sizeof(int), \"ctzll result\");\n"
+                "_Static_assert(sizeof(__builtin_popcount(1u)) == sizeof(int), \"popcount result\");\n"
+                "_Static_assert(sizeof(__builtin_popcountl(1ul)) == sizeof(int), \"popcountl result\");\n"
+                "_Static_assert(sizeof(__builtin_popcountll(1ull)) == sizeof(int), \"popcountll result\");\n"
+                "int query_counts(unsigned long long value) {\n"
+                "    return __builtin_clz(value) + __builtin_clzl(value) + __builtin_clzll(value) +\n"
+                "           __builtin_ctz(value) + __builtin_ctzl(value) + __builtin_ctzll(value) +\n"
+                "           __builtin_popcount(value) + __builtin_popcountl(value) + __builtin_popcountll(value);\n"
+                "}\n");
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("count-signatures.c"), preprocess, parse, target,
+                    (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    IrFunction* function = c_test_find_ir_function(module, S8("query_counts"));
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        u32 count_width_32 = 0;
+                        u32 count_width_64 = 0;
+                        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                        {
+                            IrInstruction* instruction = function->instructions + instruction_index;
+                            if (instruction->opcode == IR_OPCODE_UNARY &&
+                                (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
+                                 instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS))
+                            {
+                                IrType* type = ir_type_from_id(&lowered.program->types, instruction->canonical_type);
+                                if (BUSTER_REQUIRE(arguments, type != 0))
+                                {
+                                    count_width_32 += type->bit_width == 32;
+                                    count_width_64 += type->bit_width == 64;
+                                }
+                            }
+                        }
+                        BUSTER_TEST(arguments, count_width_32 == (target_uses_llp64_data_model(target) ? 4u : 2u));
+                        BUSTER_TEST(arguments, count_width_64 == (target_uses_llp64_data_model(target) ? 2u : 4u));
+                        BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+
+    String8 invalid_count_sources[] = {
+        S8("int f(void) { return __builtin_clz(); }"),
+        S8("int f(void) { return __builtin_clzll(1, 2); }"),
+        S8("int f(void) { return __builtin_ctzl((int*)0); }"),
+        S8("int f(void) { return __builtin_popcountll((struct Bad { int x; }){0}); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_count_sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_count_sources[index], (CPreprocessOptions){.target = targets[0]});
         CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
         CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
@@ -11229,6 +11321,55 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_constant_expression(UnitTestArg
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
     }
     scratch_end(temporary);
+    return result;
+}
+
+// #629: the integer-range evaluator must use the source token indices. With
+// compact lexing, copying the expression under an assertion wrapper borrowed
+// the original shape sidecar and rejected this valid sizeof compound literal.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_token_view_constant_range(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena,
+            S8("struct TokenViewPair { int x, y; };\n"
+               "#pragma pack(push, 1)\n"
+               "struct TokenViewPacked { char c; int x; };\n"
+               "#pragma pack(pop)\n"
+               "int unrelated = 7;\n"
+               "constexpr int size = sizeof (struct TokenViewPair){1, 2};\n"
+               "constexpr int packed_size = sizeof (struct TokenViewPacked){1, 2};\n"
+               "_Static_assert(sizeof (struct TokenViewPacked){1, 2} == 5, \"compound literal, comma\");\n"
+               "int array[(size == 8 && packed_size == 5) ? 1 : -1];\n"),
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                 .dialect = C_PREPROCESS_DIALECT_C23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+        {
+            bool found_size = false;
+            bool found_packed_size = false;
+            for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+            {
+                CEntity* entity = parse.entities + entity_index;
+                found_size |= string_equal(entity->name, S8("size")) && entity->has_constant_value && entity->constant_value == 8;
+                found_packed_size |= string_equal(entity->name, S8("packed_size")) && entity->has_constant_value && entity->constant_value == 5;
+            }
+            BUSTER_TEST(arguments, found_size);
+            BUSTER_TEST(arguments, found_packed_size);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("token-view-constant.c"), preprocess, parse,
+                                                                target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count))
+            {
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+            }
+        }
+        scratch_end(temporary);
+    }
     return result;
 }
 
@@ -22600,6 +22741,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_compound_assignment_conversions(UnitTe
     return result;
 }
 
+// Check the expression separately from the atomic object: a narrow RMW can
+// store the wrapped byte while its promoted arithmetic result is still 256.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL String8 const c_test_atomic_compound_result_source = S8_INITIALIZER(
+    "static _Atomic(unsigned char) byte;\n"
+    "static _Atomic(unsigned short) half;\n"
+    "static unsigned rhs_hits;\n"
+    "static int rhs(void) { rhs_hits += 1; return 1; }\n"
+    "int main(void) {\n"
+    "    int failed = 0;\n"
+    "    int types_ok = _Generic((byte += 1), unsigned char: 1, default: 0) &&\n"
+    "        _Generic((++byte), unsigned char: 1, default: 0) &&\n"
+    "        _Generic((byte++), unsigned char: 1, default: 0) &&\n"
+    "        _Generic((half += 1), unsigned short: 1, default: 0);\n"
+    "    failed |= !types_ok || byte != 0 || half != 0;\n"
+    "    byte = 255; int observed = (byte += rhs());\n"
+    "    failed |= observed != 0 || byte != 0 || rhs_hits != 1;\n"
+    "    byte = 0; observed = (byte -= 1);\n"
+    "    failed |= observed != 255 || byte != 255;\n"
+    "    half = 65535; observed = (half += 1);\n"
+    "    failed |= observed != 0 || half != 0;\n"
+    "    byte = 255; observed = ++byte;\n"
+    "    failed |= observed != 0 || byte != 0;\n"
+    "    byte = 255; failed |= ++byte != 0 || byte != 0;\n"
+    "    byte = 255; observed = byte++;\n"
+    "    failed |= observed != 255 || byte != 0;\n"
+    "    byte = 255; observed = (unsigned char)(byte += 1);\n"
+    "    failed |= observed != 0 || byte != 0;\n"
+    "    byte = 3; observed = (byte += 2);\n"
+    "    failed |= observed != 5 || byte != 5;\n"
+    "    unsigned char ordinary = 255; observed = (ordinary += 1);\n"
+    "    failed |= observed != 0 || ordinary != 0;\n"
+    "    return failed;\n"
+    "}\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_result(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source = buster_test_temporary_path(arguments->arena, S8("atomic-compound-result"), S8(".c"));
+    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_atomic_compound_result_source))))
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("atomic-compound-result-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), S8("-std=c17"), S8("-fverify-codegen"), allocators[allocator],
+                                        frontends[form], optimizations[optimization], S8("-o"), output, source};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = allocator != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("atomic compound {S8} {S8} {S8}: {S8}"),
+                                      allocators[allocator], frontends[form], optimizations[optimization], compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("atomic result {S8} {S8} {S8}: status={u32} timed_out={u32}"),
+                                              allocators[allocator], frontends[form], optimizations[optimization],
+                                              execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // Buster deliberately selects signed __int128 for decimal magnitudes above
 // INT64_MAX. Test that established extension, not Clang's different raw-literal
 // policy, and retain explicit unsigned suffixes/casts as independent controls.
@@ -22957,6 +23186,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_semantic_basics);
     BUSTER_TEST_FIXTURE(arguments, c_test_typedef_fallback_lookup);
     BUSTER_TEST_FIXTURE(arguments, c_test_compound_assignment_conversions);
+    BUSTER_TEST_FIXTURE(arguments, c_test_atomic_compound_result);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_global_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
     BUSTER_TEST_FIXTURE(arguments, c_test_typed_enum_integer_constants);
@@ -22974,6 +23204,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
+    BUSTER_TEST_FIXTURE(arguments, c_test_token_view_constant_range);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_function_type_name);
     BUSTER_TEST_FIXTURE(arguments, c_test_void_object_refusals);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);

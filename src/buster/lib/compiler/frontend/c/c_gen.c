@@ -13081,21 +13081,28 @@ typedef enum CIrLowerFrameStage
     C_IR_LOWER_STAGE_EXPRESSION_CORE_COMPOUND_LITERAL,
 } CIrLowerFrameStage;
 
-typedef struct CIrNestedInitializerTask CIrNestedInitializerTask;
-struct CIrNestedInitializerTask
-{
-    IrValueId place;
-    IrTypeId type;
-    u32 open;
-    u32 close;
-};
-
 typedef struct CIrNestedInitializerCursor CIrNestedInitializerCursor;
 struct CIrNestedInitializerCursor
 {
     IrValueId place;
     IrTypeId type;
     u32 next_index;
+};
+
+typedef struct CIrNestedInitializerTask CIrNestedInitializerTask;
+struct CIrNestedInitializerTask
+{
+    IrValueId place;
+    IrTypeId type;
+    CIrNestedInitializerCursor* cursors;
+    u32 open;
+    u32 close;
+    u32 item_start;
+    u32 index;
+    u32 next_index;
+    u32 cursor_count;
+    bool resume;
+    bool zero_subobject;
 };
 
 typedef struct CIrNestedCompoundLiteralState CIrNestedCompoundLiteralState;
@@ -20075,13 +20082,26 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             {
                 return false;
             }
-            IrTypeId type = builder->function->values[operand.value].canonical_type;
-            IrType* type_value = ir_type_from_id(&builder->program->types, type);
-            bool find_first_set = c_ir_token_builtin_kind(builder, token) == C_SYMBOL_BUILTIN_FIND_FIRST_SET;
-            if (!type_value || (!find_first_set && type_value->kind != IR_TYPE_INTEGER))
+            CSymbolBuiltin builtin = c_ir_token_builtin_kind(builder, token);
+            CTypeKind parameter_kind = c_semantic_integer_count_parameter_kind(builtin,
+                c_token_spelling(builder->preprocess.spelling_base, token));
+            bool find_first_set = builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET;
+            IrTypeId original_type = builder->function->values[operand.value].canonical_type;
+            IrType* original = ir_type_from_id(&builder->program->types, original_type);
+            if (!original || (!find_first_set && original->kind != IR_TYPE_INTEGER && original->kind != IR_TYPE_BOOLEAN &&
+                              original->kind != IR_TYPE_FLOAT && !original->is_complex))
             {
                 return false;
             }
+            if (parameter_kind != C_TYPE_INVALID)
+            {
+                operand = c_ir_emit_cast(builder, operand, builder->scalar_types[parameter_kind], c_ir_token_source_range(builder, token));
+                if (operand.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+            }
+            IrTypeId type = builder->function->values[operand.value].canonical_type;
             IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
             IrValueId result = IR_VALUE_ID_INVALID;
             if (find_first_set)
@@ -20107,6 +20127,14 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 instruction.result = result;
                 IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
                 builder->function->values[result.value].definition = id;
+            }
+            if (parameter_kind != C_TYPE_INVALID && result.value != IR_ID_UNDERLYING_INVALID)
+            {
+                result = c_ir_emit_cast(builder, result, builder->s32_type, instruction_source);
+            }
+            if (result.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return false;
             }
             selected->result = result;
             selected->argument_count = 1;
@@ -23233,7 +23261,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
         // The operation runs in the promoted type, so a narrower object's
         // result comes back down here -- `(data[i] += 2) == 0` has to see the
         // stored byte, not the 256 the addition produced.
-        if (!atomic && values[0].value < builder->function->value_count &&
+        if (values[0].value < builder->function->value_count &&
             builder->function->values[values[0].value].canonical_type.value != value_type.value)
         {
             values[0] = c_ir_emit_cast(builder, values[0], value_type, source);
@@ -24549,6 +24577,69 @@ BUSTER_C_INTERNAL u32 c_ir_initializer_next_field_index(IrType* type, u32 index)
     return index;
 }
 
+// A named designator can cross anonymous struct/union members. Recover every
+// FIELD edge emitted for that member so positional items resume at the deepest
+// selected container before moving to its enclosing siblings.
+BUSTER_C_INTERNAL bool c_ir_nested_initializer_field_cursors(CIntegerIrBuilder* builder, CIrNestedCompoundLiteralState* state,
+                                                              IrValueId parent, IrValueId child)
+{
+    u32 first = state->cursor_count;
+    bool result = true;
+    while (result && child.value != parent.value)
+    {
+        if (child.value >= builder->function->value_count || state->cursor_count >= state->cursor_capacity)
+        {
+            result = false;
+        }
+        else
+        {
+            IrInstructionId definition = builder->function->values[child.value].definition;
+            if (definition.value >= builder->function->instruction_count)
+            {
+                result = false;
+            }
+            else
+            {
+                IrInstruction* field = builder->function->instructions + definition.value;
+                if (field->opcode != IR_OPCODE_FIELD || field->operand_count != 1 || field->immediate_count != 1)
+                {
+                    result = false;
+                }
+                else
+                {
+                    IrValueId container_place = field->operands[0];
+                    IrTypeId container_type = container_place.value < builder->function->value_count
+                                                  ? builder->function->values[container_place.value].canonical_type
+                                                  : IR_TYPE_ID_INVALID;
+                    IrType* container = ir_type_from_id(&builder->program->types, container_type);
+                    u64 selected = field->immediates[0];
+                    if (!container || (container->kind != IR_TYPE_STRUCT && container->kind != IR_TYPE_UNION) || selected >= container->field_count)
+                    {
+                        result = false;
+                    }
+                    else
+                    {
+                        state->cursors[state->cursor_count++] = (CIrNestedInitializerCursor){
+                            .place = container_place,
+                            .type = container_type,
+                            .next_index = (u32)selected + 1,
+                        };
+                        child = container_place;
+                    }
+                }
+            }
+        }
+    }
+    for (u32 left = first, right = state->cursor_count; result && left < right; left += 1)
+    {
+        right -= 1;
+        CIrNestedInitializerCursor swap = state->cursors[left];
+        state->cursors[left] = state->cursors[right];
+        state->cursors[right] = swap;
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -24629,14 +24720,47 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
         {
             frame->as.nested_compound_literal.state->task =
                 frame->as.nested_compound_literal.state->tasks[--frame->as.nested_compound_literal.state->task_count];
-            frame->as.nested_compound_literal.state->next_index = 0;
-            frame->as.nested_compound_literal.state->item_start = frame->as.nested_compound_literal.state->task.open + 1;
-            frame->as.nested_compound_literal.state->index = frame->as.nested_compound_literal.state->item_start;
-            frame->as.nested_compound_literal.state->cursors[0] = (CIrNestedInitializerCursor){
-                .place = frame->as.nested_compound_literal.state->task.place,
-                .type = frame->as.nested_compound_literal.state->task.type,
-            };
-            frame->as.nested_compound_literal.state->cursor_count = 1;
+            CIrNestedInitializerTask* active = &frame->as.nested_compound_literal.state->task;
+            if (active->resume)
+            {
+                frame->as.nested_compound_literal.state->next_index = active->next_index;
+                frame->as.nested_compound_literal.state->item_start = active->item_start;
+                frame->as.nested_compound_literal.state->index = active->index;
+                memcpy(frame->as.nested_compound_literal.state->cursors, active->cursors,
+                       active->cursor_count * sizeof(*active->cursors));
+                frame->as.nested_compound_literal.state->cursor_count = active->cursor_count;
+            }
+            else
+            {
+                if (active->zero_subobject)
+                {
+                    CToken token = builder->preprocess.tokens[active->open];
+                    bool zeroed;
+                    if (c_ir_zero_storage_compatible(builder, active->type))
+                    {
+                        IrType* subobject = ir_type_from_id(&builder->program->types, active->type);
+                        zeroed = c_ir_emit_zero_storage(builder, active->place, active->type, subobject->layout.size, token);
+                    }
+                    else
+                    {
+                        IrValueId zero = c_ir_emit_zero_value(builder, active->type, token);
+                        zeroed = zero.value != IR_ID_UNDERLYING_INVALID &&
+                                 c_ir_emit_store_place(builder, active->place, active->type, zero, c_ir_token_source_range(builder, token));
+                    }
+                    if (!zeroed)
+                    {
+                        goto c_ir_nested_compound_failed;
+                    }
+                }
+                frame->as.nested_compound_literal.state->next_index = 0;
+                frame->as.nested_compound_literal.state->item_start = active->open + 1;
+                frame->as.nested_compound_literal.state->index = frame->as.nested_compound_literal.state->item_start;
+                frame->as.nested_compound_literal.state->cursors[0] = (CIrNestedInitializerCursor){
+                    .place = active->place,
+                    .type = active->type,
+                };
+                frame->as.nested_compound_literal.state->cursor_count = 1;
+            }
             frame->as.nested_compound_literal.state->task_active = true;
         }
         CIrNestedInitializerTask task = frame->as.nested_compound_literal.state->task;
@@ -24683,6 +24807,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
         u32 parentheses = 0;
         u32 brackets = 0;
         u32 braces = 0;
+        bool descended = false;
         while (index <= task.close)
         {
             bool at_end = index == task.close;
@@ -24742,8 +24867,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             {
                 u32 close = c_ir_matching_delimiter_cached(builder, item_start, index, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
                 u64 designated = UINT64_MAX;
-                if (close >= index || close + 1 >= index || !c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_ASSIGN) ||
-                    close != item_start + 2)
+                if (close >= index || close + 1 >= index || close != item_start + 2)
                 {
                     if (close < index && c_ir_array_designator_has_range(builder, item_start, close))
                     {
@@ -24887,12 +25011,20 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             }
             if (!cursor_item)
             {
-                frame->as.nested_compound_literal.state->cursors[0] = (CIrNestedInitializerCursor){
-                    .place = task.place,
-                    .type = task.type,
-                    .next_index = promoted_designator ? next_index : selected_index + 1,
-                };
-                frame->as.nested_compound_literal.state->cursor_count = 1;
+                frame->as.nested_compound_literal.state->cursor_count = 0;
+                if (array_designator)
+                {
+                    if (frame->as.nested_compound_literal.state->cursor_count >= frame->as.nested_compound_literal.state->cursor_capacity)
+                    {
+                        goto c_ir_nested_compound_failed;
+                    }
+                    frame->as.nested_compound_literal.state->cursors[frame->as.nested_compound_literal.state->cursor_count++] =
+                        (CIrNestedInitializerCursor){.place = task.place, .type = task.type, .next_index = selected_index + 1};
+                }
+                else if (!c_ir_nested_initializer_field_cursors(builder, frame->as.nested_compound_literal.state, task.place, child_place))
+                {
+                    goto c_ir_nested_compound_failed;
+                }
             }
             for (u32 designator = nested_designator_start; designator < designator_equals;)
             {
@@ -24907,14 +25039,29 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                     {
                         goto c_ir_nested_compound_failed;
                     }
+                    IrType* container = ir_type_from_id(&builder->program->types, child_type);
+                    if (!container || (container->kind != IR_TYPE_ARRAY && container->kind != IR_TYPE_VECTOR) ||
+                        subscript_value >= container->element_count ||
+                        frame->as.nested_compound_literal.state->cursor_count >= frame->as.nested_compound_literal.state->cursor_capacity)
+                    {
+                        goto c_ir_nested_compound_failed;
+                    }
+                    frame->as.nested_compound_literal.state->cursors[frame->as.nested_compound_literal.state->cursor_count++] =
+                        (CIrNestedInitializerCursor){.place = child_place, .type = child_type, .next_index = (u32)subscript_value + 1};
                     IrValueId subscript = c_ir_emit_integer_value(builder, subscript_value, false, builder->preprocess.tokens[designator]);
                     child_place = c_ir_emit_index_place(builder, child_place, subscript, source);
                     designator = subscript_close + 1;
                 }
                 else
                 {
+                    IrValueId parent_place = child_place;
                     child_place = c_ir_emit_field_place_from_value(builder, child_place, builder->preprocess.tokens[designator],
                                                                    builder->preprocess.tokens[designator + 1]);
+                    if (child_place.value >= builder->function->value_count ||
+                        !c_ir_nested_initializer_field_cursors(builder, frame->as.nested_compound_literal.state, parent_place, child_place))
+                    {
+                        goto c_ir_nested_compound_failed;
+                    }
                     designator += 2;
                 }
                 if (child_place.value >= builder->function->value_count)
@@ -25016,16 +25163,31 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             }
             else if (nested)
             {
-                if (frame->as.nested_compound_literal.state->task_count >= frame->as.nested_compound_literal.state->capacity)
+                if (frame->as.nested_compound_literal.state->task_count > frame->as.nested_compound_literal.state->capacity - 2)
                 {
                     goto c_ir_nested_compound_failed;
                 }
+                // Suspend the parent before lowering this brace list. Its later
+                // scalar items must not run before the nested stores.
+                CIrNestedInitializerTask parent = task;
+                parent.resume = true;
+                parent.item_start = index + 1;
+                parent.index = index + 1;
+                parent.next_index = (!cursor_item && !promoted_designator) ? selected_index + 1 : next_index;
+                parent.cursor_count = frame->as.nested_compound_literal.state->cursor_count;
+                parent.cursors = arena_allocate(builder->temporary_arena, CIrNestedInitializerCursor, parent.cursor_count);
+                memcpy(parent.cursors, frame->as.nested_compound_literal.state->cursors,
+                       parent.cursor_count * sizeof(*parent.cursors));
+                frame->as.nested_compound_literal.state->tasks[frame->as.nested_compound_literal.state->task_count++] = parent;
                 frame->as.nested_compound_literal.state->tasks[frame->as.nested_compound_literal.state->task_count++] = (CIrNestedInitializerTask){
                     .place = child_place,
                     .type = child_type,
                     .open = value_start,
                     .close = index - 1,
+                    .zero_subobject = true,
                 };
+                descended = true;
+                break;
             }
             else
             {
@@ -25069,6 +25231,10 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             index += 1;
         }
         frame->as.nested_compound_literal.state->task_active = false;
+        if (descended)
+        {
+            continue;
+        }
     }
     {
         CToken root_token = builder->preprocess.tokens[frame->as.nested_compound_literal.state->root_open];
@@ -25873,7 +26039,11 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_postfix_chain_attempt(CIntegerIrBuild
         }
         if ((c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS)) && index + 1 == end)
         {
-            // Postfix increment keeps the operand type.
+            // Postfix yields the non-atomic value, not the access type.
+            if (value->is_atomic)
+            {
+                *type = value->unqualified_type;
+            }
             return true;
         }
         bool arrow = c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW);
@@ -25927,6 +26097,24 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     CToken token = builder->preprocess.tokens[start];
     String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
     u32 chain_start = start + 1;
+
+    // A count builtin has no declared function entity. Resolve its fixed
+    // signed-int result before a surrounding conditional predicts the type
+    // of either arm, even when the call has not been emitted yet.
+    if (c_semantic_integer_count_parameter_kind(c_ir_token_builtin_kind(builder, token), name) != C_TYPE_INVALID)
+    {
+        if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            return false;
+        }
+        u32 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close >= end)
+        {
+            return false;
+        }
+        *type_out = builder->s32_type;
+        return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
+    }
 
     // Builtin math names are parser symbols rather than ordinary declarations,
     // so they have no CEntity/signature for the strict type walk to query.
@@ -26273,8 +26461,15 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     }
     if (first_assign != UINT32_MAX)
     {
-        // Assignment yields the unpromoted type of its left operand.
-        return c_ir_sizeof_operand_type_attempt_depth(builder, start, first_assign, type_out, remaining_depth, promote_bit_fields);
+        // Assignment to an atomic place yields its unpromoted non-atomic value
+        // type, not the access type carried by the destination place.
+        bool resolved = c_ir_sizeof_operand_type_attempt_depth(builder, start, first_assign, type_out, remaining_depth, promote_bit_fields);
+        IrType* assigned = resolved ? ir_type_from_id(&builder->program->types, *type_out) : 0;
+        if (assigned && assigned->is_atomic)
+        {
+            *type_out = assigned->unqualified_type;
+        }
+        return resolved;
     }
     if (first_question != UINT32_MAX)
     {
@@ -26483,7 +26678,13 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     }
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS_MINUS))
     {
-        return c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, type_out, remaining_depth, promote_bit_fields);
+        bool resolved = c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, type_out, remaining_depth, promote_bit_fields);
+        IrType* operand = resolved ? ir_type_from_id(&builder->program->types, *type_out) : 0;
+        if (operand && operand->is_atomic)
+        {
+            *type_out = operand->unqualified_type;
+        }
+        return resolved;
     }
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_PARENTHESIS))
     {

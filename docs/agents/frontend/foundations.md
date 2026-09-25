@@ -220,6 +220,12 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   association by token range without flattening or copying the translation
   unit, and unselected associations are never evaluated. The nested
   generic-constant cases cover this path (GitHub #797).
+- Legacy integer constant ranges and static assertions share the private
+  `c_parse_constant_expression_evaluate` walker over original token indices.
+  The shape sidecar and parse position index describe that stream; copying a
+  range into a synthesized token view while retaining either derived index
+  gives the wrong classification. Spelling, source recovery, and pack changes
+  still belong to the original preprocess result (GitHub #629).
 - Preprocessing integer-expression reductions carry signedness and a deferred
   arithmetic-fault bit in the same byte. Division by zero and signed
   `INT64_MIN / -1` (including remainder) never execute as host arithmetic.
@@ -299,6 +305,16 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   selected x86-64 float-to-u64 conversion whose binary32 threshold encoded
   2^31 instead of 2^63. Runtime float-to-128-bit conversion on x86-64 remains
   unsupported; constant conversion supports both integer limbs.
+- Automatic chained designators in `c_ir_lower_nested_compound_literal_step`
+  retain a continuation cursor for every selected aggregate container. A
+  following positional item resumes at the innermost remaining sibling and
+  advances outward only when that container is exhausted. Named members may
+  cross anonymous structs or unions; `c_ir_nested_initializer_field_cursors`
+  records each emitted field edge, while array steps record their selected
+  index directly. The driver's `c_designator_continuation_source` checks
+  automatic and file-static values, compound literals, and outward
+  continuation across both frontend forms and all native allocators (GitHub
+  #1206).
 - `c_parse_index_scope_children` stores siblings in token-interval order.
   Source-ordered rows keep a linear construction path; synthesized rows use
   iterative merging with the finished CSR cursor storage as scratch.

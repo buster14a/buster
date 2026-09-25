@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -14,6 +15,7 @@ import tempfile
 
 KNOWN_ISSUE_1041_MERGE = "718ee0064bdc3513499784e7522ebad5e39bc29c"
 ZERO_SHA = re.compile(r"^0+$")
+FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 class MergePreservationError(RuntimeError):
@@ -61,6 +63,59 @@ def commit_details(repository: Path, revision: str) -> tuple[str, list[str]]:
 
 def is_ancestor(repository: Path, ancestor: str, descendant: str) -> bool:
     return run_git(repository, ["merge-base", "--is-ancestor", ancestor, descendant], check=False).returncode == 0
+
+
+def pull_request_binding(repository: Path, candidate: str, requested_base: str | None,
+                         event_path: str | None) -> dict[str, str]:
+    """Bind a PR candidate to runner event data and checkout-fetched base history."""
+    if not event_path:
+        raise MergePreservationError("pull_request requires --event-path or GITHUB_EVENT_PATH")
+    try:
+        event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+        pull_request = event["pull_request"]
+        event_base = pull_request["base"]["sha"]
+        base_ref = pull_request["base"]["ref"]
+        source_head = pull_request["head"]["sha"]
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
+        raise MergePreservationError("pull_request event data is missing or malformed") from error
+    if any(not isinstance(sha, str) or not FULL_SHA.fullmatch(sha)
+           for sha in (event_base, source_head)):
+        raise MergePreservationError("pull_request event base and source head must be full commit SHAs")
+    if not isinstance(base_ref, str) or not base_ref or run_git(
+        repository, ["check-ref-format", f"refs/heads/{base_ref}"], check=False
+    ).returncode != 0:
+        raise MergePreservationError("pull_request event base ref is invalid")
+    if not requested_base or resolve_commit(repository, requested_base) != event_base:
+        raise MergePreservationError("pull_request requested base does not equal the event base SHA")
+    if resolve_commit(repository, "HEAD") != candidate:
+        raise MergePreservationError("pull_request candidate does not equal the checked-out HEAD")
+    if git_text(repository, "rev-parse", "--is-shallow-repository") != "false":
+        raise MergePreservationError("pull_request binding requires a full-history checkout")
+    _tree, parents = commit_details(repository, candidate)
+    if len(parents) != 2:
+        raise MergePreservationError("pull_request candidate must be a two-parent merge commit")
+    if parents[1] != source_head:
+        raise MergePreservationError("pull_request candidate second parent does not equal the event source head SHA")
+
+    # actions/checkout with fetch-depth: 0 fetches base-repository branches to
+    # refs/remotes/origin/*. Resolve once: later main advancement must not turn
+    # this immutable candidate's base into a different scan boundary. Merely
+    # trusting candidate^1 or general ancestry would admit a side-branch parent.
+    base_tip = resolve_commit(repository, f"refs/remotes/origin/{base_ref}")
+    base_history = set(git_text(repository, "rev-list", "--first-parent", base_tip).splitlines())
+    if event_base not in base_history or parents[0] not in base_history:
+        raise MergePreservationError(
+            "pull_request event base and candidate first parent must be on the fetched base branch's first-parent history"
+        )
+    if not is_ancestor(repository, event_base, parents[0]):
+        raise MergePreservationError("pull_request event base is not an ancestor of the candidate first parent")
+    return {
+        "event_base": event_base,
+        "source_head": source_head,
+        "base_ref": base_ref,
+        "base_tip": base_tip,
+        "base": parents[0],
+    }
 
 
 def resolve_range_base(repository: Path, candidate: str, requested_base: str | None,
@@ -205,9 +260,10 @@ def inspect_merge(repository: Path, merge_sha: str) -> dict[str, object] | None:
 
 
 def check_history(repository: Path, candidate_revision: str, base_revision: str | None,
-                  event_name: str = "") -> dict[str, object]:
+                  event_name: str = "", *, event_path: str | None = None) -> dict[str, object]:
     candidate = resolve_commit(repository, candidate_revision)
-    base, _parents = resolve_range_base(repository, candidate, base_revision, event_name)
+    binding = pull_request_binding(repository, candidate, base_revision, event_path) if event_name == "pull_request" else {}
+    base, _parents = resolve_range_base(repository, candidate, binding.get("base", base_revision), event_name)
     merges = merge_commits_in_range(repository, candidate, base)
     findings: list[dict[str, object]] = []
     first_parent_equal = 0
@@ -219,7 +275,9 @@ def check_history(repository: Path, candidate_revision: str, base_revision: str 
         if finding:
             findings.append(finding)
     return {
+        **binding,
         "candidate": candidate,
+        "candidate_tree": commit_details(repository, candidate)[0],
         "base": base,
         "merge_count": len(merges),
         "first_parent_equal_count": first_parent_equal,
@@ -254,12 +312,14 @@ def main(arguments: list[str] | None = None) -> int:
     parser.add_argument("--candidate", default=os.environ.get("GITHUB_SHA", ""))
     parser.add_argument("--base", default=os.environ.get("MERGE_PARENT_BASE_SHA", ""))
     parser.add_argument("--event-name", default=os.environ.get("GITHUB_EVENT_NAME", ""))
+    parser.add_argument("--event-path", default=os.environ.get("GITHUB_EVENT_PATH", ""))
     options = parser.parse_args(arguments)
     if not options.candidate:
         parser.error("--candidate or GITHUB_SHA is required")
     repository = Path(options.repository).resolve()
     try:
-        report = check_history(repository, options.candidate, options.base, options.event_name)
+        report = check_history(repository, options.candidate, options.base, options.event_name,
+                               event_path=options.event_path)
     except MergePreservationError as error:
         print(f"::error title=Merge-parent preservation check failed::{error}")
         return 2
@@ -269,6 +329,13 @@ def main(arguments: list[str] | None = None) -> int:
         f"candidate={report['candidate']} base={report['base'] or '(root)'} "
         f"merges={report['merge_count']} first-parent-equal={report['first_parent_equal_count']}"
     )
+    if options.event_name == "pull_request":
+        print(
+            "PR binding: "
+            f"tree={report['candidate_tree']} source={report['source_head']} "
+            f"event-base={report['event_base']} base-ref={report['base_ref']} "
+            f"fetched-base-tip={report['base_tip']}"
+        )
     findings = report["findings"]
     for finding in findings:
         for line in format_finding(finding):

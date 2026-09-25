@@ -45,9 +45,9 @@
 //                                                 and the null-pointer-
 //                                                 constant rule a conditional
 //                                                 picks a pointer type with)
-//   c_parse_static_assert_evaluate                _Static_assert, including
-//                                                 deferral past unresolved
-//                                                 array bounds
+//   c_parse_constant_expression_evaluate          shared original-token-range
+//   c_parse_static_assert_evaluate                evaluator and _Static_assert
+//                                                 deferral past unresolved bounds
 //   c_parse_initializer_designator,               initializer shapes and
 //   c_parse_infer_initializer_array_count_core    array-bound inference
 //   c_parse_add_type, c_parse_aggregate_lookup,   type interning and
@@ -3463,9 +3463,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
             {
                 String8 name = c_token_spelling(preprocess.spelling_base, first);
                 CSymbolBuiltin builtin = c_symbol_builtin_from_spelling(name);
-                if (builtin == C_SYMBOL_BUILTIN_MATH || builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET)
+                if (builtin == C_SYMBOL_BUILTIN_MATH || builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET ||
+                    c_semantic_integer_count_parameter_kind(builtin, name) != C_TYPE_INVALID)
                 {
-                    CTypeKind kind = builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET || string_starts_with_sequence(name, S8("__builtin_signbit")) || string_starts_with_sequence(name, S8("__builtin_is"))
+                    CTypeKind kind = builtin != C_SYMBOL_BUILTIN_MATH || string_starts_with_sequence(name, S8("__builtin_signbit")) || string_starts_with_sequence(name, S8("__builtin_is"))
                                          ? C_TYPE_INT : name.length && name.pointer[name.length - 1] == 'f' && !string_equal(name, S8("__builtin_inf"))
                                          ? C_TYPE_FLOAT : C_TYPE_DOUBLE;
                     return c_parse_expression_scalar_type(result, kind);
@@ -4613,89 +4614,33 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_expression_range(CPreprocessResult 
     return valid;
 }
 
-BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
-                                                        CDeclaration declaration, CScopeId scope, u64* value_out, String8* message_out,
-                                                        bool* requires_typed_evaluation_out)
+BUSTER_C_INTERNAL bool c_parse_constant_expression_evaluate(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                             CParseResult* result, CScopeId scope, u32 expression_start,
+                                                             u32 expression_end, u64* value_out, bool* requires_typed_evaluation_out)
 {
     if (requires_typed_evaluation_out)
     {
         *requires_typed_evaluation_out = false;
     }
-    u32 start = declaration.token_start;
-    u32 end = start + declaration.token_count;
-    if (start + 3 >= end || !c_token_is_punctuator(&preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-    {
-        return false;
-    }
-    u32 comma = end;
-    u32 close = end;
-    u32 depth = 0;
-    // Braces and brackets carry commas of their own -- a compound literal
-    // operand (`_Static_assert(sizeof (struct S){1, 2} == 8, "...")`) or a
-    // subscript -- and neither can close the assert's parenthesis, so they get
-    // their own depth. Counting only parentheses takes the literal's first
-    // comma for the message separator and truncates the expression.
-    u32 group_depth = 0;
-    for (u32 token_index = start + 1; token_index < end; token_index += 1)
-    {
-        CToken token = preprocess.tokens[token_index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            group_depth += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
-        {
-            group_depth -= group_depth != 0;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            depth += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-        {
-            if (!depth)
-            {
-                return false;
-            }
-            depth -= 1;
-            if (!depth)
-            {
-                close = token_index;
-                break;
-            }
-        }
-        else if (depth == 1 && !group_depth && comma == end && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-        {
-            comma = token_index;
-        }
-    }
-    u32 expression_end = comma < close ? comma : close;
-    if (close == end || expression_end <= start + 2)
-    {
-        return false;
-    }
-    if (comma < close && comma + 1 < close && preprocess.tokens[comma + 1].kind == C_TOKEN_STRING_LITERAL)
-    {
-        *message_out = c_token_spelling(preprocess.spelling_base, preprocess.tokens[comma + 1]);
-    }
-    u32 expression_count = expression_end - (start + 2);
+    bool valid = expression_start < expression_end && expression_end <= preprocess.token_count;
+    u32 expression_count = valid ? expression_end - expression_start : 0;
     CToken* tokens = arena_allocate(arena, CToken, expression_count * 2 + 1);
     u32 token_count = 0;
     u64 evaluation_spelling_capacity = 0;
     for (u32 expression_index = 0; expression_index < expression_count; expression_index += 1)
     {
-        evaluation_spelling_capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[start + 2 + expression_index]) + 21;
+        evaluation_spelling_capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[expression_start + expression_index]) + 21;
     }
     CSpellingSpace evaluation_space = c_space_local(arena, evaluation_spelling_capacity);
     for (u32 expression_index = 0; expression_index < expression_count; expression_index += 1)
     {
-        CToken token = preprocess.tokens[start + 2 + expression_index];
+        CToken token = preprocess.tokens[expression_start + expression_index];
         // The legacy spelling evaluator only folds `sizeof (type-or-expression)`.
         // A unary-form `sizeof object` must use the typed evaluator so block-scope
         // locals and arrays resolve in the assertion's lexical scope.
         if (requires_typed_evaluation_out && token.kind == C_TOKEN_IDENTIFIER &&
             string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof")) && expression_index + 1 < expression_count &&
-            !c_token_is_punctuator(&preprocess.tokens[start + 3 + expression_index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            !c_token_is_punctuator(&preprocess.tokens[expression_start + 1 + expression_index], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             *requires_typed_evaluation_out = true;
         }
@@ -4705,7 +4650,7 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
             u32 cast_depth = 1;
             while (cast_close < expression_count && cast_depth)
             {
-                CToken cast_token = preprocess.tokens[start + 2 + cast_close];
+                CToken cast_token = preprocess.tokens[expression_start + cast_close];
                 if (c_token_is_punctuator(&cast_token, C_PUNCTUATOR_LEFT_PARENTHESIS))
                 {
                     cast_depth += 1;
@@ -4722,8 +4667,8 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
             }
             if (!cast_depth && cast_close > expression_index + 1 && cast_close + 1 < expression_count)
             {
-                u32 type_start = start + 3 + expression_index;
-                u32 type_end = start + 2 + cast_close;
+                u32 type_start = expression_start + 1 + expression_index;
+                u32 type_end = expression_start + cast_close;
                 u32 type_index = type_start;
                 CTypeId cast_type = machine ? c_parse_scalar_type_in_scope(machine, result, preprocess, scope, type_start, type_end, &type_index)
                                             : c_parse_machineless_base_type(result, preprocess, scope, type_start, type_end, &type_index);
@@ -4749,7 +4694,7 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
                         // erasing this cast changes both the controlling type and
                         // truncating conversions.  Real static assertions hand the
                         // expression to canonical-IR constant evaluation instead;
-                        // synthetic integer-range callers retain the established
+                        // direct integer-range callers retain the established
                         // token path by passing no flag.
                         if (requires_typed_evaluation_out)
                         {
@@ -4762,9 +4707,9 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
             }
         }
         if (token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token))) &&
-            expression_index + 2 < expression_count && c_token_is_punctuator(&preprocess.tokens[start + 3 + expression_index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            expression_index + 2 < expression_count && c_token_is_punctuator(&preprocess.tokens[expression_start + 1 + expression_index], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
-            u32 type_start = start + 4 + expression_index;
+            u32 type_start = expression_start + 2 + expression_index;
             u32 type_end = type_start;
             u32 type_depth = 1;
             while (type_end < expression_end && type_depth)
@@ -4786,7 +4731,8 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
             }
             if (type_depth || type_end == type_start)
             {
-                return false;
+                valid = false;
+                break;
             }
             // `sizeof (T){...}` sizes the compound literal, not the type name
             // the parenthesis closes: the size is the same either way, but the
@@ -4843,7 +4789,8 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
                     have_layout = c_parse_machineless_sizeof_operand_layout(arena, result, preprocess, scope, type_start, type_end, &size, &alignment);
                     if (!have_layout)
                     {
-                        return false;
+                        valid = false;
+                        break;
                     }
                 }
                 type_index = type_end;
@@ -4851,12 +4798,13 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
             if (!have_layout && (type.value == C_ID_UNDERLYING_INVALID || type_index != type_end ||
                                  !c_parse_type_layout(machine, arena, preprocess, result, type, &size, &alignment)))
             {
-                return false;
+                valid = false;
+                break;
             }
             bool evaluation_word_is_alignof = c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token));
             token = c_space_token(&evaluation_space, string_format(arena, S8("{u64}"), evaluation_word_is_alignof ? alignment : size),
                                   C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
-            expression_index = (literal_close != UINT32_MAX ? literal_close : type_end) - (start + 2);
+            expression_index = (literal_close != UINT32_MAX ? literal_close : type_end) - expression_start;
             tokens[token_count++] = token;
             continue;
         }
@@ -4870,7 +4818,8 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
                                     : 0;
             if (!constant)
             {
-                return false;
+                valid = false;
+                break;
             }
             if (constant->constant_is_negative)
             {
@@ -4882,59 +4831,97 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
         }
         tokens[token_count++] = c_space_retoken(&evaluation_space, preprocess.spelling_base, token);
     }
-    CPreprocessResult evaluation = {
-        .diagnostics = arena_allocate(arena, CDiagnostic, token_count + 1),
-        .target = preprocess.target,
-        .dialect = preprocess.dialect,
-    };
-    return c_integer_expression_evaluate(arena, evaluation_space.base, tokens, token_count, 65536, &evaluation, value_out) && !evaluation.diagnostic_count;
+    if (valid)
+    {
+        CPreprocessResult evaluation = {
+            .diagnostics = arena_allocate(arena, CDiagnostic, token_count + 1),
+            .target = preprocess.target,
+            .dialect = preprocess.dialect,
+        };
+        valid = c_integer_expression_evaluate(arena, evaluation_space.base, tokens, token_count, 65536, &evaluation, value_out) &&
+                !evaluation.diagnostic_count;
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                        CDeclaration declaration, CScopeId scope, u64* value_out, String8* message_out,
+                                                        bool* requires_typed_evaluation_out)
+{
+    if (requires_typed_evaluation_out)
+    {
+        *requires_typed_evaluation_out = false;
+    }
+    u32 start = declaration.token_start;
+    u32 end = start + declaration.token_count;
+    bool valid = start + 3 < end && end <= preprocess.token_count &&
+                 c_token_is_punctuator(&preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+    u32 comma = end;
+    u32 close = end;
+    u32 depth = 0;
+    // Braces and brackets carry commas of their own -- a compound literal
+    // operand (`_Static_assert(sizeof (struct S){1, 2} == 8, "...")`) or a
+    // subscript -- and neither can close the assert's parenthesis, so they get
+    // their own depth. Counting only parentheses takes the literal's first
+    // comma for the message separator and truncates the expression.
+    u32 group_depth = 0;
+    for (u32 token_index = start + 1; valid && token_index < end; token_index += 1)
+    {
+        CToken token = preprocess.tokens[token_index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            group_depth += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            group_depth -= group_depth != 0;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            if (!depth)
+            {
+                valid = false;
+            }
+            else if (!--depth)
+            {
+                close = token_index;
+                break;
+            }
+        }
+        else if (depth == 1 && !group_depth && comma == end && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            comma = token_index;
+        }
+    }
+    u32 expression_end = comma < close ? comma : close;
+    valid = valid && close != end && expression_end > start + 2;
+    if (valid)
+    {
+        if (comma < close && comma + 1 < close && preprocess.tokens[comma + 1].kind == C_TOKEN_STRING_LITERAL)
+        {
+            *message_out = c_token_spelling(preprocess.spelling_base, preprocess.tokens[comma + 1]);
+        }
+        valid = c_parse_constant_expression_evaluate(machine, arena, preprocess, result, scope, start + 2, expression_end,
+                                                      value_out, requires_typed_evaluation_out);
+    }
+    return valid;
 }
 
 BUSTER_C_INTERNAL bool c_parse_integer_constant_range(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                         CScopeId scope, u32 start, u32 end, u64* value_out)
 {
-    if (start >= end)
+    // Keep the original token indices: both the shape sidecar and the parse
+    // position index describe this stream, not a copied assertion wrapper.
+    bool valid = start < end && end <= preprocess.token_count;
+    if (valid)
     {
-        return false;
+        valid = c_parse_constant_expression_evaluate(machine, arena, preprocess, result, scope, start, end, value_out, 0);
     }
-    u32 expression_count = end - start;
-    CToken* tokens = arena_allocate(arena, CToken, expression_count + 4);
-    // The wrapper tokens reference the fixed prelude of the shared spelling
-    // space; their recovered locations are the prelude's placeholder, which
-    // no diagnostic path reads (the expression tokens keep their own).
-    tokens[0] = (CToken){
-        .offset = C_SPELLING_STATIC_ASSERT,
-        .length = C_SPELLING_STATIC_ASSERT_LENGTH,
-        .kind = C_TOKEN_IDENTIFIER,
-    };
-    tokens[1] = (CToken){
-        .offset = C_SPELLING_LEFT_PARENTHESIS,
-        .length = 1,
-        .kind = C_TOKEN_PUNCTUATOR,
-        .punctuator = C_PUNCTUATOR_LEFT_PARENTHESIS,
-    };
-    memcpy(tokens + 2, preprocess.tokens + start, sizeof(*tokens) * expression_count);
-    tokens[expression_count + 2] = (CToken){
-        .offset = C_SPELLING_RIGHT_PARENTHESIS,
-        .length = 1,
-        .kind = C_TOKEN_PUNCTUATOR,
-        .punctuator = C_PUNCTUATOR_RIGHT_PARENTHESIS,
-    };
-    tokens[expression_count + 3] = (CToken){
-        .offset = C_SPELLING_SEMICOLON,
-        .length = 1,
-        .kind = C_TOKEN_PUNCTUATOR,
-        .punctuator = C_PUNCTUATOR_SEMICOLON,
-    };
-    CPreprocessResult synthetic = preprocess;
-    synthetic.tokens = tokens;
-    synthetic.token_count = expression_count + 4;
-    String8 ignored_message = {0};
-    return c_parse_static_assert_evaluate(machine, arena, synthetic, result,
-                                          (CDeclaration){
-                                              .token_count = expression_count + 4,
-                                          },
-                                          scope, value_out, &ignored_message, 0);
+    return valid;
 }
 
 // C11 6.3.2.3p3 gives a null pointer constant two spellings: an integer
@@ -21142,6 +21129,19 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         String8 message = count < minimum || count > maximum ? S8("could not prepare C calls") : (String8){0};
         u32 location = close;
         if (builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET && !message.length)
+        {
+            CTypeId type = C_TYPE_ID_INVALID;
+            bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope,
+                                                       starts[0], ends[0], &type);
+            if (typed && type.value < result->type_count &&
+                !c_parse_expression_real_kind(result->types[type.value].kind) &&
+                !c_type_kind_is_complex(result->types[type.value].kind))
+            {
+                message = string_format(result->arena, S8("{S8} requires one arithmetic scalar argument"), name);
+                location = starts[0];
+            }
+        }
+        if (c_semantic_integer_count_parameter_kind(builtin, name) != C_TYPE_INVALID && !message.length)
         {
             CTypeId type = C_TYPE_ID_INVALID;
             bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope,
