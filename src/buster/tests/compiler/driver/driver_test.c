@@ -2346,6 +2346,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArg
     return result;
 }
 
+// Arena pools are per thread and the coordinator destroys every TU arena after
+// ordered publication. Repeated full cohorts must therefore circulate at most
+// one TU arena per worker through the coordinator's pool. Lane-created arenas
+// instead parked one more per worker lane and cohort, up to ARENA_POOL_LIMIT,
+// and no worker ever reused one.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_arena_ownership(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 main_path = buster_test_temporary_path(arena, S8("buster-unit-arena-main"), S8(".c"));
+    String8 empty_path = buster_test_temporary_path(arena, S8("buster-unit-arena-empty"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-unit-arena"), S8(".out"));
+    String8 main_source = S8("int main(void) { return 0; }\n");
+    String8 empty_source = S8("typedef int unit_arena_int;\n");
+    BUSTER_TEST(arguments, file_write(main_path, BUSTER_SLICE_TO_BYTE_SLICE(main_source)));
+    BUSTER_TEST(arguments, file_write(empty_path, BUSTER_SLICE_TO_BYTE_SLICE(empty_source)));
+    u32 workers = (u32)buster_test_worker_count(BUSTER_MIN((u64)2, (u64)BUSTER_MAX(os_get_logical_thread_count(), (u32)1)));
+    workers = BUSTER_MAX(workers, (u32)1);
+    // Three full cohorts, so a leak would outgrow the worker count on the
+    // first invocation already.
+    u32 input_count = workers * 3;
+    u32 command_count = 5 + input_count;
+    String8* command = arena_allocate(arena, String8, command_count);
+    command[0] = S8("-target");
+    command[1] = S8("x86_64-unknown-linux");
+    command[2] = S8("-nostdinc");
+    command[3] = S8("-o");
+    command[4] = output;
+    for (u32 index = 0; index < input_count; index += 1)
+    {
+        command[5 + index] = index ? empty_path : main_path;
+    }
+    CompilerDriverInvocation invocation =
+        compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command, .length = command_count});
+    BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+    invocation.compile_jobs = workers;
+    // Parked arenas are only cached mappings; start from an empty pool so the
+    // bound below does not depend on earlier tests.
+    arena_pool_release_thread();
+    for (u32 repetition = 0; repetition < 3; repetition += 1)
+    {
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+        BUSTER_TEST(arguments, compiled.compilation_workers == workers);
+        u64 parked = arena_test_pool_count(COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE);
+        BUSTER_TEST(arguments, parked == workers);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // Exercise the complete native-language boundary, then drive a nonstandard-
 // suffix assembly unit through parsing, assembly, object serialization and
 // object reading. This reaches the native target resolver, unlike an
@@ -9166,6 +9218,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #endif
 
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_batches);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_ownership);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
 
     TestArenaScope driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("prewarm"), false);
