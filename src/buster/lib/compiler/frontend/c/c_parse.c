@@ -2627,8 +2627,12 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_base(CPreprocessResult pre
     return type;
 }
 
-BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result, CTypeId type, String8 name)
+BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result, CTypeId type, String8 name, u32* bit_width_out)
 {
+    if (bit_width_out)
+    {
+        *bit_width_out = 0;
+    }
     CType value = result->types[type.value];
     CTypeId field_type = C_TYPE_ID_INVALID;
     if (!value.is_complete && value.has_unqualified_type && value.unqualified_type.value < result->type_count)
@@ -2643,6 +2647,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result
         if (string_equal(member.name, name))
         {
             field_type = member.type;
+            if (bit_width_out && member.is_bit_field)
+            {
+                *bit_width_out = member.bit_width;
+            }
         }
         promoted |= !member.name.length && !member.is_bit_field;
     }
@@ -2666,6 +2674,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result
                 if (string_equal(member->name, name))
                 {
                     field_type = member->type;
+                    if (bit_width_out && member->is_bit_field)
+                    {
+                        *bit_width_out = member->bit_width;
+                    }
                     break;
                 }
                 if (member->name.length || member->type.value >= result->type_count || visited[member->type.value])
@@ -2738,7 +2750,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_postfix(Arena* arena, CPre
         break;
     }
     CType qualifiers = {.is_const = type_value->is_const, .is_volatile = type_value->is_volatile};
-    type = c_parse_member_type(arena, result, type, c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 1]));
+    type = c_parse_member_type(arena, result, type, c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 1]), 0);
     if (type.value < result->type_count && (qualifiers.is_const || qualifiers.is_volatile))
     {
         type = c_parse_add_qualified_type(result, type, qualifiers);
@@ -3081,6 +3093,21 @@ BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind(CTypeKind kind)
     return kind;
 }
 
+BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind_with_width(Target target, CTypeKind kind, u32 bit_field_width)
+{
+    kind = c_parse_expression_promoted_kind(kind);
+    if (bit_field_width && kind == C_TYPE_UNSIGNED_INT)
+    {
+        u64 int_size = 0;
+        u32 int_alignment = 0;
+        if (c_parse_builtin_type_layout(target, C_TYPE_INT, &int_size, &int_alignment) && bit_field_width < int_size * 8)
+        {
+            kind = C_TYPE_INT;
+        }
+    }
+    return kind;
+}
+
 // Integer operations use the compatible type of an enum, never an implicit
 // signed-int default after completion. Qualified forward uses resolve through
 // their original tag, whose compatible type may have been selected later.
@@ -3157,7 +3184,8 @@ BUSTER_C_INTERNAL CEnumMember const* c_parse_pending_enum_member(CPreprocessResu
     return found;
 }
 
-BUSTER_C_INTERNAL CTypeId c_parse_expression_arithmetic_type(CParseResult* result, Target target, CTypeId left_id, CTypeId right_id)
+BUSTER_C_INTERNAL CTypeId c_parse_expression_arithmetic_type(CParseResult* result, Target target, CTypeId left_id, CTypeId right_id,
+                                                                u32 left_bit_field_width, u32 right_bit_field_width)
 {
     if (left_id.value >= result->type_count || right_id.value >= result->type_count)
     {
@@ -3197,8 +3225,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_arithmetic_type(CParseResult* resul
     {
         return C_TYPE_ID_INVALID;
     }
-    left = c_parse_expression_promoted_kind(left);
-    right = c_parse_expression_promoted_kind(right);
+    left = c_parse_expression_promoted_kind_with_width(target, left, left_bit_field_width);
+    right = c_parse_expression_promoted_kind_with_width(target, right, right_bit_field_width);
     u64 left_size = 0;
     u64 right_size = 0;
     u32 ignored_alignment = 0;
@@ -3483,6 +3511,43 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
     return end == start + 1 && first.kind == C_TOKEN_IDENTIFIER
                ? c_parse_direct_expression_base(preprocess, result, scope, start, end)
                : c_parse_direct_expression_type(arena, preprocess, result, scope, start, end, &type) ? type : C_TYPE_ID_INVALID;
+}
+
+BUSTER_C_INTERNAL u32 c_parse_expression_bit_field_width(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+                                                           u32 start, u32 end)
+{
+    while (start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           c_parse_matching_delimiter_indexed(result, preprocess, start) == end - 1)
+    {
+        start += 1;
+        end -= 1;
+    }
+    u32 width = 0;
+    if (start + 2 < end && preprocess.tokens[end - 1].kind == C_TOKEN_IDENTIFIER &&
+        (c_token_is_punctuator(&preprocess.tokens[end - 2], C_PUNCTUATOR_DOT) ||
+         c_token_is_punctuator(&preprocess.tokens[end - 2], C_PUNCTUATOR_ARROW)))
+    {
+        u32 operator_index = end - 2;
+        bool indirect = c_token_is_punctuator(&preprocess.tokens[operator_index], C_PUNCTUATOR_ARROW);
+        CTypeId aggregate = C_TYPE_ID_INVALID;
+        if (c_parse_direct_expression_type(arena, preprocess, result, scope, start, operator_index, &aggregate) &&
+            aggregate.value < result->type_count)
+        {
+            if (indirect)
+            {
+                CType* pointer = result->types + aggregate.value;
+                aggregate = pointer->kind == C_TYPE_POINTER ? pointer->element_type : C_TYPE_ID_INVALID;
+            }
+            aggregate = c_parse_unqualified_type(result, aggregate);
+            if (aggregate.value < result->type_count &&
+                (result->types[aggregate.value].kind == C_TYPE_STRUCT || result->types[aggregate.value].kind == C_TYPE_UNION))
+            {
+                c_parse_member_type(arena, result, aggregate,
+                    c_token_spelling(preprocess.spelling_base, preprocess.tokens[end - 1]), &width);
+            }
+        }
+    }
+    return width;
 }
 
 BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
@@ -3900,10 +3965,6 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     machine->expression_constraint_token = task->start;
                 }
             }
-            else if (c_token_is_punctuator(&preprocess.tokens[task->start], C_PUNCTUATOR_PLUS))
-            {
-                // Lowering historically treats unary plus as an identity.
-            }
             else if (c_type_kind_is_complex(result->types[last.value].kind))
             {
                 // GNU unary +, -, and ~ preserve the complex operand type.
@@ -3920,8 +3981,8 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             }
             else
             {
-                CTypeKind kind = c_parse_expression_value_kind(result, last);
-                kind = c_parse_expression_promoted_kind(kind);
+                u32 bit_field_width = c_parse_expression_bit_field_width(arena, preprocess, result, scope, task->start + 1, task->end);
+                CTypeKind kind = c_parse_expression_promoted_kind_with_width(preprocess.target, c_parse_expression_value_kind(result, last), bit_field_width);
                 bool complement = c_token_is_punctuator(&preprocess.tokens[task->start], C_PUNCTUATOR_TILDE);
                 last = (c_parse_expression_integer_kind(kind) || (!complement && (kind == C_TYPE_FLOAT16 || kind == C_TYPE_BFLOAT16 || kind == C_TYPE_FLOAT ||
                         kind == C_TYPE_DOUBLE || kind == C_TYPE_LONG_DOUBLE)))
@@ -4097,7 +4158,8 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         break;
         case C_PARSE_EXPRESSION_TYPE_SHIFT:
         {
-            CTypeKind kind = c_parse_expression_promoted_kind(c_parse_expression_value_kind(result, left));
+            u32 bit_field_width = c_parse_expression_bit_field_width(arena, preprocess, result, scope, task->start, task->split);
+            CTypeKind kind = c_parse_expression_promoted_kind_with_width(preprocess.target, c_parse_expression_value_kind(result, left), bit_field_width);
             last = c_parse_expression_integer_kind(kind) ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
         }
         break;
@@ -4120,7 +4182,9 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             }
             else
             {
-                last = c_parse_expression_arithmetic_type(result, preprocess.target, left, right);
+                u32 left_bit_field_width = c_parse_expression_bit_field_width(arena, preprocess, result, scope, task->start, task->split);
+                u32 right_bit_field_width = c_parse_expression_bit_field_width(arena, preprocess, result, scope, task->split + 1, task->end);
+                last = c_parse_expression_arithmetic_type(result, preprocess.target, left, right, left_bit_field_width, right_bit_field_width);
             }
         }
         break;
@@ -13201,7 +13265,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPre
         return c_parse_conditional_pointer_type(arena, preprocess, result, scope, left, right, left_start, left_end, right_start, right_end);
     }
     if (left_value.kind == right_value.kind &&
-        (left_value.kind == C_TYPE_STRUCT || left_value.kind == C_TYPE_UNION || left_value.kind == C_TYPE_ENUM))
+        (left_value.kind == C_TYPE_STRUCT || left_value.kind == C_TYPE_UNION))
     {
         CTypeId left_unqualified = c_parse_unqualified_type(result, left);
         CTypeId right_unqualified = c_parse_unqualified_type(result, right);
@@ -13219,11 +13283,9 @@ BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPre
         }
         return C_TYPE_ID_INVALID;
     }
-    if (left.value == right.value)
-    {
-        return left;
-    }
-    return c_parse_expression_arithmetic_type(result, preprocess.target, left, right);
+    u32 left_bit_field_width = c_parse_expression_bit_field_width(arena, preprocess, result, scope, left_start, left_end);
+    u32 right_bit_field_width = c_parse_expression_bit_field_width(arena, preprocess, result, scope, right_start, right_end);
+    return c_parse_expression_arithmetic_type(result, preprocess.target, left, right, left_bit_field_width, right_bit_field_width);
 }
 
 // Names resolve to intern ids through the borrowed preprocess table; a parse
@@ -17674,7 +17736,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CParseResult* result, T
     }
     else
     {
-        CTypeId common = c_parse_expression_arithmetic_type(result, target, left.type, right.type);
+        CTypeId common = c_parse_expression_arithmetic_type(result, target, left.type, right.type, 0, 0);
         if (precedence == 11 && left.type.value < result->type_count)
         {
             common = c_parse_expression_scalar_type(result, c_parse_expression_promoted_kind(c_parse_expression_value_kind(result, left.type)));
@@ -18817,7 +18879,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                 {
                     query_mark = machine->scratch_arena->position;
                     CTypeId field = c_parse_member_type(machine->scratch_arena, result, operand_type,
-                                                        c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 1]));
+                                                        c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 1]), 0);
                     arena_set_position(machine->scratch_arena, query_mark);
                     if (field.value >= result->type_count)
                     {
@@ -19734,7 +19796,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_compound_literals
                 if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_DOT) && cursor + 1 < end)
                 {
                     current = c_parse_member_type(machine->scratch_arena, result, current,
-                        c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor + 1]));
+                        c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor + 1]), 0);
                     if (current.value >= result->type_count) diagnostic.message = S8("aggregate designator names an unknown field");
                     cursor += 2;
                 }
