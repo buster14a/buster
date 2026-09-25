@@ -321,6 +321,21 @@ BUSTER_GLOBAL_LOCAL void bq_worker_lease_release(BqWorkerLease* lease)
     lease->descriptor = -1;
 }
 
+/* The supervisor can pause the unit after handoff. Before exec, recheck the
+ * held lease against its installed pathname and conflicting lock so a renamed
+ * or replaced lease cannot carry the worker into a different attempt. The
+ * duplicate shares the original lock and is closed without releasing it. */
+BUSTER_GLOBAL_LOCAL bool bq_worker_lease_recheck_for_exec(char const* path,
+                                                           BqWorkerLease const* lease)
+{
+    int duplicate = lease && lease->descriptor >= 3 ?
+        fcntl(lease->descriptor, F_DUPFD_CLOEXEC, 3) : -1;
+    BqWorkerLease checked = {.descriptor = -1};
+    bool ok = duplicate >= 3 && bq_worker_lease_adopt(path, duplicate, &checked) == 0;
+    bq_worker_lease_release(&checked);
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_worker_text(String8 input, char* output, u32 capacity)
 {
     bool ok = input.length && input.length < capacity && !memchr(input.pointer, 0, (size_t)input.length);
@@ -4229,14 +4244,17 @@ BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token
         if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED) arguments[9] = phase_text;
         if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED) arguments[10] = deadline_text;
         u64 now_ns = bq_phase_clock();
-        if (now_ns && now_ns < execution_deadline_ns)
+        bool live = now_ns && now_ns < execution_deadline_ns;
+        bool lease_matches = live && bq_worker_lease_recheck_for_exec(path, &lease);
+        if (live && lease_matches && bq_phase_clock() < execution_deadline_ns)
         {
 #ifdef BUSTER_BENCH_SERVICE_TEST
             bq_worker_test_recipe_exec_count += 1;
 #endif
             execv(BQ_RECIPE_EXECUTABLE, (char* const*)arguments);
         }
-        error = !now_ns || now_ns >= execution_deadline_ns ? BQ_WORKER_TIMEOUT : BQ_CONFIGURATION_MISMATCH;
+        error = !now_ns || bq_phase_clock() >= execution_deadline_ns ?
+                BQ_WORKER_TIMEOUT : BQ_CONFIGURATION_MISMATCH;
     }
     bq_worker_lease_release(&lease);
     if (phase_descriptor >= 0) close(phase_descriptor);

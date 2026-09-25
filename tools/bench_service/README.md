@@ -183,8 +183,13 @@ before constructing any child and waits for four ordered acknowledgements:
 preparing, settling, measuring, and measurement finished. The supervisor also binds
 the absolute monotonic execution deadline to its lease response and the
 recipient's acknowledgement. It rejects a missing, expired, or altered deadline;
-the unit checks it again after resuming from `SIGSTOP`, before executing the
-installed recipe. The still-blocked retirement path receives that deadline as
+the unit checks it again after resuming from `SIGSTOP`, then reopens the lease
+pathname and verifies that the held lock still names the same inode before
+executing the installed recipe. A missing or replaced lease, or a deadline
+that expires during the pause, prevents recipe exec. The forked unit-entry
+fixture counts zero attempted execs on those cases as well as malformed lease
+responses; it uses the admitted smoke entry, not a timed retirement campaign.
+The still-blocked retirement path receives that deadline as
 a private recipe argument for its future bounded phase exchanges. The admitted
 smoke recipe retains its six-value interface.
 The supervisor binds
@@ -427,8 +432,10 @@ journal and control schema numbers.
 registry entry. `profiles/native-retirement-performance-v1.blocked` pins the
 landed performance contract, support declaration, binding validator and
 statistics implementation by SHA-256 and records the remaining execution
-requirements. It has no executable command, is not an installed `.recipe`, and
-is rejected by request validation and `worker-unit`. This prevents the one-pair
+requirements. It has no admitted executable command or installed `.recipe`, and
+is rejected by request validation and `worker-unit`. Its private build-driver
+parser accepts the lease-bound preparation digest, phase descriptor and deadline
+but deliberately builds no timed-child graph. This prevents the one-pair
 smoke recipe from being relabelled as a retirement result while preserving a
 machine-visible identity for the future admitted implementation.
 

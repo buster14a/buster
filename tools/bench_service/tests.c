@@ -2367,22 +2367,63 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
     rmdir(root);
 }
 
-/* Drive the installed unit entry, not just a message parser. A received fd
- * with an expired or malformed response must be closed and the child must
- * return before a single recipe exec attempt. The public retirement recipe
- * remains blocked; this fixture exercises the admitted smoke unit boundary. */
-BUSTER_GLOBAL_LOCAL void bq_test_worker_unit_bad_lease_response(bool expired)
+/* A new lease inode at the same path cannot substitute for the transferred
+ * lock. The checker must release each temporary descriptor on both paths. */
+BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_recheck_before_exec(void)
+{
+    char root[] = "/tmp/buster-lease-recheck-XXXXXX";
+    char lease_path[BQ_PATH_CAP + 1], prior_path[BQ_PATH_CAP + 1];
+    BqWorkerLease lease = {.descriptor = -1};
+    bool ready = bq_test_mkdtemp_physical(root, sizeof(root));
+    int path_length = snprintf(lease_path, sizeof(lease_path), "%s/host.lock", root);
+    int prior_length = snprintf(prior_path, sizeof(prior_path), "%s/prior.lock", root);
+    ready = ready && path_length > 0 && (u32)path_length < sizeof(lease_path) &&
+            prior_length > 0 && (u32)prior_length < sizeof(prior_path) &&
+            bq_worker_lease_acquire(lease_path, &lease) == 0;
+    BQ_CHECK(ready);
+    if (ready)
+    {
+        u32 before = 0, after = 0;
+        for (int fd = 3; fd < 256; ++fd) before += fcntl(fd, F_GETFD) >= 0;
+        BQ_CHECK(bq_worker_lease_recheck_for_exec(lease_path, &lease));
+        bool moved = rename(lease_path, prior_path) == 0;
+        BQ_CHECK(moved);
+        if (moved)
+        {
+            BQ_CHECK(!bq_worker_lease_recheck_for_exec(lease_path, &lease));
+            int replacement = open(lease_path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+            BQ_CHECK(replacement >= 3);
+            if (replacement >= 0) BQ_CHECK(close(replacement) == 0);
+            BQ_CHECK(!bq_worker_lease_recheck_for_exec(lease_path, &lease));
+            BQ_CHECK(unlink(lease_path) == 0 && rename(prior_path, lease_path) == 0);
+            BQ_CHECK(bq_worker_lease_recheck_for_exec(lease_path, &lease));
+        }
+        for (int fd = 3; fd < 256; ++fd) after += fcntl(fd, F_GETFD) >= 0;
+        BQ_CHECK(before == after);
+        bq_worker_lease_release(&lease);
+        BQ_CHECK(unlink(lease_path) == 0);
+    }
+    if (ready) BQ_CHECK(rmdir(root) == 0);
+}
+
+/* Drive the installed unit entry, not just a message parser. Even after a
+ * valid response and SIGSTOP, an expired deadline or renamed/replaced lease
+ * must return before a recipe exec. Retirement remains publicly blocked; this
+ * fixture exercises the admitted smoke unit at its real exec boundary. */
+BUSTER_GLOBAL_LOCAL void bq_test_worker_unit_bad_lease_response(u32 mode)
 {
     char root[] = "/tmp/buster-lease-unit-negative-XXXXXX";
-    char result_root[BQ_PATH_CAP + 1], lease_path[BQ_PATH_CAP + 1];
+    char result_root[BQ_PATH_CAP + 1], lease_path[BQ_PATH_CAP + 1], prior_path[BQ_PATH_CAP + 1];
     BqWorkerLease lease = {.descriptor = -1};
     BqWorkerLeaseHandoff handoff = {.listener = -1, .parent = -1};
     bool ready = bq_test_mkdtemp_physical(root, sizeof(root));
     int result_length = snprintf(result_root, sizeof(result_root), "%s/result", root);
     int lease_length = snprintf(lease_path, sizeof(lease_path), "%s/host.lock", root);
+    int prior_length = snprintf(prior_path, sizeof(prior_path), "%s/prior.lock", root);
     int result_directory = -1;
     ready = ready && result_length > 0 && (u32)result_length < sizeof(result_root) &&
             lease_length > 0 && (u32)lease_length < sizeof(lease_path) &&
+            prior_length > 0 && (u32)prior_length < sizeof(prior_path) && mode < 5 &&
             mkdir(result_root, 0700) == 0 &&
             (result_directory = open(result_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)) >= 0 &&
             bq_worker_lease_acquire(lease_path, &lease) == 0 &&
@@ -2403,7 +2444,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_unit_bad_lease_response(bool expired)
             S8("1111111111111111111111111111111111111111"),
             S8("2222222222222222222222222222222222222222"), string_from_pointer(result_root));
         for (int fd = 3; fd < 256; ++fd) after += fcntl(fd, F_GETFD) >= 0;
-        _exit(error == BQ_CONFIGURATION_MISMATCH && !bq_worker_test_recipe_exec_count &&
+        _exit(error == (mode == 2 ? BQ_WORKER_TIMEOUT : BQ_CONFIGURATION_MISMATCH) &&
+              !bq_worker_test_recipe_exec_count &&
               before == after ? 0 : 1);
     }
     int connection = ready && child > 0 && bq_worker_lease_handoff_poll(handoff.listener, POLLIN,
@@ -2416,11 +2458,12 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_unit_bad_lease_response(bool expired)
             bq_worker_lease_message_matches(&request, BQ_WORKER_LEASE_REQUEST,
                 lease_path, 1, 2, 0, 0, "", 0) && fstat(lease.descriptor, &info) == 0;
     BqWorkerLeaseMessage response = {0};
-    u64 future_ns = bq_phase_clock() + UINT64_C(5000000000);
+    u64 future_ns = bq_phase_clock() + (mode == 2 ? UINT64_C(2000000000) :
+                                         mode >= 3 ? UINT64_C(10000000000) : UINT64_C(5000000000));
     ready = ready && bq_worker_lease_message_make(&response, BQ_WORKER_LEASE_RESPONSE,
         lease_path, 1, 2, (u64)info.st_dev, (u64)info.st_ino, "", future_ns);
-    if (expired) response.execution_deadline_ns = 1;
-    else response.attempt_token += 1;
+    if (mode == 0) response.execution_deadline_ns = 1;
+    if (mode == 1) response.attempt_token += 1;
     char control[CMSG_SPACE(sizeof(lease.descriptor))] = {0};
     struct iovec vector = {&response, sizeof(response)};
     struct msghdr message = {0};
@@ -2438,11 +2481,63 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_unit_bad_lease_response(bool expired)
         ready = sendmsg(connection, &message, MSG_NOSIGNAL) == (ssize_t)sizeof(response);
     }
     BQ_CHECK(ready);
+    bool moved = false;
+    if (ready && mode >= 2 && connection >= 0)
+    {
+        BqWorkerLeaseMessage acknowledgement = {0};
+        bool ack = bq_worker_lease_handoff_poll(connection, POLLIN,
+            bq_worker_deadline(bq_worker_monotonic_milliseconds(), 5000)) &&
+            recv(connection, &acknowledgement, sizeof(acknowledgement), 0) ==
+                (ssize_t)sizeof(acknowledgement) &&
+            acknowledgement.phase == BQ_WORKER_LEASE_ACK &&
+            acknowledgement.job_id == 1 && acknowledgement.attempt_token == 2 &&
+            acknowledgement.execution_deadline_ns == future_ns;
+        BQ_CHECK(ack);
+        int stopped = 0;
+        pid_t waited = 0;
+        u64 stop_deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), 5000);
+        while (ack && !waited && bq_worker_monotonic_milliseconds() < stop_deadline)
+        {
+            waited = waitpid(child, &stopped, WUNTRACED | WNOHANG);
+            if (!waited) poll(NULL, 0, 5);
+        }
+        BQ_CHECK(waited == child && WIFSTOPPED(stopped) && WSTOPSIG(stopped) == SIGSTOP);
+        if (waited == child && WIFSTOPPED(stopped))
+        {
+            bool resume = true;
+            if (mode == 2)
+            {
+                u64 bound = bq_worker_deadline(bq_worker_monotonic_milliseconds(), 4000);
+                while (bq_phase_clock() <= future_ns &&
+                       bq_worker_monotonic_milliseconds() < bound) poll(NULL, 0, 10);
+                resume = bq_phase_clock() > future_ns;
+                BQ_CHECK(resume);
+            }
+            else
+            {
+                moved = rename(lease_path, prior_path) == 0;
+                BQ_CHECK(moved);
+                if (moved && mode == 3)
+                {
+                    int replacement = open(lease_path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+                    BQ_CHECK(replacement >= 3);
+                    if (replacement >= 0) BQ_CHECK(close(replacement) == 0);
+                }
+            }
+            BQ_CHECK(kill(child, resume ? SIGCONT : SIGKILL) == 0);
+        }
+        else if (child > 0) kill(child, SIGKILL);
+    }
     if (connection >= 0) close(connection);
     if (child > 0)
     {
         int status = 0;
         while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+        if (moved)
+        {
+            if (mode == 3) BQ_CHECK(unlink(lease_path) == 0);
+            BQ_CHECK(rename(prior_path, lease_path) == 0);
+        }
         BQ_CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0 && bq_test_worker_probe_locked(lease_path));
     }
     bq_worker_lease_handoff_close(&handoff);
@@ -4737,8 +4832,8 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_lease_handoff_negative(2);
     bq_test_worker_lease_handoff_negative(3);
     bq_test_worker_lease_handoff_negative(4);
-    bq_test_worker_unit_bad_lease_response(true);
-    bq_test_worker_unit_bad_lease_response(false);
+    bq_test_worker_lease_recheck_before_exec();
+    for (u32 mode = 0; mode < 5; ++mode) bq_test_worker_unit_bad_lease_response(mode);
     bq_test_worker_lease_handoff_cleanup_failure(0);
     bq_test_worker_lease_handoff_cleanup_failure(1);
     bq_test_worker_lease_handoff_cleanup_failure(2);
