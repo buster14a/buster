@@ -4,6 +4,8 @@ The benchmark host is not a general Actions executor. The sole Actions path
 uses the installed fixed gateway in `.github/workflows/9700x-service-dispatch.yml`;
 no workflow may check out candidate code onto this host. The repository variable
 `BENCH_SERVICE_DISPATCH_ENABLED` stays `false` until live host qualification.
+The read-only PR-head request resolver and its current dispatch limitations are
+documented in [REQUEST_PR.md](REQUEST_PR.md); it does not relax these gates.
 
 ## 1. Restrict the runner before accepting connector requests
 
