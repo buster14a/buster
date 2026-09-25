@@ -508,10 +508,15 @@ BUSTER_GLOBAL_LOCAL void ir_rewrite_compact(Arena* arena, IrProgram* program, Ir
     for (u32 block = 0; block < function->block_count; block += 1)
     {
         IrBlock* destination = function->blocks + block;
+        IrBlockParameter* last_parameter = 0;
         for (IrBlockParameter* parameter = destination->first_parameter; parameter; parameter = parameter->next)
         {
             value_map[parameter->value.value] = 0;
+            last_parameter = parameter;
         }
+        // The simplifier used to repair this tail even when it had no new
+        // parameters to inspect. Keep that repair in the mandatory remap.
+        destination->last_parameter = last_parameter;
         u32 previous = IR_PROMOTE_NONE;
         u32 first = IR_PROMOTE_NONE;
         for (u32 row = destination->first_instruction.value; row != IR_PROMOTE_NONE; row = function->instructions[row].next.value)
@@ -650,7 +655,9 @@ BUSTER_GLOBAL_LOCAL void ir_promote_compact(Arena* arena, IrProgram* program, Ir
     {
         replacements[value] = value < old_value_count ? load_replacements[value] : value;
     }
-    bool changed = true;
+    // Only promotion-created values can be simplified here. Block-local
+    // promotion removes rows but appends no values; the remap still runs.
+    bool changed = count != old_value_count;
     while (changed)
     {
         changed = false;

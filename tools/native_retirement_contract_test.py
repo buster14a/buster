@@ -369,8 +369,15 @@ class ContractTests(unittest.TestCase):
                     "support_contract_sha256": contract.FULL_SUPPORT_CONTRACT_SHA256, "inputs": "559",
                     "shard_count": "4", "fixture_filter": "", "target_filter": "", "subjects": "411"}
         inputs = {f"tests/subject-{index}.c": {"role": "subject"} for index in range(contract.FULL_SUBJECT_COUNT)}
-        self.assertEqual(contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT),
-                         (contract.FULL_CENSUS_PROFILE, contract.FULL_SUBJECT_COUNT))
+        for digest in (contract.FULL_SUPPORT_CONTRACT_SHA256,
+                       contract.NEXT_SUPPORT_CONTRACT_SHA256):
+            with self.subTest(digest=digest):
+                manifest["support_contract_sha256"] = digest
+                self.assertEqual(contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT),
+                                 (contract.FULL_CENSUS_PROFILE, contract.FULL_SUBJECT_COUNT))
+        manifest["support_contract_sha256"] = "0" * 64
+        with self.assertRaises(AssertionError):
+            contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT)
 
     def test_checked_in_production_gap_ledger_is_canonical_and_authenticated(self):
         ledger_path = Path(__file__).resolve().parents[1] / "docs/native-retirement-supported-gaps-v1.tsv"
@@ -1349,6 +1356,9 @@ class CheckedInDependencyTests(unittest.TestCase):
                         "x64_emit_vector_native_memory", "x64_emit_vector_native_binary_operation",
                         "codegen_canonical_x64_metadata_vector",
                         "x64_emit_vzeroupper", "a64_emit_initialize_aggregate_result",
+                        "a64_emit_copy_memory_registers(", "a64_emit_float_load_offset(",
+                        "a64_emit_float_store_offset(", "x64_target_supports_native_vector(",
+                        "CodegenRelocation",
                         "canonical_prep", "canonical_emit("):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, codegen + private)

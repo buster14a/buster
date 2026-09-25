@@ -145,6 +145,32 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   Ordering the members differently does not substitute for it -- a whole-unit
   store loses whichever neighbour ran first, and two overlapping units lose one
   of themselves whatever the order (issue #705).
+  **Enum bit-fields consume the resolved enum type, never a storage-derived
+  replacement.** `c_parse_enum_complete` selects the compatible integer type
+  from the typed range (or preserves a fixed base); the ordinary `c_type_ir_map`
+  entry supplies every member, including qualified typedefs. There is no
+  bit-field-only enumerator scan or unsigned-int fallback. Thus a nonnegative
+  enum may be unsigned 32 or 64 bits, a mixed-sign wide enum remains signed,
+  and an explicitly signed fixed base stays signed even with only positive
+  enumerators. `CMember.type` and `IrField.type` retain that semantic choice;
+  `bit_width`, `bit_offset`, packing and `access_size` independently describe
+  storage and extraction. A packed 40-bit field can occupy five bytes while
+  its semantic and result type remains the resolved 64-bit integer.
+  `c_test_enum_bit_fields` checks the semantic compatible kind, field and
+  ordinary-object IR type agreement, return types, volatile load widths and
+  canonical validation across Linux/macOS/Windows x86-64/AArch64, GNU17/GNU23
+  and both frontend forms. Its embedded source also exercises static and
+  automatic initialization, signed comparisons, stores and adjacent packed
+  objects in every native allocator. The registered enum differential runs
+  the same field source through Clang GNU17 and GCC GNU2x at `-O0`/`-O2`, with
+  fixed expectations rather than oracle-derived values (GitHub #902).
+  Split storage pieces also retain the original place's `volatile` flag on
+  every load and store. Casting the access address to an unsigned piece
+  pointer must not erase that semantic qualification. The regression
+  checks both volatile accesses and a nonvolatile packed control. After
+  reassembly, the read has the same unqualified value type as a single-unit
+  bit-field load; the qualified place must not leak into arithmetic, returns,
+  or call arguments.
   **Integer promotion uses the bit-field width, not its storage width.** An
   `unsigned int : 3` promotes to `int`, while an `unsigned int : 32` remains
   unsigned. `c_ir_mark_unsigned_bit_field_value` keeps this distinction in a

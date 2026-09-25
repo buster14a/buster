@@ -32,6 +32,17 @@ import tempfile
 from contextlib import closing
 
 try:
+    import native_retirement_performance_schema as RETIREMENT_SCHEMA
+except ImportError:
+    _performance_schema_spec = importlib.util.spec_from_file_location(
+        "native_retirement_performance_schema",
+        Path(__file__).resolve().with_name("native_retirement_performance_schema.py"))
+    if _performance_schema_spec is None or _performance_schema_spec.loader is None:
+        raise RuntimeError("native retirement performance schema is unavailable")
+    RETIREMENT_SCHEMA = importlib.util.module_from_spec(_performance_schema_spec)
+    _performance_schema_spec.loader.exec_module(RETIREMENT_SCHEMA)
+
+try:
     import native_retirement_result_input as RESULT_INPUT
 except ImportError:
     _result_input_spec = importlib.util.spec_from_file_location(
@@ -110,8 +121,8 @@ REQUESTED_WORK_KINDS = {
 REQUIRED_WORK_CLOSURE_KINDS = (
     "inputs", "dependencies", "resources", "sysroot", "sdk", "workloads",
 )
-ROW_SCHEMA = "buster-native-retirement-performance-rows-v1"
-ROW_VERSION = 1
+ROW_SCHEMA = "buster-native-retirement-performance-rows-v2"
+ROW_VERSION = 2
 PROVENANCE_SCHEMA = "buster-native-retirement-provenance-v1"
 PROVENANCE_VERSION = 1
 REPLAY_SCHEMA = "buster-native-retirement-performance-replay-v1"
@@ -126,6 +137,7 @@ ROW_ELIGIBILITY_FIELDS = [
 ]
 SUPPORT_DECLARATION_PATH = "docs/native-retirement-support-v1.tsv"
 SUPPORT_DECLARATION_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376669d90e192f5b8"
+NEXT_SUPPORT_DECLARATION_SHA256 = "932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82"
 SUPPORT_DECLARATION_FIELDS = ["path", "role", "compile_obligation", "bytes", "sha256"]
 INPUT_FIELDS = ["path", "role", "compile_obligation", "bytes", "buster_hash_64",
                 "sha256", "fixture_recipe", "fixture_flags"]
@@ -137,8 +149,8 @@ DEPENDENCY_FIELDS = ["kind", "path", "bytes", "sha256"]
 ENVIRONMENT_FIELDS = ["name", "present", "value"]
 VALIDATOR_REPORT_SCHEMA = "buster-native-retirement-census-validation-v1"
 VALIDATOR_REPORT_VERSION = 1
-PERFORMANCE_DECLARATION_SCHEMA = "buster-native-retirement-performance-population-v1"
-PERFORMANCE_DECLARATION_VERSION = 1
+PERFORMANCE_DECLARATION_SCHEMA = "buster-native-retirement-performance-population-v2"
+PERFORMANCE_DECLARATION_VERSION = 2
 SOURCE_SNAPSHOT_SCHEMA = "buster-native-retirement-source-snapshot-v1"
 BUILD_RECEIPT_SCHEMA = "buster-native-retirement-build-receipt-v1"
 SERVICE_RECEIPT_SCHEMA = "buster-native-retirement-service-receipt-v1"
@@ -158,7 +170,7 @@ WORKFLOW_PHASES = ("pre_sample_plan", "post_aa_binding", "sealed_result",
                    "independent_replay")
 ADMISSION_SCHEMA = "buster-native-retirement-admission-v1"
 ORACLE_SCHEMA = "buster-native-retirement-oracle-v1"
-RESULT_INPUT_PLAN_SCHEMA = "buster-native-retirement-result-input-plan-v1"
+RESULT_INPUT_PLAN_SCHEMA = "buster-native-retirement-result-input-plan-v2"
 SEALED_RESULT_SCHEMA = "buster-native-retirement-sealed-result-v1"
 RESULT_BUNDLE_SCHEMA = "buster-native-retirement-result-bundle-v1"
 REPLAY_BUNDLE_SCHEMA = "buster-native-retirement-independent-replay-bundle-v1"
@@ -661,15 +673,23 @@ def _performance_rows_with_sources(value, name="performance_rows"):
         for metric in METRICS:
             metrics[metric] = _boolean(eligibility[metric],
                                        f"{name}.rows[{index}].eligibility.{metric}")
-        if not metrics["compiler_wall_time"] or not metrics["compiler_peak_rss"]:
-            _fail(f"{name}.rows[{index}] must measure compiler wall time and peak RSS")
-        if metrics["generated_code_bytes"]:
+        compile_eligible = metrics["compiler_wall_time"]
+        if metrics["compiler_peak_rss"] is not compile_eligible:
+            _fail(f"{name}.rows[{index}] must keep wall-time and peak-RSS eligibility paired")
+        if not compile_eligible:
+            if metrics["generated_code_bytes"] or metrics["generated_runtime"] \
+                    or eligibility["code_section"] != "not-applicable" \
+                    or eligibility["runtime_oracle"] != "not-applicable":
+                _fail(f"{name}.rows[{index}] gives metrics to an authenticated untimed row")
+        elif metrics["generated_code_bytes"]:
             if eligibility["code_section"] != "deterministic-code-section":
                 _fail(f"{name}.rows[{index}] has an invalid code-section obligation")
-        elif eligibility["code_section"] != "not-applicable":
-            _fail(f"{name}.rows[{index}] has an inapplicable code-section marker")
+        elif eligibility["code_section"] not in {
+                "deterministic-zero-baseline-code-section", "not-applicable"}:
+            _fail(f"{name}.rows[{index}] has an invalid zero/inapplicable code marker")
         if metrics["generated_runtime"]:
-            if eligibility["runtime_oracle"] != "independent-native-executable-oracle":
+            if not compile_eligible \
+                    or eligibility["runtime_oracle"] != "independent-native-executable-oracle":
                 _fail(f"{name}.rows[{index}] has an invalid runtime oracle")
         elif eligibility["runtime_oracle"] != "not-applicable":
             _fail(f"{name}.rows[{index}] has an inapplicable runtime oracle")
@@ -1324,6 +1344,209 @@ def _evidence_bytes(root, artifact, name):
     return root.joinpath(*relative.parts).read_bytes()
 
 
+
+def _bounded_code_bytes(value, name, *, positive=False):
+    if type(value) is not int or value < (1 if positive else 0) or value > (1 << 63) - 1:
+        qualifier = "positive " if positive else "nonnegative "
+        _fail(f"{name} must be a {qualifier}bounded integer")
+    return value
+
+
+def _row_ids(value, name, row_count):
+    rows = _list(value, name)
+    for index, row in enumerate(rows):
+        if type(row) is not int or not 0 <= row < row_count:
+            _fail(f"{name}[{index}] is outside the complete census population")
+    if rows != sorted(set(rows)):
+        _fail(f"{name} must be sorted and unique")
+    return rows
+
+
+def _tsv_rows(data, fields, name, *, allow_empty=False):
+    """Parse a strict TSV, optionally permitting a header-only table."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        _fail(f"{name} is not valid UTF-8 TSV: {error}")
+    expected = list(fields)
+    reader = csv.DictReader(io.StringIO(text), delimiter="\t", lineterminator="\n")
+    if reader.fieldnames != expected:
+        _fail(f"{name} header does not match the reviewed schema")
+    rows = []
+    for index, row in enumerate(reader):
+        if None in row or any(value is None for value in row.values()):
+            _fail(f"{name}[{index}] is malformed")
+        if any("\r" in value or "\n" in value for value in row.values()):
+            _fail(f"{name}[{index}] contains a multi-line field")
+        rows.append(row)
+    if not rows and not allow_empty:
+        _fail(f"{name} is empty")
+    return rows
+
+
+def _validator_projection(report, row_count):
+    # Validate the producer's complete applicability/admission partition.
+    if report["profile"] != "full-census":
+        _fail("#508 validator report is not the production full-census profile")
+    _exact_list(report["applicability_classes"], list(RETIREMENT_SCHEMA.APPLICABILITY_CLASSES),
+                "validator_report.applicability_classes")
+    _exact_list(report["admission_classes"], list(RETIREMENT_SCHEMA.APPLICABILITY_CLASSES),
+                "validator_report.admission_classes")
+    counts = _keys(report["applicability_counts"], RETIREMENT_SCHEMA.APPLICABILITY_CLASSES,
+                   "validator_report.applicability_counts")
+    admission_counts = _keys(report["admission_counts"], RETIREMENT_SCHEMA.APPLICABILITY_CLASSES,
+                             "validator_report.admission_counts")
+    rows_by_class = _keys(report["applicability_rows_by_class"],
+                          RETIREMENT_SCHEMA.APPLICABILITY_CLASSES,
+                          "validator_report.applicability_rows_by_class")
+    admission_rows = _keys(report["admission_rows_by_class"],
+                           RETIREMENT_SCHEMA.APPLICABILITY_CLASSES,
+                           "validator_report.admission_rows_by_class")
+    by_row = {}
+    for classification in RETIREMENT_SCHEMA.APPLICABILITY_CLASSES:
+        rows = _row_ids(rows_by_class[classification],
+                        f"validator_report.applicability_rows_by_class.{classification}",
+                        row_count)
+        _nonnegative_int(counts[classification],
+                         f"validator_report.applicability_counts.{classification}")
+        _nonnegative_int(admission_counts[classification],
+                         f"validator_report.admission_counts.{classification}")
+        if counts[classification] != len(rows):
+            _fail("validator report applicability count differs from its authenticated row set")
+        if admission_counts[classification] != counts[classification] \
+                or admission_rows[classification] != rows:
+            _fail("validator report admission projection differs from applicability")
+        for row in rows:
+            if row in by_row:
+                _fail("validator report applicability classes overlap")
+            by_row[row] = classification
+    if set(by_row) != set(range(row_count)) or report["applicability_rows"] != row_count:
+        _fail("validator report applicability projection is not a complete row partition")
+    skip_rows = _row_ids(report["applicability_skip_rows"],
+                         "validator_report.applicability_skip_rows", row_count)
+    permitted_skips = {
+        row for row, classification in by_row.items()
+        if classification in {"retained-control", "platform-inapplicable", "unavailable"}
+    }
+    # Allocator none may be a measured direct-reference retained control.
+    # Only the independently replayed skip ledger determines non-execution.
+    if not set(skip_rows) <= permitted_skips:
+        _fail("validator report skips an admitted executed row")
+    if report["global_identity_unique"] is not True:
+        _fail("validator report does not prove global row identity uniqueness")
+    return by_row, set(skip_rows)
+
+
+def _report_evidence_path(root, value, name, *, directory=False):
+    _string(value, name)
+    root = Path(root).resolve()
+    candidate = Path(value)
+    if candidate.is_absolute():
+        candidate = Path(value)
+    else:
+        relative = _relative_path(value, name)
+        candidate = root.joinpath(*PurePosixPath(relative).parts)
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        _fail(f"{name} escapes the evidence root")
+    relative = _relative_path(candidate.relative_to(root).as_posix(), name)
+    cursor = root
+    for part in PurePosixPath(relative).parts:
+        cursor /= part
+        if cursor.is_symlink():
+            _fail(f"{name} contains a symbolic link")
+    exists = candidate.is_dir() if directory else candidate.is_file()
+    if not exists or candidate.is_symlink():
+        _fail(f"{name} is missing, has the wrong type, or is a symbolic link")
+    return candidate
+
+
+def _check_validator_projection_evidence(root, report, census_rows, by_row, skip_rows):
+    if report["applicability_evidence"] != report["applicability_tsv"]:
+        _fail("validator report applicability aliases identify different files")
+    if report["residual_evidence"] != report["residual_tsv"]:
+        _fail("validator report residual aliases identify different files")
+    applicability_path = _report_evidence_path(
+        root, report["applicability_evidence"], "validator_report.applicability_evidence")
+    skip_path = _report_evidence_path(
+        root, report["applicability_skip_evidence"],
+        "validator_report.applicability_skip_evidence")
+    residual_path = _report_evidence_path(
+        root, report["residual_evidence"], "validator_report.residual_evidence")
+    if hashlib.sha256(applicability_path.read_bytes()).hexdigest() != report["applicability_sha256"]:
+        _fail("validator report applicability digest differs from its evidence")
+    if hashlib.sha256(residual_path.read_bytes()).hexdigest() != report["residual_sha256"]:
+        _fail("validator report residual digest differs from its evidence")
+
+    applicability = _tsv_rows(
+        applicability_path.read_bytes(), RETIREMENT_SCHEMA.APPLICABILITY_FIELDS,
+        "applicability.tsv")
+    if len(applicability) != len(census_rows):
+        _fail("applicability.tsv is not the complete census population")
+    reasons = {}
+    candidate_failures = []
+    reference_failures = []
+    acceptance_failures = []
+    for index, item in enumerate(applicability):
+        if int(item["row"]) != index:
+            _fail("applicability.tsv rows are not contiguous")
+        source = census_rows[index]
+        expected = {
+            "group": source["group"], "fixture": source["fixture"], "target": source["target"],
+            "cpu": source["cpu"], "frontend": source["frontend_lowering"],
+            "allocator": source["allocator"], "PIC": source["PIC"],
+        }
+        if any(item[key] != value for key, value in expected.items()):
+            _fail("applicability.tsv identity differs from rows.tsv")
+        if item["applicability"] != by_row[index] or item["admission"] != by_row[index]:
+            _fail("applicability.tsv classification differs from the report partition")
+        for field, target in (("candidate_failure", candidate_failures),
+                              ("reference_failure", reference_failures),
+                              ("acceptance_failure", acceptance_failures)):
+            if item[field] not in {"0", "1"}:
+                _fail(f"applicability.tsv {field} is not boolean")
+            if item[field] == "1":
+                target.append(index)
+        reasons[index] = item["reason"]
+    if candidate_failures != report["candidate_failure_rows"] \
+            or reference_failures != report["reference_failure_rows"] \
+            or acceptance_failures != report["acceptance_failure_rows"]:
+        _fail("applicability.tsv failure projection differs from the validator report")
+
+    skips = _tsv_rows(
+        skip_path.read_bytes(), RETIREMENT_SCHEMA.APPLICABILITY_SKIP_FIELDS,
+        "applicability-skips.tsv", allow_empty=True)
+    if [int(item["row"]) for item in skips] != sorted(skip_rows):
+        _fail("applicability-skips.tsv differs from the authenticated skip row set")
+    for item in skips:
+        row = int(item["row"])
+        source = census_rows[row]
+        expected = {"group": source["group"], "fixture": source["fixture"],
+                    "target": source["target"], "allocator": source["allocator"],
+                    "applicability": by_row[row], "reason": reasons[row]}
+        # Non-object source obligations determine skip provenance even when
+        # final applicability describes unavailable native execution instead.
+        # The census replay authenticates both projections independently.
+        if source["compile_obligation"] == "registered-non-object-control":
+            expected["applicability"] = "retained-control"
+            expected["reason"] = source["compile_obligation"]
+        if any(item[key] != value for key, value in expected.items()):
+            _fail("applicability-skips.tsv is not row-bound to trusted source evidence")
+    artifacts = []
+    for path in (applicability_path, skip_path, residual_path):
+        data = path.read_bytes()
+        artifacts.append({"path": path.relative_to(Path(root).resolve()).as_posix(),
+                          "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    return {
+        "artifacts": artifacts,
+        "applicability_bytes": applicability_path.read_bytes(),
+        "skip_bytes": skip_path.read_bytes(),
+        "residual_bytes": residual_path.read_bytes(),
+        "reasons": reasons,
+    }
+
+
 TARGET_ABIS = {
     "aarch64-apple-ios": "darwin-aarch64",
     "aarch64-apple-macos": "darwin-aarch64",
@@ -1340,6 +1563,72 @@ TARGET_ABIS = {
 }
 
 
+def _replay_validator_report(root, validator_report, projection_evidence):
+    directories = _list(validator_report["directories"],
+                        "validator_report.directories")
+    if not directories:
+        _fail("#508 validator report must name the validated census shard directories")
+    directory_paths = [
+        _report_evidence_path(root, directory,
+                              f"validator_report.directories[{index}]", directory=True)
+        for index, directory in enumerate(directories)
+    ]
+    # Re-run the repository's actual schema-2 validator over the bound shard
+    # directories.  The receipt above is only accepted when every report
+    # field (including both candidate and acceptance gates) equals this fresh
+    # recomputation; a copied ``clean_*`` claim cannot pass.
+    validator_program = Path(__file__).resolve().with_name("native_retirement_contract.py")
+    if not validator_program.is_file():
+        _fail("#508 schema-2 validator source is unavailable for replay")
+    with tempfile.TemporaryDirectory(prefix="retirement-census-replay-") as replay_dir:
+        output = Path(replay_dir) / "validator-report.json"
+        command = [sys.executable, str(validator_program), "validate-shards",
+                   *(str(path) for path in directory_paths), "--out", str(output)]
+        if validator_report["require_clean_candidate"]:
+            command.append("--require-clean-candidate")
+        if validator_report["require_clean_acceptance"]:
+            command.append("--require-clean-acceptance")
+        if validator_report["reference_supplement_sha256"]:
+            command.append("--reference-supplements")
+        replay = subprocess.run(command, check=False, capture_output=True, text=True,
+                                cwd=Path(root).resolve())
+        expected_success = not (
+            validator_report["require_clean_candidate"]
+            and validator_report["candidate_failure_rows"]) and not (
+            validator_report["require_clean_acceptance"]
+            and validator_report["acceptance_failure_rows"])
+        if (replay.returncode == 0) is not expected_success or not output.is_file():
+            _fail("#508 schema-2 validator replay status differs from retained failures")
+        try:
+            recomputed = json.loads(output.read_text(encoding="utf-8"),
+                                    object_pairs_hook=_json_object)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            _fail(f"#508 schema-2 validator replay output is invalid: {error}")
+        path_fields = set(RETIREMENT_SCHEMA.PATH_FIELDS)
+        for field, expected in validator_report.items():
+            if field in path_fields:
+                continue
+            if recomputed.get(field) != expected:
+                _fail(f"#508 schema-2 validator replay differs in {field}")
+        _keys(recomputed, RETIREMENT_SCHEMA.VALIDATOR_REPORT_FIELDS, "replayed validator report")
+        replay_files = {
+            "applicability_evidence": projection_evidence["applicability_bytes"],
+            "applicability_skip_evidence": projection_evidence["skip_bytes"],
+            "residual_evidence": projection_evidence["residual_bytes"],
+        }
+        for field, expected_bytes in replay_files.items():
+            replay_path = Path(recomputed[field])
+            if not replay_path.is_file() or replay_path.read_bytes() != expected_bytes:
+                _fail(f"#508 schema-2 validator replay differs in {field}")
+
+
+def _check_census_cpu_axes(census_rows, axes):
+    # These rows are authenticated by the mandatory census replay. Preserve
+    # their exact CPU profiles, including target-scoped fixture overrides.
+    if axes["cpus"] != sorted({row["cpu"] for row in census_rows}):
+        _fail("canonical performance CPU profiles differ from the census")
+
+
 def _check_support_output(root, binding, row_data, native_target=None):
     """Cross-check every performance row against the independent #508 output.
 
@@ -1353,11 +1642,13 @@ def _check_support_output(root, binding, row_data, native_target=None):
     support_declaration = _support_file(support, "support_declaration")
     if support_declaration["path"] != SUPPORT_DECLARATION_PATH:
         _fail("#508 support declaration path is not the frozen declaration")
-    if support_declaration["sha256"] != SUPPORT_DECLARATION_SHA256:
+    support_sha256 = support_declaration["sha256"]
+    if support_sha256 not in (SUPPORT_DECLARATION_SHA256,
+                             NEXT_SUPPORT_DECLARATION_SHA256):
         _fail("#508 support declaration digest is not the approved immutable input")
     declaration_data = _evidence_bytes(root, support_declaration,
                                        "support.files.support_declaration")
-    if hashlib.sha256(declaration_data).hexdigest() != SUPPORT_DECLARATION_SHA256:
+    if hashlib.sha256(declaration_data).hexdigest() != support_sha256:
         _fail("#508 support declaration bytes changed")
     declaration = _tsv(declaration_data, SUPPORT_DECLARATION_FIELDS,
                        "support_declaration")
@@ -1394,7 +1685,7 @@ def _check_support_output(root, binding, row_data, native_target=None):
         _fail("#508 manifest is not an executed, SHA-256 census")
     if manifest["support_contract"] != SUPPORT_DECLARATION_PATH:
         _fail("#508 manifest does not identify the frozen support declaration")
-    if manifest["support_contract_sha256"] != SUPPORT_DECLARATION_SHA256:
+    if manifest["support_contract_sha256"] != support_sha256:
         _fail("#508 manifest support declaration digest differs")
     if manifest["environment"] != "explicit-replacement-in-environment.tsv":
         _fail("#508 manifest lacks the explicit replacement environment")
@@ -1502,8 +1793,8 @@ def _check_support_output(root, binding, row_data, native_target=None):
             _fail(f"rows.tsv[{index}] has an invalid target ABI")
         if row["cpu"] == "" or not row["cpu_features"]:
             _fail(f"rows.tsv[{index}] lacks explicit CPU identity")
-        if row["cpu"] != manifest["cpu"]:
-            _fail(f"rows.tsv[{index}] CPU differs from the manifest")
+        # The census validator authenticates target-scoped fixture CPU recipes
+        # during independent replay below; manifest.cpu is only the fallback.
         if row["PIC"] not in PIC or row["selected"] not in {"0", "1"}:
             _fail(f"rows.tsv[{index}] has an invalid PIC/selection field")
         for field in ("fixture_recipe", "compile_obligation", "link_obligation",
@@ -1549,8 +1840,7 @@ def _check_support_output(root, binding, row_data, native_target=None):
             or axes["PIC"] != PIC or axes["stages"] != STAGES \
             or axes["targets"] != sorted(TARGETS):
         _fail("canonical performance rows do not cover the approved axes")
-    if len(axes["cpus"]) != 1:
-        _fail("canonical performance rows must bind one explicit CPU profile")
+    _check_census_cpu_axes(census_rows, axes)
 
     performance_artifact = _support_file(support, "performance_declaration")
     performance = _read_json_evidence(root, performance_artifact,
@@ -1596,38 +1886,17 @@ def _check_support_output(root, binding, row_data, native_target=None):
     # This is the actual schema-2 report emitted by native_retirement_contract.py
     # validate-shards.  Do not replace it with a caller-invented success receipt:
     # candidate and acceptance gates have distinct meanings and remain visible.
-    validator_report = _keys(validator_report, (
-        "schema", "directories", "shards", "rows_validated", "groups",
-        "compiler_revision_claim", "baseline_revision_claim", "compiler_sha256",
-        "baseline_sha256", "support_contract_sha256", "resource_include_sha256",
-        "manifest_identity_sha256", "rows_identity_fields", "rows_identity_sha256",
-        "input_ledger_fields", "input_ledger_sha256", "baseline_dispositions",
-        "reference_dispositions", "setup_dispositions", "candidate_dispositions",
-        "candidate_failure_rows", "reference_failure_rows", "acceptance_failure_rows",
-        "inapplicable_rows", "fallback_defect_rows", "telemetry_defect_rows",
-        "execution_defect_rows", "require_clean_candidate", "require_clean_acceptance",
-        "clean_candidate", "clean_acceptance", "complete_row_partition"),
+    validator_report = _keys(
+        validator_report, RETIREMENT_SCHEMA.VALIDATOR_REPORT_FIELDS,
         "validator_report")
-    if validator_report["schema"] != 2 or validator_report["complete_row_partition"] is not True:
+    if validator_report["schema"] != 2 \
+            or validator_report["complete_row_partition"] is not True:
         _fail("#508 validator report is not a complete schema-2 partition")
-    directories = _list(validator_report["directories"],
-                        "validator_report.directories")
-    if not directories:
-        _fail("#508 validator report must name the validated census shard directories")
-    directory_paths = []
-    for index, directory in enumerate(directories):
-        _string(directory, f"validator_report.directories[{index}]")
-        candidate = Path(directory)
-        if candidate.is_absolute():
-            try:
-                candidate = candidate.resolve().relative_to(Path(root).resolve())
-            except ValueError:
-                _fail("validator report directory escapes the evidence root")
-            directory = candidate.as_posix()
-        else:
-            directory = _relative_path(directory,
-                                       f"validator_report.directories[{index}]")
-        directory_paths.append(Path(root).resolve() / PurePosixPath(directory))
+    applicability_by_row, applicability_skip_rows = _validator_projection(
+        validator_report, declaration_object_rows)
+    projection_evidence = _check_validator_projection_evidence(
+        root, validator_report, census_rows, applicability_by_row,
+        applicability_skip_rows)
     if validator_report["rows_validated"] != declaration_object_rows \
             or validator_report["groups"] != declaration_groups \
             or validator_report["shards"] <= 0:
@@ -1639,39 +1908,53 @@ def _check_support_output(root, binding, row_data, native_target=None):
         _fail("schema-2 validator report does not bind the manifest identities")
     for field in ("require_clean_candidate", "require_clean_acceptance",
                   "clean_candidate", "clean_acceptance"):
-        if validator_report[field] is not True:
-            _fail(f"schema-2 validator report.{field} is not true")
+        _boolean(validator_report[field], f"schema-2 validator report.{field}")
+    if not validator_report["require_clean_candidate"] \
+            or not validator_report["clean_candidate"]:
+        _fail("schema-2 validator report does not enforce a clean candidate")
     for field in ("candidate_failure_rows", "reference_failure_rows",
-                  "acceptance_failure_rows", "fallback_defect_rows",
-                  "telemetry_defect_rows", "execution_defect_rows"):
+                  "fallback_defect_rows", "telemetry_defect_rows",
+                  "execution_defect_rows", "artifact_defect_rows",
+                  "unexpected_failure_rows"):
         if validator_report[field]:
             _fail(f"schema-2 validator report contains {field}")
-    # Re-run the repository's actual schema-2 validator over the bound shard
-    # directories.  The receipt above is only accepted when every report
-    # field (including both candidate and acceptance gates) equals this fresh
-    # recomputation; a copied ``clean_*`` claim cannot pass.
-    validator_program = Path(__file__).resolve().with_name("native_retirement_contract.py")
-    if not validator_program.is_file():
-        _fail("#508 schema-2 validator source is unavailable for replay")
-    with tempfile.TemporaryDirectory(prefix="retirement-census-replay-") as replay_dir:
-        output = Path(replay_dir) / "validator-report.json"
-        command = [sys.executable, str(validator_program), "validate-shards",
-                   *(str(path) for path in directory_paths), "--out", str(output),
-                   "--require-clean-candidate", "--require-clean-acceptance"]
-        replay = subprocess.run(command, check=False, capture_output=True, text=True,
-                                cwd=Path(root).resolve())
-        if replay.returncode != 0 or not output.is_file():
-            _fail("#508 schema-2 validator replay failed")
-        try:
-            recomputed = json.loads(output.read_text(encoding="utf-8"),
-                                    object_pairs_hook=_json_object)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            _fail(f"#508 schema-2 validator replay output is invalid: {error}")
-        for field, expected in validator_report.items():
-            if field == "directories":
-                continue
-            if recomputed.get(field) != expected:
-                _fail(f"#508 schema-2 validator replay differs in {field}")
+    unavailable_rows = validator_report["applicability_rows_by_class"]["unavailable"]
+    if validator_report["acceptance_failure_rows"] != unavailable_rows:
+        _fail("schema-2 acceptance failures are not exactly authenticated unavailable rows")
+    if validator_report["clean_acceptance"] != (
+            not validator_report["acceptance_failure_rows"]):
+        _fail("schema-2 clean_acceptance disagrees with retained failure evidence")
+    _replay_validator_report(root, validator_report, projection_evidence)
+    compiler_eligible_rows = set()
+    performance_applicability = {}
+    eligible_object_rows = 0
+    for row in parsed:
+        identity = tuple(row["identity"][field] for field in ROW_IDENTITY_FIELDS
+                         if field != "artifact_stage")
+        source = expected_object.get(identity)
+        if source is None:
+            _fail("canonical performance row has no schema-2 census identity")
+        census_row = int(source["row"])
+        compiler_eligible = census_row not in applicability_skip_rows
+        if row["metrics"]["compiler_wall_time"] is not compiler_eligible \
+                or row["metrics"]["compiler_peak_rss"] is not compiler_eligible:
+            _fail("canonical compiler eligibility differs from authenticated skip provenance")
+        if not compiler_eligible:
+            if any(row["metrics"][metric] for metric in METRICS) \
+                    or row["eligibility"]["runtime_oracle"] != "not-applicable" \
+                    or row["eligibility"]["code_section"] != "not-applicable":
+                _fail("authenticated non-executed row contains measurement eligibility")
+        else:
+            compiler_eligible_rows.add(row["row"])
+            if row["identity"]["artifact_stage"] == "object":
+                eligible_object_rows += 1
+        performance_applicability[row["row"]] = {
+            "census_row": census_row,
+            "classification": applicability_by_row[census_row],
+            "reason": projection_evidence["reasons"][census_row],
+            "compiler_eligible": compiler_eligible,
+        }
+
     # Keep the byte-level identities available to the workflow validator.  A
     # result-input plan must bind the actual schema-2 artifacts, not a digest
     # recomputed from the parsed manifest or a caller-provided row total.
@@ -1684,6 +1967,12 @@ def _check_support_output(root, binding, row_data, native_target=None):
             "performance_rows_sha256": _support_file(support, "performance_rows")["sha256"],
             "validator_report_sha256": validator_artifact["sha256"],
             "object_row_count": declaration_object_rows,
+            "eligible_object_row_count": eligible_object_rows,
+            "compiler_eligible_rows": compiler_eligible_rows,
+            "performance_applicability": performance_applicability,
+            "projection_artifacts": projection_evidence["artifacts"],
+            "applicability_sha256": validator_report["applicability_sha256"],
+            "applicability_skip_rows": sorted(applicability_skip_rows),
             "group_count": declaration_groups}
 
 
@@ -1733,10 +2022,12 @@ def _result_input_plan(root, artifact, support_output, population, rules):
         _fail("result-input plan must use the #615 record_id identity")
     if value["coordinate_schema"] != "row-round-pair-v1":
         _fail("result-input plan coordinate schema is not approved")
-    if value["sample_population"] != "canonical-performance-rows-with-required-metrics":
-        _fail("result-input plan must sample every eligible canonical row")
-    if value["eligible_population"] != "canonical-performance-rows":
-        _fail("result-input plan must bind every eligible performance row")
+    if value["sample_population"] != \
+            "trusted-census-eligible-performance-rows-with-required-metrics":
+        _fail("result-input plan must sample every authenticated eligible row")
+    if value["eligible_population"] != \
+            "authenticated-applicability-minus-nonexecuted-rows":
+        _fail("result-input plan must bind the trusted applicability projection")
     if value["source_manifest_sha256"] != support_output["manifest_sha256"]:
         _fail("result-input plan does not bind the actual schema-2 manifest")
     if value["source_rows_sha256"] != support_output["rows_sha256"]:
@@ -1827,9 +2118,9 @@ def _result_manifest_descriptors(value, result_plan):
 # Execution evidence is a separate trust boundary from result-file integrity.
 # The caller obtains the receipt digest independently from the admitted control
 # service; neither the result bundle nor the receipt may choose that trust root.
-EXECUTION_PLAN_SCHEMA = "buster-native-retirement-execution-plan-v1"
+EXECUTION_PLAN_SCHEMA = "buster-native-retirement-execution-plan-v2"
 EXECUTION_RECEIPT_SCHEMA = "buster-native-retirement-execution-receipt-v1"
-EXECUTION_SCHEDULE = "tp-retirement-block-schedule-v1"
+EXECUTION_SCHEDULE = "tp-retirement-block-schedule-v2"
 EXECUTION_LINE_CAP = 8192
 EXECUTION_RECEIPT_BYTE_CAP = 1024 * 1024
 EXECUTION_SHARD_CAP = 4096
@@ -1881,8 +2172,10 @@ def _execution_schedule(rows, sampling):
         _fail("execution schedule seed must fit the #619 uint64 domain")
     sequence = 0
     for kind in ("compiler", "runtime"):
-        selected = sorted(row["row"] for row in rows
-                          if kind == "compiler" or row["metrics"]["generated_runtime"])
+        selected = sorted(
+            row["row"] for row in rows
+            if (kind == "compiler" and row["metrics"]["compiler_wall_time"])
+            or (kind == "runtime" and row["metrics"]["generated_runtime"]))
         if len(selected) > 100000:
             _fail("execution schedule exceeds the #619 cell limit")
         for row in selected:
@@ -1974,14 +2267,26 @@ def _check_execution_plan(root, descriptor, binding, parsed, sampling,
             "row", "code_section_status", "code_section_bytes", "code_section_sha256",
             "runtime_oracle_status", "runtime_exit_code", "native_runtime"),
             "execution_plan.oracle")
-        code_eligible = oracle_item["code_section_status"] == "parsed-deterministic"
-        if code_eligible:
-            _positive_int(oracle_item["code_section_bytes"], "execution oracle code-section size")
+        code_observed = oracle_item["code_section_status"] == "parsed-deterministic"
+        if code_observed:
+            _bounded_code_bytes(oracle_item["code_section_bytes"],
+                                "execution oracle code-section size")
             _sha(oracle_item["code_section_sha256"], "execution oracle code-section digest")
+            if oracle_item["code_section_bytes"] == 0 \
+                    and oracle_item["code_section_sha256"] != hashlib.sha256(b"").hexdigest():
+                _fail("zero-byte execution oracle does not bind the empty payload")
+        elif oracle_item["code_section_status"] != "not-applicable" \
+                or oracle_item["code_section_bytes"] is not None \
+                or oracle_item["code_section_sha256"] is not None:
+            _fail("inapplicable execution oracle must use explicit null code observations")
+        code_eligible = code_observed and oracle_item["code_section_bytes"] > 0
+        compile_eligible = row["metrics"]["compiler_wall_time"]
         if type(oracle_item["native_runtime"]) is not bool \
-                or type(oracle_item["runtime_exit_code"]) is not int:
+                or (compile_eligible and type(oracle_item["runtime_exit_code"]) is not int) \
+                or (not compile_eligible and oracle_item["runtime_exit_code"] is not None):
             _fail("execution oracle native/status fields have invalid types")
-        runtime_required = _native_runtime_required(row, native_target)
+        runtime_required = (row["metrics"]["compiler_wall_time"]
+                            and _native_runtime_required(row, native_target))
         if oracle_item["native_runtime"] is not runtime_required:
             _fail("execution oracle native-runtime applicability differs from the frozen row obligation")
         if runtime_required:
@@ -1989,24 +2294,40 @@ def _check_execution_plan(root, descriptor, binding, parsed, sampling,
                     or oracle_item["runtime_exit_code"] != 0:
                 _fail("required native runtime lacks a passing independent oracle")
         elif oracle_item["runtime_oracle_status"] != "not-applicable" \
-                or oracle_item["runtime_exit_code"] != -1:
+                or oracle_item["runtime_exit_code"] != (-1 if compile_eligible else None):
             _fail("inapplicable runtime oracle contradicts the frozen row obligation")
         runtime_eligible = runtime_required
+        expected_code_marker = (
+            "deterministic-code-section" if code_eligible
+            else "deterministic-zero-baseline-code-section" if code_observed
+            else "not-applicable")
         if row["metrics"]["generated_code_bytes"] is not code_eligible \
-                or row["metrics"]["generated_runtime"] is not runtime_eligible:
+                or row["metrics"]["generated_runtime"] is not runtime_eligible \
+                or row["eligibility"]["code_section"] != expected_code_marker:
             _fail("execution eligibility is not derived from the independent oracle")
         for variant in ("baseline", "candidate"):
             side = _keys(contract[variant], ("compiler_command_sha256", "artifact_sha256",
                           "code_section_sha256", "code_section_bytes",
                           "runtime_command_sha256", "runtime_output_sha256"),
                          f"execution_plan.row.{variant}")
+            compile_eligible = row["metrics"]["compiler_wall_time"]
             for key in ("compiler_command_sha256", "artifact_sha256"):
-                _sha(side[key], f"execution_plan.row.{variant}.{key}")
-            if row["metrics"]["generated_code_bytes"]:
+                if compile_eligible:
+                    _sha(side[key], f"execution_plan.row.{variant}.{key}")
+                elif side[key] is not None:
+                    _fail("untimed row compiler evidence must be explicitly null")
+            if code_observed:
                 _sha(side["code_section_sha256"], "execution plan code-section identity")
-                _positive_int(side["code_section_bytes"], "execution plan code-section size")
-                if side["code_section_bytes"] > (1 << 63) - 1:
-                    _fail("execution plan code-section size exceeds the result domain")
+                _bounded_code_bytes(
+                    side["code_section_bytes"], "execution plan code-section size",
+                    positive=(variant == "baseline" and code_eligible))
+                if side["code_section_bytes"] == 0 \
+                        and side["code_section_sha256"] != hashlib.sha256(b"").hexdigest():
+                    _fail("zero-byte execution plan payload does not bind empty bytes")
+                if variant == "baseline" and (
+                        side["code_section_bytes"] != oracle_item["code_section_bytes"]
+                        or side["code_section_sha256"] != oracle_item["code_section_sha256"]):
+                    _fail("execution plan baseline code fact differs from the independent oracle")
             elif side["code_section_sha256"] is not None or side["code_section_bytes"] is not None:
                 _fail("ineligible code-section evidence must be explicitly absent")
             for key in ("runtime_command_sha256", "runtime_output_sha256"):
@@ -2107,7 +2428,8 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
                                  admitted_cpu, native_target)
     contracts = {item["row"]: item for item in plan["rows"]}
     row_by_id = {row["row"]: row for row in parsed}
-    campaigns = len(parsed) + sum(row["metrics"]["generated_runtime"] for row in parsed)
+    campaigns = (sum(row["metrics"]["compiler_wall_time"] for row in parsed)
+                 + sum(row["metrics"]["generated_runtime"] for row in parsed))
     expected_count = campaigns * 2 * (sampling["warmups_per_variant"]
                                       + sampling["rounds"] * sampling["pairs_per_round"])
     if receipt["invocations"] != expected_count:
@@ -2246,8 +2568,10 @@ def _consume_result_record(value, row_ordinals, row_by_id, rounds, pairs,
         for side in ("baseline", "candidate"):
             sample = pair_value[side]
             if metric == "generated_code_bytes":
-                if type(sample) is not int or sample <= 0 or sample > (1 << 63) - 1:
-                    _fail("generated code-byte observations must be bounded integers")
+                minimum = 1 if side == "baseline" else 0
+                if type(sample) is not int or sample < minimum or sample > (1 << 63) - 1:
+                    _fail("generated code-byte observations require a positive baseline and "
+                          "a nonnegative candidate")
                 continue
             if type(sample) not in (int, float) or isinstance(sample, bool) \
                     or not math.isfinite(float(sample)) or sample <= 0:
@@ -2652,6 +2976,8 @@ def _sealed_closure_files(root, binding, support_output, records, phases,
     # ``phases`` is the workflow descriptor map, whose sealed-result entry is
     # only an artifact descriptor.  The parsed result-bundle descriptor is
     # passed separately and is the identity that belongs in the closure.
+    for index, artifact in enumerate(support_output.get("projection_artifacts", [])):
+        add(f"census.projection.{index}", artifact)
     add("workflow.result_bundle", result_bundle_descriptor)
     add("workflow.adapter_input", result_bundle["adapter_input"])
     add("workflow.adapter_result", adapter_result)
@@ -3375,28 +3701,38 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
                 continue
             if identity[field] != source[field]:
                 _fail("admission identity is not derived from schema-2 rows")
-        if item["requested_obligation"] != "compiler-wall-time-and-peak-rss":
-            _fail("admission records must name the timing/resource obligation")
-        if item["status"] != "completed" or item["exit_code"] != 0:
-            _fail("admission records must be completed successful compiler executions")
+        expected_compile = item["row"] in support_output["compiler_eligible_rows"]
         _boolean(item["timed_out"],
                  f"workflow.records.admission.records[{index}].timed_out")
         _boolean(item["native_compiler"],
                  f"workflow.records.admission.records[{index}].native_compiler")
-        if item["timed_out"] or not item["native_compiler"]:
-            _fail("admission records must prove native non-timeout compiler execution")
-        if item["artifact_kind"] not in {"object", "linked-executable", "self-host-stage1"}:
-            _fail("admission record artifact kind is not approved")
-        _positive_int(item["artifact_bytes"],
-                      f"workflow.records.admission.records[{index}].artifact_bytes")
-        _sha(item["artifact_sha256"],
-             f"workflow.records.admission.records[{index}].artifact_sha256")
+        if expected_compile:
+            if item["requested_obligation"] != "compiler-wall-time-and-peak-rss" \
+                    or item["status"] != "completed" or item["exit_code"] != 0 \
+                    or item["timed_out"] or not item["native_compiler"]:
+                _fail("eligible admission record is not a successful native compiler execution")
+            if item["artifact_kind"] not in {
+                    "object", "linked-executable", "self-host-stage1"}:
+                _fail("eligible admission record artifact kind is not approved")
+            _positive_int(item["artifact_bytes"],
+                          f"workflow.records.admission.records[{index}].artifact_bytes")
+            _sha(item["artifact_sha256"],
+                 f"workflow.records.admission.records[{index}].artifact_sha256")
+            object_admissions += item["artifact_stage"] == "object"
+        else:
+            if item["requested_obligation"] is not None \
+                    or item["status"] != "not-applicable" \
+                    or item["exit_code"] is not None \
+                    or item["timed_out"] or item["native_compiler"] \
+                    or item["artifact_kind"] is not None \
+                    or item["artifact_bytes"] is not None \
+                    or item["artifact_sha256"] is not None:
+                _fail("authenticated non-executed admission must use explicit null observations")
         admission_by_row[item["row"]] = item
-        object_admissions += item["artifact_stage"] == "object"
     if set(admission_by_row) != set(range(len(parsed))):
         _fail("admission records do not cover every canonical performance row")
-    if object_admissions != support_output["object_row_count"]:
-        _fail("admission records do not cover every schema-2 object row")
+    if object_admissions != support_output["eligible_object_row_count"]:
+        _fail("admission records do not cover every authenticated eligible object row")
 
     oracle = _read_json_evidence(root, records["oracle"], "workflow.records.oracle")
     oracle = _keys(oracle, ("schema", "version", "source_manifest_sha256",
@@ -3418,25 +3754,38 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
             _fail("oracle record row is outside the canonical population")
         if item["row"] in oracle_by_row:
             _fail("oracle records duplicate a canonical row")
-        if item["code_section_status"] != "parsed-deterministic":
-            _fail("oracle record code section was not independently parsed")
-        _positive_int(item["code_section_bytes"],
-                      f"workflow.records.oracle.records[{index}].code_section_bytes")
-        _sha(item["code_section_sha256"],
-             f"workflow.records.oracle.records[{index}].code_section_sha256")
+        expected_compile = item["row"] in support_output["compiler_eligible_rows"]
+        if expected_compile:
+            if item["code_section_status"] != "parsed-deterministic":
+                _fail("eligible oracle record code section was not independently parsed")
+            _bounded_code_bytes(
+                item["code_section_bytes"],
+                f"workflow.records.oracle.records[{index}].code_section_bytes")
+            _sha(item["code_section_sha256"],
+                 f"workflow.records.oracle.records[{index}].code_section_sha256")
+            if item["code_section_bytes"] == 0 \
+                    and item["code_section_sha256"] != hashlib.sha256(b"").hexdigest():
+                _fail("zero-byte oracle record does not bind the empty payload")
+        else:
+            if item["code_section_status"] != "not-applicable" \
+                    or item["code_section_bytes"] is not None \
+                    or item["code_section_sha256"] is not None:
+                _fail("untimed oracle record must retain explicit null code observations")
         if item["runtime_oracle_status"] not in {"passed-native", "not-applicable"}:
             _fail("oracle record runtime status is not approved")
         if item["runtime_oracle_status"] == "passed-native" and item["runtime_exit_code"] != 0:
             _fail("passing native oracle must have exit code zero")
-        if item["runtime_oracle_status"] == "not-applicable" and item["runtime_exit_code"] != -1:
-            _fail("inapplicable runtime oracle must use exit code -1")
+        if item["runtime_oracle_status"] == "not-applicable" \
+                and item["runtime_exit_code"] != (-1 if expected_compile else None):
+            _fail("inapplicable runtime oracle has an invalid absent observation")
         _boolean(item["native_runtime"],
                  f"workflow.records.oracle.records[{index}].native_runtime")
         if item["native_runtime"] is not \
                 (item["runtime_oracle_status"] == "passed-native"):
             _fail("oracle native-runtime flag contradicts its runtime status")
         if native_target is not None:
-            runtime_required = _native_runtime_required(parsed[item["row"]], native_target)
+            runtime_required = (expected_compile
+                                and _native_runtime_required(parsed[item["row"]], native_target))
             if item["native_runtime"] is not runtime_required:
                 _fail("oracle native-runtime applicability differs from the frozen row obligation")
         oracle_by_row[item["row"]] = item
@@ -3448,28 +3797,22 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
         oracle_item = oracle_by_row[row["row"]]
         if admission_item["identity"] != row["identity"]:
             _fail("canonical row identity differs from the admitted execution row")
+        compile_eligible = row["row"] in support_output["compiler_eligible_rows"]
+        code_parsed = oracle_item["code_section_status"] == "parsed-deterministic"
+        code_ratio_eligible = (
+            code_parsed and compile_eligible and oracle_item["code_section_bytes"] > 0)
         expected = {
-            "compiler_wall_time": admission_item["status"] == "completed"
-                and admission_item["exit_code"] == 0
-                and not admission_item["timed_out"]
-                and admission_item["native_compiler"]
-                and admission_item["requested_obligation"]
-                == "compiler-wall-time-and-peak-rss",
-            "compiler_peak_rss": admission_item["status"] == "completed"
-                and admission_item["exit_code"] == 0
-                and not admission_item["timed_out"]
-                and admission_item["native_compiler"]
-                and admission_item["requested_obligation"]
-                == "compiler-wall-time-and-peak-rss",
-            "generated_code_bytes": oracle_item["code_section_status"]
-                == "parsed-deterministic" and oracle_item["code_section_bytes"] > 0,
-            "generated_runtime": oracle_item["native_runtime"],
+            "compiler_wall_time": compile_eligible,
+            "compiler_peak_rss": compile_eligible,
+            "generated_code_bytes": code_ratio_eligible,
+            "generated_runtime": oracle_item["native_runtime"] and compile_eligible,
             "runtime_oracle": ("independent-native-executable-oracle"
                                 if oracle_item["runtime_oracle_status"] == "passed-native"
                                 else "not-applicable"),
-            "code_section": ("deterministic-code-section"
-                             if oracle_item["code_section_status"] == "parsed-deterministic"
-                             else "not-applicable"),
+            "code_section": (
+                "deterministic-code-section" if code_ratio_eligible
+                else "deterministic-zero-baseline-code-section"
+                if code_parsed and compile_eligible else "not-applicable"),
         }
         if row["eligibility"] != expected:
             _fail("canonical row eligibility is not derived from admission and oracle records")

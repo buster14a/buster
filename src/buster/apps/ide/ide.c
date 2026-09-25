@@ -146,6 +146,9 @@ struct CompilerProgram
     SliceString8 fuzz_arguments;
     String8 completion_census_output_path;
     String8 selection_benchmark_path;
+#if BUSTER_INCLUDE_TESTS
+    String8 coff_relocation_fixture_path;
+#endif
     CompilerCommand command;
 };
 
@@ -156,7 +159,7 @@ BUSTER_GLOBAL_LOCAL void compiler_print_usage(void)
 {
     string_print(S8("usage:\n"
                     "  ide cc <C compiler options and inputs>\n"
-                    "  ide test [--verbose=0|1] [--ci=0|1]\n"
+                    "  ide test [--verbose=0|1] [--ci=0|1] [--coff-relocation-fixture=<path>]\n"
                     "  ide metamorphic (configure through BUSTER_METAMORPHIC_* environment variables)\n"
                     "  ide bench\n"
                     "  ide bench-select <self-contained-source.c>\n"
@@ -199,9 +202,28 @@ ProcessResult process_arguments(void)
         compiler_state.command = string_equal(command, S8("metamorphic")) ? COMPILER_COMMAND_METAMORPHIC : COMPILER_COMMAND_TEST;
         for (u64 index = 2; index < arguments.length; index += 1)
         {
+            String8 argument = arguments.pointer[index];
+#if BUSTER_INCLUDE_TESTS
+            if (string_starts_with_sequence(argument, S8("--coff-relocation-fixture=")))
+            {
+                if (compiler_state.coff_relocation_fixture_path.length)
+                {
+                    string_print(S8("test: --coff-relocation-fixture may only be specified once\n"));
+                    return PROCESS_RESULT_FAILED;
+                }
+                compiler_state.coff_relocation_fixture_path =
+                    string_slice(argument, S8("--coff-relocation-fixture=").length, argument.length);
+                if (!compiler_state.coff_relocation_fixture_path.length)
+                {
+                    string_print(S8("test: expected a path after --coff-relocation-fixture=\n"));
+                    return PROCESS_RESULT_FAILED;
+                }
+            }
+            else
+#endif
             if (!compiler_process_common_argument(index))
             {
-                string_print(S8("test: unsupported option: {S8}\n"), arguments.pointer[index]);
+                string_print(S8("test: unsupported option: {S8}\n"), argument);
                 return PROCESS_RESULT_FAILED;
             }
         }
@@ -298,7 +320,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_run_tests(void)
         Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(512)});
         if (arena)
         {
-            UnitTestArguments arguments = {arena, &default_show};
+            UnitTestArguments arguments = {
+                .arena = arena,
+                .show = &default_show,
+#if BUSTER_INCLUDE_TESTS
+                .coff_relocation_fixture_path = compiler_state.coff_relocation_fixture_path,
+#endif
+            };
 
             ThreadContext* application_context = thread_context_selected();
             ThreadContext* test_context = thread_context_allocate();
@@ -791,9 +819,8 @@ BUSTER_GLOBAL_LOCAL void report_source_metrics(Arena* arena, String8 unit, CSour
 // throughput series that STEP_INSTRUCTIONS alone cannot express (see
 // `self_host_compare_action` in build.c).
 //
-// A whole file rather than another stdout line, because capturing the
-// compiler's stdout would buffer the diagnostics that currently stream as the
-// compile runs, and losing those on a failing build costs more than this file.
+// A whole file rather than another stdout line lets a build driver read these
+// measurements without capturing the compiler's primary output.
 //
 // Keys are `<group>.<CSourceMetrics field name>`, so the format is the struct
 // and readers can key off exactly the fields they need. Only ever add keys:
@@ -862,7 +889,7 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
 #if BUSTER_BENCH_ALLOCATIONS
     source_metrics_append_field(arena, &text, S8("allocation"), S8("arena_calls"), allocations.calls);
     source_metrics_append_field(arena, &text, S8("allocation"), S8("arena_bytes"), allocations.requested_bytes);
-    source_metrics_append_field(arena, &text, S8("quality_census"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("quality_census"), S8("version"), 2);
 #define BUSTER_QUALITY_WRITE_FIELD(name) source_metrics_append_field(arena, &text, S8("quality_census"), S8(#name), quality.name);
     BUSTER_QUALITY_CENSUS_FIELDS(BUSTER_QUALITY_WRITE_FIELD)
 #undef BUSTER_QUALITY_WRITE_FIELD
@@ -905,6 +932,14 @@ BUSTER_GLOBAL_LOCAL String8 compiler_census_stage(CodegenFallbackReason reason)
     return stage;
 }
 
+BUSTER_GLOBAL_LOCAL void compiler_print_diagnostic(String8 format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), format, arguments, STRING_FORMAT_VA_GP_SLOTS(2));
+    va_end(arguments);
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
 {
     Arena* arena = arena_create((ArenaCreation){
@@ -919,11 +954,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     if (compile.warning.length)
     {
-        string_print(S8("{S8}"), compile.warning);
+        compiler_print_diagnostic(S8("{S8}"), compile.warning);
     }
     if (compile.error != COMPILER_DRIVER_ERROR_NONE)
     {
-        string_print(S8("cc: error: {S8}\n"), compile.diagnostic);
+        compiler_print_diagnostic(S8("cc: error: {S8}\n"), compile.diagnostic);
         result = PROCESS_RESULT_FAILED;
     }
     else if (!invocation.output_path.length)
@@ -968,7 +1003,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         if (invocation.source_metrics_path.length &&
             !write_source_metrics(arena, invocation.source_metrics_path, unit, compile.source_unique, compile.source_lexed, compile.preprocessed))
         {
-            string_print(S8("cc: error: could not write {S8}\n"), invocation.source_metrics_path);
+            compiler_print_diagnostic(S8("cc: error: could not write {S8}\n"), invocation.source_metrics_path);
             result = PROCESS_RESULT_FAILED;
         }
     }

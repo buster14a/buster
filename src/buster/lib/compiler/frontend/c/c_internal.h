@@ -416,6 +416,7 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_COUNT,
 } CSymbolBuiltin;
 BUSTER_C_EXTERN CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling);
+BUSTER_C_EXTERN CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String8 spelling);
 
 struct CSymbolTable
 {
@@ -792,6 +793,7 @@ struct CTypeParseFrame
     bool has_function_suffix;
     bool original_type_valid;
     bool is_bit_field;
+    bool tag_only_declaration;
     bool scanning_inner_parameters;
     bool has_inner_parameters;
     bool inner_variadic;

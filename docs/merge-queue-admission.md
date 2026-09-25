@@ -1,35 +1,70 @@
 # Serialized main integration (#867)
 
-## Rollout state: not enabled
+## Rollout state: enabled; live acceptance in progress
 
-Implementation baseline: `46ed5e141baed17dfc1e977691ac73e08be5b9f5`.
-The live ruleset read during this work was `22537199`: six required GitHub
-Actions checks, non-strict branch freshness, no bypass, and no merge queue.
-`.github/main-merge-queue.ruleset.json` is a **desired configuration**, not an
-assertion that those settings have been applied. The checker has no write API.
+Adapter baseline: `f5ce6cdc10e0e9f49b8698a82944daf4688c0f2e` (after #927 and #933).
+On 2026-09-22, after #945 landed, ruleset `22537199` was updated and read back:
+eight required GitHub Actions checks, non-strict branch freshness, no bypass,
+and an initial build limit of one with a merge limit of one, ALLGREEN, and
+merge commits. The saved response passed `check-ruleset` at main
+`6929d847fbab0014284f698cd235ddb570d60e9d`. The checked-in ruleset now
+describes the desired build limit of 20; verify live settings before relying
+on it. The checker has no write API.
 
-Do not activate that configuration yet. #925/#927 must first repair current
-main, land the trusted retirement admission gate, and support retirement-bound
-merge groups. The observed #927 implementation rejects every retirement-sensitive
-merge group, including one carrying an attested integration head. This change
-preserves that rejection instead of manufacturing a green queue result. Thus
-this PR is an independently testable #867 prerequisite, not completion of #867.
+On 2026-09-24, the administrator intentionally added Repository admin (role 5)
+and `davidgmbb` (user 39247043) as `always` bypass actors. The repository
+contract now expects exactly those two. This records the live setting; a bypass
+does not satisfy or replace any of the eight required checks or admission
+receipts for a normal queued merge.
+
+The trusted retirement gate and queue collector have landed. The adapter admits
+one synthetic merge commit only when its first parent has become current main.
+For a sensitive group its entire tree must equal the existing writer's attested
+PR head. It verifies the open
+same-repository PR, creator-bearing status and completed successful writer run.
+The acceptance exercises below are still required; local
+fixtures do not establish GitHub's live synthetic-commit shape or queue behavior.
 
 ## One admission owner, no branch-freshness requirement
 
 GitHub's native merge queue owns order, synthetic heads and rebuilding. Configure
-`max_entries_to_build: 1`, `max_entries_to_merge: 1`, `min_entries_to_merge: 1`,
+`max_entries_to_build: 20`, `max_entries_to_merge: 1`, `min_entries_to_merge: 1`,
+`min_entries_to_merge_wait_minutes: 0`, `check_response_timeout_minutes: 360`,
 `grouping_strategy: ALLGREEN`, and `merge_method: MERGE`. Retain
 `strict_required_status_checks_policy: false`. A clean feature branch does not
 need to be manually updated merely because main advanced. The queue, not the
 feature author, constructs and validates the combined candidate.
 
-Build concurrency and merge batch size are distinct controls; both are one.
+Build concurrency permits up to 20 queued candidates to run speculative
+combined-head validation concurrently; it does not authorize 20 merges. A
+later candidate may have the preceding unmerged synthetic commit as its base.
+Both admission jobs keep that exact group pending until the base lands on main;
+they never grant success while the predecessor is speculative. The merge limit
+of one serializes merging, and GitHub replaces stale groups when necessary.
+`ALLGREEN` requires every queued group to satisfy
+its required checks. `MERGE` retains merge commits. Required checks still bind
+the exact group and the trusted retirement gate still owns sensitive trees.
 The 360-minute queue timeout exceeds the admission workflow's 310-minute job
 limit and its five-hour bounded wait. A timeout is a failure, not permission to
-merge. Cancellation only coalesces the same PR or merge-group ref; main-push
-policy runs use unique run-ID groups. Workflow concurrency is not a FIFO queue
-and is never used as a replacement for GitHub queue enforcement.
+merge. Workflow concurrency cancellation only coalesces the same PR or
+merge-group ref; main-push policy runs use unique run-ID groups. Separately, the
+trusted default-branch CI lifecycle controller starts from the in-progress
+Buster CI merge-group run. It watches that run's jobs and the live ruleset's
+required GitHub Actions checks across workflows. A completed non-success
+required check or Buster CI job cancels active Actions runs for that exact
+merge-group head. Optional check failures do not invalidate the group.
+Candidate workflows retain read-only authority; the
+write-capable watcher executes only the default-branch controller and never
+checks out candidate bytes or artifacts. Workflow concurrency is not a FIFO
+queue and is never used as a replacement for GitHub queue enforcement.
+The read-only native-retirement rebinding workflow also waits for the exact
+predecessor to land before checking a later group's closure. It loads that
+wait policy from independently checked-out main, checks that the predecessor
+did not change admission or rebinding policy, and requires the queue ref to
+retain the same group identity at admission. Its bounded 310-minute job accommodates the
+five-hour wait.
+The self-hosted 9700X benchmark service is manual `workflow_dispatch` work,
+not a `merge_group` workflow, so the queue does not schedule it.
 
 There is no second retirement publisher. The existing protected
 `native-retirement-integration.yml` writer remains the sole authority allowed
@@ -51,8 +86,10 @@ only as part of the reviewed queue rollout; never remove an existing requirement
 | GPU Linux consumers | gpu-toolchains.yml | Workflow-selected PR revision | Exact synthetic group |
 | Benchmark service workflow policy | bench-service-policy.yml | GitHub PR merge revision | Exact synthetic group |
 | API migration policy | api-migration-policy.yml | Bounded API compatibility policy | Exact synthetic group |
-| Native retirement merge admission | api-migration-policy.yml | Exact head and trusted integration evidence | Trusted retirement gate; sensitive groups fail closed until supported |
+| Native retirement merge admission | api-migration-policy.yml | Exact head and trusted integration evidence | Exact generated tree plus successful trusted writer publication |
 | Main integration admission | merge-queue-admission.yml | Readiness/regression checks only | Trusted-base verification of the exact group and all six gates |
+
+`CI complete` also runs the [merge-parent preservation guard](merge-parent-preservation.md) over merges introduced by each PR candidate, merge-group candidate, and main push. It uses the event's exact base commit and does not require a feature branch to be updated when `main` advances.
 
 `CI complete` retains desktop x86-64/AArch64, mobile, native-mode, UEFI, lint and
 static-analysis ownership. The independent self-host and canonical bootstrap
@@ -70,17 +107,43 @@ persisted checkout credentials. GitHub's normal fork approval rules still apply.
 
 ## Exact identities and fail-closed evidence
 
-For a group, the admission workflow checks out `merge_group.base_sha`, never
-candidate-modified authority code. It fetches the immutable group object without
-checking out or executing it. It requires `GITHUB_SHA == merge_group.head_sha`,
-main as the base ref, a main queue ref, the expected repository, and base ancestry.
-The report binds base SHA/tree, group SHA/tree and queue ref.
+For a group, both admission workflows check out live `main` as independently
+trusted policy, never the speculative `merge_group.base_sha` or candidate-modified
+authority code. The collector fetches the immutable group object without
+checking out or executing it; the native gate's candidate checkout is Git data
+only for enforcement. They require `GITHUB_SHA == merge_group.head_sha`, main
+as the base ref, a main queue ref, the expected repository, and a two-parent
+group head with the event base first. The bounded first-parent chain of the
+base must contain the trusted policy SHA and observed main. A main SHA outside
+that chain, a replaced queue ref, or a changed admission policy between the
+initial trusted main and the landed base rejects this group. The report binds
+the trusted policy SHA, base SHA/tree, group SHA/tree and queue ref.
 
-Before waiting for CI it invokes the trusted base's
-`native_retirement_merge_gate.py check --event merge_group` without
-`--allow-pending`. An absent gate, pending result, rejected candidate or mismatched
-base/head fails. The retirement integration owner must extend that gate for the
-final attested group; this checker cannot bless it independently.
+Once the predecessor lands, the collector invokes the trusted policy's
+`native_retirement_merge_gate.py check --event merge_group --repository ...`
+without `--allow-pending`. An absent gate, pending result, rejected candidate or
+mismatched base/head fails. For sensitive groups, the gate verifies a two-parent
+synthetic commit with landed current main first and the attested integration second.
+The synthetic tree must equal both Git's clean combined tree and the full
+attested final tree. Additional candidates or any changed byte require a fresh
+writer preparation. A generated-only delta also requires publication evidence.
+
+The PR head must still identify exactly one open, ready, same-repository PR
+targeting main. The latest integration status must be successful and authored
+by `github-actions[bot]`; an earlier green cannot hide a later pending/failure.
+Its target must be this repository's trusted integration workflow run from the
+exact base. That run must have completed successfully, and the status timestamp
+must fall within its latest attempt. Cancelled, incomplete and superseded writer
+attempts cannot authorize a group. Sensitive fork heads are rejected because
+the existing writer cannot publish to them; ordinary fork groups retain CI.
+
+After main advances, dispatch the same protected writer again with the PR number
+and default inputs. It verifies the previous publication, recovers the original
+source candidate and reconstructs against current main. Authorization and the
+publication lease still bind the current PR head; old generated output is never
+merged or reused. The new attested head replaces the old generated integration
+commit while retaining its source ancestry. Then enqueue the new head. This is
+a fresh authorized dispatch, not autonomous reuse of a historical approval.
 
 The collector reads workflow runs by exact group SHA and `merge_group` event,
 then resolves each of the six workflow **paths**, latest run and latest attempt.
@@ -91,13 +154,39 @@ jobs, skipped/neutral jobs and cancelled workflows do not count. Missing or
 running workflows remain pending until the bounded timeout. API errors,
 truncation and ambiguous results fail closed.
 
-Immediately before admission, the collector repeats the six-result read,
-requires the same evidence, rechecks live main and the queue ref, and validates
+Immediately before admission, the collector repeats the six-result read and
+trusted-publication verification, requires the same evidence, rechecks that the
+group base still equals live main and the queue ref still names this head, and validates
 the active ruleset again. The ruleset validator retains the six original checks,
-preserves independent retirement admission, adds the exact-group gate, rejects bypasses/strict branch updates, and
-requires the single-build/single-merge policy. The success artifact records each
+preserves independent retirement admission, adds the exact-group gate, rejects
+visible bypass inventories other than the two reviewed actors and strict branch updates, and
+requires the exact 20-build/one-merge policy. The success artifact records each
 required workflow's run ID, run attempt and job ID. These are read-only checks;
 GitHub's enforced queue still owns the final atomic admission/rebuild decision.
+
+### Read-only ruleset visibility
+
+GitHub returns `bypass_actors` only to callers with write access to the ruleset.
+The Actions read-only token normally receives no such property. The live
+collector validates the ruleset identity, enforcement, scope, required checks,
+queue settings and every other policy field it can read. An explicitly returned
+bypass list must equal the two reviewed actors; an explicitly returned caller bypass capability must
+be `never`. Missing bypass data is recorded as `hidden` in both ruleset reads
+in the admission artifact and explained in the log. It is not reported as a
+verified actor inventory.
+
+The exact two-actor bypass configuration is an administrator-audited deployment
+invariant, not something the read-only workflow can independently prove.
+`check-ruleset` remains strict: a saved administrator response must explicitly
+contain both actors with `always` mode and no others. Audit that response at activation, after every
+ruleset change, and after any emergency recovery. Do not give the admission
+workflow ruleset-write credentials to expose this field.
+
+The first live group for #956 exposed the former bug: treating a hidden list as
+a standing bypass. The repair preserves trusted-base execution. Consequently,
+it cannot authorize its own first merge while main still contains the bug.
+Follow the emergency policy below for an explicitly authorized, narrowly scoped
+bootstrap; do not run candidate authority code or forge a successful check.
 
 A PR readiness success is not combined-head authorization. Neither a reused
 artifact nor a manually posted status may authorize another SHA/tree. A newer
@@ -105,14 +194,35 @@ main/group invalidates the current attempt. GitHub must build a fresh group and
 rerun required workflows. Content conflicts use #869's exact-path explanation;
 the queue removes/blocks the PR, never chooses `ours`, `theirs` or a union merge.
 
-## Activation and acceptance still required
+## Build-limit rollout and acceptance
 
-Before editing repository settings, complete and retain evidence for all of:
+### Changing the live build limit
 
-1. Land #925/#927's repaired, exact-head-attested bootstrap. Extend its
-   merge-group retirement gate to recognize only an exact final generated tree
-   from the existing trusted writer, including main-advance rebuilding. Keep
-   writer authorization, trust transitions, fork disposition and cancellation
+The merge-group workflow runs admission code from the main revision checked out
+as trusted policy, so a PR
+changing the repository queue contract must first pass the policy already on
+`main`. If live build concurrency has been raised ahead of the repository
+contract, temporarily restore the live `Build concurrency` field in ruleset
+`22537199` to `1` and read back all queue parameters. Merge the policy PR
+through the existing queue with all required checks; do not bypass admission.
+Resolve the exact resulting `main` commit before changing the live setting to
+`20`. Read the ruleset back and observe `Main integration admission` accept a
+new exact merge group. Between the PR merge and the live edit, the trusted
+policy expects `20` while GitHub still reports `1`, so new groups fail closed.
+Only the build limit changes; leave the merge limit, grouping strategy, merge
+method, timeout, checks, non-strict freshness and bypass settings untouched.
+The read-only collector cannot update rulesets; a repository administrator
+changes **Settings → Rulesets → main → Require merge queue → Build concurrency**.
+
+### Remaining acceptance
+
+Activation is complete. Retain evidence for the remaining live exercises below;
+do not close #867 based on settings or offline fixtures alone:
+
+1. Land the exact-tree adapter and source-recovery bootstrap through the existing
+   trusted writer. Verify a fresh dispatch after main advancement, and verify
+   the actual GitHub group shape against the adapter's single-candidate contract.
+   Keep writer authorization, trust transitions, fork disposition and cancellation
    fail-closed. Do not create another writer/queue to work around that gate.
 2. Merge this prerequisite and run its policy tests on actual main. Resolve
    any newly added required checks by auditing and extending the inventory;
@@ -123,14 +233,32 @@ Before editing repository settings, complete and retain evidence for all of:
    run `check-ruleset` against the saved current response. Contents/PR write
    access does not imply permission to edit repository rulesets.
 4. Queue two nonconflicting PRs from the same old base and retain both exact
-   group reports. After the first lands, prove the second was rebuilt against
-   the new main. Repeat with different retirement-bound sources and attestations.
+   group reports. Record M, G1 and G2: the later base may be G1 while live main
+   is M. Confirm both admission jobs stay pending on G2, then succeed only if
+   G1 lands unchanged on main and G2 remains the exact queue ref; prove both
+   PRs merge in order without manual re-enqueue. Repeat with different
+   retirement-bound sources and attestations;
+   retain the fresh authorized writer dispatch and regenerated second head.
+   A stale sensitive group must block until that dispatch finishes and the
+   replacement head is enqueued. Automatic dispatch/re-enqueue is not implemented
+   or authorized by this adapter; any such automation must preserve the existing
+   exact-head admin/reviewer authorization policy.
 5. Inject a controlled combined-candidate check failure despite green PR heads;
    prove no merge. Exercise cancellation/rerun, main advance during preparation,
    fork approval, and genuine conflict removal with exact path diagnostics.
 6. Verify UI merge, API merge, squash/rebase and every automation are subject to
    the effective queue/retirement controls. No live production rejection or
    queue experiment is claimed by the offline fixtures.
+
+This policy repair requires a first-position queue merge under the old trusted
+admission code. The native workflow uses that older gate directly only when
+the group base equals the trusted main revision; a speculative base requires
+the new trusted `wait-base` command and fails closed until the repair lands.
+Keep the repair at the front of the queue during rollout; older later groups
+still run the old code and can fail. After the repair lands, queue
+fresh groups and retain their exact-head workflow and queue progression links.
+The read-only collector cannot alter the ruleset or enqueue a PR. Do not report
+the offline M/G1/G2 fixtures as a live acceptance trace.
 
 Useful read-only commands:
 
@@ -143,8 +271,9 @@ python3 -B tools/merge_queue_admission.py check-ruleset /tmp/live-main-ruleset.j
 
 ## Emergency policy
 
-There is no standing bypass and this work changes no live settings. A repair PR
-with genuine passing checks is preferred. Any emergency settings change needs
+There are two reviewed standing bypass actors. A repair PR with genuine
+passing checks is preferred; using bypass does not make a failed or missing
+check successful. Any emergency settings change needs
 explicit administrator authorization, a recorded reason and exact before/after
 settings, followed by restoration and read-back verification. Never mint a green
 check for cancelled, missing, failed or stale validation. Do not run a post-merge

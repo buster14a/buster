@@ -192,3 +192,10 @@ repeated setup, diagnostics and any duplicate compiler build. Report aggregate
 runner-seconds change alongside latency. A faster desktop job is insufficient
 if native, mobile, analyzer or UEFI work remains the whole-workflow critical
 path. **No measured speedup or completion of #333 is asserted by this document.**
+
+## Per-tree critical paths
+
+The existing desktop artifact also retains [versioned native phase records](ci-matrix-phases.md).
+Their consumer joins every tree to this authoritative coverage manifest and
+fails the desktop result on missing or inconsistent evidence. Scheduling and
+row ownership remain unchanged; alternative-order predictions are diagnostic.

@@ -57,6 +57,19 @@ publish cache entries. Immutable scalar query types are created before query
 checkpoints; declarator and qualified types remain independent. All borrowed
 cache pointers are cleared before the semantic model is returned.
 
+`c_parse_validate_label_values` walks a body's assignment, return and call
+values -- one scope-chain entity lookup per identifier -- only when
+`c_parse_label_values_needed` proves the body takes a label address or
+branches through a computed goto. The proof is the walk's own test:
+`c_parse_label_address_prefix_proven`, or `c_parse_label_address_cast_at` for
+the `(type)&&label` form, whose type name may be a typedef resolved in the
+token's scope. Every provenance fact the walk records descends from such a
+root, so a body it skips could have recorded or diagnosed nothing. The
+conjunction operator shares the spelling; a body with a goto label and
+`a && b` is not walked, and a parenthesized sizeof/alignof operand before
+`&&` is that operator's operand, not a cast. `c_test_label_values_gate` pins
+the gate through the private seam beside the unchanged diagnostics.
+
 ## Regression contract
 
 `compiler_driver_test_syntax_diagnostic_equivalence` contains frozen acceptance

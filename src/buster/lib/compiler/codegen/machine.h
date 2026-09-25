@@ -734,7 +734,7 @@ typedef enum MachineOpcode
     MACHINE_A64_VA_HOME_WINDOWS,
     // Closed x87 transactions over frame values. No ST register survives a
     // row except the explicit ABI result bridge immediately beside CALL/RET.
-    MACHINE_X64_F80_BINARY, // destination, left, right frames; payload = add/sub/mul/div
+    MACHINE_X64_F80_BINARY, // destination, left, right frames; payload = MachineX64F80BinaryMode
     MACHINE_X64_F80_NEGATE, // destination, source frames
     MACHINE_X64_F80_COMPARE, // general definition, left/right frames; payload = relation
     MACHINE_X64_F80_CONVERT, // destination/source/scratch frames; payload = conversion
@@ -771,6 +771,20 @@ typedef enum MachineOpcode
     MACHINE_A64_CVT_F64_TO_F16,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
+
+typedef enum MachineX64F80BinaryMode
+{
+    MACHINE_X64_F80_ADD,
+    MACHINE_X64_F80_SUBTRACT,
+    MACHINE_X64_F80_MULTIPLY,
+    MACHINE_X64_F80_DIVIDE,
+    MACHINE_X64_F80_ADD_P24,
+    MACHINE_X64_F80_ADD_P53,
+    MACHINE_X64_F80_ADD_P64,
+    MACHINE_X64_F80_MULTIPLY_P64,
+    MACHINE_X64_F80_SUBTRACT_P64,
+    MACHINE_X64_F80_BINARY_MODE_COUNT,
+} MachineX64F80BinaryMode;
 
 // x86-64 encoder authority registry.  The opcode rows are a contiguous
 // projection of MACHINE_X64_MOV_RI..MACHINE_X64_ATOMIC_RMW16; the authority and
@@ -1894,6 +1908,7 @@ BUSTER_F_DECL MachineFunction machine_function_builder_finish(Arena* arena, Mach
 BUSTER_F_DECL void machine_function_stamp_frequency_classes(MachineFunction* function);
 BUSTER_F_DECL bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineVerifyResult machine_verify_function(MachineFunction* function);
+BUSTER_F_DECL String8 machine_verify_error_name(MachineVerifyError error);
 BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* function);
 // Dispatches on the target architecture; each backend rejects a target it

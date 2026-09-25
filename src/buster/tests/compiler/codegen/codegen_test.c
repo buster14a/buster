@@ -2478,11 +2478,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, exact_encoder_stats_module.statistics.exact_successes == 4);
         BUSTER_TEST(arguments, exact_encoder_stats_module.statistics.exact_failures == 0);
     }
-    // Keep a canonical-IR witness for the AArch64 i128 count extension. The
-    // GNU clzll/ctzll spellings normally describe 64-bit operands; Buster's
-    // frontend deliberately preserves an i128 operand width, so this test
-    // checks the IR type directly and then runs the canonical emitter. The
-    // runtime fixture exercises the resulting pair stores separately.
+    // An i128 argument to the GNU clzll/ctzll spellings converts to unsigned
+    // long long before the count. Check the canonical operand width on AArch64
+    // as well as the native-target frontend tests.
     String8 i128_count_source = S8(
         "typedef unsigned __int128 U128;\n"
         "void count_i128(U128 value, U128 *leading, U128 *trailing) {\n"
@@ -2525,8 +2523,8 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                                                ir_type_from_id(&i128_count_ir.program->types,
                                                                function->values[instruction->operands[0].value].canonical_type)
                                                                      : 0;
-                    BUSTER_TEST(arguments, result_type && result_type->kind == IR_TYPE_INTEGER && result_type->bit_width == 128);
-                    BUSTER_TEST(arguments, operand_type && operand_type->kind == IR_TYPE_INTEGER && operand_type->bit_width == 128);
+                    BUSTER_TEST(arguments, result_type && result_type->kind == IR_TYPE_INTEGER && result_type->bit_width == 64);
+                    BUSTER_TEST(arguments, operand_type && operand_type->kind == IR_TYPE_INTEGER && operand_type->bit_width == 64);
                     saw_leading |= instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS;
                     saw_trailing |= instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS;
                 }

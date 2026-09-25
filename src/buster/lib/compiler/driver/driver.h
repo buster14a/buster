@@ -28,6 +28,7 @@ typedef enum CompilerDriverError
     COMPILER_DRIVER_ERROR_LLVM_BITCODE,
     COMPILER_DRIVER_ERROR_CODEGEN,
     COMPILER_DRIVER_ERROR_WASM64,
+    COMPILER_DRIVER_ERROR_WASM = COMPILER_DRIVER_ERROR_WASM64,
     COMPILER_DRIVER_ERROR_GPU,
     COMPILER_DRIVER_ERROR_EBPF,
     COMPILER_DRIVER_ERROR_OBJECT,
@@ -167,8 +168,9 @@ struct CompilerDriverInvocation
     // -fPIC/-fpic, cleared by -fno-pic. The code generator reads it as a code
     // model: it picks the thread-local model, and a symbol another object
     // could interpose is addressed through the GOT and called through the
-    // PLT, which are the references `ld -shared` will place. -fPIE/-fpie set
-    // nothing; see where they are parsed.
+    // PLT, which are the references `ld -shared` will place. -fPIE/-fpie are
+    // rejected on x86-64 ELF because that reference model is not implemented;
+    // other targets preserve their prior accepted no-op behavior.
     bool position_independent;
     u8 optimization_level;
     bool has_gpu_target;
@@ -208,6 +210,9 @@ struct CompilerDriverResult
     u32 diagnostic_count;
     String8 output;
     NativeExecutableLinkResult native_link;
+    WasmArtifact wasm;
+    // Compatibility mirror; both artifacts reference the same arena-owned
+    // bytes when WebAssembly output is produced.
     Wasm64Artifact wasm64;
     GpuArtifact gpu;
     LlvmBitcodeArtifact llvm_bitcode;
@@ -238,6 +243,7 @@ struct CompilerDriverResult
     // one on serial/unsupported paths. This is not a physical-core count.
     u32 compilation_workers;
     bool has_object;
+    bool has_wasm;
     bool has_wasm64;
     bool has_gpu;
     bool has_llvm_bitcode;

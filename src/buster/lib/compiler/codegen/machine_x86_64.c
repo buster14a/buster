@@ -24,6 +24,7 @@
 #include <buster/lib/compiler/codegen/codegen_internal.h>
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
+#include <buster/lib/compiler/object/object.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 #include <buster/lib/integer.h>
@@ -300,14 +301,17 @@ struct MachineX64Selector
     bool supported;
 };
 
-// The reference form a symbol takes in this module: its own address under
-// the default model, the linker's slot or entry under -fPIC when another
-// object could supply the definition. `call_site` distinguishes the two
-// -fPIC forms, which differ only in what names the symbol -- a call's rel32
-// or a load's displacement.
+// The reference form a symbol takes in this module. An undefined ELF
+// function uses the PLT even in the default model, so an external linker can
+// place the -c object in a PIE. Under -fPIC, any interposable function uses
+// the PLT and any interposable address uses the GOT.
 BUSTER_GLOBAL_LOCAL u8 machine_x64_symbol_reference(MachineX64Selector* selector, IrSymbolId symbol, bool call_site)
 {
-    bool indirect = selector->position_independent && ir_symbol_is_interposable(ir_symbol_from_id(&selector->program->symbols, symbol));
+    IrSymbol* record = ir_symbol_from_id(&selector->program->symbols, symbol);
+    bool elf_external_call = call_site && record && !record->is_definition &&
+                             object_format_for_target(selector->target) == OBJECT_FORMAT_ELF64;
+    bool indirect = elf_external_call ||
+                    (selector->position_independent && ir_symbol_is_interposable(record));
     return (u8)(!indirect ? MACHINE_SYMBOL_REFERENCE_DIRECT : call_site ? MACHINE_SYMBOL_REFERENCE_PLT : MACHINE_SYMBOL_REFERENCE_GOT);
 }
 
@@ -2540,6 +2544,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_constant(MachineX64Selector* selecto
 // truncations use the existing frame rows, a 128-bit reinterpret is a
 // byte-preserving frame copy, and other aggregate casts continue through the
 // explicit unsupported fallback.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_i128_float(MachineX64Selector* selector, IrInstruction* instruction,
+                                                            IrType* source_type, IrType* target_type, u32 result_register);
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_i128(MachineX64Selector* selector, IrInstruction* instruction, IrType* source_type,
                                                       IrType* cast_target_type, u32 source_bits, u32 result_register)
 {
@@ -2775,13 +2782,19 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast(MachineX64Selector* selector, I
         u32 source_register = UINT32_MAX;
         if (machine_x64_type_is_f80(selector, source_type_id) || machine_x64_type_is_f80(selector, instruction->canonical_type))
         {
-            selected = machine_x64_select_f80_unsigned64_cast(selector, instruction, result_register) ||
-                       machine_x64_select_f80_cast(selector, instruction, result_register);
+            selected = (source_integer128 || target_integer128)
+                           ? machine_x64_select_cast_i128_float(selector, instruction, ir_type_from_id(&program->types, source_type_id),
+                                                                ir_type_from_id(&program->types, instruction->canonical_type), result_register)
+                           : machine_x64_select_f80_unsigned64_cast(selector, instruction, result_register) ||
+                                 machine_x64_select_f80_cast(selector, instruction, result_register);
         }
         else if (source_integer128 || target_integer128)
         {
-            selected = machine_x64_select_cast_i128(selector, instruction, ir_type_from_id(&program->types, source_type_id),
-                                                    ir_type_from_id(&program->types, instruction->canonical_type), source_bits, result_register);
+            IrType* source_type = ir_type_from_id(&program->types, source_type_id);
+            IrType* target_type = ir_type_from_id(&program->types, instruction->canonical_type);
+            selected = (source_type && target_type && (source_type->kind == IR_TYPE_FLOAT || target_type->kind == IR_TYPE_FLOAT))
+                           ? machine_x64_select_cast_i128_float(selector, instruction, source_type, target_type, result_register)
+                           : machine_x64_select_cast_i128(selector, instruction, source_type, target_type, source_bits, result_register);
         }
         // Float conversions mirror the canonical forms.
         else if (result_register != UINT32_MAX && machine_x64_operand_register(selector, instruction->operands[0], &source_register))
@@ -3476,6 +3489,234 @@ BUSTER_GLOBAL_LOCAL void machine_x64_select_i128_apply_sign(MachineX64Selector* 
     *low = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, inverted_low, sign);
     *high = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, inverted_high, sign);
     *high = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, *high, borrow);
+}
+
+// The extra binary modes set x87 precision for one closed frame transaction.
+// In particular the final i128 sum rounds once at the destination precision.
+BUSTER_GLOBAL_LOCAL void machine_x64_select_f80_binary_slot(MachineX64Selector* selector, u32 destination, u32 left, u32 right, u32 mode)
+{
+    machine_x64_select_row(selector, (MachineInstruction){
+        .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, destination), machine_ref_make(MACHINE_REF_STACK_SLOT, left),
+                     machine_ref_make(MACHINE_REF_STACK_SLOT, right)},
+        .payload = mode, .opcode = MACHINE_X64_F80_BINARY});
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_select_f80_convert_slot(MachineX64Selector* selector, u32 destination, u32 source, u32 mode)
+{
+    u32 scratch = machine_x64_append_slot(selector, 8, 8);
+    machine_x64_select_row(selector, (MachineInstruction){
+        .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, destination), machine_ref_make(MACHINE_REF_STACK_SLOT, source),
+                     machine_ref_make(MACHINE_REF_STACK_SLOT, scratch)},
+        .payload = mode, .opcode = MACHINE_X64_F80_CONVERT});
+}
+
+// FILD consumes a signed eightbyte. Split the unsigned top bit before it and
+// add the exact 2^63 correction under a temporary 64-bit x87 precision mode.
+BUSTER_GLOBAL_LOCAL void machine_x64_select_u64_to_f80_slot(MachineX64Selector* selector, u32 value, u32 destination)
+{
+    u32 sign = machine_x64_select_constrained_row(selector, MACHINE_X64_SAR64, value,
+                                                  machine_x64_select_immediate_register(selector, 63));
+    u32 low = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, value,
+                                                machine_x64_select_immediate_register(selector, UINT64_C(0x7fffffffffffffff)));
+    u32 integer = machine_x64_append_slot(selector, 8, 8);
+    u32 bias = machine_x64_append_slot(selector, 16, 16);
+    machine_x64_select_frame_store64(selector, integer, 0, low);
+    machine_x64_select_f80_convert_slot(selector, destination, integer, 4);
+    machine_x64_select_f80_u64_bias(selector, bias, sign);
+    machine_x64_select_f80_binary_slot(selector, destination, destination, bias, MACHINE_X64_F80_ADD_P64);
+}
+
+// Compare against 2^63, subtract the exact selected bias, then FISTP under
+// truncation. The correction bit is ORed back into the unsigned eightbyte.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_select_f80_slot_to_u64(MachineX64Selector* selector, u32 source)
+{
+    u32 bias = machine_x64_append_slot(selector, 16, 16);
+    u32 remainder = machine_x64_append_slot(selector, 16, 16);
+    u32 integer = machine_x64_append_slot(selector, 8, 8);
+    machine_x64_select_frame_store64(selector, bias, 0,
+                                     machine_x64_select_immediate_register(selector, UINT64_C(0x8000000000000000)));
+    machine_x64_select_frame_store64(selector, bias, 8, machine_x64_select_immediate_register(selector, UINT64_C(0x403e)));
+    u32 high = machine_x64_synthesize_register(selector);
+    machine_x64_select_row(selector, (MachineInstruction){
+        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high), machine_ref_make(MACHINE_REF_STACK_SLOT, source),
+                     machine_ref_make(MACHINE_REF_STACK_SLOT, bias)},
+        .payload = 5, .opcode = MACHINE_X64_F80_COMPARE});
+    u32 mask = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64,
+                                                 machine_x64_select_immediate_register(selector, 0), high);
+    u32 high_bit = machine_x64_select_f80_u64_bias(selector, bias, mask);
+    machine_x64_select_f80_binary_slot(selector, remainder, source, bias, MACHINE_X64_F80_SUBTRACT_P64);
+    machine_x64_select_f80_convert_slot(selector, integer, remainder, 5);
+    u32 low = machine_x64_select_frame_load64(selector, integer, 0);
+    return machine_x64_select_arithmetic_row(selector, MACHINE_X64_OR64, low, high_bit);
+}
+
+// A two-limb magnitude is exact in f80 until the final add. That add uses
+// destination precision (24/53/64 bits) and the caller's rounding mode;
+// changing the x87 control word never escapes the binary machine row.
+BUSTER_GLOBAL_LOCAL void machine_x64_select_i128_to_float(MachineX64Selector* selector, IrInstruction* instruction,
+                                                         IrType* target_type, u32 source_slot, u32 result_register)
+{
+    bool signed_value = instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT;
+    u32 low = machine_x64_select_frame_load64(selector, source_slot, 0);
+    u32 high = machine_x64_select_frame_load64(selector, source_slot, 8);
+    u32 sign = machine_x64_select_immediate_register(selector, 0);
+    if (signed_value)
+    {
+        sign = machine_x64_select_constrained_row(selector, MACHINE_X64_SAR64, high,
+                                                  machine_x64_select_immediate_register(selector, 63));
+        machine_x64_select_i128_apply_sign(selector, sign, &low, &high);
+    }
+    u32 low_float = machine_x64_append_slot(selector, 16, 16);
+    u32 high_float = machine_x64_append_slot(selector, 16, 16);
+    u32 scale = machine_x64_append_slot(selector, 16, 16);
+    u32 scaled_high = machine_x64_append_slot(selector, 16, 16);
+    u32 sum = machine_x64_append_slot(selector, 16, 16);
+    machine_x64_select_u64_to_f80_slot(selector, low, low_float);
+    machine_x64_select_u64_to_f80_slot(selector, high, high_float);
+    machine_x64_select_frame_store64(selector, scale, 0,
+                                     machine_x64_select_immediate_register(selector, UINT64_C(0x8000000000000000)));
+    machine_x64_select_frame_store64(selector, scale, 8, machine_x64_select_immediate_register(selector, UINT64_C(0x403f)));
+    machine_x64_select_f80_binary_slot(selector, scaled_high, high_float, scale, MACHINE_X64_F80_MULTIPLY_P64);
+    if (signed_value)
+    {
+        // Round a negative sum as a negative x87 value. Flipping the sign
+        // after a positive addition would reverse upward/downward rounding.
+        u32 sign_bit = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, sign,
+                                                         machine_x64_select_immediate_register(selector, UINT64_C(0x8000)));
+        u32 halves[] = {scaled_high, low_float};
+        for (u32 half = 0; half < BUSTER_ARRAY_LENGTH(halves); half += 1)
+        {
+            u32 exponent = machine_x64_select_frame_load64(selector, halves[half], 8);
+            machine_x64_select_frame_store64(selector, halves[half], 8,
+                machine_x64_select_arithmetic_row(selector, MACHINE_X64_XOR64, exponent, sign_bit));
+        }
+    }
+    u32 mode = target_type->bit_width == 32 ? MACHINE_X64_F80_ADD_P24 :
+               target_type->bit_width == 64 ? MACHINE_X64_F80_ADD_P53 : MACHINE_X64_F80_ADD_P64;
+    machine_x64_select_f80_binary_slot(selector, sum, scaled_high, low_float, mode);
+    if (target_type->bit_width == 80)
+    {
+        u32 destination = selector->value_stack_slots[instruction->result.value];
+        machine_x64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, destination), machine_ref_make(MACHINE_REF_STACK_SLOT, sum)},
+            .payload = 16, .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME});
+    }
+    else
+    {
+        u32 scalar = machine_x64_append_slot(selector, 8, 8);
+        machine_x64_select_f80_convert_slot(selector, scalar, sum, target_type->bit_width == 32 ? 2u : 3u);
+        u32 row = machine_x64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register), machine_ref_make(MACHINE_REF_STACK_SLOT, scalar)},
+            .opcode = MACHINE_X64_LOAD_FRAME});
+        machine_x64_define(selector, result_register, row);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_select_float_to_i128(MachineX64Selector* selector, IrInstruction* instruction,
+                                                         IrType* source_type, u32 source_slot, u32 source_register, u32 result_slot)
+{
+    bool signed_value = instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER;
+    u32 sign = machine_x64_select_immediate_register(selector, 0);
+    u32 magnitude = machine_x64_append_slot(selector, 16, 16);
+    if (source_type->bit_width == 80)
+    {
+        machine_x64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, magnitude), machine_ref_make(MACHINE_REF_STACK_SLOT, source_slot)},
+            .payload = 16, .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME});
+        u32 exponent = machine_x64_select_frame_load64(selector, source_slot, 8);
+        if (signed_value)
+        {
+            u32 sign_bit = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, exponent,
+                                                              machine_x64_select_immediate_register(selector, UINT64_C(0x8000)));
+            sign = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, sign,
+                machine_x64_select_constrained_row(selector, MACHINE_X64_SHR64, sign_bit,
+                                                   machine_x64_select_immediate_register(selector, 15)));
+        }
+        u32 absolute = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, exponent,
+                                                          machine_x64_select_immediate_register(selector, UINT64_C(0x7fff)));
+        machine_x64_select_frame_store64(selector, magnitude, 8, absolute);
+    }
+    else
+    {
+        u64 sign_mask = source_type->bit_width == 32 ? UINT64_C(0x80000000) : UINT64_C(0x8000000000000000);
+        if (signed_value)
+        {
+            u32 sign_bit = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, source_register,
+                                                              machine_x64_select_immediate_register(selector, sign_mask));
+            u32 shifted = machine_x64_select_constrained_row(selector, MACHINE_X64_SHR64, sign_bit,
+                                machine_x64_select_immediate_register(selector, source_type->bit_width - 1));
+            sign = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, sign, shifted);
+        }
+        u32 absolute = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, source_register,
+                                                          machine_x64_select_immediate_register(selector,
+                                                              source_type->bit_width == 32 ? UINT64_C(0x7fffffff) : UINT64_C(0x7fffffffffffffff)));
+        u32 input = machine_x64_append_slot(selector, 8, 8);
+        machine_x64_select_frame_store64(selector, input, 0, absolute);
+        machine_x64_select_f80_convert_slot(selector, magnitude, input, source_type->bit_width == 32 ? 0u : 1u);
+    }
+    u32 inverse_scale = machine_x64_append_slot(selector, 16, 16);
+    u32 scaled = machine_x64_append_slot(selector, 16, 16);
+    u32 high_float = machine_x64_append_slot(selector, 16, 16);
+    u32 scale = machine_x64_append_slot(selector, 16, 16);
+    u32 contribution = machine_x64_append_slot(selector, 16, 16);
+    u32 residual = machine_x64_append_slot(selector, 16, 16);
+    machine_x64_select_frame_store64(selector, inverse_scale, 0,
+                                     machine_x64_select_immediate_register(selector, UINT64_C(0x8000000000000000)));
+    machine_x64_select_frame_store64(selector, inverse_scale, 8, machine_x64_select_immediate_register(selector, UINT64_C(0x3fbf)));
+    machine_x64_select_f80_binary_slot(selector, scaled, magnitude, inverse_scale, MACHINE_X64_F80_MULTIPLY_P64);
+    u32 high = machine_x64_select_f80_slot_to_u64(selector, scaled);
+    machine_x64_select_u64_to_f80_slot(selector, high, high_float);
+    machine_x64_select_frame_store64(selector, scale, 0,
+                                     machine_x64_select_immediate_register(selector, UINT64_C(0x8000000000000000)));
+    machine_x64_select_frame_store64(selector, scale, 8, machine_x64_select_immediate_register(selector, UINT64_C(0x403f)));
+    machine_x64_select_f80_binary_slot(selector, contribution, high_float, scale, MACHINE_X64_F80_MULTIPLY_P64);
+    machine_x64_select_f80_binary_slot(selector, residual, magnitude, contribution, MACHINE_X64_F80_SUBTRACT_P64);
+    u32 low = machine_x64_select_f80_slot_to_u64(selector, residual);
+    if (signed_value)
+    {
+        machine_x64_select_i128_apply_sign(selector, sign, &low, &high);
+    }
+    machine_x64_select_frame_store64(selector, result_slot, 0, low);
+    machine_x64_select_frame_store64(selector, result_slot, 8, high);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_i128_float(MachineX64Selector* selector, IrInstruction* instruction,
+                                                            IrType* source_type, IrType* target_type, u32 result_register)
+{
+    bool from_integer = source_type && target_type && source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128 &&
+                        target_type->kind == IR_TYPE_FLOAT &&
+                        (instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT ||
+                         instruction->conversion_operation == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT);
+    bool to_integer = source_type && target_type && source_type->kind == IR_TYPE_FLOAT &&
+                      target_type->kind == IR_TYPE_INTEGER && target_type->bit_width == 128 &&
+                      (instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER ||
+                       instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER);
+    bool source_float = source_type && (source_type->bit_width == 32 || source_type->bit_width == 64 ||
+                                        (source_type->bit_width == 80 && machine_x64_type_is_f80(selector,
+                                            selector->function->values[instruction->operands[0].value].canonical_type)));
+    bool target_float = target_type && (target_type->bit_width == 32 || target_type->bit_width == 64 ||
+                                        (target_type->bit_width == 80 && machine_x64_type_is_f80(selector, instruction->canonical_type)));
+    u32 source_slot = selector->value_stack_slots[instruction->operands[0].value];
+    u32 result_slot = selector->value_stack_slots[instruction->result.value];
+    u32 source_register = UINT32_MAX;
+    bool selected = from_integer ? target_float && source_slot != UINT32_MAX &&
+                                   (target_type->bit_width == 80 ? result_slot != UINT32_MAX : result_register != UINT32_MAX)
+                    : to_integer ? source_float && result_slot != UINT32_MAX &&
+                                   (source_type->bit_width == 80 ? source_slot != UINT32_MAX :
+                                    machine_x64_operand_register(selector, instruction->operands[0], &source_register))
+                                 : false;
+    if (selected)
+    {
+        if (from_integer)
+        {
+            machine_x64_select_i128_to_float(selector, instruction, target_type, source_slot, result_register);
+        }
+        else
+        {
+            machine_x64_select_float_to_i128(selector, instruction, source_type, source_slot, source_register, result_slot);
+        }
+    }
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL void machine_x64_select_i128_divide_edge(MachineX64Selector* selector, u32 source, u32 destination, u32 const* values)
@@ -5619,25 +5860,27 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_store(MachineX64Selector* selector, 
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_function(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
-    // A function reference is an ordinary rip-relative symbol address;
-    // direct calls carry the symbol on the CALL row itself, so this lea
-    // only matters when the value is used as data.
+    // A function reference is an ordinary symbol address; direct calls carry
+    // the symbol on the CALL row itself, so a value used only as that callee
+    // needs no address row or relocation.
     bool selected = false;
-    if (result_register != UINT32_MAX && instruction->symbol.value != IR_ID_UNDERLYING_INVALID)
+    if (instruction->symbol.value != IR_ID_UNDERLYING_INVALID)
     {
-        // The address of a function is data like any other address: under
-        // -fPIC an interposable one comes out of the GOT, so every object in
-        // the image agrees on which definition `&f` names.
-        u8 reference = machine_x64_symbol_reference(selector, instruction->symbol, false);
-        u32 target_index = machine_x64_call_target(selector, instruction->symbol, reference);
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
-                                                       .payload = target_index,
-                                                       .opcode = (u16)(reference == MACHINE_SYMBOL_REFERENCE_GOT ? MACHINE_X64_LOAD_SYMBOL_GOT
-                                                                                                                 : MACHINE_X64_LEA_SYMBOL),
-                                                   });
-        machine_x64_define(selector, result_register, row);
         selected = true;
+        if (result_register != UINT32_MAX)
+        {
+            // Under -fPIC an interposable address comes out of the GOT, so
+            // every object in the image agrees on which definition `&f` names.
+            u8 reference = machine_x64_symbol_reference(selector, instruction->symbol, false);
+            u32 target_index = machine_x64_call_target(selector, instruction->symbol, reference);
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                           .payload = target_index,
+                                                           .opcode = (u16)(reference == MACHINE_SYMBOL_REFERENCE_GOT ? MACHINE_X64_LOAD_SYMBOL_GOT
+                                                                                                                     : MACHINE_X64_LEA_SYMBOL),
+                                                       });
+            machine_x64_define(selector, result_register, row);
+        }
     }
     return selected;
 }
@@ -7896,6 +8139,22 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 {
                     continue;
                 }
+                // A direct CALL names its function on the call row. Its
+                // function-value operand is not an address use; counting it
+                // would keep a dead LEA/GOT load and its relocation alive.
+                bool direct_symbol_callee = operand_index == 0 && instruction->opcode == IR_OPCODE_CALL &&
+                                            instruction->symbol.value != IR_ID_UNDERLYING_INVALID;
+                if (direct_symbol_callee)
+                {
+                    IrInstructionId definition = function->values[used].definition;
+                    direct_symbol_callee = definition.value < function->instruction_count &&
+                                           function->instructions[definition.value].opcode == IR_OPCODE_FUNCTION &&
+                                           function->instructions[definition.value].symbol.value == instruction->symbol.value;
+                }
+                if (direct_symbol_callee)
+                {
+                    continue;
+                }
                 MachineX64ValueUse* use = value_uses + used;
                 use->use_count += 1;
                 if (use->use_block == 0)
@@ -8097,6 +8356,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             }
             IrValue* value = function->values + instruction->result.value;
             selector.place_kinds[instruction->result.value] = (u8)machine_x64_place_kind_of_opcode(instruction->opcode);
+            if (instruction->opcode == IR_OPCODE_FUNCTION && !value_uses[instruction->result.value].use_count)
+            {
+                continue;
+            }
             if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->immediate_count && instruction->immediates &&
                 instruction->immediates[0] < selector.parameter_count)
             {
@@ -11782,6 +12045,14 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64Prepared
 #define MACHINE_X64_CHUNK_DIRECTION_LOAD 0u
 #define MACHINE_X64_CHUNK_DIRECTION_STORE 1u
 BUSTER_GLOBAL_LOCAL u8 machine_x64_chunk_memory_tables[2][MACHINE_X64_CHUNK_WIDTH_COUNT];
+// Frame chunks are the closed RBP, forced-disp32 row of those same tables:
+// the record depends only on direction, width and data register, so prewarm
+// copies the sixteen RBP records of each table here and a spill or reload
+// reads one record instead of re-validating the table index and re-deriving
+// the displacement class and row stride per call. The frame base offset is
+// still added at emission time; it is a per-function fact. A zero byte count
+// is the same refusal an unprepared table gave.
+BUSTER_GLOBAL_LOCAL MachineX64GprEncoding machine_x64_frame_chunk_encodings[2][MACHINE_X64_CHUNK_WIDTH_COUNT][16];
 // Chunk byte counts are 1, 2, 4 and 8 (machine_x64_copy_chunk); every other
 // value took the ladder's 64-bit arm, so it maps to the last width here.
 BUSTER_GLOBAL_LOCAL u8 const machine_x64_chunk_width_index[9] = {3, 0, 1, 3, 2, 3, 3, 3, 3};
@@ -11818,6 +12089,17 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_chunk_memory_tables(void)
             load_entry && load_entry->plan_valid && load_entry->variant_count ? load_entry->variable_memory_encoding_tables[0] : 0;
         machine_x64_chunk_memory_tables[MACHINE_X64_CHUNK_DIRECTION_STORE][width_slot] =
             store_entry && store_entry->plan_valid && store_entry->variant_count ? store_entry->variable_memory_encoding_tables[0] : 0;
+        for (u32 direction = 0; direction < 2; direction += 1)
+        {
+            u8 table_plus_one = machine_x64_chunk_memory_tables[direction][width_slot];
+            for (u32 reg = 0; reg < 16; reg += 1)
+            {
+                machine_x64_frame_chunk_encodings[direction][width_slot][reg] =
+                    table_plus_one && table_plus_one <= machine_x64_variable_memory_encoding_table_count
+                        ? machine_x64_variable_memory_encoding_tables[table_plus_one - 1u].encodings[2][reg + (MACHINE_X64_RBP << 4)]
+                        : (MachineX64GprEncoding){0};
+            }
+        }
     }
 }
 
@@ -13680,20 +13962,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
     MachineX64Encoder* encoder, u8 table_plus_one, u32 reg, u32 base, s32 displacement,
     bool force_disp32, MachineX64ExactEmitCounters* counters);
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
-                                                             MachineX64ExactEmitCounters* counters)
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk_metadata(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
+                                                                      MachineX64ExactEmitCounters* counters)
 {
-    // Spill/reload and expansion chunks are the same MOV/MOVZX population as
-    // pointer memory.  Preserve their canonical frame shape by selecting the
-    // already-proven disp32 lane rather than rebuilding physical operands.
-    if (machine_x64_emit_variable_memory_encoding(
-            encoder,
-            machine_x64_chunk_memory_tables[load ? MACHINE_X64_CHUNK_DIRECTION_LOAD : MACHINE_X64_CHUNK_DIRECTION_STORE]
-                                           [machine_x64_chunk_width_slot(chunk)],
-            reg, MACHINE_X64_RBP, (s32)(0u - offset), true, counters))
-        return true;
-    if (encoder->overflow) return false;
-
     u16 opcode = load ? (chunk == 1 ? MACHINE_X64_LOAD_PTR8 : chunk == 2 ? MACHINE_X64_LOAD_PTR16 : chunk == 4 ? MACHINE_X64_LOAD_PTR32
                                                                            : MACHINE_X64_LOAD_FRAME)
                       : (chunk == 1 ? MACHINE_X64_STORE_FRAME8 : chunk == 2 ? MACHINE_X64_STORE_FRAME16 : chunk == 4 ? MACHINE_X64_STORE_FRAME32
@@ -13718,6 +13989,78 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* e
     MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, 0);
     return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, true, false, 0, false, counters);
 }
+
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
+                                                                           MachineX64ExactEmitCounters* counters)
+{
+    bool result = false;
+    MachineX64GprEncoding const* encoding =
+        machine_x64_frame_chunk_encodings[load ? MACHINE_X64_CHUNK_DIRECTION_LOAD : MACHINE_X64_CHUNK_DIRECTION_STORE]
+                                         [machine_x64_chunk_width_slot(chunk)] + (reg & 15u);
+    u32 byte_count = encoding->byte_count;
+    if (reg < 16 && byte_count)
+    {
+        if (encoder->count > encoder->capacity || byte_count > encoder->capacity - encoder->count)
+        {
+            encoder->overflow = true;
+            if (counters)
+            {
+                counters->attempts += 1;
+                counters->fallbacks += 1;
+            }
+        }
+        else
+        {
+            machine_x64_encoder_copy_encoding(encoder, encoding, byte_count);
+            u32 value = (0u - offset) + encoder->frame_base_offset;
+            memcpy(encoder->bytes + encoder->count + byte_count - (u32)sizeof(u32), &value, sizeof(value));
+            encoder->count += byte_count;
+            if (counters)
+            {
+                counters->attempts += 1;
+                counters->successes += 1;
+            }
+            result = true;
+        }
+    }
+    else
+    {
+        result = machine_x64_emit_exact_frame_chunk_metadata(encoder, load, reg, offset, chunk, counters);
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool machine_x64_test_frame_chunk_prepared(void)
+{
+    bool result = machine_x64_exact_opcode_map_ready;
+    for (u32 direction = 0; direction < 2; direction += 1)
+    {
+        for (u32 width_slot = 0; width_slot < MACHINE_X64_CHUNK_WIDTH_COUNT; width_slot += 1)
+        {
+            for (u32 reg = 0; reg < 16; reg += 1)
+            {
+                u32 byte_count = machine_x64_frame_chunk_encodings[direction][width_slot][reg].byte_count;
+                result &= byte_count > sizeof(u32) && byte_count <= 15;
+            }
+        }
+    }
+    return result;
+}
+
+MachineEncodeResult machine_x64_test_emit_frame_chunk(u8* bytes, u32 capacity, u32 start, u32 frame_base_offset, bool load, u32 reg,
+                                                      u32 offset, u32 chunk, bool reference)
+{
+    MachineX64Encoder encoder = {.bytes = bytes, .capacity = capacity, .count = start, .frame_base_offset = frame_base_offset};
+    MachineX64ExactEmitCounters counters = {0};
+    MachineEncodeResult result = {.bytes = bytes};
+    result.valid = reference ? machine_x64_emit_exact_frame_chunk_metadata(&encoder, load, reg, offset, chunk, &counters)
+                             : machine_x64_emit_exact_frame_chunk(&encoder, load, reg, offset, chunk, &counters);
+    result.byte_count = encoder.count;
+    machine_x64_exact_counters_assign(&result, counters);
+    return result;
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_x87(MachineX64Encoder* encoder, String8 mnemonic,
                                                BusterX86MetadataPhysicalOperand const* operands, u32 operand_count);
@@ -14800,11 +15143,36 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_f80(MachineX64Encoder* encoder, Machin
     if (instruction->opcode == MACHINE_X64_F80_BINARY)
     {
         String8 names[] = {S8("FADDP"), S8("FSUBP"), S8("FMULP"), S8("FDIVP")};
+        u32 mode = instruction->payload;
+        bool controlled = mode >= MACHINE_X64_F80_ADD_P24;
+        u32 operation = mode == MACHINE_X64_F80_MULTIPLY_P64 ? MACHINE_X64_F80_MULTIPLY :
+                        mode == MACHINE_X64_F80_SUBTRACT_P64 ? MACHINE_X64_F80_SUBTRACT : controlled ? MACHINE_X64_F80_ADD : mode;
+        u32 precision = mode == MACHINE_X64_F80_ADD_P24 ? 0u : mode == MACHINE_X64_F80_ADD_P53 ? 0x200u : 0x300u;
+        if (controlled)
+        {
+            // The six padding bytes in the destination frame hold the saved
+            // and temporary control words until this closed transaction ends.
+            machine_x64_emit_x87_memory(encoder, S8("FNSTCW"), offsets[0] + 10, 16);
+            (void)machine_x64_emit_metadata_register_memory(encoder, S8("MOVZX"), MACHINE_X64_RAX, MACHINE_X64_RBP,
+                                                           offsets[0] + 10, 64, 16, 0);
+            (void)machine_x64_emit_metadata_register_immediate(encoder, S8("AND"), MACHINE_X64_RAX, ~UINT32_C(0x300), 32, 32, 0);
+            if (precision)
+            {
+                (void)machine_x64_emit_metadata_register_immediate(encoder, S8("OR"), MACHINE_X64_RAX, precision, 32, 32, 0);
+            }
+            (void)machine_x64_emit_metadata_memory_register(encoder, S8("MOV"), MACHINE_X64_RBP, offsets[0] + 12,
+                                                           MACHINE_X64_RAX, 16, 16, 0);
+            machine_x64_emit_x87_memory(encoder, S8("FLDCW"), offsets[0] + 12, 16);
+        }
         machine_x64_emit_x87_memory(encoder, S8("FLD"), offsets[1], 80);
         machine_x64_emit_x87_memory(encoder, S8("FLD"), offsets[2], 80);
         BusterX86MetadataPhysicalOperand operands[] = {machine_x64_x87_operand(1), machine_x64_x87_operand(0)};
-        (void)machine_x64_emit_x87(encoder, names[instruction->payload], operands, 1);
+        (void)machine_x64_emit_x87(encoder, names[operation], operands, 1);
         machine_x64_emit_x87_memory(encoder, S8("FSTP"), offsets[0], 80);
+        if (controlled)
+        {
+            machine_x64_emit_x87_memory(encoder, S8("FLDCW"), offsets[0] + 10, 16);
+        }
         machine_x64_emit_f80_padding(encoder, offsets[0]);
     }
     else if (instruction->opcode == MACHINE_X64_F80_NEGATE)

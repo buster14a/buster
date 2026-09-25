@@ -19,9 +19,13 @@ pass.
 single-job supervisor. A request may name only an admitted service recipe;
 `validate-buster-v1` is currently the sole admitted entry. It cannot supply a
 program, argument, unit name, resource property, cgroup path or timeout. The
-service constructs one fixed `/usr/bin/systemd-run --wait --service-type=exec`
-invocation of `/usr/local/libexec/buster-bench-service worker-unit`, explicitly
-as `--uid=buster-bench --gid=buster-bench`.
+service sends a typed job/attempt request to the root-owned
+`buster-bench-systemd-broker` socket. The broker constructs the fixed
+`/usr/bin/systemd-run --wait --service-type=exec` invocation of
+`/usr/local/libexec/buster-bench-service worker-unit`, explicitly as
+`--uid=buster-bench --gid=buster-bench`. Only the trusted service account can
+reach the broker socket; the candidate and runner cannot request manager work.
+The broker accepts no caller-selected executable, unit property or path.
 `worker-unit` authenticates the private result-root handoff and adopts the exact
 stable lease open-file description before mapping the passed recipe identity
 through the same compiled registry. Unknown, blocked or commandless entries
@@ -134,7 +138,7 @@ no-replace `linkat`, temporary unlink and parent-directory fsync. A planted
 target, stale temporary, crash-window race or post-build tamper fails closed;
 no `rename` replacement is used.
 
-If `systemd-run` starts but no trustworthy service identity can be bound, the
+If the broker starts `systemd-run` but no trustworthy service identity can be bound, the
 server cannot signal an unverified unit name. It instead kills and reaps the
 tracked launcher PID under the command deadline while retaining the active job
 and coordinator quarantine lease for the still-ambiguous service state.
@@ -144,7 +148,7 @@ manager ControlGroup, AllowedCPUs, MemoryMax, MemorySwapMax, TasksMax and
 RuntimeMaxUSec. It opens every cgroup component without following a symlink and
 verifies the leaf plus every ancestor below the trusted cgroup-v2 mount. A
 tighter ancestor is a configuration mismatch, not a silently different
-experiment. `systemd-run` success alone never proves completion: exact unit
+experiment. Broker or `systemd-run` success alone never proves completion: exact unit
 identity and an empty recursive cgroup are required.
 
 Lease parents and the cgroup root are parsed as strict absolute paths and

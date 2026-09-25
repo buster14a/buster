@@ -196,6 +196,11 @@ Windows. Only optimized, unsanitized Clang/AppleClang builds use the requested
 unity build; every other build uses split translation units. TCC is retained
 only as the bootstrap compiler for `build.c` and is omitted from all
 application/compiler combinations.
+Desktop jobs retain [per-tree phase evidence](../ci-matrix-phases.md) through
+the existing artifact/result contract. `BUSTER_MATRIX_PHASE_OUTPUT` enables the
+observer; leave it unset for compiler performance acceptance. The observer
+does not change the schedulers described below.
+
 The matrix configures its compiler trees in parallel, then uses
 `cmake/superbuild/CMakeLists.txt` for one outer `cmake --build` invocation.
 Each shared compiler tree builds Debug and Release through one cross-config

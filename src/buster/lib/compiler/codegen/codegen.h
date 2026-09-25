@@ -10,6 +10,7 @@
 
 #include <buster/lib/compiler/debug/debug.h>
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/target.h>
 
 // IEEE encodings of 2^63, shared by the canonical and machine unsigned
@@ -444,6 +445,10 @@ struct CodegenModule
     IrFunctionId failed_function;
     IrInstructionId failed_instruction;
     IrOpcode failed_opcode;
+    // Set only when selected or scheduled MIR fails invariant verification.
+    // Machine row coordinates are separate from canonical instruction IDs.
+    MachineVerifyResult failed_machine_verification;
+    bool failed_machine_scheduled;
     // First fallback in source order, valid when fallback_function_count is
     // nonzero. Retained even when canonical emission succeeds, so strict
     // driver coverage can identify the function before writing any artifact.

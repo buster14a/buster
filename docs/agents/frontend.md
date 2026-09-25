@@ -38,6 +38,10 @@ open-addressed table stays at most half full, diagnoses invalid identity or
 arena exhaustion, and records probe counts only in tests. `c_once_tests` covers
 real aliases for all three suppression mechanisms plus an end-to-end fan-out
 and depth workload whose actual slot examinations must scale near-linearly.
+The end-to-end workload bounds probes against its own include operations;
+physical device/inode hashes vary between simulator app containers, so probe
+counts from two independently created file sets are not a stable ratio. The
+direct table workload retains its cross-size ratio check on fixed path keys.
 
 ## Builtin capability queries
 
@@ -68,3 +72,9 @@ evaluated argument to `int`, `long`, and `long long` respectively, return an
 Lowering uses canonical CTZ with a nonzero operand even for the zero case.
 The capability query admits all three implemented spellings. The `long`
 conversion follows the target data model, including 32-bit `long` on Windows.
+`__builtin_clz`, `__builtin_ctz`, and `__builtin_popcount` and their `l`/`ll`
+variants instead take unsigned int/long/long long respectively and return
+signed int. Semantic expression queries and lowering share the spelling policy;
+the canonical count operation runs at the converted operand width, and its
+result converts to int before the surrounding C expression uses it. Keep
+clz/ctz runtime oracles on nonzero inputs.
