@@ -1,0 +1,138 @@
+name: Issue 1162 hosted systemd executor preflight
+
+on:
+  push:
+    branches:
+      - codex/1162-hosted-systemd-preflight-20260925
+    paths:
+      - .github/workflows/1162-hosted-systemd-preflight.yml
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    if: github.repository == 'buster14a/buster' && github.ref == 'refs/heads/codex/1162-hosted-systemd-preflight-20260925'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Probe a disposable real systemd container
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          evidence=/tmp/issue-1162-executor-preflight
+          mkdir -p "$evidence"
+          exec > >(tee "$evidence/preflight.log") 2>&1
+          container="issue1162-$GITHUB_RUN_ID"
+          image="issue1162-preflight:$GITHUB_RUN_ID"
+          cleanup() {
+            result=$?
+            trap - EXIT
+            sudo docker logs "$container" > "$evidence/container.log" 2>&1 || true
+            sudo docker rm -f "$container" || true
+            if sudo docker ps -a --format '{{.Names}}' | grep -Fx "$container"; then
+              echo "FAIL: disposable container remains"
+              result=1
+            else
+              echo "TEARDOWN: container absent"
+            fi
+            exit "$result"
+          }
+          trap cleanup EXIT
+          echo "WORKFLOW_SHA=$GITHUB_SHA RUN_ID=$GITHUB_RUN_ID OS=$RUNNER_OS ARCH=$RUNNER_ARCH"
+          uname -a
+          sudo docker version
+          cat > "$evidence/Dockerfile" <<'DOCKERFILE'
+          FROM ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4
+          RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv util-linux python3-minimal && rm -rf /var/lib/apt/lists/*
+          STOPSIGNAL SIGRTMIN+3
+          CMD ["/sbin/init"]
+          DOCKERFILE
+          sudo docker build --pull --no-cache -t "$image" "$evidence"
+          sudo docker image inspect "$image" --format 'IMAGE_ID={{.Id}}'
+          sudo docker run -d --name "$container" --privileged --cgroupns=private --network none --env container=docker --tmpfs /run --tmpfs /run/lock -v /sys/fs/cgroup:/sys/fs/cgroup:rw "$image"
+          ready=false
+          for attempt in $(seq 1 40); do
+            if sudo docker exec "$container" systemctl show --property=Version --property=SystemState > "$evidence/manager.txt" 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          cat "$evidence/manager.txt"
+          test "$ready" = true
+          sudo docker exec "$container" sh -ec '
+            test "$(cat /proc/1/comm)" = systemd
+            test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
+            test -w /sys/fs/cgroup/cgroup.subtree_control
+            for controller in cpu memory pids cpuset; do grep -qw "$controller" /sys/fs/cgroup/cgroup.controllers; done
+            printf "PID1=%s\nCGROUP_CONTROLLERS=%s\nCGROUP_MOUNT=%s\n" "$(cat /proc/1/comm)" "$(cat /sys/fs/cgroup/cgroup.controllers)" "$(findmnt -no OPTIONS -T /sys/fs/cgroup)"
+            systemctl is-system-running
+            dpkg-query --show systemd systemd-sysv util-linux python3-minimal
+          ' | tee "$evidence/guest.txt"
+          unit="issue1162-$GITHUB_RUN_ID.service"
+          sudo docker exec "$container" systemd-run --unit="$unit" --property=AllowedCPUs=2 --property=MemoryMax=8589934592 --property=MemorySwapMax=0 --property=TasksMax=256 --property=RestrictSUIDSGID=yes --property=NoNewPrivileges=yes -- /usr/bin/sleep 90
+          sudo docker exec "$container" systemctl show "$unit" --all > "$evidence/unit.txt"
+          sudo docker exec "$container" sh -c 'cat /proc/$(systemctl show --property=MainPID --value "$1")/status' sh "$unit" > "$evidence/unit-process-status.txt"
+          cat > "$evidence/check.py" <<'PY'
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          unit = sys.argv[1]
+          values = subprocess.check_output(["systemctl", "show", unit, "--property=ControlGroup", "--property=MemoryMax", "--property=MemorySwapMax", "--property=TasksMax", "--property=RestrictSUIDSGID", "--property=NoNewPrivileges", "--property=AllowedCPUs", "--property=ActiveState"], text=True)
+          props = dict(line.split("=", 1) for line in values.splitlines() if "=" in line)
+          print("POLICY_PROPERTIES", props, flush=True)
+          expected = {"MemoryMax": "8589934592", "MemorySwapMax": "0", "TasksMax": "256", "RestrictSUIDSGID": "yes", "NoNewPrivileges": "yes", "ActiveState": "active"}
+          for key, expected_value in expected.items():
+              assert props.get(key) == expected_value, (key, props.get(key), expected_value)
+          root = Path("/sys/fs/cgroup")
+          unit_path = root / props["ControlGroup"].lstrip("/")
+          assert unit_path.is_dir(), unit_path
+          def contains_cpu2(text):
+              for part in text.strip().split(","):
+                  if not part:
+                      continue
+                  bounds = [int(n) for n in part.split("-")]
+                  if bounds[0] <= 2 <= bounds[-1]:
+                      return True
+              return False
+          for path in [unit_path, *list(unit_path.parents)]:
+              if not path.is_relative_to(root):
+                  break
+              for name, threshold in (("memory.max", 8589934592), ("pids.max", 256)):
+                  value = (path / name).read_text().strip()
+                  assert value == "max" or int(value) >= threshold, (path, name, value)
+              cpus = (path / "cpuset.cpus.effective").read_text().strip()
+              assert contains_cpu2(cpus), (path, "cpuset.cpus.effective", cpus)
+              print("EFFECTIVE", path, "memory.max=" + (path / "memory.max").read_text().strip(),
+                    "memory.swap.max=" + (path / "memory.swap.max").read_text().strip(),
+                    "pids.max=" + (path / "pids.max").read_text().strip(),
+                    "cpuset=" + cpus, flush=True)
+          assert (unit_path / "memory.max").read_text().strip() == "8589934592"
+          assert (unit_path / "memory.swap.max").read_text().strip() == "0"
+          assert (unit_path / "pids.max").read_text().strip() == "256"
+          print("POLICY_PASS", flush=True)
+          PY
+          sudo docker cp "$evidence/check.py" "$container:/tmp/check.py"
+          sudo docker exec "$container" python3 /tmp/check.py "$unit" | tee "$evidence/effective.txt"
+          sudo docker exec "$container" systemctl stop "$unit"
+          sudo docker exec "$container" systemctl reset-failed "$unit"
+          sudo docker exec "$container" systemd-run --wait --pipe --unit="issue1162-control-$GITHUB_RUN_ID" --property=RestrictSUIDSGID=no -- /bin/sh -c 'd=$(mktemp -d); chmod 2770 "$d"; result=$?; rmdir "$d"; exit "$result"' | tee "$evidence/suid-control.txt"
+          set +e
+          sudo docker exec "$container" systemd-run --wait --pipe --unit="issue1162-restrict-$GITHUB_RUN_ID" --property=RestrictSUIDSGID=yes -- /bin/sh -c 'd=$(mktemp -d); chmod 2770 "$d"; result=$?; rmdir "$d"; exit "$result"' > "$evidence/suid-restrict.txt" 2>&1
+          restricted_status=$?
+          set -e
+          cat "$evidence/suid-restrict.txt"
+          test "$restricted_status" -ne 0
+          grep -qi 'Operation not permitted' "$evidence/suid-restrict.txt"
+          echo "RESTRICT_SUID_SGID_PASS: unrestricted chmod succeeded; restricted chmod got EPERM"
+          echo "EXECUTOR_PREFLIGHT_PASS: no Buster service or source installed"
+      - name: Retain preflight diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue-1162-hosted-systemd-preflight
+          path: /tmp/issue-1162-executor-preflight
+          if-no-files-found: warn
+          retention-days: 7
