@@ -230,6 +230,13 @@ through its held descriptor, and rechecks the bundle on completion.
 Stage/final receipts bind the manifest SHA-256 and same-job inode identity;
 readback rechecks both along with the output binaries. A change to the bundle
 after the first stage poisons the sequence before another command is issued.
+Before either build stage creates a log or child, the helper checks through the
+configured build directory that `Release/ide` is absent (whether or not the
+`Release` directory exists). A leftover baseline executable after candidate
+generation or any stale output before baseline build poisons the sequence;
+a successful no-op stage cannot freeze an inherited executable. The worker
+must isolate that directory and reap descendants across this check and the
+build so another process cannot replace the name during the attempt.
 The #923 worker must apply its fixed containment, separate candidate identity,
 deadlines and cancellation to the launched child. `complete` stores each
 command/exit/log as an immutable queue log plus receipt, reimports A, freezes
