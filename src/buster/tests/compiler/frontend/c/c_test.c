@@ -22612,6 +22612,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_atomic_compound_result_source = S8_INIT
     "    int failed = 0;\n"
     "    int types_ok = _Generic((byte += 1), unsigned char: 1, default: 0) &&\n"
     "        _Generic((++byte), unsigned char: 1, default: 0) &&\n"
+    "        _Generic((byte++), unsigned char: 1, default: 0) &&\n"
     "        _Generic((half += 1), unsigned short: 1, default: 0);\n"
     "    failed |= !types_ok || byte != 0 || half != 0;\n"
     "    byte = 255; int observed = (byte += rhs());\n"

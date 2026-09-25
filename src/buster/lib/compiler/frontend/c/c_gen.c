@@ -25873,7 +25873,11 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_postfix_chain_attempt(CIntegerIrBuild
         }
         if ((c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS)) && index + 1 == end)
         {
-            // Postfix increment keeps the operand type.
+            // Postfix yields the non-atomic value, not the access type.
+            if (value->is_atomic)
+            {
+                *type = value->unqualified_type;
+            }
             return true;
         }
         bool arrow = c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW);
@@ -26273,8 +26277,15 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     }
     if (first_assign != UINT32_MAX)
     {
-        // Assignment yields the unpromoted type of its left operand.
-        return c_ir_sizeof_operand_type_attempt_depth(builder, start, first_assign, type_out, remaining_depth, promote_bit_fields);
+        // Assignment to an atomic place yields its unpromoted non-atomic value
+        // type, not the access type carried by the destination place.
+        bool resolved = c_ir_sizeof_operand_type_attempt_depth(builder, start, first_assign, type_out, remaining_depth, promote_bit_fields);
+        IrType* assigned = resolved ? ir_type_from_id(&builder->program->types, *type_out) : 0;
+        if (assigned && assigned->is_atomic)
+        {
+            *type_out = assigned->unqualified_type;
+        }
+        return resolved;
     }
     if (first_question != UINT32_MAX)
     {
@@ -26483,7 +26494,13 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     }
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS_MINUS))
     {
-        return c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, type_out, remaining_depth, promote_bit_fields);
+        bool resolved = c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, type_out, remaining_depth, promote_bit_fields);
+        IrType* operand = resolved ? ir_type_from_id(&builder->program->types, *type_out) : 0;
+        if (operand && operand->is_atomic)
+        {
+            *type_out = operand->unqualified_type;
+        }
+        return resolved;
     }
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_PARENTHESIS))
     {

@@ -212,7 +212,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   Integer promotions may make the arithmetic wider than the destination, so
   `c_ir_emit_compound_assignment` converts the computed result back to the
   unqualified destination type before publishing it. Prefix increment uses
-  that result; postfix increment uses the old value. The atomic update remains
+  that result; postfix increment uses the old value. The type-only expression
+  query also strips atomic access qualification from assignment and increment
+  results, so `_Generic` sees the same value type as runtime lowering. The
+  atomic update remains
   one sequentially consistent read-modify-write. `c_test_atomic_compound_result`
   checks byte/short wrapping, expression types, both increment forms, and
   the stored value across native allocator and frontend modes.
