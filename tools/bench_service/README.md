@@ -61,6 +61,16 @@ final manifest, bundle and outcome evidence with no-replace links; the result
 tree is never writable by the candidate identity and is replayed before success
 is acknowledged.
 
+On Linux, `RestrictSUIDSGID` rejects `mkdir` and `chmod` requests that include
+SGID, even when the target directory already has it. The trusted materializer
+and recipe driver create their shared directories with a short-lived `0007`
+umask, inherit SGID and group from a validated parent, then verify the exact
+resulting owner, group and mode before use. The base and candidate subject
+directories both start at `02710`; copied source directories become `0550`
+after materialization. Once builds are complete, the driver clears special bits
+while making their trees read-only. The service and transient sandbox settings
+remain unchanged.
+
 Each fixed recipe stage helper uses a deterministic unit name linked with
 `PartOf=`, `BindsTo=` and `After=` to its owning worker unit and uses
 `CollectMode=inactive-or-failed`. Every nested

@@ -36979,6 +36979,36 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_binary_digest(int build_directory,
     return ok;
 }
 
+BUSTER_GLOBAL_LOCAL int bench_service_recipe_create_inherited_group_directory(int parent, char const* name,
+                                                                               mode_t mode)
+{
+    struct stat parent_info = {0}, child_info = {0};
+    bool ok = parent >= 0 && fstat(parent, &parent_info) == 0 && S_ISDIR(parent_info.st_mode) &&
+              parent_info.st_uid == geteuid() && (parent_info.st_mode & S_ISGID) != 0 &&
+              (mode & S_ISGID) != 0 && (mode & 0007) == 0;
+    int child = -1;
+    if (ok)
+    {
+        /* The setgid parent supplies group and SGID without requesting either
+         * in mkdir/chmod, which the real RestrictSUIDSGID sandbox rejects. */
+        mode_t previous_umask = umask(0007);
+        int status = mkdirat(parent, name, mode & 0777);
+        int saved_errno = errno;
+        umask(previous_umask);
+        errno = saved_errno;
+        if (status == 0) child = openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    }
+    ok = child >= 0 && fstat(child, &child_info) == 0 && S_ISDIR(child_info.st_mode) &&
+         child_info.st_uid == geteuid() && child_info.st_gid == parent_info.st_gid &&
+         (child_info.st_mode & 07777) == mode;
+    if (!ok)
+    {
+        if (child >= 0) close(child);
+        child = -1;
+    }
+    return child;
+}
+
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_candidate_stage(String8 candidate_subject,
                                                                        String8 candidate_stage_build)
 {
@@ -36987,8 +37017,8 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_candidate_stage(String8 ca
     bool ok = parent >= 0;
     if (stage < 0 && ok && errno == ENOENT)
     {
-        ok = mkdirat(parent, "staging", 02770) == 0 && fchmodat(parent, "staging", 02770, 0) == 0 && fsync(parent) == 0;
-        if (ok) stage = openat(parent, "staging", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        stage = bench_service_recipe_create_inherited_group_directory(parent, "staging", 02770);
+        ok = stage >= 0 && fsync(parent) == 0;
     }
     struct stat info = {0};
     if (ok)
@@ -37003,13 +37033,13 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_candidate_stage(String8 ca
     return ok;
 }
 
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_make_visible_directory(String8 path, mode_t mode)
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_verify_visible_directory(String8 path, mode_t mode)
 {
     int descriptor = bench_service_recipe_open_directory(path);
     struct stat info = {0};
     bool ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) &&
               (info.st_uid == 0 || info.st_uid == geteuid());
-    if (ok) ok = fchmod(descriptor, mode) == 0 && fsync(descriptor) == 0;
+    if (ok) ok = (info.st_mode & 07777) == mode && fsync(descriptor) == 0;
     if (descriptor >= 0 && close(descriptor) != 0) ok = false;
     return ok;
 }
@@ -37028,7 +37058,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_candidate_visibility(Arena
     mode_t modes[] = {02710, 02710, 02710, 02710, 0550, 0550};
     bool ok = manifest != NULL;
     for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(paths); index += 1)
-        ok = bench_service_recipe_make_visible_directory(paths[index], modes[index]);
+        ok = bench_service_recipe_verify_visible_directory(paths[index], modes[index]);
     return ok;
 }
 
@@ -37045,9 +37075,8 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_prepare_throughput_output(Arena* a
         descriptor = openat(parent, "throughput-results", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (descriptor < 0 && errno == ENOENT)
         {
-            ok = mkdirat(parent, "throughput-results", 02770) == 0 &&
-                 fchmodat(parent, "throughput-results", 02770, 0) == 0 && fsync(parent) == 0;
-            if (ok) descriptor = openat(parent, "throughput-results", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            descriptor = bench_service_recipe_create_inherited_group_directory(parent, "throughput-results", 02770);
+            ok = descriptor >= 0 && fsync(parent) == 0;
         }
     }
     struct stat info = {0};
@@ -37446,9 +37475,9 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_lock_tree(Arena* arena, int direct
         ok = fstat(directory, &root_info) == 0;
         if (ok)
         {
-            root_mode = root_info.st_mode & 07777;
-            root_mode = candidate_visible ? (root_mode & (S_ISUID | S_ISGID | S_ISVTX)) | 0550 : root_mode & ~0222;
-            ok = fchmod(directory, root_mode) == 0;
+            root_mode = root_info.st_mode & 0777;
+            root_mode = candidate_visible ? 0550 : root_mode & ~0222;
+            ok = (root_info.st_mode & 07777) == root_mode || fchmod(directory, root_mode) == 0;
         }
         ok = ok &&
              fsync(directory) == 0;
@@ -37485,17 +37514,16 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_lock_tree(Arena* arena, int direct
                  (info.st_uid == 0 || info.st_uid == geteuid());
             int child = ok ? openat(parent, entry->d_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW |
                                     (S_ISDIR(info.st_mode) ? O_DIRECTORY : 0)) : -1;
-            mode_t child_mode = info.st_mode & 07777;
+            mode_t child_mode = info.st_mode & 0777;
             if (candidate_visible)
             {
-                child_mode = (child_mode & (S_ISUID | S_ISGID | S_ISVTX)) | (S_ISDIR(info.st_mode) ? 0550 :
-                                                                                 (info.st_mode & 0111) ? 0550 : 0440);
+                child_mode = S_ISDIR(info.st_mode) ? 0550 : (info.st_mode & 0111) ? 0550 : 0440;
             }
             else
             {
                 child_mode &= ~0222;
             }
-            ok = ok && child >= 0 && fchmod(child, child_mode) == 0;
+            ok = ok && child >= 0 && ((info.st_mode & 07777) == child_mode || fchmod(child, child_mode) == 0);
             if (ok && S_ISDIR(info.st_mode))
             {
                 ok = depth < BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP;
@@ -38448,14 +38476,14 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_fixture_make(BenchServiceReci
     bool ok = mkdtemp(root_template) != NULL;
     if (ok) snprintf(fixture->root, sizeof(fixture->root), "%s", root_template);
     int length = ok ? snprintf(fixture->workspace, sizeof(fixture->workspace), "%s/workspaces", fixture->root) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->workspace) && bench_service_recipe_test_mkdir(fixture->workspace, 0700);
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->workspace) && bench_service_recipe_test_mkdir(fixture->workspace, 02710);
     length = ok ? snprintf(fixture->attempt, sizeof(fixture->attempt), "%s/job-1-attempt-2", fixture->workspace) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(fixture->attempt) && bench_service_recipe_test_mkdir(fixture->attempt, 0700);
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->attempt) && bench_service_recipe_test_mkdir(fixture->attempt, 02710);
     char base[BENCH_SERVICE_RECIPE_PATH_CAP], candidate[BENCH_SERVICE_RECIPE_PATH_CAP], results[BENCH_SERVICE_RECIPE_PATH_CAP];
     length = ok ? snprintf(base, sizeof(base), "%s/base", fixture->attempt) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(base) && bench_service_recipe_test_mkdir(base, 0700);
+    ok = ok && length > 0 && (size_t)length < sizeof(base) && bench_service_recipe_test_mkdir(base, 02710);
     length = ok ? snprintf(candidate, sizeof(candidate), "%s/candidate", fixture->attempt) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(candidate) && bench_service_recipe_test_mkdir(candidate, 0700);
+    ok = ok && length > 0 && (size_t)length < sizeof(candidate) && bench_service_recipe_test_mkdir(candidate, 02710);
     length = ok ? snprintf(fixture->base_source, sizeof(fixture->base_source), "%s/source", base) : -1;
     ok = ok && length > 0 && (size_t)length < sizeof(fixture->base_source) && bench_service_recipe_test_mkdir(fixture->base_source, 0700);
     length = ok ? snprintf(fixture->base_build, sizeof(fixture->base_build), "%s/build", base) : -1;

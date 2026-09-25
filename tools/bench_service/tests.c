@@ -754,7 +754,10 @@ BUSTER_GLOBAL_LOCAL void bq_test_materialization_and_recovery(void)
         memcpy(body + 8 + installed.length, workspaces.pointer, (size_t)workspaces.length);
         BqPacket packet, response;
         bq_packet(&packet, BQ_OP_MATERIALIZE, 91, body, 8 + (u32)installed.length + (u32)workspaces.length);
-        BQ_CHECK(bq_dispatch(&fixture.queue.queue, packet.bytes, packet.size, &response) == BQ_OK);
+        mode_t prior_umask = umask(0077);
+        BqError materialized = bq_dispatch(&fixture.queue.queue, packet.bytes, packet.size, &response);
+        mode_t remaining_umask = umask(prior_umask);
+        BQ_CHECK(materialized == BQ_OK && remaining_umask == 0077);
         id = bq_u64(response.bytes + BQ_CONTROL_HEADER + 4);
         u64 token = bq_u64(response.bytes + BQ_CONTROL_HEADER + 12);
         BqJob* job = bq_job(&fixture.queue.queue.state, id);
@@ -779,7 +782,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_materialization_and_recovery(void)
         BQ_CHECK(stat(workspace, &attempt_info) == 0 && stat(base_subject_path, &base_subject) == 0 &&
                  stat(candidate_subject_path, &candidate_subject) == 0 &&
                  (attempt_info.st_mode & 07777) == 02710 && attempt_info.st_gid == workspace_root_info.st_gid &&
-                 (base_subject.st_mode & 07777) == 02750 && base_subject.st_gid == workspace_root_info.st_gid &&
+                 (base_subject.st_mode & 07777) == 02710 && base_subject.st_gid == workspace_root_info.st_gid &&
                  (candidate_subject.st_mode & 07777) == 02710 &&
                  candidate_subject.st_gid == workspace_root_info.st_gid);
         struct stat base_source_info = {0}, candidate_source_info = {0};
@@ -4462,7 +4465,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_recipe_materialized_bridge(char const* driver)
         ok = manifest_length > 0 && base_length > 0 && candidate_length > 0 &&
              stat(copied_manifest, &manifest_info) == 0 && manifest_info.st_size > 4096 &&
              stat(workspace, &attempt_info) == 0 && (attempt_info.st_mode & 07777) == 02710 &&
-             stat(base_subject, &base_info) == 0 && (base_info.st_mode & 07777) == 02750 &&
+             stat(base_subject, &base_info) == 0 && (base_info.st_mode & 07777) == 02710 &&
              stat(candidate_subject, &candidate_info) == 0 && (candidate_info.st_mode & 07777) == 02710;
         BQ_CHECK(ok);
     }

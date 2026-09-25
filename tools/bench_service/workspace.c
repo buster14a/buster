@@ -129,6 +129,49 @@ BUSTER_GLOBAL_LOCAL bool bq_workspace_root_directory(int fd)
     return ok;
 }
 
+BUSTER_GLOBAL_LOCAL int bq_create_inherited_group_directory(int parent, char const* name, mode_t mode, bool* created)
+{
+    struct stat parent_info = {0}, child_info = {0};
+    *created = false;
+    bool ok = fstat(parent, &parent_info) == 0 && S_ISDIR(parent_info.st_mode) &&
+              parent_info.st_uid == geteuid() && (mode & S_ISGID) != 0 && (mode & 0007) == 0;
+#ifdef __linux__
+    ok = ok && (parent_info.st_mode & S_ISGID) != 0;
+#endif
+    if (ok)
+    {
+#ifdef __linux__
+        /* Linux inherits SGID from the parent. RestrictSUIDSGID rejects both
+         * mkdir and chmod when SGID appears in the requested mode. The service
+         * is single-threaded; restore its private umask before opening files. */
+        mode_t previous_umask = umask(0007);
+        int status = mkdirat(parent, name, mode & 0777);
+        int saved_errno = errno;
+        umask(previous_umask);
+        errno = saved_errno;
+        *created = status == 0;
+#else
+        *created = mkdirat(parent, name, mode) == 0;
+        if (*created && fchmodat(parent, name, mode, 0) != 0) ok = false;
+#endif
+    }
+    else
+    {
+        errno = EPERM;
+    }
+    int child = ok && *created ? openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = child >= 0 && fstat(child, &child_info) == 0 && S_ISDIR(child_info.st_mode) &&
+         child_info.st_uid == geteuid() && child_info.st_gid == parent_info.st_gid &&
+         (child_info.st_mode & 07777) == mode;
+    if (!ok)
+    {
+        if (child >= 0) close(child);
+        child = -1;
+        if (*created) errno = EPERM;
+    }
+    return child;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_workspace_reconcile_root_directory(int fd)
 {
     struct stat info;
@@ -1136,20 +1179,16 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
     {
         error = BQ_RECIPE_MISMATCH;
     }
+    int workspace = -1;
     if (error == BQ_OK)
     {
-        created = mkdirat(workspaces, name, BQ_WORKSPACE_TRAVERSE_MODE) == 0;
-        if (created && fchmodat(workspaces, name, BQ_WORKSPACE_TRAVERSE_MODE, 0) != 0)
+        workspace = bq_create_inherited_group_directory(workspaces, name, BQ_WORKSPACE_TRAVERSE_MODE, &created);
+        if (workspace < 0)
         {
-            created = false;
-        }
-        if (!created)
-        {
-            collision = errno == EEXIST;
+            collision = !created && errno == EEXIST;
             error = BQ_WORKSPACE_MISMATCH;
         }
     }
-    int workspace = created ? openat(workspaces, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     if (error == BQ_OK && (workspace < 0 || fstat(workspace, &workspace_info) != 0 ||
                            !bq_workspace_seal(workspace, job, true) || fsync(workspaces) != 0))
     {
@@ -1158,18 +1197,16 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
     char const* subjects[] = {"base", "candidate"};
     for (u32 subject = 0; error == BQ_OK && subject < 2; subject += 1)
     {
-        mode_t subject_mode = subject == 0 ? 02750 : BQ_WORKSPACE_TRAVERSE_MODE;
+        mode_t subject_mode = BQ_WORKSPACE_TRAVERSE_MODE;
         mode_t build_mode = BQ_WORKSPACE_PRIVATE_BUILD_MODE;
-        bool made = mkdirat(workspace, subjects[subject], subject_mode) == 0;
-        if (made && fchmodat(workspace, subjects[subject], subject_mode, 0) != 0)
-        {
-            made = false;
-        }
-        int subject_fd = made ? openat(workspace, subjects[subject], O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-        made = subject_fd >= 0 && mkdirat(subject_fd, "source", 02750) == 0 &&
-               fchmodat(subject_fd, "source", 02750, 0) == 0 && mkdirat(subject_fd, "build", build_mode) == 0 &&
-               fchmodat(subject_fd, "build", build_mode, 0) == 0;
-        int source = made ? openat(subject_fd, "source", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        bool subject_created = false, source_created = false, build_created = false;
+        int subject_fd = bq_create_inherited_group_directory(workspace, subjects[subject], subject_mode,
+                                                               &subject_created);
+        int source = subject_fd >= 0 ? bq_create_inherited_group_directory(subject_fd, "source", 02750,
+                                                                            &source_created) : -1;
+        int build = source >= 0 ? bq_create_inherited_group_directory(subject_fd, "build", build_mode,
+                                                                       &build_created) : -1;
+        bool made = source >= 0 && build >= 0;
         if (made)
         {
             String8 revision = bq_field(&job->request, 3 + subject);
@@ -1178,6 +1215,10 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
         if (source >= 0)
         {
             close(source);
+        }
+        if (build >= 0)
+        {
+            close(build);
         }
         if (subject_fd >= 0)
         {
