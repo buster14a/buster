@@ -123,6 +123,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_traffic(UnitTestArgument
     MachineQualityTraffic zeros[] = {0, 0, 0};
     BUSTER_TEST(arguments, machine_quality_region_next(0, 0, UINT32_MAX) == UINT32_MAX);
     BUSTER_TEST(arguments, machine_quality_region_next(zeros, BUSTER_ARRAY_LENGTH(zeros), UINT32_MAX) == UINT32_MAX);
+
+    // The sparse row order must reproduce the dense query sequence exactly.
+    // Deterministic generated rows cover empty, single, dense, sparse,
+    // tie-heavy, zero-bearing, unsorted and duplicate-region rows, all
+    // written over dirty storage.
+    {
+        enum
+        {
+            ROW_REGION_LIMIT = 48,
+            ROW_ENTRY_LIMIT = 96,
+        };
+        MachineQualityRegionTraffic row[ROW_ENTRY_LIMIT];
+        MachineQualityTraffic dense[ROW_REGION_LIMIT];
+        u64 state = UINT64_C(0x9e3779b97f4a7c15);
+        for (u32 trial = 0; trial < 512; trial += 1)
+        {
+            u32 shape = trial % 8;
+            u32 region_count = 1 + (u32)(trial % ROW_REGION_LIMIT);
+            u32 entry_count = shape == 0 ? 0 : shape == 1 ? 1 : shape == 2 ? region_count : shape == 3 ? 1 + region_count / 8 : 1 + (u32)(trial % ROW_ENTRY_LIMIT);
+            for (u32 index = 0; index < ROW_ENTRY_LIMIT; index += 1)
+            {
+                row[index] = (MachineQualityRegionTraffic){.traffic = UINT64_MAX, .region = UINT32_MAX, .reserved = UINT32_MAX};
+            }
+            for (u32 region = 0; region < region_count; region += 1)
+            {
+                dense[region] = 0;
+            }
+            for (u32 index = 0; index < entry_count; index += 1)
+            {
+                state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                u32 random = (u32)(state >> 33);
+                u32 region = shape <= 2 ? index % region_count : shape == 3 ? (index * 8) % region_count : random % region_count;
+                if (shape == 4 && index)
+                {
+                    region = row[index - 1].region + (random % 3 == 0 ? 0 : 1) < region_count ? row[index - 1].region + (random % 3 == 0 ? 0 : 1)
+                                                                                               : row[index - 1].region;
+                }
+                MachineQualityTraffic traffic = shape == 5 ? (MachineQualityTraffic)(1 + random % 2)
+                                              : shape == 6 ? (MachineQualityTraffic)(random % 4)
+                                                           : (MachineQualityTraffic)(random % 4096) << (random % 32);
+                row[index] = (MachineQualityRegionTraffic){.traffic = traffic, .region = region};
+                dense[region] += traffic;
+            }
+            u32 ordered = machine_quality_region_row_build(row, entry_count);
+            u32 previous = UINT32_MAX;
+            u32 matched = 0;
+            for (;;)
+            {
+                previous = machine_quality_region_next(dense, region_count, previous);
+                if (previous == UINT32_MAX)
+                {
+                    break;
+                }
+                BUSTER_TEST_RAW(arguments, matched < ordered && row[matched].region == previous && row[matched].traffic == dense[previous],
+                                string_format(arguments->arena, S8("QUALITY sparse region order trial {u32} rank {u32}"), trial, matched));
+                matched += 1;
+            }
+            BUSTER_TEST(arguments, matched == ordered);
+        }
+        BUSTER_TEST(arguments, machine_quality_region_row_build(0, 0) == 0);
+        MachineQualityRegionTraffic ties[] = {
+            {.traffic = 3, .region = 4}, {.traffic = 7, .region = 1}, {.traffic = 3, .region = 0},
+            {.traffic = 0, .region = 2}, {.traffic = 4, .region = 0}, {.traffic = 7, .region = 3},
+        };
+        u32 tie_regions[] = {0, 1, 3, 4};
+        u32 tie_count = machine_quality_region_row_build(ties, BUSTER_ARRAY_LENGTH(ties));
+        BUSTER_TEST(arguments, tie_count == BUSTER_ARRAY_LENGTH(tie_regions));
+        for (u32 index = 0; index < tie_count && index < BUSTER_ARRAY_LENGTH(tie_regions); index += 1)
+        {
+            BUSTER_TEST(arguments, ties[index].region == tie_regions[index]);
+        }
+    }
     return result;
 }
 // Independent goldens correspond to x86_64_movabs_encoding_oracle.s. The
@@ -194,6 +266,123 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_movabs(UnitTestArgument
         BUSTER_TEST(arguments, !emitted.valid && emitted.byte_count == start);
         BUSTER_TEST(arguments, emitted.exact_attempts == 1 && emitted.exact_successes == 0 && emitted.exact_failures == 1);
         BUSTER_TEST(arguments, memcmp(bytes, expected, sizeof(bytes)) == 0);
+    }
+    return result;
+}
+
+// Independent goldens: GNU as and LLVM MC agree on every row. Each row is the
+// instruction before its disp32 for -0x1000(%rbp): loads (MOVZX r64 for one
+// and two bytes, MOV otherwise) then stores, widths 1/2/4/8, registers 0-15.
+// The reference is the metadata exact form the prepared records are copied
+// from; bytes past the instruction but inside capacity are the emitter's
+// spare record bytes and are not compared.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_frame_chunk(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST(arguments, machine_x64_test_frame_chunk_prepared());
+    static u8 const goldens[2][4][16][5] = {
+        {
+            {{4, 0x48, 0x0f, 0xb6, 0x85}, {4, 0x48, 0x0f, 0xb6, 0x8d}, {4, 0x48, 0x0f, 0xb6, 0x95}, {4, 0x48, 0x0f, 0xb6, 0x9d}, {4, 0x48, 0x0f, 0xb6, 0xa5}, {4, 0x48, 0x0f, 0xb6, 0xad}, {4, 0x48, 0x0f, 0xb6, 0xb5}, {4, 0x48, 0x0f, 0xb6, 0xbd}, {4, 0x4c, 0x0f, 0xb6, 0x85}, {4, 0x4c, 0x0f, 0xb6, 0x8d}, {4, 0x4c, 0x0f, 0xb6, 0x95}, {4, 0x4c, 0x0f, 0xb6, 0x9d}, {4, 0x4c, 0x0f, 0xb6, 0xa5}, {4, 0x4c, 0x0f, 0xb6, 0xad}, {4, 0x4c, 0x0f, 0xb6, 0xb5}, {4, 0x4c, 0x0f, 0xb6, 0xbd}},
+            {{4, 0x48, 0x0f, 0xb7, 0x85}, {4, 0x48, 0x0f, 0xb7, 0x8d}, {4, 0x48, 0x0f, 0xb7, 0x95}, {4, 0x48, 0x0f, 0xb7, 0x9d}, {4, 0x48, 0x0f, 0xb7, 0xa5}, {4, 0x48, 0x0f, 0xb7, 0xad}, {4, 0x48, 0x0f, 0xb7, 0xb5}, {4, 0x48, 0x0f, 0xb7, 0xbd}, {4, 0x4c, 0x0f, 0xb7, 0x85}, {4, 0x4c, 0x0f, 0xb7, 0x8d}, {4, 0x4c, 0x0f, 0xb7, 0x95}, {4, 0x4c, 0x0f, 0xb7, 0x9d}, {4, 0x4c, 0x0f, 0xb7, 0xa5}, {4, 0x4c, 0x0f, 0xb7, 0xad}, {4, 0x4c, 0x0f, 0xb7, 0xb5}, {4, 0x4c, 0x0f, 0xb7, 0xbd}},
+            {{2, 0x8b, 0x85}, {2, 0x8b, 0x8d}, {2, 0x8b, 0x95}, {2, 0x8b, 0x9d}, {2, 0x8b, 0xa5}, {2, 0x8b, 0xad}, {2, 0x8b, 0xb5}, {2, 0x8b, 0xbd}, {3, 0x44, 0x8b, 0x85}, {3, 0x44, 0x8b, 0x8d}, {3, 0x44, 0x8b, 0x95}, {3, 0x44, 0x8b, 0x9d}, {3, 0x44, 0x8b, 0xa5}, {3, 0x44, 0x8b, 0xad}, {3, 0x44, 0x8b, 0xb5}, {3, 0x44, 0x8b, 0xbd}},
+            {{3, 0x48, 0x8b, 0x85}, {3, 0x48, 0x8b, 0x8d}, {3, 0x48, 0x8b, 0x95}, {3, 0x48, 0x8b, 0x9d}, {3, 0x48, 0x8b, 0xa5}, {3, 0x48, 0x8b, 0xad}, {3, 0x48, 0x8b, 0xb5}, {3, 0x48, 0x8b, 0xbd}, {3, 0x4c, 0x8b, 0x85}, {3, 0x4c, 0x8b, 0x8d}, {3, 0x4c, 0x8b, 0x95}, {3, 0x4c, 0x8b, 0x9d}, {3, 0x4c, 0x8b, 0xa5}, {3, 0x4c, 0x8b, 0xad}, {3, 0x4c, 0x8b, 0xb5}, {3, 0x4c, 0x8b, 0xbd}},
+        },
+        {
+            {{2, 0x88, 0x85}, {2, 0x88, 0x8d}, {2, 0x88, 0x95}, {2, 0x88, 0x9d}, {3, 0x40, 0x88, 0xa5}, {3, 0x40, 0x88, 0xad}, {3, 0x40, 0x88, 0xb5}, {3, 0x40, 0x88, 0xbd}, {3, 0x44, 0x88, 0x85}, {3, 0x44, 0x88, 0x8d}, {3, 0x44, 0x88, 0x95}, {3, 0x44, 0x88, 0x9d}, {3, 0x44, 0x88, 0xa5}, {3, 0x44, 0x88, 0xad}, {3, 0x44, 0x88, 0xb5}, {3, 0x44, 0x88, 0xbd}},
+            {{3, 0x66, 0x89, 0x85}, {3, 0x66, 0x89, 0x8d}, {3, 0x66, 0x89, 0x95}, {3, 0x66, 0x89, 0x9d}, {3, 0x66, 0x89, 0xa5}, {3, 0x66, 0x89, 0xad}, {3, 0x66, 0x89, 0xb5}, {3, 0x66, 0x89, 0xbd}, {4, 0x66, 0x44, 0x89, 0x85}, {4, 0x66, 0x44, 0x89, 0x8d}, {4, 0x66, 0x44, 0x89, 0x95}, {4, 0x66, 0x44, 0x89, 0x9d}, {4, 0x66, 0x44, 0x89, 0xa5}, {4, 0x66, 0x44, 0x89, 0xad}, {4, 0x66, 0x44, 0x89, 0xb5}, {4, 0x66, 0x44, 0x89, 0xbd}},
+            {{2, 0x89, 0x85}, {2, 0x89, 0x8d}, {2, 0x89, 0x95}, {2, 0x89, 0x9d}, {2, 0x89, 0xa5}, {2, 0x89, 0xad}, {2, 0x89, 0xb5}, {2, 0x89, 0xbd}, {3, 0x44, 0x89, 0x85}, {3, 0x44, 0x89, 0x8d}, {3, 0x44, 0x89, 0x95}, {3, 0x44, 0x89, 0x9d}, {3, 0x44, 0x89, 0xa5}, {3, 0x44, 0x89, 0xad}, {3, 0x44, 0x89, 0xb5}, {3, 0x44, 0x89, 0xbd}},
+            {{3, 0x48, 0x89, 0x85}, {3, 0x48, 0x89, 0x8d}, {3, 0x48, 0x89, 0x95}, {3, 0x48, 0x89, 0x9d}, {3, 0x48, 0x89, 0xa5}, {3, 0x48, 0x89, 0xad}, {3, 0x48, 0x89, 0xb5}, {3, 0x48, 0x89, 0xbd}, {3, 0x4c, 0x89, 0x85}, {3, 0x4c, 0x89, 0x8d}, {3, 0x4c, 0x89, 0x95}, {3, 0x4c, 0x89, 0x9d}, {3, 0x4c, 0x89, 0xa5}, {3, 0x4c, 0x89, 0xad}, {3, 0x4c, 0x89, 0xb5}, {3, 0x4c, 0x89, 0xbd}},
+        },
+    };
+    u32 const chunks[4] = {1, 2, 4, 8};
+    u32 const offsets[] = {0, 8, 0x7f, 0x80, 0x1000, 0x12345678, 0x7fffffff, 0xfffffff8u};
+    u32 const frame_bases[] = {0, 0x30, 0x12345};
+    u32 const starts[] = {0, 1, 7, 15, 16, 17};
+    for (u32 direction = 0; direction < 2; direction += 1)
+    {
+        bool load = direction == 0;
+        for (u32 width_slot = 0; width_slot < 4; width_slot += 1)
+        {
+            for (u32 reg = 0; reg < 16; reg += 1)
+            {
+                u8 const* golden = goldens[direction][width_slot][reg];
+                u32 length = golden[0] + (u32)sizeof(u32);
+                u8 bytes[64];
+                memset(bytes, 0xa5, sizeof(bytes));
+                MachineEncodeResult emitted = machine_x64_test_emit_frame_chunk(bytes, sizeof(bytes), 0, 0, load, reg, 0x1000, chunks[width_slot], false);
+                u8 const displacement[4] = {0x00, 0xf0, 0xff, 0xff};
+                BUSTER_TEST(arguments, emitted.valid && emitted.byte_count == length && memcmp(bytes, golden + 1, golden[0]) == 0 &&
+                                           memcmp(bytes + golden[0], displacement, sizeof(displacement)) == 0);
+
+                bool row_matches = true;
+                for (u32 offset_index = 0; offset_index < BUSTER_ARRAY_LENGTH(offsets); offset_index += 1)
+                {
+                    for (u32 base_index = 0; base_index < BUSTER_ARRAY_LENGTH(frame_bases); base_index += 1)
+                    {
+                        u32 offset = offsets[offset_index];
+                        u32 frame_base = frame_bases[base_index];
+                        u32 value = (0u - offset) + frame_base;
+                        for (u32 start_index = 0; start_index < BUSTER_ARRAY_LENGTH(starts); start_index += 1)
+                        {
+                            u32 start = starts[start_index];
+                            for (u32 available = 0; available <= 17; available += 1)
+                            {
+                                u32 capacity = start + available;
+                                bool valid = available >= length;
+                                u8 reference[64];
+                                memset(bytes, 0xa5, sizeof(bytes));
+                                memset(reference, 0xa5, sizeof(reference));
+                                MachineEncodeResult prepared =
+                                    machine_x64_test_emit_frame_chunk(bytes, capacity, start, frame_base, load, reg, offset, chunks[width_slot], false);
+                                MachineEncodeResult oracle =
+                                    machine_x64_test_emit_frame_chunk(reference, capacity, start, frame_base, load, reg, offset, chunks[width_slot], true);
+                                row_matches &= prepared.valid == valid && oracle.valid == valid;
+                                row_matches &= prepared.byte_count == start + (valid ? length : 0u) && prepared.byte_count == oracle.byte_count;
+                                row_matches &= prepared.exact_attempts == 1 && prepared.exact_successes == (u32)valid &&
+                                               prepared.exact_failures == (u32)!valid;
+                                if (valid)
+                                {
+                                    row_matches &= oracle.exact_attempts == 1 && oracle.exact_successes == 1 && oracle.exact_failures == 0;
+                                    row_matches &= memcmp(bytes, reference, start + length) == 0;
+                                    row_matches &= memcmp(bytes + start, golden + 1, golden[0]) == 0;
+                                    u32 patched;
+                                    memcpy(&patched, bytes + start + golden[0], sizeof(patched));
+                                    row_matches &= patched == value;
+                                }
+                                for (u32 index = 0; index < sizeof(bytes); index += 1)
+                                {
+                                    bool untouched = index < start || index >= capacity || !valid;
+                                    row_matches &= !untouched || bytes[index] == 0xa5;
+                                }
+                            }
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, row_matches);
+            }
+        }
+    }
+    // An encoder already past its capacity and a register outside the dense
+    // records both keep the metadata path's refusal and accounting.
+    u32 const refused_registers[] = {0, 16, UINT32_MAX};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused_registers); index += 1)
+    {
+        u32 reg = refused_registers[index];
+        u32 start = reg == 0 ? 33u : 0u;
+        u8 bytes[32];
+        u8 reference[32];
+        u8 expected[32];
+        memset(bytes, 0xa5, sizeof(bytes));
+        memset(reference, 0xa5, sizeof(reference));
+        memset(expected, 0xa5, sizeof(expected));
+        MachineEncodeResult prepared = machine_x64_test_emit_frame_chunk(bytes, sizeof(bytes), start, 0, true, reg, 8, 8, false);
+        MachineEncodeResult oracle = machine_x64_test_emit_frame_chunk(reference, sizeof(reference), start, 0, true, reg, 8, 8, reg != 0);
+        BUSTER_TEST(arguments, !prepared.valid && prepared.byte_count == start && prepared.exact_attempts == 1 && prepared.exact_successes == 0 &&
+                                   prepared.exact_failures == 1);
+        BUSTER_TEST(arguments, prepared.valid == oracle.valid && prepared.byte_count == oracle.byte_count &&
+                                   prepared.exact_attempts == oracle.exact_attempts && prepared.exact_successes == oracle.exact_successes &&
+                                   prepared.exact_failures == oracle.exact_failures);
+        BUSTER_TEST(arguments, memcmp(bytes, expected, sizeof(bytes)) == 0 && memcmp(reference, expected, sizeof(reference)) == 0);
     }
     return result;
 }
@@ -6490,12 +6679,378 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_sparse_local_state(UnitTestArgum
     return result;
 }
 
+enum
+{
+    MACHINE_TEST_SCHEDULE_TREE,
+    MACHINE_TEST_SCHEDULE_DUPLICATE,
+    MACHINE_TEST_SCHEDULE_READ_MODIFY,
+    MACHINE_TEST_SCHEDULE_FANOUT,
+};
+
+BUSTER_GLOBAL_LOCAL u32 machine_test_schedule_value(MachineFunctionBuilder* builder, u32 flags)
+{
+    return machine_builder_virtual_register(builder, (MachineVirtualRegister){
+        .definition_point = machine_point_make(builder->instructions.total_count, MACHINE_POINT_AFTER),
+        .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+        .typed_origin = IR_ID_UNDERLYING_INVALID,
+        .flags = (u8)flags,
+    });
+}
+
+BUSTER_GLOBAL_LOCAL u32 machine_test_schedule_add(MachineFunctionBuilder* builder, u32 left, u32 right)
+{
+    u32 value = machine_test_schedule_value(builder, 0);
+    machine_builder_instruction(builder, (MachineInstruction){
+        .opcode = MACHINE_X64_ADD64,
+        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left),
+                     machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right)},
+    });
+    return value;
+}
+
+// 64 independent leaves reduced to one result, so source order carries
+// excess pressure. DUPLICATE repeats one operand in each first-level row,
+// READ_MODIFY negates each first-level value in place (a USE_DEFINE slot on
+// a mutable value), and FANOUT gives leaf 0 `fanout` extra consumers, which
+// puts it at fanout + 1 touches for the refresh cutoff.
+BUSTER_GLOBAL_LOCAL MachineFunction machine_test_schedule_trace_function(Arena* arena, u32 shape, u32 fanout)
+{
+    enum { LEAF_COUNT = 64 };
+    MachineFunctionBuilder builder = machine_function_builder_begin(arena);
+    u32* values = arena_allocate(arena, u32, 2 * LEAF_COUNT);
+    u32* leaves = values + LEAF_COUNT;
+    machine_builder_block_begin(&builder);
+    for (u32 leaf = 0; leaf < LEAF_COUNT; leaf += 1)
+    {
+        u32 value = machine_test_schedule_value(&builder, 0);
+        machine_builder_instruction(&builder, (MachineInstruction){
+            .opcode = MACHINE_X64_MOV_RI,
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value), machine_ref_make(MACHINE_REF_IMMEDIATE, 0)},
+        });
+        leaves[leaf] = value;
+    }
+    u32 count = 0;
+    if (shape == MACHINE_TEST_SCHEDULE_FANOUT)
+    {
+        for (u32 index = 0; index < fanout; index += 1)
+        {
+            values[count] = machine_test_schedule_add(&builder, leaves[0], leaves[index + 1]);
+            count += 1;
+        }
+        for (u32 leaf = fanout + 1; leaf < LEAF_COUNT; leaf += 1)
+        {
+            values[count] = leaves[leaf];
+            count += 1;
+        }
+    }
+    else
+    {
+        for (u32 pair = 0; pair < LEAF_COUNT / 2; pair += 1)
+        {
+            u32 value = 0;
+            if (shape == MACHINE_TEST_SCHEDULE_READ_MODIFY)
+            {
+                value = machine_test_schedule_value(&builder, MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE);
+                machine_builder_instruction(&builder, (MachineInstruction){
+                    .opcode = MACHINE_X64_ADD64,
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value),
+                                 machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, leaves[2 * pair]),
+                                 machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, leaves[2 * pair + 1])},
+                });
+                machine_builder_instruction(&builder, (MachineInstruction){
+                    .opcode = MACHINE_X64_NEG64,
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value)},
+                });
+            }
+            else
+            {
+                value = machine_test_schedule_add(&builder, leaves[2 * pair], leaves[2 * pair + 1]);
+                if (shape == MACHINE_TEST_SCHEDULE_DUPLICATE)
+                {
+                    value = machine_test_schedule_add(&builder, value, value);
+                }
+            }
+            values[count] = value;
+            count += 1;
+        }
+    }
+    while (count > 1)
+    {
+        u32 next = 0;
+        for (u32 index = 0; index + 1 < count; index += 2)
+        {
+            values[next] = machine_test_schedule_add(&builder, values[index], values[index + 1]);
+            next += 1;
+        }
+        if (count & 1u)
+        {
+            values[next] = values[count - 1];
+            next += 1;
+        }
+        count = next;
+    }
+    machine_builder_instruction(&builder, (MachineInstruction){
+        .opcode = MACHINE_X64_MOV_RR,
+        .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[0])},
+    });
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+    machine_builder_block_end(&builder, (MachineBlock){0});
+    MachineFunction function = machine_function_builder_finish(arena, &builder);
+    function.target = machine_target_x86_64();
+    function.immediates = arena_allocate(arena, u64, 1);
+    function.immediates[0] = 1;
+    function.immediate_count = 1;
+    return function;
+}
+
+typedef struct MachineTestScheduleTraceSummary MachineTestScheduleTraceSummary;
+struct MachineTestScheduleTraceSummary
+{
+    bool equivalent;
+    bool moved;
+    u32 event_count;
+    u32 kind_counts[MACHINE_SCHEDULE_TRACE_GATE + 1];
+    u32 refreshed_transitions;
+    u32 capped_transitions;
+    u32 maximum_touchers;
+    bool gate_rejected;
+    MachineScheduleTrace trace;
+};
+
+// Runs the production occurrence stream and the descriptor-decoding oracle on
+// the same input and requires identical decision traces and output rows.
+BUSTER_GLOBAL_LOCAL MachineTestScheduleTraceSummary machine_test_schedule_trace_compare(Arena* arena, MachineFunction* function, u32 capacity_limit)
+{
+    MachineTestScheduleTraceSummary summary = {0};
+    u32 event_capacity = 64u * function->instruction_count + 1024u;
+    MachineScheduleTrace traces[2] = {0};
+    MachineScheduleResult results[2] = {0};
+    for (u32 index = 0; index < 2; index += 1)
+    {
+        traces[index] = (MachineScheduleTrace){
+            .events = arena_allocate(arena, MachineScheduleTraceEvent, event_capacity),
+            .event_capacity = event_capacity,
+            .entry_capacity_limit = capacity_limit,
+            .reference = index == 1,
+        };
+        results[index] = machine_schedule_function_traced(arena, function, traces + index);
+    }
+    MachineScheduleResult plain = capacity_limit ? results[0] : machine_schedule_function(arena, function);
+    summary.equivalent = traces[0].dropped == 0 && traces[1].dropped == 0 && traces[0].event_count == traces[1].event_count &&
+                         memcmp(traces[0].events, traces[1].events, traces[0].event_count * sizeof(MachineScheduleTraceEvent)) == 0 &&
+                         results[0].moved == results[1].moved && results[0].moved == plain.moved &&
+                         memcmp(results[0].function.instructions, results[1].function.instructions,
+                                function->instruction_count * sizeof(MachineInstruction)) == 0 &&
+                         memcmp(results[0].function.instructions, plain.function.instructions,
+                                function->instruction_count * sizeof(MachineInstruction)) == 0;
+    summary.moved = results[0].moved;
+    summary.event_count = traces[0].event_count;
+    summary.trace = traces[0];
+    for (u32 event_index = 0; event_index < traces[0].event_count; event_index += 1)
+    {
+        MachineScheduleTraceEvent event = traces[0].events[event_index];
+        summary.kind_counts[event.kind] += 1;
+        if (event.kind == MACHINE_SCHEDULE_TRACE_TRANSITION)
+        {
+            summary.refreshed_transitions += event.extra <= 16;
+            summary.capped_transitions += event.extra > 16;
+            summary.maximum_touchers = BUSTER_MAX(summary.maximum_touchers, event.extra);
+        }
+        summary.gate_rejected |= event.kind == MACHINE_SCHEDULE_TRACE_GATE && event.value >= (s32)event.extra;
+    }
+    return summary;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_schedule_trace_equivalence(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 fixture_position = arguments->arena->position;
+
+    // Exhaustive opcode x slot projection: the row lanes are the scheduler's
+    // role source, and a definition is DEFINE or USE_DEFINE.
+    MachineOpcodeRow const* opcode_rows = machine_opcode_row_table();
+    bool projection_exact = true;
+    for (u16 opcode = 0; opcode < MACHINE_OPCODE_COUNT; opcode += 1)
+    {
+        MachineOpcodeInfo const* info = machine_opcode_info(opcode);
+        MachineOpcodeRow row = opcode_rows[opcode];
+        projection_exact &= row.operand_count == info->operand_count;
+        for (u32 slot = 0; slot < MACHINE_INSTRUCTION_OPERAND_COUNT; slot += 1)
+        {
+            u32 role = slot < info->operand_count ? info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u) : MACHINE_OPERAND_ROLE_NONE;
+            u32 uses = (row.role_lanes >> (MACHINE_OPCODE_ROW_USE_SHIFT + slot)) & 1u;
+            u32 define_only = (row.role_lanes >> (MACHINE_OPCODE_ROW_DEFINE_SHIFT + slot)) & 1u;
+            u32 use_define = (row.role_lanes >> (MACHINE_OPCODE_ROW_USE_DEFINE_SHIFT + slot)) & 1u;
+            projection_exact &= uses == (u32)(role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE);
+            projection_exact &= (define_only | use_define) == (u32)(role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE);
+            projection_exact &= !(define_only && use_define);
+        }
+        projection_exact &= (row.role_lanes >> 12) == 0;
+    }
+    BUSTER_TEST(arguments, projection_exact);
+    // The DEFINE plane alone misses read-modify-write definitions.
+    BUSTER_TEST(arguments, opcode_rows[MACHINE_X64_NEG64].role_lanes == 0x101u);
+    BUSTER_TEST(arguments, opcode_rows[MACHINE_X64_NEG32].role_lanes == 0x101u);
+
+    MachineFunction tree = machine_test_schedule_trace_function(arguments->arena, MACHINE_TEST_SCHEDULE_TREE, 0);
+    BUSTER_TEST(arguments, machine_verify_function(&tree).error == MACHINE_VERIFY_NONE);
+    MachineTestScheduleTraceSummary tree_summary = machine_test_schedule_trace_compare(arguments->arena, &tree, 0);
+    BUSTER_TEST(arguments, tree_summary.equivalent && tree_summary.moved);
+    BUSTER_TEST(arguments, tree_summary.kind_counts[MACHINE_SCHEDULE_TRACE_READY] > 0);
+    BUSTER_TEST(arguments, tree_summary.kind_counts[MACHINE_SCHEDULE_TRACE_SELECT] == tree.instruction_count);
+    BUSTER_TEST(arguments, tree_summary.kind_counts[MACHINE_SCHEDULE_TRACE_GATE] == 1 && !tree_summary.gate_rejected);
+
+    // Repeated operands count per occurrence. `u = t + t` becomes ready once
+    // u is demanded and t is not: growth -1 + 2 = +1, where a distinct-value
+    // set would compute 0 and bucket the unit differently.
+    MachineFunction duplicate = machine_test_schedule_trace_function(arguments->arena, MACHINE_TEST_SCHEDULE_DUPLICATE, 0);
+    BUSTER_TEST(arguments, machine_verify_function(&duplicate).error == MACHINE_VERIFY_NONE);
+    MachineTestScheduleTraceSummary duplicate_summary = machine_test_schedule_trace_compare(arguments->arena, &duplicate, 0);
+    BUSTER_TEST(arguments, duplicate_summary.equivalent && duplicate_summary.moved);
+    u32 duplicate_pushes = 0;
+    bool duplicate_growth = true;
+    for (u32 event_index = 0; event_index < duplicate_summary.event_count; event_index += 1)
+    {
+        MachineScheduleTraceEvent event = duplicate_summary.trace.events[event_index];
+        MachineInstruction const* row = duplicate.instructions + event.subject;
+        if (event.kind == MACHINE_SCHEDULE_TRACE_PUSH && event.extra == 1 && row->opcode == MACHINE_X64_ADD64 &&
+            row->operands[1] == row->operands[2])
+        {
+            duplicate_pushes += 1;
+            duplicate_growth &= event.value == 1;
+        }
+    }
+    BUSTER_TEST(arguments, duplicate_pushes == 32 && duplicate_growth);
+
+    MachineFunction read_modify = machine_test_schedule_trace_function(arguments->arena, MACHINE_TEST_SCHEDULE_READ_MODIFY, 0);
+    BUSTER_TEST(arguments, machine_verify_function(&read_modify).error == MACHINE_VERIFY_NONE);
+    MachineTestScheduleTraceSummary read_modify_summary = machine_test_schedule_trace_compare(arguments->arena, &read_modify, 0);
+    BUSTER_TEST(arguments, read_modify_summary.equivalent);
+    BUSTER_TEST(arguments, read_modify_summary.kind_counts[MACHINE_SCHEDULE_TRACE_SELECT] == read_modify.instruction_count);
+
+    // Leaf 0 has fanout + 1 touches: 16 still refreshes its touchers, 17 does
+    // not. With two consumers, placing one makes leaf 0 demanded while its
+    // sibling is ready, so the sibling is re-pushed and its first entry goes
+    // stale.
+    u32 stale = tree_summary.kind_counts[MACHINE_SCHEDULE_TRACE_STALE] + duplicate_summary.kind_counts[MACHINE_SCHEDULE_TRACE_STALE] +
+                read_modify_summary.kind_counts[MACHINE_SCHEDULE_TRACE_STALE];
+    u32 fanouts[] = {2, 15, 16};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fanouts); index += 1)
+    {
+        MachineFunction fanout = machine_test_schedule_trace_function(arguments->arena, MACHINE_TEST_SCHEDULE_FANOUT, fanouts[index]);
+        BUSTER_TEST(arguments, machine_verify_function(&fanout).error == MACHINE_VERIFY_NONE);
+        MachineTestScheduleTraceSummary fanout_summary = machine_test_schedule_trace_compare(arguments->arena, &fanout, 0);
+        BUSTER_TEST(arguments, fanout_summary.equivalent && fanout_summary.maximum_touchers == fanouts[index] + 1);
+        BUSTER_TEST(arguments, fanouts[index] + 1 > 16 ? fanout_summary.capped_transitions > 0 : fanout_summary.capped_transitions == 0);
+        BUSTER_TEST(arguments, fanouts[index] != 2 || fanout_summary.kind_counts[MACHINE_SCHEDULE_TRACE_STALE] > 0);
+        stale += fanout_summary.kind_counts[MACHINE_SCHEDULE_TRACE_STALE];
+    }
+
+    // A queue that runs out of entries restores source order in both paths.
+    MachineTestScheduleTraceSummary exhausted = machine_test_schedule_trace_compare(arguments->arena, &tree, 8);
+    BUSTER_TEST(arguments, exhausted.equivalent && !exhausted.moved);
+    BUSTER_TEST(arguments, exhausted.kind_counts[MACHINE_SCHEDULE_TRACE_OVERFLOW] == 1 &&
+                               exhausted.kind_counts[MACHINE_SCHEDULE_TRACE_FALLBACK] == 1 &&
+                               exhausted.kind_counts[MACHINE_SCHEDULE_TRACE_GATE] == 0);
+
+    // Selected source functions on both targets, including schedules the
+    // excess gate rejects.
+    String8 sources[] = {S8("tests/basic_c_machine_alias.c"), S8("tests/basic_c_operations.c")};
+    u32 compared = 0;
+    u32 moved = 0;
+    u32 rejected = 0;
+    bool corpus_equivalent = true;
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        Target target = {.cpu_arch = architecture ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+        {
+            ByteSlice source = file_read(arguments->arena, sources[source_index], (FileReadOptions){0});
+            IrProgram* program = source.pointer ? machine_test_compile_c(arguments->arena, sources[source_index],
+                (String8){.pointer = (char8*)source.pointer, .length = source.length}, target) : 0;
+            BUSTER_TEST(arguments, program && program->module_count);
+            for (u32 module_index = 0; program && module_index < program->module_count; module_index += 1)
+            {
+                IrModule* module = program->modules + module_index;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    u64 function_position = arguments->arena->position;
+                    MachineSelectResult selected = machine_select_canonical_function(arguments->arena, program, module->functions + function_index, target);
+                    if (selected.supported && selected.function.instruction_count)
+                    {
+                        MachineTestScheduleTraceSummary summary = machine_test_schedule_trace_compare(arguments->arena, &selected.function, 0);
+                        corpus_equivalent &= summary.equivalent;
+                        compared += summary.kind_counts[MACHINE_SCHEDULE_TRACE_BLOCK] != 0;
+                        moved += summary.moved;
+                        rejected += summary.gate_rejected;
+                        stale += summary.kind_counts[MACHINE_SCHEDULE_TRACE_STALE];
+                    }
+                    arena_set_position(arguments->arena, function_position);
+                }
+            }
+        }
+    }
+    arguments->show(arguments, S8("MACHINE_SCHEDULE_TRACE scheduled_functions={u32} moved={u32} gate_rejected={u32} stale={u32}\n"), compared, moved,
+                    rejected, stale);
+    BUSTER_TEST(arguments, corpus_equivalent && compared > 0 && moved > 0 && rejected > 0);
+    // Entries superseded by a re-push, or left behind by a placed unit, are
+    // rejected on pop.
+    BUSTER_TEST(arguments, stale > 0);
+    arena_set_position(arguments->arena, fixture_position);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_constant_short_circuit(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("int dead_relational(void) { return 1 || (0 > (0 || 0) || 0); }\n"
+                        "int dead_nonunit(void) { return 5 || (0 > (0 || 0) || 0); }\n"
+                        "int dead_group(void) { return 1 || ((0 > (0 || 0)) || 0); }\n"
+                        "int dead_and(void) { return 1 || (0 > (0 && 0) || 0); }\n"
+                        "int dead_less(void) { return 1 || (0 < (0 || 0) || 0); }\n"
+                        "int trailing_control(void) { return 1 || (0 > (0 || 0)); }\n"
+                        "int equal_control(void) { return 1 || (0 == (0 || 0) || 0); }\n"
+                        "int live_control(int a) { return a || (0 > (0 || 0) || 0); }\n");
+    Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            TemporalArena temporary = arena_begin_temporal(arguments->arena);
+            IrProgram* program = machine_test_compile_c_with_options(arguments->arena, S8("constant-short-circuit.c"), source, targets[target],
+                                                                     (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrModule* module = program->modules;
+                IrValidationResult prepared = ir_prepare_canonical_module(program, module, false);
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && module->function_count == 8);
+                for (u32 function_index = 0; prepared.error == IR_VALIDATION_NONE && function_index < module->function_count; function_index += 1)
+                {
+                    MachineSelectResult selected = machine_select_canonical_function(arguments->arena, program,
+                                                                                       module->functions + function_index, targets[target]);
+                    MachineVerifyResult verified = selected.supported ? machine_verify_function(&selected.function) : (MachineVerifyResult){0};
+                    String8 description = string_format(arguments->arena, S8("constant short circuit target={u32} frontend={u32} function='{S8}' error={S8}"),
+                                                        target, frontend, module->functions[function_index].name,
+                                                        machine_verify_error_name(verified.error));
+                    BUSTER_TEST_RAW(arguments, selected.supported && selected.selector_certified && verified.error == MACHINE_VERIFY_NONE, description);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, machine_fast_close_live_ranges_test(arguments->arena));
     BUSTER_TEST_FIXTURE(arguments, machine_test_sparse_local_state);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_constant_short_circuit);
     BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_line_mark_repair);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_trace_equivalence);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_capacity);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);
@@ -7657,6 +8212,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
     BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_movabs);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_frame_chunk);
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
     // Atomic NAND adds the 8-, 16-, 32- and 64-bit NOT register shapes.
@@ -10142,12 +10698,12 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, census.candidate_region_cells == census.candidates * census.merged_regions);
                 BUSTER_TEST(arguments, census.candidate_region_nonzero_cells > 0 &&
                                        census.candidate_region_nonzero_cells <= census.candidate_region_cells);
-                BUSTER_TEST(arguments, census.candidate_region_clear_bytes == census.candidate_region_cells * sizeof(MachineQualityTraffic));
+                BUSTER_TEST(arguments, census.candidate_region_clear_bytes == census.candidates * 2 * sizeof(u32));
                 BUSTER_TEST(arguments, census.initial_value_clear_bytes == census.global_values * (sizeof(MachineQualityTraffic) + 2 * sizeof(u32)));
                 BUSTER_TEST(arguments, census.region_table_zero_functions + census.region_table_sparse_functions +
                                        census.region_table_mixed_functions + census.region_table_dense_functions == 1);
                 BUSTER_TEST(arguments, census.heap_restore_bytes == census.heap_snapshot_bytes * census.attempts);
-                BUSTER_TEST(arguments, census.region_selection_cells == census.region_selection_passes * census.merged_regions);
+                BUSTER_TEST(arguments, census.region_selection_cells == census.selected_regions);
                 BUSTER_TEST(arguments, census.selected_regions <= census.region_selection_passes);
                 BUSTER_TEST(arguments, census.placement_probes <= census.attempts);
                 BUSTER_TEST(arguments, census.accepted_placements == 1);

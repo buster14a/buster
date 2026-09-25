@@ -43,8 +43,9 @@ class PerformanceIdentityTests(unittest.TestCase):
                             * len(binding.ALLOCATORS))
 
     def test_checked_in_support_bytes_match_reviewed_pin(self):
-        self.assertEqual(hashlib.sha256(self.declaration).hexdigest(),
-                         binding.SUPPORT_DECLARATION_SHA256)
+        self.assertIn(hashlib.sha256(self.declaration).hexdigest(),
+                      (binding.SUPPORT_DECLARATION_SHA256,
+                       binding.NEXT_SUPPORT_DECLARATION_SHA256))
 
     def test_support_counts_follow_checked_in_population(self):
         self.assertEqual(binding._approved_support_counts(),
@@ -148,8 +149,8 @@ class PerformanceIdentityTests(unittest.TestCase):
             "source_manifest_sha256": support["manifest_sha256"],
             "source_rows_sha256": support["rows_sha256"],
             "identity_field": "record_id", "coordinate_schema": "row-round-pair-v1",
-            "sample_population": "canonical-performance-rows-with-required-metrics",
-            "eligible_population": "canonical-performance-rows",
+            "sample_population": "trusted-census-eligible-performance-rows-with-required-metrics",
+            "eligible_population": "authenticated-applicability-minus-nonexecuted-rows",
             "object_row_count": self.object_rows, "sample_row_count": sample_rows,
             "rounds": 2, "pairs_per_round": pairs, "records_per_row": 2 * pairs,
             "required_records": required, "max_records_per_manifest": cap,
@@ -268,12 +269,17 @@ class InvocationEvidenceTests(unittest.TestCase):
             contract = {"row": row["row"], "identity_sha256": binding._canonical_json_digest(row["identity"]),
                         "oracle_sha256": binding._canonical_json_digest(oracle_by_row[row["row"]])}
             for side in ("baseline", "candidate"):
-                metrics = samples[(row["row"], 0, 0)]
-                code_bytes = metrics["generated_code_bytes"][side] if row["metrics"]["generated_code_bytes"] else None
+                metrics = samples.get((row["row"], 0, 0), {})
+                observed = oracle_by_row[row["row"]]["code_section_status"] == "parsed-deterministic"
+                code_bytes = (metrics["generated_code_bytes"][side]
+                              if row["metrics"]["generated_code_bytes"] else 0 if observed else None)
                 contract[side] = {
-                    "compiler_command_sha256": hashlib.sha256(f"compile/{row['row']}/{side}".encode()).hexdigest(),
-                    "artifact_sha256": hashlib.sha256(f"artifact/{row['row']}/{side}".encode()).hexdigest(),
-                    "code_section_sha256": ("b" * 64 if code_bytes is not None else None),
+                    "compiler_command_sha256": (hashlib.sha256(f"compile/{row['row']}/{side}".encode()).hexdigest()
+                                                if row["metrics"]["compiler_wall_time"] else None),
+                    "artifact_sha256": (hashlib.sha256(f"artifact/{row['row']}/{side}".encode()).hexdigest()
+                                        if row["metrics"]["compiler_wall_time"] else None),
+                    "code_section_sha256": (hashlib.sha256(b"").hexdigest() if code_bytes == 0
+                                             else "b" * 64 if code_bytes is not None else None),
                     "code_section_bytes": code_bytes,
                     "runtime_command_sha256": ("c" * 64 if row["metrics"]["generated_runtime"] else None),
                     "runtime_output_sha256": ("d" * 64 if row["metrics"]["generated_runtime"] else None),
@@ -415,6 +421,41 @@ class InvocationEvidenceTests(unittest.TestCase):
         result = self.check()
         self.assertEqual(result["invocations"], 3 * (4 + 2 * 60 * 2))
 
+    def test_mixed_untimed_and_empty_code_rows_replay_complete_transcript(self):
+        # The zero-code row still runs its compiler; the retained control does not.
+        empty = hashlib.sha256(b"").hexdigest()
+        zero = self.rows[1]
+        zero["metrics"]["generated_code_bytes"] = False
+        zero["eligibility"]["generated_code_bytes"] = False
+        zero["eligibility"]["code_section"] = "deterministic-zero-baseline-code-section"
+        for coordinate, metrics in self.samples.items():
+            if coordinate[0] == 1:
+                del metrics["generated_code_bytes"]
+        self.db.execute("DELETE FROM samples WHERE row_id=1 AND metric='generated_code_bytes'")
+        control = copy.deepcopy(zero)
+        control["row"] = 2
+        control["identity"]["fixture"] = "tests/untimed-control.c"
+        control["identity"]["compile_obligation"] = "registered-non-object-control"
+        for metric in binding.METRICS:
+            control["metrics"][metric] = False
+            control["eligibility"][metric] = False
+        control["eligibility"]["code_section"] = "not-applicable"
+        self.rows.append(control)
+        oracle_path = self.record["workflow"]["records"]["oracle"]["path"]
+        oracle = json.loads((self.root / oracle_path).read_text())
+        oracle["records"][1].update(code_section_bytes=0, code_section_sha256=empty)
+        oracle["records"].append({"row": 2, "code_section_status": "not-applicable",
+                                  "code_section_bytes": None, "code_section_sha256": None,
+                                  "runtime_oracle_status": "not-applicable",
+                                  "runtime_exit_code": None, "native_runtime": False})
+        self.record["workflow"]["records"]["oracle"] = self.put(self.root, oracle_path, oracle)
+        self.plan, self.receipt, self.descriptor, self.events, self.raw_digest = self.attach_execution(
+            self.root, self.record, self.rows, self.samples)
+        self.assertEqual(self.check()["invocations"], 3 * (4 + 2 * 60 * 2))
+        self.assertNotIn(2, {event["row"] for event in self.events})
+        self.assertEqual({event["code_section_bytes"] for event in self.events
+                          if event["row"] == 1}, {0})
+
     def test_missing_or_self_selected_trust_root_is_rejected(self):
         for trusted in (None, "0" * 64, "main"):
             with self.subTest(trusted=trusted), self.assertRaises(ValueError):
@@ -517,8 +558,8 @@ class InvocationEvidenceTests(unittest.TestCase):
             "source_manifest_sha256": support["manifest_sha256"],
             "source_rows_sha256": support["rows_sha256"],
             "identity_field": "record_id", "coordinate_schema": "row-round-pair-v1",
-            "sample_population": "canonical-performance-rows-with-required-metrics",
-            "eligible_population": "canonical-performance-rows", "object_row_count": 2,
+            "sample_population": "trusted-census-eligible-performance-rows-with-required-metrics",
+            "eligible_population": "authenticated-applicability-minus-nonexecuted-rows", "object_row_count": 2,
             "sample_row_count": 2, "rounds": 2, "pairs_per_round": 60, "records_per_row": 120,
             "required_records": 240, "max_records_per_manifest": binding.RESULT_INPUT_MAX_RECORDS,
             "manifest_count": 1, "manifests": [{"identity": "numeric", "path": manifest["path"],

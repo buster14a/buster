@@ -89,17 +89,33 @@ JSON encoding. The requested-work root uses the same encoding over sorted
 
 `support.files[performance_rows]` is the independent #508-produced canonical
 UTF-8 JSON artifact with schema
-`buster-native-retirement-performance-rows-v1`, integer version `1`, the exact
+`buster-native-retirement-performance-rows-v2`, integer version `2`, the exact
 `row_identity_fields` list, a `sources` map for the #508 declaration, manifest,
 inputs, dependencies, environment and validator report digests, and an array
 of rows with contiguous zero-based IDs. A row contains every identity field
 plus explicit boolean eligibility for compiler wall time, peak RSS,
-deterministic code-section bytes and generated runtime. Runtime eligibility
-must name an independent native executable oracle; code eligibility must name
+deterministic code-section bytes and generated runtime. The array remains an
+exhaustive one-to-one audit join to every census row. Compiler eligibility is
+recomputed from the production validator's authenticated
+`applicability_skip_rows`; source-proven non-executed rows retain explicit null
+admission/oracle observations and never enter the dense timing schedule,
+result-input population, or statistical family. Runtime eligibility must name
+an independent native executable oracle; code eligibility must name
 deterministic code sections. The bound `population.source_digests` must identify
 the complete #508 output, including its versioned performance declaration;
 rewriting six self-consistent artifacts or omitting the independent validator
-report is rejected. Validation parses the whole array, rejects duplicate
+report is rejected. The CPU axis retains the census's target-scoped fixture
+recipes (including `haswell` and `skylake-avx512`); the manifest CPU is the
+fallback, not a requirement that every row use the same profile. Independent
+census replay authenticates each row's CPU recipe. The execution plan's numeric
+CPU remains the separately admitted host affinity, not a code-generation profile.
+Validator report shard directories may be absolute inside the evidence root or
+normalized relative paths; replay rejects missing directories and symlinks. When
+the report binds independent reference supplements, replay enables the existing
+census supplement validator and compares every supplement identity. Direct
+reference failures remain retained. A non-object control's source-owned skip
+reason remains distinct from its final platform-execution applicability; both
+are independently replayed rather than requiring their labels to coincide. Validation parses the whole array, rejects duplicate
 identities, recomputes its count and all axes, and derives the aggregate,
 slice and cell members for each simultaneous `round-1`, `round-2` and `pooled`
 statistical family. The family also binds cell counts and canonical identity
@@ -210,9 +226,14 @@ invalid, not wins.
 The primary aggregate upper bound is `1.02` for compiler wall time, `1.02` for
 peak RSS, `1.01` for generated code bytes, and `1.03` for generated runtime.
 Code bytes are deterministic and use the observed exact ratio rather than a
-fabricated confidence interval. If a format cannot identify code sections with
-an existing validated parser, that cell is unavailable until the parser is
-provided; whole-file size cannot be silently substituted.
+fabricated confidence interval. A deterministic zero-byte candidate code
+payload is retained as the integer observation `0` and is valid against a
+positive baseline denominator; no padding or positive-value fabrication is
+permitted. A zero baseline code payload has no ratio denominator and is
+retained as evidence but excluded from the code-ratio population. If a format
+cannot identify code sections with an existing validated parser, that cell is
+unavailable until the parser is provided; whole-file size cannot be silently
+substituted.
 
 Aggregate results are also recomputed separately for every target, target CPU,
 mode, frontend configuration, and artifact stage. Every slice must satisfy the
@@ -371,8 +392,8 @@ is trustworthy.
 
 Both `pre_sample_plan` and `post_aa_binding` carry the same `execution_plan`
 artifact descriptor. Its schema is
-`buster-native-retirement-execution-plan-v1`, integer version `1`. It binds
-`schedule=tp-retirement-block-schedule-v1`, the full uint64 seed, two rounds,
+`buster-native-retirement-execution-plan-v2`, integer version `1`. It binds
+`schedule=tp-retirement-block-schedule-v2`, the full uint64 seed, two rounds,
 pairs per round, two warmups per variant, the logical CPU and native target from
 the admitted profile/qualification/A/A receipts, the canonical performance-row
 digest, and exactly one contract per canonical row. Each row contract binds its
@@ -479,3 +500,41 @@ row; if impact cannot be proven structurally disjoint from the measured path,
 rerun the complete family. Limits may be changed only by a new versioned
 maintainer decision made before seeing the replacement result. Version 1 must
 never be edited after binding to widen a threshold or excuse an observed row.
+
+## Eligibility replay regression (#929)
+
+The optional full-census regression consumes an extracted, independently
+hash-verified census ZIP. It relocates only report path metadata, invokes the
+production schema-2 validator with its original gates and supplement mode,
+compares every non-path field and all three applicability/residual files, and
+checks every compiler schedule coordinate using the approved 2 warmups and
+2 rounds of 60 pairs. It never executes or fabricates performance measurements.
+
+```sh
+BUSTER_RETIREMENT_CENSUS_ROOT=/absolute/path/to/extracted-archive \
+BUSTER_RETIREMENT_RECORDED_ROOT=/home/runner/work/buster/buster/candidate \
+python3 tools/native_retirement_performance_eligibility_test.py -v
+```
+
+On 2026-09-22, artifact `10621310872` from run `35555863719` was downloaded
+and verified at 514,260,140 bytes, SHA-256
+`406c799dea5650ac49070e2493343868abc89c45a16873609a59986525c764fd`.
+It records compiler source `351542e826cae7ff1ebe8bfab8e0fb69b5e37446`;
+this is historical census evidence, not a measurement of current main.
+Independent replay retained all 78,912 rows, including all six registered
+controls / 1,152 rows. The compiler projection contains 72,672 eligible and
+6,240 untimed rows; its complete schedule has 17,731,968 invocations. CPU
+profiles are `baseline`, `haswell`, and `skylake-avx512`.
+
+The archive also contains a real empty-code object: row 20737,
+`tests/basic_c_driver.c`, `x86_64-unknown-linux-gnu`, `mir-stack`, group 5184
+in shard 0. Its file is 2,216 bytes with SHA-256
+`09c7f0f0c3eb38de3947117f62ccd424e9599434876ae2d6015d02aa22c6cfc5`;
+`readelf -SW` independently reports `.text` size zero. Object-file size is
+therefore not a substitute for the code-section denominator.
+
+This regression proves full-census compiler scheduling and census replay. It
+does not cover the complete service-produced object/link/execute performance
+bundle, supervisor transcripts, or a qualified-host performance verdict. Those
+require the remaining #881/#923 producers and #512 execution; do not label this
+diagnostic as that end-to-end acceptance evidence.

@@ -6,7 +6,7 @@
 // rather than guessing. compiler_driver_execute_invocation then runs the
 // selected pipeline: compiler_driver_execute_c_single carries a C input
 // through preprocess, parse, lowering, codegen, and object/executable
-// output (with -emit-llvm, Wasm64, and eBPF as alternate emissions), the
+// output (with -emit-llvm, WebAssembly, and eBPF as alternate emissions), the
 // compiler_driver_preprocess_text serializer keeps -E line structure while
 // guarding every apparent adjacency with the C lexical-boundary rules, the
 // dynamic-library plumbing around compiler_driver_dynamic_libraries
@@ -47,6 +47,22 @@ void compiler_prewarm(void)
 {
     c_prewarm();
     codegen_prewarm();
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_target_is_wasm(Target target)
+{
+    return target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_WASM64;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_target_is_supported_wasm(Target target)
+{
+    return (target.cpu_arch == CPU_ARCH_WASM32 && target.os == OPERATING_SYSTEM_WASI) ||
+           (target.cpu_arch == CPU_ARCH_WASM64 && target.os == OPERATING_SYSTEM_FREESTANDING);
+}
+
+BUSTER_GLOBAL_LOCAL WasmOptions compiler_driver_wasm_options(Target target)
+{
+    return target.cpu_arch == CPU_ARCH_WASM32 ? WASM32_WASI_OPTIONS_DEFAULT : WASM64_OPTIONS_DEFAULT;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_windows_runtime_object_target(Target target)
@@ -777,22 +793,33 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_append_system_includes(Arena* arena, Co
 #endif
     if (invocation->sysroot.length)
     {
-        invocation->system_include_paths[invocation->system_include_path_count++] = string_format(arena, S8("{S8}/usr/local/include"), invocation->sysroot);
-        if (invocation->target.os == OPERATING_SYSTEM_LINUX || invocation->target.os == OPERATING_SYSTEM_ANDROID)
-        {
-            String8 multiarch = invocation->target.cpu_arch == CPU_ARCH_AARCH64
-                                    ? (invocation->target.os == OPERATING_SYSTEM_ANDROID ? S8("aarch64-linux-android") : S8("aarch64-linux-gnu"))
-                                    : (invocation->target.os == OPERATING_SYSTEM_ANDROID ? S8("x86_64-linux-android") : S8("x86_64-linux-gnu"));
-            invocation->system_include_paths[invocation->system_include_path_count++] =
-                string_format(arena, S8("{S8}/usr/include/{S8}"), invocation->sysroot, multiarch);
-        }
-        else if (invocation->target.os == OPERATING_SYSTEM_WINDOWS)
+        if (invocation->target.os == OPERATING_SYSTEM_WASI)
         {
             invocation->system_include_paths[invocation->system_include_path_count++] =
-                string_format(arena, S8("{S8}/x86_64-w64-mingw32/include"), invocation->sysroot);
+                string_format(arena, S8("{S8}/include/wasm32-wasip1"), invocation->sysroot);
+            invocation->system_include_paths[invocation->system_include_path_count++] =
+                string_format(arena, S8("{S8}/include/wasm32-wasi"), invocation->sysroot);
             invocation->system_include_paths[invocation->system_include_path_count++] = string_format(arena, S8("{S8}/include"), invocation->sysroot);
         }
-        invocation->system_include_paths[invocation->system_include_path_count++] = string_format(arena, S8("{S8}/usr/include"), invocation->sysroot);
+        else
+        {
+            invocation->system_include_paths[invocation->system_include_path_count++] = string_format(arena, S8("{S8}/usr/local/include"), invocation->sysroot);
+            if (invocation->target.os == OPERATING_SYSTEM_LINUX || invocation->target.os == OPERATING_SYSTEM_ANDROID)
+            {
+                String8 multiarch = invocation->target.cpu_arch == CPU_ARCH_AARCH64
+                                        ? (invocation->target.os == OPERATING_SYSTEM_ANDROID ? S8("aarch64-linux-android") : S8("aarch64-linux-gnu"))
+                                        : (invocation->target.os == OPERATING_SYSTEM_ANDROID ? S8("x86_64-linux-android") : S8("x86_64-linux-gnu"));
+                invocation->system_include_paths[invocation->system_include_path_count++] =
+                    string_format(arena, S8("{S8}/usr/include/{S8}"), invocation->sysroot, multiarch);
+            }
+            else if (invocation->target.os == OPERATING_SYSTEM_WINDOWS)
+            {
+                invocation->system_include_paths[invocation->system_include_path_count++] =
+                    string_format(arena, S8("{S8}/x86_64-w64-mingw32/include"), invocation->sysroot);
+                invocation->system_include_paths[invocation->system_include_path_count++] = string_format(arena, S8("{S8}/include"), invocation->sysroot);
+            }
+            invocation->system_include_paths[invocation->system_include_path_count++] = string_format(arena, S8("{S8}/usr/include"), invocation->sysroot);
+        }
     }
     else if (invocation->target.cpu_arch == target_native.cpu_arch && invocation->target.os == target_native.os)
     {
@@ -865,6 +892,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     String8 architecture_option = {0};
     bool options_ended = false;
     bool action_seen = false;
+    String8 position_independent_executable_option = {0};
+    bool common_storage_requested = false;
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
         String8 argument = arguments.pointer[argument_index];
@@ -1370,6 +1399,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.disable_target_local_promotion = string_equal(argument, S8("-fno-target-local-promotion"));
             continue;
         }
+        if (string_equal(argument, S8("-fcommon")) || string_equal(argument, S8("-fno-common")))
+        {
+            common_storage_requested = string_equal(argument, S8("-fcommon"));
+            continue;
+        }
         // Register allocation is independent of source-level optimization:
         // like LLVM, -O0 still uses the low-latency allocator. QUALITY stays
         // out of the optimization-level mapping because it does not yet beat
@@ -1543,16 +1577,18 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         // an offset from the thread pointer, and it decides how every other
         // reference to an interposable symbol is spelled: through the GOT for
         // an address and the PLT for a direct call. -fno-pic asks for the
-        // rip-relative forms back. -fPIE/-fpie stay accepted and inert on
-        // purpose -- a position-independent executable's own thread-local
-        // block is still the initial one, its own definitions are not
-        // interposable, its references to another image's data are what the
-        // linker's copy relocation is for, and every reference this compiler
-        // emits is already rip-relative, so that model asks for no code this
-        // one does not already produce.
+        // rip-relative forms back. PIE-specific reference selection is not
+        // implemented for x86-64 ELF, so -fPIE/-fpie are rejected there
+        // instead of being silently ignored; other targets keep their prior
+        // accepted no-op behavior.
         if (string_equal(argument, S8("-fPIC")) || string_equal(argument, S8("-fpic")))
         {
             invocation.position_independent = true;
+            continue;
+        }
+        if (string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie")))
+        {
+            position_independent_executable_option = argument;
             continue;
         }
         if (string_equal(argument, S8("-fno-pic")))
@@ -1570,10 +1606,9 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         bool compatible_codegen_option =
             string_equal(argument, S8("-pipe")) || string_equal(argument, S8("-pthread")) ||
-            string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie")) ||
             string_equal(argument, S8("-fno-pie")) || string_equal(argument, S8("-fno-builtin")) ||
             string_equal(argument, S8("-fwrapv")) || string_equal(argument, S8("-fno-strict-aliasing")) || string_equal(argument, S8("-funsigned-char")) ||
-            string_equal(argument, S8("-fsigned-char")) || string_equal(argument, S8("-fcommon")) || string_equal(argument, S8("-fno-common")) ||
+            string_equal(argument, S8("-fsigned-char")) ||
             // Buster emits no stack-protector prologue, so the disabling
             // spelling is already what it does. A libc asks for it on the
             // translation units that run before thread-local storage exists,
@@ -1605,6 +1640,19 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         {
             compiler_driver_resolve_native_target(arena, &invocation, architecture_option, feature_overrides, feature_override_count);
         }
+    }
+    // No canonical object field carries common-storage intent. Reject only an
+    // effective request when this invocation will emit a code-generation artifact;
+    // preprocessing and syntax-only checks have no storage representation to lose.
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && common_storage_requested &&
+        invocation.action != COMPILER_DRIVER_ACTION_PREPROCESS && invocation.action != COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), S8("-fcommon"));
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && position_independent_executable_option.length && !invocation.has_gpu_target &&
+        invocation.target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(invocation.target) == OBJECT_FORMAT_ELF64)
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), position_independent_executable_option);
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.emit_llvm_bitcode &&
         (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
@@ -2841,6 +2889,10 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_object_path(Arena* arena, St
 
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_llvm_target_triple(Target target)
 {
+    if (target.cpu_arch == CPU_ARCH_WASM32)
+    {
+        return (String8){0};
+    }
     if (target.cpu_arch == CPU_ARCH_WASM64)
     {
         return S8("wasm64-unknown-unknown");
@@ -2870,6 +2922,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_llvm_target_triple(Target target)
             return aarch64 ? (String8){0} : S8("x86_64-unknown-windows");
         case OPERATING_SYSTEM_FREESTANDING:
             return aarch64 ? S8("aarch64-unknown-none") : S8("x86_64-unknown-none");
+        case OPERATING_SYSTEM_WASI:
         case OPERATING_SYSTEM_COUNT:
             break;
         }
@@ -2906,6 +2959,8 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_llvm_data_layout(Target target)
             return S8("e-m:w-p:64:64-i32:32-i64:64-i128:128-n32:64-S128-Fn32");
         }
         return S8("e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32");
+    case CPU_ARCH_WASM32:
+        return (String8){0};
     case CPU_ARCH_WASM64:
         return S8("e-m:e-p:64:64-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20");
     case CPU_ARCH_BPFEL:
@@ -2978,7 +3033,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_llvm_bitcode(Arena* arena, Compil
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_wasm64_path(Arena* arena, String8 input)
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_wasm_path(Arena* arena, String8 input)
 {
     u64 extension = input.length;
     for (u64 index = input.length; index != 0; index -= 1)
@@ -3000,26 +3055,28 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_wasm64_path(Arena* arena, St
                                                       });
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm64(Arena* arena, CompilerDriverInvocation invocation, Wasm64Artifact artifact,
-                                                        CompilerDriverResult* result)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriverInvocation invocation, WasmArtifact artifact,
+                                                     CompilerDriverResult* result)
 {
     if (!result)
     {
         return false;
     }
+    result->wasm = artifact;
     result->wasm64 = artifact;
     if (artifact.error.code != WASM64_ERROR_NONE)
     {
-        result->error = COMPILER_DRIVER_ERROR_WASM64;
+        result->error = COMPILER_DRIVER_ERROR_WASM;
         result->diagnostic = artifact.error.diagnostic.length ? artifact.error.diagnostic
                              : artifact.error.message.length  ? artifact.error.message
-                                                               : S8("Wasm64 code generation failed");
+                                                               : S8("WebAssembly code generation failed");
         return false;
     }
-    result->has_wasm64 = true;
+    result->has_wasm = true;
+    result->has_wasm64 = artifact.stats.memory64;
     String8 output = invocation.output_path.length ? invocation.output_path
                      : invocation.action == COMPILER_DRIVER_ACTION_OBJECT
-                         ? compiler_driver_default_wasm64_path(arena, invocation.input_paths[0])
+                         ? compiler_driver_default_wasm_path(arena, invocation.input_paths[0])
                          : S8("a.wasm");
     if (!file_publish(output, artifact.bytes))
     {
@@ -3094,7 +3151,9 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
         {
             result->error = COMPILER_DRIVER_ERROR_OBJECT;
             result->object_error = artifact.error;
-            result->diagnostic = string_format(arena, S8("native object serialization failed with error {u32}"), (u32)artifact.error);
+            result->diagnostic = artifact.error == OBJECT_ERROR_UNSUPPORTED_ALIGNMENT
+                                     ? S8("COFF section alignment exceeds the 8192-byte format limit")
+                                     : string_format(arena, S8("native object serialization failed with error {u32}"), (u32)artifact.error);
             return;
         }
         String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
@@ -3134,8 +3193,8 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
         result->error = COMPILER_DRIVER_ERROR_LINK;
         result->native_link.error = linked.error;
         result->native_link.symbol = linked.symbol;
-        result->diagnostic = linked.symbol.length ? string_format(arena, S8("C object linking failed with error {u32} on symbol '{S8}'"), (u32)linked.error, linked.symbol)
-                                                 : string_format(arena, S8("C object linking failed with error {u32}"), (u32)linked.error);
+        result->diagnostic = linked.symbol.length ? string_format(arena, S8("C object linking failed with {S8} on symbol '{S8}'"), link_error_name(linked.error), linked.symbol)
+                                                 : string_format(arena, S8("C object linking failed with {S8}"), link_error_name(linked.error));
         return;
     }
     String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
@@ -3226,10 +3285,10 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
                                                                                   CPreprocessResult* preprocess, String8 split_source)
 {
     CompilerDriverResult result = {0};
-    if (invocation.emit_llvm_bitcode || invocation.target.cpu_arch == CPU_ARCH_WASM64 || invocation.target.cpu_arch == CPU_ARCH_BPFEL)
+    if (invocation.emit_llvm_bitcode || compiler_driver_target_is_wasm(invocation.target) || invocation.target.cpu_arch == CPU_ARCH_BPFEL)
     {
         result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
-        result.diagnostic = S8("assembly input has no LLVM bitcode, Wasm64, or eBPF emission");
+        result.diagnostic = S8("assembly input has no LLVM bitcode, WebAssembly, or eBPF emission");
         return result;
     }
     AssemblyUnitResult unit = assembly_unit_encode(arena, source,
@@ -3638,10 +3697,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         compiler_driver_write_llvm_bitcode(arena, invocation, artifact, &result);
         goto end;
     }
-    if (invocation.target.cpu_arch == CPU_ARCH_WASM64)
+    if (compiler_driver_target_is_wasm(invocation.target))
     {
-        Wasm64Artifact artifact = wasm64_emit(arena, lowered.program, module, 1);
-        compiler_driver_write_wasm64(arena, invocation, artifact, &result);
+        WasmArtifact artifact = wasm_emit(arena, lowered.program, module, 1, compiler_driver_wasm_options(invocation.target));
+        compiler_driver_write_wasm(arena, invocation, artifact, &result);
         goto end;
     }
     if (invocation.target.cpu_arch == CPU_ARCH_BPFEL)
@@ -3695,8 +3754,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         if (mir_trace.invalid_mir)
         {
             result.error = COMPILER_DRIVER_ERROR_IR;
-            result.diagnostic = string_format(arena, S8("bootstrap MIR validation failed in '{S8}': error {u32}, block {u32}, instruction {u32}, operand {u32}"),
-                                              mir_trace.invalid_function, (u32)mir_trace.invalid_validation.error, mir_trace.invalid_validation.block,
+            result.diagnostic = string_format(arena, S8("bootstrap MIR validation failed in '{S8}': error {u32} ({S8}), block {u32}, instruction {u32}, operand {u32}"),
+                                              mir_trace.invalid_function, (u32)mir_trace.invalid_validation.error,
+                                              machine_verify_error_name(mir_trace.invalid_validation.error), mir_trace.invalid_validation.block,
                                               mir_trace.invalid_validation.instruction, mir_trace.invalid_validation.operand);
             goto end;
         }
@@ -3773,10 +3833,19 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             .code = compiler_driver_codegen_error_name(code.error), .backend = &backend,
             .primary = compiler_driver_backend_location(lowered.program, module, code.failed_function, code.failed_instruction),
         };
-        diagnostic.message = string_format(arena,
-            S8("C code generation refused: kind={S8} target={S8} allocator={S8} reason={S8} function='{S8}' opcode={S8} operation={S8}"),
-            diagnostic.code, backend.target, backend.allocator, backend.reason.length ? backend.reason : S8("not-applicable"),
-            backend.function, backend.opcode, backend.operation);
+        diagnostic.message = code.failed_machine_verification.error != MACHINE_VERIFY_NONE
+            ? string_format(arena,
+                S8("C code generation refused: kind={S8} target={S8} allocator={S8} reason={S8} function='{S8}' opcode={S8} operation={S8} verifier={S8} error={S8} ({u32}) block={u32} instruction={u32} operand={u32}"),
+                diagnostic.code, backend.target, backend.allocator, backend.reason.length ? backend.reason : S8("not-applicable"),
+                backend.function, backend.opcode, backend.operation,
+                code.failed_machine_scheduled ? S8("scheduled-mir") : S8("selected-mir"),
+                machine_verify_error_name(code.failed_machine_verification.error),
+                (u32)code.failed_machine_verification.error, code.failed_machine_verification.block,
+                code.failed_machine_verification.instruction, code.failed_machine_verification.operand)
+            : string_format(arena,
+                S8("C code generation refused: kind={S8} target={S8} allocator={S8} reason={S8} function='{S8}' opcode={S8} operation={S8}"),
+                diagnostic.code, backend.target, backend.allocator, backend.reason.length ? backend.reason : S8("not-applicable"),
+                backend.function, backend.opcode, backend.operation);
         compiler_driver_collect_diagnostic(warnings, diagnostic);
         result.error = COMPILER_DRIVER_ERROR_CODEGEN;
         result.diagnostic = compiler_diagnostic_render(arena, diagnostic);
@@ -4123,34 +4192,46 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             }
         }
     }
-    if (invocation.target.cpu_arch == CPU_ARCH_WASM64)
+    if (invocation.target.cpu_arch == CPU_ARCH_WASM32 && invocation.emit_llvm_bitcode)
     {
-        if (invocation.target.os != OPERATING_SYSTEM_FREESTANDING)
+        result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        result.diagnostic = S8("-emit-llvm does not support wasm32-wasip1; use direct WebAssembly module output");
+        goto finish;
+    }
+    if (compiler_driver_target_is_wasm(invocation.target))
+    {
+        if (!compiler_driver_target_is_supported_wasm(invocation.target))
         {
             result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-            result.diagnostic = S8("Wasm64 currently requires the wasm64-unknown-freestanding target");
+            result.diagnostic = S8("direct WebAssembly output supports wasm32-wasip1 and wasm64-unknown-freestanding");
             goto finish;
         }
         if (invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY)
         {
             result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-            result.diagnostic = S8("-S is not supported for direct Wasm64 module output");
+            result.diagnostic = S8("-S is not supported for direct WebAssembly module output");
             goto finish;
         }
         if (invocation.input_count > 1 || invocation.library_count || invocation.library_path_count || invocation.framework_count ||
             invocation.framework_path_count || invocation.linker_argument_count)
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
-            result.diagnostic = S8("Wasm64 accepts one source program and no native objects, archives, libraries, frameworks, or linker arguments");
+            result.diagnostic = S8("WebAssembly accepts one source program and no native objects, archives, libraries, frameworks, or linker arguments");
             goto finish;
         }
         if (invocation.input_count &&
             (compiler_driver_object_input(invocation.input_paths[0]) || compiler_driver_archive_input(invocation.input_paths[0])))
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
-            result.diagnostic = S8("native objects and archives cannot be linked into a Wasm64 module");
+            result.diagnostic = S8("native objects and archives cannot be linked into a WebAssembly module");
             goto finish;
         }
+    }
+    else if (invocation.target.os == OPERATING_SYSTEM_WASI)
+    {
+        result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        result.diagnostic = S8("WASI Preview 1 requires the wasm32-wasip1 target");
+        goto finish;
     }
     if (invocation.target.cpu_arch == CPU_ARCH_BPFEL)
     {
@@ -4700,8 +4781,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.error = COMPILER_DRIVER_ERROR_LINK;
         result.native_link.error = linked.error;
         result.native_link.symbol = linked.symbol;
-        result.diagnostic = linked.symbol.length ? string_format(arena, S8("C object linking failed with error {u32} on symbol '{S8}'"), (u32)linked.error, linked.symbol)
-                                                 : string_format(arena, S8("C object linking failed with error {u32}"), (u32)linked.error);
+        result.diagnostic = linked.symbol.length ? string_format(arena, S8("C object linking failed with {S8} on symbol '{S8}'"), link_error_name(linked.error), linked.symbol)
+                                                 : string_format(arena, S8("C object linking failed with {S8}"), link_error_name(linked.error));
         goto finish;
     }
     result.object = linked.object;

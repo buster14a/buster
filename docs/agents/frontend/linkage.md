@@ -25,6 +25,18 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   data, so reused arenas produce the same bytes as fresh mappings. The zeroed
   arena allocation clears only the dirty overlap. BSS and thread-local BSS
   keep their virtual sizes without allocating serialized storage (GitHub #303).
+- **COFF section alignment is a linker placement contract.** A nonzero
+  `ObjectSection.alignment` is preserved in `IMAGE_SCN_ALIGN_*`; zero resolves
+  through `object_section_default_alignment` for that kind. COFF represents
+  powers of two from 1 through 8192 bytes, so the writer rejects a stronger
+  requirement instead of clamping it. Initializer and unwind sections keep
+  their 8-byte defaults, Windows pdata/xdata keep 4-byte defaults, and a
+  stronger valid request still wins. `PointerToRawData` remains four-byte
+  aligned because its file offset is separate from the linker's in-memory
+  placement. The registered object test parses emitted section-header bytes
+  directly. On Windows x64, the driver regression puts a prior data contribution
+  before an aligned C global, links both into a DLL, and checks the exported
+  symbol's RVA; it also checks that a rejected alignment does not replace output.
 - **A read-only object that carries a relocation is laid out with the writable
   data.** `const` is the frontend's answer and the object writer's read-only
   section is where it usually goes, but those bytes are written when the

@@ -1666,15 +1666,22 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         if (helper_escaped) { BUSTER_TEST(arguments, os_file_delete(escaped_sentinel)); }
     }
 
-    // A hot inherited writer keeps poll continuously readable. Deadline
-    // enforcement is independent of readability: the owner kills the group,
-    // proves every member quiescent, and drains the captured pipe to EOF.
+    // A hot inherited writer keeps poll continuously readable. Wait until its
+    // first output is written before starting the deadline, so a slow shell
+    // startup cannot make the output assertion depend on scheduler timing.
+    // The owner kills the group, proves every member quiescent, and drains
+    // the captured pipe to EOF.
     {
         u64 position = arguments->arena->position;
+        String8 ready = buster_test_temporary_path(arguments->arena, S8("buster-hot-writer-ready"), S8(".txt"));
+        BUSTER_TEST(arguments, os_file_delete(ready));
         String8 spawn_arguments[] = {
             S8("/bin/sh"),
             S8("-c"),
-            S8("while :; do printf 0123456789abcdef0123456789abcdef; done"),
+            S8("printf 0123456789abcdef0123456789abcdef || exit 90; printf ready > \"$1\" || exit 90; "
+               "while :; do printf 0123456789abcdef0123456789abcdef; done"),
+            S8("hot-writer-helper"),
+            ready,
         };
         ProcessSpawnOptions options = {
             .capture = (u64)1 << STANDARD_STREAM_OUTPUT,
@@ -1686,13 +1693,18 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, spawn.handle != 0 && spawn.process_group);
         if (spawn.handle)
         {
-            ProcessWaitResult wait_result = os_process_wait_deadline(arguments->arena, spawn, 100000);
-            BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_FAILED);
-            BUSTER_TEST(arguments, wait_result.timed_out);
-            BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_OUTPUT].length > 0);
-            BUSTER_TEST(arguments, !wait_result.process_group_reservation_retained);
-            BUSTER_TEST(arguments, !wait_result.process_group_ownership_lost);
+            OsTestProcessTreeWait tree = os_test_process_tree_wait(arguments->arena, spawn, ready, 3000, 10, 100000);
+            BUSTER_TEST(arguments, tree.ready);
+            if (tree.ready)
+            {
+                BUSTER_TEST(arguments, tree.waited.result == PROCESS_RESULT_FAILED);
+                BUSTER_TEST(arguments, tree.waited.timed_out);
+                BUSTER_TEST(arguments, tree.waited.streams[STANDARD_STREAM_OUTPUT].length > 0);
+                BUSTER_TEST(arguments, !tree.waited.process_group_reservation_retained);
+                BUSTER_TEST(arguments, !tree.waited.process_group_ownership_lost);
+            }
         }
+        BUSTER_TEST(arguments, os_file_delete(ready));
         arena_set_position(arguments->arena, position);
     }
 

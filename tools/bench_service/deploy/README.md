@@ -12,7 +12,8 @@ selects the authenticated long-lived `serve` endpoint, not the one-shot
 `worker-run` CLI. The installed service includes the fixed gateway and
 [bounded result exporter](../EXPORT.md); this directory still supplies no
 runner authorization, durable publication destination or physical-host
-qualification.
+qualification. The constrained broker design and operator checks are in
+[SYSTEMD_BROKER.md](SYSTEMD_BROKER.md).
 
 The installed executable must be the reviewed `bench_service` binary at
 `/usr/local/libexec/buster-bench-service`. The queue, workspace root and stable
@@ -75,11 +76,10 @@ directory before a no-replace directory publication. The workspace parent is
 SGID to the candidate group so materialized source/build descendants inherit
 the intended group without a request-controlled chown or path.
 
-Do not enable the service yet. This change supplies the fixed recipe boundary
-but does not install dependencies, run systemd, qualify a host or claim a
-successful performance measurement. Live-systemd qualification and narrowly
-service authorization remain explicit operator work; no request field is
-executable.
+Do not enable the service yet. The broker socket, binary, root-owned lease
+identity and service dependencies must be installed and independently reviewed
+as one exact set. These references do not qualify a host or claim a successful
+performance measurement. No request field is executable.
 
 The reference service needs no Linux capability and explicitly empties both
 capability sets. It retains only local `AF_UNIX` access for the system manager,

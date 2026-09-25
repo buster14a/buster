@@ -1,6 +1,28 @@
 #include <buster/lib/compiler/codegen/machine_schedule_internal.h>
 #include <buster/lib/simd.h>
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL void machine_schedule_trace_event(MachineScheduleTrace* trace, u32 kind, u32 subject, s32 value, u32 extra)
+{
+    if (trace)
+    {
+        if (trace->event_count < trace->event_capacity)
+        {
+            trace->events[trace->event_count] = (MachineScheduleTraceEvent){.kind = kind, .subject = subject, .value = value, .extra = extra};
+            trace->event_count += 1;
+        }
+        else
+        {
+            trace->dropped += 1;
+        }
+    }
+}
+#define MACHINE_SCHEDULE_TRACE_EVENT(trace, kind, subject, value, extra) \
+    machine_schedule_trace_event((trace), (kind), (subject), (value), (extra))
+#else
+#define MACHINE_SCHEDULE_TRACE_EVENT(trace, kind, subject, value, extra) ((void)0)
+#endif
+
 MachineLineMark* machine_schedule_remap_line_marks(Arena* arena, Arena* scratch_arena,
                                                    MachineLineMark const* marks, u32 mark_count,
                                                    u32 const* new_rows, u32 row_count)
@@ -339,8 +361,19 @@ struct MachineScheduleQueue
     u32 block_first_instruction;
     u32 const* unit_first_rows;
     u32 const* unit_row_counts;
-    u32 const* demand_epochs;
+    // Every virtual-register operand occurrence of the block in unit, row
+    // and slot order: unit u owns [unit_occurrence_offsets[u],
+    // unit_occurrence_offsets[u + 1]). Duplicates are kept; growth counts
+    // occurrences, not distinct values.
+    u32 const* unit_occurrence_offsets;
+    u32 const* occurrence_registers;
+    u8 const* occurrence_roles;
+    u32* demand_epochs;
     u32 demand_epoch;
+    u32 const* vreg_slots;
+    u32 const* slot_touch_offsets;
+    u32 const* touch_units;
+    u8 const* unit_states;
     u32* unit_seqs;
     u32* entry_units;
     u32* entry_seqs;
@@ -353,12 +386,35 @@ struct MachineScheduleQueue
     u32 bucket_heads[33];
     u32 minimum_bucket;
     bool overflow;
+#if BUSTER_INCLUDE_TESTS
+    MachineScheduleTrace* trace;
+#endif
 };
+
+#define MACHINE_SCHEDULE_OCCURRENCE_USES 1u
+#define MACHINE_SCHEDULE_OCCURRENCE_DEFINES 2u
 
 // How many more values stay live once this unit is placed: every operand it
 // defines that something below already demands is retired, and every operand
 // it uses that nothing below demands yet is newly born.
 BUSTER_GLOBAL_LOCAL s32 machine_schedule_queue_growth(MachineScheduleQueue const* queue, u32 candidate_unit)
+{
+    s32 growth = 0;
+    for (u32 occurrence = queue->unit_occurrence_offsets[candidate_unit]; occurrence < queue->unit_occurrence_offsets[candidate_unit + 1];
+         occurrence += 1)
+    {
+        u32 roles = queue->occurrence_roles[occurrence];
+        bool demanded = queue->demand_epochs[queue->occurrence_registers[occurrence]] == queue->demand_epoch;
+        growth -= (roles & MACHINE_SCHEDULE_OCCURRENCE_DEFINES) != 0 && demanded;
+        growth += (roles & MACHINE_SCHEDULE_OCCURRENCE_USES) != 0 && !demanded;
+    }
+    return growth;
+}
+
+#if BUSTER_INCLUDE_TESTS
+// The descriptor-decoding growth the occurrence stream replaced, retained as
+// the trace oracle.
+BUSTER_GLOBAL_LOCAL s32 machine_schedule_queue_growth_reference(MachineScheduleQueue const* queue, u32 candidate_unit)
 {
     s32 growth = 0;
     u32 candidate_first = queue->unit_first_rows[candidate_unit];
@@ -381,18 +437,26 @@ BUSTER_GLOBAL_LOCAL s32 machine_schedule_queue_growth(MachineScheduleQueue const
     }
     return growth;
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL void machine_schedule_queue_push(MachineScheduleQueue* queue, u32 pushed_unit)
 {
     if (queue->entry_count == queue->entry_capacity)
     {
         queue->overflow = true;
+        MACHINE_SCHEDULE_TRACE_EVENT(queue->trace, MACHINE_SCHEDULE_TRACE_OVERFLOW, pushed_unit, 0, 0);
         return;
     }
     // MIN/MAX may evaluate their operands more than once; scan the unit once.
+#if BUSTER_INCLUDE_TESTS
+    s32 growth = queue->trace && queue->trace->reference ? machine_schedule_queue_growth_reference(queue, pushed_unit)
+                                                         : machine_schedule_queue_growth(queue, pushed_unit);
+#else
     s32 growth = machine_schedule_queue_growth(queue, pushed_unit);
+#endif
     u32 bucket = (u32)(BUSTER_MAX(BUSTER_MIN(growth, 16), -16) + 16);
     queue->unit_seqs[pushed_unit] += 1;
+    MACHINE_SCHEDULE_TRACE_EVENT(queue->trace, MACHINE_SCHEDULE_TRACE_PUSH, pushed_unit, growth, queue->unit_seqs[pushed_unit]);
     queue->entry_units[queue->entry_count] = pushed_unit;
     queue->entry_seqs[queue->entry_count] = queue->unit_seqs[pushed_unit];
     queue->entry_next[queue->entry_count] = queue->bucket_heads[bucket];
@@ -401,8 +465,38 @@ BUSTER_GLOBAL_LOCAL void machine_schedule_queue_push(MachineScheduleQueue* queue
     queue->minimum_bucket = BUSTER_MIN(queue->minimum_bucket, bucket);
 }
 
-MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function)
+// One demand transition of a virtual register: record it, then re-push the
+// ready units touching the value so their queue positions stay exact.
+BUSTER_GLOBAL_LOCAL void machine_schedule_queue_transition(MachineScheduleQueue* queue, u32 virtual_register, u32 direction)
 {
+    queue->demand_epochs[virtual_register] = direction ? queue->demand_epoch : 0;
+    u32 value_slot = queue->vreg_slots[virtual_register];
+    u32 touch_begin = queue->slot_touch_offsets[value_slot];
+    u32 touch_end = queue->slot_touch_offsets[value_slot + 1];
+    MACHINE_SCHEDULE_TRACE_EVENT(queue->trace, MACHINE_SCHEDULE_TRACE_TRANSITION, virtual_register, (s32)direction, touch_end - touch_begin);
+    // A widely-touched value — a hot promoted local — transitions once per
+    // touch, and refreshing all its touchers each time is quadratic; past the
+    // cap its touchers keep their last pushed growth, a heuristic staleness
+    // the excess gate still checks.
+    if (touch_end - touch_begin <= 16)
+    {
+        for (u32 touch_index = touch_begin; touch_index < touch_end; touch_index += 1)
+        {
+            if (queue->unit_states[queue->touch_units[touch_index]] == 1)
+            {
+                machine_schedule_queue_push(queue, queue->touch_units[touch_index]);
+            }
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL MachineScheduleResult machine_schedule_function_core(Arena* arena, MachineFunction* function, MachineScheduleTrace* trace)
+{
+#if BUSTER_INCLUDE_TESTS
+    bool reference = trace && trace->reference;
+#else
+    (void)trace;
+#endif
     MachineScheduleResult result = {
         .function = *function,
     };
@@ -589,6 +683,12 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                 u32 touch_capacity = 4 * maximum_block_rows + 4;
                 u32* slot_touch_offsets = arena_allocate(scratch.arena, u32, touch_capacity + 1);
                 u32* touch_units = arena_allocate(scratch.arena, u32, touch_capacity);
+                // Each row contributes at most four occurrences, so the touch
+                // capacity also bounds the block's occurrence stream.
+                u32* unit_occurrence_offsets = arena_allocate(scratch.arena, u32, maximum_block_rows + 1);
+                u32* occurrence_registers = arena_allocate(scratch.arena, u32, touch_capacity);
+                u8* occurrence_roles = arena_allocate(scratch.arena, u8, touch_capacity);
+                MachineOpcodeRow const* opcode_rows = machine_opcode_row_table();
                 // Per-virtual-register block-local dependence tracking, epoch-stamped:
                 // the last defining unit for single-definition values, the last touching
                 // unit for multi-definition ones.
@@ -858,54 +958,58 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                     }
                     predecessor_offsets[0] = 0;
                     // Touch lists for the eager growth updates: for every value the
-                    // block touches, the units touching it, in compact slots.
+                    // block touches, the units touching it, in compact slots. The same
+                    // walk records the block's occurrence stream, with roles projected
+                    // from the opcode rows: a USE_DEFINE slot both uses and defines.
                     u32 slot_count = 0;
+                    u32 occurrence_count = 0;
                     slot_touch_offsets[0] = 0;
-                    for (u32 pass = 0; pass < 2; pass += 1)
+                    for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
                     {
-                        for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
+                        unit_occurrence_offsets[unit_index] = occurrence_count;
+                        u32 first_row = unit_first_rows[unit_index];
+                        for (u32 unit_row = 0; unit_row < unit_row_counts[unit_index]; unit_row += 1)
                         {
-                            u32 first_row = unit_first_rows[unit_index];
-                            for (u32 unit_row = 0; unit_row < unit_row_counts[unit_index]; unit_row += 1)
+                            MachineInstruction* instruction = function->instructions + block->first_instruction + first_row + unit_row;
+                            MachineOpcodeRow const* opcode_row = opcode_rows + instruction->opcode;
+                            u32 role_lanes = opcode_row->role_lanes;
+                            for (u32 slot = 0; slot < opcode_row->operand_count; slot += 1)
                             {
-                                MachineInstruction* instruction = function->instructions + block->first_instruction + first_row + unit_row;
-                                MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-                                for (u32 slot = 0; slot < info->operand_count; slot += 1)
+                                if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_VIRTUAL_REGISTER)
                                 {
-                                    if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_VIRTUAL_REGISTER)
-                                    {
-                                        continue;
-                                    }
-                                    u32 virtual_register = machine_ref_payload(instruction->operands[slot]);
-                                    if (vreg_slot_epochs[virtual_register] != 2 * epoch + pass)
-                                    {
-                                        vreg_slot_epochs[virtual_register] = 2 * epoch + pass;
-                                        vreg_slots[virtual_register] = pass ? vreg_slots[virtual_register] : slot_count;
-                                        slot_count += pass ? 0 : 1;
-                                        if (!pass)
-                                        {
-                                            slot_touch_offsets[slot_count] = 0;
-                                        }
-                                    }
-                                    u32 value_slot = vreg_slots[virtual_register];
-                                    if (pass)
-                                    {
-                                        touch_units[slot_touch_offsets[value_slot]] = unit_index;
-                                        slot_touch_offsets[value_slot] += 1;
-                                    }
-                                    else
-                                    {
-                                        slot_touch_offsets[value_slot + 1] += 1;
-                                    }
+                                    continue;
                                 }
+                                u32 virtual_register = machine_ref_payload(instruction->operands[slot]);
+                                u32 uses = (role_lanes >> (MACHINE_OPCODE_ROW_USE_SHIFT + slot)) & 1u;
+                                u32 defines = ((role_lanes >> (MACHINE_OPCODE_ROW_DEFINE_SHIFT + slot)) |
+                                               (role_lanes >> (MACHINE_OPCODE_ROW_USE_DEFINE_SHIFT + slot))) & 1u;
+                                occurrence_registers[occurrence_count] = virtual_register;
+                                occurrence_roles[occurrence_count] = (u8)(uses * MACHINE_SCHEDULE_OCCURRENCE_USES |
+                                                                          defines * MACHINE_SCHEDULE_OCCURRENCE_DEFINES);
+                                occurrence_count += 1;
+                                if (vreg_slot_epochs[virtual_register] != 2 * epoch + 1)
+                                {
+                                    vreg_slot_epochs[virtual_register] = 2 * epoch + 1;
+                                    vreg_slots[virtual_register] = slot_count;
+                                    slot_count += 1;
+                                    slot_touch_offsets[slot_count] = 0;
+                                }
+                                slot_touch_offsets[vreg_slots[virtual_register] + 1] += 1;
                             }
                         }
-                        if (!pass)
+                    }
+                    unit_occurrence_offsets[unit_count] = occurrence_count;
+                    for (u32 slot_index = 0; slot_index < slot_count; slot_index += 1)
+                    {
+                        slot_touch_offsets[slot_index + 1] += slot_touch_offsets[slot_index];
+                    }
+                    for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
+                    {
+                        for (u32 occurrence = unit_occurrence_offsets[unit_index]; occurrence < unit_occurrence_offsets[unit_index + 1]; occurrence += 1)
                         {
-                            for (u32 slot_index = 0; slot_index < slot_count; slot_index += 1)
-                            {
-                                slot_touch_offsets[slot_index + 1] += slot_touch_offsets[slot_index];
-                            }
+                            u32 value_slot = vreg_slots[occurrence_registers[occurrence]];
+                            touch_units[slot_touch_offsets[value_slot]] = unit_index;
+                            slot_touch_offsets[value_slot] += 1;
                         }
                     }
                     for (u32 slot_index = slot_count; slot_index > 0; slot_index -= 1)
@@ -913,6 +1017,67 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                         slot_touch_offsets[slot_index] = slot_touch_offsets[slot_index - 1];
                     }
                     slot_touch_offsets[0] = 0;
+#if BUSTER_INCLUDE_TESTS
+                    // The oracle rebuilds the touch lists with the original
+                    // two-pass descriptor walk.
+                    if (reference)
+                    {
+                        slot_count = 0;
+                        slot_touch_offsets[0] = 0;
+                        for (u32 pass = 0; pass < 2; pass += 1)
+                        {
+                            for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
+                            {
+                                u32 first_row = unit_first_rows[unit_index];
+                                for (u32 unit_row = 0; unit_row < unit_row_counts[unit_index]; unit_row += 1)
+                                {
+                                    MachineInstruction* instruction = function->instructions + block->first_instruction + first_row + unit_row;
+                                    MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                                    for (u32 slot = 0; slot < info->operand_count; slot += 1)
+                                    {
+                                        if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_VIRTUAL_REGISTER)
+                                        {
+                                            continue;
+                                        }
+                                        u32 virtual_register = machine_ref_payload(instruction->operands[slot]);
+                                        if (vreg_slot_epochs[virtual_register] != 2 * epoch + pass)
+                                        {
+                                            vreg_slot_epochs[virtual_register] = 2 * epoch + pass;
+                                            vreg_slots[virtual_register] = pass ? vreg_slots[virtual_register] : slot_count;
+                                            slot_count += pass ? 0 : 1;
+                                            if (!pass)
+                                            {
+                                                slot_touch_offsets[slot_count] = 0;
+                                            }
+                                        }
+                                        u32 value_slot = vreg_slots[virtual_register];
+                                        if (pass)
+                                        {
+                                            touch_units[slot_touch_offsets[value_slot]] = unit_index;
+                                            slot_touch_offsets[value_slot] += 1;
+                                        }
+                                        else
+                                        {
+                                            slot_touch_offsets[value_slot + 1] += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            if (!pass)
+                            {
+                                for (u32 slot_index = 0; slot_index < slot_count; slot_index += 1)
+                                {
+                                    slot_touch_offsets[slot_index + 1] += slot_touch_offsets[slot_index];
+                                }
+                            }
+                        }
+                        for (u32 slot_index = slot_count; slot_index > 0; slot_index -= 1)
+                        {
+                            slot_touch_offsets[slot_index] = slot_touch_offsets[slot_index - 1];
+                        }
+                        slot_touch_offsets[0] = 0;
+                    }
+#endif
                     for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
                     {
                         unit_seqs[unit_index] = 0;
@@ -924,15 +1089,32 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                         .block_first_instruction = block->first_instruction,
                         .unit_first_rows = unit_first_rows,
                         .unit_row_counts = unit_row_counts,
+                        .unit_occurrence_offsets = unit_occurrence_offsets,
+                        .occurrence_registers = occurrence_registers,
+                        .occurrence_roles = occurrence_roles,
                         .demand_epochs = demand_epochs,
                         .demand_epoch = demand_epoch,
+                        .vreg_slots = vreg_slots,
+                        .slot_touch_offsets = slot_touch_offsets,
+                        .touch_units = touch_units,
+                        .unit_states = unit_states,
                         .unit_seqs = unit_seqs,
                         .entry_units = entry_units,
                         .entry_seqs = entry_seqs,
                         .entry_next = entry_next,
                         .entry_capacity = entry_capacity,
                         .minimum_bucket = 33,
+#if BUSTER_INCLUDE_TESTS
+                        .trace = trace,
+#endif
                     };
+#if BUSTER_INCLUDE_TESTS
+                    if (trace && trace->entry_capacity_limit)
+                    {
+                        queue.entry_capacity = BUSTER_MIN(queue.entry_capacity, trace->entry_capacity_limit);
+                    }
+#endif
+                    MACHINE_SCHEDULE_TRACE_EVENT(trace, MACHINE_SCHEDULE_TRACE_BLOCK, block_index, (s32)unit_count, 0);
                     for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
                     {
                         if (!successor_remaining[unit_index])
@@ -955,8 +1137,11 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                         u32 unit_index = entry_units[entry_slot - 1];
                         if (unit_states[unit_index] != 1 || entry_seqs[entry_slot - 1] != unit_seqs[unit_index])
                         {
+                            MACHINE_SCHEDULE_TRACE_EVENT(trace, MACHINE_SCHEDULE_TRACE_STALE, unit_index, (s32)entry_seqs[entry_slot - 1],
+                                                         (u32)unit_states[unit_index] << 24 | unit_seqs[unit_index]);
                             continue;
                         }
+                        MACHINE_SCHEDULE_TRACE_EVENT(trace, MACHINE_SCHEDULE_TRACE_SELECT, unit_index, 0, 0);
                         unit_states[unit_index] = 2;
                         u32 unit_rows = unit_row_counts[unit_index];
                         out_row -= unit_rows;
@@ -966,49 +1151,54 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                         }
                         // Update demand: placed definitions are satisfied, operands are
                         // now needed by everything below; a value both defined and used
-                        // here stays demanded for its producer above. Every transition
-                        // re-pushes the ready units touching the value, so their queue
-                        // positions stay exact.
-                        u32 emitted_first = unit_first_rows[unit_index];
-                        for (u32 direction = 0; direction < 2; direction += 1)
+                        // here stays demanded for its producer above. Occurrences are
+                        // visited in the same unit, row and slot order for both directions.
+#if BUSTER_INCLUDE_TESTS
+                        if (reference)
                         {
-                            for (u32 unit_row = 0; unit_row < unit_rows; unit_row += 1)
+                            u32 emitted_first = unit_first_rows[unit_index];
+                            for (u32 direction = 0; direction < 2; direction += 1)
                             {
-                                MachineInstruction* instruction = function->instructions + block->first_instruction + emitted_first + unit_row;
-                                MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-                                for (u32 slot = 0; slot < info->operand_count; slot += 1)
+                                for (u32 unit_row = 0; unit_row < unit_rows; unit_row += 1)
                                 {
-                                    if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_VIRTUAL_REGISTER)
+                                    MachineInstruction* instruction = function->instructions + block->first_instruction + emitted_first + unit_row;
+                                    MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                                    for (u32 slot = 0; slot < info->operand_count; slot += 1)
                                     {
-                                        continue;
-                                    }
-                                    u32 virtual_register = machine_ref_payload(instruction->operands[slot]);
-                                    u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-                                    bool defines = role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;
-                                    bool uses = role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;
-                                    bool transition = direction ? uses && demand_epochs[virtual_register] != demand_epoch
-                                                                : defines && demand_epochs[virtual_register] == demand_epoch;
-                                    if (!transition)
-                                    {
-                                        continue;
-                                    }
-                                    demand_epochs[virtual_register] = direction ? demand_epoch : 0;
-                                    // A widely-touched value — a hot promoted local —
-                                    // transitions once per touch, and refreshing all its
-                                    // touchers each time is quadratic; past the cap its
-                                    // touchers keep their last pushed growth, a
-                                    // heuristic staleness the excess gate still checks.
-                                    u32 value_slot = vreg_slots[virtual_register];
-                                    if (slot_touch_offsets[value_slot + 1] - slot_touch_offsets[value_slot] > 16)
-                                    {
-                                        continue;
-                                    }
-                                    for (u32 touch_index = slot_touch_offsets[value_slot]; touch_index < slot_touch_offsets[value_slot + 1]; touch_index += 1)
-                                    {
-                                        if (unit_states[touch_units[touch_index]] == 1)
+                                        if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_VIRTUAL_REGISTER)
                                         {
-                                            machine_schedule_queue_push(&queue, touch_units[touch_index]);
+                                            continue;
                                         }
+                                        u32 virtual_register = machine_ref_payload(instruction->operands[slot]);
+                                        u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                                        bool defines = role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;
+                                        bool uses = role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;
+                                        bool transition = direction ? uses && demand_epochs[virtual_register] != demand_epoch
+                                                                    : defines && demand_epochs[virtual_register] == demand_epoch;
+                                        if (!transition)
+                                        {
+                                            continue;
+                                        }
+                                        machine_schedule_queue_transition(&queue, virtual_register, direction);
+                                    }
+                                }
+                            }
+                        }
+                        else
+#endif
+                        {
+                            for (u32 direction = 0; direction < 2; direction += 1)
+                            {
+                                for (u32 occurrence = unit_occurrence_offsets[unit_index]; occurrence < unit_occurrence_offsets[unit_index + 1];
+                                     occurrence += 1)
+                                {
+                                    u32 virtual_register = occurrence_registers[occurrence];
+                                    u32 roles = occurrence_roles[occurrence];
+                                    bool transition = direction ? (roles & MACHINE_SCHEDULE_OCCURRENCE_USES) && demand_epochs[virtual_register] != demand_epoch
+                                                                : (roles & MACHINE_SCHEDULE_OCCURRENCE_DEFINES) && demand_epochs[virtual_register] == demand_epoch;
+                                    if (transition)
+                                    {
+                                        machine_schedule_queue_transition(&queue, virtual_register, direction);
                                     }
                                 }
                             }
@@ -1028,6 +1218,7 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                         for (u32 push_index = 0; push_index < newly_ready_count; push_index += 1)
                         {
                             unit_states[newly_ready[push_index]] = 1;
+                            MACHINE_SCHEDULE_TRACE_EVENT(trace, MACHINE_SCHEDULE_TRACE_READY, newly_ready[push_index], 0, 0);
                             machine_schedule_queue_push(&queue, newly_ready[push_index]);
                         }
                     }
@@ -1036,6 +1227,7 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                     // source order rather than corrupting the block.
                     if (emitted_units != unit_count || out_row != 0)
                     {
+                        MACHINE_SCHEDULE_TRACE_EVENT(trace, MACHINE_SCHEDULE_TRACE_FALLBACK, block_index, 0, 0);
                         for (u32 offset = 0; offset < block_rows; offset += 1)
                         {
                             new_rows[block->first_instruction + offset] = block->first_instruction + offset;
@@ -1069,6 +1261,7 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                         scheduled_excess += machine_schedule_block_excess(function, block->instruction_count, order_scratch, class_capacities, register_classes,
                                                                           function->block_count + block_index + 1, touch_epochs, last_touches, window_deltas);
                     }
+                    MACHINE_SCHEDULE_TRACE_EVENT(trace, MACHINE_SCHEDULE_TRACE_GATE, 0, (s32)scheduled_excess, compared_excess);
                     if (scheduled_excess < compared_excess)
                     {
                         MachineInstruction* scheduled_instructions = arena_allocate(arena, MachineInstruction, row_count);
@@ -1106,3 +1299,15 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
 
     return result;
 }
+
+MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function)
+{
+    return machine_schedule_function_core(arena, function, 0);
+}
+
+#if BUSTER_INCLUDE_TESTS
+MachineScheduleResult machine_schedule_function_traced(Arena* arena, MachineFunction* function, MachineScheduleTrace* trace)
+{
+    return machine_schedule_function_core(arena, function, trace);
+}
+#endif

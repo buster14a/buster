@@ -28,6 +28,8 @@ typedef enum ObjectError
     OBJECT_ERROR_EXECUTABLE_MEMORY,
     // Requested debug information cannot be represented by the target format.
     OBJECT_ERROR_DEBUG_INFO,
+    // A section's requested alignment cannot be represented by its object format.
+    OBJECT_ERROR_UNSUPPORTED_ALIGNMENT,
     OBJECT_ERROR_COUNT,
 } ObjectError;
 
@@ -86,6 +88,13 @@ typedef enum ObjectSymbolKind
     OBJECT_SYMBOL_DATA,
     OBJECT_SYMBOL_COUNT,
 } ObjectSymbolKind;
+
+enum
+{
+    OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN,
+    OBJECT_SYMBOL_THREAD_LOCAL_NO,
+    OBJECT_SYMBOL_THREAD_LOCAL_YES,
+};
 
 typedef enum ObjectRelocationKind
 {
@@ -237,7 +246,10 @@ struct ObjectSymbol
     // the ELF writer and reader carry it -- COFF and Mach-O have no
     // equivalent per-symbol visibility byte.
     bool hidden;
-    u8 reserved;
+    // The ELF symbol type carries TLS identity even when section is undefined.
+    // UNKNOWN is retained for object formats that do not encode this property
+    // on an undefined symbol. This occupies the former reserved byte.
+    u8 thread_local_state;
 };
 
 typedef struct ObjectRelocation ObjectRelocation;

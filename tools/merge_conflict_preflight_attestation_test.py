@@ -138,6 +138,68 @@ class AttestedPreflightTests(unittest.TestCase):
         return preflight.analyze(self.fixture.repo, self.fixture.base, self.head,
                                  retirement_status=status)
 
+    def synthetic_group(self, member, tree=None, first_parent=None):
+        base = self.fixture.base
+        tree = tree or gate.clean_merge_tree(self.fixture.repo, base, member)
+        first_parent = first_parent or base
+        return git(
+            self.fixture.repo, "commit-tree", tree,
+            "-p", first_parent, "-p", member,
+            input_text="synthetic merge group\n",
+        )
+
+    def merge_group_api(self, head=None, state="success"):
+        head = head or self.head
+        base = self.fixture.base
+        status = copy.deepcopy(self.status["statuses"][0])
+        status["state"] = state
+        status["created_at"] = "2026-09-22T00:01:00Z"
+
+        class Api:
+            repository = "buster14a/buster"
+
+            def __init__(self):
+                self.run = {
+                    "id": 1,
+                    "run_attempt": 1,
+                    "repository": {"full_name": self.repository},
+                    "path": ".github/workflows/native-retirement-integration.yml",
+                    "event": "workflow_dispatch",
+                    "head_branch": "main",
+                    "head_sha": base,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "run_started_at": "2026-09-22T00:00:00Z",
+                    "updated_at": "2026-09-22T00:02:00Z",
+                }
+                self.statuses = [status]
+                self.pulls = [{
+                    "number": 1,
+                    "state": "open",
+                    "draft": False,
+                    "head": {"sha": head, "repo": {"full_name": self.repository}},
+                    "base": {"ref": "main", "repo": {"full_name": self.repository}},
+                }]
+
+            def all(self, path, **query):
+                if path == "statuses/" + head:
+                    return self.statuses
+                if path == "commits/" + head + "/pulls":
+                    return self.pulls
+                raise AssertionError((path, query))
+
+            def request(self, path, **query):
+                if path == "actions/runs/1":
+                    return self.run
+                raise AssertionError((path, query))
+
+        return Api()
+
+    def analyze_group(self, group, api, main=None):
+        return preflight.analyze(
+            self.fixture.repo, main or self.fixture.base, group,
+            retirement_event="merge_group", retirement_api=api)
+
     def test_attested_generated_delta_is_clean_and_reported(self):
         report = self.analyze(self.status)
         self.assertFalse(report["outcome"]["blocking"])
@@ -187,6 +249,84 @@ class AttestedPreflightTests(unittest.TestCase):
         self.assertEqual(value["sha"], self.head)
         self.assertEqual(value["statuses"][-1], self.status["statuses"][0])
         self.assertEqual(request.call_count, 2)
+
+    def test_merge_group_api_pagination_supports_the_retirement_gate(self):
+        api = preflight.GitHubApi("buster14a/buster", "test", "https://api.github.com")
+        with mock.patch.object(api, "request", side_effect=[[{}] * 100, [{"id": 101}]]) as request:
+            rows = api.all("commits/" + self.head + "/pulls")
+        self.assertEqual(rows[-1], {"id": 101})
+        self.assertEqual(request.call_count, 2)
+
+    def test_merge_group_api_uses_the_configured_repository_endpoint(self):
+        api = preflight.GitHubApi("buster14a/buster", "test", "https://api.example.invalid")
+        with mock.patch.object(api, "_request", return_value=[]) as request:
+            self.assertEqual(api.all("statuses/" + self.head), [])
+        request.assert_called_once_with(
+            "GET", f"/repos/buster14a/buster/statuses/{self.head}?per_page=100&page=1", None)
+
+    def test_attested_synthetic_merge_group_uses_exact_writer_verification(self):
+        group = self.synthetic_group(self.head)
+        api = self.merge_group_api()
+
+        report = self.analyze_group(group, api)
+
+        self.assertNotEqual(group, self.head)
+        self.assertEqual(gate.tree(self.fixture.repo, group), gate.tree(self.fixture.repo, self.head))
+        self.assertFalse(report["outcome"]["blocking"])
+        self.assertEqual(report["trusted_retirement_integration"]["mode"],
+                         "trusted-integration-merge-group")
+        verified = report["trusted_retirement_integration"]["record"]
+        self.assertEqual(verified["head"], group)
+        self.assertEqual(verified["integration_head"], self.head)
+        self.assertEqual(verified["publication"], {"run_id": 1, "run_attempt": 1})
+
+    def test_altered_synthetic_tree_stays_blocked(self):
+        git(self.fixture.repo, "checkout", "--detach", self.head)
+        (self.fixture.repo / "README.md").write_text("altered merge group\n")
+        git(self.fixture.repo, "add", "README.md")
+        altered_tree = git(self.fixture.repo, "write-tree")
+        git(self.fixture.repo, "reset", "--hard", self.head)
+        group = self.synthetic_group(self.head, tree=altered_tree)
+
+        report = self.analyze_group(group, self.merge_group_api())
+
+        self.assertTrue(report["outcome"]["blocking"])
+        self.assertIn("does not match its conflict-free combined tree",
+                      report["trusted_retirement_integration"]["reason"])
+
+    def test_synthetic_group_with_wrong_first_parent_stays_blocked(self):
+        advanced_main = self.fixture.branch("advanced-main", {"README.md": "advanced\n"})
+        group = self.synthetic_group(self.head, first_parent=advanced_main)
+
+        report = self.analyze_group(group, self.merge_group_api())
+
+        self.assertTrue(report["outcome"]["blocking"])
+        self.assertIn("current main as first parent",
+                      report["trusted_retirement_integration"]["reason"])
+
+    def test_unpublished_generated_merge_group_stays_blocked(self):
+        member = self.fixture.branch("unpublished", {
+            "tools/native_retirement_dependency_binding.generated.h": "#define BAD 1\n",
+        })
+        group = self.synthetic_group(member)
+
+        report = self.analyze_group(group, None)
+
+        self.assertTrue(report["outcome"]["blocking"])
+        self.assertEqual(report["trusted_retirement_integration"]["verified"], False)
+        self.assertIn("live trusted publication evidence",
+                      report["trusted_retirement_integration"]["reason"])
+
+    def test_latest_failed_writer_attempt_does_not_authorize_merge_group(self):
+        group = self.synthetic_group(self.head)
+        api = self.merge_group_api()
+        api.run["conclusion"] = "failure"
+
+        report = self.analyze_group(group, api)
+
+        self.assertTrue(report["outcome"]["blocking"])
+        self.assertIn("successful current-base trusted writer run",
+                      report["trusted_retirement_integration"]["reason"])
 
 
 if __name__ == "__main__":

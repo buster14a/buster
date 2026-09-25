@@ -63,6 +63,7 @@ struct UnitTestArguments
     Arena* arena;
     ShowCallback* show;
 #if BUSTER_INCLUDE_TESTS
+    String8 coff_relocation_fixture_path;
     String8 memory_module;
     u64 memory_fixture_index;
     String8 memory_top_retained_fixture;

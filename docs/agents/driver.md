@@ -2,6 +2,22 @@
 
 [Agent instructions](../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
+## Compiler output streams
+
+`ide cc` writes warnings, source diagnostics, and `cc: error:` driver errors to
+stderr. With `-E` or `-S` and no `-o`, the generated text goes to stdout;
+warnings cannot enter the preprocessed or assembly stream. `#warning` and
+`#error` messages retain the spelling between the first and last message
+tokens, including punctuation and internal whitespace, without expanding macros.
+
+Opt-in machine-readable records remain on stdout: `CODEGEN_VERIFY`,
+`CODEGEN_FALLBACK*`, `CODEGEN`, `IR_*`, `TARGET`, `GPU`, and the `-v` source
+statistics. The differential runner reads `CODEGEN_VERIFY` there and compares
+captured stderr diagnostics separately; the retirement census reads its
+`-v`/fallback records from stdout. `ide metamorphic` uses stderr first when
+reporting a failed compiler invocation. A `-v -E` invocation also prints the
+requested statistics on stdout; use plain `-E` when piping preprocessed C.
+
 ## Opt-in native translation-unit lanes
 
 `-fcompile-jobs=N` accepts a positive 32-bit worker request. Omission (or
@@ -256,6 +272,12 @@ input, and rejects native objects, archives, libraries, frameworks, linker
 arguments, `-E`, `-S`, and `-fsyntax-only`. The writer has no LLVM dependency;
 see `LLVM_BITCODE.md` for its target metadata, API, and supported boundary.
 
+Direct WebAssembly output accepts one C source for `wasm64-unknown-freestanding`
+or `wasm32-wasip1` (also spelled `wasm32-wasi`). The latter emits a WASI Preview 1
+command module, with an exported `_start` and 32-bit pointers. Its `--sysroot`
+header paths and supported imports are in [WASI.md](../../WASI.md). Direct wasm32
+output rejects `-emit-llvm`, native link inputs, and `-S`.
+
 Static archive extraction uses `compiler_driver_archive_extract` in the
 private `driver/archive.c` implementation. Its invocation-owned name table
 records selected definitions and strong/weak undefined references once per
@@ -394,6 +416,9 @@ selected-function and scheduled-function counts and the effective allocator.
 Normal compilation keeps its existing validation certificates and fast paths.
 The [native differential runner](../differential-testing.md) consumes this
 explicit opt-in evidence and compares executable observations independently.
+When selected or scheduled MIR fails verification, the refusal names the
+`MachineVerifyError` and its block, machine instruction, and operand. Without a
+failing canonical instruction its opcode is `unknown`, not an IR enum default.
 
 With `-v`, aggregate `CODEGEN` data is printed after codegen errors too. Legacy
 fallback counters and `-fcodegen-fallback-census` remain accepted during the

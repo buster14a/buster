@@ -1,0 +1,26 @@
+2026-09-23T14:07:01Z
+194bd65b2d6c2668d3ccecd940af846927b8e487
+2c1f1b8f6cca5d52539a739d952af819afe89a9b
+dba3e3d9b8a115bce52070060017809f12fb37ddc4cda9ee90ca5980943e4353  build/Release/ide
+bb8d3a0982cfb6bb8031c66e24ba44f96f4c6e7bed6fc533b6f0e405fd7bcb0a  src/buster/apps/ide/ide.c
+clang version 22.1.8
+1.0.7621.644-alpha
+Model name:                              AMD Ryzen 7 9700X 8-Core Processor
+CPU family:                              26
+Model:                                   68
+Thread(s) per core:                      2
+Core(s) per socket:                      8
+Socket(s):                               1
+Microcode version:                       0xb404038
+Frequency boost:                         enabled
+2,10
+amd-pstate-epp
+powersave
+balance_performance
+2
+clang 22.1.8-1
+glibc 2.44+r24+g16be1518495f-1
+cmake 4.4.3-2
+ninja 1.13.2-3
+mold 2.42.1-1
+tcc 0.9.27.r1337.gb39cbc70-1

@@ -2068,6 +2068,7 @@ CodegenAbi codegen_abi_for_target(Target target)
         case OPERATING_SYSTEM_FREESTANDING:
             return CODEGEN_ABI_X86_64_SYSTEM_V;
             break;
+        case OPERATING_SYSTEM_WASI:
         case OPERATING_SYSTEM_COUNT:
             return CODEGEN_ABI_COUNT;
         }
@@ -2100,15 +2101,17 @@ CodegenAbi codegen_abi_for_target(Target target)
         case OPERATING_SYSTEM_FREESTANDING:
             return CODEGEN_ABI_AARCH64_AAPCS64;
             break;
+        case OPERATING_SYSTEM_WASI:
         case OPERATING_SYSTEM_COUNT:
             return CODEGEN_ABI_COUNT;
         }
     }
     break;
         break;
+    case CPU_ARCH_WASM32:
     case CPU_ARCH_WASM64:
     case CPU_ARCH_BPFEL:
-        // Wasm64 and eBPF are emitted directly from canonical IR and do not
+        // WebAssembly and eBPF are emitted directly from canonical IR and do not
         // use a native platform ABI or the native machine-code pipeline.
         return CODEGEN_ABI_COUNT;
         break;
@@ -4655,6 +4658,68 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_define_labels(IrProgram* progra
     return valid;
 }
 
+// Make module-level assembly definitions visible before function rows choose
+// their relocations. Assembly is emitted after functions, so discovering a
+// label only during emission would make a repeated codegen pass see a
+// different `is_definition` state for calls to that label.
+BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_predeclare_labels(IrProgram* program, Target target, String8 source)
+{
+    bool valid = true;
+    u64 line_start = 0;
+    while (line_start < source.length && valid)
+    {
+        u64 line_end = line_start;
+        while (line_end < source.length && source.pointer[line_end] != '\n')
+        {
+            line_end += 1;
+        }
+        String8 line = codegen_global_assembly_trim((String8){
+            .pointer = source.pointer + line_start,
+            .length = line_end - line_start,
+        });
+        line_start = line_end < source.length ? line_end + 1 : source.length;
+        if (line.length && line.pointer[0] != '#')
+        {
+            bool done = false;
+            while (valid && !done)
+            {
+                u64 colon = UINT64_MAX;
+                for (u64 index = 0; index < line.length && colon == UINT64_MAX; index += 1)
+                {
+                    colon = line.pointer[index] == ':' ? index : colon;
+                }
+                String8 name = codegen_global_assembly_trim((String8){
+                    .pointer = line.pointer,
+                    .length = colon == UINT64_MAX ? 0 : colon,
+                });
+                if (colon == UINT64_MAX || !codegen_global_assembly_name(name))
+                {
+                    done = true;
+                }
+                else
+                {
+                    IrSymbolId symbol = codegen_global_assembly_symbol(program, name, target, IR_SYMBOL_FUNCTION);
+                    if (symbol.value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        valid = false;
+                    }
+                    else
+                    {
+                        program->symbols.symbols[symbol.value].is_definition = true;
+                        program->symbols.symbols[symbol.value].kind = IR_SYMBOL_FUNCTION;
+                        line.pointer += colon + 1;
+                        line.length -= colon + 1;
+                        line = codegen_global_assembly_trim(line);
+                        done = line.length == 0;
+                    }
+                }
+            }
+        }
+    }
+
+    return valid;
+}
+
 // `.byte 1, 2, 0x03`.
 BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_emit_bytes(CodegenBuffer* buffer, String8 values)
 {
@@ -7178,6 +7243,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     CodegenModule result = {
         .ir_module = module,
         .abi = codegen_abi_for_target(target),
+        .failed_function = IR_FUNCTION_ID_INVALID,
+        .failed_instruction = IR_INSTRUCTION_ID_INVALID,
+        .failed_opcode = IR_OPCODE_COUNT,
     };
     // The one place -fPIC is turned into a fact about this module. It is a
     // statement about which references `ld` will place in a shared object, so
@@ -7641,6 +7709,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 {
                     // Do not let a selector certificate bypass a failed
                     // audit verifier and feed invalid MIR to allocation.
+                    result.failed_machine_verification = bootstrap_trace->invalid_validation;
                     fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
                     selected.supported = false;
                 }
@@ -7658,13 +7727,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             // Keep the verifier as the authority for replayed/manual machine
             // IR, but do not reread every freshly selected row before its
             // immediate allocator consumer.
-            MachineVerifyError verify_error = selected.supported && (options.verify_invariants || !selected.selector_certified)
-                                                  ? machine_verify_function(&selected.function).error : MACHINE_VERIFY_NONE;
+            MachineVerifyResult verification = selected.supported && (options.verify_invariants || !selected.selector_certified)
+                                                   ? machine_verify_function(&selected.function) : (MachineVerifyResult){0};
+            MachineVerifyError verify_error = verification.error;
             if (options.verify_invariants && selected.supported)
             {
                 result.statistics.verified_mir_function_count += 1;
                 if (verify_error != MACHINE_VERIFY_NONE)
                 {
+                    result.failed_machine_verification = verification;
                     fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
                     selected.supported = false;
                 }
@@ -7707,8 +7778,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         if (options.verify_invariants)
                         {
                             result.statistics.verified_scheduled_function_count += 1;
-                            if (machine_verify_function(&scheduled.function).error != MACHINE_VERIFY_NONE)
+                            MachineVerifyResult scheduled_verification = machine_verify_function(&scheduled.function);
+                            if (scheduled_verification.error != MACHINE_VERIFY_NONE)
                             {
+                                result.failed_machine_verification = scheduled_verification;
+                                result.failed_machine_scheduled = true;
                                 fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
                                 scheduled_valid = false;
                                 placement.valid = false;
@@ -8296,7 +8370,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                            ? CODEGEN_ERROR_CAPACITY
                            : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
         return result;
-
     }
     for (u32 relocation_index = 0; relocation_index < result.relocation_count; relocation_index += 1)
     {
@@ -8380,6 +8453,21 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
         result.error = CODEGEN_ERROR_INVALID_IR;
         return result;
     }
+    // The ELF default call model depends on whether a symbol has a definition
+    // in this module. Module-level assembly is emitted after the functions,
+    // so publish its label definitions first to keep that decision stable
+    // across repeated codegen passes and allocator modes.
+    if (target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(target) == OBJECT_FORMAT_ELF64)
+    {
+        for (u32 assembly_index = 0; assembly_index < module->assembly_count; assembly_index += 1)
+        {
+            if (!codegen_global_assembly_predeclare_labels(program, target, module->assemblies[assembly_index].source))
+            {
+                result.error = CODEGEN_ERROR_CAPACITY;
+                return result;
+            }
+        }
+    }
     // Function emission uses the machine encoder. Module-level assembly
     // allocates its encoding cache lazily inside each attempt.
     CodegenX64MetadataCache* x64_metadata_cache = 0;
@@ -8437,6 +8525,8 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
                     .failed_function = result.failed_function,
                     .failed_instruction = result.failed_instruction,
                     .failed_opcode = result.failed_opcode,
+                    .failed_machine_verification = result.failed_machine_verification,
+                    .failed_machine_scheduled = result.failed_machine_scheduled,
                     .first_fallback_function = result.first_fallback_function,
                     .first_fallback_opcode = result.first_fallback_opcode,
                     .failed_assembly = result.failed_assembly,

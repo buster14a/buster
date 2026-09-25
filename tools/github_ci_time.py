@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import statistics
 import sys
+import time
 import urllib.parse
 import urllib.request
 
@@ -38,6 +39,9 @@ RUN_FIELDS = ("id", "head_sha", "head_branch", "event", "path", "status", "concl
               "run_attempt", "created_at", "run_started_at", "html_url")
 JOB_FIELDS = ("id", "name", "run_attempt", "status", "conclusion", "created_at", "started_at", "completed_at", "labels")
 STEP_FIELDS = ("name", "status", "conclusion", "started_at", "completed_at")
+API_TIMEOUT_SECONDS = 30.0
+JOB_METADATA_REFRESH_BUDGET_SECONDS = 30.0
+JOB_METADATA_REFRESH_DELAYS_SECONDS = (1.0, 2.0, 4.0)
 
 
 def timestamp(value):
@@ -173,15 +177,62 @@ def summarize(data):
                       "Cache state and compiler source changes require separate review; these are descriptive medians, not causal claims."]}
 
 
-def api_get(repository, path, token):
+def api_get(repository, path, token, timeout=API_TIMEOUT_SECONDS):
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
                "User-Agent": "buster-ci-timing"}
     if token:
         headers["Authorization"] = "Bearer " + token
     request = urllib.request.Request(f"https://api.github.com/repos/{repository}/{path}", headers=headers)
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         result = json.load(response)
     return result
+
+
+def _required_job_steps(name):
+    required = set()
+    if name in COMBINATION_PLATFORMS:
+        required.update(("Install verified Zig", "Desktop result and reproduction", "Retain desktop logs",
+                         "Combination matrix (Windows)" if name.startswith("Windows")
+                         else "Combination matrix (Linux, macOS)"))
+        if name.endswith(" release"):
+            required.update(("Workflow tool regression tests", "Bootstrap wrapper regression tests"))
+    elif name in NATIVE:
+        required.update(("Native result and reproduction",
+                         "Execution-mode matrix (Windows)" if name.startswith("Windows")
+                         else "Execution-mode matrix"))
+        if not name.startswith("Windows"):
+            required.add("Native configuration differential matrix")
+    return tuple(sorted(required))
+
+
+def _metadata_pending(message):
+    return f"metadata pending: {message}"
+
+
+def _metadata_can_refresh(errors):
+    return bool(errors) and all(error.startswith("metadata pending:") for error in errors)
+
+
+def _job_evidence(jobs):
+    evidence = []
+    for job in jobs:
+        required_steps = []
+        steps = job.get("steps", [])
+        if not isinstance(steps, list):
+            steps = []
+        for name in _required_job_steps(job.get("name")):
+            matching = [step for step in steps if isinstance(step, dict) and step.get("name") == name]
+            required_steps.append({
+                "name": name,
+                "matching_records": len(matching),
+                "observed": [{"status": step.get("status"), "conclusion": step.get("conclusion")}
+                             for step in matching],
+            })
+        record = {key: job.get(key) for key in
+                  ("id", "name", "run_id", "head_sha", "run_attempt", "status", "conclusion")}
+        record["required_steps"] = required_steps
+        evidence.append(record)
+    return evidence
 
 
 def validate_required_jobs(jobs, run_id, run_attempt, head_sha):
@@ -193,13 +244,13 @@ def validate_required_jobs(jobs, run_id, run_attempt, head_sha):
     """
     errors = []
     if not isinstance(jobs, list):
-        return ["job inventory is not a list"]
+        return [_metadata_pending("job inventory is not a list")]
     names = [job.get("name") if isinstance(job, dict) else None for job in jobs]
     if Counter(names) != Counter(COMBINATION_JOBS):
-        errors.append("required job identities are missing, duplicated or unexpected")
+        errors.append(_metadata_pending("required job identities are missing, duplicated or unexpected"))
     for job in jobs:
         if not isinstance(job, dict):
-            errors.append("malformed job record")
+            errors.append(_metadata_pending("malformed job record"))
             continue
         name = job.get("name", "missing")
         attempt = job.get("run_attempt")
@@ -209,31 +260,37 @@ def validate_required_jobs(jobs, run_id, run_attempt, head_sha):
             errors.append(f"{name}: invalid job attempt")
         if name == "CI complete":
             if attempt != run_attempt or job.get("status") != "in_progress":
-                errors.append("CI complete is not the current active attempt")
-        elif job.get("status") != "completed" or job.get("conclusion") != "success":
-            errors.append(f"{name}: required job did not complete successfully")
-        required = set()
-        if name in COMBINATION_PLATFORMS:
-            required.update(("Install verified Zig", "Desktop result and reproduction", "Retain desktop logs",
-                             "Combination matrix (Windows)" if name.startswith("Windows")
-                             else "Combination matrix (Linux, macOS)"))
-            if name.endswith(" release"):
-                required.update(("Workflow tool regression tests", "Bootstrap wrapper regression tests"))
-        elif name in NATIVE:
-            required.update(("Native result and reproduction",
-                             "Execution-mode matrix (Windows)" if name.startswith("Windows")
-                             else "Execution-mode matrix"))
-            if not name.startswith("Windows"):
-                required.add("Native configuration differential matrix")
-        if required:
+                errors.append(_metadata_pending("CI complete is not the current active attempt"))
+        elif job.get("status") != "completed":
+            status = job.get("status")
+            if status in (None, "queued", "in_progress", "waiting", "pending"):
+                errors.append(_metadata_pending(f"{name}: job status is not terminal (status={status!r})"))
+            else:
+                errors.append(f"{name}: required job did not complete successfully (status={status!r})")
+        elif job.get("conclusion") != "success":
+            conclusion = job.get("conclusion")
+            if conclusion is None:
+                errors.append(_metadata_pending(f"{name}: completed job has no conclusion"))
+            else:
+                errors.append(f"{name}: required job did not complete successfully (conclusion={conclusion!r})")
+        for step_name in _required_job_steps(name):
             steps = job.get("steps", [])
             if not isinstance(steps, list):
-                errors.append(f"{name}: malformed step records")
+                errors.append(_metadata_pending(f"{name}: required step {step_name!r} has no usable records"))
                 continue
-            for step_name in required:
-                matching = [step for step in steps if isinstance(step, dict) and step.get("name") == step_name]
-                if len(matching) != 1 or matching[0].get("conclusion") != "success":
-                    errors.append(f"{name}: {step_name} did not complete exactly once")
+            matching = [step for step in steps if isinstance(step, dict) and step.get("name") == step_name]
+            if len(matching) != 1:
+                errors.append(_metadata_pending(
+                    f"{name}: required step {step_name!r} lacks unique completion proof "
+                    f"(found {len(matching)} records)"))
+            elif matching[0].get("status") != "completed" or matching[0].get("conclusion") != "success":
+                conclusion = matching[0].get("conclusion")
+                if conclusion not in (None, "") and conclusion != "success":
+                    errors.append(f"{name}: required step {step_name!r} concluded {conclusion!r}; success required")
+                else:
+                    errors.append(_metadata_pending(
+                        f"{name}: required step {step_name!r} lacks completed success proof "
+                        f"(status={matching[0].get('status')!r}, conclusion={conclusion!r})"))
     return sorted(set(errors))
 
 
@@ -271,29 +328,63 @@ def require_jobs(args):
     head_sha = run.get("head_sha")
     if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
         raise ValueError("The API run has no exact source identity")
+    deadline = time.monotonic() + JOB_METADATA_REFRESH_BUDGET_SECONDS
     jobs = []
-    total = None
-    page = 1
-    while total is None or len(jobs) < total:
-        batch = api_get(args.repository, f"actions/runs/{args.run_id}/jobs?filter=all&per_page=100&page={page}", token)
-        count = batch.get("total_count")
-        if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 1000 or (total is not None and count != total):
-            raise ValueError("Missing, changing or excessive job inventory")
-        total = count
-        chunk = batch.get("jobs")
-        if not isinstance(chunk, list) or not chunk or len(jobs) + len(chunk) > total:
-            raise ValueError("Incomplete job pagination; refusing a partial gate")
-        jobs.extend(chunk)
-        page += 1
-    # filter=latest is an API execution filter, not a proof that successful
-    # non-rerun jobs were retained. Reconstruct the logical latest result from
-    # all attempts of this immutable run and reject duplicate attempt records.
-    jobs = latest_run_jobs(jobs, args.run_id, args.run_attempt, head_sha)
-    errors = validate_required_jobs(jobs, args.run_id, args.run_attempt, head_sha)
+    errors = []
+    snapshot_attempts = 0
+    for snapshot_attempt in range(len(JOB_METADATA_REFRESH_DELAYS_SECONDS) + 1):
+        snapshot_attempts = snapshot_attempt + 1
+        errors = []
+        inventory = []
+        total = None
+        page = 1
+        while total is None or len(inventory) < total:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                errors = [_metadata_pending("job metadata refresh budget exhausted before a complete snapshot")]
+                break
+            batch = api_get(args.repository,
+                            f"actions/runs/{args.run_id}/jobs?filter=all&per_page=100&page={page}",
+                            token, timeout=min(API_TIMEOUT_SECONDS, remaining))
+            count = batch.get("total_count")
+            if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 1000 or \
+                    (total is not None and count != total):
+                raise ValueError("Missing, changing or excessive job inventory")
+            total = count
+            chunk = batch.get("jobs")
+            if not isinstance(chunk, list) or not chunk or len(inventory) + len(chunk) > total:
+                raise ValueError("Incomplete job pagination; refusing a partial inventory snapshot")
+            inventory.extend(chunk)
+            page += 1
+        if errors:
+            break
+        try:
+            # filter=latest can hide successful non-rerun jobs. Reconstruct each
+            # logical job from all attempts of this exact immutable run/head.
+            jobs = latest_run_jobs(inventory, args.run_id, args.run_attempt, head_sha)
+        except ValueError as error:
+            jobs = []
+            errors = [_metadata_pending(f"job-attempt inventory is inconsistent: {error}")]
+        else:
+            errors = validate_required_jobs(jobs, args.run_id, args.run_attempt, head_sha)
+        if not _metadata_can_refresh(errors) or snapshot_attempt >= len(JOB_METADATA_REFRESH_DELAYS_SECONDS):
+            break
+        delay = JOB_METADATA_REFRESH_DELAYS_SECONDS[snapshot_attempt]
+        remaining = deadline - time.monotonic()
+        if delay >= remaining:
+            errors.append(_metadata_pending("refresh budget expired before another exact-run snapshot"))
+            break
+        time.sleep(delay)
+    if _metadata_can_refresh(errors):
+        errors = [f"{error}; exact run/head proof unresolved after {snapshot_attempts} snapshots "
+                  f"(run {args.run_id}, head {head_sha})" for error in errors]
     return {"schema": 1, "run_id": args.run_id, "run_attempt": args.run_attempt,
             "run_head_sha": head_sha, "checkout_sha": os.getenv("GITHUB_SHA", "unknown"),
             "success": not errors, "errors": errors,
-            "jobs": [{key: job.get(key) for key in ("id", "name", "run_attempt", "conclusion")} for job in jobs]}
+            "job_metadata": {"snapshot_attempts": snapshot_attempts,
+                             "refreshes": max(0, snapshot_attempts - 1),
+                             "refresh_budget_seconds": JOB_METADATA_REFRESH_BUDGET_SECONDS},
+            "jobs": _job_evidence(jobs)}
 
 
 def collect(args):

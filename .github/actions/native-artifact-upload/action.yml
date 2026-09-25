@@ -1,0 +1,83 @@
+name: Upload CI log artifacts with one bounded retry
+description: Upload CI log evidence and retry one transient failure.
+inputs:
+  label:
+    description: Artifact family named in step labels and recovery evidence.
+    required: false
+    default: native
+  label_title:
+    description: Title-cased artifact family used in recovery messages.
+    required: false
+    default: Native
+  name:
+    description: Artifact name used for both attempts.
+    required: true
+  path:
+    description: Files to retain.
+    required: true
+  compression-level:
+    description: Upload compression level.
+    required: false
+    default: "0"
+  if-no-files-found:
+    description: Behavior when the path is empty.
+    required: false
+    default: error
+  retention-days:
+    description: Artifact retention period.
+    required: false
+    default: "7"
+runs:
+  using: composite
+  steps:
+    - name: Retain ${{ inputs.label }} logs
+      id: artifact_upload
+      if: ${{ !cancelled() }}
+      continue-on-error: true
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        compression-level: ${{ inputs.compression-level }}
+        if-no-files-found: ${{ inputs.if-no-files-found }}
+        retention-days: ${{ inputs.retention-days }}
+
+    - name: Back off before retrying ${{ inputs.label }} log upload
+      if: ${{ !cancelled() && steps.artifact_upload.outcome == 'failure' }}
+      shell: bash
+      env:
+        ARTIFACT_TITLE: ${{ inputs.label_title }}
+      run: |
+        printf '::warning::%s artifact upload failed; retrying once after 15 seconds.\n' "$ARTIFACT_TITLE"
+        printf '## %s artifact upload\n\nInitial upload failed; retrying once after a 15-second backoff.\n' "$ARTIFACT_TITLE" >> "$GITHUB_STEP_SUMMARY"
+        sleep 15
+
+    - name: Retain ${{ inputs.label }} logs (retry)
+      id: artifact_upload_retry
+      if: ${{ !cancelled() && steps.artifact_upload.outcome == 'failure' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        compression-level: ${{ inputs.compression-level }}
+        if-no-files-found: ${{ inputs.if-no-files-found }}
+        retention-days: ${{ inputs.retention-days }}
+        # A timed-out CreateArtifact request may have committed remotely.
+        overwrite: true
+
+    - name: Record recovered ${{ inputs.label }} log upload
+      if: ${{ !cancelled() && steps.artifact_upload.outcome == 'failure' && steps.artifact_upload_retry.outcome == 'success' }}
+      shell: bash
+      env:
+        ARTIFACT_LABEL: ${{ inputs.label }}
+      run: printf '\nRetry succeeded; %s evidence was retained.\n' "$ARTIFACT_LABEL" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Record failed ${{ inputs.label }} log upload
+      if: ${{ always() && !cancelled() && steps.artifact_upload.outcome == 'failure' && steps.artifact_upload_retry.outcome == 'failure' }}
+      shell: bash
+      env:
+        ARTIFACT_TITLE: ${{ inputs.label_title }}
+        ARTIFACT_LABEL: ${{ inputs.label }}
+      run: |
+        printf '::error::%s artifact upload retry failed; evidence was not retained.\n' "$ARTIFACT_TITLE"
+        printf '\n%s artifact upload retry failed; evidence was not retained.\n' "$ARTIFACT_LABEL" >> "$GITHUB_STEP_SUMMARY"

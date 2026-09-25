@@ -12,6 +12,7 @@ behind-branch policy for unrelated pull requests.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import importlib.util
 import json
 import os
@@ -166,15 +167,16 @@ def verify_status(status: dict, head: str, evidence: str) -> dict:
     for row in rows:
         if not isinstance(row, dict) or row.get("context") != STATUS_CONTEXT:
             continue
-        creator = row.get("creator")
-        if (row.get("state") == "success" and isinstance(creator, dict) and
-                creator.get("login") == "github-actions[bot]"):
-            matches.append(row)
+        matches.append(row)
     if not matches:
         raise AdmissionError(
             "exact head lacks the trusted GitHub Actions integration attestation"
         )
     row = max(matches, key=lambda value: int(value.get("id", 0)))
+    creator = row.get("creator")
+    if (row.get("state") != "success" or not isinstance(creator, dict) or
+            creator.get("login") != "github-actions[bot]"):
+        raise AdmissionError("latest trusted GitHub Actions integration attestation is not successful")
     description = row.get("description")
     if not isinstance(description, str) or evidence[:16] not in description:
         raise AdmissionError("integration status does not name the exact evidence digest")
@@ -191,7 +193,8 @@ def integration_record(repo: Path, head: str) -> tuple[tuple[str, ...], dict[str
 
 
 def check_pull_request(repo: Path, base: str, head: str, current_main: str,
-                       status_path: Path | None, allow_pending: bool) -> dict:
+                       status_path: Path | None, allow_pending: bool, *,
+                       status_data: dict | None = None) -> dict:
     repo = repo.resolve()
     base = commit(repo, base)
     head = commit(repo, head)
@@ -248,9 +251,10 @@ def check_pull_request(repo: Path, base: str, head: str, current_main: str,
                 "trusted integration changed non-generated paths after the reviewed candidate: " +
                 ", ".join(sorted(final_changes - integration.GENERATED_PATHS))
             )
-        if status_path is None:
+        if status_path is None and status_data is None:
             raise AdmissionError("trusted integration status evidence is required")
-        status_row = verify_status(load_status(status_path), head, evidence)
+        status_row = verify_status(status_data if status_data is not None else load_status(status_path),
+                                   head, evidence)
         return {
             "schema": SCHEMA,
             "status": "admitted",
@@ -295,31 +299,133 @@ def check_pull_request(repo: Path, base: str, head: str, current_main: str,
     }
 
 
+def verify_group_publication(api, status: dict, base: str) -> dict:
+    """A status posted during publication is not a completed writer run."""
+    prefix = "https://github.com/" + api.repository + "/actions/runs/"
+    target = status.get("target_url", "")
+    run_id = target.removeprefix(prefix)
+    if not target.startswith(prefix) or re.fullmatch(r"[1-9][0-9]*", run_id) is None:
+        raise AdmissionError("group attestation must name this repository's writer run")
+    run = api.request("actions/runs/" + run_id)
+    if (run.get("id") != int(run_id) or
+            run.get("repository", {}).get("full_name") != api.repository or
+            run.get("path") != ".github/workflows/native-retirement-integration.yml" or
+            run.get("event") != "workflow_dispatch" or run.get("head_branch") != "main" or
+            run.get("head_sha") != base or run.get("status") != "completed" or
+            run.get("conclusion") != "success" or
+            type(run.get("run_attempt")) is not int or run["run_attempt"] < 1):
+        raise AdmissionError("group publication is not a successful current-base trusted writer run")
+    try:
+        started = datetime.fromisoformat(run["run_started_at"].replace("Z", "+00:00"))
+        posted = datetime.fromisoformat(status["created_at"].replace("Z", "+00:00"))
+        finished = datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00"))
+        current_attempt = (started.utcoffset() is not None and posted.utcoffset() is not None and
+                           finished.utcoffset() is not None and started <= posted <= finished)
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        raise AdmissionError("writer attempt timestamps are missing or invalid") from error
+    if not current_attempt:
+        raise AdmissionError("integration status predates the latest writer attempt")
+    return {"run_id": run["id"], "run_attempt": run["run_attempt"]}
+
+
+def source_candidate(repo: Path, base: str, head: str, api) -> dict:
+    """Recover source for a fresh authorized dispatch without reusing output.
+
+    Authorization still targets the live PR head. Only a successfully published
+    two-parent integration may be unwrapped, and its original source must still
+    form a clean merge with current main. The existing writer performs its full
+    reconstruction; this helper changes no refs or generated files.
+    """
+    base, head = commit(repo, base), commit(repo, head)
+    parents, trailers = integration_record(repo, head)
+    source = head
+    if any(key in trailers for key in TRAILER_KEYS):
+        if len(parents) != 2 or not all(key in trailers for key in TRAILER_KEYS):
+            raise AdmissionError("incomplete previous integration record")
+        old_base = require_hex(trailers[TRAILER_BASE], HEX40, "previous integration base")
+        integration._git(repo, "merge-base", "--is-ancestor", old_base, base)
+        if api is None:
+            raise AdmissionError("source recovery requires live trusted publication evidence")
+        statuses = {"sha": head, "statuses": api.all("statuses/" + head)}
+        admitted = check_pull_request(repo, old_base, head, old_base, None, False,
+                                      status_data=statuses)
+        evidence = require_hex(trailers[TRAILER_EVIDENCE], HEX64, "previous integration evidence")
+        verify_group_publication(api, verify_status(statuses, head, evidence), old_base)
+        source = admitted["candidate"]
+    classification = integration.classify_candidate(repo, base, source)
+    integration.enforce_classification(classification, None, True)
+    combined = clean_merge_tree(repo, base, source)
+    return {"base": base, "head": head, "source_head": source,
+            "combined_tree": combined, "classification": classification.kind}
+
+
+def check_merge_group(repo: Path, base: str, head: str, current_main: str, api) -> dict:
+    """Admit only a single exact-tree projection of the existing writer's output.
+
+    GitHub owns the synthetic commit. Its SHA may differ from the attested PR
+    head, but its entire tree must be identical. No generated bytes are written
+    and no status on the PR head substitutes for combined-head CI.
+    """
+    base, head = commit(repo, base), commit(repo, head)
+    if base != require_hex(current_main, HEX40, "current main"):
+        raise AdmissionError(
+            f"group base does not equal live main: main={current_main} "
+            f"base={base} head={head}; wait for the predecessor or rebuild the group"
+        )
+    parents = commit_parents(repo, head)
+    if len(parents) != 2 or parents[0] != base:
+        raise AdmissionError("merge groups must contain one candidate with current main as first parent")
+    member = parents[1]
+    if tree(repo, head) != clean_merge_tree(repo, base, member):
+        raise AdmissionError("merge group does not match its conflict-free combined tree")
+
+    classification = integration.classify_candidate(repo, base, head)
+    changed = changed_paths(repo, base, head)
+    sensitive = bool(classification.generated_paths) or classification_requires_writer(
+        classification, changed, bound_sources(repo, base)
+    ) or classification.kind == "split-required"
+    report = {"schema": SCHEMA, "status": "admitted", "mode": "ordinary-merge-group",
+              "base": base, "head": head, "final_tree": tree(repo, head)}
+    if sensitive:
+        if api is None:
+            raise AdmissionError("retirement-sensitive merge groups require live trusted publication evidence")
+        pulls = api.all("commits/" + member + "/pulls")
+        matches = [pull for pull in pulls if pull.get("head", {}).get("sha") == member and
+                   pull.get("state") == "open" and pull.get("draft") is False and
+                   pull.get("head", {}).get("repo", {}).get("full_name") == api.repository and
+                   pull.get("base", {}).get("repo", {}).get("full_name") == api.repository and
+                   pull.get("base", {}).get("ref") == "main"]
+        if len(matches) != 1:
+            raise AdmissionError("group must identify one open same-repository attested PR head")
+        # Use the exact creator-bearing status endpoint, never the combined
+        # status endpoint (which does not preserve publisher identity).
+        statuses = {"sha": member, "statuses": api.all("statuses/" + member)}
+        parents, trailers = integration_record(repo, member)
+        if len(parents) != 2 or not all(key in trailers for key in TRAILER_KEYS):
+            raise AdmissionError("merge group member has no trusted integration record")
+        evidence = require_hex(trailers[TRAILER_EVIDENCE], HEX64, "integration evidence")
+        status = verify_status(statuses, member, evidence)
+        # Reuse every PR admission invariant, including source ownership,
+        # current-base identity, transition class and generated-only final delta.
+        admitted = check_pull_request(repo, base, member, current_main, None, False,
+                                      status_data=statuses)
+        if admitted.get("mode") != "trusted-integration" or report["final_tree"] != admitted["final_tree"]:
+            raise AdmissionError("merge group tree differs from the exact attested final tree")
+        publication = verify_group_publication(api, status, base)
+        report.update(mode="trusted-integration-merge-group", integration_head=member,
+                      candidate=admitted["candidate"], pull_request=matches[0]["number"],
+                      attestation_id=admitted["attestation_id"], publication=publication)
+    return report
+
+
 def check_event(repo: Path, base: str, head: str, current_main: str,
-                status_path: Path | None, event: str, allow_pending: bool) -> dict:
+                status_path: Path | None, event: str, allow_pending: bool, api=None) -> dict:
     if event == "pull_request":
         return check_pull_request(
             repo, base, head, current_main, status_path, allow_pending
         )
     if event == "merge_group":
-        classification = integration.classify_candidate(repo, base, head)
-        changed = changed_paths(repo, base, head)
-        requires_writer = classification_requires_writer(
-            classification, changed, bound_sources(repo, base)
-        )
-        if requires_writer:
-            raise AdmissionError(
-                "retirement-sensitive merge groups require the serialized trusted "
-                "integration path; do not admit a synthetic group that lacks its "
-                "generated final tree"
-            )
-        return {
-            "schema": SCHEMA,
-            "status": "admitted",
-            "mode": "ordinary-merge-group",
-            "base": commit(repo, base),
-            "head": commit(repo, head),
-        }
+        return check_merge_group(repo, base, head, current_main, api)
     return {
         "schema": SCHEMA,
         "status": "admitted",
@@ -419,11 +525,18 @@ def parser() -> argparse.ArgumentParser:
     check.add_argument("--head", required=True)
     check.add_argument("--current-main", required=True)
     check.add_argument("--status-json", type=Path)
+    check.add_argument("--repository", help="Repository for live merge-group publication verification")
     check.add_argument(
         "--event", choices=("pull_request", "merge_group", "push", "workflow_dispatch"),
         required=True,
     )
     check.add_argument("--allow-pending", action="store_true")
+
+    source = subparsers.add_parser("source-candidate")
+    source.add_argument("--repo-root", type=Path, required=True)
+    source.add_argument("--base", required=True)
+    source.add_argument("--head", required=True)
+    source.add_argument("--repository", required=True)
 
     invalidate = subparsers.add_parser("invalidate-stale")
     invalidate.add_argument("--repository", required=True)
@@ -436,11 +549,16 @@ def main(argv=None) -> int:
     arguments = parser().parse_args(argv)
     try:
         if arguments.command == "check":
+            api = (GitHub(arguments.repository, os.environ.get("GH_TOKEN", ""))
+                   if arguments.event == "merge_group" and arguments.repository else None)
             report = check_event(
                 arguments.repo_root, arguments.base, arguments.head,
                 arguments.current_main, arguments.status_json, arguments.event,
-                arguments.allow_pending,
+                arguments.allow_pending, api,
             )
+        elif arguments.command == "source-candidate":
+            api = GitHub(arguments.repository, os.environ.get("GH_TOKEN", ""))
+            report = source_candidate(arguments.repo_root, arguments.base, arguments.head, api)
         else:
             api = GitHub(arguments.repository, os.environ["GH_TOKEN"])
             report = invalidate_stale(api, arguments.new_main, arguments.details_url)

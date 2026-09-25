@@ -19,6 +19,7 @@
 //   cmake_profile_summary_*,                    diagnostics: build summaries
 //   ninja_log_summary_*, time_trace_summary_*,   and the compile/test time
 //   test_timing_summary_*                        summaries
+//   tools/matrix_phase.c                       optional desktop phase observation
 //   matrix_superbuild_*                          the test_all_combinations
 //                                                superbuild scheduler
 //   matrix_coverage_*                            authoritative desktop
@@ -28,6 +29,7 @@
 //   aarch64_import_*, aarch64_generated_*        Arm A64 XML importer
 //   bench_throughput_add                        reproducible compiler benchmarks
 //   bench_service_recipe                        fixed validate-buster service recipe
+//   bench_service_broker_add                    Linux constrained systemd broker build
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance
 //   uefi_boot_*                                 pinned firmware boot gate
@@ -78,6 +80,7 @@ typedef enum BuildCommand
 {
     BUILD_COMMAND_NONE,
     BUILD_COMMAND_BENCH_SERVICE,
+    BUILD_COMMAND_BENCH_SERVICE_BROKER,
     BUILD_COMMAND_BENCH_SERVICE_RECIPE,
     BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST,
     BUILD_COMMAND_BENCH_THROUGHPUT,
@@ -124,6 +127,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST,
+    BUILD_COMMAND_MATRIX_PHASE_RUN,
     BUILD_COMMAND_COUNT,
 } BuildCommand;
 
@@ -210,6 +214,7 @@ struct ProcessRun
     ProcessSpawnResult spawn;
     ProcessResult result;
     String8 working_directory;
+    String8 phase_task; // Optional desktop observer; empty outside instrumented matrices.
     String8 timing_description;
     String8 timing_configuration;
     u64 start_us;
@@ -578,6 +583,8 @@ struct Generate
     String8 linker;
     String8 cmake_profile;
     SliceString8 cmake_arguments;
+    // Native observation settings do not alter canonical compiler policy.
+    SliceString8 phase_arguments;
     u64 cmake_profile_summary_limit;
     BuildCompiler compiler;
     u32 fuzz_available : 1;
@@ -1802,6 +1809,10 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     for (u64 i = 0; i < generate.cmake_arguments.length; i += 1)
     {
         os_argument_builder_append(b, generate.cmake_arguments.pointer[i]);
+    }
+    for (u64 i = 0; i < generate.phase_arguments.length; i += 1)
+    {
+        os_argument_builder_append(b, generate.phase_arguments.pointer[i]);
     }
 
     SliceString8 arguments = os_argument_builder_flush(&r.builder);
@@ -24118,6 +24129,8 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_self_host_plan_valid(MatrixSuperbuild
     return result;
 }
 
+#include "tools/matrix_phase.c"
+
 BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 path, String8 source_directory, String8 build_driver,
                                                            MatrixTestTree* trees, u32 tree_count, u32 outer_jobs,
                                                            MatrixTestCombination* combinations, MatrixSuperbuildSelfHostPlan self_host,
@@ -24394,6 +24407,29 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
         }
 
         String8 prefix = string_format(arena, S8("BUSTER_SUPERBUILD_TREE_{u32}"), tree_i);
+        String8 phase_tree = matrix_phase_find_tree(tree.build_directory);
+        String8 build_id = string_format(arena, S8("{S8}-build-all"), phase_tree);
+        String8 test_pool = string_format(arena, S8("validation-{S8}"), phase_tree);
+        matrix_phase_cmake(arena, &lines, string_format(arena, S8("{S8}_BUILD_OBSERVER"), prefix), phase_tree,
+                           S8("build"), S8(""), string_format(arena, S8("build-{S8}"), phase_tree), S8("scheduler"), tree.parallel_jobs);
+        if (first_test_config.length)
+        {
+            matrix_phase_cmake(arena, &lines, string_format(arena, S8("{S8}_TEST_0_OBSERVER"), prefix), phase_tree,
+                               S8("validation"), first_test_config, test_pool, build_id, tree.parallel_jobs);
+        }
+        if (second_test_config.length)
+        {
+            matrix_phase_cmake(arena, &lines, string_format(arena, S8("{S8}_TEST_1_OBSERVER"), prefix), phase_tree,
+                               S8("validation"), second_test_config, test_pool,
+                               string_format(arena, S8("{S8}-validation-{S8}"), phase_tree, first_test_config), tree.parallel_jobs);
+        }
+        if (analyze_config.length)
+        {
+            matrix_phase_cmake(arena, &lines, string_format(arena, S8("{S8}_ANALYZE_OBSERVER"), prefix), phase_tree,
+                               S8("post_test"), analyze_config, test_pool,
+                               string_format(arena, S8("{S8}-validation-{S8}"), phase_tree, analyze_config), 0);
+        }
+
         string8_list_push(arena, &lines,
                           string_format(arena, S8("set({S8}_BUILD_DIRECTORY [==[{S8}]==])\n"), prefix, tree.build_directory));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_NATIVE_CONFIG {S8})\n"), prefix, first_config));
@@ -24422,6 +24458,12 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
                           string_format(arena, S8("set({S8}_TABLE_AUDITS {u32})\n"), prefix, tree.table_audit_scheduled));
     }
 
+    if (self_host.enabled)
+    {
+        String8 phase_tree = matrix_phase_find_tree(self_host.build_directory);
+        matrix_phase_cmake(arena, &lines, S8("BUSTER_SUPERBUILD_SELF_HOST_OBSERVER"), phase_tree, S8("self_host"), S8("Release"),
+                           S8("self-host"), string_format(arena, S8("{S8}-build-all"), phase_tree), self_host.pool_jobs);
+    }
     String8 manifest = string_join_arena(arena, string8_list_to_slice(arena, lines), true);
     return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(manifest));
 }
@@ -24591,6 +24633,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         return PROCESS_RESULT_FAILED;
     }
 
+    if (!matrix_phase_begin(arena, coverage_manifest, direct_matrix))
+    {
+        string_print(S8("error: matrix phase output must be a fresh directory\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
     MatrixTestCombination combinations[BUILD_COMPILER_COUNT * 4] = {0};
     u64 combination_count = 0;
     BuildStep* generate_step = step_add(arena);
@@ -24645,7 +24693,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             .cross_configs = !direct_matrix,
             .cmake_arguments = ci ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments) : (SliceString8){0},
         };
+        generate = matrix_phase_tree(arena, generate, coverage_manifest, tree_plan);
         generate_add(arena, generate_step, generate);
+        matrix_phase_wrap(arena, generate_step->last_process, matrix_phase_find_tree(build_directory), S8("configure"), S8(""), 0);
         if (cmake_profile)
         {
             cmake_profile_summary_add(arena, profile_summary_step, cmake_profile_path, cmake_profile_summary_limit);
@@ -24788,6 +24838,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     if (!direct_matrix)
     {
         matrix_superbuild_allocate_jobs(trees, tree_count, thread_count);
+        matrix_phase.outer_jobs = matrix_superbuild_outer_jobs(thread_count, tree_count);
         string_print(S8("BUSTER_SUPERBUILD_PARALLELISM: threads={u32} trees={u32} outer_jobs={u32}\n"), thread_count, tree_count,
                      matrix_superbuild_outer_jobs(thread_count, tree_count));
         for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
@@ -37932,93 +37983,67 @@ BUSTER_GLOBAL_LOCAL ProcessRun* bench_service_recipe_sandbox_process_add(Arena* 
                                                                           BenchServiceRecipeIdentity identity,
                                                                           BenchServiceRecipeStage* stage);
 
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_argument_present(SliceString8 arguments, String8 expected)
-{
-    bool found = false;
-    for (u64 index = 0; !found && index < arguments.length; index += 1)
-        found = string_equal(arguments.pointer[index], expected);
-    return found;
-}
-
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_identity_test(Arena* arena)
 {
     String8List trusted = {0}, candidate = {0}, invalid = {0};
     bool ok = bench_service_recipe_identity_append(arena, &trusted, BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED) &&
               bench_service_recipe_identity_append(arena, &candidate, BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE) &&
               !bench_service_recipe_identity_append(arena, &invalid, BENCH_SERVICE_RECIPE_IDENTITY_INVALID);
-    SliceString8 trusted_arguments = string8_list_to_slice(arena, trusted);
-    SliceString8 candidate_arguments = string8_list_to_slice(arena, candidate);
-    ok = ok && invalid.count == 0 && trusted_arguments.length == 3 && candidate_arguments.length == 3 &&
-         string_equal(trusted_arguments.pointer[0], S8("--uid=buster-bench")) &&
-         string_equal(trusted_arguments.pointer[1], S8("--gid=buster-bench")) &&
-         string_equal(trusted_arguments.pointer[2], S8("--property=UMask=0077")) &&
-         string_equal(candidate_arguments.pointer[0], S8("--uid=buster-bench-candidate")) &&
-         string_equal(candidate_arguments.pointer[1], S8("--gid=buster-bench-candidate")) &&
-         string_equal(candidate_arguments.pointer[2], S8("--property=UMask=0007"));
+    SliceString8 trusted_identity = string8_list_to_slice(arena, trusted);
+    SliceString8 candidate_identity = string8_list_to_slice(arena, candidate);
+    ok = ok && invalid.count == 0 && trusted_identity.length == 3 && candidate_identity.length == 3 &&
+         string_equal(trusted_identity.pointer[0], S8("--uid=buster-bench")) &&
+         string_equal(candidate_identity.pointer[0], S8("--uid=buster-bench-candidate"));
     BuildGraph saved_graph = program.build_graph;
     program.build_graph = (BuildGraph){0};
     String8 production_arguments[] = {S8(BENCH_SERVICE_RECIPE_DRIVER), S8("generate")};
-    BenchServiceRecipeManifest test_manifest = {.job_id = S8("1"), .attempt_token = S8("2")};
-    BenchServiceRecipeStage stage = {.manifest = &test_manifest, .name = S8("throughput")};
-    ProcessRun* trusted_run = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
-                                                                         (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments),
-                                                                         S8("/"), S8("/installed /source"), S8("/workspace"),
-                                                                         S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED,
-                                                                         &stage);
+    BenchServiceRecipeManifest test_manifest = {.job_id = S8("1"), .attempt_token = S8("2"),
+        .base_revision = S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        .candidate_revision = S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")};
+    BenchServiceRecipeStage base_stage = {.manifest = &test_manifest, .name = S8("base-generate")};
+    BenchServiceRecipeStage candidate_stage = {.manifest = &test_manifest, .name = S8("throughput")};
+    ProcessRun* base = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments), S8("/"), S8("/installed /source"),
+        S8("/workspace"), S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED, &base_stage);
     ProcessRun* candidate_run = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
-                                                                           (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments),
-                                                                           S8("/"), S8("/installed /source"), S8("/workspace"),
-                                                                           S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE,
-                                                                           &stage);
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments), S8("/"), S8("/installed /source"),
+        S8("/workspace"), S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE, &candidate_stage);
     ProcessRun* invalid_run = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
-                                                                         (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments),
-                                                                         S8("/"), S8("/installed /source"), S8("/workspace"),
-                                                                         S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_INVALID,
-                                                                         &stage);
-    SliceString8 trusted_wrapped = trusted_run ? trusted_run->arguments : (SliceString8){0};
-    SliceString8 candidate_wrapped = candidate_run ? candidate_run->arguments : (SliceString8){0};
-    SliceString8 invalid_wrapped = invalid_run ? invalid_run->arguments : (SliceString8){0};
-    bool common = trusted_wrapped.length > 5 && candidate_wrapped.length > 5 &&
-                  string_equal(trusted_wrapped.pointer[0], S8("/usr/bin/systemd-run")) &&
-                  string_equal(trusted_wrapped.pointer[1], S8("--quiet")) &&
-                  string_equal(trusted_wrapped.pointer[2], S8("--wait")) &&
-                  string_equal(trusted_wrapped.pointer[4], S8("--service-type=exec")) &&
-                  string_equal(candidate_wrapped.pointer[0], S8("/usr/bin/systemd-run")) &&
-                  string_equal(candidate_wrapped.pointer[1], S8("--quiet")) &&
-                  string_equal(candidate_wrapped.pointer[2], S8("--wait")) &&
-                  string_equal(candidate_wrapped.pointer[4], S8("--service-type=exec"));
-    bool trusted_identity = common && bench_service_recipe_argument_present(trusted_wrapped, S8("--uid=buster-bench")) &&
-                            bench_service_recipe_argument_present(trusted_wrapped, S8("--gid=buster-bench")) &&
-                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=UMask=0077")) &&
-                            !bench_service_recipe_argument_present(trusted_wrapped, S8("--uid=buster-bench-candidate")) &&
-                            bench_service_recipe_argument_present(trusted_wrapped, S8("--slice=buster-bench.slice")) &&
-                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=AllowedCPUs=" BENCH_SERVICE_RECIPE_CPU)) &&
-                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=MemoryMax=" BENCH_SERVICE_RECIPE_MEMORY)) &&
-                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=MemorySwapMax=" BENCH_SERVICE_RECIPE_SWAP)) &&
-                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=TasksMax=" BENCH_SERVICE_RECIPE_TASKS)) &&
-                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=RuntimeMaxSec=" BENCH_SERVICE_RECIPE_RUNTIME));
-    bool candidate_identity = common && bench_service_recipe_argument_present(candidate_wrapped, S8("--uid=buster-bench-candidate")) &&
-                              bench_service_recipe_argument_present(candidate_wrapped, S8("--gid=buster-bench-candidate")) &&
-                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=UMask=0007")) &&
-                              !bench_service_recipe_argument_present(candidate_wrapped, S8("--uid=buster-bench")) &&
-                              bench_service_recipe_argument_present(candidate_wrapped, S8("--slice=buster-bench.slice")) &&
-                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=AllowedCPUs=" BENCH_SERVICE_RECIPE_CPU)) &&
-                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=MemoryMax=" BENCH_SERVICE_RECIPE_MEMORY)) &&
-                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=MemorySwapMax=" BENCH_SERVICE_RECIPE_SWAP)) &&
-                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=TasksMax=" BENCH_SERVICE_RECIPE_TASKS)) &&
-                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=RuntimeMaxSec=" BENCH_SERVICE_RECIPE_RUNTIME));
-    bool invalid_identity = invalid_wrapped.length == 1 && string_equal(invalid_wrapped.pointer[0], S8("/usr/bin/false"));
-    bool nested_relation = bench_service_recipe_argument_present(candidate_wrapped,
-                                                                  S8("--unit=buster-bench-1-2-throughput.service")) &&
-                           bench_service_recipe_argument_present(candidate_wrapped,
-                                                                  S8("--property=PartOf=buster-bench-1-2.service")) &&
-                           bench_service_recipe_argument_present(candidate_wrapped,
-                                                                  S8("--property=BindsTo=buster-bench-1-2.service")) &&
-                           bench_service_recipe_argument_present(candidate_wrapped,
-                                                                  S8("--property=After=buster-bench-1-2.service")) &&
-                           bench_service_recipe_argument_present(candidate_wrapped, S8("--collect"));
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments), S8("/"), S8("/installed /source"),
+        S8("/workspace"), S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_INVALID, &candidate_stage);
+    SliceString8 base_arguments = base ? base->arguments : (SliceString8){0};
+    SliceString8 candidate_arguments = candidate_run ? candidate_run->arguments : (SliceString8){0};
+    SliceString8 invalid_arguments = invalid_run ? invalid_run->arguments : (SliceString8){0};
+    ok = ok && base_arguments.length == 7 && candidate_arguments.length == 7 &&
+         string_equal(base_arguments.pointer[0], S8("/usr/local/libexec/buster-bench-systemd-broker")) &&
+         string_equal(candidate_arguments.pointer[0], base_arguments.pointer[0]) &&
+         string_equal(base_arguments.pointer[1], S8("start-stage")) &&
+         string_equal(base_arguments.pointer[2], S8("1")) &&
+         string_equal(base_arguments.pointer[3], S8("2")) &&
+         string_equal(base_arguments.pointer[4], S8("base-generate")) &&
+         string_equal(candidate_arguments.pointer[4], S8("throughput")) &&
+         string_equal(base_arguments.pointer[5], test_manifest.base_revision) &&
+         string_equal(candidate_arguments.pointer[6], test_manifest.candidate_revision) &&
+         invalid_arguments.length == 1 && string_equal(invalid_arguments.pointer[0], S8("/usr/bin/false"));
+    String8 additional_names[] = {S8("base-build"), S8("candidate-generate"), S8("candidate-build")};
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(additional_names); index += 1)
+    {
+        BenchServiceRecipeStage additional = {.manifest = &test_manifest, .name = additional_names[index]};
+        BenchServiceRecipeIdentity additional_identity = index == 0 ? BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED :
+                                                            BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE;
+        ProcessRun* run = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments), S8("/"), S8("/installed /source"),
+            S8("/workspace"), S8("/result"), additional_identity, &additional);
+        ok = run && run->arguments.length == 7 &&
+             string_equal(run->arguments.pointer[4], additional_names[index]);
+    }
+    BenchServiceRecipeStage unknown_stage = {.manifest = &test_manifest, .name = S8("shell")};
+    ProcessRun* unknown = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments), S8("/"), S8("/installed /source"),
+        S8("/workspace"), S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED, &unknown_stage);
+    ok = ok && unknown && unknown->arguments.length == 1 &&
+         string_equal(unknown->arguments.pointer[0], S8("/usr/bin/false"));
     program.build_graph = saved_graph;
-    ok = ok && trusted_identity && candidate_identity && invalid_identity && nested_relation;
     return ok;
 }
 
@@ -38034,79 +38059,36 @@ BUSTER_GLOBAL_LOCAL ProcessRun* bench_service_recipe_sandbox_process_add(Arena* 
     String8 driver = arguments.length ? arguments.pointer[0] : (String8){0};
     bool production_driver = string_equal(driver, S8(BENCH_SERVICE_RECIPE_DRIVER)) ||
                              string_equal(driver, S8(BENCH_SERVICE_RECIPE_THROUGHPUT));
+    bool base_stage = stage && (string_equal(stage->name, S8("base-generate")) ||
+                                string_equal(stage->name, S8("base-build")));
+    bool candidate_stage = stage && (string_equal(stage->name, S8("candidate-generate")) ||
+                                     string_equal(stage->name, S8("candidate-build")) ||
+                                     string_equal(stage->name, S8("throughput")));
+    bool identity_ok = (base_stage && identity == BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED) ||
+                       (candidate_stage && identity == BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE);
     String8List wrapped = {0};
-    bool identity_ok = true;
-    if (production_driver)
+    if (production_driver && identity_ok && stage->manifest)
     {
-        string8_list_push(arena, &wrapped, S8("/usr/bin/systemd-run"));
-        string8_list_push(arena, &wrapped, S8("--quiet"));
-        string8_list_push(arena, &wrapped, S8("--wait"));
-        string8_list_push(arena, &wrapped, S8("--pipe"));
-        string8_list_push(arena, &wrapped, S8("--service-type=exec"));
-        string8_list_push(arena, &wrapped, S8("--slice=buster-bench.slice"));
-        string8_list_push(arena, &wrapped, S8("--property=AllowedCPUs=" BENCH_SERVICE_RECIPE_CPU));
-        string8_list_push(arena, &wrapped, S8("--property=MemoryMax=" BENCH_SERVICE_RECIPE_MEMORY));
-        string8_list_push(arena, &wrapped, S8("--property=MemorySwapMax=" BENCH_SERVICE_RECIPE_SWAP));
-        string8_list_push(arena, &wrapped, S8("--property=TasksMax=" BENCH_SERVICE_RECIPE_TASKS));
-        string8_list_push(arena, &wrapped, S8("--property=RuntimeMaxSec=" BENCH_SERVICE_RECIPE_RUNTIME));
-        if (stage && stage->manifest)
-        {
-            String8 child_unit = string_format(arena, S8("buster-bench-{S8}-{S8}-{S8}.service"),
-                                                stage->manifest->job_id, stage->manifest->attempt_token, stage->name);
-            String8 parent_unit = string_format(arena, S8("buster-bench-{S8}-{S8}.service"),
-                                                stage->manifest->job_id, stage->manifest->attempt_token);
-            string8_list_push(arena, &wrapped, string_format(arena, S8("--unit={S8}"), child_unit));
-            string8_list_push(arena, &wrapped, string_format(arena, S8("--property=PartOf={S8}"), parent_unit));
-            string8_list_push(arena, &wrapped, string_format(arena, S8("--property=BindsTo={S8}"), parent_unit));
-            string8_list_push(arena, &wrapped, string_format(arena, S8("--property=After={S8}"), parent_unit));
-            string8_list_push(arena, &wrapped, S8("--collect"));
-        }
-        identity_ok = bench_service_recipe_identity_append(arena, &wrapped, identity);
-        string8_list_push(arena, &wrapped, S8("--property=KillMode=control-group"));
-        string8_list_push(arena, &wrapped, S8("--property=SendSIGKILL=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=TimeoutStopSec=10s"));
-        string8_list_push(arena, &wrapped, S8("--property=NoNewPrivileges=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=PrivateTmp=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=PrivateDevices=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectSystem=strict"));
-        string8_list_push(arena, &wrapped, S8("--property=RestrictSUIDSGID=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectHome=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectControlGroups=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectKernelTunables=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectKernelModules=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectKernelLogs=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectClock=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectHostname=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectProc=invisible"));
-        string8_list_push(arena, &wrapped, S8("--property=LockPersonality=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=MemoryDenyWriteExecute=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=RemoveIPC=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=KeyringMode=private"));
-        string8_list_push(arena, &wrapped, S8("--property=RestrictNamespaces=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=RestrictRealtime=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=RestrictAddressFamilies=AF_UNIX"));
-        string8_list_push(arena, &wrapped, S8("--property=SystemCallArchitectures=native"));
-        string8_list_push(arena, &wrapped, S8("--property=SystemCallFilter=@system-service"));
-        string8_list_push(arena, &wrapped, S8("--property=SystemCallErrorNumber=EPERM"));
-        string8_list_push(arena, &wrapped, string_format(arena, S8("--property=ReadOnlyPaths={S8}"), read_only_paths));
-        string8_list_push(arena, &wrapped, string_format(arena, S8("--property=ReadWritePaths={S8}"), read_write_path));
-        if (result_root.length && !string_equal(result_root, read_write_path))
-            string8_list_push(arena, &wrapped, string_format(arena, S8("--property=InaccessiblePaths={S8}"), result_root));
-        string8_list_push(arena, &wrapped, S8("--property=PrivateNetwork=yes"));
+        string8_list_push(arena, &wrapped, S8("/usr/local/libexec/buster-bench-systemd-broker"));
+        string8_list_push(arena, &wrapped, S8("start-stage"));
+        string8_list_push(arena, &wrapped, stage->manifest->job_id);
+        string8_list_push(arena, &wrapped, stage->manifest->attempt_token);
+        string8_list_push(arena, &wrapped, stage->name);
+        string8_list_push(arena, &wrapped, stage->manifest->base_revision);
+        string8_list_push(arena, &wrapped, stage->manifest->candidate_revision);
     }
-    if (!identity_ok)
-    {
-        /* No production stage may fall back to the manager's default root
-         * identity.  An invalid compile-time identity is converted into a
-         * fixed failing command with no caller arguments. */
-        wrapped = (String8List){0};
-        string8_list_push(arena, &wrapped, S8("/usr/bin/false"));
-    }
-    else
+    else if (identity_ok)
     {
         for (u64 index = 0; index < arguments.length; index += 1)
             string8_list_push(arena, &wrapped, arguments.pointer[index]);
     }
+    else
+    {
+        string8_list_push(arena, &wrapped, S8("/usr/bin/false"));
+    }
+    (void)read_only_paths;
+    (void)read_write_path;
+    (void)result_root;
     SliceString8 stable = string8_list_to_slice(arena, wrapped);
     return bench_service_recipe_process_add(arena, step, stable, working_directory, stage);
 }
@@ -38964,6 +38946,48 @@ BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
     native_foundation_tool_add(arena, arguments, true);
 }
 
+BUSTER_GLOBAL_LOCAL ProcessResult bench_service_broker_add(Arena* arena, SliceString8 arguments)
+{
+    bool self_test = arguments.length == 1 && string_equal(arguments.pointer[0], S8("self-test"));
+    ProcessResult result = arguments.length == 0 || self_test ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+#if BUSTER_LINUX
+    if (result == PROCESS_RESULT_SUCCESS)
+    {
+        make_directory_recursive(arena, S8("build/bench-service-tools"));
+        String8 executable = S8("build/bench-service-tools/systemd-broker");
+        String8 compiler = cmake_cc(arena, BUILD_COMPILER_CLANG);
+        ProcessRun* compile = run_add(arena, step_add(arena));
+        OsArgumentBuilder builder = os_argument_builder_start(arena);
+        os_argument_builder_append(&builder, compiler);
+        os_argument_builder_append(&builder, S8("-std=c11"));
+        os_argument_builder_append(&builder, S8("-O2"));
+        os_argument_builder_append(&builder, S8("-Wall"));
+        os_argument_builder_append(&builder, S8("-Wextra"));
+        os_argument_builder_append(&builder, S8("-Werror"));
+        os_argument_builder_append(&builder, S8("-fwrapv"));
+        os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
+        os_argument_builder_append(&builder, S8("-funsigned-char"));
+        os_argument_builder_append(&builder, S8("tools/bench_service/systemd_broker.c"));
+        os_argument_builder_append(&builder, S8("-o"));
+        os_argument_builder_append(&builder, executable);
+        *compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder), .working_directory = S8("."),
+                                .spawn_options = {.use_process_environment = 1}};
+        if (self_test)
+        {
+            ProcessRun* test = run_add(arena, step_add(arena));
+            String8 command[] = {executable, S8("self-test")};
+            *test = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                                 .working_directory = S8("."), .spawn_options = {.use_process_environment = 1}};
+        }
+    }
+#else
+    (void)arena;
+    (void)self_test;
+    result = PROCESS_RESULT_FAILED;
+#endif
+    return result;
+}
+
 // A same-runner CI comparison. A separately checked-out baseline is required;
 // the generated workload and flags are owned by the candidate harness, shared
 // byte-for-byte by both compiler executables. Never restore timing baselines or
@@ -39059,6 +39083,7 @@ ProcessResult process_arguments(void)
 BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_NONE] = S8_INITIALIZER("none"),
         [BUILD_COMMAND_BENCH_SERVICE] = S8_INITIALIZER("bench_service"),
+        [BUILD_COMMAND_BENCH_SERVICE_BROKER] = S8_INITIALIZER("bench_service_broker"),
         [BUILD_COMMAND_BENCH_SERVICE_RECIPE] = S8_INITIALIZER("bench_service_recipe"),
         [BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST] = S8_INITIALIZER("bench_service_recipe_self_test"),
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
@@ -39105,6 +39130,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
         [BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST] = S8_INITIALIZER("coverage_manifest_self_test"),
+        [BUILD_COMMAND_MATRIX_PHASE_RUN] = S8_INITIALIZER("matrix_phase_run"),
     };
 
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(build_command_names) == BUILD_COMMAND_COUNT);
@@ -39185,7 +39211,12 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     TestMuslOptions test_musl_options = {0};
     TestCpythonOptions test_cpython_options = {0};
 
-    if (command == BUILD_COMMAND_PRODUCTION_PROFILE)
+    if (command == BUILD_COMMAND_MATRIX_PHASE_RUN)
+    {
+        result = matrix_phase_run(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
+        argument_i = arguments.length;
+    }
+    else if (command == BUILD_COMMAND_PRODUCTION_PROFILE)
     {
         result = production_profile_main(
             arena,
@@ -39228,7 +39259,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
         String8 argument = arguments.pointer[argument_i];
-        if (command == BUILD_COMMAND_BENCH_SERVICE || command == BUILD_COMMAND_BENCH_SERVICE_RECIPE ||
+        if (command == BUILD_COMMAND_BENCH_SERVICE || command == BUILD_COMMAND_BENCH_SERVICE_BROKER ||
+            command == BUILD_COMMAND_BENCH_SERVICE_RECIPE ||
             command == BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST || command == BUILD_COMMAND_BENCH_THROUGHPUT ||
             command == BUILD_COMMAND_BENCH_THROUGHPUT_CI)
         {
@@ -40170,6 +40202,11 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             bench_service_add(arena, string8_list_to_slice(arena, throughput_arguments));
         }
         break;
+        case BUILD_COMMAND_BENCH_SERVICE_BROKER:
+        {
+            result = bench_service_broker_add(arena, string8_list_to_slice(arena, throughput_arguments));
+        }
+        break;
         case BUILD_COMMAND_BENCH_SERVICE_RECIPE:
         {
             result = bench_service_recipe_add(arena, string8_list_to_slice(arena, throughput_arguments));
@@ -40384,6 +40421,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             test_cpython_action_add(arena, test_cpython_options);
         }
         break;
+        case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
@@ -40404,6 +40442,10 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             machine_info_print();
             bool ci = command == BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI;
             result = test_all(arena, ci, options);
+            if (result == PROCESS_RESULT_SUCCESS && !matrix_phase_plan(arena, string_equal(matrix_phase.scheduler, S8("direct"))))
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
         }
         break;
         case BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST:
@@ -40563,6 +40605,11 @@ ProcessResult entry_point(void)
 
     for (BuildStep* step = build_graph->first_step; step; step = step->next)
     {
+        if (matrix_phase.enabled && !matrix_phase_ready(arena, step))
+        {
+            result = PROCESS_RESULT_FAILED;
+            break;
+        }
         u32 pending_count = 0;
         ProcessRun* first_pending = step->first_process;
 
@@ -40594,7 +40641,12 @@ ProcessResult entry_point(void)
 
                 if (result == PROCESS_RESULT_SUCCESS)
                 {
-                    ProcessResult callback_result = run->callback(arena, run->callback_data);
+                    bool observed = !matrix_phase.enabled || matrix_phase_callback(arena, run, false, PROCESS_RESULT_SUCCESS);
+                    ProcessResult callback_result = observed ? run->callback(arena, run->callback_data) : PROCESS_RESULT_FAILED;
+                    if (observed && matrix_phase.enabled && !matrix_phase_callback(arena, run, true, callback_result))
+                    {
+                        callback_result = PROCESS_RESULT_FAILED;
+                    }
                     if (callback_result != PROCESS_RESULT_SUCCESS)
                     {
                         result = callback_result;
@@ -40648,5 +40700,6 @@ ProcessResult entry_point(void)
         }
     }
 
+    result = matrix_phase_finish(arena, result);
     return result;
 }

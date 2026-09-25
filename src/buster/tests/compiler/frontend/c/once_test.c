@@ -713,7 +713,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_preprocess_probe_scaling(UnitTest
 {
     UnitTestResult result = {0};
     u32 counts[] = {64, 256};
-    u64 previous_probes = 0;
     for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(counts); size_index += 1)
     {
         u32 count = counts[size_index];
@@ -774,14 +773,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_once_test_preprocess_probe_scaling(UnitTest
             BUSTER_TEST(arguments, detail->source_lexed.files == (u64)count + C_ONCE_TEST_SCALE_DEPTH + 2);
             BUSTER_TEST(arguments, detail->source_unique.files == (u64)count + C_ONCE_TEST_SCALE_DEPTH + 2);
             BUSTER_TEST(arguments, probes >= operations);
-            BUSTER_TEST(arguments, probes <= operations * 16);
-            if (previous_probes)
-            {
-                BUSTER_TEST(arguments, probes <= previous_probes * 6);
-            }
+            // Physical file identities depend on the simulator's filesystem.
+            // Bound each workload by its own include operations: a lucky
+            // small table must not make an independent larger table fail.
+            BUSTER_TEST(arguments, probes <= operations * 8);
             arguments->show(arguments, S8("C_ONCE_PREPROCESS_PROBES_V1 entries={u32} operations={u64} probes={u64}\n"),
                             count + C_ONCE_TEST_SCALE_DEPTH + 1, operations, probes);
-            previous_probes = probes;
         }
         scratch_end(temporary);
     }

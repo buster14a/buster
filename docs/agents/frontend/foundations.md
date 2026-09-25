@@ -65,6 +65,10 @@ incoming values, forwarding through single-predecessor chains. Trivial
 parameters and unused parameter cycles are removed. Disconnected empty label
 blocks have no outgoing edge. Publication includes **every** predecessor edge,
 including parameter-free destinations; selectors must never see a partial CFG.
+Condition lowering resolves a literal left operand of `||` or `&&` before
+allocating a block for its right operand. A short-circuited arm must not
+become a disconnected source block that joins a value defined only on another
+path; selected MIR enforces dominance in unreachable code too.
 Nested GNU statement-expression body walks reuse the function's label block at
 the same source token. Allocating a second block leaves the predeclared label
 unterminated and separates ordinary goto from label-address provenance. The
@@ -174,6 +178,12 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   across batch pushes that may grow the array. An ENABLE marker remains below
   its replacement batch, and refused identifiers retain `no_expand` on rescans.
   Output nodes and source-stamp ownership are independent of task storage.
+  A non-builtin definition without `#` or `##` is written straight into its
+  reserved batch by `c_macro_produce_plain_tasks` (exact size from
+  `plain_count` and per-parameter use counts); builtins, stringify and paste
+  still stage a `CPpToken` list in `c_macro_replacement_tokens` and push it
+  with `c_macro_expansion_tasks_push`. Both orders must stay identical:
+  `c_test_macro_plain_production` compares them token for token.
 - Macro placemarkers survive the entire `##` sequence. The replacement loop
   compacts into its existing materialized buffer and removes placemarkers only
   when emitting the rescan tokens. Only the explicitly marked GNU
@@ -210,13 +220,24 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   association by token range without flattening or copying the translation
   unit, and unselected associations are never evaluated. The nested
   generic-constant cases cover this path (GitHub #797).
+- Legacy integer constant ranges and static assertions share the private
+  `c_parse_constant_expression_evaluate` walker over original token indices.
+  The shape sidecar and parse position index describe that stream; copying a
+  range into a synthesized token view while retaining either derived index
+  gives the wrong classification. Spelling, source recovery, and pack changes
+  still belong to the original preprocess result (GitHub #629).
 - Preprocessing integer-expression reductions carry signedness and a deferred
   arithmetic-fault bit in the same byte. Division by zero and signed
   `INT64_MIN / -1` (including remainder) never execute as host arithmetic.
   `&&`, `||` and `?:` propagate faults only from evaluated operands; the
   conditional's common unsigned type still depends on both arms. Syntax
-  validation remains unconditional. `c_test_preprocessor_short_circuit` covers
-  generated `#if`/`#elif`, live-fault and malformed-dead-operand controls;
+  validation remains unconditional. Character constants obtain their
+  preprocessing signedness from the decoded target scalar type, including
+  target-dependent `L` and C23 `u8` literals. Parse-side constant folds retain
+  ordinary C promotions and do not inherit this `intmax_t`/`uintmax_t` widening.
+  `c_macro_conditional_tests` covers those character types alongside ordinary C
+  controls; `c_test_preprocessor_short_circuit` covers generated `#if`/`#elif`,
+  live-fault and malformed-dead-operand controls;
   `tests/basic_c_preprocessor_short_circuit.c` runs in the existing native
   allocator matrix (GitHub #147, #258).
 - A folded conditional expression converts its selected value to the common
@@ -253,6 +274,14 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   over the 32-bit key. The one temporary row buffer is rewound before origin
   recovery and publication; the original region array remains authoritative.
   Do not restore displacement-dependent insertion sorting for `#line` splits.
+  Publish lookup keys before C23 respelling so its origin queries can read the
+  existing prefix. `c_source_map_publish_appended` rebuilds keys afterwards only
+  if that append-only phase added regions; without an append, keep the original
+  keys and sentinel. Count equality is not a general mutation-cache contract.
+  Respelling may move the region array, but must not invalidate the published
+  key prefix while querying it. Neither publication rewinds the TU arena:
+  canonical lowering copies the map's pointers into `IrProgram.source_map`,
+  whose diagnostic, DWARF and CodeView consumers still borrow their storage.
 - Zero-initialize aggregate tables before publishing a partially resolved type.
   Recursive and mutually dependent declarations can expose an aggregate while
   later members are still unresolved; an uninitialized `IrField` must never be
@@ -276,6 +305,16 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   selected x86-64 float-to-u64 conversion whose binary32 threshold encoded
   2^31 instead of 2^63. Runtime float-to-128-bit conversion on x86-64 remains
   unsupported; constant conversion supports both integer limbs.
+- Automatic chained designators in `c_ir_lower_nested_compound_literal_step`
+  retain a continuation cursor for every selected aggregate container. A
+  following positional item resumes at the innermost remaining sibling and
+  advances outward only when that container is exhausted. Named members may
+  cross anonymous structs or unions; `c_ir_nested_initializer_field_cursors`
+  records each emitted field edge, while array steps record their selected
+  index directly. The driver's `c_designator_continuation_source` checks
+  automatic and file-static values, compound literals, and outward
+  continuation across both frontend forms and all native allocators (GitHub
+  #1206).
 - `c_parse_index_scope_children` stores siblings in token-interval order.
   Source-ordered rows keep a linear construction path; synthesized rows use
   iterative merging with the finished CSR cursor storage as scratch.
@@ -445,6 +484,14 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   pointer-local reads restore their declaration's bounds. Explicit scalar
   pointer casts discard it, even when canonical pointer types match. `sizeof`
   of a named VLA pointer's dereference reads the cached suffix size.
+  A saved size does not suppress evaluation of a VLA-typed operand. The
+  sizeof continuation evaluates its operand once through the existing
+  expression machine, discards the row address, and retains that size.
+  The remaining original C type decides evaluation: a variable outer
+  bound does not make a fixed-size row or scalar operand evaluated.
+  Declaration bounds are not reevaluated and array data is not read.
+  `c_test_sizeof_vla_evaluation` checks raw calls/volatile stores and
+  runtime results across contexts, saved bounds and outer sizeof.
   Compatible conditional pointer results retain their shape through the
   result slot and remain rvalues. Concrete consumers normalize any pointer
   shell retained by unevaluated type prediction before applying scalar element
@@ -704,7 +751,14 @@ through following implicit members; an explicit initializer can reset the
 sequence. Explicit initializers never speculatively compute a successor, so an
 explicit reset immediately after the largest supported constant is valid.
 Fixed-base successors use the same arithmetic but must fit their declared base
-and never widen. General explicit fixed-base range validation remains #903.
+and never widen. Explicit fixed-base initializers pass the same signed-magnitude
+representability check after typed evaluation, including all casts in the ICE,
+and before the member's fixed declaration type is published (#903). A negative
+value cannot fit an unsigned base; an explicit cast can change that value before
+checking. Range failures diagnose the enumerator's name and invalidate its ICE,
+so following implicit members stay invalid until an explicit reset. The declared
+base and the original ICE's magnitude/type are never widened or narrowed to make
+an invalid value fit. GNU17's fixed-base extension and GNU23 use this same rule.
 
 Pending lookup respects lexical scope and declaration order, including a nearer
 ordinary identifier shadowing an outer enumerator. Published names use ordinary
@@ -756,6 +810,15 @@ and constants observed through globals and runtime functions.
 location for consecutive invalid successors at both 128-bit terminal limits
 and signed/unsigned fixed 8/64-bit limits, without changing the declared base.
 
+`c_test_fixed_enum_ranges` and `c_test_fixed_enum_range_diagnostics` extend that
+contract to signed/unsigned 8/16/32/64/128-bit bases, target-sized long, typedef
+bases and bool. They cover exact endpoints, out-of-range explicit values,
+signedness-changing casts, implicit overflow and recovery, with declaration-site
+diagnostics and unchanged base types on Linux/Windows x86-64/AArch64 in GNU17
+and GNU23. Positive inputs also validate both frontend IR forms. The existing
+enumerator differential harness compiles and executes the fixed-base source
+with Clang in both dialects at O0/O2 and with Buster in both frontend forms.
+
 The Linux x86-64 `c_test_enumerator_type_differential` also executes the new
 sources at O0/O2: Clang in GNU17/GNU2x for the 32-bit transitions and negative
 int-range reentry, and GCC in both modes for the 64-to-128-bit transitions.
@@ -769,3 +832,31 @@ unconditional completion contract selected by its requested dialect.
 
 The implicit declaration rule is specified by C23 draft N3096, 6.7.2.2p11
 ([WG14 draft](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3096.pdf)).
+
+## Resolved enum lowering (#904)
+
+`c_parse_enum_complete` is the authority for an ordinary enum's compatible
+integer type. Lowering reads its stored `element_type` through `c_type_ir_map`;
+it never rescans the enumerators or substitutes signed int. Enumerator runtime
+values (`c_ir_emit_enumerator`) and constant identifiers use the completed
+symbol's mapped semantic type, which can still be int for an individually small
+GNU17 enumerator. `c_ir_emit_integer_value` is only the synthetic-int helper.
+An unavailable constant type remains unresolved instead of folding through s32.
+
+The existing type worklist also resolves enum bases that depend on a pending
+typedef mapping. This matters for fixed bases with an alignment attribute:
+their enum objects, return values and static initializers must all consume the
+same resolved base. An ordinary forward enum tag has an incomplete canonical
+enum type so pointers can name it without inventing a four-byte object layout.
+
+`c_test_enum_lowering` checks the semantic compatible kind and canonical return,
+parameter and global types on Linux, Windows and macOS, each on x86-64/AArch64,
+in GNU17/GNU23 and both frontend forms. The assertion-bearing source covers
+all-small signed/unsigned ranges, bit 31, 2^32, mixed negative/large-positive
+values, implicit successors across UINT_MAX, UINT64_MAX, sizeof, comparisons,
+widening, static initializers and volatile runtime values. The existing external
+differential harness runs it with Clang/GCC at O0/O2; expected values are literal
+constants, not inferred from Buster. The fixed-range fixture additionally checks
+the aligned-base case against Clang. `c_test_enum_runtime` runs these two sources
+and the bit-field source in all four native allocator modes with strict codegen
+verification, rejecting machine fallback outside NONE.

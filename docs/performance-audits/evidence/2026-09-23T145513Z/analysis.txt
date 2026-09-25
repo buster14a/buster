@@ -1,0 +1,186 @@
+== src/buster/apps/ide/ide.c
+lowering total 398.864 ms = preamble 60.321 (15.1%) + body loop 338.436 (84.8%) + epilogue 0.107 (0.0%)
+TU arena retained: preamble 275.3 MiB, body loop 695.7 MiB, epilogue 0.0 MiB; per-function scratch high water 80.3 MiB
+shared tables across body loop: types 39313->48872 (+9559), symbols 11598->21304 (+9706), globals 5476->15166 (+9690), functions 5991->5991 (+0)
+declarations 13442, lowered 5136, rejected 0, census rows 5138
+statuses: {'ok': 5136, 'skip-unneeded': 2}
+per-function sum 335.041 ms (+0.000 ms in non-ok rows); loop overhead outside rows 3.395 ms
+  prepare 31.875 (9.5%), body 221.017 (66.0%), finish(ssa) 81.667 (24.4%), publish 0.481 (0.1%)
+per-function total ns: n=5136 mean=65234 p50=17222 p90=118873 p99=711031 max=29969963
+  largest:
+    codegen_generate_canonical_module_attempt          29.970 ms  tokens=106833  instr=90095   share=8.95%  +types=564 +symbols=570 +globals=570
+    c_lower_to_ir_with_options                          4.892 ms  tokens=20857   instr=17217   share=1.46%  +types=48 +symbols=48 +globals=48
+    link_native_executable_pe64                         3.839 ms  tokens=14509   instr=10499   share=1.15%  +types=28 +symbols=33 +globals=33
+    c_preprocess                                        3.818 ms  tokens=29008   instr=13092   share=1.14%  +types=465 +symbols=470 +globals=470
+    c_ir_emit_prepared_call_step                        2.844 ms  tokens=17599   instr=12882   share=0.85%  +types=40 +symbols=40 +globals=40
+    machine_encode_x86_64                               2.775 ms  tokens=18027   instr=11742   share=0.83%  +types=165 +symbols=166 +globals=166
+    machine_select_canonical_function_x86_64            2.772 ms  tokens=12125   instr=10322   share=0.83%  +types=1 +symbols=1 +globals=1
+    c_ir_lower_body_advance                             2.676 ms  tokens=14726   instr=12284   share=0.80%  +types=39 +symbols=39 +globals=39
+body tokens 1908714, instructions 1496510, ns/token 175.5, ns/instruction 223.9
+  publishes any shared entity (type|symbol|global|function): 1086/5136 functions (21.1%), 205.031 ms (61.2% of per-function time)
+  appends a type: 1063/5136 functions (20.7%), 202.905 ms (60.6% of per-function time)
+  appends a symbol: 1085/5136 functions (21.1%), 205.017 ms (61.2% of per-function time)
+  appends a global: 1069/5136 functions (20.8%), 204.812 ms (61.1% of per-function time)
+  appends a function: 0/5136 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a type but no symbol/global: 1/5136 functions (0.0%), 0.013 ms (0.0% of per-function time)
+  total appended in bodies: types 9559, symbols 9706, globals 9690, functions 0
+  TU arena bytes retained by ok bodies 695.7 MiB (mean 142043 B), scratch max 80.35 MiB, temporary-arena delta max 0 B
+  direct SSA enabled for 5129/5136 bodies
+modeled zero-overhead loop makespan (ms) -- analytical bound from measured serial durations, not a forecast:
+  lanes=1: LPT 335.041 (x1.00), lane_range 335.041 (x1.00), take-index 335.041 (x1.00)
+  lanes=2: LPT 167.520 (x2.00), lane_range 195.782 (x1.71), take-index 167.701 (x2.00)
+  lanes=4: LPT 83.760 (x4.00), lane_range 108.246 (x3.10), take-index 89.483 (x3.74)
+  lanes=8: LPT 41.880 (x8.00), lane_range 65.524 (x5.11), take-index 59.618 (x5.62)
+  largest single function = 8.95% of loop => loop cannot drop below 29.970 ms at any lane count
+closed-world model: eligible 4050 fn / 130.010 ms; deferred 1086 fn / 205.031 ms serial replay
+  lanes=2: modeled loop = 65.008 parallel + 205.031 serial = 270.039 ms (x1.25 vs measured serial loop 338.436); whole lowering x1.21
+  lanes=4: modeled loop = 32.512 parallel + 205.031 serial = 237.543 ms (x1.42 vs measured serial loop 338.436); whole lowering x1.34
+  lanes=8: modeled loop = 16.281 parallel + 205.031 serial = 221.312 ms (x1.53 vs measured serial loop 338.436); whole lowering x1.42
+
+== tests/c_abi_cfuncs.c
+lowering total 3.263 ms = preamble 0.393 (12.0%) + body loop 2.868 (87.9%) + epilogue 0.002 (0.1%)
+TU arena retained: preamble 2.3 MiB, body loop 6.7 MiB, epilogue 0.0 MiB; per-function scratch high water 0.3 MiB
+shared tables across body loop: types 763->763 (+0), symbols 611->611 (+0), globals 2->2 (+0), functions 609->609 (+0)
+declarations 727, lowered 361, rejected 0, census rows 361
+statuses: {'ok': 361}
+per-function sum 2.603 ms (+0.000 ms in non-ok rows); loop overhead outside rows 0.265 ms
+  prepare 0.301 (11.6%), body 2.148 (82.5%), finish(ssa) 0.144 (5.5%), publish 0.009 (0.3%)
+per-function total ns: n=361 mean=7210 p50=4228 p90=11051 p99=69320 max=162664
+  largest:
+    c_vector_32_u8                                      0.163 ms  tokens=327     instr=396     share=6.25%  +types=0 +symbols=0 +globals=0
+    c_test_struct_array_3_sentinel_f32                  0.089 ms  tokens=80      instr=95      share=3.42%  +types=0 +symbols=0 +globals=0
+    c_vector_4_f32_vector_4_f32                         0.087 ms  tokens=87      instr=109     share=3.33%  +types=0 +symbols=0 +globals=0
+    c_test_vector_64_u8                                 0.083 ms  tokens=786     instr=905     share=3.19%  +types=0 +symbols=0 +globals=0
+    c_vector_64_u8                                      0.069 ms  tokens=647     instr=780     share=2.66%  +types=0 +symbols=0 +globals=0
+    run_c_tests                                         0.064 ms  tokens=434     instr=401     share=2.45%  +types=0 +symbols=0 +globals=0
+    memcpy                                              0.058 ms  tokens=58      instr=23      share=2.23%  +types=0 +symbols=0 +globals=0
+    c_test_vector_32_u8                                 0.047 ms  tokens=402     instr=457     share=1.82%  +types=0 +symbols=0 +globals=0
+body tokens 17249, instructions 18892, ns/token 150.9, ns/instruction 137.8
+  publishes any shared entity (type|symbol|global|function): 0/361 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a type: 0/361 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a symbol: 0/361 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a global: 0/361 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a function: 0/361 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a type but no symbol/global: 0/361 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  total appended in bodies: types 0, symbols 0, globals 0, functions 0
+  TU arena bytes retained by ok bodies 6.7 MiB (mean 19558 B), scratch max 0.34 MiB, temporary-arena delta max 0 B
+  direct SSA enabled for 361/361 bodies
+modeled zero-overhead loop makespan (ms) -- analytical bound from measured serial durations, not a forecast:
+  lanes=1: LPT 2.603 (x1.00), lane_range 2.603 (x1.00), take-index 2.603 (x1.00)
+  lanes=2: LPT 1.301 (x2.00), lane_range 1.638 (x1.59), take-index 1.303 (x2.00)
+  lanes=4: LPT 0.651 (x4.00), lane_range 1.041 (x2.50), take-index 0.656 (x3.97)
+  lanes=8: LPT 0.326 (x7.99), lane_range 0.539 (x4.83), take-index 0.337 (x7.71)
+  largest single function = 6.25% of loop => loop cannot drop below 0.163 ms at any lane count
+closed-world model: eligible 361 fn / 2.603 ms; deferred 0 fn / 0.000 ms serial replay
+  lanes=2: modeled loop = 1.303 parallel + 0.000 serial = 1.303 ms (x2.20 vs measured serial loop 2.868); whole lowering x1.92
+  lanes=4: modeled loop = 0.656 parallel + 0.000 serial = 0.656 ms (x4.37 vs measured serial loop 2.868); whole lowering x3.11
+  lanes=8: modeled loop = 0.337 parallel + 0.000 serial = 0.337 ms (x8.50 vs measured serial loop 2.868); whole lowering x4.45
+
+== /home/david/531/inputs/many_small.c
+lowering total 43.891 ms = preamble 2.999 (6.8%) + body loop 40.846 (93.1%) + epilogue 0.046 (0.1%)
+TU arena retained: preamble 43.5 MiB, body loop 129.2 MiB, epilogue 0.0 MiB; per-function scratch high water 25.8 MiB
+shared tables across body loop: types 6030->6030 (+0), symbols 6002->6002 (+0), globals 0->0 (+0), functions 6002->6002 (+0)
+declarations 6004, lowered 6002, rejected 0, census rows 6002
+statuses: {'ok': 6002}
+per-function sum 38.561 ms (+0.000 ms in non-ok rows); loop overhead outside rows 2.285 ms
+  prepare 6.930 (18.0%), body 28.066 (72.8%), finish(ssa) 3.315 (8.6%), publish 0.249 (0.6%)
+per-function total ns: n=6002 mean=6425 p50=4338 p90=4729 p99=9498 max=7717947
+  largest:
+    main                                                7.718 ms  tokens=60020   instr=30011   share=20.02%  +types=0 +symbols=0 +globals=0
+    f3665                                               0.155 ms  tokens=45      instr=29      share=0.40%  +types=0 +symbols=0 +globals=0
+    f4214                                               0.143 ms  tokens=45      instr=29      share=0.37%  +types=0 +symbols=0 +globals=0
+    f5533                                               0.139 ms  tokens=45      instr=29      share=0.36%  +types=0 +symbols=0 +globals=0
+    f4873                                               0.129 ms  tokens=45      instr=29      share=0.33%  +types=0 +symbols=0 +globals=0
+    f5093                                               0.113 ms  tokens=45      instr=29      share=0.29%  +types=0 +symbols=0 +globals=0
+    f3116                                               0.107 ms  tokens=45      instr=29      share=0.28%  +types=0 +symbols=0 +globals=0
+    f1907                                               0.105 ms  tokens=45      instr=29      share=0.27%  +types=0 +symbols=0 +globals=0
+body tokens 330027, instructions 204017, ns/token 116.8, ns/instruction 189.0
+  publishes any shared entity (type|symbol|global|function): 0/6002 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a type: 0/6002 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a symbol: 0/6002 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a global: 0/6002 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a function: 0/6002 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a type but no symbol/global: 0/6002 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  total appended in bodies: types 0, symbols 0, globals 0, functions 0
+  TU arena bytes retained by ok bodies 129.2 MiB (mean 22579 B), scratch max 25.82 MiB, temporary-arena delta max 0 B
+  direct SSA enabled for 6002/6002 bodies
+modeled zero-overhead loop makespan (ms) -- analytical bound from measured serial durations, not a forecast:
+  lanes=1: LPT 38.561 (x1.00), lane_range 38.561 (x1.00), take-index 38.561 (x1.00)
+  lanes=2: LPT 19.280 (x2.00), lane_range 23.538 (x1.64), take-index 23.139 (x1.67)
+  lanes=4: LPT 9.641 (x4.00), lane_range 15.668 (x2.46), take-index 15.418 (x2.50)
+  lanes=8: LPT 7.718 (x5.00), lane_range 11.671 (x3.30), take-index 11.564 (x3.33)
+  largest single function = 20.02% of loop => loop cannot drop below 7.718 ms at any lane count
+closed-world model: eligible 6002 fn / 38.561 ms; deferred 0 fn / 0.000 ms serial replay
+  lanes=2: modeled loop = 23.139 parallel + 0.000 serial = 23.139 ms (x1.77 vs measured serial loop 40.846); whole lowering x1.68
+  lanes=4: modeled loop = 15.418 parallel + 0.000 serial = 15.418 ms (x2.65 vs measured serial loop 40.846); whole lowering x2.38
+  lanes=8: modeled loop = 11.564 parallel + 0.000 serial = 11.564 ms (x3.53 vs measured serial loop 40.846); whole lowering x3.00
+
+== /home/david/531/inputs/few_large.c
+lowering total 59.406 ms = preamble 1.920 (3.2%) + body loop 57.485 (96.8%) + epilogue 0.001 (0.0%)
+TU arena retained: preamble 41.9 MiB, body loop 236.5 MiB, epilogue 0.0 MiB; per-function scratch high water 76.9 MiB
+shared tables across body loop: types 33->33 (+0), symbols 5->5 (+0), globals 0->0 (+0), functions 5->5 (+0)
+declarations 6, lowered 5, rejected 0, census rows 5
+statuses: {'ok': 5}
+per-function sum 57.355 ms (+0.000 ms in non-ok rows); loop overhead outside rows 0.131 ms
+  prepare 2.664 (4.6%), body 48.452 (84.5%), finish(ssa) 6.237 (10.9%), publish 0.001 (0.0%)
+per-function total ns: n=5 mean=11470925 p50=14148085 p90=14855218 p99=14855218 max=14855218
+  largest:
+    big0                                               14.855 ms  tokens=175224  instr=130817  share=25.90%  +types=0 +symbols=0 +globals=0
+    big1                                               14.268 ms  tokens=175224  instr=130817  share=24.88%  +types=0 +symbols=0 +globals=0
+    big3                                               14.148 ms  tokens=175224  instr=130817  share=24.67%  +types=0 +symbols=0 +globals=0
+    big2                                               14.034 ms  tokens=175224  instr=130817  share=24.47%  +types=0 +symbols=0 +globals=0
+    main                                                0.049 ms  tokens=64      instr=61      share=0.09%  +types=0 +symbols=0 +globals=0
+body tokens 700960, instructions 523329, ns/token 81.8, ns/instruction 109.6
+  publishes any shared entity (type|symbol|global|function): 0/5 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a type: 0/5 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a symbol: 0/5 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a global: 0/5 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a function: 0/5 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a type but no symbol/global: 0/5 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  total appended in bodies: types 0, symbols 0, globals 0, functions 0
+  TU arena bytes retained by ok bodies 236.5 MiB (mean 49607853 B), scratch max 76.89 MiB, temporary-arena delta max 0 B
+  direct SSA enabled for 5/5 bodies
+modeled zero-overhead loop makespan (ms) -- analytical bound from measured serial durations, not a forecast:
+  lanes=1: LPT 57.355 (x1.00), lane_range 57.355 (x1.00), take-index 57.355 (x1.00)
+  lanes=2: LPT 28.889 (x1.99), lane_range 29.123 (x1.97), take-index 29.003 (x1.98)
+  lanes=4: LPT 14.855 (x3.86), lane_range 14.855 (x3.86), take-index 14.855 (x3.86)
+  lanes=8: LPT 14.855 (x3.86), lane_range 14.855 (x3.86), take-index 14.855 (x3.86)
+  largest single function = 25.90% of loop => loop cannot drop below 14.855 ms at any lane count
+closed-world model: eligible 5 fn / 57.355 ms; deferred 0 fn / 0.000 ms serial replay
+  lanes=2: modeled loop = 29.003 parallel + 0.000 serial = 29.003 ms (x1.98 vs measured serial loop 57.485); whole lowering x1.92
+  lanes=4: modeled loop = 14.855 parallel + 0.000 serial = 14.855 ms (x3.87 vs measured serial loop 57.485); whole lowering x3.54
+  lanes=8: modeled loop = 14.855 parallel + 0.000 serial = 14.855 ms (x3.87 vs measured serial loop 57.485); whole lowering x3.54
+
+== /home/david/531/inputs/tiny.c
+lowering total 0.289 ms = preamble 0.138 (47.9%) + body loop 0.150 (52.0%) + epilogue 0.000 (0.2%)
+TU arena retained: preamble 0.0 MiB, body loop 0.0 MiB, epilogue 0.0 MiB; per-function scratch high water 0.0 MiB
+shared tables across body loop: types 29->29 (+0), symbols 3->3 (+0), globals 0->0 (+0), functions 3->3 (+0)
+declarations 4, lowered 3, rejected 0, census rows 3
+statuses: {'ok': 3}
+per-function sum 0.059 ms (+0.000 ms in non-ok rows); loop overhead outside rows 0.091 ms
+  prepare 0.010 (16.8%), body 0.046 (78.0%), finish(ssa) 0.003 (5.0%), publish 0.000 (0.2%)
+per-function total ns: n=3 mean=19637 p50=14407 p90=35577 p99=35577 max=35577
+  largest:
+    add                                                 0.036 ms  tokens=5       instr=4       share=60.39%  +types=0 +symbols=0 +globals=0
+    sum_pair                                            0.014 ms  tokens=12      instr=10      share=24.46%  +types=0 +symbols=0 +globals=0
+    main                                                0.009 ms  tokens=18      instr=11      share=15.15%  +types=0 +symbols=0 +globals=0
+body tokens 35, instructions 25, ns/token 1683.2, ns/instruction 2356.4
+  publishes any shared entity (type|symbol|global|function): 0/3 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a type: 0/3 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a symbol: 0/3 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a global: 0/3 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a function: 0/3 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  appends a type but no symbol/global: 0/3 functions (0.0%), 0.000 ms (0.0% of per-function time)
+  total appended in bodies: types 0, symbols 0, globals 0, functions 0
+  TU arena bytes retained by ok bodies 0.0 MiB (mean 6538 B), scratch max 0.01 MiB, temporary-arena delta max 0 B
+  direct SSA enabled for 3/3 bodies
+modeled zero-overhead loop makespan (ms) -- analytical bound from measured serial durations, not a forecast:
+  lanes=1: LPT 0.059 (x1.00), lane_range 0.059 (x1.00), take-index 0.059 (x1.00)
+  lanes=2: LPT 0.036 (x1.66), lane_range 0.036 (x1.66), take-index 0.036 (x1.66)
+  lanes=4: LPT 0.036 (x1.66), lane_range 0.036 (x1.66), take-index 0.036 (x1.66)
+  lanes=8: LPT 0.036 (x1.66), lane_range 0.036 (x1.66), take-index 0.036 (x1.66)
+  largest single function = 60.39% of loop => loop cannot drop below 0.036 ms at any lane count
+closed-world model: eligible 3 fn / 0.059 ms; deferred 0 fn / 0.000 ms serial replay
+  lanes=2: modeled loop = 0.036 parallel + 0.000 serial = 0.036 ms (x4.22 vs measured serial loop 0.150); whole lowering x1.66
+  lanes=4: modeled loop = 0.036 parallel + 0.000 serial = 0.036 ms (x4.22 vs measured serial loop 0.150); whole lowering x1.66
+  lanes=8: modeled loop = 0.036 parallel + 0.000 serial = 0.036 ms (x4.22 vs measured serial loop 0.150); whole lowering x1.66
