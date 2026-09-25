@@ -21229,6 +21229,185 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_post_tag_declaration_specifiers(UnitTe
     return result;
 }
 
+// Only the selected GNU choose-expression arm owns effects. The tests use
+// scalar results and one-argument identity wrappers; no sibling evaluation
+// order or escaping statement-expression lifetime is assumed.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_choose_expr_evaluation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 expression;
+        u32 calls;
+        u32 stores;
+        u32 effects;
+        u32 value;
+    } cases[] = {
+        {S8("__builtin_choose_expr(1, 7, mark())"), 0, 0, 0, 7},
+        {S8("__builtin_choose_expr(0, mark(), 7)"), 0, 0, 0, 7},
+        {S8("__builtin_choose_expr(1, mark(), 7)"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(0, 7, mark())"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(1, 7, identity(mark()))"), 0, 0, 0, 7},
+        {S8("__builtin_choose_expr(0, 7, identity(mark()))"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(1, mark(), other())"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(0, other(), mark())"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(1, 7, (hits += 1))"), 0, 0, 0, 7},
+        {S8("__builtin_choose_expr(0, 7, (hits += 1))"), 0, 1, 1, 1},
+        {S8("__builtin_choose_expr(1, 7, (flag ? mark() : 0))"), 0, 0, 0, 7},
+        {S8("__builtin_choose_expr(0, 0, (flag ? mark() : 0))"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(1, 7, ({ mark(); 7; }))"), 0, 0, 0, 7},
+        {S8("__builtin_choose_expr(0, 0, ({ mark(); 7; }))"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(1, __builtin_choose_expr(0, other(), mark()), other())"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(0, __builtin_choose_expr(1, other(), mark()), 7)"), 0, 0, 0, 7},
+        {S8("sizeof(__builtin_choose_expr(1, mark(), other()))"), 0, 0, 0, 4},
+        {S8("_Generic(0, int: __builtin_choose_expr(1, mark(), other()), default: other())"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(1, _Generic(0, int: mark(), default: other()), other())"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(1, __builtin_constant_p(mark()) + 7, other())"), 0, 0, 0, 7},
+    };
+    enum { CONTEXT_COUNT = 6, CASE_COUNT = BUSTER_ARRAY_LENGTH(cases), PROBE_COUNT = CASE_COUNT * CONTEXT_COUNT };
+    TemporalArena sources_temporary = scratch_begin(&arguments->arena, 1);
+    String8 definitions[PROBE_COUNT + 1];
+    String8 checks[PROBE_COUNT + 2];
+    definitions[0] = S8("static volatile unsigned hits;"
+        "static int mark(void) { hits += 1; return 7; }"
+        "static int other(void) { hits += 100; return 9; }"
+        "static int identity(int value) { return value; }\n");
+    checks[0] = S8("int main(void) { int failed = 0; int value;\n");
+    for (u32 case_index = 0; case_index < CASE_COUNT; case_index += 1)
+    {
+        for (u32 context = 0; context < CONTEXT_COUNT; context += 1)
+        {
+            String8 expression = cases[case_index].expression;
+            u32 expected = cases[case_index].value;
+            String8 body = {0};
+            switch (context)
+            {
+            case 0:
+                body = string_format(sources_temporary.arena, S8("int value = ({S8}); return value;"), expression);
+                break;
+            case 1:
+                body = string_format(sources_temporary.arena, S8("return identity({S8});"), expression);
+                break;
+            case 2:
+                body = string_format(sources_temporary.arena, S8("return ({S8});"), expression);
+                break;
+            case 3:
+                body = string_format(sources_temporary.arena,
+                    S8("int value = {u32}; if (({S8}) == {u32}) value = {u32}; return value;"), expected + 1, expression, expected, expected);
+                break;
+            case 4:
+                // A discarded full expression has no value observation.
+                body = string_format(sources_temporary.arena, S8("(void)({S8}); return {u32};"), expression, expected);
+                break;
+            case 5:
+                body = string_format(sources_temporary.arena, S8("return ({{ int inner = ({S8}); inner; }});"), expression);
+                break;
+            }
+            u32 probe = case_index * CONTEXT_COUNT + context;
+            definitions[probe + 1] = string_format(sources_temporary.arena,
+                S8("int probe_{u32}(int flag) {{ {S8} }}\n"), probe, body);
+            // Update, call completion, and observation are separate full
+            // expressions. Both unselected and exactly-once controls matter.
+            checks[probe + 1] = string_format(sources_temporary.arena,
+                S8("hits = 0; value = probe_{u32}(1); failed |= value != {u32}; failed |= hits != {u32}u;\n"),
+                probe, expected, cases[case_index].effects);
+        }
+    }
+    checks[PROBE_COUNT + 1] = S8("return failed; }\n");
+    String8 parts[] = {
+        string_join_arena(sources_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(definitions), false),
+        string_join_arena(sources_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(checks), false),
+    };
+    String8 source_text = string_join_arena(sources_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+    Target targets[] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        targets[index].cpu_arch = index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[index].os = index < 2 ? OPERATING_SYSTEM_LINUX : index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+    }
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            Arena* conflicts[] = {arguments->arena, sources_temporary.arena};
+            TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source_text,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("choose-expr-evaluation.c"), tokens, parsed, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                for (u32 probe = 0; probe < PROBE_COUNT; probe += 1)
+                {
+                    String8 name = string_format(temporary.arena, S8("probe_{u32}"), probe);
+                    IrFunction* function = c_test_find_ir_function(module, name);
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        u32 stores = 0;
+                        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                        {
+                            IrInstruction* instruction = function->instructions + instruction_index;
+                            stores += instruction->opcode == IR_OPCODE_STORE && instruction->volatile_access;
+                        }
+                        u32 calls = c_test_ir_direct_call_count(lowered.program, function, S8("mark"));
+                        u32 discarded = c_test_ir_direct_call_count(lowered.program, function, S8("other"));
+                        String8 observation = string_format(temporary.arena,
+                            S8("{S8}: mark={u32}/{u32} other={u32}/0 volatile-stores={u32}/{u32}"),
+                            name, calls, cases[probe / CONTEXT_COUNT].calls, discarded, stores, cases[probe / CONTEXT_COUNT].stores);
+                        BUSTER_TEST_RAW(arguments, calls == cases[probe / CONTEXT_COUNT].calls, observation);
+                        BUSTER_TEST_RAW(arguments, discarded == 0, observation);
+                        BUSTER_TEST_RAW(arguments, stores == cases[probe / CONTEXT_COUNT].stores, observation);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("choose-expr-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                Arena* conflicts[] = {arguments->arena, sources_temporary.arena};
+                TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                String8 output = buster_test_temporary_path(temporary.arena, S8("choose-expr-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source_path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("choose-expr {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    scratch_end(sources_temporary);
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -21278,6 +21457,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);
     BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_member_call_arity_ownership);
