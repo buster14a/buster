@@ -1,0 +1,38 @@
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_encoding(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // LLVM reserves the encoded value 1 for INT64_MIN, not for the minimum
+    // of the IR integer type. These are wire values, independent of the writer.
+    u32 widths[] = {1, 8, 16, 32, 64};
+    u64 expected[] = {3, 257, 65537, UINT64_C(4294967297), 1};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(widths); index += 1)
+    {
+        u64 sign = UINT64_C(1) << (widths[index] - 1);
+        BUSTER_TEST(arguments, llvm_bitcode_test_encode_integer_bits(sign, widths[index]) == expected[index]);
+    }
+    for (u32 width = 1; width <= 64; width += 1)
+    {
+        u64 sign = UINT64_C(1) << (width - 1);
+        u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+        // Exhaust every pattern through i16; then check each larger width's
+        // zero, one, sign boundary, all-ones, and discarded high input bits.
+        u64 boundaries[] = {0, 1, sign - 1, sign, sign + 1, mask, UINT64_MAX};
+        u64 count = width <= 16 ? (UINT64_C(1) << width) : BUSTER_ARRAY_LENGTH(boundaries);
+        for (u64 index = 0; index < count; index += 1)
+        {
+            u64 bits = width <= 16 ? index : boundaries[index];
+            u64 encoded = llvm_bitcode_test_encode_integer_bits(bits, width);
+            u64 decoded = encoded >> 1;
+            if (encoded == 1)
+            {
+                decoded = UINT64_C(1) << 63;
+            }
+            else if (encoded & 1)
+            {
+                decoded = 0 - decoded;
+            }
+            BUSTER_TEST(arguments, (decoded & mask) == (bits & mask));
+        }
+    }
+    return result;
+}
