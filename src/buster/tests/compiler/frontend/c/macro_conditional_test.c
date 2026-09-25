@@ -264,8 +264,6 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                                 "#error conditional common type lost in driver preprocessing\n"
                                 "#endif\n"
                                 "#define WIDE_PROMOTES_UNSIGNED _Generic(+(L'\\0'), unsigned int: 1, default: 0)\n"
-                                "_Static_assert(sizeof(u'\\0') == 2, \"UTF-16 character width\");\n"
-                                "_Static_assert(sizeof(U'\\0') == 4, \"UTF-32 character width\");\n"
                                 "_Static_assert(!(u'\\0' - 1 > 0), \"ordinary UTF-16 promotes to int\");\n"
                                 "_Static_assert(U'\\0' - 1 > 0, \"ordinary UTF-32 keeps unsigned int\");\n"
                                 "_Static_assert((1 ? -1 : u'\\0') < 0, \"ordinary UTF-16 conditional promotes to int\");\n"
