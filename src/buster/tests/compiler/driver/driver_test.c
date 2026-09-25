@@ -7,6 +7,7 @@
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/tests/compiler/driver/driver_test.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/tests/compiler/driver/fixtures/wasi_test_data.h>
 #include <buster/tests/compiler/codegen/codegen_test.h>
 #include <buster/lib/hash.h>
 #include <buster/lib/time.h>
@@ -8931,6 +8932,73 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, file_read(arguments->arena, wasm64_output, (FileReadOptions){0}).length == wasm64_compile.wasm64.bytes.length);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(wasm64_target));
 
+    Target wasi_target = {.cpu_arch = CPU_ARCH_WASM32, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WASI};
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(wasi_target));
+    String8 wasi_input = buster_test_temporary_path(arguments->arena, S8("buster-driver-wasip1-input"), S8(".c"));
+    String8 wasi_start_input = buster_test_temporary_path(arguments->arena, S8("buster-driver-wasip1-start-input"), S8(".c"));
+    String8 wasi_bad_import_input = buster_test_temporary_path(arguments->arena, S8("buster-driver-wasip1-bad-import"), S8(".c"));
+    String8 wasi_script = buster_test_temporary_path(arguments->arena, S8("buster-driver-wasip1-execution"), S8(".js"));
+    bool wasi_inputs_written =
+        file_write(wasi_input, BUSTER_SLICE_TO_BYTE_SLICE(S8(compiler_driver_wasi_main_source))) &&
+        file_write(wasi_start_input, BUSTER_SLICE_TO_BYTE_SLICE(S8(compiler_driver_wasi_start_source))) &&
+        file_write(wasi_bad_import_input, BUSTER_SLICE_TO_BYTE_SLICE(S8(compiler_driver_wasi_bad_import_source))) &&
+        file_write(wasi_script, BUSTER_SLICE_TO_BYTE_SLICE(S8(compiler_driver_wasi_execution_script)));
+    if (BUSTER_REQUIRE(arguments, wasi_inputs_written))
+    {
+        String8 wasi_output = buster_test_temporary_path(arguments->arena, S8("buster-driver-wasip1"), S8(".wasm"));
+        String8 wasi_command[] = {
+            S8("--target=wasm32-wasip1"), S8("-nostdinc"), S8("-o"), wasi_output, wasi_input,
+        };
+        CompilerDriverResult wasi = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wasi_command)));
+        if (wasi.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("WASI compiler driver error: {S8}\n"), wasi.diagnostic);
+        }
+        BUSTER_TEST(arguments, wasi.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, wasi.has_wasm && !wasi.has_wasm64 && wasi.wasm.stats.wasi_preview1 && !wasi.wasm.stats.memory64);
+        BUSTER_TEST(arguments, wasi.wasm.bytes.length >= 8 && memcmp(wasi.wasm.bytes.pointer, "\0asm\1\0\0\0", 8) == 0);
+
+        String8 wasi_start_output = buster_test_temporary_path(arguments->arena, S8("buster-driver-wasip1-start"), S8(".wasm"));
+        String8 wasi_start_command[] = {
+            S8("--target=wasm32-wasi"), S8("-nostdinc"), S8("-o"), wasi_start_output, wasi_start_input,
+        };
+        CompilerDriverResult wasi_start = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wasi_start_command)));
+        BUSTER_TEST(arguments, wasi_start.error == COMPILER_DRIVER_ERROR_NONE && wasi_start.has_wasm && !wasi_start.has_wasm64);
+        if (wasi.error == COMPILER_DRIVER_ERROR_NONE && wasi_start.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+            if (node.length)
+            {
+                String8 node_arguments[] = {node, S8("--no-warnings"), wasi_script,
+                                            wasi_output, wasi_start_output};
+                CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run(
+                    arguments, arguments->arena, S8("wasi-preview1"), S8("small-and-grown"),
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), S8("3/3 wasm32 WASI Preview 1 command executions passed"),
+                    compiler_driver_test_wasm_node_deadline_microseconds());
+                BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(node_run));
+            }
+            else
+            {
+                arguments->show(arguments, S8("WASI engine execution unavailable: Node is not installed\n"));
+            }
+        }
+
+        String8 wasi_bad_import_command[] = {
+            S8("--target=wasm32-wasip1"), S8("-nostdinc"), S8("-o"), wasi_output, wasi_bad_import_input,
+        };
+        CompilerDriverResult wasi_bad_import = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wasi_bad_import_command)));
+        BUSTER_TEST(arguments, wasi_bad_import.error == COMPILER_DRIVER_ERROR_WASM && wasi_bad_import.wasm.error.code != WASM64_ERROR_NONE);
+        String8 wasi_llvm_command[] = {
+            S8("--target=wasm32-wasip1"), S8("-emit-llvm"), wasi_input,
+        };
+        CompilerDriverResult wasi_llvm = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wasi_llvm_command)));
+        BUSTER_TEST(arguments, wasi_llvm.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    }
+
     // Keep over-aligned C types in the ordinary driver suite. When Node is
     // available, validate AND execute the emitted memory64 module; a header
     // check alone cannot detect an illegal memory-argument alignment hint.
@@ -9036,7 +9104,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     CompilerDriverResult wasm64_assembly = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wasm64_assembly_command_line)));
     BUSTER_TEST(arguments, wasm64_assembly.error == COMPILER_DRIVER_ERROR_ARGUMENT);
-    BUSTER_STRING_TEST(arguments, wasm64_assembly.diagnostic, S8("-S is not supported for direct Wasm64 module output"));
+    BUSTER_STRING_TEST(arguments, wasm64_assembly.diagnostic, S8("-S is not supported for direct WebAssembly module output"));
 
     String8 uefi_targets[] = {
         S8("x86_64-unknown-uefi"),

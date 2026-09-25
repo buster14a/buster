@@ -2427,6 +2427,7 @@ CodegenAbi codegen_abi_for_target(Target target)
         case OPERATING_SYSTEM_FREESTANDING:
             return CODEGEN_ABI_X86_64_SYSTEM_V;
             break;
+        case OPERATING_SYSTEM_WASI:
         case OPERATING_SYSTEM_COUNT:
             return CODEGEN_ABI_COUNT;
         }
@@ -2459,15 +2460,17 @@ CodegenAbi codegen_abi_for_target(Target target)
         case OPERATING_SYSTEM_FREESTANDING:
             return CODEGEN_ABI_AARCH64_AAPCS64;
             break;
+        case OPERATING_SYSTEM_WASI:
         case OPERATING_SYSTEM_COUNT:
             return CODEGEN_ABI_COUNT;
         }
     }
     break;
         break;
+    case CPU_ARCH_WASM32:
     case CPU_ARCH_WASM64:
     case CPU_ARCH_BPFEL:
-        // Wasm64 and eBPF are emitted directly from canonical IR and do not
+        // WebAssembly and eBPF are emitted directly from canonical IR and do not
         // use a native platform ABI or the native machine-code pipeline.
         return CODEGEN_ABI_COUNT;
         break;
