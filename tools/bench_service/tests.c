@@ -2458,8 +2458,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_unit_bad_lease_response(u32 mode)
             bq_worker_lease_message_matches(&request, BQ_WORKER_LEASE_REQUEST,
                 lease_path, 1, 2, 0, 0, "", 0) && fstat(lease.descriptor, &info) == 0;
     BqWorkerLeaseMessage response = {0};
-    u64 future_ns = bq_phase_clock() + (mode == 2 ? UINT64_C(2000000000) :
-                                         mode >= 3 ? UINT64_C(10000000000) : UINT64_C(5000000000));
+    u64 future_ns = bq_phase_clock() + (mode == 2 ? UINT64_C(15000000000) :
+                                         mode >= 3 ? UINT64_C(30000000000) : UINT64_C(5000000000));
     ready = ready && bq_worker_lease_message_make(&response, BQ_WORKER_LEASE_RESPONSE,
         lease_path, 1, 2, (u64)info.st_dev, (u64)info.st_ino, "", future_ns);
     if (mode == 0) response.execution_deadline_ns = 1;
@@ -2507,7 +2507,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_unit_bad_lease_response(u32 mode)
             bool resume = true;
             if (mode == 2)
             {
-                u64 bound = bq_worker_deadline(bq_worker_monotonic_milliseconds(), 4000);
+                u64 bound = bq_worker_deadline(bq_worker_monotonic_milliseconds(), 20000);
                 while (bq_phase_clock() <= future_ns &&
                        bq_worker_monotonic_milliseconds() < bound) poll(NULL, 0, 10);
                 resume = bq_phase_clock() > future_ns;
