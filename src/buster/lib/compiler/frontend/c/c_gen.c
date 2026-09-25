@@ -12985,6 +12985,8 @@ struct CIrExpressionCoreState
     u32 operation_count;
     u32 pending_start;
     u32 pending_end;
+    u32 sizeof_vla_start;
+    u32 sizeof_vla_end;
     IrTypeId pending_type;
     IrSourceRange pending_source;
     bool expect_operand;
@@ -13047,6 +13049,7 @@ typedef enum CIrLowerFrameStage
     C_IR_LOWER_STAGE_EXPRESSION_VOID_ASSIGNMENT,
     C_IR_LOWER_STAGE_EXPRESSION_CONDITION,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_STATEMENT,
+    C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA_CALLS,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_CONTROL,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_CALLS,
@@ -27357,6 +27360,23 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
         frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
         goto c_ir_expression_core_loop;
     }
+    if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA_CALLS)
+    {
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA;
+        if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                .as.expression = {.start = state->sizeof_vla_start, .end = state->sizeof_vla_end},
+            }))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        }
+        return;
+    }
     if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_STATEMENT ||
         frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA)
     {
@@ -27927,13 +27947,24 @@ c_ir_expression_core_loop:
                         expect_operand = false;
                         if (c_ir_sizeof_vla_suffix_evaluated(builder, size_entity, suffix_index))
                         {
+                            // The enclosing call-preparation pass skipped
+                            // this sizeof operand; discover its calls only
+                            // after its original type requires evaluation.
+                            state->sizeof_vla_start = operand_start;
+                            state->sizeof_vla_end = operand_end;
                             c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types,
                                                       value_count, operation_count, consumed_index + 1, false);
-                            frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA;
-                            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                    .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                    .as.expression = {.start = operand_start, .end = operand_end},
-                                }))
+                            u32 operand_preparation_start = operand_start;
+                            while (operand_preparation_start < operand_end &&
+                                   builder->preprocess.tokens[operand_preparation_start].kind == C_TOKEN_IDENTIFIER &&
+                                   string_equal(c_token_spelling(builder->preprocess.spelling_base,
+                                                                 builder->preprocess.tokens[operand_preparation_start]),
+                                                S8("__extension__")))
+                            {
+                                operand_preparation_start += 1;
+                            }
+                            frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA_CALLS;
+                            if (!c_ir_prepare_calls_frame_push(builder, operand_preparation_start, operand_end))
                             {
                                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                             }
