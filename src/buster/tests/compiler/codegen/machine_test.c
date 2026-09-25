@@ -6680,6 +6680,327 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_sparse_local_state(UnitTestArgum
     return result;
 }
 
+enum
+{
+    MACHINE_TEST_SCHEDULE_TREE,
+    MACHINE_TEST_SCHEDULE_DUPLICATE,
+    MACHINE_TEST_SCHEDULE_READ_MODIFY,
+    MACHINE_TEST_SCHEDULE_FANOUT,
+};
+
+BUSTER_GLOBAL_LOCAL u32 machine_test_schedule_value(MachineFunctionBuilder* builder, u32 flags)
+{
+    return machine_builder_virtual_register(builder, (MachineVirtualRegister){
+        .definition_point = machine_point_make(builder->instructions.total_count, MACHINE_POINT_AFTER),
+        .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+        .typed_origin = IR_ID_UNDERLYING_INVALID,
+        .flags = (u8)flags,
+    });
+}
+
+BUSTER_GLOBAL_LOCAL u32 machine_test_schedule_add(MachineFunctionBuilder* builder, u32 left, u32 right)
+{
+    u32 value = machine_test_schedule_value(builder, 0);
+    machine_builder_instruction(builder, (MachineInstruction){
+        .opcode = MACHINE_X64_ADD64,
+        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left),
+                     machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right)},
+    });
+    return value;
+}
+
+// 64 independent leaves reduced to one result, so source order carries
+// excess pressure. DUPLICATE repeats one operand in each first-level row,
+// READ_MODIFY negates each first-level value in place (a USE_DEFINE slot on
+// a mutable value), and FANOUT gives leaf 0 `fanout` extra consumers, which
+// puts it at fanout + 1 touches for the refresh cutoff.
+BUSTER_GLOBAL_LOCAL MachineFunction machine_test_schedule_trace_function(Arena* arena, u32 shape, u32 fanout)
+{
+    enum { LEAF_COUNT = 64 };
+    MachineFunctionBuilder builder = machine_function_builder_begin(arena);
+    u32* values = arena_allocate(arena, u32, 2 * LEAF_COUNT);
+    u32* leaves = values + LEAF_COUNT;
+    machine_builder_block_begin(&builder);
+    for (u32 leaf = 0; leaf < LEAF_COUNT; leaf += 1)
+    {
+        u32 value = machine_test_schedule_value(&builder, 0);
+        machine_builder_instruction(&builder, (MachineInstruction){
+            .opcode = MACHINE_X64_MOV_RI,
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value), machine_ref_make(MACHINE_REF_IMMEDIATE, 0)},
+        });
+        leaves[leaf] = value;
+    }
+    u32 count = 0;
+    if (shape == MACHINE_TEST_SCHEDULE_FANOUT)
+    {
+        for (u32 index = 0; index < fanout; index += 1)
+        {
+            values[count] = machine_test_schedule_add(&builder, leaves[0], leaves[index + 1]);
+            count += 1;
+        }
+        for (u32 leaf = fanout + 1; leaf < LEAF_COUNT; leaf += 1)
+        {
+            values[count] = leaves[leaf];
+            count += 1;
+        }
+    }
+    else
+    {
+        for (u32 pair = 0; pair < LEAF_COUNT / 2; pair += 1)
+        {
+            u32 value = 0;
+            if (shape == MACHINE_TEST_SCHEDULE_READ_MODIFY)
+            {
+                value = machine_test_schedule_value(&builder, MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE);
+                machine_builder_instruction(&builder, (MachineInstruction){
+                    .opcode = MACHINE_X64_ADD64,
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value),
+                                 machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, leaves[2 * pair]),
+                                 machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, leaves[2 * pair + 1])},
+                });
+                machine_builder_instruction(&builder, (MachineInstruction){
+                    .opcode = MACHINE_X64_NEG64,
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value)},
+                });
+            }
+            else
+            {
+                value = machine_test_schedule_add(&builder, leaves[2 * pair], leaves[2 * pair + 1]);
+                if (shape == MACHINE_TEST_SCHEDULE_DUPLICATE)
+                {
+                    value = machine_test_schedule_add(&builder, value, value);
+                }
+            }
+            values[count] = value;
+            count += 1;
+        }
+    }
+    while (count > 1)
+    {
+        u32 next = 0;
+        for (u32 index = 0; index + 1 < count; index += 2)
+        {
+            values[next] = machine_test_schedule_add(&builder, values[index], values[index + 1]);
+            next += 1;
+        }
+        if (count & 1u)
+        {
+            values[next] = values[count - 1];
+            next += 1;
+        }
+        count = next;
+    }
+    machine_builder_instruction(&builder, (MachineInstruction){
+        .opcode = MACHINE_X64_MOV_RR,
+        .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[0])},
+    });
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+    machine_builder_block_end(&builder, (MachineBlock){0});
+    MachineFunction function = machine_function_builder_finish(arena, &builder);
+    function.target = machine_target_x86_64();
+    function.immediates = arena_allocate(arena, u64, 1);
+    function.immediates[0] = 1;
+    function.immediate_count = 1;
+    return function;
+}
+
+typedef struct MachineTestScheduleTraceSummary MachineTestScheduleTraceSummary;
+struct MachineTestScheduleTraceSummary
+{
+    bool equivalent;
+    bool moved;
+    u32 event_count;
+    u32 kind_counts[MACHINE_SCHEDULE_TRACE_GATE + 1];
+    u32 refreshed_transitions;
+    u32 capped_transitions;
+    u32 maximum_touchers;
+    bool gate_rejected;
+    MachineScheduleTrace trace;
+};
+
+// Runs the production occurrence stream and the descriptor-decoding oracle on
+// the same input and requires identical decision traces and output rows.
+BUSTER_GLOBAL_LOCAL MachineTestScheduleTraceSummary machine_test_schedule_trace_compare(Arena* arena, MachineFunction* function, u32 capacity_limit)
+{
+    MachineTestScheduleTraceSummary summary = {0};
+    u32 event_capacity = 64u * function->instruction_count + 1024u;
+    MachineScheduleTrace traces[2] = {0};
+    MachineScheduleResult results[2] = {0};
+    for (u32 index = 0; index < 2; index += 1)
+    {
+        traces[index] = (MachineScheduleTrace){
+            .events = arena_allocate(arena, MachineScheduleTraceEvent, event_capacity),
+            .event_capacity = event_capacity,
+            .entry_capacity_limit = capacity_limit,
+            .reference = index == 1,
+        };
+        results[index] = machine_schedule_function_traced(arena, function, traces + index);
+    }
+    MachineScheduleResult plain = capacity_limit ? results[0] : machine_schedule_function(arena, function);
+    summary.equivalent = traces[0].dropped == 0 && traces[1].dropped == 0 && traces[0].event_count == traces[1].event_count &&
+                         memcmp(traces[0].events, traces[1].events, traces[0].event_count * sizeof(MachineScheduleTraceEvent)) == 0 &&
+                         results[0].moved == results[1].moved && results[0].moved == plain.moved &&
+                         memcmp(results[0].function.instructions, results[1].function.instructions,
+                                function->instruction_count * sizeof(MachineInstruction)) == 0 &&
+                         memcmp(results[0].function.instructions, plain.function.instructions,
+                                function->instruction_count * sizeof(MachineInstruction)) == 0;
+    summary.moved = results[0].moved;
+    summary.event_count = traces[0].event_count;
+    summary.trace = traces[0];
+    for (u32 event_index = 0; event_index < traces[0].event_count; event_index += 1)
+    {
+        MachineScheduleTraceEvent event = traces[0].events[event_index];
+        summary.kind_counts[event.kind] += 1;
+        if (event.kind == MACHINE_SCHEDULE_TRACE_TRANSITION)
+        {
+            summary.refreshed_transitions += event.extra <= 16;
+            summary.capped_transitions += event.extra > 16;
+            summary.maximum_touchers = BUSTER_MAX(summary.maximum_touchers, event.extra);
+        }
+        summary.gate_rejected |= event.kind == MACHINE_SCHEDULE_TRACE_GATE && event.value >= (s32)event.extra;
+    }
+    return summary;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_schedule_trace_equivalence(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 fixture_position = arguments->arena->position;
+
+    // Exhaustive opcode x slot projection: the row lanes are the scheduler's
+    // role source, and a definition is DEFINE or USE_DEFINE.
+    MachineOpcodeRow const* opcode_rows = machine_opcode_row_table();
+    bool projection_exact = true;
+    for (u16 opcode = 0; opcode < MACHINE_OPCODE_COUNT; opcode += 1)
+    {
+        MachineOpcodeInfo const* info = machine_opcode_info(opcode);
+        MachineOpcodeRow row = opcode_rows[opcode];
+        projection_exact &= row.operand_count == info->operand_count;
+        for (u32 slot = 0; slot < MACHINE_INSTRUCTION_OPERAND_COUNT; slot += 1)
+        {
+            u32 role = slot < info->operand_count ? info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u) : MACHINE_OPERAND_ROLE_NONE;
+            u32 uses = (row.role_lanes >> (MACHINE_OPCODE_ROW_USE_SHIFT + slot)) & 1u;
+            u32 define_only = (row.role_lanes >> (MACHINE_OPCODE_ROW_DEFINE_SHIFT + slot)) & 1u;
+            u32 use_define = (row.role_lanes >> (MACHINE_OPCODE_ROW_USE_DEFINE_SHIFT + slot)) & 1u;
+            projection_exact &= uses == (u32)(role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE);
+            projection_exact &= (define_only | use_define) == (u32)(role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE);
+            projection_exact &= !(define_only && use_define);
+        }
+        projection_exact &= (row.role_lanes >> 12) == 0;
+    }
+    BUSTER_TEST(arguments, projection_exact);
+    // The DEFINE plane alone misses read-modify-write definitions.
+    BUSTER_TEST(arguments, opcode_rows[MACHINE_X64_NEG64].role_lanes == 0x101u);
+    BUSTER_TEST(arguments, opcode_rows[MACHINE_X64_NEG32].role_lanes == 0x101u);
+
+    MachineFunction tree = machine_test_schedule_trace_function(arguments->arena, MACHINE_TEST_SCHEDULE_TREE, 0);
+    BUSTER_TEST(arguments, machine_verify_function(&tree).error == MACHINE_VERIFY_NONE);
+    MachineTestScheduleTraceSummary tree_summary = machine_test_schedule_trace_compare(arguments->arena, &tree, 0);
+    BUSTER_TEST(arguments, tree_summary.equivalent && tree_summary.moved);
+    BUSTER_TEST(arguments, tree_summary.kind_counts[MACHINE_SCHEDULE_TRACE_READY] > 0);
+    BUSTER_TEST(arguments, tree_summary.kind_counts[MACHINE_SCHEDULE_TRACE_SELECT] == tree.instruction_count);
+    BUSTER_TEST(arguments, tree_summary.kind_counts[MACHINE_SCHEDULE_TRACE_GATE] == 1 && !tree_summary.gate_rejected);
+
+    // Repeated operands count per occurrence. `u = t + t` becomes ready once
+    // u is demanded and t is not: growth -1 + 2 = +1, where a distinct-value
+    // set would compute 0 and bucket the unit differently.
+    MachineFunction duplicate = machine_test_schedule_trace_function(arguments->arena, MACHINE_TEST_SCHEDULE_DUPLICATE, 0);
+    BUSTER_TEST(arguments, machine_verify_function(&duplicate).error == MACHINE_VERIFY_NONE);
+    MachineTestScheduleTraceSummary duplicate_summary = machine_test_schedule_trace_compare(arguments->arena, &duplicate, 0);
+    BUSTER_TEST(arguments, duplicate_summary.equivalent && duplicate_summary.moved);
+    u32 duplicate_pushes = 0;
+    bool duplicate_growth = true;
+    for (u32 event_index = 0; event_index < duplicate_summary.event_count; event_index += 1)
+    {
+        MachineScheduleTraceEvent event = duplicate_summary.trace.events[event_index];
+        MachineInstruction const* row = duplicate.instructions + event.subject;
+        if (event.kind == MACHINE_SCHEDULE_TRACE_PUSH && event.extra == 1 && row->opcode == MACHINE_X64_ADD64 &&
+            row->operands[1] == row->operands[2])
+        {
+            duplicate_pushes += 1;
+            duplicate_growth &= event.value == 1;
+        }
+    }
+    BUSTER_TEST(arguments, duplicate_pushes == 32 && duplicate_growth);
+
+    MachineFunction read_modify = machine_test_schedule_trace_function(arguments->arena, MACHINE_TEST_SCHEDULE_READ_MODIFY, 0);
+    BUSTER_TEST(arguments, machine_verify_function(&read_modify).error == MACHINE_VERIFY_NONE);
+    MachineTestScheduleTraceSummary read_modify_summary = machine_test_schedule_trace_compare(arguments->arena, &read_modify, 0);
+    BUSTER_TEST(arguments, read_modify_summary.equivalent);
+    BUSTER_TEST(arguments, read_modify_summary.kind_counts[MACHINE_SCHEDULE_TRACE_SELECT] == read_modify.instruction_count);
+
+    // Leaf 0 has fanout + 1 touches: 16 still refreshes its touchers, 17 does
+    // not. With two consumers, placing one makes leaf 0 demanded while its
+    // sibling is ready, so the sibling is re-pushed and its first entry goes
+    // stale.
+    u32 stale = tree_summary.kind_counts[MACHINE_SCHEDULE_TRACE_STALE] + duplicate_summary.kind_counts[MACHINE_SCHEDULE_TRACE_STALE] +
+                read_modify_summary.kind_counts[MACHINE_SCHEDULE_TRACE_STALE];
+    u32 fanouts[] = {2, 15, 16};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fanouts); index += 1)
+    {
+        MachineFunction fanout = machine_test_schedule_trace_function(arguments->arena, MACHINE_TEST_SCHEDULE_FANOUT, fanouts[index]);
+        BUSTER_TEST(arguments, machine_verify_function(&fanout).error == MACHINE_VERIFY_NONE);
+        MachineTestScheduleTraceSummary fanout_summary = machine_test_schedule_trace_compare(arguments->arena, &fanout, 0);
+        BUSTER_TEST(arguments, fanout_summary.equivalent && fanout_summary.maximum_touchers == fanouts[index] + 1);
+        BUSTER_TEST(arguments, fanouts[index] + 1 > 16 ? fanout_summary.capped_transitions > 0 : fanout_summary.capped_transitions == 0);
+        BUSTER_TEST(arguments, fanouts[index] != 2 || fanout_summary.kind_counts[MACHINE_SCHEDULE_TRACE_STALE] > 0);
+        stale += fanout_summary.kind_counts[MACHINE_SCHEDULE_TRACE_STALE];
+    }
+
+    // A queue that runs out of entries restores source order in both paths.
+    MachineTestScheduleTraceSummary exhausted = machine_test_schedule_trace_compare(arguments->arena, &tree, 8);
+    BUSTER_TEST(arguments, exhausted.equivalent && !exhausted.moved);
+    BUSTER_TEST(arguments, exhausted.kind_counts[MACHINE_SCHEDULE_TRACE_OVERFLOW] == 1 &&
+                               exhausted.kind_counts[MACHINE_SCHEDULE_TRACE_FALLBACK] == 1 &&
+                               exhausted.kind_counts[MACHINE_SCHEDULE_TRACE_GATE] == 0);
+
+    // Selected source functions on both targets, including schedules the
+    // excess gate rejects.
+    String8 sources[] = {S8("tests/basic_c_machine_alias.c"), S8("tests/basic_c_operations.c")};
+    u32 compared = 0;
+    u32 moved = 0;
+    u32 rejected = 0;
+    bool corpus_equivalent = true;
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        Target target = {.cpu_arch = architecture ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+        {
+            ByteSlice source = file_read(arguments->arena, sources[source_index], (FileReadOptions){0});
+            IrProgram* program = source.pointer ? machine_test_compile_c(arguments->arena, sources[source_index],
+                (String8){.pointer = (char8*)source.pointer, .length = source.length}, target) : 0;
+            BUSTER_TEST(arguments, program && program->module_count);
+            for (u32 module_index = 0; program && module_index < program->module_count; module_index += 1)
+            {
+                IrModule* module = program->modules + module_index;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    u64 function_position = arguments->arena->position;
+                    MachineSelectResult selected = machine_select_canonical_function(arguments->arena, program, module->functions + function_index, target);
+                    if (selected.supported && selected.function.instruction_count)
+                    {
+                        MachineTestScheduleTraceSummary summary = machine_test_schedule_trace_compare(arguments->arena, &selected.function, 0);
+                        corpus_equivalent &= summary.equivalent;
+                        compared += summary.kind_counts[MACHINE_SCHEDULE_TRACE_BLOCK] != 0;
+                        moved += summary.moved;
+                        rejected += summary.gate_rejected;
+                        stale += summary.kind_counts[MACHINE_SCHEDULE_TRACE_STALE];
+                    }
+                    arena_set_position(arguments->arena, function_position);
+                }
+            }
+        }
+    }
+    arguments->show(arguments, S8("MACHINE_SCHEDULE_TRACE scheduled_functions={u32} moved={u32} gate_rejected={u32} stale={u32}\n"), compared, moved,
+                    rejected, stale);
+    BUSTER_TEST(arguments, corpus_equivalent && compared > 0 && moved > 0 && rejected > 0);
+    // Entries superseded by a re-push, or left behind by a placed unit, are
+    // rejected on pop.
+    BUSTER_TEST(arguments, stale > 0);
+    arena_set_position(arguments->arena, fixture_position);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_constant_short_circuit(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6730,6 +7051,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_sparse_local_state);
     BUSTER_TEST_FIXTURE(arguments, machine_test_constant_short_circuit);
     BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_line_mark_repair);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_trace_equivalence);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_capacity);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);
