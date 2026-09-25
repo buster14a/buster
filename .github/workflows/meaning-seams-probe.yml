@@ -2,13 +2,13 @@ name: Meaning seams investigation
 on:
   push:
     branches: [research/meaning-seams-20260925-d9e7-astra]
-    paths: [.github/workflows/meaning-seams-probe.yml, tools/investigations/meaning-seams-20260925/**]
+    paths: [.github/workflows/meaning-seams-probe.yml, tools/investigations/meaning-seams-20260925/confirm.py]
 permissions:
   contents: read
 jobs:
-  correctness:
+  confirmation:
     runs-on: ubuntu-26.04
-    timeout-minutes: 25
+    timeout-minutes: 30
     env:
       BUSTER_TEST_JOBS: '2'
     steps:
@@ -16,19 +16,19 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Pin and build production in an isolated worktree
+      - name: Build refreshed production in an isolated worktree
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p evidence
-          pin=d9e736e2cf08804a2c603d153e9fb608f18c5c49
-          test "$(git rev-parse "$pin^{tree}")" = ae9f274b6768b023fe6e0ef80a161e14b290e0a2
+          pin=ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          test "$(git rev-parse "$pin^{tree}")" = 4c5306221fdb22fccc929b55e333163742de17d0
           git rev-parse HEAD HEAD^{tree} > evidence/transport.txt
           git rev-parse "$pin" "$pin^{tree}" > evidence/production.txt
-          git diff --exit-code "$pin" HEAD -- src build.c CMakeLists.txt cmake
+          git diff --exit-code d9e736e2cf08804a2c603d153e9fb608f18c5c49 HEAD -- src build.c CMakeLists.txt cmake
           git worktree add --detach "$RUNNER_TEMP/meaning-source" "$pin"
+          git archive --format=tar "$pin" > evidence/production.tar
           { uname -a; cat /etc/os-release; clang --version; gcc --version; cmake --version; ninja --version; lscpu; } > evidence/environment.txt
-          echo 'clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o $RUNNER_TEMP/meaning-build' > evidence/build-command.txt
           cd "$RUNNER_TEMP/meaning-source"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/meaning-build" > "$GITHUB_WORKSPACE/evidence/bootstrap.stdout" 2> "$GITHUB_WORKSPACE/evidence/bootstrap.stderr"
           "$RUNNER_TEMP/meaning-build" generate --cc clang --ci --linker DEFAULT > "$GITHUB_WORKSPACE/evidence/generate.stdout" 2> "$GITHUB_WORKSPACE/evidence/generate.stderr"
@@ -36,12 +36,12 @@ jobs:
           sha256sum build/Release/ide > "$GITHUB_WORKSPACE/evidence/compiler.sha256"
           cp build/Release/ide "$GITHUB_WORKSPACE/evidence/ide"
           cp build/CMakeCache.txt "$GITHUB_WORKSPACE/evidence/CMakeCache.txt"
-      - name: Run independent semantic scouts on this same hosted CPU
+      - name: Confirm family and decode canonical bitcode on same hosted CPU
         shell: bash
         run: |
           set -euo pipefail
-          cp tools/investigations/meaning-seams-20260925/{scout.c,run.py} evidence/
-          python3 -B tools/investigations/meaning-seams-20260925/run.py tools/investigations/meaning-seams-20260925/scout.c "$RUNNER_TEMP/meaning-source/build/Release/ide" evidence/scout 2>&1 | tee evidence/observer.log
+          cp tools/investigations/meaning-seams-20260925/confirm.py evidence/
+          python3 -B tools/investigations/meaning-seams-20260925/confirm.py "$RUNNER_TEMP/meaning-source/build/Release/ide" evidence/confirmation 2>&1 | tee evidence/observer.log
       - name: Retain all raw attempts
         if: always()
         shell: bash
@@ -51,7 +51,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: meaning-seams-scout-${{ github.run_id }}-${{ github.run_attempt }}
+          name: meaning-seams-confirm-${{ github.run_id }}-${{ github.run_attempt }}
           path: evidence
           retention-days: 30
           if-no-files-found: error
