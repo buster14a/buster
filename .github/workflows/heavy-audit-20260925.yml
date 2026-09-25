@@ -6,6 +6,7 @@ on:
     paths:
       - .github/workflows/heavy-audit-20260925.yml
       - tools/investigations/heavy-audit-20260925/probe.py
+      - tools/investigations/heavy-audit-20260925/followup.py
   workflow_dispatch:
 
 permissions:
@@ -33,12 +34,18 @@ jobs:
           cp "$RUNNER_TEMP/buster-baseline/production.txt" heavy-audit-evidence/provenance/original-production.txt
           cp "$RUNNER_TEMP/buster-baseline/compiler.sha256" heavy-audit-evidence/provenance/original-compiler.sha256
           git rev-parse HEAD HEAD^{tree} > heavy-audit-evidence/provenance/experiment-git.txt
-          python3 -m py_compile tools/investigations/heavy-audit-20260925/probe.py
+          cp tools/investigations/heavy-audit-20260925/{probe.py,followup.py} heavy-audit-evidence/provenance/
+          python3 -m py_compile tools/investigations/heavy-audit-20260925/{probe.py,followup.py}
       - name: Independent-consumer correctness probes
         shell: bash
         run: |
-          set -euo pipefail
+          set +e
           python3 tools/investigations/heavy-audit-20260925/probe.py "$RUNNER_TEMP/buster-baseline/ide" "$GITHUB_WORKSPACE/heavy-audit-evidence"
+          scout_status=$?
+          python3 tools/investigations/heavy-audit-20260925/followup.py "$RUNNER_TEMP/buster-baseline/ide" "$GITHUB_WORKSPACE/heavy-audit-evidence"
+          followup_status=$?
+          printf 'scout_status=%s followup_status=%s\n' "$scout_status" "$followup_status"
+          test "$scout_status" -eq 0 && test "$followup_status" -eq 0
       - name: Preserve outcome distinctions
         if: always()
         shell: bash
@@ -47,6 +54,9 @@ jobs:
             cat heavy-audit-evidence/summary.md >> "$GITHUB_STEP_SUMMARY"
           else
             printf '%s\n' 'Probe setup did not produce a summary. This is not compiler correctness evidence.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if test -f heavy-audit-evidence/followup/summary.md; then
+            cat heavy-audit-evidence/followup/summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
