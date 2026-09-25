@@ -1,0 +1,16 @@
+# callgrind inclusive Ir, counting build (-march=x86-64-v3 -O1 -fno-inline -g) of d9e736e; inputs from object_link_gen.py
+# Mach-O __eh_frame (#1309): ide cc -g0 -O0 --target=<t> -c fn<N>.c
+N=1000 x86_64-apple-macos total=342929318 object_mach_eh_frame_record_start=13073000 object_write=15645169
+N=2000 x86_64-apple-macos total=486075298 object_mach_eh_frame_record_start=52146000 object_write=57321305
+N=4000 x86_64-apple-macos total=850831195 object_mach_eh_frame_record_start=208292000 object_write=218673467
+N=1000 x86_64-linux-gnu total=328030459
+N=2000 x86_64-linux-gnu total=430232412
+N=4000 x86_64-linux-gnu total=635100190
+# initializer slots (#1319): ide cc -g0 -O0 ctor<N>.c -o ctor<N>.exe
+N=500 total=511675601 link_initializer_entries_collect=<1%
+N=1000 total=803934119 link_initializer_entries_collect=17533555 link_initializer_plan_build=17580126
+N=2000 total=1421608893 link_initializer_entries_collect=70067055 link_initializer_plan_build=70159503
+# assembler (#1319): ide cc -c asm<N>.s
+N=500 total=291509838 assembly_unit_symbol_intern=16906920
+N=1000 total=567352907 assembly_unit_symbol_intern=76148859
+N=2000 total=1142258998 assembly_unit_symbol_intern=217167450

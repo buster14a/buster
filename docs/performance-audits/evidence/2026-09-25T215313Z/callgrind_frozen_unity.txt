@@ -1,0 +1,72 @@
+# callgrind Ir, frozen d9e736e unity (-g0 -c), counting builds (-march=x86-64-v3 -O1 -fno-inline -g)
+# base = ide-base-noinl2, prototype = ide-proto-noinl; both objects SHA-256 1947cf0b0d9d82cf6a17df0e12bc8e774cac6d344a48ca8e1546d7a73739909b
+PROGRAM_TOTAL base=31710581013 prototype=29994589536 delta=1715991477
+
+# self-cost deltas (largest 12 and all negative)
+self machine_fast_close_live_ranges base=1183801109 prototype=22770227 delta=1161030882
+self trailing_zeroes_u64 base=442374530 prototype=2395855 delta=439978675
+self machine_fast_placement_build_prepassed base=723065891 prototype=633566378 delta=89499513
+self __memset_avx2_unaligned_erms base=859764467 prototype=807837683 delta=51926784
+self machine_schedule_frame_access base=181027452 prototype=146910972 delta=34116480
+self machine_ref_payload base=139837632 prototype=135406164 delta=4431468
+self machine_ref_kind base=140208672 prototype=137240364 delta=2968308
+self machine_point_instruction base=9052800 prototype=8798718 delta=254082
+self arena_allocate_commit base=457601 prototype=457191 delta=410
+self os_commit base=324050 prototype=323760 delta=290
+self arena_os_position_after_commit base=189958 prototype=189788 delta=170
+self os_get_page_size base=78229 prototype=78159 delta=70
+self 0x00000000003dd9e8 base=0 prototype=4 delta=-4
+self __memcpy_avx_unaligned_erms base=677129961 prototype=677130515 delta=-554
+self __memcmp_avx2_movbe base=77642559 prototype=77700047 delta=-57488
+self machine_fast_close_slot_ranges base=0 prototype=68157893 delta=-68157893
+
+# inclusive
+incl codegen_generate_canonical_module_attempt base=6964189479 prototype=5248140670
+incl machine_fast_placement_build_prepassed base=3472441489 prototype=1756205738
+incl machine_fast_close_live_ranges base=1653108040 prototype=25850345
+incl machine_fast_close_slot_ranges base=0 prototype=160517271
+incl machine_fast_color_slots base=19951744 prototype=19951744
+incl machine_fast_close_home_ranges base=1491651 prototype=1491651
+
+# baseline top-40 self cost
+base_self PROGRAM 31710581013
+base_self machine_fast_close_live_ranges 1183801109
+base_self simd512_equal_byte_fallback 1135992087
+base_self simd512_load_masked_fallback 899338020
+base_self __memset_avx2_unaligned_erms 859764467
+base_self machine_fast_placement_build_prepassed 723065891
+base_self __memcpy_avx_unaligned_erms 677129961
+base_self c_type_parse_sizeof_step 645156028
+base_self target_data_layout 599120392
+base_self c_parse_expression_type_query 564900362
+base_self machine_fast_prepass_build 518824215
+base_self c_lex_scan_one 512690093
+base_self machine_select_canonical_function_x86_64 448283936
+base_self trailing_zeroes_u64 442374530
+base_self c_ir_ssa_finish 372732064
+base_self c_parse_type_layout_core 367267887
+base_self string_equal 360016130
+base_self machine_encode_x86_64 348545472
+base_self c_conditional_number 321155715
+base_self c_parse_validate_const_assignments 283986603
+base_self c_ir_lower_expression_core_step 266435141
+base_self c_parse_expression_leaf_without_cast 263776379
+base_self c_lower_to_ir_with_options 262739667
+base_self machine_x64_emit_exact_recipe 261082433
+base_self ir_type_from_id 242659519
+base_self c_type_parse_core_step 221017898
+base_self ir_rewrite_compact 219392442
+base_self c_semantic_integer_literal_kind 219261101
+base_self c_translate_source 216975997
+base_self c_parse_ast 210760200
+base_self c_parse_bind_block_statements 202170896
+base_self c_parse_infer_initializer_array_count_core 199086258
+base_self machine_function_compact_virtual_registers 190459869
+base_self c_ir_lower_expression_step 189201278
+base_self machine_schedule_frame_access 181027452
+base_self c_token_push 177669408
+base_self simd512_store_masked_fallback 174478839
+base_self c_ir_emit_prepared_call_step 166984002
+base_self c_preprocess 157172920
+base_self ir_validate_block_instructions 149467466
+base_self c_parse_position_index_build 146942893
