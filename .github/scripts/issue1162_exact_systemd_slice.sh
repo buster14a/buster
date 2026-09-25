@@ -23,6 +23,14 @@ retain() {
     sudo docker exec "$guest" systemctl list-units --all 'buster-bench*' >"$evidence/units-final.txt" 2>&1
     sudo docker exec "$guest" sh -c 'find /var/lib/buster-bench -xdev -printf "%m %u:%g %s %p\n" | sort' >"$evidence/state-inventory.txt" 2>&1
     sudo docker exec "$guest" sh -c 'stat -c "lease device=%d inode=%i links=%h mode=%a owner=%u:%g" /var/lib/buster-bench/lease/host.lock' >"$evidence/lease-final.txt" 2>&1
+    broker="$(sudo docker exec "$guest" systemctl list-units --all --plain --no-legend 'buster-bench-systemd-broker@*.service' | awk '{print $1; exit}')"
+    if [[ -n "$broker" ]]; then
+      sudo docker exec "$guest" systemctl show "$broker" -p Id -p User -p Group -p SupplementaryGroups -p MainPID -p ExecMainStatus -p Result -p InvocationID >"$evidence/broker-effective.txt" 2>&1
+    fi
+    attempt="$(sed -nE 's/^job=[0-9]+ token=([0-9]+) .*/\1/p' "$evidence/status-latest.txt" 2>/dev/null | head -1)"
+    if [[ -n "${job:-}" && -n "$attempt" && "$attempt" != 0 ]]; then
+      sudo docker exec "$guest" /root/issue1162-install/broker-state-probe "$job" "$attempt" "$baseline" "$subject" >"$evidence/broker-state-probe.txt" 2>&1
+    fi
     sudo docker exec "$guest" tar -C /var/lib -czf - buster-bench >"$evidence/retained-state.tgz" 2>"$evidence/state-tar.log"
     tar -tzf "$evidence/retained-state.tgz" >"$evidence/state-tar-inventory.txt" 2>>"$evidence/state-tar.log"
     sha256sum "$evidence/retained-state.tgz" >"$evidence/state-tar-sha256.txt"
@@ -73,6 +81,46 @@ grep -E 'GNU_STACK.*RW[[:space:]]' "$evidence/build-driver-elf.txt"
 build/buster-bench-build bench_service capabilities
 build/buster-bench-build bench_service_broker
 clang -Isrc -DBUSTER_SINGLE_THREADED=1 -std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/throughput/throughput.c tools/throughput/shared.c -lm -o build/throughput
+cat > "$payload/broker-state-probe.c" <<'PROBE'
+#define main bq_original_broker_main
+#include "tools/bench_service/systemd_broker.c"
+#undef main
+int main(int argc, char** argv)
+{
+    if (argc != 5) return 2;
+    BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = 1,
+                               .operation = BQ_BROKER_START, .stage = BQ_BROKER_OUTER,
+                               .job = strtoull(argv[1], NULL, 10), .attempt = strtoull(argv[2], NULL, 10)};
+    snprintf(request.base, sizeof(request.base), "%s", argv[3]);
+    snprintf(request.candidate, sizeof(request.candidate), "%s", argv[4]);
+    struct passwd* service = getpwnam("buster-bench");
+    uid_t uid = service ? service->pw_uid : (uid_t)-1;
+    gid_t gid = service ? service->pw_gid : (gid_t)-1;
+    struct passwd* candidate = getpwnam("buster-bench-candidate");
+    gid_t candidate_gid = candidate ? candidate->pw_gid : (gid_t)-1;
+    BqBrokerPaths paths;
+    bool paths_ok = bq_broker_paths(&request, &paths);
+    printf("read-only probe of durable file predicates after failed attempt; separate root context\n");
+    printf("request=%d paths=%d state=%d\n", bq_broker_request_valid(&request), paths_ok,
+           paths_ok && bq_broker_state(&request, uid, gid, candidate_gid));
+    if (!paths_ok) return 1;
+    printf("private-root=%d workspace=%d results=%d result=%d queue=%d\n",
+           bq_broker_private_directory("/var/lib/buster-bench", uid, candidate_gid, 0710),
+           bq_broker_private_directory(BQ_BROKER_WORKSPACES, uid, candidate_gid, 02710),
+           bq_broker_private_directory(BQ_BROKER_WORKSPACES "/results", uid, gid, 0710),
+           bq_broker_private_directory(paths.result, uid, gid, 0700),
+           bq_broker_private_directory(BQ_BROKER_QUEUE, uid, gid, 0710));
+    printf("worker-record=%d lease-held=%d base-manifest=%d candidate-manifest=%d\n",
+           bq_broker_worker_record(&request, &paths, uid, gid, false),
+           bq_broker_lease_held(uid, gid), bq_broker_manifest(&request, &paths, uid, false),
+           bq_broker_manifest(&request, &paths, uid, true));
+    printf("installed-service=%d build=%d throughput=%d\n",
+           bq_broker_installed_binary(BQ_BROKER_SERVICE), bq_broker_installed_binary(BQ_BROKER_BUILD),
+           bq_broker_installed_binary(BQ_BROKER_THROUGHPUT));
+    return 0;
+}
+PROBE
+clang -I "$source_root" -std=c11 -O0 -g -Wno-unused-function "$payload/broker-state-probe.c" -o "$payload/broker-state-probe"
 install -m 0755 build/buster-bench-build "$payload/binaries/buster-bench-build"
 install -m 0755 build/bench-service-tools/service "$payload/binaries/buster-bench-service"
 install -m 0755 build/bench-service-tools/systemd-broker "$payload/binaries/buster-bench-systemd-broker"
