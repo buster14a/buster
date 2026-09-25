@@ -384,6 +384,11 @@ handoff, fixed arguments, and bundle validation; they do not qualify the
 recipe only inside the disposable service regression executable. Keep the
 installed service and GitHub dispatch disabled until these requirements and
 the separate host qualification gates are reviewed and satisfied.
+For scale, the complete Git tree at prototype head `ac9cff47` has 2,951
+regular files and about 137 MiB of blob bytes; a `BQ-SOURCE-V1` manifest of
+every path would be about 347 KiB, above the current 64 KiB source-manifest
+limit. A reviewed minimal build closure or revised bounded inventory is
+therefore also required before admitting a real PR source.
 
 `native-retirement-performance-v1` is a recognized but deliberately blocked
 registry entry. `profiles/native-retirement-performance-v1.blocked` pins the
