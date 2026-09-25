@@ -1,0 +1,180 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
+index ede2de4..21469ba 100644
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -17168,6 +17168,35 @@ BUSTER_C_INTERNAL u32 c_ir_unevaluated_operand_end(CIntegerIrBuilder* builder, u
+ 
+ BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* builder, CToken token);
+ 
++// Preparation authority, not builtin result semantics. Both eager prepasses
++// must leave an owned operand to its existing selection/predicate continuation.
++// No token annotations, new IR, retained cache, or mutable invalidation state.
++typedef enum CIrBuiltinPreparationOwner
++{
++    C_IR_BUILTIN_PREPARATION_CALLER,
++    C_IR_BUILTIN_PREPARATION_SELECTION,
++    C_IR_BUILTIN_PREPARATION_UNEVALUATED,
++} CIrBuiltinPreparationOwner;
++
++BUSTER_C_INTERNAL CIrBuiltinPreparationOwner c_ir_builtin_preparation_owner(CSymbolBuiltin builtin)
++{
++    CIrBuiltinPreparationOwner result = C_IR_BUILTIN_PREPARATION_CALLER;
++    switch (builtin)
++    {
++    case C_SYMBOL_BUILTIN_GENERIC:
++    case C_SYMBOL_BUILTIN_CHOOSE_EXPR:
++        result = C_IR_BUILTIN_PREPARATION_SELECTION;
++        break;
++    case C_SYMBOL_BUILTIN_OBJECT_SIZE:
++    case C_SYMBOL_BUILTIN_CONSTANT_P:
++        result = C_IR_BUILTIN_PREPARATION_UNEVALUATED;
++        break;
++    default:
++        break;
++    }
++    return result;
++}
++
+ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+ {
+     CIrLowerMachine* machine = &builder->lower_machine;
+@@ -17214,7 +17243,7 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder*
+             c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+         {
+             CSymbolBuiltin builtin = c_ir_token_builtin_kind(builder, builder->preprocess.tokens[index]);
+-            if (builtin == C_SYMBOL_BUILTIN_GENERIC || builtin == C_SYMBOL_BUILTIN_CHOOSE_EXPR)
++            if (c_ir_builtin_preparation_owner(builtin) != C_IR_BUILTIN_PREPARATION_CALLER)
+             {
+                 // The selection owns preparation of its chosen expression.
+                 // Preparing a group here would execute a discarded arm.
+@@ -17224,7 +17253,8 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder*
+                 {
+                     builder->failure_token_index = index;
+                     builder->failure_message = builtin == C_SYMBOL_BUILTIN_GENERIC ? S8("unterminated _Generic selection") :
+-                                                                                     S8("unterminated __builtin_choose_expr selection");
++                                               builtin == C_SYMBOL_BUILTIN_CHOOSE_EXPR ? S8("unterminated __builtin_choose_expr selection") :
++                                                                                        S8("unterminated builtin operand");
+                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                     return;
+                 }
+@@ -18040,6 +18070,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
+         // Atomic and math names resolve their exact operation by spelling
+         // below, but only after c_ir_token_builtin_kind says they are one.
+         CSymbolBuiltin builtin_kind = c_ir_token_builtin_kind(builder, token);
++        CIrBuiltinPreparationOwner preparation_owner = c_ir_builtin_preparation_owner(builtin_kind);
+         bool builtin_identity = builtin_kind == C_SYMBOL_BUILTIN_EXPECT;
+         bool builtin_constant_p = builtin_kind == C_SYMBOL_BUILTIN_CONSTANT_P;
+         bool builtin_choose_expr = builtin_kind == C_SYMBOL_BUILTIN_CHOOSE_EXPR;
+@@ -18269,8 +18300,21 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
+              !builtin_math_link_name.length && builtin_memory == C_IR_MEMORY_BUILTIN_COUNT && builtin_unary == IR_UNARY_COUNT &&
+              builtin_simd == C_IR_SIMD_BUILTIN_NONE && builtin_sse2_immediate_shift == C_IR_SSE2_IMMEDIATE_SHIFT_NONE && !indirect &&
+              !c_ir_function_name_resolution(builder, c_token_spelling(builder->preprocess.spelling_base, token))) ||
+-            (!indirect && c_ir_prepared_control_expression_contains(builder, index)) || c_ir_prepared_call_find(builder, callee_start))
++            (!indirect && c_ir_prepared_control_expression_contains(builder, index)))
++        {
++            continue;
++        }
++        CIrPreparedCall* existing_call = c_ir_prepared_call_find(builder, callee_start);
++        if (existing_call)
+         {
++            // A hit means this call is already recorded, not that its operand
++            // belongs to this scan. Preserve the owned span on replay too.
++            // Do not consume an enclosing call while scanning its callee.
++            if (!indirect && preparation_owner != C_IR_BUILTIN_PREPARATION_CALLER &&
++                existing_call->open_index == index + 1 && existing_call->close_index < end)
++            {
++                index = existing_call->close_index;
++            }
+             continue;
+         }
+         if (c_ir_lazy_operand_scan_deferred(lazy) || comma_sequence_depth != UINT32_MAX)
+@@ -18336,7 +18380,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
+             .builtin_va_end = builtin_va_end,
+             .builtin_va_arg = builtin_va_arg,
+             .builtin_generic = builtin_generic,
+-            .deferred_calls = builtin_generic || builtin_choose_expr,
++            .deferred_calls = preparation_owner == C_IR_BUILTIN_PREPARATION_SELECTION,
+             .builtin_atomic = builtin_atomic,
+             .builtin_memory = builtin_memory,
+             .builtin_math_link_name = builtin_math_link_name,
+@@ -18375,7 +18419,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
+         // _Generic and __builtin_choose_expr own their selected expression.
+         // Deferred preparation lets that expression prepare its own calls.
+         // __builtin_constant_p also discards side effects in its operand.
+-        if (builtin_generic || builtin_choose_expr || builtin_object_size || builtin_constant_p)
++        if (preparation_owner != C_IR_BUILTIN_PREPARATION_CALLER)
+         {
+             index = close;
+         }
+diff --git a/src/buster/tests/compiler/frontend/c/c_test.c b/src/buster/tests/compiler/frontend/c/c_test.c
+index 7b623e7..5bf99e1 100644
+--- a/src/buster/tests/compiler/frontend/c/c_test.c
++++ b/src/buster/tests/compiler/frontend/c/c_test.c
+@@ -23156,6 +23156,64 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_choose_expr_evaluation(UnitTestArgumen
+     return result;
+ }
+ 
++BUSTER_GLOBAL_LOCAL UnitTestResult c_test_architecture_preparation_replay(UnitTestArguments* arguments)
++{
++    UnitTestResult result = {0};
++    String8 source = S8("static volatile unsigned hits; static char buffer[32];"
++                       "static unsigned mark(void) { hits += 1; return 7; }"
++                       "static unsigned long identity(unsigned long x) { return x; }"
++                       "unsigned long probe_0(void) { return __builtin_constant_p((hits = mark(), 7)); }"
++                       "unsigned long probe_1(void) { return __builtin_object_size((hits = mark(), buffer), 0); }"
++                       "unsigned long probe_2(void) { return __builtin_constant_p((hits = 1, 7)); }"
++                       "unsigned long probe_3(void) { return identity(__builtin_constant_p((hits = mark(), 7))); }"
++                       "unsigned long probe_4(void) { return __builtin_choose_expr(1, mark(), (hits = 1, 7)); }"
++                       "unsigned long probe_5(void) { return (hits = 1, mark()); }");
++    u32 expected_calls[] = {0, 0, 0, 0, 1, 1};
++    u32 expected_stores[] = {0, 0, 0, 0, 0, 1};
++    for (u32 layout = 0; layout < 6; layout += 1)
++    {
++        Target target = target_native;
++        target.cpu_arch = layout & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
++        target.os = layout < 2 ? OPERATING_SYSTEM_LINUX : layout < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
++        for (u32 form = 0; form < 2; form += 1)
++        {
++            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
++            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
++                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
++            CParseResult parsed = c_parse(temporary.arena, tokens);
++            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("preparation-replay.c"), tokens, parsed, target,
++                (CIRLowerOptions){.disable_direct_ssa = form != 0});
++            if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
++            {
++                IrModule* module = lowered.program->modules;
++                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
++                for (u32 probe = 0; probe < BUSTER_ARRAY_LENGTH(expected_calls); probe += 1)
++                {
++                    String8 name = string_format(temporary.arena, S8("probe_{u32}"), probe);
++                    IrFunction* function = c_test_find_ir_function(module, name);
++                    if (BUSTER_REQUIRE(arguments, function != 0))
++                    {
++                        u32 calls = c_test_ir_direct_call_count(lowered.program, function, S8("mark"));
++                        u32 stores = 0;
++                        for (u32 index = 0; index < function->instruction_count; index += 1)
++                        {
++                            IrInstruction* instruction = function->instructions + index;
++                            stores += instruction->opcode == IR_OPCODE_STORE && instruction->volatile_access;
++                        }
++                        String8 observation = string_format(temporary.arena,
++                            S8("replay layout={u32} form={u32} {S8}: mark={u32}/{u32} stores={u32}/{u32}"),
++                            layout, form, name, calls, expected_calls[probe], stores, expected_stores[probe]);
++                        BUSTER_TEST_RAW(arguments, calls == expected_calls[probe], observation);
++                        BUSTER_TEST_RAW(arguments, stores == expected_stores[probe], observation);
++                    }
++                }
++            }
++            scratch_end(temporary);
++        }
++    }
++    return result;
++}
++
+ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
+ {
+     UnitTestResult result = {0};
+@@ -23409,6 +23467,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
+     BUSTER_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
++    BUSTER_TEST_FIXTURE(arguments, c_test_architecture_preparation_replay);
