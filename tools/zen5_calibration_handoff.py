@@ -164,7 +164,7 @@ def replay(plan: dict[str, Any], trusted_digest: str, captures: dict[str, dict[s
     }
 
 
-def verify_service_phase(plan: dict[str, Any], report: Any,
+def verify_service_phase(plan: Any, report: Any,
                          presample: Any, completion: Any, trusted: Any) -> dict[str, Any]:
     """Check a service phase handoff; never turn descriptive replay into A/B authority.
 
@@ -176,6 +176,8 @@ def verify_service_phase(plan: dict[str, Any], report: Any,
     """
     errors: list[str] = plan_errors(plan)
     plan_digest = sha256_bytes(canonical_bytes(plan))
+    if not isinstance(plan, dict):
+        plan = {}
     identities = ("job_id", "attempt", "host_id", "boot_id", "lease_id",
                   "profile_sha256", "host_qualification_sha256")
     expected_trusted = {*identities, "host_qualification_state", "lease_state",
@@ -197,6 +199,8 @@ def verify_service_phase(plan: dict[str, Any], report: Any,
             type(receipt["version"]) is not int or receipt["version"] != 1
         ):
             errors.append(f"{name} receipt phase/status differs")
+        if type(receipt["attempt"]) is not int or receipt["attempt"] < 1:
+            errors.append(f"{name} receipt attempt must be a positive integer")
         if any(receipt[field] != trusted.get(field) for field in identities):
             errors.append(f"{name} receipt job/host/lease identity differs")
         if receipt["plan_sha256"] != plan_digest:

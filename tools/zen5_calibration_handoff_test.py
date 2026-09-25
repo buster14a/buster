@@ -108,6 +108,23 @@ def run() -> None:
     }
     phase = verify_service_phase(plan, report, presample, completion, trusted)
     assert phase["status"] == "verified-descriptive" and not phase["ab_authorized"], phase
+    for malformed in (None, [], "invalid", 1):
+        checked = verify_service_phase(malformed, report, presample, completion, trusted)
+        assert checked["status"] == "denied" and "calibration family schema/version differs" in checked["errors"], checked
+    for name in ("presample", "completion"):
+        for bad_attempt in (True, 1.0):
+            changed_pre, changed_post, changed_trusted = deepcopy(presample), deepcopy(completion), dict(trusted)
+            if name == "presample":
+                changed_pre["attempt"] = bad_attempt
+                changed_trusted["presample_sha256"] = sha256_bytes(canonical_bytes(changed_pre))
+                changed_post["presample_sha256"] = changed_trusted["presample_sha256"]
+            else:
+                changed_post["attempt"] = bad_attempt
+            changed_trusted["completion_sha256"] = sha256_bytes(canonical_bytes(changed_post))
+            checked = verify_service_phase(plan, report, changed_pre, changed_post, changed_trusted)
+            assert checked["status"] == "denied" and checked["errors"] == [
+                f"{name} receipt attempt must be a positive integer"
+            ], checked
     # A complete authenticated descriptive receipt is still not the reviewed
     # empirical A/A decision required for a service A/B transition.
     def denied(pre: dict, post: dict, authority: dict, result: dict = report) -> None:
