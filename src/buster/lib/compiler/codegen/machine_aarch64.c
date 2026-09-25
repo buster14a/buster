@@ -3981,7 +3981,15 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_load(MachineA64Selector* selector, I
     IrFunction* function = selector->function;
 
     bool selected = false;
-    if (instruction->operands[0].value < function->value_count && instruction->result.value != IR_ID_UNDERLYING_INVALID)
+    IrType* loaded_type = ir_type_from_id(&selector->program->types, instruction->canonical_type);
+    if (instruction->opcode == IR_OPCODE_LOAD && instruction->operands[0].value < function->value_count && loaded_type &&
+        loaded_type->kind == IR_TYPE_VOID)
+    {
+        // The address expression is selected separately. A void dereference
+        // has no sized result or memory access to lower.
+        selected = true;
+    }
+    else if (instruction->operands[0].value < function->value_count && instruction->result.value != IR_ID_UNDERLYING_INVALID)
     {
         MachineSelectionAddress address = machine_a64_address(selector, instruction->operands[0]);
         if (address.opcode != IR_OPCODE_COUNT)

@@ -27,9 +27,7 @@
 //   codegen_abi_for_target, codegen_prewarm      ABI selection and the serial
 //                                                table prewarm (AGENTS.md)
 //   codegen_canonical_x64_f80_cache_*,           ABI classification: x87 f80
-//   codegen_canonical_aggregate_abi,             shapes, aggregate part
-//   codegen_canonical_x64_call_layout_cached     splitting, SysV and Win64
-//                                                call layout
+//   codegen_canonical_aggregate_abi              shapes and aggregate parts
 //   codegen_x64_emit_windows_stack_allocate,    shared machine stack probes
 //   codegen_a64_windows_large_stack_adjust      and unwind descriptions
 //   codegen_global_assembly_*,                   module-level asm: directives
@@ -2873,16 +2871,6 @@ bool codegen_canonical_x64_abi_is_f80_result(IrType* type, CodegenCanonicalAbiVa
            abi->parts[0].value_offset == 0 && abi->parts[1].value_offset == 8 && abi->parts[0].size == 8 && abi->parts[1].size == 8;
 }
 
-// The complex counterpart of the predicate above.  System V returns a
-// `long double _Complex` under its COMPLEX_X87 class: the real half in ST(0)
-// and the imaginary half in ST(1), where the same two f80 fields spelled as a
-// plain struct go to memory through a hidden pointer.  The classifier owns
-// that distinction; this only reads its answer back.
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_abi_is_f80_complex_result(IrProgram* program, IrTypeId type_id)
-{
-    return ir_abi_value_is_complex_x87_result(program, type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64);
-}
-
 // How many consecutive vector registers one ABI part occupies on this target,
 // and how much of it each one carries. The IR ABI classifies a vector by the
 // psABI rule alone -- a 512-bit vector is one vector part whatever the machine
@@ -2919,79 +2907,6 @@ u32 codegen_canonical_x64_vector_part_registers(Target const* target, u32 size, 
     return size / width;
 }
 
-typedef struct CodegenCanonicalX64NonPowerVector CodegenCanonicalX64NonPowerVector;
-struct CodegenCanonicalX64NonPowerVector
-{
-    u32 lane_count;
-    u32 lane_size;
-    u32 storage_size;
-    bool floating;
-};
-
-// A GNU vector keeps its written lane count while its object image is rounded
-// up to the next power of two. Power-of-two vectors have no padding and stay
-// on the established paths; this describes only the padded shape.
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_non_power_vector(IrProgram* program, IrType* type,
-                                                                 CodegenCanonicalX64NonPowerVector* info)
-{
-    bool result = false;
-    IrType* element = program && type && type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, type->element_type) : 0;
-    if (program && info && type && type->layout.resolved && type->layout.size && type->layout.size <= UINT32_MAX &&
-        type->element_count && type->element_count <= UINT32_MAX && element && element->layout.resolved && element->layout.size &&
-        element->layout.size <= 8 && (element->kind == IR_TYPE_INTEGER || element->kind == IR_TYPE_FLOAT) &&
-        (element->kind != IR_TYPE_FLOAT || element->layout.size == 2 || element->layout.size == 4 || element->layout.size == 8))
-    {
-        u64 logical_size = type->element_count * element->layout.size;
-        result = logical_size / element->layout.size == type->element_count && logical_size < type->layout.size &&
-                 type->layout.size == next_power_of_two(logical_size);
-        if (result)
-        {
-            *info = (CodegenCanonicalX64NonPowerVector){
-                .lane_count = (u32)type->element_count,
-                .lane_size = (u32)element->layout.size,
-                .storage_size = (u32)type->layout.size,
-                .floating = element->kind == IR_TYPE_FLOAT,
-            };
-        }
-    }
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL u32 codegen_canonical_x64_native_vector_width(Target const* target)
-{
-    return BUSTER_MAX(16u, target_vector_register_size(*target));
-}
-
-// Win64 passes a padded vector by one reference when the object fits a native
-// vector register. Half-precision vectors use that vector contract even below
-// sixteen bytes; integer vectors below sixteen bytes scalarize instead.
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_windows_non_power_vector_indirect(
-    Target const* target, CodegenCanonicalX64NonPowerVector const* info)
-{
-    return info && ((info->floating && info->lane_size == 2) ||
-                    (info->storage_size >= 16 && info->storage_size <= codegen_canonical_x64_native_vector_width(target)));
-}
-
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_non_power_vector_three_part_result(
-    CodegenAbi abi, Target const* target, CodegenCanonicalX64NonPowerVector const* info)
-{
-    bool result = false;
-    if (info && info->lane_count == 3)
-    {
-        bool native = info->storage_size <= codegen_canonical_x64_native_vector_width(target);
-        if (abi == CODEGEN_ABI_X86_64_WINDOWS)
-        {
-            native = codegen_canonical_x64_windows_non_power_vector_indirect(target, info);
-            result = !native && ((!info->floating && info->lane_size <= 8) || (info->floating && info->lane_size == 8));
-        }
-        else if (abi == CODEGEN_ABI_X86_64_SYSTEM_V)
-        {
-            result = info->storage_size > 16 && !native && info->lane_size == 8;
-        }
-    }
-    return result;
-}
-
 // How many indirect references a Win64 vector argument travels as on this
 // target: one per register-sized piece when the value is wider than the
 // model's widest register, one for the whole value otherwise (including
@@ -3017,91 +2932,6 @@ u32 codegen_canonical_x64_windows_vector_argument_pieces(Target const* target, I
     return count;
 }
 
-// The backend's half of the Win64 wide-vector result contract. The
-// classification keeps a vector result past 64 bytes behind the reference
-// because whether it comes back directly depends on the CPU model, which a
-// classification keyed on convention alone cannot see: clang splits the value
-// into registers of the widest width the model owns and returns it directly
-// while at most four suffice (two zmm for 128 bytes on znver5, four ymm on
-// haswell), and through the caller's hidden pointer past that (128 bytes at
-// baseline is eight xmm-sized pieces, so it stays indirect). Every canonical
-// read of a result classification funnels through this rewrite so the caller
-// and callee sides of one build, and clang across the boundary, agree.
-BUSTER_GLOBAL_LOCAL CodegenCanonicalAbiValue codegen_canonical_x64_vector_result(IrProgram* program, IrTypeId type_id, CodegenAbi abi,
-                                                                                   Target const* target, CodegenCanonicalAbiValue value)
-{
-    IrType* type = ir_type_from_id(&program->types, type_id);
-    CodegenCanonicalX64NonPowerVector non_power = {0};
-    if (codegen_canonical_x64_non_power_vector(program, type, &non_power))
-    {
-        bool native = non_power.storage_size <= codegen_canonical_x64_native_vector_width(target);
-        if (abi == CODEGEN_ABI_X86_64_WINDOWS)
-        {
-            native = codegen_canonical_x64_windows_non_power_vector_indirect(target, &non_power);
-        }
-        bool generic_system_v = abi == CODEGEN_ABI_X86_64_SYSTEM_V && non_power.storage_size <= 16;
-        if (codegen_canonical_x64_non_power_vector_three_part_result(abi, target, &non_power))
-        {
-            value = (CodegenCanonicalAbiValue){.part_count = 3};
-            for (u32 lane = 0; lane < 3; lane += 1)
-            {
-                value.parts[lane] = (CodegenCanonicalAbiPart){
-                    .abi_class = non_power.floating ? lane == 2 ? IR_ABI_CLASS_X87 : IR_ABI_CLASS_FLOAT : IR_ABI_CLASS_INTEGER,
-                    .value_offset = lane * non_power.lane_size,
-                    .size = non_power.lane_size,
-                };
-            }
-        }
-        else if (!native && !generic_system_v)
-        {
-            value = (CodegenCanonicalAbiValue){.part_count = 1, .indirect = true};
-            value.parts[0] = (CodegenCanonicalAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
-        }
-    }
-    else if (abi == CODEGEN_ABI_X86_64_WINDOWS && value.indirect && type && type->kind == IR_TYPE_VECTOR && type->layout.resolved &&
-             type->layout.size > 64 && type->layout.size <= UINT32_MAX && !(type->layout.size & (type->layout.size - 1)))
-    {
-        u32 register_size = 0;
-        u32 register_count = codegen_canonical_x64_vector_part_registers(target, (u32)type->layout.size, &register_size);
-        if (register_count && register_count <= 4)
-        {
-            value = (CodegenCanonicalAbiValue){.part_count = 1};
-            value.parts[0] = (CodegenCanonicalAbiPart){
-                .abi_class = IR_ABI_CLASS_VECTOR,
-                .size = (u32)type->layout.size,
-            };
-        }
-    }
-    return value;
-}
-
-// Whether this target hands the value over in the registers the classification
-// named. A part it has to split is one the psABI expected a single register to
-// hold, and the split is only available to a return, whose registers are its
-// own; an argument competing for the shared pool is passed in memory instead,
-// which is again what clang does for the same declaration.
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_abi_value_in_registers(CodegenCanonicalAbiValue const* value, Target const* target)
-{
-    for (u32 part_index = 0; part_index < value->part_count; part_index += 1)
-    {
-        CodegenCanonicalAbiPart const* part = value->parts + part_index;
-        u32 register_size = 0;
-        if (part->size > 16 && codegen_canonical_abi_part_is_float(part->abi_class) &&
-            codegen_canonical_x64_vector_part_registers(target, part->size, &register_size) != 1)
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
-// Whether a result travels in the registers its classification named, rather
-// than in the single register the scalar path below loads it into. SystemV
-// names every part of every result that way. Win64 names one part, and only a
-// vector one has to come through here: its integer and floating-point results
-// already have a path that carries their width, and a vector part is the only
-// one that can be wider than the register the psABI picked for it.
-
 BUSTER_GLOBAL_LOCAL CodegenCanonicalAbiValue codegen_canonical_aggregate_abi(IrProgram* program, IrTypeId type_id, CodegenAbi abi, bool is_result,
                                                                              bool variadic_argument)
 {
@@ -3110,13 +2940,6 @@ BUSTER_GLOBAL_LOCAL CodegenCanonicalAbiValue codegen_canonical_aggregate_abi(IrP
     IrAbiUse use = is_result ? IR_ABI_USE_RESULT : variadic_argument ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT;
     return ir_type_abi_value(program, type_id, convention, use);
 }
-
-// AAPCS64's C.8 rule rounds the next general-purpose argument register up to
-// an even number for a 16-byte integer pair.  The same type is sixteen-byte
-// aligned when it spills to the incoming or outgoing stack area.  The IR ABI
-// classifier owns the shape test; this helper only converts the convention's
-// alignment requirement into the eightbyte cursors used by the canonical
-// emitter.
 
 // The ABI classifier is the authority for aggregate x87 shapes.  It admits
 // nested one-field wrappers, one-element arrays, and unions whose alternatives
@@ -3152,56 +2975,6 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_type_is_f80_x87_shape_cached(Code
     return codegen_canonical_x64_abi_is_f80_result(type, &result_abi);
 }
 
-// The counterpart to the shape predicate above: a type that carries an f80
-// payload the classifier resolved without any x87 class.  System V's merger
-// gives INTEGER precedence over x87, so musl's `union ldshape` -- a
-// `long double` overlaid with `struct { uint64_t m; uint16_t se; }` --
-// becomes two INTEGER eightbytes in general-purpose registers, while a union
-// the merger cannot reconcile goes to memory whole.  Both are ordinary
-// aggregates here: their bytes are copied, never pushed onto the x87 stack,
-// so every gate below lets them fall through to the aggregate paths.
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_type_is_f80_opaque_cached(CodegenCanonicalX64F80Cache const* cache, IrProgram* program,
-                                                                          IrTypeId type_id)
-{
-    if (!cache || cache->allocation_failed || !program || !codegen_canonical_x64_type_contains_f80_cached(cache, program, type_id))
-    {
-        return false;
-    }
-    IrType* type = ir_type_from_id(&program->types, type_id);
-    if (!type || !type->layout.resolved || (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION && type->kind != IR_TYPE_ARRAY))
-    {
-        return false;
-    }
-    return !ir_abi_value_has_x87_part(program, type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT) &&
-           !ir_abi_value_has_x87_part(program, type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
-}
-
-// A `long double _Complex`: an f80-carrying aggregate whose result really is
-// an x87 pair, but whose argument, load, store and copy directions are the
-// plain 32-byte memory image the size rule already gives it.  Only the two
-// result sites -- the RETURN emitter and the call-result reader -- push or
-// pop its halves; every other gate treats it like the opaque aggregates
-// above.
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_type_is_f80_complex_cached(CodegenCanonicalX64F80Cache const* cache, IrProgram* program,
-                                                                            IrTypeId type_id)
-{
-    if (!cache || cache->allocation_failed || !program || !codegen_canonical_x64_type_contains_f80_cached(cache, program, type_id))
-    {
-        return false;
-    }
-    return codegen_canonical_x64_abi_is_f80_complex_result(program, type_id);
-}
-
-// The union the non-result gates want: an f80 payload that crosses this
-// boundary as bytes, whether because the classifier resolved it without any
-// x87 class or because it is a complex value away from its result position.
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_type_is_f80_bytes_cached(CodegenCanonicalX64F80Cache const* cache, IrProgram* program,
-                                                                          IrTypeId type_id)
-{
-    return codegen_canonical_x64_type_is_f80_opaque_cached(cache, program, type_id) ||
-           codegen_canonical_x64_type_is_f80_complex_cached(cache, program, type_id);
-}
-
 bool codegen_canonical_x64_type_is_f80_x87_shape(IrProgram* program, IrTypeId type_id)
 {
     TemporalArena temporary = scratch_begin(0, 0);
@@ -3224,10 +2997,8 @@ bool codegen_canonical_integer_aggregate_parts(IrProgram* program, IrTypeId type
         *part_count = (u32)(type->layout.size / 8);
         return true;
     }
-    // Any resolved vector is a copyable run of eightbytes to the canonical
-    // emitter; the width cap that used to sit here only protected paths that
-    // now size their copies from this count. How a wide vector crosses a call
-    // boundary is the ABI classification's question, not this one.
+    // A resolved vector is a copyable run of eightbytes for AArch64 machine
+    // selection. The ABI classifier decides how the value crosses a call.
     if (type && type->kind == IR_TYPE_VECTOR && type->layout.resolved && type->layout.size && type->layout.size <= (u64)UINT32_MAX * 8)
     {
         *part_count = (u32)((type->layout.size + 7) / 8);
@@ -3325,440 +3096,6 @@ u32 codegen_canonical_x64_stack_argument_alignment(IrType* type)
     else
     {
         result = (u32)alignment;
-    }
-
-    return result;
-}
-
-// Where the next argument starts. The System V convention places a stack
-// argument at an address respecting its alignment rather than immediately after
-// the one before it, so the gap this opens is padding the caller writes nothing
-// into and the callee reads nothing out of.
-BUSTER_GLOBAL_LOCAL u64 codegen_canonical_x64_stack_argument_offset(u64 cursor, u32 alignment)
-{
-    u64 remainder = cursor & (alignment - 1);
-    return remainder ? cursor + alignment - remainder : cursor;
-}
-
-CodegenError codegen_canonical_x64_call_layout_cached(Arena* arena, IrProgram* program, CodegenCanonicalX64F80Cache const* f80_cache,
-                                                       IrFunction* function, IrInstruction* instruction, CodegenAbi abi, Target target,
-                                                       CodegenCanonicalCallLayout* layout)
-{
-    if (!layout)
-    {
-        return CODEGEN_ERROR_INVALID_IR;
-    }
-    *layout = (CodegenCanonicalCallLayout){0};
-    if (!arena || !program || !function || !function->values || !instruction || instruction->opcode != IR_OPCODE_CALL || !instruction->operand_count ||
-        !instruction->operands || (abi != CODEGEN_ABI_X86_64_SYSTEM_V && abi != CODEGEN_ABI_X86_64_WINDOWS) ||
-        instruction->operands[0].value >= function->value_count)
-    {
-        return CODEGEN_ERROR_INVALID_IR;
-    }
-    IrType* callee_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
-    if (!callee_type)
-    {
-        return CODEGEN_ERROR_INVALID_IR;
-    }
-    if (callee_type->kind == IR_TYPE_POINTER)
-    {
-        callee_type = ir_type_from_id(&program->types, callee_type->element_type);
-        if (!callee_type)
-        {
-            return CODEGEN_ERROR_INVALID_IR;
-        }
-    }
-    if (callee_type->kind != IR_TYPE_FUNCTION)
-    {
-        return CODEGEN_ERROR_UNSUPPORTED_ABI;
-    }
-    u32 argument_count = instruction->operand_count - 1;
-    if ((!callee_type->is_variadic && argument_count != callee_type->parameter_count) ||
-        (callee_type->is_variadic && argument_count < callee_type->parameter_count) ||
-        (callee_type->parameter_count && !callee_type->parameter_types))
-    {
-        return CODEGEN_ERROR_INVALID_IR;
-    }
-    for (u32 parameter_index = 0; parameter_index < callee_type->parameter_count; parameter_index += 1)
-    {
-        if (!ir_type_from_id(&program->types, callee_type->parameter_types[parameter_index]))
-        {
-            return CODEGEN_ERROR_INVALID_IR;
-        }
-    }
-    if (!ir_type_from_id(&program->types, instruction->canonical_type))
-    {
-        return CODEGEN_ERROR_INVALID_IR;
-    }
-    layout->argument_count = argument_count;
-    layout->return_abi = codegen_canonical_x64_vector_result(
-        program, instruction->canonical_type, abi, &target, codegen_canonical_aggregate_abi(program, instruction->canonical_type, abi, true, false));
-    bool return_contains_f80 = codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, callee_type->return_type);
-    if (return_contains_f80 && (abi != CODEGEN_ABI_X86_64_SYSTEM_V ||
-                                (!codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, callee_type->return_type) &&
-                                 !codegen_canonical_x64_type_is_f80_complex_cached(f80_cache, program, callee_type->return_type) &&
-                                 !codegen_canonical_x64_type_is_f80_opaque_cached(f80_cache, program, callee_type->return_type))))
-    {
-        return CODEGEN_ERROR_UNSUPPORTED_ABI;
-    }
-    layout->indirect_return = layout->return_abi.indirect;
-    layout->windows_indirect_return = abi == CODEGEN_ABI_X86_64_WINDOWS && layout->return_abi.indirect;
-    layout->simulated_registers = layout->indirect_return ? 1 : 0;
-    if (argument_count)
-    {
-        layout->arguments = arena_allocate(arena, CodegenCanonicalCallArgument, argument_count);
-    }
-    static u8 const system_v[] = {
-        7, 6, 2, 1, 8, 9,
-    };
-    static u8 const windows[] = {
-        1,
-        2,
-        8,
-        9,
-    };
-    u32 register_count = abi == CODEGEN_ABI_X86_64_WINDOWS ? BUSTER_ARRAY_LENGTH(windows) : BUSTER_ARRAY_LENGTH(system_v);
-    u64 stack_part_count = 0;
-    for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
-    {
-        IrValueId argument = instruction->operands[argument_index + 1];
-        if (argument.value >= function->value_count)
-        {
-            return CODEGEN_ERROR_INVALID_IR;
-        }
-        IrTypeId type_id = function->values[argument.value].canonical_type;
-        IrType* type = ir_type_from_id(&program->types, type_id);
-        if (!type)
-        {
-            return CODEGEN_ERROR_INVALID_IR;
-        }
-        u32 part_count = 1;
-        bool aggregate = codegen_canonical_integer_aggregate_parts(program, type_id, &part_count);
-        CodegenCanonicalAbiValue argument_abi = codegen_canonical_aggregate_abi(program, type_id, abi, false, false);
-        bool contains_f80 = codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, type_id);
-        bool f80_x87_shape = codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, type_id);
-        if (contains_f80 && (abi != CODEGEN_ABI_X86_64_SYSTEM_V ||
-                             (!f80_x87_shape && !codegen_canonical_x64_type_is_f80_bytes_cached(f80_cache, program, type_id))))
-        {
-            return CODEGEN_ERROR_UNSUPPORTED_ABI;
-        }
-        // SysV puts both a scalar f80 and the canonical single-f80 aggregate
-        // in a sixteen-byte, sixteen-aligned memory slot.  Any memory-class
-        // aggregate (an f80 wrapper, or one whose walk hit a MEMORY field such
-        // as a single-lane double vector) is marked here so the normal
-        // stack-copy path does not mistake it for an unsupported register
-        // aggregate.
-        bool f80_memory = f80_x87_shape && argument_abi.memory && type->layout.size == 16;
-        if (argument_abi.memory && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_ARRAY))
-        {
-            aggregate = true;
-        }
-        // A value the target cannot carry in the registers its classification
-        // named goes on the stack, and its stack image is the eightbyte count
-        // the aggregate walk already produced rather than the register count.
-        bool argument_in_registers = codegen_canonical_x64_abi_value_in_registers(&argument_abi, &target);
-        if (argument_abi.part_count && !argument_abi.memory && !argument_abi.indirect)
-        {
-            aggregate = true;
-            if (argument_in_registers)
-            {
-                part_count = argument_abi.part_count;
-            }
-        }
-        if (!type || ((type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) && !aggregate))
-        {
-            return CODEGEN_ERROR_UNSUPPORTED_ABI;
-        }
-        CodegenCanonicalX64NonPowerVector non_power_vector = {0};
-        bool windows_scalar_vector =
-            abi == CODEGEN_ABI_X86_64_WINDOWS && codegen_canonical_x64_non_power_vector(program, type, &non_power_vector) &&
-            !codegen_canonical_x64_windows_non_power_vector_indirect(&target, &non_power_vector);
-        bool windows_indirect = abi == CODEGEN_ABI_X86_64_WINDOWS && argument_abi.indirect && !windows_scalar_vector;
-        if (windows_scalar_vector)
-        {
-            aggregate = true;
-            part_count = non_power_vector.lane_count;
-        }
-        else if (aggregate && abi == CODEGEN_ABI_X86_64_WINDOWS)
-        {
-            part_count = 1;
-        }
-        u32 windows_piece_size = 0;
-        if (windows_indirect)
-        {
-            // A bare vector wider than the model's widest register legalizes
-            // into one reference per register-sized piece, the way clang and
-            // MSVC pass the same declaration: each piece is its own argument
-            // slot, so a 128-byte vector is two references on znver5 and
-            // eight at baseline. Wrapping aggregates keep the single
-            // reference, as do vectors the model carries whole.
-            part_count = codegen_canonical_x64_windows_vector_argument_pieces(&target, type, &windows_piece_size);
-            if (!part_count)
-            {
-                return CODEGEN_ERROR_UNSUPPORTED_ABI;
-            }
-        }
-        CodegenCanonicalCallArgument call_argument = {
-            .abi = argument_abi,
-            .type = type,
-            .part_count = part_count,
-            .stack_part_count = windows_scalar_vector ? part_count : (u32)((type->layout.size + 7) / 8),
-            .windows_piece_size = windows_piece_size,
-            .windows_scalar_lane_size = windows_scalar_vector ? non_power_vector.lane_size : 0,
-            .float_register = UINT8_MAX,
-            .aggregate = aggregate,
-            .windows_indirect = windows_indirect,
-            .windows_scalar_float = windows_scalar_vector && non_power_vector.floating,
-            .system_v_aggregate = abi == CODEGEN_ABI_X86_64_SYSTEM_V && argument_abi.part_count && !argument_abi.memory && argument_in_registers,
-        };
-        u64 argument_stack_parts = 0;
-        if (abi == CODEGEN_ABI_X86_64_SYSTEM_V && argument_abi.memory)
-        {
-            // The classifier already sent this argument to memory — an f80
-            // slot, a single-lane double vector, or an aggregate the SysV
-            // walk gave a MEMORY class — so it always lives in the outgoing
-            // area regardless of how many registers remain.
-            call_argument.on_stack = true;
-            argument_stack_parts = call_argument.stack_part_count;
-        }
-        else if (abi == CODEGEN_ABI_X86_64_SYSTEM_V && type->kind == IR_TYPE_FLOAT)
-        {
-            if (layout->simulated_float_registers < 8)
-            {
-                call_argument.float_register = (u8)layout->simulated_float_registers++;
-            }
-            else
-            {
-                call_argument.on_stack = true;
-                argument_stack_parts = 1;
-            }
-        }
-        else if (call_argument.system_v_aggregate)
-        {
-            u32 integer_count = 0;
-            u32 float_count = 0;
-            for (u32 part = 0; part < argument_abi.part_count; part += 1)
-            {
-                if (codegen_canonical_abi_part_is_float(argument_abi.parts[part].abi_class))
-                {
-                    float_count += 1;
-                }
-                else
-                {
-                    integer_count += 1;
-                }
-            }
-            if (layout->simulated_registers <= register_count && integer_count <= register_count - layout->simulated_registers &&
-                layout->simulated_float_registers <= 8 && float_count <= 8 - layout->simulated_float_registers)
-            {
-                call_argument.float_register = (u8)layout->simulated_float_registers;
-                layout->simulated_registers += integer_count;
-                layout->simulated_float_registers += float_count;
-            }
-            else
-            {
-                call_argument.on_stack = true;
-                argument_stack_parts = (type->layout.size + 7) / 8;
-            }
-        }
-        else if (windows_scalar_vector)
-        {
-            // Scalarized lanes are ordinary positional argument slots. The
-            // leading lanes occupy the remaining register positions and the
-            // tail continues in eightbyte stack slots in this same call.
-            u32 available = layout->simulated_registers < register_count ? register_count - layout->simulated_registers : 0;
-            u32 register_lanes = BUSTER_MIN(part_count, available);
-            call_argument.windows_register_lane_count = register_lanes;
-            layout->simulated_registers += register_lanes;
-            if (register_lanes < part_count)
-            {
-                call_argument.on_stack = true;
-                argument_stack_parts = part_count - register_lanes;
-            }
-        }
-        else if (windows_piece_size)
-        {
-            // Pieces are ordinary argument slots, so unlike every other
-            // multi-part shape they straddle: the leading pieces take the
-            // registers that remain and the tail continues on the stack in
-            // the same call, exactly as clang assigns them.
-            u32 available = layout->simulated_registers < register_count ? register_count - layout->simulated_registers : 0;
-            u32 register_pieces = BUSTER_MIN(part_count, available);
-            call_argument.windows_register_piece_count = register_pieces;
-            layout->simulated_registers += register_pieces;
-            if (register_pieces < part_count)
-            {
-                call_argument.on_stack = true;
-                argument_stack_parts = part_count - register_pieces;
-            }
-        }
-        else
-        {
-            bool system_v_memory = aggregate && abi == CODEGEN_ABI_X86_64_SYSTEM_V && type->layout.size > 16;
-            if (!system_v_memory && layout->simulated_registers <= register_count && part_count <= register_count - layout->simulated_registers)
-            {
-                layout->simulated_registers += part_count;
-            }
-            else
-            {
-                call_argument.on_stack = true;
-                argument_stack_parts = part_count;
-            }
-        }
-        if (call_argument.on_stack)
-        {
-            // Windows gives every stack argument one eightbyte and passes
-            // anything wider by reference, so only System V has an argument
-            // whose alignment the area has to answer for.
-            u32 argument_alignment = abi == CODEGEN_ABI_X86_64_SYSTEM_V
-                                         ? f80_memory ? 16 : codegen_canonical_x64_stack_argument_alignment(type)
-                                         : 8;
-            u64 offset = codegen_canonical_x64_stack_argument_offset(stack_part_count * 8, argument_alignment);
-            if (offset > UINT32_MAX || argument_stack_parts > (UINT32_MAX - offset) / 8)
-            {
-                return CODEGEN_ERROR_CAPACITY;
-            }
-            call_argument.stack_offset = (u32)offset;
-            stack_part_count = (offset + argument_stack_parts * 8) / 8;
-            layout->stack_alignment = BUSTER_MAX(layout->stack_alignment, argument_alignment);
-        }
-        if (layout->arguments)
-        {
-            layout->arguments[argument_index] = call_argument;
-        }
-    }
-    // A System V hidden result pointer has the same alignment contract as a
-    // stack argument. Canonical frame slots are addressed from RBP, which is
-    // only sixteen-aligned, so an over-aligned result must live in the
-    // explicitly aligned outgoing area for the duration of the call. Reserve
-    // it after the ABI-visible stack arguments; the callee never observes the
-    // private tail of the area.
-    if (abi == CODEGEN_ABI_X86_64_SYSTEM_V && layout->indirect_return)
-    {
-        IrType* bounce_type = ir_type_from_id(&program->types, instruction->canonical_type);
-        u32 bounce_alignment = bounce_type && bounce_type->layout.resolved
-                                   ? codegen_canonical_x64_stack_argument_alignment(bounce_type)
-                                   : 0;
-        if (bounce_type && bounce_type->layout.resolved && bounce_alignment > CODEGEN_X64_STACK_ALIGNMENT)
-        {
-            u64 bounce_size = bounce_type->layout.size;
-            u64 bounce_offset = codegen_canonical_x64_stack_argument_offset(stack_part_count * 8, bounce_alignment);
-            if (!bounce_size || bounce_size > UINT32_MAX || bounce_offset > UINT32_MAX ||
-                bounce_size > UINT32_MAX - bounce_offset)
-            {
-                return CODEGEN_ERROR_CAPACITY;
-            }
-            layout->result_copy_offset = (u32)bounce_offset;
-            layout->result_copy_size = (u32)bounce_size;
-            layout->result_copy_alignment = bounce_alignment;
-            stack_part_count = (bounce_offset + bounce_size + 7) / 8;
-            layout->stack_alignment = BUSTER_MAX(layout->stack_alignment, bounce_alignment);
-        }
-    }
-    if (stack_part_count > UINT32_MAX)
-    {
-        return CODEGEN_ERROR_CAPACITY;
-    }
-    layout->stack_part_count = (u32)stack_part_count;
-    layout->stack_alignment = BUSTER_MAX(layout->stack_alignment, (u32)CODEGEN_X64_STACK_ALIGNMENT);
-    layout->stack_padding = abi == CODEGEN_ABI_X86_64_SYSTEM_V && (layout->stack_part_count & 1) != 0;
-    if (abi == CODEGEN_ABI_X86_64_WINDOWS)
-    {
-        u64 stack_bytes = 32 + stack_part_count * 8;
-        u64 copy_cursor = stack_bytes;
-        for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
-        {
-            CodegenCanonicalCallArgument* call_argument = layout->arguments ? layout->arguments + argument_index : 0;
-            if (!call_argument || !call_argument->windows_indirect)
-            {
-                continue;
-            }
-            u64 copy_size = call_argument->type->layout.size;
-            // The same question a System V stack argument asks, with the
-            // outgoing area's own floor under it: this slot is measured from
-            // the stack pointer, so nothing below sixteen buys anything.
-            u64 copy_alignment =
-                BUSTER_MAX(codegen_canonical_x64_stack_argument_alignment(call_argument->type), (u32)CODEGEN_X64_STACK_ALIGNMENT);
-            if (!call_argument->type->layout.resolved || !copy_size || copy_size > UINT32_MAX)
-            {
-                return CODEGEN_ERROR_INVALID_IR;
-            }
-            // The slot starts sixteen-aligned like the stack pointer it is
-            // measured from; a wider argument -- a 512-bit vector wants sixty
-            // four -- is rounded up to its own alignment at the call, so the
-            // reserve carries the bytes that round-up can consume.
-            u64 copy_slack = copy_alignment - CODEGEN_X64_STACK_ALIGNMENT;
-            u64 remainder = copy_cursor & (CODEGEN_X64_STACK_ALIGNMENT - 1);
-            if (remainder)
-            {
-                copy_cursor += CODEGEN_X64_STACK_ALIGNMENT - remainder;
-            }
-            if (copy_cursor > UINT32_MAX || copy_size > UINT32_MAX - copy_cursor || copy_slack > UINT32_MAX - copy_cursor - copy_size)
-            {
-                return CODEGEN_ERROR_CAPACITY;
-            }
-            if (call_argument)
-            {
-                call_argument->copy_offset = (u32)copy_cursor;
-                call_argument->copy_size = (u32)copy_size;
-                call_argument->copy_alignment = (u32)copy_alignment;
-            }
-            copy_cursor += copy_size + copy_slack;
-        }
-        // Win64 keeps its outgoing area sixteen-aligned rather than aligning
-        // RSP to the result type, so reserve slack around this private slot and
-        // round the address itself. The bytes come home to the result's ordinary
-        // frame slot immediately after the call.
-        if (layout->windows_indirect_return && !layout->result_copy_size)
-        {
-            IrType* bounce_type = ir_type_from_id(&program->types, instruction->canonical_type);
-            u64 bounce_alignment = bounce_type && bounce_type->layout.resolved ? codegen_canonical_x64_stack_argument_alignment(bounce_type) : 0;
-            if (bounce_type && bounce_type->layout.resolved && bounce_alignment > CODEGEN_X64_STACK_ALIGNMENT)
-            {
-                u64 bounce_size = bounce_type->layout.size;
-                u64 bounce_slack = bounce_alignment - CODEGEN_X64_STACK_ALIGNMENT;
-                u64 bounce_remainder = copy_cursor & (CODEGEN_X64_STACK_ALIGNMENT - 1);
-                if (bounce_remainder)
-                {
-                    copy_cursor += CODEGEN_X64_STACK_ALIGNMENT - bounce_remainder;
-                }
-                if (!bounce_size || bounce_size > UINT32_MAX || copy_cursor > UINT32_MAX || bounce_size > UINT32_MAX - copy_cursor ||
-                    bounce_slack > UINT32_MAX - copy_cursor - bounce_size)
-                {
-                    return CODEGEN_ERROR_CAPACITY;
-                }
-                layout->result_copy_offset = (u32)copy_cursor;
-                layout->result_copy_size = (u32)bounce_size;
-                layout->result_copy_alignment = (u32)bounce_alignment;
-                copy_cursor += bounce_size + bounce_slack;
-            }
-        }
-        if (copy_cursor > UINT32_MAX - 15)
-        {
-            return CODEGEN_ERROR_CAPACITY;
-        }
-        layout->windows_stack_size = (u32)((copy_cursor + 15) & ~(u64)15);
-        if (layout->windows_stack_size > INT32_MAX)
-        {
-            return CODEGEN_ERROR_CAPACITY;
-        }
-        layout->windows_copy_storage_size = (u32)(copy_cursor - stack_bytes);
-    }
-    return CODEGEN_ERROR_NONE;
-}
-
-CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
-                                               CodegenAbi abi, Target target, CodegenCanonicalCallLayout* layout)
-{
-    CodegenCanonicalX64F80Cache cache = codegen_canonical_x64_f80_cache_initialize(arena, program);
-    CodegenError result;
-    if (cache.allocation_failed)
-    {
-        result = CODEGEN_ERROR_CAPACITY;
-    }
-    else
-    {
-        result = codegen_canonical_x64_call_layout_cached(arena, program, &cache, function, instruction, abi, target, layout);
     }
 
     return result;
@@ -7049,6 +6386,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         bool machine_function_emitted = false;
         CodegenFallbackReason fallback_reason = CODEGEN_FALLBACK_TARGET_EXCLUDED;
         IrOpcode fallback_opcode = IR_OPCODE_COUNT;
+        String8 fallback_detail = {0};
         // The descriptor is a shell until this path knows its unwind shape.
         // Every public allocator mode reaches machine selection, placement,
         // and encoding; a failure leaves this attempt unpublished and returns
@@ -7082,6 +6420,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 fallback_reason = selected.signature_rejected ? CODEGEN_FALLBACK_SIGNATURE
                                   : fallback_opcode < IR_OPCODE_COUNT ? CODEGEN_FALLBACK_OPCODE
                                                                       : CODEGEN_FALLBACK_SELECTION_OTHER;
+                if (fallback_reason == CODEGEN_FALLBACK_OPCODE && selected.failure_detail.length)
+                {
+                    // The selector's scratch arena ends below. Keep the exact
+                    // refusal in this attempt's output arena for the driver.
+                    fallback_detail = string_duplicate_arena(arena, selected.failure_detail, false);
+                }
             }
             // The target selectors publish a complete machine function only
             // after their typed builder streams and side tables are closed.
@@ -7713,7 +7057,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             return result;
         }
         result.failed_opcode = fallback_opcode;
-        result.failure_reason = codegen_fallback_reason_string(fallback_reason);
+        result.failure_reason = fallback_detail.length ? fallback_detail : codegen_fallback_reason_string(fallback_reason);
         if (fallback_opcode < IR_OPCODE_COUNT)
         {
             for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)

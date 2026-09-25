@@ -2723,15 +2723,16 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, leaf_layout_descriptor != 0);
             BUSTER_TEST(arguments, large_layout_descriptor != 0);
             BUSTER_TEST(arguments, dynamic_layout_descriptor != 0);
-            u32 maximum_layout_stack_size = 0;
+            MachineSelectResult layout_selected = machine_select_canonical_function(arguments->arena, canonical_program,
+                                                                                   layout_mix_function, canonical_windows_target);
+            BUSTER_TEST(arguments, layout_selected.supported);
+            u32 maximum_layout_stack_size = layout_selected.supported ? layout_selected.function.outgoing_bytes : 0;
             u32 layout_stack_size_count = 0;
             bool found_register_indirect_copy = false;
             bool found_stack_indirect_copy = false;
             bool found_hidden_indirect_result = false;
             bool found_variadic_call = false;
             bool found_more_than_four_arguments = false;
-            bool found_differing_outgoing_sizes = false;
-            u32 first_layout_stack_size = 0;
             for (u32 instruction_index = 0; instruction_index < layout_mix_function->instruction_count; instruction_index += 1)
             {
                 IrInstruction* instruction = layout_mix_function->instructions + instruction_index;
@@ -2739,58 +2740,40 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 {
                     continue;
                 }
-                CodegenCanonicalCallLayout call_layout = {0};
-                CodegenError call_error = codegen_canonical_x64_call_layout(arguments->arena, canonical_program, layout_mix_function, instruction,
-                                                                             CODEGEN_ABI_X86_64_WINDOWS,
-                                                                             codegen_target_for_abi(CODEGEN_ABI_X86_64_WINDOWS), &call_layout);
-                BUSTER_TEST(arguments, call_error == CODEGEN_ERROR_NONE);
-                if (call_error != CODEGEN_ERROR_NONE)
-                {
-                    continue;
-                }
-                if (!layout_stack_size_count)
-                {
-                    first_layout_stack_size = call_layout.windows_stack_size;
-                }
-                else
-                {
-                    found_differing_outgoing_sizes |= first_layout_stack_size != call_layout.windows_stack_size;
-                }
                 layout_stack_size_count += 1;
-                maximum_layout_stack_size = BUSTER_MAX(maximum_layout_stack_size, call_layout.windows_stack_size);
-                found_more_than_four_arguments |= call_layout.argument_count > 4;
-                found_hidden_indirect_result |= call_layout.windows_indirect_return;
+                found_more_than_four_arguments |= instruction->operand_count > 5;
                 IrType* callee_type = ir_type_from_id(&canonical_program->types, layout_mix_function->values[instruction->operands[0].value].canonical_type);
                 if (callee_type && callee_type->kind == IR_TYPE_POINTER)
                 {
                     callee_type = ir_type_from_id(&canonical_program->types, callee_type->element_type);
                 }
                 found_variadic_call |= callee_type && callee_type->kind == IR_TYPE_FUNCTION && callee_type->is_variadic;
-                u32 stack_slots_end = 32 + call_layout.stack_part_count * 8;
-                for (u32 argument_index = 0; argument_index < call_layout.argument_count; argument_index += 1)
+                if (callee_type && callee_type->kind == IR_TYPE_FUNCTION)
                 {
-                    CodegenCanonicalCallArgument* call_argument = call_layout.arguments + argument_index;
-                    if (!call_argument->windows_indirect)
-                    {
-                        continue;
-                    }
-                    BUSTER_TEST(arguments, call_argument->copy_size == call_argument->type->layout.size);
-                    BUSTER_TEST(arguments, call_argument->copy_alignment == 16);
-                    BUSTER_TEST(arguments, (call_argument->copy_offset & 15) == 0);
-                    BUSTER_TEST(arguments, call_argument->copy_offset >= stack_slots_end);
-                    BUSTER_TEST(arguments, call_argument->copy_offset + call_argument->copy_size <= call_layout.windows_stack_size);
-                    found_register_indirect_copy |= !call_argument->on_stack;
-                    found_stack_indirect_copy |= call_argument->on_stack;
+                    IrType* result_type = ir_type_from_id(&canonical_program->types, callee_type->return_type);
+                    found_hidden_indirect_result |= result_type && result_type->layout.resolved && result_type->layout.size > 16;
+                }
+            }
+            if (layout_selected.supported)
+            {
+                u32 outgoing_slot = layout_selected.function.outgoing_slot;
+                BUSTER_TEST(arguments, outgoing_slot < layout_selected.function.stack_slot_count);
+                for (u32 row_index = 0; row_index < layout_selected.function.instruction_count; row_index += 1)
+                {
+                    MachineInstruction* row = layout_selected.function.instructions + row_index;
+                    found_register_indirect_copy |= row->opcode == MACHINE_X64_COPY_PTR_FROM_FRAME && row->payload == sizeof(CodegenTestAbiLarge);
+                    found_stack_indirect_copy |= row->opcode == MACHINE_X64_STORE_FRAME64 && row->payload >= 32 &&
+                                                 row->payload < maximum_layout_stack_size &&
+                                                 row->operands[0] == machine_ref_make(MACHINE_REF_STACK_SLOT, outgoing_slot);
                 }
             }
             BUSTER_TEST(arguments, layout_stack_size_count >= 4);
-            BUSTER_TEST(arguments, maximum_layout_stack_size >= 32);
+            BUSTER_TEST(arguments, maximum_layout_stack_size >= 48);
             BUSTER_TEST(arguments, found_more_than_four_arguments);
             BUSTER_TEST(arguments, found_register_indirect_copy);
             BUSTER_TEST(arguments, found_stack_indirect_copy);
             BUSTER_TEST(arguments, found_hidden_indirect_result);
             BUSTER_TEST(arguments, found_variadic_call);
-            BUSTER_TEST(arguments, found_differing_outgoing_sizes);
             u32 layout_allocated = 0;
             u32 layout_allocation_count = 0;
             if (layout_mix_descriptor)
@@ -2859,19 +2842,26 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 {
                     continue;
                 }
-                CodegenCanonicalCallLayout call_layout = {0};
-                CodegenError call_error = codegen_canonical_x64_call_layout(arguments->arena, canonical_program, dynamic_layout_function, instruction,
-                                                                             CODEGEN_ABI_X86_64_WINDOWS,
-                                                                             codegen_target_for_abi(CODEGEN_ABI_X86_64_WINDOWS), &call_layout);
-                BUSTER_TEST(arguments, call_error == CODEGEN_ERROR_NONE);
-                if (call_error == CODEGEN_ERROR_NONE)
+                dynamic_call_count += 1;
+            }
+            MachineSelectResult dynamic_selected = machine_select_canonical_function(arguments->arena, canonical_program,
+                                                                                    dynamic_layout_function, canonical_windows_target);
+            BUSTER_TEST(arguments, dynamic_selected.supported);
+            dynamic_body_decode_valid &= dynamic_selected.supported;
+            for (u32 row_index = 1; dynamic_selected.supported && row_index < dynamic_selected.function.instruction_count; row_index += 1)
+            {
+                MachineInstruction* row = dynamic_selected.function.instructions + row_index;
+                MachineInstruction* prior = row - 1;
+                if (row->opcode == MACHINE_X64_STACK_ALLOCATE && row->payload == CODEGEN_X64_STACK_ALIGNMENT &&
+                    prior->opcode == MACHINE_X64_MOV_RI && machine_ref_kind(prior->operands[1]) == MACHINE_REF_IMMEDIATE)
                 {
-                    dynamic_call_count += 1;
-                    dynamic_call_stack_size = BUSTER_MAX(dynamic_call_stack_size, call_layout.windows_stack_size);
-                }
-                else
-                {
-                    dynamic_body_decode_valid = false;
+                    u32 immediate_index = machine_ref_payload(prior->operands[1]);
+                    if (immediate_index < dynamic_selected.function.immediate_count &&
+                        dynamic_selected.function.immediates[immediate_index] <= INT32_MAX)
+                    {
+                        dynamic_call_stack_size = BUSTER_MAX(dynamic_call_stack_size,
+                            (u32)dynamic_selected.function.immediates[immediate_index]);
+                    }
                 }
             }
             bool full_body_decode_valid = true;
@@ -3125,12 +3115,10 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     // A System V stack argument is placed at an address respecting its own
     // alignment rather than immediately after the argument before it, and the
     // area itself starts at the widest alignment any of them asked for. This is
-    // asserted on the layout and on the emitted body rather than by running a
-    // fixture, because a caller and a callee that agree with each other but not
-    // with the psABI pass every fixture this suite can build: the disagreement
-    // only shows against an object some other compiler produced, where a
-    // stack-passed 512-bit vector is read back with `vmovaps` and a
-    // sixteen-aligned aggregate is read from the offset the ABI put it at.
+    // asserted against MIR staging and the emitted body rather than only a
+    // caller/callee pair: two internally agreeing sides could still disagree
+    // with an external psABI object that reads a stack-passed 512-bit vector
+    // with `vmovaps` or a sixteen-aligned aggregate at its required offset.
     String8 stack_alignment_c_source = S8(
         "typedef unsigned char Bytes64 __attribute__((vector_size(64)));\n"
         "struct Wide16 { _Alignas(16) long long v[2]; };\n"
@@ -3165,72 +3153,31 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         CodegenFunctionDescriptor* stack_alignment_descriptor = stack_alignment_function
             ? codegen_test_c_descriptor_find(&stack_alignment_generated, stack_alignment_function->symbol) : 0;
         BUSTER_TEST(arguments, stack_alignment_descriptor != 0);
-        bool stack_alignment_offsets_valid = true;
-        bool stack_alignment_area_valid = true;
-        bool found_vector_ninth_layout = false;
-        bool found_wide16_layout = false;
-        bool found_wide64_layout = false;
-        for (u32 instruction_index = 0; stack_alignment_function && instruction_index < stack_alignment_function->instruction_count; instruction_index += 1)
+        MachineSelectResult stack_alignment_selected = {0};
+        if (stack_alignment_function)
         {
-            IrInstruction* instruction = stack_alignment_function->instructions + instruction_index;
-            if (instruction->opcode != IR_OPCODE_CALL)
-            {
-                continue;
-            }
-            CodegenCanonicalCallLayout stack_alignment_layout = {0};
-            CodegenError stack_alignment_error = codegen_canonical_x64_call_layout(
-                arguments->arena, stack_alignment_program, stack_alignment_function, instruction, CODEGEN_ABI_X86_64_SYSTEM_V, avx512f_target,
-                &stack_alignment_layout);
-            BUSTER_TEST(arguments, stack_alignment_error == CODEGEN_ERROR_NONE);
-            if (stack_alignment_error != CODEGEN_ERROR_NONE)
-            {
-                continue;
-            }
-            u32 widest_stack_argument = CODEGEN_X64_STACK_ALIGNMENT;
-            CodegenCanonicalCallArgument* last_stack_argument = 0;
-            for (u32 argument_index = 0; argument_index < stack_alignment_layout.argument_count; argument_index += 1)
-            {
-                CodegenCanonicalCallArgument* stack_argument = stack_alignment_layout.arguments + argument_index;
-                if (!stack_argument->on_stack)
-                {
-                    continue;
-                }
-                u32 argument_alignment = codegen_canonical_x64_stack_argument_alignment(stack_argument->type);
-                widest_stack_argument = BUSTER_MAX(widest_stack_argument, argument_alignment);
-                stack_alignment_offsets_valid &= (stack_argument->stack_offset & (argument_alignment - 1)) == 0;
-                stack_alignment_offsets_valid &=
-                    stack_argument->stack_offset + stack_argument->stack_part_count * 8 <= stack_alignment_layout.stack_part_count * 8;
-                last_stack_argument = stack_argument;
-            }
-            stack_alignment_area_valid &= stack_alignment_layout.stack_alignment == widest_stack_argument;
-            if (!last_stack_argument)
-            {
-                continue;
-            }
-            // The ninth vector is the only thing on the stack, so it starts the
-            // area; the aggregates follow a seventh integer that took the first
-            // eightbyte and are pushed past it to their own alignment.
-            if (stack_alignment_layout.argument_count == 9)
-            {
-                found_vector_ninth_layout = true;
-                stack_alignment_offsets_valid &= last_stack_argument->stack_offset == 0 && stack_alignment_layout.stack_alignment == 64;
-            }
-            else if (last_stack_argument->type->layout.size == 16)
-            {
-                found_wide16_layout = true;
-                stack_alignment_offsets_valid &= last_stack_argument->stack_offset == 16 && stack_alignment_layout.stack_alignment == 16;
-            }
-            else if (last_stack_argument->type->layout.size == 64)
-            {
-                found_wide64_layout = true;
-                stack_alignment_offsets_valid &= last_stack_argument->stack_offset == 64 && stack_alignment_layout.stack_alignment == 64;
-            }
+            stack_alignment_selected = machine_select_canonical_function(arguments->arena, stack_alignment_program,
+                                                                         stack_alignment_function, avx512f_target);
         }
-        BUSTER_TEST(arguments, stack_alignment_offsets_valid);
-        BUSTER_TEST(arguments, stack_alignment_area_valid);
-        BUSTER_TEST(arguments, found_vector_ninth_layout);
-        BUSTER_TEST(arguments, found_wide16_layout);
-        BUSTER_TEST(arguments, found_wide64_layout);
+        BUSTER_TEST(arguments, stack_alignment_selected.supported);
+        u32 vector_copy_count = 0;
+        bool found_wide16_copy = false;
+        bool found_wide16_offset = false;
+        bool found_wide64_offset = false;
+        bool found_sixty_four_alignment = false;
+        for (u32 row_index = 0; stack_alignment_selected.supported && row_index < stack_alignment_selected.function.instruction_count;
+             row_index += 1)
+        {
+            MachineInstruction* row = stack_alignment_selected.function.instructions + row_index;
+            vector_copy_count += row->opcode == MACHINE_X64_COPY_PTR_FROM_FRAME && row->payload == 64;
+            found_wide16_copy |= row->opcode == MACHINE_X64_COPY_PTR_FROM_FRAME && row->payload == 16;
+            found_wide16_offset |= row->opcode == MACHINE_X64_LEA_OFFSET && row->payload == 16;
+            found_wide64_offset |= row->opcode == MACHINE_X64_LEA_OFFSET && row->payload == 64;
+            found_sixty_four_alignment |= row->opcode == MACHINE_X64_STACK_ALLOCATE && row->payload == 64;
+        }
+        BUSTER_TEST(arguments, vector_copy_count >= 2);
+        BUSTER_TEST(arguments, found_wide16_copy && found_wide16_offset);
+        BUSTER_TEST(arguments, found_wide64_offset && found_sixty_four_alignment);
         // The ABI requires a 64-byte-aligned outgoing area. Accept either a
         // direct RSP mask or a rounded temporary subsequently subtracted from
         // RSP; register choice and probing sequence are lowering details.

@@ -298,6 +298,7 @@ struct MachineX64Selector
     MachineTypeClass const* type_classes;
     u32 type_class_count;
     IrOpcode failed_opcode;
+    String8 failure_detail;
     bool supported;
 };
 
@@ -4679,7 +4680,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
     IrIdUnderlying index = value_id.value;
 
     bool value_valid = (index < function->value_count) & (instruction->result.value != IR_ID_UNDERLYING_INVALID);
-    if (value_valid)
+    IrType* void_load_type = ir_type_from_id(&selector->program->types, instruction->canonical_type);
+    if (instruction->opcode == IR_OPCODE_LOAD && index < function->value_count && void_load_type && void_load_type->kind == IR_TYPE_VOID)
+    {
+        // An expression such as *void_pointer evaluates its address but has no
+        // object bytes to read. Its address-producing rows have already been
+        // selected; emitting a machine load would invent an access width.
+        selected = true;
+    }
+    else if (value_valid)
     {
         u8 place_kind = selector->place_kinds[index];
 
@@ -5086,7 +5095,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_inline_assembly_source(MachineX64Selector* 
 {
     String8 resolved = {0};
     bool selected = codegen_inline_assembly_resolve_template(selector->arena, selector->program, selector->function, instruction, extra,
-                                                              registers, vector_registers, ASSEMBLY_SYNTAX_ATT, &resolved, 0);
+                                                              registers, vector_registers, ASSEMBLY_SYNTAX_ATT, &resolved,
+                                                              &selector->failure_detail);
     // Each retained line below gets a newline, including a final unterminated
     // template line. Reserve that byte instead of overwriting the next arena
     // object before the standalone assembler parses it.
@@ -5204,6 +5214,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
     bool general_goto = instruction->target_count && first_continuation != UINT32_MAX;
     MachineAssemblyLabelPlan label_plan = {.literal = extra.literal};
     bool labels_planned = !general_goto || machine_selection_assembly_label_plan(selector->arena, function, instruction, extra, &label_plan);
+    u32 label_reference_count = 0;
+    if (!labels_planned && machine_selection_assembly_label_reference_capacity(extra.literal, &label_reference_count) &&
+        label_reference_count)
+    {
+        selector->failure_detail = S8("inline assembly label references (%l) are unsupported in this template form");
+    }
     IrInstructionExtra source_extra = extra;
     source_extra.literal = label_plan.literal;
     bool selected = instruction->operand_count <= MACHINE_X64_INLINE_ASSEMBLY_OPERAND_LIMIT &&
@@ -9462,6 +9478,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     if (!selector.supported)
     {
         result.failed_opcode = selector.failed_opcode;
+        result.failure_detail = selector.failure_detail;
         return result;
     }
     u32 canonical_edge_offset = selector.builder.edges.total_count;
