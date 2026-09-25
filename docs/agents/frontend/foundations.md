@@ -65,6 +65,10 @@ incoming values, forwarding through single-predecessor chains. Trivial
 parameters and unused parameter cycles are removed. Disconnected empty label
 blocks have no outgoing edge. Publication includes **every** predecessor edge,
 including parameter-free destinations; selectors must never see a partial CFG.
+Condition lowering resolves a literal left operand of `||` or `&&` before
+allocating a block for its right operand. A short-circuited arm must not
+become a disconnected source block that joins a value defined only on another
+path; selected MIR enforces dominance in unreachable code too.
 Nested GNU statement-expression body walks reuse the function's label block at
 the same source token. Allocating a second block leaves the predeclared label
 unterminated and separates ordinary goto from label-address provenance. The
@@ -174,6 +178,12 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   across batch pushes that may grow the array. An ENABLE marker remains below
   its replacement batch, and refused identifiers retain `no_expand` on rescans.
   Output nodes and source-stamp ownership are independent of task storage.
+  A non-builtin definition without `#` or `##` is written straight into its
+  reserved batch by `c_macro_produce_plain_tasks` (exact size from
+  `plain_count` and per-parameter use counts); builtins, stringify and paste
+  still stage a `CPpToken` list in `c_macro_replacement_tokens` and push it
+  with `c_macro_expansion_tasks_push`. Both orders must stay identical:
+  `c_test_macro_plain_production` compares them token for token.
 - Macro placemarkers survive the entire `##` sequence. The replacement loop
   compacts into its existing materialized buffer and removes placemarkers only
   when emitting the rescan tokens. Only the explicitly marked GNU

@@ -18,8 +18,9 @@ does not satisfy or replace any of the eight required checks or admission
 receipts for a normal queued merge.
 
 The trusted retirement gate and queue collector have landed. The adapter admits
-one synthetic merge commit only when its first parent is current main and its
-entire tree equals the existing writer's attested PR head. It verifies the open
+one synthetic merge commit only when its first parent has become current main.
+For a sensitive group its entire tree must equal the existing writer's attested
+PR head. It verifies the open
 same-repository PR, creator-bearing status and completed successful writer run.
 The acceptance exercises below are still required; local
 fixtures do not establish GitHub's live synthetic-commit shape or queue behavior.
@@ -35,9 +36,12 @@ need to be manually updated merely because main advanced. The queue, not the
 feature author, constructs and validates the combined candidate.
 
 Build concurrency permits up to 20 queued candidates to run speculative
-combined-head validation concurrently; it does not authorize 20 merges. The
-merge limit of one serializes admission and merging, and GitHub rebuilds stale
-groups after main advances. `ALLGREEN` requires every queued group to satisfy
+combined-head validation concurrently; it does not authorize 20 merges. A
+later candidate may have the preceding unmerged synthetic commit as its base.
+Both admission jobs keep that exact group pending until the base lands on main;
+they never grant success while the predecessor is speculative. The merge limit
+of one serializes merging, and GitHub replaces stale groups when necessary.
+`ALLGREEN` requires every queued group to satisfy
 its required checks. `MERGE` retains merge commits. Required checks still bind
 the exact group and the trusted retirement gate still owns sensitive trees.
 The 360-minute queue timeout exceeds the admission workflow's 310-minute job
@@ -53,6 +57,12 @@ Candidate workflows retain read-only authority; the
 write-capable watcher executes only the default-branch controller and never
 checks out candidate bytes or artifacts. Workflow concurrency is not a FIFO
 queue and is never used as a replacement for GitHub queue enforcement.
+The read-only native-retirement rebinding workflow also waits for the exact
+predecessor to land before checking a later group's closure. It loads that
+wait policy from independently checked-out main, checks that the predecessor
+did not change admission or rebinding policy, and requires the queue ref to
+retain the same group identity at admission. Its bounded 310-minute job accommodates the
+five-hour wait.
 The self-hosted 9700X benchmark service is manual `workflow_dispatch` work,
 not a `merge_group` workflow, so the queue does not schedule it.
 
@@ -95,17 +105,23 @@ persisted checkout credentials. GitHub's normal fork approval rules still apply.
 
 ## Exact identities and fail-closed evidence
 
-For a group, the admission workflow checks out `merge_group.base_sha`, never
-candidate-modified authority code. It fetches the immutable group object without
-checking out or executing it. It requires `GITHUB_SHA == merge_group.head_sha`,
-main as the base ref, a main queue ref, the expected repository, and base ancestry.
-The report binds base SHA/tree, group SHA/tree and queue ref.
+For a group, both admission workflows check out live `main` as independently
+trusted policy, never the speculative `merge_group.base_sha` or candidate-modified
+authority code. The collector fetches the immutable group object without
+checking out or executing it; the native gate's candidate checkout is Git data
+only for enforcement. They require `GITHUB_SHA == merge_group.head_sha`, main
+as the base ref, a main queue ref, the expected repository, and a two-parent
+group head with the event base first. The bounded first-parent chain of the
+base must contain the trusted policy SHA and observed main. A main SHA outside
+that chain, a replaced queue ref, or a changed admission policy between the
+initial trusted main and the landed base rejects this group. The report binds
+the trusted policy SHA, base SHA/tree, group SHA/tree and queue ref.
 
-Before waiting for CI it invokes the trusted base's
+Once the predecessor lands, the collector invokes the trusted policy's
 `native_retirement_merge_gate.py check --event merge_group --repository ...`
 without `--allow-pending`. An absent gate, pending result, rejected candidate or
 mismatched base/head fails. For sensitive groups, the gate verifies a two-parent
-synthetic commit with current main first and the attested integration second.
+synthetic commit with landed current main first and the attested integration second.
 The synthetic tree must equal both Git's clean combined tree and the full
 attested final tree. Additional candidates or any changed byte require a fresh
 writer preparation. A generated-only delta also requires publication evidence.
@@ -137,7 +153,8 @@ running workflows remain pending until the bounded timeout. API errors,
 truncation and ambiguous results fail closed.
 
 Immediately before admission, the collector repeats the six-result read and
-trusted-publication verification, requires the same evidence, rechecks live main and the queue ref, and validates
+trusted-publication verification, requires the same evidence, rechecks that the
+group base still equals live main and the queue ref still names this head, and validates
 the active ruleset again. The ruleset validator retains the six original checks,
 preserves independent retirement admission, adds the exact-group gate, rejects
 visible bypass inventories other than the two reviewed actors and strict branch updates, and
@@ -179,7 +196,8 @@ the queue removes/blocks the PR, never chooses `ours`, `theirs` or a union merge
 
 ### Changing the live build limit
 
-The merge-group workflow runs admission code from its trusted base, so a PR
+The merge-group workflow runs admission code from the main revision checked out
+as trusted policy, so a PR
 changing the repository queue contract must first pass the policy already on
 `main`. If live build concurrency has been raised ahead of the repository
 contract, temporarily restore the live `Build concurrency` field in ruleset
@@ -213,8 +231,11 @@ do not close #867 based on settings or offline fixtures alone:
    run `check-ruleset` against the saved current response. Contents/PR write
    access does not imply permission to edit repository rulesets.
 4. Queue two nonconflicting PRs from the same old base and retain both exact
-   group reports. After the first lands, prove the second was rebuilt against
-   the new main. Repeat with different retirement-bound sources and attestations;
+   group reports. Record M, G1 and G2: the later base may be G1 while live main
+   is M. Confirm both admission jobs stay pending on G2, then succeed only if
+   G1 lands unchanged on main and G2 remains the exact queue ref; prove both
+   PRs merge in order without manual re-enqueue. Repeat with different
+   retirement-bound sources and attestations;
    retain the fresh authorized writer dispatch and regenerated second head.
    A stale sensitive group must block until that dispatch finishes and the
    replacement head is enqueued. Automatic dispatch/re-enqueue is not implemented
@@ -226,6 +247,16 @@ do not close #867 based on settings or offline fixtures alone:
 6. Verify UI merge, API merge, squash/rebase and every automation are subject to
    the effective queue/retirement controls. No live production rejection or
    queue experiment is claimed by the offline fixtures.
+
+This policy repair requires a first-position queue merge under the old trusted
+admission code. The native workflow uses that older gate directly only when
+the group base equals the trusted main revision; a speculative base requires
+the new trusted `wait-base` command and fails closed until the repair lands.
+Keep the repair at the front of the queue during rollout; older later groups
+still run the old code and can fail. After the repair lands, queue
+fresh groups and retain their exact-head workflow and queue progression links.
+The read-only collector cannot alter the ruleset or enqueue a PR. Do not report
+the offline M/G1/G2 fixtures as a live acceptance trace.
 
 Useful read-only commands:
 

@@ -3704,8 +3704,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         if (mir_trace.invalid_mir)
         {
             result.error = COMPILER_DRIVER_ERROR_IR;
-            result.diagnostic = string_format(arena, S8("bootstrap MIR validation failed in '{S8}': error {u32}, block {u32}, instruction {u32}, operand {u32}"),
-                                              mir_trace.invalid_function, (u32)mir_trace.invalid_validation.error, mir_trace.invalid_validation.block,
+            result.diagnostic = string_format(arena, S8("bootstrap MIR validation failed in '{S8}': error {u32} ({S8}), block {u32}, instruction {u32}, operand {u32}"),
+                                              mir_trace.invalid_function, (u32)mir_trace.invalid_validation.error,
+                                              machine_verify_error_name(mir_trace.invalid_validation.error), mir_trace.invalid_validation.block,
                                               mir_trace.invalid_validation.instruction, mir_trace.invalid_validation.operand);
             goto end;
         }
@@ -3782,7 +3783,14 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             .code = compiler_driver_codegen_error_name(code.error), .backend = &backend,
             .primary = compiler_driver_backend_location(lowered.program, module, code.failed_function, code.failed_instruction),
         };
-        diagnostic.message = backend.reason.length
+        diagnostic.message = code.failed_machine_verification.error != MACHINE_VERIFY_NONE
+            ? string_format(arena,
+                S8("C code generation refused: kind={S8} target={S8} allocator={S8} function='{S8}' opcode={S8} verifier={S8} error={S8} ({u32}) block={u32} instruction={u32} operand={u32}"),
+                diagnostic.code, backend.target, backend.allocator, backend.function, backend.opcode,
+                code.failed_machine_scheduled ? S8("scheduled-mir") : S8("selected-mir"), backend.reason,
+                (u32)code.failed_machine_verification.error, code.failed_machine_verification.block,
+                code.failed_machine_verification.instruction, code.failed_machine_verification.operand)
+            : backend.reason.length
             ? string_format(arena, S8("{S8} (in function '{S8}')"), backend.reason, backend.function)
             : string_format(arena,
                 S8("C code generation refused: kind={S8} target={S8} allocator={S8} function='{S8}' opcode={S8} operation={S8}"),

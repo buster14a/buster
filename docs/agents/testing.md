@@ -50,12 +50,14 @@
   see [analyzer sharding](../clang-analyze-shards.md). The separate
   `Linux x86-64 bootstrap evidence` check is required as well when the stronger
   repeated self-host audit is mandatory; `CI complete` does not aggregate it.
-  The aggregate's independent desktop inventory waits up to 24 seconds if the
-  Actions API still reports a required job unfinished after the matrix need
-  completes. It checks every job and required step again on each probe and
-  fails closed after the deadline. A completed job with missing steps, including
-  a partial-rerun carry-forward, is rejected immediately; run a fresh full CI
-  attempt rather than treating a copied success label as execution evidence.
+  The aggregate's independent desktop inventory checks exact-run job attempts
+  and required step records. When the Actions API returns incomplete or stale
+  metadata, it retries with 1/2/4-second backoff, at most three refreshes and
+  a 30-second total metadata budget. A later exact snapshot may recover a
+  transient omission; a persistent empty, stale or ambiguous record fails
+  closed. It never borrows step proof from an older attempt when a newer attempt
+  shadows that job. Run a fresh full CI attempt when required metadata remains
+  unresolved; a green job-level conclusion alone is not execution evidence.
   Both workflows cover the same PR merge revision, main/tag pushes, merge groups
   and explicit dispatches without duplicate feature-push runs. Buster CI keeps
   full matrix diagnostics for pull requests, main/tag pushes and manual runs.
