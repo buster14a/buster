@@ -1,0 +1,27 @@
+name: Issue 1183 boundary validation
+on:
+  push:
+    branches: [codex/1183-broker-boundary-validation]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Export exact base source, without credentials or generated output
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz a33a1ac33149ccccef6added886218ab838c3bed > "$RUNNER_TEMP/1183-base.tar.gz"
+          git rev-parse a33a1ac33149ccccef6added886218ab838c3bed^{tree}
+          sha256sum "$RUNNER_TEMP/1183-base.tar.gz"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue-1183-base-source
+          path: ${{ runner.temp }}/1183-base.tar.gz
+          if-no-files-found: error
+          retention-days: 3
