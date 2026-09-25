@@ -20,7 +20,6 @@ jobs:
     env:
       LC_ALL: C
       BQ_REQUIRE_DISTINCT_GROUP: '1'
-      RUNNER_ENVIRONMENT: ${{ runner.environment }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -70,6 +69,8 @@ jobs:
           set -euo pipefail
           "$RUNNER_TEMP/buster-build" bench_service_broker self-test 2>&1 | tee "$RUNNER_TEMP/pr1177-broker.log"
       - name: Disposable real-systemd result retention controls
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: python3 .github/scripts/pr1177_terminal_retention_packet.py live
       - name: Publish validated files only to the temporary branch
         env:
