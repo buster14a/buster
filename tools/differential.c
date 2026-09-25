@@ -743,9 +743,11 @@ BUSTER_GLOBAL_LOCAL bool d_verification(DSettings* settings, DObservation* obser
                 }
             }
             String8 allocator = string_format(settings->arena, S8("allocator={S8}"), expected);
+            // Every public allocator now selects MIR. The retained `none`
+            // spelling aliases MIR stack allocation, so zero selected MIR is
+            // no longer valid for these nonempty differential cases.
             valid &= string_equal(string_slice(line, cursor, line.length), allocator) && values[0] == 1 && values[1] > 0 &&
-                     values[3] <= values[2] && (!string_equal(expected, S8("none")) || values[2] == 0);
-            // Fallback-only functions may legitimately produce zero selected MIR.
+                     values[2] > 0 && values[3] <= values[2];
             remove_from = offset;
             remove_to = end < text.length ? end + 1 : end;
         }
@@ -2462,25 +2464,25 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         }
 #endif
         DConfig config = {.allocator = 0};
-        DObservation telemetry = {.output = S8("CODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator=none\n"),
+        DObservation telemetry = {.output = S8("CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=none\n"),
                                   .error = S8("warning\n")};
         errors += !d_verification(&settings, &telemetry, config) || telemetry.output.length ||
                   !string_equal(telemetry.error, S8("warning\n"));
-        telemetry.output = S8("CODEGEN_VERIFY version=1 ir=0 mir=0 scheduled=0 allocator=none\n");
+        telemetry.output = S8("CODEGEN_VERIFY version=1 ir=0 mir=1 scheduled=0 allocator=none\n");
         errors += d_verification(&settings, &telemetry, config);
-        telemetry.output = S8("CODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator=fast\n");
+        telemetry.output = S8("CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=fast\n");
         errors += d_verification(&settings, &telemetry, config);
-        telemetry.output = S8("CODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator=none\nCODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator=none\n");
+        telemetry.output = S8("CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=none\nCODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=none\n");
         errors += d_verification(&settings, &telemetry, config);
         String8 invalid_markers[] = {
-            S8("CODEGEN_VERIFY version=1 ir=-1 mir=0 scheduled=0 allocator=none\n"),
-            S8("CODEGEN_VERIFY version=1 ir=4294967297 mir=0 scheduled=0 allocator=none\n"),
-            S8("CODEGEN_VERIFY version=1 ir=+1 mir=0 scheduled=0 allocator=none\n"),
-            S8("CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=none\n"),
-            S8("CODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=1 allocator=none\n"),
-            S8("CODEGEN_VERIFY version=2 ir=1 mir=0 scheduled=0 allocator=none\n"),
-            S8("CODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator=none trailing\n"),
-            S8("CODEGEN_VERIFY version=1 ir=1 mir=0 allocator=none\n"),
+            S8("CODEGEN_VERIFY version=1 ir=-1 mir=1 scheduled=0 allocator=none\n"),
+            S8("CODEGEN_VERIFY version=1 ir=4294967297 mir=1 scheduled=0 allocator=none\n"),
+            S8("CODEGEN_VERIFY version=1 ir=+1 mir=1 scheduled=0 allocator=none\n"),
+            S8("CODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator=none\n"),
+            S8("CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=2 allocator=none\n"),
+            S8("CODEGEN_VERIFY version=2 ir=1 mir=1 scheduled=0 allocator=none\n"),
+            S8("CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=none trailing\n"),
+            S8("CODEGEN_VERIFY version=1 ir=1 mir=1 allocator=none\n"),
             S8("ordinary warning\n"),
         };
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_markers); index += 1)
