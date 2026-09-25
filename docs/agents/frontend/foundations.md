@@ -455,6 +455,14 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   pointer-local reads restore their declaration's bounds. Explicit scalar
   pointer casts discard it, even when canonical pointer types match. `sizeof`
   of a named VLA pointer's dereference reads the cached suffix size.
+  A saved size does not suppress evaluation of a VLA-typed operand. The
+  sizeof continuation evaluates its operand once through the existing
+  expression machine, discards the row address, and retains that size.
+  The remaining original C type decides evaluation: a variable outer
+  bound does not make a fixed-size row or scalar operand evaluated.
+  Declaration bounds are not reevaluated and array data is not read.
+  `c_test_sizeof_vla_evaluation` checks raw calls/volatile stores and
+  runtime results across contexts, saved bounds and outer sizeof.
   Compatible conditional pointer results retain their shape through the
   result slot and remain rvalues. Concrete consumers normalize any pointer
   shell retained by unevaluated type prediction before applying scalar element
