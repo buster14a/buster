@@ -303,7 +303,8 @@ class WorkflowSetupTests(unittest.TestCase):
             "tools/analyzer_selection_test.py", "tools/coverage_manifest_test.py",
             "tools/matrix_shard_test.py", "tools/differential_ci_policy_test.py",
             "tools/native_producer_profile_test.py", "tools/ci_configure_evidence_test.py",
-            "tools/ci_matrix_phases_test.py", "tools/ci_native_observation_test.py",
+            "tools/ci_matrix_phases_test.py", "tools/ci_matrix_phases_bridge_test.py",
+            "tools/ci_native_observation_test.py",
         }
         suites = re.findall(r'^          run_suite ([^ ]+) [^ ]+\.log$', block, re.M)
         self.assertEqual(set(suites), expected)
@@ -388,7 +389,7 @@ class CompletionGateTests(unittest.TestCase):
             jobs.append({"id": number + 1, "name": name, "run_id": 123, "run_attempt": 1, "head_sha": "a" * 40,
                          "status": "in_progress" if name == "CI complete" else "completed",
                          "conclusion": None if name == "CI complete" else "success",
-                         "steps": [{"name": step, "conclusion": "success"} for step in steps]})
+                         "steps": [{"name": step, "status": "completed", "conclusion": "success"} for step in steps]})
         return jobs
 
     def check(self, jobs, attempt=1):
@@ -459,7 +460,15 @@ class CompletionGateTests(unittest.TestCase):
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
         responses = [run, {"total_count": total, "jobs": jobs[:10]}, {"total_count": total, "jobs": jobs[10:]}]
         with mock.patch.object(github_ci_time, "api_get", side_effect=responses) as fetch:
-            self.assertTrue(github_ci_time.require_jobs(args)["success"])
+            result = github_ci_time.require_jobs(args)
+            self.assertTrue(result["success"])
+            self.assertEqual(result["job_metadata"], {"snapshot_attempts": 1, "refreshes": 0,
+                                                       "refresh_budget_seconds": 30.0})
+            job = next(item for item in result["jobs"] if item["name"] == "Linux x86-64 release")
+            self.assertEqual(job["run_id"], 123)
+            self.assertEqual(job["head_sha"], "a" * 40)
+            step = next(item for item in job["required_steps"] if item["name"] == "Desktop result and reproduction")
+            self.assertEqual(step["observed"], [{"status": "completed", "conclusion": "success"}])
             self.assertIn("filter=all", fetch.call_args_list[1].args[1])
             self.assertIn("page=2", fetch.call_args_list[2].args[1])
         for last in ({"total_count": total, "jobs": []}, {"total_count": total - 1, "jobs": jobs[10:]}):
@@ -470,42 +479,117 @@ class CompletionGateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 github_ci_time.require_jobs(args)
 
-    def test_api_gate_waits_for_unfinished_job_but_rejects_missing_final_steps(self):
-        completed = self.sample()
-        pending = copy.deepcopy(completed)
-        windows = next(job for job in pending if job["name"] == "Windows x86-64 checks")
-        windows.update(status="in_progress", conclusion=None, steps=[])
+    def test_delayed_job_status_is_refreshed_before_the_gate_decides(self):
+        jobs = self.sample()
+        pending = copy.deepcopy(jobs)
+        pending[0].update(status="in_progress", conclusion=None)
         run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
-
-        def api_get(_repository, path, _token):
-            if path == "actions/runs/123":
-                return run
-            api_get.probes += 1
-            return {"total_count": len(completed), "jobs": pending if not api_get.settles or api_get.probes == 1 else completed}
-
-        api_get.probes = 0
-        api_get.settles = True
-        with mock.patch.object(github_ci_time, "api_get", side_effect=api_get), \
+        responses = [run, {"total_count": len(jobs), "jobs": pending},
+                     {"total_count": len(jobs), "jobs": jobs}]
+        with mock.patch.object(github_ci_time, "api_get", side_effect=responses) as fetch, \
                 mock.patch.object(github_ci_time.time, "sleep") as sleep:
-            self.assertTrue(github_ci_time.require_jobs(args)["success"])
-            sleep.assert_called_once_with(github_ci_time.REQUIRED_JOB_SETTLE_SECONDS)
+            result = github_ci_time.require_jobs(args)
+        self.assertTrue(result["success"], result["errors"])
+        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 2)
+        self.assertEqual(fetch.call_count, 3)
+        sleep.assert_called_once_with(1.0)
 
-        api_get.probes = 0
-        api_get.settles = False
-        with mock.patch.object(github_ci_time, "api_get", side_effect=api_get), \
+    def test_stale_in_progress_step_record_is_refreshed_for_exact_run_and_head(self):
+        jobs = self.sample()
+        pending = copy.deepcopy(jobs)
+        target = next(job for job in pending if job["name"] == "macOS x86-64 checks")
+        step = next(step for step in target["steps"] if step["name"] == "Desktop result and reproduction")
+        step.update(status="in_progress", conclusion=None)
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
+        responses = [run, {"total_count": len(jobs), "jobs": pending},
+                     {"total_count": len(jobs), "jobs": jobs}]
+        with mock.patch.object(github_ci_time, "api_get", side_effect=responses), \
                 mock.patch.object(github_ci_time.time, "sleep") as sleep:
-            self.assertFalse(github_ci_time.require_jobs(args)["success"])
-            self.assertEqual(api_get.probes, github_ci_time.REQUIRED_JOB_SETTLE_PROBES)
-            self.assertEqual(sleep.call_count, github_ci_time.REQUIRED_JOB_SETTLE_PROBES - 1)
+            result = github_ci_time.require_jobs(args)
+        self.assertTrue(result["success"], result["errors"])
+        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 2)
+        sleep.assert_called_once_with(1.0)
 
-        # A finished job without its required steps is not an unfinished API
-        # observation. No previous green attempt may supply those steps.
-        windows.update(status="completed", conclusion="success")
-        with mock.patch.object(github_ci_time, "api_get", side_effect=[run, {"total_count": len(pending), "jobs": pending}]), \
+    def test_terminal_failure_is_not_retried_or_replaced_by_a_later_green_snapshot(self):
+        jobs = self.sample()
+        failed = copy.deepcopy(jobs)
+        failed[0].update(conclusion="failure")
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[run, {"total_count": len(jobs), "jobs": failed}]) as fetch, \
                 mock.patch.object(github_ci_time.time, "sleep") as sleep:
-            self.assertFalse(github_ci_time.require_jobs(args)["success"])
-            sleep.assert_not_called()
+            result = github_ci_time.require_jobs(args)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 1)
+        self.assertEqual(fetch.call_count, 2)
+        sleep.assert_not_called()
+        self.assertTrue(any("required job did not complete successfully" in error for error in result["errors"]))
+
+    def test_partial_rerun_shadow_never_borrows_an_older_green_steps_record(self):
+        first_attempt = self.sample()
+        target_name = "macOS x86-64 checks"
+        shadow = copy.deepcopy(next(job for job in first_attempt if job["name"] == target_name))
+        shadow.update(id=101, run_attempt=2, steps=[])
+        current_gate = copy.deepcopy(next(job for job in first_attempt if job["name"] == "CI complete"))
+        current_gate.update(id=102, run_attempt=2)
+        history = first_attempt + [current_gate, shadow]
+        run = {"id": 123, "run_attempt": 2, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=2)
+        batch = {"total_count": len(history), "jobs": history}
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[run] + [batch] * 4) as fetch, \
+                mock.patch.object(github_ci_time.time, "sleep") as sleep:
+            result = github_ci_time.require_jobs(args)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 4)
+        self.assertEqual(fetch.call_count, 5)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1.0, 2.0, 4.0])
+        self.assertTrue(any("exact run/head proof unresolved after 4 snapshots" in error
+                            for error in result["errors"]))
+        missing = [error for error in result["errors"]
+                   if target_name in error and "lacks unique completion proof" in error]
+        self.assertEqual(len(missing), 4)
+        target = next(job for job in result["jobs"] if job["name"] == target_name)
+        self.assertEqual(target["run_attempt"], 2)
+        self.assertEqual(target["run_id"], 123)
+        self.assertEqual(target["head_sha"], "a" * 40)
+        self.assertTrue(all(step["matching_records"] == 0 for step in target["required_steps"]))
+
+    def test_metadata_refresh_budget_prevents_an_extra_sleep_or_snapshot(self):
+        jobs = self.sample()
+        pending = copy.deepcopy(jobs)
+        pending[0]["steps"] = []
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
+        batch = {"total_count": len(jobs), "jobs": pending}
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[run, batch]) as fetch, \
+                mock.patch.object(github_ci_time.time, "monotonic", side_effect=[100.0, 100.0, 129.5]), \
+                mock.patch.object(github_ci_time.time, "sleep") as sleep:
+            result = github_ci_time.require_jobs(args)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 1)
+        self.assertEqual(fetch.call_count, 2)
+        sleep.assert_not_called()
+        self.assertTrue(any("refresh budget expired before another exact-run snapshot" in error
+                            for error in result["errors"]))
+
+    def test_completed_job_with_missing_steps_refreshes_exact_snapshot(self):
+        jobs = self.sample()
+        incomplete = copy.deepcopy(jobs)
+        target = next(job for job in incomplete if job["name"] == "Windows x86-64 checks")
+        target["steps"] = []
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
+        batch = {"total_count": len(jobs), "jobs": incomplete}
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[run, batch,
+                                                                          {"total_count": len(jobs), "jobs": jobs}]) as fetch, \
+                mock.patch.object(github_ci_time.time, "sleep") as sleep:
+            result = github_ci_time.require_jobs(args)
+        self.assertTrue(result["success"], result["errors"])
+        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 2)
+        self.assertEqual(fetch.call_count, 3)
+        sleep.assert_called_once_with(1.0)
 
     def test_workflow_expands_exact_cross_product_and_keeps_gate_wiring(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

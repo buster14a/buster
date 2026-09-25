@@ -601,7 +601,47 @@ class NativeObservationTest(unittest.TestCase):
         summary = steps["Mobile result and reproduction"]
         upload = steps["Retain mobile logs"]
         self.assertIn("if: ${{ always() && steps.checkout.outcome == 'success' }}", summary)
-        self.assertIn("if: ${{ !cancelled() }}", upload)
+        # Exercise the actual caller condition, not the composite's internal
+        # retry guards. Only this small conjunction vocabulary is supported;
+        # Actions adds success() implicitly when no status function appears.
+        condition = re.search(r"(?m)^        if: \$\{\{ (.+) \}\}$", upload)
+        self.assertIsNotNone(condition)
+        terms = condition.group(1).split(" && ")
+        scenarios = (
+            ("success", False, None, True),
+            ("success", False, "setup", True),
+            ("success", False, "build", True),
+            ("success", False, "test", True),
+            ("success", False, "summary", True),
+            ("failure", False, "checkout", False),
+            ("skipped", False, "checkout", False),
+            ("cancelled", False, "checkout", False),
+            ("", False, "checkout", False),
+            ("success", True, None, False),
+            ("success", True, "test", False),
+            ("failure", True, "checkout", False),
+        )
+        for lane, _, _, _ in entries:
+            for checkout, cancelled, earlier_failure, expected in scenarios:
+                with self.subTest(lane=lane, checkout=checkout, cancelled=cancelled,
+                                  earlier_failure=earlier_failure):
+                    values = {
+                        "!cancelled()": not cancelled,
+                        "success()": checkout == "success" and earlier_failure is None and not cancelled,
+                        "always()": True,
+                        "steps.checkout.outcome == 'success'": checkout == "success",
+                    }
+                    self.assertTrue(set(terms) <= values.keys())
+                    explicit_status = any(term in terms for term in ("!cancelled()", "success()", "always()"))
+                    enabled = all(values[term] for term in terms)
+                    if not explicit_status:
+                        enabled = enabled and values["success()"]
+                    self.assertEqual(expected, enabled)
+        self.assertIn("id: checkout", steps["Checkout"])
+        self.assertLess(mobile.index("      - name: Checkout"), mobile.index("      - name: Retain mobile logs"))
+        # Retaining evidence must never forgive a checkout or payload failure.
+        self.assertNotRegex(mobile, r"(?m)^\s*continue-on-error:")
+        self.assertIn("if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}", upload)
         self.assertIn("uses: ./.github/actions/native-artifact-upload", upload)
         self.assertIn("label: mobile", upload)
         self.assertIn("label_title: Mobile", upload)

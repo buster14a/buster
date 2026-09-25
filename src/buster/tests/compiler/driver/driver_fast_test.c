@@ -193,9 +193,124 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_positional_languages(Uni
     return result;
 }
 
+// Static assertions containing local-object sizeof operands must agree in the
+// semantic-only and object actions, including both frontend SSA forms.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asserts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        bool valid;
+        String8 diagnostic_fragment;
+    } cases[] = {
+        {S8("typedef long T;\n"
+            "int f(void) {\n"
+            "    T a = 0;\n"
+            "    {\n"
+            "        typedef char T;\n"
+            "        T b = 0;\n"
+            "        _Static_assert(sizeof b == 1, \"inner\");\n"
+            "    }\n"
+            "    return sizeof a;\n"
+            "}\n"), true, {0}},
+        {S8("int f(void) {\n"
+            "    int a[4];\n"
+            "    _Static_assert(sizeof a == 4 * sizeof(int), \"array\");\n"
+            "    return _Generic(a, int *: 1);\n"
+            "}\n"), true, {0}},
+        {S8("int f(void) {\n"
+            "    char value;\n"
+            "    _Static_assert(sizeof (value) == 1, \"parenthesized scalar\");\n"
+            "    return sizeof value;\n"
+            "}\n"), true, {0}},
+        {S8("int f(void) {\n"
+            "    int values[4];\n"
+            "    _Static_assert(sizeof (values) == 4 * sizeof(int), \"parenthesized array\");\n"
+            "    return sizeof values;\n"
+            "}\n"), true, {0}},
+        {S8("int f(int n) {\n"
+            "    _Static_assert(sizeof n == n, \"runtime value\");\n"
+            "    return n;\n"
+            "}\n"), false, S8("static assertion expression is not an integer constant expression")},
+        {S8("int f(int n) {\n"
+            "    int values[n];\n"
+            "    _Static_assert(sizeof values == n * sizeof(int), \"variable array\");\n"
+            "    return (int)sizeof values;\n"
+            "}\n"), false, S8("static assertion expression is not an integer constant expression")},
+        {S8("int f(void) {\n"
+            "    char value;\n"
+            "    _Static_assert(sizeof value == 2, \"false\");\n"
+            "    return 0;\n"
+            "}\n"), false, S8("static assertion expression is not a true integer constant expression")},
+    };
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-local-sizeof-static-assert"), S8(".c"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[case_index].source)));
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            String8 output = buster_test_temporary_path(arena,
+                string_format(arena, S8("buster-local-sizeof-static-assert-{u32}-{u32}"), case_index, form), S8(".o"));
+            String8 syntax_command[] = {S8("-nostdinc"), S8("-g0"), S8("-std=gnu23"), forms[form], S8("-fsyntax-only"), input};
+            String8 object_command[] = {S8("-nostdinc"), S8("-g0"), S8("-std=gnu23"), forms[form], S8("-c"), S8("-o"), output, input};
+            CompilerDriverInvocation syntax_invocation = compiler_driver_parse_arguments(
+                arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command));
+            CompilerDriverInvocation object_invocation = compiler_driver_parse_arguments(
+                arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command));
+            BUSTER_TEST(arguments, syntax_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, object_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+#if BUSTER_BENCH_ALLOCATIONS
+            IrConstructionCounters before = ir_construction_counters();
+#endif
+            CompilerDriverResult syntax = compiler_driver_execute_invocation(arena, syntax_invocation);
+#if BUSTER_BENCH_ALLOCATIONS
+            IrConstructionCounters after = ir_construction_counters();
+            BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+            for (u32 counter = 0; counter < IR_CONSTRUCTION_COUNT; counter += 1)
+            {
+                BUSTER_TEST(arguments, before.values[counter] == after.values[counter]);
+            }
+#endif
+            CompilerDriverResult object = compiler_driver_execute_invocation(arena, object_invocation);
+            BUSTER_TEST(arguments, (syntax.error == COMPILER_DRIVER_ERROR_NONE) == cases[case_index].valid);
+            BUSTER_TEST(arguments, syntax.error == object.error);
+            BUSTER_TEST_RAW(arguments, string_equal(syntax.diagnostic, object.diagnostic),
+                            string_format(arena, S8("source={S8}\nsyntax={S8}\nobject={S8}"),
+                                          cases[case_index].source, syntax.diagnostic, object.diagnostic));
+            BUSTER_STRING_TEST(arguments, syntax.warning, object.warning);
+            BUSTER_TEST(arguments, syntax.diagnostic_count == object.diagnostic_count);
+            BUSTER_TEST(arguments, syntax.analysis_diagnostic_count == object.analysis_diagnostic_count);
+            for (u32 diagnostic = 0; diagnostic < BUSTER_MIN(syntax.diagnostic_count, object.diagnostic_count); diagnostic += 1)
+            {
+                CompilerDiagnostic first = syntax.diagnostics[diagnostic];
+                CompilerDiagnostic second = object.diagnostics[diagnostic];
+                BUSTER_TEST(arguments, first.severity == second.severity && first.note_count == second.note_count);
+                BUSTER_STRING_TEST(arguments, first.code, second.code);
+                BUSTER_STRING_TEST(arguments, first.symbol, second.symbol);
+            }
+            if (cases[case_index].diagnostic_fragment.length)
+            {
+                BUSTER_TEST_RAW(arguments, compiler_driver_test_string_contains(syntax.diagnostic, cases[case_index].diagnostic_fragment),
+                                string_format(arena, S8("source={S8}\ndiagnostic={S8}"), cases[case_index].source, syntax.diagnostic));
+            }
+            if (cases[case_index].valid)
+            {
+                BUSTER_TEST(arguments, object.has_object);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_local_sizeof_static_asserts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_positional_languages);
     String8 default_command[] = {S8("source.c")};
     CompilerDriverInvocation default_invocation = compiler_driver_parse_arguments(arguments->arena,

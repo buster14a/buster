@@ -104,8 +104,17 @@ the host compiler links it to the fixed caller/observer translation unit.
 This also accepts saved C cases from `tools/differential_c_harness.py`.
 `--host` and `--reject` cannot be combined. The original subject's directory
 remains on the include path during reduction. `--generated N`, `--seed N`,
-`--timeout N`, and `--minimize N` are validated bounded integers; zero reduction
-trials disables automatic reduction. `--no-verify` exists for testing older
+`--timeout N`, `--reference-timeout N`, and `--minimize N` are validated bounded
+integers; `--reference-timeout` defaults to the value of `--timeout` and applies
+only to the independent compiler and its caller, link, and run processes. The
+candidate matrix keeps `--timeout`, whose default is 10 seconds. Zero reduction
+trials disables automatic reduction. `--reference-samples N` (1–64) is an
+MSVC-only measurement option for one custom source; it records sequential
+`/Od` and `/O2` subject compiles before the independent oracle run. The summary
+prints the sample count, 50th percentile, 90th percentile, and maximum, while
+`processes.tsv` and each sample's `.argv`, `.stdout`, and `.stderr` retain the
+underlying observations. Samples do not add rows to the 432-configuration
+matrix. `--no-verify` exists for testing older
 compiler binaries that lack the verification flag, and is recorded explicitly.
 `--strict-mir` requires `-fno-machine-fallback` for every MIR allocator and the
 default mode, retaining NONE and its alias as direct controls. It is recorded in
@@ -150,7 +159,8 @@ a Release `ide.exe` built for that target, run:
 ```powershell
 ./build.ps1 test_differential --ide build/Release/ide.exe --cc cl.exe `
   --reference-dialect msvc --source tools/fixtures/msvc_reference_subject.c `
-  --host tools/fixtures/msvc_reference_caller.c --minimize 0 --strict-mir `
+  --host tools/fixtures/msvc_reference_caller.c --minimize 0 --reference-timeout 60 `
+  --reference-samples 12 --strict-mir `
   --out build/differential-msvc
 ```
 
@@ -187,11 +197,21 @@ The manifest records the resolved executable and its hash, MSVC version and
 target, dialect, capabilities and environment policy; phase `.argv` files
 record exact NUL-delimited arguments. Child stdout/stderr/status and stable
 artifact hashes use the same evidence checks as the default dialect.
+The GitHub Windows AArch64 CI step uses a 60-second deadline for the independent
+MSVC references and their caller, link, and run processes. Buster candidate
+processes keep the 10-second default. On AArch64, 12 extra `/Od` and 12 extra
+`/O2` subject compiles report runner timings. A forced one-second timeout
+self-control checks the timeout observation path on that runner.
 
 ## Observations and independent controls
 
 The two reference executions compile the same subject with the host compiler
-at O0 and O2. The default dialect preserves `-fwrapv`,
+at O0 and O2. A failed oracle now reports its phase and cause, such as
+`host-o0-compile-timeout` or `host-o0-compile-spawn-failure`, together with the
+case evidence directory and `processes.tsv` path. The matching phase names the
+exact `.argv`, `.stdout`, and `.stderr` files. Completed O0/O2 disagreement is
+reported separately as `host-o0-o2-observations-disagree`. The default dialect
+preserves `-fwrapv`,
 `-fno-strict-aliasing`, and `-funsigned-char` for subjects and callers. The
 MSVC subset uses `/J` and sources that do not require the first two flags.
 The references must agree and terminate normally before they can be an

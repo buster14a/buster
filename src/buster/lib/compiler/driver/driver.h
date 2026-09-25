@@ -167,8 +167,9 @@ struct CompilerDriverInvocation
     // -fPIC/-fpic, cleared by -fno-pic. The code generator reads it as a code
     // model: it picks the thread-local model, and a symbol another object
     // could interpose is addressed through the GOT and called through the
-    // PLT, which are the references `ld -shared` will place. -fPIE/-fpie set
-    // nothing; see where they are parsed.
+    // PLT, which are the references `ld -shared` will place. -fPIE/-fpie are
+    // rejected on x86-64 ELF because that reference model is not implemented;
+    // other targets preserve their prior accepted no-op behavior.
     bool position_independent;
     u8 optimization_level;
     bool has_gpu_target;

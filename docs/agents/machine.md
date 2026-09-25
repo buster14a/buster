@@ -711,32 +711,27 @@
   corpus checks native Apple linking and execution across allocator modes.
 - `-fPIC` is a code model, not an accepted flag. It reaches code generation as
   `CodegenModuleOptions.position_independent`, and generation resolves it for
-  the target: x86-64 ELF, where the relocations it changes are the ones `ld`
-  refuses in a shared object. A symbol another object could interpose --
+  the target: x86-64 ELF. A symbol another object could interpose --
   `ir_symbol_is_interposable`, which is external or imported linkage without
   hidden visibility -- has its address loaded out of its GOT slot
-  (`R_X86_64_GOTPCREL`) instead of computed rip-relative, and a direct call to
-  one is relocated `R_X86_64_PLT32` so the linker may route it through a
-  procedure linkage entry. Internal and hidden symbols keep the rip-relative
-  form, and a thread-local address is the thread-local model's to pick --
-  `codegen_thread_local_model` reads the same flag and answers general-dynamic
-  under it. The canonical emitter and the machine path make
-  the same decision from the same predicate: the selector writes a
-  `MachineSymbolReference` beside each call-target row and the module
-  relocation is derived from it, so the four allocators cannot disagree. One
-  object-writer decision follows from the model rather than from a relocation:
+  (`R_X86_64_GOTPCREL`) instead of computed rip-relative. Direct calls to
+  undefined x86-64 ELF functions use `R_X86_64_PLT32` even in the default
+  model so external linkers can put `-c` objects in PIE executables; under
+  `-fPIC`, a call to any interposable symbol also uses PLT32. Internal and
+  hidden symbols keep the rip-relative form, and a thread-local address is
+  the thread-local model's to pick -- `codegen_thread_local_model` reads the
+  same flag and answers general-dynamic under it. The canonical emitter and
+  machine path make the same call/address distinctions, so the four
+  allocators cannot disagree. One object-writer decision follows from the
+  model rather than from a relocation:
   an unwind record's function pointer is relocated against a local text symbol
   with the function's own offset, because an FDE naming a preemptible function
   is the same PC-relative reference to an interposable symbol that `ld`
   refuses in the body.
-- `-fPIE`/`-fpie` stay accepted and inert, and that is a statement rather than
-  an omission: every reference this compiler emits is already rip-relative, an
-  executable's own definitions are not interposable, its references to another
-  image's data are what the linker's copy relocation is for, and its own
-  thread-local block is still the initial one -- so the
-  position-independent-executable model asks for no code this compiler does not
-  already produce. `-fno-pic` clears the model; `-fno-pie` clears nothing
-  because nothing was set.
+- On x86-64 ELF, `-fPIE`/`-fpie` are rejected because PIE-specific reference
+  selection is not implemented. Mach-O, COFF, UEFI, eBPF and Wasm keep their
+  existing accepted no-op behavior. `-fno-pic` clears the PIC model;
+  `-fno-pie` remains an accepted no-op.
 - The built-in linker resolves both forms for the image it writes, which binds
   every name in it: `PLT32` patches the same rel32 `PC32` does, and a GOT load
   is relaxed back into the `lea` it would have been (`link_x86_relax_got_load`),

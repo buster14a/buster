@@ -201,6 +201,17 @@ same head still shows a green status. The default-branch refresh rewrites the
 status for open PRs, and the later merge-group admission path must validate its
 own exact combined head rather than reuse a historical PR-head result.
 
+The default-branch sweep retries selected transient GET failures at most three
+times within a 240-second refresh budget, using bounded backoff and server
+rate-limit timing when safe. Status POSTs are sent once: a timeout after a write
+may leave publication uncertain. A per-PR lookup failure retains an error JSON
+and allows later independent PRs to be checked; a systemic rate limit or spent
+budget leaves the rest unattempted. The retained `refresh.json` and job summary
+count completed, failed, and unattempted work. Incomplete coverage exits 2;
+ordinary blocking PR conflicts do not fail the main-push sweep. A missing
+lookup never authorizes a status, and a green result for an older main remains
+stale until that exact PR is successfully refreshed.
+
 The preflight never checks out, rebases, merges or updates a PR branch. It uses
 `git merge-tree` plumbing, reports every unmerged path and Git's conflict kind,
 and does not choose `ours`, `theirs`, a union driver or a semantic resolution.
