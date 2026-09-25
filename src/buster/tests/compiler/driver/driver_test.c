@@ -6095,6 +6095,195 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestAr
     return result;
 }
 
+// Recompile each frontend form for byte stability, then use Node's own Wasm
+// validator and engine for positive calls and ABI-negative traps.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm64_function_tables(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-wasm64-table"), S8(".c"));
+    String8 script_path = buster_test_temporary_path(arguments->arena, S8("buster-wasm64-table"), S8(".cjs"));
+    String8 source = S8(
+        "// Function pointers use 64-bit handles, separate from Memory64 data addresses.\n"
+        "typedef int (*Unary)(int);\n"
+        "typedef int (*Binary)(int, int);\n"
+        "\n"
+        "extern int host_offset(int value);\n"
+        "\n"
+        "static int plus_three(int value)\n"
+        "{\n"
+        "    return value + 3;\n"
+        "}\n"
+        "\n"
+        "static int double_value(int value)\n"
+        "{\n"
+        "    return value * 2;\n"
+        "}\n"
+        "\n"
+        "static int add_pair(int left, int right)\n"
+        "{\n"
+        "    return left + right;\n"
+        "}\n"
+        "\n"
+        "Unary global_callback = plus_three;\n"
+        "Unary imported_callback = host_offset;\n"
+        "Unary callback_array[3] = {plus_three, double_value, host_offset};\n"
+        "\n"
+        "struct CallbackRecord\n"
+        "{\n"
+        "    int tag;\n"
+        "    Unary callback;\n"
+        "};\n"
+        "\n"
+        "struct CallbackRecord callback_record = {41, double_value};\n"
+        "\n"
+        "Unary get_plus_three(void)\n"
+        "{\n"
+        "    return plus_three;\n"
+        "}\n"
+        "\n"
+        "Unary get_double_value(void)\n"
+        "{\n"
+        "    return double_value;\n"
+        "}\n"
+        "\n"
+        "Binary get_add_pair(void)\n"
+        "{\n"
+        "    return add_pair;\n"
+        "}\n"
+        "\n"
+        "Unary get_imported(void)\n"
+        "{\n"
+        "    return host_offset;\n"
+        "}\n"
+        "\n"
+        "int apply(Unary callback, int value)\n"
+        "{\n"
+        "    return callback(value);\n"
+        "}\n"
+        "\n"
+        "int apply_global(int value)\n"
+        "{\n"
+        "    return global_callback(value);\n"
+        "}\n"
+        "\n"
+        "int apply_imported(int value)\n"
+        "{\n"
+        "    return imported_callback(value);\n"
+        "}\n"
+        "\n"
+        "int apply_array(int index, int value)\n"
+        "{\n"
+        "    return callback_array[index](value);\n"
+        "}\n"
+        "\n"
+        "int apply_record(int value)\n"
+        "{\n"
+        "    return callback_record.callback(value) + callback_record.tag;\n"
+        "}\n"
+        "\n"
+        "int apply_loop(int value)\n"
+        "{\n"
+        "    for (int index = 0; index < 3; index += 1)\n"
+        "    {\n"
+        "        value = callback_array[index](value);\n"
+        "    }\n"
+        "    return value;\n"
+        "}\n"
+        "\n"
+        "void set_global(Unary callback)\n"
+        "{\n"
+        "    global_callback = callback;\n"
+        "}\n");
+    String8 script = S8(
+        "// Validate and execute the emitted table and typed calls in an independent engine.\n"
+        "'use strict';\n"
+        "const fs = require('node:fs');\n"
+        "const assert = require('node:assert/strict');\n"
+        "\n"
+        "const bytes = fs.readFileSync(process.argv[2]);\n"
+        "assert(WebAssembly.validate(bytes), 'invalid Wasm64 function-table module');\n"
+        "const imports = {env: {host_offset(value) { return value + 11; }}};\n"
+        "const functions = new WebAssembly.Instance(new WebAssembly.Module(bytes), imports).exports;\n"
+        "const plus = functions.get_plus_three();\n"
+        "const twice = functions.get_double_value();\n"
+        "const imported = functions.get_imported();\n"
+        "const binary = functions.get_add_pair();\n"
+        "const handles = [plus, twice, imported, binary];\n"
+        "assert(handles.every(value => typeof value === 'bigint' && value > 0n));\n"
+        "assert.equal(new Set(handles).size, handles.length);\n"
+        "\n"
+        "let checks = 0;\n"
+        "const check = (actual, expected) => { assert.equal(actual, expected); checks += 1; };\n"
+        "for (let value = -4; value <= 4; value += 1) {\n"
+        "    check(functions.apply(plus, value), value + 3);\n"
+        "    check(functions.apply(twice, value), value * 2);\n"
+        "    check(functions.apply(imported, value), value + 11);\n"
+        "    check(functions.apply_global(value), value + 3);\n"
+        "    check(functions.apply_imported(value), value + 11);\n"
+        "    check(functions.apply_array(0, value), value + 3);\n"
+        "    check(functions.apply_array(1, value), value * 2);\n"
+        "    check(functions.apply_array(2, value), value + 11);\n"
+        "    check(functions.apply_record(value), value * 2 + 41);\n"
+        "    check(functions.apply_loop(value), ((value + 3) * 2) + 11);\n"
+        "}\n"
+        "functions.set_global(twice);\n"
+        "check(functions.apply_global(13), 26);\n"
+        "functions.set_global(plus);\n"
+        "check(functions.apply_global(13), 16);\n"
+        "\n"
+        "// These inputs are ABI-negative probes, not defined C executions. The high\n"
+        "// bits must trap before i32.wrap_i64, and call_indirect checks slot and type.\n"
+        "for (const handle of [0n, 0xffffffffn, (1n << 32n) | plus, binary]) {\n"
+        "    assert.throws(() => functions.apply(handle, 5), WebAssembly.RuntimeError);\n"
+        "    checks += 1;\n"
+        "}\n"
+        "console.log(`${checks}/${checks} Wasm64 function-table engine checks passed`);\n");
+    bool prepared = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source)) &&
+                    file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script));
+    bool ready = BUSTER_REQUIRE(arguments, prepared);
+    String8 frontend_options[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    for (u32 frontend = 0; ready && frontend < BUSTER_ARRAY_LENGTH(frontend_options); frontend += 1)
+    {
+        String8 first_output = buster_test_temporary_path(arguments->arena, S8("buster-wasm64-table-first"),
+                                                         string_format(arguments->arena, S8("-{u32}.wasm"), frontend));
+        String8 second_output = buster_test_temporary_path(arguments->arena, S8("buster-wasm64-table-second"),
+                                                          string_format(arguments->arena, S8("-{u32}.wasm"), frontend));
+        String8 first_command[] = {S8("-target"), S8("wasm64-unknown-freestanding"), S8("-nostdinc"), frontend_options[frontend],
+                                   S8("-o"), first_output, source_path};
+        String8 second_command[] = {S8("-target"), S8("wasm64-unknown-freestanding"), S8("-nostdinc"), frontend_options[frontend],
+                                    S8("-o"), second_output, source_path};
+        CompilerDriverResult first = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(first_command)));
+        CompilerDriverResult second = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(second_command)));
+        if (first.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("Wasm64 function-table error: {S8}\n"), first.diagnostic);
+        }
+        if (BUSTER_REQUIRE(arguments, first.error == COMPILER_DRIVER_ERROR_NONE && first.has_wasm64 &&
+                                         second.error == COMPILER_DRIVER_ERROR_NONE && second.has_wasm64))
+        {
+            BUSTER_TEST(arguments, first.wasm64.bytes.length == second.wasm64.bytes.length &&
+                                       memcmp(first.wasm64.bytes.pointer, second.wasm64.bytes.pointer, first.wasm64.bytes.length) == 0);
+            String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+            if (node.length)
+            {
+                String8 node_arguments[] = {node, script_path, first_output};
+                CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run(
+                    arguments, arguments->arena, S8("function-table"), frontend ? S8("frontend-ssa") : S8("frontend-memory"),
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), S8("96/96 Wasm64 function-table engine checks passed"),
+                    compiler_driver_test_wasm_node_deadline_microseconds());
+                BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(node_run));
+            }
+            else
+            {
+                arguments->show(arguments, S8("Wasm64 function-table engine execution skipped: Node is not installed\n"));
+            }
+        }
+    }
+    return result;
+}
+
 typedef struct CompilerDriverWasm64NodeRun CompilerDriverWasm64NodeRun;
 struct CompilerDriverWasm64NodeRun
 {
@@ -8782,6 +8971,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x64_i128_float);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_node_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_function_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_stack);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_i128);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_tls);

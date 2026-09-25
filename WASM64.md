@@ -54,6 +54,25 @@ imports from `env` by default. A link name of `module#name` selects an explicit
 import module and name; this keeps versioned host APIs outside the instruction
 backend.
 
+Scalar function pointers use a module-private, fixed-size `funcref` table.
+Slot zero stays null; every imported and defined function has one nonzero C
+handle equal to its function index plus one, stored in an `i64` pointer slot.
+Imports precede definitions in the deterministic emitter order. Table indices
+remain `i32`, and indirect calls reject an `i64` handle above `UINT32_MAX`
+before narrowing it. The table and its active element segment map those
+handles back to function indices; null, missing slots and incompatible Wasm
+signatures trap. Neither a handle nor a table index is a Memory64 linear-memory
+address. Data pointers continue to use 64-bit memory addresses. Global,
+array and struct initializers may relocate function symbols into pointer
+slots using the same handle mapping. The table is not exported or grown.
+
+The scalar call ABI uses WebAssembly's `i32`, `i64`, `f32` and `f64` signature
+types, including pointer arguments and results as `i64`. Indirect calls need
+a prototyped function pointer. Calls with aggregate or variadic signatures,
+and nonzero addends on function-address relocations, remain diagnostics. The
+host supplies imports with their declared signatures; a wrong host import is
+rejected by the engine during instantiation or call.
+
 The emitter owns an upward-growing stack above static data in linear memory. The statically
 allocated region is the half-open range from 64 KiB through the static-data end rounded up to a
 16-byte boundary. That aligned end is the stack's inclusive lower bound and initial pointer. The
@@ -120,7 +139,14 @@ both frontend forms and, when Node is available, executes the result using
 `tests/wasm_local_aggregate_execution.js`.
 
 The scalar core rejects constructs it cannot represent correctly, including
-variadic and aggregate function ABIs, indirect calls and function tables,
-function-pointer data relocations, atomics/threads/TLS/SIMD, inline assembly,
+variadic and aggregate function ABIs, unprototyped indirect calls, function
+address addends, atomics/threads/TLS/SIMD, inline assembly,
 computed labels and indirect branches, and Component Model packaging. These
 are explicit errors, not silent native fallbacks.
+
+The driver test generates isolated C and Node fixtures for callbacks, imports,
+function pointer globals, arrays, records and loops in both frontend forms.
+It compares repeated module bytes and, when Node is available, validates and
+executes the module independently. The Node fixture also checks null,
+out-of-range, high-bit and wrong-signature traps as ABI-negative probes; those
+inputs are not asserted to be defined C behavior.
