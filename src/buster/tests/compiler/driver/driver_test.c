@@ -16064,7 +16064,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(fixture_temporary);
         }
     }
-    String8 c_flat_initializer_source = S8(
+    // Keep each embedded source literal below the C99 minimum supported
+    // string-literal length; the executed fixture spans both parts.
+    String8 c_flat_initializer_parts[] = {S8(
         "struct Pair\n"
         "{\n"
         "    int first;\n"
@@ -16092,6 +16094,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         "    int rows[2][2];\n"
         "    int tail;\n"
         "};\n"
+        "struct PointerPair { int *first; int *second; };\n"
+        "struct PointerOuter { struct PointerPair pair; int tail; };\n"
+        "struct Two { int a[2]; };\n"
+        "static int anchor;\n"
+        "static struct NamedOuter static_override = {.pair = {1, 2}, .pair.first = 3};\n"
+        "static struct Two static_leaf_whole = {.a[0] = 1, .a = {[1] = 2}};\n"
         "\n"
         "struct UnionOuter\n"
         "{\n"
@@ -16168,39 +16176,72 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         "    return direct.pair.first != 79 || direct.pair.second != 83 || direct.tail != 89 || parenthesized.pair.first != 97 ||\n"
         "           parenthesized.pair.second != 101 || parenthesized.tail != 103;\n"
         "}\n"
+        "\n"),
+        S8(
+        "static int nested_overrides(void)\n"
+        "{\n"
+        "    struct NamedOuter leaf = {.pair = {1, 2}, .pair.first = 3};\n"
+        "    struct NamedOuter reverse = {.pair.first = 3, .pair = {1, 2}};\n"
+        "    struct NamedOuter whole = {.pair = {1, 2}, .pair = {3}};\n"
+        "    struct NamedOuter repeated = {.pair = {1, 2}, .pair = {3, 4}, .pair.second = 5};\n"
+        "    struct ArrayOuter array = {.rows[0] = {1, 2}, .rows[0][0] = 3};\n"
+        "    struct ArrayOuter array_whole = {.rows[0] = {1, 2}, .rows[0] = {3}};\n"
+        "    struct PointerOuter pointer = {.pair = {&anchor, &anchor}, .pair.first = 0};\n"
+        "    struct PointerOuter pointer_whole = {.pair = {&anchor, &anchor}, .pair = {.first = 0}};\n"
+        "    struct PointerOuter pointer_leaf_whole = {.pair.first = &anchor, .pair = {.second = &anchor}};\n"
+        "    struct Two leaf_whole = {.a[0] = 1, .a = {[1] = 2}};\n"
+        "    struct Two leaf_whole_last = {.a[1] = 2, .a = {[0] = 3}};\n"
+        "    struct Two leaf_whole_literal = (struct Two){.a[0] = 1, .a = {[1] = 2}};\n"
+        "    struct NamedOuter literal = (struct NamedOuter){.pair = {1, 2}, .pair.first = 3};\n"
+        "    return leaf.pair.first != 3 || leaf.pair.second != 2 || reverse.pair.first != 1 || reverse.pair.second != 2 ||\n"
+        "           whole.pair.first != 3 || whole.pair.second != 0 || repeated.pair.first != 3 || repeated.pair.second != 5 ||\n"
+        "           array.rows[0][0] != 3 || array.rows[0][1] != 2 || array.rows[1][0] != 0 ||\n"
+        "           array_whole.rows[0][0] != 3 || array_whole.rows[0][1] != 0 ||\n"
+        "           pointer.pair.first != 0 || pointer.pair.second != &anchor || pointer_whole.pair.first != 0 ||\n"
+        "           pointer_whole.pair.second != 0 || pointer_leaf_whole.pair.first != 0 || pointer_leaf_whole.pair.second != &anchor ||\n"
+        "           leaf_whole.a[0] != 0 || leaf_whole.a[1] != 2 || leaf_whole_last.a[0] != 3 || leaf_whole_last.a[1] != 0 ||\n"
+        "           leaf_whole_literal.a[0] != 0 || leaf_whole_literal.a[1] != 2 ||\n"
+        "           static_override.pair.first != 3 || static_override.pair.second != 2 ||\n"
+        "           static_leaf_whole.a[0] != 0 || static_leaf_whole.a[1] != 2;\n"
+        "}\n"
         "\n"
         "int main(void)\n"
         "{\n"
-        "    return named_local() || named_literal() || anonymous_local() || array_local() || union_local() || aggregate_expression();\n"
-        "}\n");
+        "    return named_local() || named_literal() || anonymous_local() || array_local() || union_local() || aggregate_expression() || nested_overrides();\n"
+        "}\n")};
+    String8 c_flat_initializer_source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_flat_initializer_parts), false);
     String8 c_flat_initializer_frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 c_flat_initializer_optimizations[] = {S8("-O0"), S8("-O2")};
     for (u64 frontend_index = 0; frontend_index < BUSTER_ARRAY_LENGTH(c_flat_initializer_frontends); frontend_index += 1)
     {
-        for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        for (u64 optimization_index = 0; optimization_index < BUSTER_ARRAY_LENGTH(c_flat_initializer_optimizations); optimization_index += 1)
         {
-            TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
-            String8 fixture_path = buster_test_temporary_path(fixture_temporary.arena, S8("buster-c-flat-aggregate-initializers"), S8(""));
-            String8 source_path = string_format(fixture_temporary.arena, S8("{S8}.c"), fixture_path);
-            BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(c_flat_initializer_source)));
-            String8 fixture_command_line[] = {
-                c_flat_initializer_frontends[frontend_index], c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path,
-                source_path,
-            };
-            CompilerDriverResult fixture = compiler_driver_execute_invocation(
-                fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
-            BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
-            if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+            for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
             {
-                String8 fixture_arguments[] = {fixture_path};
-                ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
-                                                                    (ProcessSpawnOptions){.use_process_environment = true});
-                BUSTER_TEST(arguments, fixture_spawn.handle != 0);
-                if (fixture_spawn.handle)
+                TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
+                String8 fixture_path = buster_test_temporary_path(fixture_temporary.arena, S8("buster-c-flat-aggregate-initializers"), S8(""));
+                String8 source_path = string_format(fixture_temporary.arena, S8("{S8}.c"), fixture_path);
+                BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(c_flat_initializer_source)));
+                String8 fixture_command_line[] = {
+                    c_flat_initializer_frontends[frontend_index], c_flat_initializer_optimizations[optimization_index],
+                    c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, source_path,
+                };
+                CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                    fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+                BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+                if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
                 {
-                    BUSTER_TEST(arguments, os_process_wait_sync(fixture_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                    String8 fixture_arguments[] = {fixture_path};
+                    ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                        (ProcessSpawnOptions){.use_process_environment = true});
+                    BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                    if (fixture_spawn.handle)
+                    {
+                        BUSTER_TEST(arguments, os_process_wait_sync(fixture_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                    }
                 }
+                scratch_end(fixture_temporary);
             }
-            scratch_end(fixture_temporary);
         }
     }
     // The native-retirement ledger pins tests/ fixture bytes. Keep this
