@@ -94,8 +94,10 @@ unlisted signal requests. It also sends a valid request as root and requires
 a complete server rejection frame on that same connection; candidate and
 runner must instead receive `EACCES` or `EPERM` from their own socket
 `connect` calls. A missing endpoint, refused connection or malformed response
-fails the probe. Its container and environment gates prevent an ordinary host
-test invocation.
+fails the probe. The root preflight verifies the real service-owned socket
+inode and mode `0600`, since an inaccessible parent could otherwise yield
+`EACCES` even when the socket itself is absent. Its container and environment
+gates prevent an ordinary host test invocation.
 
 Account resolution uses the full supplementary membership list, not just
 primary GIDs. Candidate and runner must not have the service or root group;

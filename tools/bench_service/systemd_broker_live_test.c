@@ -236,6 +236,16 @@ static bool bq_test_authorization_denied(bool created, int connected, int error)
     return ok;
 }
 
+static bool bq_test_socket_verified(char const* path, uid_t owner, gid_t group)
+{
+    struct stat info = {0};
+    bool ok = lstat(path, &info) == 0 && S_ISSOCK(info.st_mode) &&
+              info.st_uid == owner && info.st_gid == group &&
+              (info.st_mode & 07777) == 0600;
+    fprintf(stderr, "BROKER_SOCKET_FIXTURE path=%s verified=%s\n", path, ok ? "yes" : "no");
+    return ok;
+}
+
 static bool bq_test_socket_denied(char const* path)
 {
     int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
@@ -348,6 +358,7 @@ static int bq_test_self_test(void)
     BQ_IDENTITY_CHECK(!bq_test_authorization_denied(true, 0, EACCES));
     BQ_IDENTITY_CHECK(!bq_test_authorization_denied(true, -1, ENOENT));
     BQ_IDENTITY_CHECK(!bq_test_authorization_denied(true, -1, ECONNREFUSED));
+    BQ_IDENTITY_CHECK(!bq_test_socket_verified("/proc/self/bq-broker-missing.sock", 0, 0));
     BqTestBrokerStatus frame = {.kind = 3, .length = sizeof(int32_t), .status = 126};
     BQ_IDENTITY_CHECK(bq_test_rejection_frame(&frame, sizeof(frame)));
     BQ_IDENTITY_CHECK(!bq_test_rejection_frame(&frame, sizeof(frame) - 1));
@@ -462,6 +473,7 @@ static int bq_test_live(int argc, char** argv)
     {
         char* start_socket[] = {"/usr/bin/systemctl", "start", "buster-bench-systemd-broker.socket", NULL};
         BQ_LIVE_CHECK(bq_test_run(&root, start_socket) == 0);
+        BQ_LIVE_CHECK(bq_test_socket_verified(BQ_TEST_BROKER_SOCKET, service_uid, service_gid));
         char* active[] = {"/usr/bin/systemctl", "is-active", "--quiet", unit, NULL};
         BQ_LIVE_CHECK(bq_test_run(&root, active) == 0);
         char* resume[] = {BQ_TEST_BROKER, "signal", unit, "CONT", NULL};
