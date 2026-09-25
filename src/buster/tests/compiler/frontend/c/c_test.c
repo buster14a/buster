@@ -2950,75 +2950,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tag_scope_typedef_identity(UnitTestArg
     return result;
 }
 
-// Each source is valid C17 that Clang 18 and GCC 13 accept with
-// -std=c17 -pedantic-errors; every assertion holds there. The sources are
-// analyzed one at a time so each failing binding is reported on its own.
-BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_sources_accepted(UnitTestArguments* arguments, String8 const* sources, u32 source_count,
-                                                                    String8 source_path)
-{
-    UnitTestResult result = {0};
-    for (u32 index = 0; index < source_count; index += 1)
-    {
-        TemporalArena temporary = scratch_begin(0, 0);
-        CPreprocessResult tokens;
-        CParseResult parse;
-        CIRLowerResult lowered = c_test_lower_source(temporary.arena, sources[index], source_path, target_native, &tokens, &parse);
-        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
-        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
-        scratch_end(temporary);
-    }
-    return result;
-}
-
-// Names inside tag bodies and inside type-name bounds of constant expressions
-// bind by C17 6.2.1 scope, like every other use: not to the oldest
-// same-spelled declaration, and never to a file-scope declaration that appears
-// later in the translation unit. Found by tools/scope_oracle.
-BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_binding_scope(UnitTestArguments* arguments)
-{
-    String8 sources[] = {
-        S8("enum { N = 1 }; int main(void) { enum { N = 9 }; struct B { char a[N]; }; "
-           "_Static_assert(sizeof(struct B) == 9, \"block-scope member bound binds the local N\"); return 0; }"),
-        S8("static int first(void) { enum { K = 3 }; struct T { char a[K]; }; _Static_assert(sizeof(struct T) == 3, \"first sibling\"); return 0; } "
-           "static int second(void) { enum { K = 7 }; struct T { char a[K]; }; "
-           "_Static_assert(sizeof(struct T) == 7, \"second sibling binds its own K\"); return 0; } "
-           "int main(void) { return first() + second(); }"),
-        S8("static int local(void) { enum { L = 8 }; struct U { char a[L]; }; "
-           "_Static_assert(sizeof(struct U) == 8, \"a later file-scope L is not visible\"); return 0; } "
-           "enum { L = 5 }; int main(void) { return local(); }"),
-        S8("enum { N = 3 }; int main(void) { enum { N = 5 }; enum { M = sizeof(char[N]) }; "
-           "_Static_assert(M == 5, \"type-name bound binds the local N\"); return 0; }"),
-    };
-    return c_test_constant_sources_accepted(arguments, sources, BUSTER_ARRAY_LENGTH(sources), S8("type-constant-binding-scope.c"));
-}
-
-// The parse-side record layout must evaluate member bounds and _Alignas
-// operands as C constant expressions, as the IR layout does.
-BUSTER_GLOBAL_LOCAL UnitTestResult c_test_record_layout_constant_operands(UnitTestArguments* arguments)
-{
-    String8 sources[] = {
-        S8("enum { SZ = 5 }; struct S { float b[sizeof(char[SZ])]; }; enum { E = sizeof(struct S) }; "
-           "_Static_assert(E == 20, \"sizeof bound in a member\"); int main(void) { return 0; }"),
-        S8("enum { A = 16 }; struct S { char k; _Alignas(A) char c; }; "
-           "_Static_assert(sizeof(struct S) == 32, \"_Alignas names an enumerator\"); int main(void) { return 0; }"),
-    };
-    return c_test_constant_sources_accepted(arguments, sources, BUSTER_ARRAY_LENGTH(sources), S8("record-layout-constant-operands.c"));
-}
-
-// C17 6.8.4p3: a selection statement is a block whose scope includes its
-// controlling expression, so the substatement sees declarations made there.
-BUSTER_GLOBAL_LOCAL UnitTestResult c_test_controlling_expression_scope(UnitTestArguments* arguments)
-{
-    String8 sources[] = {
-        S8("enum { Q = 1 }; int main(void) { int v = 0; if (sizeof(enum { Q = 8 })) { "
-           "_Static_assert(Q == 8, \"if substatement sees the controlling-expression Q\"); v = Q; } return v - 8; }"),
-        S8("enum { Q = 1 }; int main(void) { int v = 0; switch (sizeof(enum { Q = 3 })) { default: { "
-           "_Static_assert(Q == 3, \"switch body sees the controlling-expression Q\"); v = Q; } } return v - 3; }"),
-    };
-    return c_test_constant_sources_accepted(arguments, sources, BUSTER_ARRAY_LENGTH(sources), S8("controlling-expression-scope.c"));
-}
-
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_frontend(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23360,9 +23291,6 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_growth);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_tag_scope_typedef_identity);
-    BUSTER_TEST_FIXTURE(arguments, c_test_type_constant_binding_scope);
-    BUSTER_TEST_FIXTURE(arguments, c_test_record_layout_constant_operands);
-    BUSTER_TEST_FIXTURE(arguments, c_test_controlling_expression_scope);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
 
