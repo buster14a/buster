@@ -279,6 +279,12 @@ input, and rejects native objects, archives, libraries, frameworks, linker
 arguments, `-E`, `-S`, and `-fsyntax-only`. The writer has no LLVM dependency;
 see `LLVM_BITCODE.md` for its target metadata, API, and supported boundary.
 
+Direct WebAssembly output accepts one C source for `wasm64-unknown-freestanding`
+or `wasm32-wasip1` (also spelled `wasm32-wasi`). The latter emits a WASI Preview 1
+command module, with an exported `_start` and 32-bit pointers. Its `--sysroot`
+header paths and supported imports are in [WASI.md](../../WASI.md). Direct wasm32
+output rejects `-emit-llvm`, native link inputs, and `-S`.
+
 Static archive extraction uses `compiler_driver_archive_extract` in the
 private `driver/archive.c` implementation. Its invocation-owned name table
 records selected definitions and strong/weak undefined references once per
