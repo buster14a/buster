@@ -23233,7 +23233,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
         // The operation runs in the promoted type, so a narrower object's
         // result comes back down here -- `(data[i] += 2) == 0` has to see the
         // stored byte, not the 256 the addition produced.
-        if (!atomic && values[0].value < builder->function->value_count &&
+        if (values[0].value < builder->function->value_count &&
             builder->function->values[values[0].value].canonical_type.value != value_type.value)
         {
             values[0] = c_ir_emit_cast(builder, values[0], value_type, source);
