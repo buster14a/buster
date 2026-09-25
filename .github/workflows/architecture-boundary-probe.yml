@@ -47,7 +47,14 @@ jobs:
           for name in ('architecture_boundary_probe.py', 'architecture_boundary_compare.py'):
               Path(os.environ['ARCH_EVIDENCE'], name).write_text(Path('transport/.github/research', name).read_text())
           PY
-          python3 -u transport/.github/research/architecture_boundary_compare.py "$GITHUB_WORKSPACE/source"
+          python3 -u - "$GITHUB_WORKSPACE/source" <<'PY'
+          from pathlib import Path
+          path = Path('transport/.github/research/architecture_boundary_compare.py')
+          # Run the generator once. Its embedded body is source material for
+          # comparison-experiment.py, not a second top-level invocation.
+          source = path.read_text().split('\n# EXECUTABLE COMPARISON BODY\n', 1)[0]
+          exec(compile(source, str(path), 'exec'), {'__file__': str(path), '__name__': '__main__'})
+          PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
