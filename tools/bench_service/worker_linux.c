@@ -54,6 +54,15 @@ BUSTER_GLOBAL_LOCAL u64 bq_worker_deadline(u64 now, u64 milliseconds)
     return result;
 }
 
+/* The private recipe phase API uses nanoseconds from the same
+ * CLOCK_MONOTONIC epoch as the supervisor's millisecond deadline. */
+BUSTER_GLOBAL_LOCAL bool bq_worker_deadline_nanoseconds(u64 deadline_milliseconds, u64* deadline_nanoseconds)
+{
+    bool ok = deadline_nanoseconds && deadline_milliseconds <= UINT64_MAX / 1000000ull;
+    if (deadline_nanoseconds) *deadline_nanoseconds = ok ? deadline_milliseconds * 1000000ull : 0;
+    return ok;
+}
+
 /* RuntimeMax is an inner unit limit. The coordinator also needs an absolute
  * budget starting under the host lease, before materialization can do work.
  * Reject an unrepresentable budget instead of silently disabling the cap. */
@@ -3959,7 +3968,6 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
                                               preparation_sha256, &phase_descriptor);
         finalization.phases_required = true;
         if (error == BQ_OK && !bq_phase_init(&phases, phase_descriptor, job->id, job->token)) error = BQ_IO;
-        if (error == BQ_OK) bq_worker_lease_release(&lease);
     }
     if (!bq_worker_lease_handoff_close(&handoff) && error == BQ_OK) error = BQ_IO;
     BqWorkerObserved observed = {0};

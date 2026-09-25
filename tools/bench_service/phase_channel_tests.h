@@ -2,10 +2,122 @@
  * processes exercise ordering and durability, not performance qualification. */
 #ifndef BUSTER_BENCH_SERVICE_PHASE_CHANNEL_TESTS_H
 #define BUSTER_BENCH_SERVICE_PHASE_CHANNEL_TESTS_H
+#include <signal.h>
+#include <sys/time.h>
 
 BUSTER_GLOBAL_LOCAL void bq_test_phase_run(unsigned defect, char const* driver);
 BUSTER_GLOBAL_LOCAL void bq_test_phase_prelaunch_deadline(void);
 BUSTER_GLOBAL_LOCAL void bq_test_phase_finalization_deadline(void);
+
+BUSTER_GLOBAL_LOCAL int bq_test_phase_ack_child(int descriptor)
+{
+    unsigned char message[BQ_PHASE_MESSAGE_BYTES] = {0};
+    ssize_t count = recv(descriptor, message, sizeof(message), 0);
+    int ok = count == BQ_PHASE_MESSAGE_BYTES && !memcmp(message, "BQPHASE1", 8) &&
+             bq_phase_get(message + 24) == BQ_PHASE_PREPARING && bq_phase_get(message + 40) == 0;
+    if (ok)
+    {
+        bq_phase_put(message + 40, 1);
+        ok = send(descriptor, message, sizeof(message), MSG_NOSIGNAL) == BQ_PHASE_MESSAGE_BYTES;
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_phase_exchange_until_success(void)
+{
+    int pair[2] = {-1, -1};
+    bool paired = socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0;
+    BQ_CHECK(paired);
+    pid_t child = paired ? fork() : -1;
+    BQ_CHECK(child != -1);
+    if (child == 0)
+    {
+        close(pair[0]);
+        int ok = bq_test_phase_ack_child(pair[1]);
+        close(pair[1]);
+        _exit(ok ? 0 : 1);
+    }
+    if (child > 0) close(pair[1]);
+    else if (pair[1] >= 0) close(pair[1]);
+    BqPhaseChannel channel = {.descriptor = -1};
+    bool initialized = child > 0 && bq_phase_init(&channel, pair[0], 7, 9);
+    uint64_t now = bq_phase_clock();
+    uint64_t deadline = now && UINT64_C(1000000000) <= UINT64_MAX - now ?
+                        now + UINT64_C(1000000000) : UINT64_MAX;
+    bool exchanged = initialized && bq_phase_exchange_until(&channel, BQ_PHASE_PREPARING, deadline);
+    int status = 0;
+    BqError joined = child > 0 ? bq_worker_waitpid_until(child, &status,
+        bq_worker_deadline(bq_worker_monotonic_milliseconds(), 1000)) : BQ_BAD_REQUEST;
+    if (joined != BQ_OK && child > 0)
+    {
+        kill(child, SIGKILL);
+        joined = bq_worker_waitpid_until(child, &status,
+            bq_worker_deadline(bq_worker_monotonic_milliseconds(), 1000));
+    }
+    BQ_CHECK(exchanged && channel.sequence == BQ_PHASE_PREPARING && joined == BQ_OK &&
+             WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    if (pair[0] >= 0) close(pair[0]);
+}
+
+BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_test_phase_alarm_count;
+
+BUSTER_GLOBAL_LOCAL void bq_test_phase_alarm_handler(int signal_number)
+{
+    if (signal_number == SIGALRM) bq_test_phase_alarm_count += 1;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_phase_exchange_until_failures(void)
+{
+    int expired_pair[2] = {-1, -1};
+    bool expired_paired = socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, expired_pair) == 0;
+    BQ_CHECK(expired_paired);
+    BqPhaseChannel expired = {.descriptor = -1};
+    uint64_t expired_at = bq_phase_clock();
+    bool expired_ready = expired_paired && bq_phase_init(&expired, expired_pair[0], 7, 9);
+    bool rejected_expired = expired_ready &&
+        !bq_phase_exchange_until(&expired, BQ_PHASE_PREPARING, expired_at);
+    unsigned char packet[BQ_PHASE_MESSAGE_BYTES] = {0};
+    errno = 0;
+    ssize_t absent = expired_paired ? recv(expired_pair[1], packet, sizeof(packet), MSG_DONTWAIT) : -1;
+    BQ_CHECK(rejected_expired && expired.failed && absent < 0 &&
+             (errno == EAGAIN || errno == EWOULDBLOCK));
+    if (expired_pair[0] >= 0) close(expired_pair[0]);
+    if (expired_pair[1] >= 0) close(expired_pair[1]);
+
+    int pair[2] = {-1, -1};
+    bool paired = socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0;
+    BQ_CHECK(paired);
+    BqPhaseChannel channel = {.descriptor = -1};
+    bool initialized = paired && bq_phase_init(&channel, pair[0], 7, 9);
+    struct sigaction action = {0}, prior_action = {0};
+    struct itimerval timer = {0}, prior_timer = {0};
+    sigemptyset(&action.sa_mask);
+    action.sa_handler = bq_test_phase_alarm_handler;
+    bool timer_saved = getitimer(ITIMER_REAL, &prior_timer) == 0;
+    bool action_installed = timer_saved && sigaction(SIGALRM, &action, &prior_action) == 0;
+    timer.it_value.tv_usec = 10000;
+    timer.it_interval.tv_usec = 10000;
+    bool timer_started = action_installed && setitimer(ITIMER_REAL, &timer, NULL) == 0;
+    uint64_t start = bq_phase_clock();
+    uint64_t deadline = start && UINT64_C(200000000) <= UINT64_MAX - start ?
+                        start + UINT64_C(200000000) : UINT64_MAX;
+    bq_test_phase_alarm_count = 0;
+    bool timed_out = timer_started && initialized &&
+        !bq_phase_exchange_until(&channel, BQ_PHASE_PREPARING, deadline);
+    uint64_t end = bq_phase_clock();
+    uint64_t elapsed = end >= start ? end - start : 0;
+    ssize_t request = paired ? recv(pair[1], packet, sizeof(packet), MSG_DONTWAIT) : -1;
+    BQ_CHECK(timed_out && channel.failed && channel.sequence == 0 && bq_test_phase_alarm_count >= 2 &&
+             elapsed >= UINT64_C(150000000) && elapsed < UINT64_C(2000000000) &&
+             request == BQ_PHASE_MESSAGE_BYTES && bq_phase_get(packet + 24) == BQ_PHASE_PREPARING &&
+             bq_phase_get(packet + 40) == 0);
+    struct itimerval cleared = {0};
+    if (timer_started) BQ_CHECK(setitimer(ITIMER_REAL, &cleared, NULL) == 0);
+    if (timer_saved) BQ_CHECK(setitimer(ITIMER_REAL, &prior_timer, NULL) == 0);
+    if (action_installed) BQ_CHECK(sigaction(SIGALRM, &prior_action, NULL) == 0);
+    if (pair[0] >= 0) close(pair[0]);
+    if (pair[1] >= 0) close(pair[1]);
+}
 
 BUSTER_GLOBAL_LOCAL void bq_test_phase_packets(void)
 {
@@ -60,6 +172,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_packets(void)
     bq_test_phase_run(9, NULL);
     bq_test_phase_prelaunch_deadline();
     bq_test_phase_finalization_deadline();
+    bq_test_phase_exchange_until_success();
+    bq_test_phase_exchange_until_failures();
 }
 
 BUSTER_GLOBAL_LOCAL u32 bq_test_phase_deadline_clock_calls;
