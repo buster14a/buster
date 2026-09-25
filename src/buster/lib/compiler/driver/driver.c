@@ -866,6 +866,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     bool options_ended = false;
     bool action_seen = false;
     String8 position_independent_executable_option = {0};
+    bool common_storage_requested = false;
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
         String8 argument = arguments.pointer[argument_index];
@@ -1371,6 +1372,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.disable_target_local_promotion = string_equal(argument, S8("-fno-target-local-promotion"));
             continue;
         }
+        if (string_equal(argument, S8("-fcommon")) || string_equal(argument, S8("-fno-common")))
+        {
+            common_storage_requested = string_equal(argument, S8("-fcommon"));
+            continue;
+        }
         // Register allocation is independent of source-level optimization:
         // like LLVM, -O0 still uses the low-latency allocator. QUALITY stays
         // out of the optimization-level mapping because it does not yet beat
@@ -1575,7 +1581,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             string_equal(argument, S8("-pipe")) || string_equal(argument, S8("-pthread")) ||
             string_equal(argument, S8("-fno-pie")) || string_equal(argument, S8("-fno-builtin")) ||
             string_equal(argument, S8("-fwrapv")) || string_equal(argument, S8("-fno-strict-aliasing")) || string_equal(argument, S8("-funsigned-char")) ||
-            string_equal(argument, S8("-fsigned-char")) || string_equal(argument, S8("-fcommon")) || string_equal(argument, S8("-fno-common")) ||
+            string_equal(argument, S8("-fsigned-char")) ||
             // Buster emits no stack-protector prologue, so the disabling
             // spelling is already what it does. A libc asks for it on the
             // translation units that run before thread-local storage exists,
@@ -1607,6 +1613,14 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         {
             compiler_driver_resolve_native_target(arena, &invocation, architecture_option, feature_overrides, feature_override_count);
         }
+    }
+    // No canonical object field carries common-storage intent. Reject only an
+    // effective request when this invocation will emit a code-generation artifact;
+    // preprocessing and syntax-only checks have no storage representation to lose.
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && common_storage_requested &&
+        invocation.action != COMPILER_DRIVER_ACTION_PREPROCESS && invocation.action != COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), S8("-fcommon"));
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && position_independent_executable_option.length && !invocation.has_gpu_target &&
         invocation.target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(invocation.target) == OBJECT_FORMAT_ELF64)

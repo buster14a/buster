@@ -630,6 +630,23 @@ BUSTER_C_INTERNAL IrTypeId c_ir_complex_type(CIrTypeContext* context, CTypeKind 
     return type;
 }
 
+// Literal magnitudes use a u64 carrier even when their selected C type is
+// wider. Cached lowering and uncached semantic queries must admit the same
+// values; a signed 128-bit type can represent every value in that carrier.
+BUSTER_C_INTERNAL u64 c_semantic_integer_literal_limit(u32 width, bool is_signed)
+{
+    u64 result = 0;
+    if (width > 64 || (width == 64 && !is_signed))
+    {
+        result = UINT64_MAX;
+    }
+    else if (width)
+    {
+        result = (UINT64_C(1) << (width - (is_signed ? 1u : 0u))) - 1;
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind kind)
 {
     if ((u32)kind >= C_TYPE_COUNT)
@@ -685,9 +702,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind k
     context->scalar_types[kind] = type;
     if (ir_kind == IR_TYPE_INTEGER)
     {
-        context->literal_limits[kind] = bit_width >= 64 ? (is_signed ? (u64)INT64_MAX : UINT64_MAX)
-                                        : is_signed     ? (((u64)1 << (bit_width - 1)) - 1)
-                                                        : (((u64)1 << bit_width) - 1);
+        context->literal_limits[kind] = c_semantic_integer_literal_limit(bit_width, is_signed);
     }
     return type;
 }
@@ -6931,7 +6946,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_split_bit_field_load(CIntegerIrBuilder* bu
         assembled = c_ir_emit_binary_value(builder, assembled, shift, signed_type, IR_BINARY_SHIFT_LEFT, source);
         assembled = c_ir_emit_binary_value(builder, assembled, shift, signed_type, IR_BINARY_SIGNED_SHIFT_RIGHT, source);
     }
-    IrValueId result = c_ir_emit_cast(builder, assembled, type, source);
+    // A bit-field place may be volatile even though the value of its read is
+    // not qualified. Keep the split path's result type in step with the
+    // ordinary load path; otherwise a multi-piece access leaks the qualified
+    // field type into arithmetic, returns, and call arguments.
+    IrTypeId result_type = value_type->is_atomic || value_type->is_volatile ? value_type->unqualified_type : type;
+    IrValueId result = c_ir_emit_cast(builder, assembled, result_type, source);
     c_ir_mark_unsigned_bit_field_value(builder, result, field);
     return result;
 }
@@ -8837,9 +8857,7 @@ BUSTER_C_INTERNAL bool c_semantic_integer_literal_fits(Target target, u64 const*
         bool sign = false;
         if (c_ir_scalar_type_properties(target, kind, &ir_kind, &width, &sign, &alignment) && width)
         {
-            limit = width > 64 ? UINT64_MAX
-                    : width == 64 ? sign ? (u64)INT64_MAX : UINT64_MAX
-                                  : (UINT64_C(1) << (width - (sign ? 1u : 0u))) - 1;
+            limit = c_semantic_integer_literal_limit(width, sign);
         }
     }
     return limit && value <= limit;
@@ -17128,6 +17146,14 @@ BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains_range(CIntegerI
     return false;
 }
 
+// An operand of sizeof or _Alignof is not prepared by either prepass. Its
+// owner decides whether a VLA expression operand must be lowered.
+#define C_IR_UNEVALUATED_OPERAND_WORDS                                                              \
+    (C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF) |                            \
+     C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU_ALT))
+
+BUSTER_C_INTERNAL u32 c_ir_unevaluated_operand_end(CIntegerIrBuilder* builder, u32 cursor, u32 end);
+
 BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* builder, CToken token);
 
 BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
@@ -17158,6 +17184,18 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
     while (frame->as.prepare_control.index < frame->as.prepare_control.end)
     {
         u32 index = frame->as.prepare_control.index++;
+        CToken token = builder->preprocess.tokens[index];
+        // The sizeof owner decides whether a VLA expression must run. When it
+        // does, it lowers the operand in a child expression frame, which runs
+        // its own preparation pass. This scan must not hoist control groups
+        // from a fixed-size sizeof or unevaluated _Alignof operand.
+        if (token.kind == C_TOKEN_IDENTIFIER &&
+            c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_IR_UNEVALUATED_OPERAND_WORDS))
+        {
+            frame->as.prepare_control.index =
+                c_ir_unevaluated_operand_end(builder, index + 1, frame->as.prepare_control.end);
+            continue;
+        }
         c_ir_lazy_operand_scan_step(builder, &frame->as.prepare_control.lazy, frame->as.prepare_control.start,
                                     frame->as.prepare_control.end, index);
         if (index + 1 < frame->as.prepare_control.end &&
@@ -17709,13 +17747,6 @@ BUSTER_C_INTERNAL bool c_ir_atomic_compare_orders_valid(IrMemoryOrder success, I
 
     return false;
 }
-
-// The words whose operand is never evaluated, as a well-known set: a call
-// inside one must not be prepared by the discover scan below, or its side
-// effects run even though the operand itself only ever folds to a constant.
-#define C_IR_UNEVALUATED_OPERAND_WORDS                                                              \
-    (C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF) |                            \
-     C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU_ALT))
 
 // Where the unevaluated operand of the sizeof or _Alignof word ending at
 // `cursor - 1` stops: the first token index past one unary-expression.
@@ -23132,7 +23163,11 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
         IrValueId scale = c_ir_emit_integer_value_typed(builder, element->layout.size, false, (CToken){0}, builder->ptrdiff_type);
         right = c_ir_emit_binary_value(builder, right, scale, builder->ptrdiff_type, IR_BINARY_INTEGER_MULTIPLY, source);
     }
-    else if (!pointer_arithmetic && !c_ir_unsigned_bit_field_promotes_to_int(builder, c_ir_bit_field_from_place(builder, place)))
+    // Ordinary compound arithmetic needs the original RHS type for promotions
+    // and the usual arithmetic conversions. Only the existing atomic RMW path
+    // needs a destination-typed operand here; non-atomic stores/results convert
+    // after c_ir_apply_operation, not before it (C17 6.5.16.2).
+    else if (atomic && !pointer_arithmetic && !c_ir_unsigned_bit_field_promotes_to_int(builder, c_ir_bit_field_from_place(builder, place)))
     {
         right = c_ir_emit_cast(builder, right, value_type, source);
         operation_right = right;

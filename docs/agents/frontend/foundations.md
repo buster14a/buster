@@ -225,8 +225,13 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   `INT64_MIN / -1` (including remainder) never execute as host arithmetic.
   `&&`, `||` and `?:` propagate faults only from evaluated operands; the
   conditional's common unsigned type still depends on both arms. Syntax
-  validation remains unconditional. `c_test_preprocessor_short_circuit` covers
-  generated `#if`/`#elif`, live-fault and malformed-dead-operand controls;
+  validation remains unconditional. Character constants obtain their
+  preprocessing signedness from the decoded target scalar type, including
+  target-dependent `L` and C23 `u8` literals. Parse-side constant folds retain
+  ordinary C promotions and do not inherit this `intmax_t`/`uintmax_t` widening.
+  `c_macro_conditional_tests` covers those character types alongside ordinary C
+  controls; `c_test_preprocessor_short_circuit` covers generated `#if`/`#elif`,
+  live-fault and malformed-dead-operand controls;
   `tests/basic_c_preprocessor_short_circuit.c` runs in the existing native
   allocator matrix (GitHub #147, #258).
 - A folded conditional expression converts its selected value to the common
@@ -263,6 +268,14 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   over the 32-bit key. The one temporary row buffer is rewound before origin
   recovery and publication; the original region array remains authoritative.
   Do not restore displacement-dependent insertion sorting for `#line` splits.
+  Publish lookup keys before C23 respelling so its origin queries can read the
+  existing prefix. `c_source_map_publish_appended` rebuilds keys afterwards only
+  if that append-only phase added regions; without an append, keep the original
+  keys and sentinel. Count equality is not a general mutation-cache contract.
+  Respelling may move the region array, but must not invalidate the published
+  key prefix while querying it. Neither publication rewinds the TU arena:
+  canonical lowering copies the map's pointers into `IrProgram.source_map`,
+  whose diagnostic, DWARF and CodeView consumers still borrow their storage.
 - Zero-initialize aggregate tables before publishing a partially resolved type.
   Recursive and mutually dependent declarations can expose an aggregate while
   later members are still unresolved; an uninitialized `IrField` must never be
