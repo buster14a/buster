@@ -316,10 +316,9 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
 ## Padded GNU vectors
 
 Non-power-of-two vectors preserve their logical lane count and round their
-object size to the next power of two. The x86-64 SysV and Win64 canonical
-emitters implement their call boundaries; optimized modes currently report
-canonical fallback for those new shapes. The registered driver suite keeps
+object size to the next power of two. The x86-64 SysV and Win64 MIR selectors
+implement their call boundaries across retained allocator spellings. The registered driver suite keeps
 the complete padded-vector source inline and materializes a private file for
 cross-target, native mixed-compiler, and Wine checks. The approved retirement
-corpus and its pre-existing C ABI header stay unchanged: #507 explicitly
-leaves this new frontend feature to #73, separate from retirement coverage.
+corpus and its pre-existing C ABI header stay unchanged. The padded-vector
+regressions cover the admitted MIR shapes independently of the archived oracle.
