@@ -5,9 +5,9 @@ on:
     paths:
       - src/buster/lib/compiler/object/object.c
       - src/buster/tests/compiler/object/object_test.c
-      - tests/coff_extended_relocations_clang.s
-      - tests/coff_extended_relocations_subject.c
-      - tests/coff_extended_relocations_support.c
+      - tools/fixtures/coff_extended_relocations_clang.s
+      - tools/fixtures/coff_extended_relocations_subject.c
+      - tools/fixtures/coff_extended_relocations_support.c
       - tools/test_coff_extended_relocations.py
       - .github/workflows/coff-extended-relocations.yml
   workflow_dispatch:

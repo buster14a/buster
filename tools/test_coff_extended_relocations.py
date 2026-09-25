@@ -66,7 +66,7 @@ def main():
     clang_input = output / "clang-extended-relocations.obj"
     run(
         ["clang", "--target=x86_64-pc-windows-msvc", "-g0", "-c",
-         repo / "tests/coff_extended_relocations_clang.s", "-o", clang_input],
+         repo / "tools/fixtures/coff_extended_relocations_clang.s", "-o", clang_input],
         cwd=repo,
     )
     clang_readobj = output / "clang-extended-relocations.readobj.txt"
@@ -80,13 +80,13 @@ def main():
     buster_object = output / "buster-extended-relocations.obj"
     run(
         [ide, "cc", "--target=x86_64-pc-windows-msvc", "-g0", "-O0", "-c",
-         repo / "tests/coff_extended_relocations_subject.c", "-o", buster_object],
+         repo / "tools/fixtures/coff_extended_relocations_subject.c", "-o", buster_object],
         cwd=repo,
     )
     support_object = output / "relocation-support.obj"
     run(
         ["clang", "--target=x86_64-pc-windows-msvc", "-g0", "-O0", "-c",
-         repo / "tests/coff_extended_relocations_support.c", "-o", support_object],
+         repo / "tools/fixtures/coff_extended_relocations_support.c", "-o", support_object],
         cwd=repo,
     )
     buster_readobj = output / "buster-extended-relocations.readobj.txt"
