@@ -4187,12 +4187,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_binary128_transp
         "#endif\n"
         "\n"
         "#ifndef BUSTER_F128_TRANSPORT_LIBRARY\n"
-        "#define F128_CHECK(expression, expected_low, expected_high, code) \\n"
-        "    do \\n"
-        "    { \\n"
-        "        F128Image observed; \\n"
-        "        observed.value = (expression); \\n"
-        "        if (!result && (observed.words[0] != (expected_low) || observed.words[1] != (expected_high))) result = (code); \\n"
+        "#define F128_CHECK(expression, expected_low, expected_high, code) \\\n"
+        "    do \\\n"
+        "    { \\\n"
+        "        F128Image observed; \\\n"
+        "        observed.value = (expression); \\\n"
+        "        if (!result && (observed.words[0] != (expected_low) || observed.words[1] != (expected_high))) result = (code); \\\n"
         "    } while (0)\n"
         "\n"
         "int main(void)\n"
@@ -13010,7 +13010,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         Arena* long_label_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
         String8 long_label_prefix = S8("int long_label_address(void)\n{\n    void *target = &&target;\n");
         String8 long_label_asm_prefix = S8("    __asm__(\"");
-        String8 long_label_asm_nop = S8("nop\n");
+        String8 long_label_asm_nop = S8("nop\\n");
         String8 long_label_asm_suffix = S8("\");\n");
         String8 long_label_suffix = S8("    goto *target;\ntarget:\n    return 0;\n}\n");
         u64 statement_count = 9000;
@@ -13194,7 +13194,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     {
         String8 unsupported_template_source_path = buster_test_temporary_path(arguments->arena, S8("buster-invalid-asm-conditional"), S8(".c"));
         String8 unsupported_template_source = S8("int conditional_asm_goto(int value) {"
-                                                 " __asm__ goto (\"test %0, %0\njne %l1\" : : \"r\"(value) : \"cc\" : taken);"
+                                                 " __asm__ goto (\"test %0, %0\\njne %l1\" : : \"r\"(value) : \"cc\" : taken);"
                                                  " return 0; taken: return 1; }\n");
         BUSTER_TEST(arguments, file_write(unsupported_template_source_path, BUSTER_SLICE_TO_BYTE_SLICE(unsupported_template_source)));
         String8 unsupported_template_object_path = buster_test_temporary_path(arguments->arena, S8("buster-invalid-asm-conditional"), S8(".o"));
