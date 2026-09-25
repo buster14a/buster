@@ -15126,7 +15126,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_f80(MachineX64Encoder* encoder, Machin
             machine_x64_emit_x87_memory(encoder, S8("FNSTCW"), offsets[0] + 10, 16);
             (void)machine_x64_emit_metadata_register_memory(encoder, S8("MOVZX"), MACHINE_X64_RAX, MACHINE_X64_RBP,
                                                            offsets[0] + 10, 64, 16, 0);
-            (void)machine_x64_emit_metadata_register_immediate(encoder, S8("AND"), MACHINE_X64_RAX, ~(s32)0x300, 32, 32, 0);
+            (void)machine_x64_emit_metadata_register_immediate(encoder, S8("AND"), MACHINE_X64_RAX, ~UINT32_C(0x300), 32, 32, 0);
             if (precision)
             {
                 (void)machine_x64_emit_metadata_register_immediate(encoder, S8("OR"), MACHINE_X64_RAX, precision, 32, 32, 0);
