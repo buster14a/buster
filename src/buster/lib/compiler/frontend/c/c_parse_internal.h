@@ -12,6 +12,7 @@ BUSTER_F_DECL bool c_test_validate_constexpr_declaration(Arena* arena, CParseRes
                                                        CDeclaration* declaration);
 BUSTER_F_DECL u32 c_test_parse_binding_bind(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol);
 BUSTER_F_DECL void c_test_parse_binding_unwind(CParseResult* result, u32 mark);
+BUSTER_F_DECL CTypeId c_test_aggregate_unique(CParseResult* result, CTypeKind kind, String8 tag, bool* decided);
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType type);
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope);
 BUSTER_F_DECL void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpoint);
