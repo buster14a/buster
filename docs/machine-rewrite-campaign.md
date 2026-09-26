@@ -288,11 +288,14 @@ Compiler gates on the final commit (Linux x86-64 container, Clang 18.1.3;
 * `test_all`: every module passes except two
   `compiler_driver_test_wide_vector_boundaries` assertions that only check
   the host Clang compile of a fixture with `-march=znver5`, which Clang 18
-  rejects on this AVX-512 host; they do not involve Buster output.
-* New self-checking fixtures `tests/basic_c_machine_rewrites.c`,
-  `tests/basic_c_branch_layout.c` and `tests/basic_c_aggregate_copies.c` run
-  under the driver in the NONE, MIR_STACK, FAST and QUALITY allocators with
-  `-fno-machine-fallback`, and agree with Clang. The machine tests add a
+  rejects on this AVX-512 host
+  ([#1292](https://github.com/buster14a/buster/issues/1292)); they do not
+  involve Buster output.
+* Three self-checking fixtures (local rewrites, branch layout, aggregate
+  copies), embedded in `compiler_driver_tests` so the frozen `tests/`
+  support inventory is unchanged, run under the driver in the NONE,
+  MIR_STACK, FAST and QUALITY allocators with `-fno-machine-fallback`, and
+  agree with Clang. The machine tests add a
   JIT-executed zero-idiom flag test (a zero between `CMP` and `SETCC`, across
   a `JMP` edge, and with dead flags) in every allocator; the frame-chunk
   golden bytes now expect disp8.
