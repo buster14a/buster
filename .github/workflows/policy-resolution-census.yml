@@ -1,0 +1,38 @@
+name: Target-policy resolution census
+
+on:
+  push:
+    branches:
+      - research/policy-resolution-census-20260925-ade6
+    paths:
+      - tools/policy_resolution_census.c
+      - .github/workflows/policy-resolution-census.yml
+
+permissions:
+  contents: read
+
+jobs:
+  census:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Build C-only disposable research driver
+        run: clang -std=c11 -Wall -Wextra -Wpedantic -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/policy_resolution_census.c -o "${{ runner.temp }}/policy-census"
+      - name: Count policies and compare matched artifacts and diagnostics
+        run: '"${{ runner.temp }}/policy-census"'
+      - name: Verify production sources were restored
+        if: always()
+        run: git diff --exit-code -- src
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: policy-resolution-census-${{ github.run_id }}-${{ github.run_attempt }}
+          path: policy-census-evidence
+          retention-days: 30
+          if-no-files-found: error
+          compression-level: 6
