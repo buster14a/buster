@@ -90,6 +90,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_GENERATE,
     BUILD_COMMAND_BUILD,
     BUILD_COMMAND_CLANG_ANALYZE,
+    BUILD_COMMAND_OPTNONE_AUDIT,
     BUILD_COMMAND_CMAKE_PROFILE_SUMMARY,
     BUILD_COMMAND_NINJA_LOG_SUMMARY,
     BUILD_COMMAND_TIME_TRACE_SUMMARY,
@@ -6342,6 +6343,7 @@ BUSTER_GLOBAL_LOCAL String8 clang_analyze_compile_commands_path(Arena* arena, St
 }
 
 #include "tools/clang_analyze.c"
+#include "tools/optnone_audit.c"
 
 BUSTER_GLOBAL_LOCAL void clang_analyze_command_add(Arena* arena, String8 build_directory, CmakeBuildOptions options)
 {
@@ -24556,7 +24558,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     }
     if (owns_preflight)
     {
-        if (!clang_analyze_self_test(arena))
+        if (!clang_analyze_self_test(arena) || !optnone_audit_self_test(arena))
         {
             return PROCESS_RESULT_FAILED;
         }
@@ -25008,6 +25010,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         if (coverage_obligations.unity_analysis_scheduled && combination.compiler == BUILD_COMPILER_CLANG && !combination.sanitize && combination.options.optimize)
         {
             clang_analyze_command_add(arena, combination.build_directory, combination.options);
+            optnone_audit_command_add(arena, combination.build_directory, combination.options);
         }
     }
     if (coverage_obligations.self_host_scheduled)
@@ -39093,6 +39096,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_GENERATE] = S8_INITIALIZER("generate"),
         [BUILD_COMMAND_BUILD] = S8_INITIALIZER("build"),
         [BUILD_COMMAND_CLANG_ANALYZE] = S8_INITIALIZER("clang_analyze"),
+        [BUILD_COMMAND_OPTNONE_AUDIT] = S8_INITIALIZER("optnone_audit"),
         [BUILD_COMMAND_CMAKE_PROFILE_SUMMARY] = S8_INITIALIZER("cmake_profile_summary"),
         [BUILD_COMMAND_NINJA_LOG_SUMMARY] = S8_INITIALIZER("ninja_log_summary"),
         [BUILD_COMMAND_TIME_TRACE_SUMMARY] = S8_INITIALIZER("time_trace_summary"),
@@ -39232,6 +39236,11 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     else if (command == BUILD_COMMAND_CLANG_ANALYZE)
     {
         result = clang_analyze_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
+        argument_i = arguments.length;
+    }
+    else if (command == BUILD_COMMAND_OPTNONE_AUDIT)
+    {
+        result = optnone_audit_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
         argument_i = arguments.length;
     }
     else if (command == BUILD_COMMAND_TEST_DIFFERENTIAL)
@@ -40244,8 +40253,9 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         }
         break;
         case BUILD_COMMAND_CLANG_ANALYZE:
+        case BUILD_COMMAND_OPTNONE_AUDIT:
         {
-            // Already executed by the analyzer-specific argument parser.
+            // Already executed by the command-specific argument parser.
         }
         break;
         case BUILD_COMMAND_CMAKE_PROFILE_SUMMARY:
