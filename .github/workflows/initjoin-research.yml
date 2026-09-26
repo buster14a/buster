@@ -1,0 +1,45 @@
+name: Initializer join research
+on:
+  push:
+    branches: [research/1319-initjoin-run-20260925-astra]
+permissions:
+  contents: write
+concurrency:
+  group: initializer-join-research
+  cancel-in-progress: false
+jobs:
+  correctness:
+    if: github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+      - name: Verify and unpack exact research inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd tools/investigations/initjoin-20260925
+          cat part0 part1 part2 part3 part4 > bundle.tar.gz
+          echo '6fb5d22b306f8638ef7ea36f3e5f47b66a596305c5cddfd5780832dc063fb828  bundle.tar.gz' | sha256sum -c -
+          tar -xzf bundle.tar.gz
+          echo '7534e5970e8e8a08456065714901b63388a5e97996dca2634ab6845c3fb8577a  candidate.patch' | sha256sum -c -
+          gzip -n -k candidate.patch
+          cd ../../..
+          mkdir -p initjoin-evidence
+          printf '%s\n' "$GITHUB_SHA" > initjoin-evidence/transport-commit.txt
+          git rev-parse HEAD^{tree} > initjoin-evidence/transport-tree.txt
+          cp tools/investigations/initjoin-20260925/run.py initjoin-evidence/run.py
+      - name: Build, compare, publish create-only source branch and retain census
+        shell: bash
+        run: python3 -u tools/investigations/initjoin-20260925/run.py
+      - name: Retain every raw attempt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: initializer-join-${{ github.run_id }}-${{ github.run_attempt }}
+          path: initjoin-evidence
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
