@@ -422,7 +422,14 @@ def self_test() -> None:
         else:
             raise AssertionError(f"expected rejection: {phrase}")
         checks += 1
-    with tempfile.TemporaryDirectory() as temp:
+    def execution_details(result: dict) -> str:
+        return (f"exit={result.get('exit')!r} timed_out={result.get('timed_out')!r} "
+                f"stdout={str(result.get('stdout', ''))[:1024]!r} "
+                f"stderr={str(result.get('stderr', ''))[:1024]!r}")
+    # Guest /tmp is intentionally mounted noexec. Keep executable fixtures on
+    # the executable root filesystem while retaining TemporaryDirectory's 0700
+    # isolation; the nobody path below makes only this fixture directory traversable.
+    with tempfile.TemporaryDirectory(prefix="issue1162-manager-selftest-", dir="/var/tmp") as temp:
         root = Path(temp)
         path1, path2 = root / "unitpath1", root / "unitpath2"
         path1.mkdir()
@@ -493,7 +500,8 @@ def self_test() -> None:
         executable.chmod(0o755)
         with patch(__name__ + ".SYSTEMCTL", str(executable)):
             actual = run_fixed(None, ("show", "-p", "Version"), time.monotonic() + 2)
-            assert actual["exit"] == 0 and actual["stdout"] == "Version=255.4\n"
+            assert actual["exit"] == 0 and actual["stdout"] == "Version=255.4\n", \
+                f"root fixture executable failed: {execution_details(actual)}"
             checks += 1
             with open("/proc/self/status", encoding="ascii") as source:
                 effective = next(int(line.split()[1], 16) for line in source
@@ -504,7 +512,8 @@ def self_test() -> None:
                 root.chmod(0o755)
                 dropped = run_fixed(fixture_account, ("show", "-p", "Version"),
                                     time.monotonic() + 2)
-                assert dropped["exit"] == 0 and dropped["stdout"] == "Version=255.4\n"
+                assert dropped["exit"] == 0 and dropped["stdout"] == "Version=255.4\n", \
+                    f"dropped-identity fixture executable failed: {execution_details(dropped)}"
                 expected = set(os.getgrouplist(fixture_account.pw_name, fixture_account.pw_gid))
                 assert status_identity(dropped["proc_status"], fixture_account, expected)["cap_eff"] == 0
                 checks += 1
