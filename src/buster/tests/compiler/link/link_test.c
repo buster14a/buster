@@ -405,11 +405,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_initializer_collection(UnitTestArgu
                 u32 slot = slots - 1 - index;
                 // Reverse relocation order, holes, repeated symbols, negative
                 // addends, wrong-kind first matches, and duplicate valid matches.
-                relocations[3 * index] = (ObjectRelocation){.section = kind, .offset = (u64)slot * OBJECT_INITIALIZER_ENTRY_SIZE,
+                relocations[3 * index] = (ObjectRelocation){.section = (u32)kind, .offset = (u64)slot * OBJECT_INITIALIZER_ENTRY_SIZE,
                                                            .symbol = 17, .kind = OBJECT_RELOCATION_ABSOLUTE32};
                 if (slot % 5 != 2)
                 {
-                    relocations[3 * index + 1] = (ObjectRelocation){.section = kind, .offset = (u64)slot * OBJECT_INITIALIZER_ENTRY_SIZE,
+                    relocations[3 * index + 1] = (ObjectRelocation){.section = (u32)kind, .offset = (u64)slot * OBJECT_INITIALIZER_ENTRY_SIZE,
                                                                   .symbol = slot ? slot % 7 : UINT32_MAX, .addend = -(s64)slot - 1,
                                                                   .kind = OBJECT_RELOCATION_ABSOLUTE64};
                     relocations[3 * index + 2] = relocations[3 * index + 1];
@@ -417,11 +417,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_initializer_collection(UnitTestArgu
                     relocations[3 * index + 2].addend = 123;
                 }
             }
-            relocations[slots * 3] = (ObjectRelocation){.section = kind, .offset = UINT64_MAX, .kind = OBJECT_RELOCATION_ABSOLUTE64};
-            relocations[slots * 3 + 1] = (ObjectRelocation){.section = kind, .offset = (u64)slots * OBJECT_INITIALIZER_ENTRY_SIZE,
+            relocations[slots * 3] = (ObjectRelocation){.section = (u32)kind, .offset = UINT64_MAX, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+            relocations[slots * 3 + 1] = (ObjectRelocation){.section = (u32)kind, .offset = (u64)slots * OBJECT_INITIALIZER_ENTRY_SIZE,
                                                          .kind = OBJECT_RELOCATION_ABSOLUTE64};
-            relocations[slots * 3 + 2] = (ObjectRelocation){.section = kind, .offset = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64};
-            relocations[slots * 3 + 3] = (ObjectRelocation){.section = section_index ? OBJECT_SECTION_INIT_ARRAY : OBJECT_SECTION_FINI_ARRAY,
+            relocations[slots * 3 + 2] = (ObjectRelocation){.section = (u32)kind, .offset = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+            relocations[slots * 3 + 3] = (ObjectRelocation){.section = (u32)(section_index ? OBJECT_SECTION_INIT_ARRAY : OBJECT_SECTION_FINI_ARRAY),
                                                          .offset = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64};
             memcpy(snapshot, relocations, (u64)relocation_count * sizeof(*snapshot));
             LinkInitializerEntry* storage = arena_allocate(arena, LinkInitializerEntry, slots + 2);
@@ -458,14 +458,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_initializer_collection(UnitTestArgu
             if (slots >= 257)
             {
                 ObjectRelocation sparse_relocations[] = {
-                    {.section = kind, .offset = (u64)(slots - 1) * OBJECT_INITIALIZER_ENTRY_SIZE, .symbol = 3,
+                    {.section = (u32)kind, .offset = (u64)(slots - 1) * OBJECT_INITIALIZER_ENTRY_SIZE, .symbol = 3,
                      .addend = -17, .kind = OBJECT_RELOCATION_ABSOLUTE64},
-                    {.section = kind, .offset = 0, .symbol = UINT32_MAX, .addend = 12, .kind = OBJECT_RELOCATION_ABSOLUTE64},
-                    {.section = kind, .offset = (u64)(slots - 1) * OBJECT_INITIALIZER_ENTRY_SIZE, .symbol = 99,
+                    {.section = (u32)kind, .offset = 0, .symbol = UINT32_MAX, .addend = 12, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+                    {.section = (u32)kind, .offset = (u64)(slots - 1) * OBJECT_INITIALIZER_ENTRY_SIZE, .symbol = 99,
                      .addend = 42, .kind = OBJECT_RELOCATION_ABSOLUTE64},
-                    {.section = kind, .offset = 8, .symbol = 0, .addend = -1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+                    {.section = (u32)kind, .offset = 8, .symbol = 0, .addend = -1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
                     {.section = OBJECT_SECTION_TEXT, .offset = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
-                    {.section = kind, .offset = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+                    {.section = (u32)kind, .offset = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
                 };
                 object.relocations = sparse_relocations;
                 object.relocation_count = BUSTER_ARRAY_LENGTH(sparse_relocations);
