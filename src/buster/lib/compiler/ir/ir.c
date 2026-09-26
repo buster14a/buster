@@ -17,7 +17,9 @@
 // ir_cfg.c), and the module validator
 // (ir_validate_canonical_module) that every producer runs before machine
 // selection or Wasm emission so a diagnosed frontend failure cannot leak a
-// half-built function into codegen.
+// half-built function into codegen. The validator is one pass visited a
+// function at a time (ir_validation_pass_begin/visit/result), which
+// preparation also drives straight after transforming each function.
 
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/ir_internal.h>
@@ -4484,69 +4486,6 @@ IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBl
     return result;
 }
 
-// Runs the ownership proof over every lowered function ahead of the
-// per-instruction checks, so those can walk `next` without a cycle guard and
-// can trust that block->last_instruction really terminates its chain. One
-// scratch array sized to the largest function serves the whole module.
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* module)
-{
-    IrValidationResult result = {
-        .function = IR_FUNCTION_ID_INVALID,
-        .block = IR_BLOCK_ID_INVALID,
-        .instruction = IR_INSTRUCTION_ID_INVALID,
-    };
-    u32 capacity = 0;
-    for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
-    {
-        IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTION_SCANS, 1);
-        IrFunction* function = module->functions + function_index;
-        if (function->state == IR_FUNCTION_LOWERED)
-        {
-            if ((function->block_count && !function->blocks) || (function->instruction_count && !function->instructions) ||
-                (function->value_count && !function->values) ||
-                (function->label_metadata_count && (!function->label_metadata || !function->label_metadata_values)) ||
-                (function->extra_count && (!function->extras || !function->extra_instructions)))
-            {
-                result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
-            }
-            else
-            {
-                if (function->published_cfg)
-                {
-                    IR_CONSTRUCTION_RECORD(VALIDATION_PUBLISHED_CFG_CHECKS, 1);
-                    result = ir_validate_published_cfg(function);
-                }
-                capacity = BUSTER_MAX(capacity, function->instruction_count);
-            }
-        }
-    }
-    if (result.error == IR_VALIDATION_NONE)
-    {
-        TemporalArena scratch = scratch_begin(0, 0);
-        IrBlockId* owners = arena_allocate(scratch.arena, IrBlockId, capacity);
-        for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
-        {
-            IrFunction* function = module->functions + function_index;
-            if (function->state != IR_FUNCTION_LOWERED)
-            {
-                continue;
-            }
-            IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTIONS, 1);
-            IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BLOCKS, function->block_count);
-            IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_INSTRUCTIONS, function->instruction_count);
-            IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BYTES_CLEARED, sizeof(*owners) * function->instruction_count);
-            IrInstructionOwnership ownership = ir_function_instruction_owners(function, owners);
-            if (ownership.error != IR_VALIDATION_NONE)
-            {
-                result = ir_validation_error(ownership.error, function, ownership.block, ownership.instruction);
-                break;
-            }
-        }
-        scratch_end(scratch);
-    }
-    return result;
-}
-
 BUSTER_GLOBAL_LOCAL bool ir_canonical_conversion_valid(IrType* source, IrType* destination, IrConversionOperation operation)
 {
     if (source && destination)
@@ -5583,9 +5522,10 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     return error;
 }
 
-// One block's instruction chain. ir_validate_module_ownership already proved
-// the chain is a simple path of in-range ids, which is why there is no range or
-// revisit guard here.
+// One block's instruction chain. The validation pass proved this function's
+// ownership before running its checks (ir_validation_pass_visit), so the chain
+// is a simple path of in-range ids, which is why there is no range or revisit
+// guard here.
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_instructions(IrProgram* program, IrFunction* function, IrType* signature, IrBlock* block)
 {
     IrValidationResult result = ir_validation_ok();
@@ -5734,61 +5674,148 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_initializer(IrProgram* program
     return result;
 }
 
-IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
+// One canonical validation pass over a module, visiting its functions in
+// index order. The result is fixed by category, not by when each piece of work
+// runs: a malformed module outranks everything; then the first structural
+// fault of a lowered function (its arrays or its published CFG); then the
+// first ownership fault; then the first global, alias or initializer fault;
+// then the first fault in a function's values and blocks. Within a category
+// the lowest function index wins. That is the order in which the validator
+// used to run these as separate whole-module sweeps, and the pass gates work
+// the same way: a function's value and block checks run only after its own
+// ownership is proven, and only while no ownership, module-level or earlier
+// check fault is known. The checks may therefore walk `next` without a cycle
+// guard and trust that block->last_instruction terminates its chain.
+//
+// What visiting changes is locality. The ownership walk and the checks read
+// the same rows. When a module's rows exceed the last-level cache (the unity
+// self-compile's do several times over), an ownership sweep of the whole
+// module followed by a check sweep fetched every row from memory twice;
+// walking and then checking one function while its rows are cached fetches
+// them once. ir_prepare_canonical_module visits each function straight after
+// transforming it, for the same reason. Module-level entities are checked when
+// the pass begins: they read function headers only, never rows or chains.
+typedef struct IrValidationPass IrValidationPass;
+struct IrValidationPass
 {
-    IrValidationResult result = ir_validation_ok();
+    IrValidationResult structure;
+    IrValidationResult ownership;
+    IrValidationResult module;
+    IrValidationResult checks;
+};
+
+BUSTER_GLOBAL_LOCAL IrValidationPass ir_validation_pass_begin(IrProgram* program, IrModule* module)
+{
+    IrValidationPass pass = {
+        .structure = ir_validation_ok(),
+        .ownership = ir_validation_ok(),
+        .module = ir_validation_ok(),
+        .checks = ir_validation_ok(),
+    };
     IR_CONSTRUCTION_RECORD(VALIDATION_CALLS, 1);
     if (!program || !module || (program->module_count && !program->modules) ||
         (program->types.count && !program->types.types) || (program->symbols.count && !program->symbols.symbols) ||
         (module->function_count && !module->functions) || (module->global_count && !module->globals) ||
         (module->alias_count && !module->aliases) || (module->initializer_count && !module->initializers))
     {
-        result.error = IR_VALIDATION_INVALID_ID;
+        pass.structure.error = IR_VALIDATION_INVALID_ID;
     }
     else
     {
-        result = ir_validate_module_ownership(module);
-        for (u32 global_index = 0; global_index < module->global_count && result.error == IR_VALIDATION_NONE; global_index += 1)
+        for (u32 global_index = 0; global_index < module->global_count && pass.module.error == IR_VALIDATION_NONE; global_index += 1)
         {
             IR_CONSTRUCTION_RECORD(VALIDATION_GLOBALS, 1);
-            result.error = ir_validate_global(program, module, module->globals + global_index);
+            pass.module.error = ir_validate_global(program, module, module->globals + global_index);
         }
-        for (u32 alias_index = 0; alias_index < module->alias_count && result.error == IR_VALIDATION_NONE; alias_index += 1)
+        for (u32 alias_index = 0; alias_index < module->alias_count && pass.module.error == IR_VALIDATION_NONE; alias_index += 1)
         {
             IR_CONSTRUCTION_RECORD(VALIDATION_ALIASES, 1);
-            result.error = ir_validate_alias(program, module, module->aliases[alias_index]);
+            pass.module.error = ir_validate_alias(program, module, module->aliases[alias_index]);
         }
-        for (u32 initializer_index = 0; initializer_index < module->initializer_count && result.error == IR_VALIDATION_NONE; initializer_index += 1)
+        for (u32 initializer_index = 0; initializer_index < module->initializer_count && pass.module.error == IR_VALIDATION_NONE; initializer_index += 1)
         {
             IR_CONSTRUCTION_RECORD(VALIDATION_INITIALIZERS, 1);
-            result.error = ir_validate_initializer(program, module, module->initializers[initializer_index]);
+            pass.module.error = ir_validate_initializer(program, module, module->initializers[initializer_index]);
         }
-        for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
+    }
+    return pass;
+}
+
+// Visits must follow function index order. Once a structural fault is known
+// the result is settled and a visit does nothing.
+BUSTER_GLOBAL_LOCAL void ir_validation_pass_visit(IrProgram* program, IrValidationPass* pass, IrFunction* function)
+{
+    if (pass->structure.error == IR_VALIDATION_NONE)
+    {
+        IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTION_SCANS, 1);
+        if (function->state == IR_FUNCTION_LOWERED)
         {
-            IrFunction* function = module->functions + function_index;
-            if (function->state != IR_FUNCTION_LOWERED)
+            if ((function->block_count && !function->blocks) || (function->instruction_count && !function->instructions) ||
+                (function->value_count && !function->values) ||
+                (function->label_metadata_count && (!function->label_metadata || !function->label_metadata_values)) ||
+                (function->extra_count && (!function->extras || !function->extra_instructions)))
             {
-                continue;
+                pass->structure = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
             }
-            IR_CONSTRUCTION_RECORD(VALIDATION_FUNCTIONS, 1);
-            IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
-            if (!signature || signature->kind != IR_TYPE_FUNCTION ||
-                (signature->parameter_count && !signature->parameter_types) ||
-                !ir_type_from_id(&program->types, signature->return_type) || function->entry.value >= function->block_count)
+            else if (function->published_cfg)
             {
-                result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+                IR_CONSTRUCTION_RECORD(VALIDATION_PUBLISHED_CFG_CHECKS, 1);
+                pass->structure = ir_validate_published_cfg(function);
             }
-            else
+            if (pass->structure.error == IR_VALIDATION_NONE && pass->ownership.error == IR_VALIDATION_NONE)
             {
-                result = ir_validate_function_values(program, function);
-                if (result.error == IR_VALIDATION_NONE)
+                IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTIONS, 1);
+                IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BLOCKS, function->block_count);
+                IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_INSTRUCTIONS, function->instruction_count);
+                IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BYTES_CLEARED, sizeof(IrBlockId) * function->instruction_count);
+                TemporalArena scratch = scratch_begin(&program->arena, 1);
+                IrBlockId* owners = arena_allocate(scratch.arena, IrBlockId, function->instruction_count);
+                IrInstructionOwnership ownership = ir_function_instruction_owners(function, owners);
+                scratch_end(scratch);
+                if (ownership.error != IR_VALIDATION_NONE)
                 {
-                    result = ir_validate_function_blocks(program, function, signature);
+                    pass->ownership = ir_validation_error(ownership.error, function, ownership.block, ownership.instruction);
+                }
+                else if (pass->module.error == IR_VALIDATION_NONE && pass->checks.error == IR_VALIDATION_NONE)
+                {
+                    IR_CONSTRUCTION_RECORD(VALIDATION_FUNCTIONS, 1);
+                    IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
+                    if (!signature || signature->kind != IR_TYPE_FUNCTION ||
+                        (signature->parameter_count && !signature->parameter_types) ||
+                        !ir_type_from_id(&program->types, signature->return_type) || function->entry.value >= function->block_count)
+                    {
+                        pass->checks = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+                    }
+                    else
+                    {
+                        pass->checks = ir_validate_function_values(program, function);
+                        if (pass->checks.error == IR_VALIDATION_NONE)
+                        {
+                            pass->checks = ir_validate_function_blocks(program, function, signature);
+                        }
+                    }
                 }
             }
         }
     }
-    return result;
+}
+
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_pass_result(IrValidationPass const* pass)
+{
+    return pass->structure.error != IR_VALIDATION_NONE   ? pass->structure
+           : pass->ownership.error != IR_VALIDATION_NONE ? pass->ownership
+           : pass->module.error != IR_VALIDATION_NONE    ? pass->module
+                                                         : pass->checks;
+}
+
+IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
+{
+    IrValidationPass pass = ir_validation_pass_begin(program, module);
+    for (u32 function_index = 0; pass.structure.error == IR_VALIDATION_NONE && function_index < module->function_count; function_index += 1)
+    {
+        ir_validation_pass_visit(program, &pass, module->functions + function_index);
+    }
+    return ir_validation_pass_result(&pass);
 }
 
 #include <buster/lib/compiler/ir/ir_cfg.c>
