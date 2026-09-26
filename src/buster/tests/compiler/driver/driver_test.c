@@ -16160,6 +16160,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // encoder paths; NONE (index 1) is the direct-emitter control.
     String8 c_machine_rewrite_paths[] = {
         S8("tests/basic_c_machine_rewrites.c"),
+        S8("tests/basic_c_branch_layout.c"),
     };
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_machine_rewrite_paths); fixture_index += 1)
     {

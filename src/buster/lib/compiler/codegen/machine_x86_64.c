@@ -14770,10 +14770,13 @@ bool machine_x64_test_block_displacement(u32 target_offset, s64 addend, u32 plac
 }
 #endif
 
+// `step_limit` bounds how many leading steps are emitted; the JCC row passes
+// one to keep only its Jcc when the other successor is the next block.
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* encoder, MachineX64PreparedExactOpcode const* entry,
                                                          MachineInstruction const* instruction, MachineStackPlacement const* placement,
                                                          u8 const* operand_registers, u32 payload, u64 immediate_value,
-                                                         MachineX64ExactEmitCounters* counters, Arena* arena, MachineBuilderStream* fixups)
+                                                         MachineX64ExactEmitCounters* counters, Arena* arena, MachineBuilderStream* fixups,
+                                                         u32 step_limit)
 {
     MachineX64ExactSequence const* sequence = entry ? entry->sequence : 0;
     if (!sequence || !entry->plan_valid || sequence->variant_count == 0 || entry->variant_count != sequence->variant_count ||
@@ -14833,7 +14836,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* enco
     }
     u32 sequence_start = encoder->count;
     u32 parity_mode = (payload >> 9) & 0x3u;
-    for (u32 step_index = 0; step_index < variant->step_count; step_index += 1)
+    for (u32 step_index = 0; step_index < variant->step_count && step_index < step_limit; step_index += 1)
     {
         if (allocated_predicate && step_index == (predicate_result ? 1u : 0u)) continue;
         MachineX64ExactSequenceStep const* step = variant->steps + step_index;
@@ -15689,7 +15692,50 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     exact_immediate = instruction->payload;
                 }
                 bool exact_emitted = false;
-                if (!exact_immediate_valid)
+                // Branch layout (docs/machine-rewrite-campaign.md): blocks are
+                // emitted in index order, so a terminator's successor at
+                // block_index + 1 is reached by falling through. A JMP there
+                // emits nothing; a JCC keeps only its Jcc when the fallthrough
+                // is next, or inverts the condition (x86 nibbles pair at bit
+                // 0) and branches to the fallthrough when the taken block is
+                // next. Allocator edits after the terminator, a non-final
+                // row, or an asm-goto landing addend on the JMP keep the full
+                // form.
+                MachineInstruction layout_row = *instruction;
+                u32 layout_step_limit = UINT32_MAX;
+                bool layout_elided = false;
+                bool layout_final = offset + 1u == block->instruction_count &&
+                                    !(edit_cursor < placement->edit_count &&
+                                      placement->edits[edit_cursor].point == machine_point_make(instruction_index, MACHINE_POINT_AFTER));
+                u32 next_block = block_index + 1u;
+                bool taken_is_block = machine_ref_kind(instruction->operands[0]) == MACHINE_REF_BLOCK;
+                bool fallthrough_is_block = machine_ref_kind(instruction->operands[1]) == MACHINE_REF_BLOCK;
+                if (layout_final && instruction->opcode == MACHINE_X64_JMP && taken_is_block &&
+                    machine_ref_payload(instruction->operands[0]) == next_block &&
+                    !(block_addend_targets && block_addend_targets[block_index] == next_block))
+                {
+                    layout_elided = true;
+                }
+                else if (layout_final && instruction->opcode == MACHINE_X64_JCC && taken_is_block && fallthrough_is_block &&
+                         (instruction->payload & ~0xfu) == 0)
+                {
+                    if (machine_ref_payload(instruction->operands[1]) == next_block)
+                    {
+                        layout_step_limit = 1;
+                    }
+                    else if (machine_ref_payload(instruction->operands[0]) == next_block)
+                    {
+                        layout_row.payload = instruction->payload ^ 1u;
+                        layout_row.operands[0] = instruction->operands[1];
+                        layout_row.operands[1] = instruction->operands[0];
+                        layout_step_limit = 1;
+                    }
+                }
+                if (layout_elided)
+                {
+                    exact_emitted = true;
+                }
+                else if (!exact_immediate_valid)
                 {
                     exact_counters.attempts += 1;
                     exact_counters.fallbacks += 1;
@@ -15702,8 +15748,9 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 else
                 {
                     exact_emitted = exact_entry->sequence_required
-                                         ? machine_x64_emit_exact_sequence(&encoder, exact_entry, instruction, placement, operand_registers,
-                                                                           instruction->payload, exact_immediate, &exact_counters, arena, &fixups)
+                                         ? machine_x64_emit_exact_sequence(&encoder, exact_entry, &layout_row, placement, operand_registers,
+                                                                           layout_row.payload, exact_immediate, &exact_counters, arena, &fixups,
+                                                                           layout_step_limit)
                                          : machine_x64_emit_exact_recipe(&encoder, exact_entry, instruction, placement, operand_registers,
                                                                          instruction->payload, exact_immediate, false, &exact_counters);
                 }
@@ -15725,7 +15772,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     // authoritative.
                     encoder.overflow = true;
                 }
-                else if (exact_entry->descriptor)
+                else if (exact_entry->descriptor && !layout_elided)
                 {
                     // Relative and symbolic forms deliberately query the
                     // metadata encoder with a neutral zero displacement. The

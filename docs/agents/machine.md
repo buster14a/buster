@@ -141,6 +141,14 @@
   killers and only `MACHINE_OPCODE_ROW_FLAGS_USE` rows and inline assembly as
   readers; keep new flag readers marked, or the proof becomes unsound. New
   forms come from metadata-published fixed templates, never literal bytes.
+- x86-64 blocks are emitted in index order, and the encoder lays out a
+  block's final terminator against that order: a `JMP` to block `index + 1`
+  emits nothing; a `JCC` whose fallthrough is next emits only its `Jcc`, and
+  one whose taken block is next branches on the inverted condition (x86
+  condition nibbles pair at bit 0) to its fallthrough. Allocator edits after
+  the terminator, an asm-goto landing addend on the `JMP`, or a `JCC` payload
+  that is not a plain condition nibble keep the two-branch form. Block order
+  therefore affects size, never semantics.
 - x86 ADD/SUB/AND/OR/XOR/IMUL rows are three-operand machine SSA with operand
   0 tied to operand 1. Allocators satisfy the physical two-address constraint;
   selectors must not reintroduce a MOV plus mutable USE_DEFINE result.
