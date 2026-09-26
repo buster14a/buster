@@ -151,6 +151,18 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   the same order the entry-stub writers do. An input that states no priorities
   (the Mach-O reader, the assembler's objects) has every entry unprioritized,
   which leaves it in link order.
+- **Initializer collection does not search the relocation list once per slot.**
+  `link_initializer_entries_collect` uses the caller's output reservation as a
+  transient slot table, then compacts it in place. Sparse arrays instead sort a
+  bounded prefix of matching relocation indices in that same storage, so holes
+  do not fault in the full reservation. At most E/32 matches take this path;
+  32-bit identities bound heap height to 32. For E complete slots and R
+  relocations, all scans, construction, sorting, compaction and reversal are
+  therefore O(E + R), with no added allocation. The dense transition can scan
+  relocations twice. Zero slots or zero relocations do no collection work, and
+  one slot keeps the first-match early exit. Both paths keep the first aligned
+  `ABSOLUTE64` per slot, omit holes, clear transient keys, and reverse fini
+  results. Input metadata is immutable; priorities were ordered at merge time.
 - **A relocatable object keeps its arrays in all three formats; ELF and COFF
   can also state a priority, Mach-O cannot.** The COFF spelling is
   `.CRT$XCA00101` for a group, `.CRT$XCU` for what named none, and

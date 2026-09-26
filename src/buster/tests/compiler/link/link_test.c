@@ -321,6 +321,184 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_coff_comdat_selection(UnitTestArgum
     return result;
 }
 
+// Slot-first search is intentionally independent of the production table.
+BUSTER_GLOBAL_LOCAL u32 link_test_initializer_reference(ObjectFile* object, ObjectSectionKind kind, LinkInitializerEntry* entries, bool reverse)
+{
+    u32 count = 0;
+    u64 slots = object->sections[kind].data.length / OBJECT_INITIALIZER_ENTRY_SIZE;
+    for (u64 position = 0; position < slots; position += 1)
+    {
+        u64 slot = reverse ? slots - 1 - position : position;
+        for (u32 index = 0; index < object->relocation_count; index += 1)
+        {
+            ObjectRelocation relocation = object->relocations[index];
+            if (relocation.section == (u32)kind && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 &&
+                relocation.offset == slot * OBJECT_INITIALIZER_ENTRY_SIZE)
+            {
+                entries[count++] = (LinkInitializerEntry){.addend = relocation.addend, .symbol = relocation.symbol};
+                break;
+            }
+        }
+    }
+    return count;
+}
+
+// Strong simple alternative: a separate relocation-index table. This has the
+// same linear bound, but adds four bytes per slot to the existing output.
+BUSTER_GLOBAL_LOCAL u32 link_test_initializer_index(Arena* arena, ObjectFile* object, ObjectSectionKind kind, LinkInitializerEntry* entries, bool reverse)
+{
+    u64 slots = object->sections[kind].data.length / OBJECT_INITIALIZER_ENTRY_SIZE;
+    u32* indices = arena_allocate(arena, u32, slots);
+    for (u64 slot = 0; slot < slots; slot += 1)
+    {
+        indices[slot] = UINT32_MAX;
+    }
+    for (u32 index = 0; index < object->relocation_count; index += 1)
+    {
+        ObjectRelocation relocation = object->relocations[index];
+        u64 slot = relocation.offset / OBJECT_INITIALIZER_ENTRY_SIZE;
+        if (relocation.section == (u32)kind && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 &&
+            relocation.offset % OBJECT_INITIALIZER_ENTRY_SIZE == 0 && slot < slots && indices[slot] == UINT32_MAX)
+        {
+            indices[slot] = index;
+        }
+    }
+    u32 count = 0;
+    for (u64 position = 0; position < slots; position += 1)
+    {
+        u64 slot = reverse ? slots - 1 - position : position;
+        if (indices[slot] != UINT32_MAX)
+        {
+            ObjectRelocation relocation = object->relocations[indices[slot]];
+            entries[count++] = (LinkInitializerEntry){.addend = relocation.addend, .symbol = relocation.symbol};
+        }
+    }
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_initializer_collection(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arena_create((ArenaCreation){0});
+    u32 counts[] = {0, 1, 2, 3, 7, 31, 32, 33, 64, 257, 4097};
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(counts); shape += 1)
+    {
+        u32 slots = counts[shape];
+        for (u32 section_index = 0; section_index < 2; section_index += 1)
+        {
+            ObjectSectionKind kind = section_index ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+            u32 relocation_count = slots * 3 + 6;
+            ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, relocation_count);
+            ObjectRelocation* snapshot = arena_allocate(arena, ObjectRelocation, relocation_count);
+            ObjectSection sections[OBJECT_SECTION_COUNT] = {0};
+            // The collector reads metadata only. An incomplete trailing slot
+            // must not become an entry, including for a zero-complete-slot array.
+            sections[kind].data.length = (u64)slots * OBJECT_INITIALIZER_ENTRY_SIZE + shape % OBJECT_INITIALIZER_ENTRY_SIZE;
+            ObjectFile object = {.sections = sections, .section_count = OBJECT_SECTION_COUNT,
+                                 .relocations = relocations, .relocation_count = relocation_count};
+            for (u32 index = 0; index < relocation_count; index += 1)
+            {
+                relocations[index] = (ObjectRelocation){.section = OBJECT_SECTION_TEXT, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+            }
+            for (u32 index = 0; index < slots; index += 1)
+            {
+                u32 slot = slots - 1 - index;
+                // Reverse relocation order, holes, repeated symbols, negative
+                // addends, wrong-kind first matches, and duplicate valid matches.
+                relocations[3 * index] = (ObjectRelocation){.section = (u32)kind, .offset = (u64)slot * OBJECT_INITIALIZER_ENTRY_SIZE,
+                                                           .symbol = 17, .kind = OBJECT_RELOCATION_ABSOLUTE32};
+                if (slot % 5 != 2)
+                {
+                    relocations[3 * index + 1] = (ObjectRelocation){.section = (u32)kind, .offset = (u64)slot * OBJECT_INITIALIZER_ENTRY_SIZE,
+                                                                  .symbol = slot ? slot % 7 : UINT32_MAX, .addend = -(s64)slot - 1,
+                                                                  .kind = OBJECT_RELOCATION_ABSOLUTE64};
+                    relocations[3 * index + 2] = relocations[3 * index + 1];
+                    relocations[3 * index + 2].symbol = 99;
+                    relocations[3 * index + 2].addend = 123;
+                }
+            }
+            relocations[slots * 3] = (ObjectRelocation){.section = (u32)kind, .offset = UINT64_MAX, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+            relocations[slots * 3 + 1] = (ObjectRelocation){.section = (u32)kind, .offset = (u64)slots * OBJECT_INITIALIZER_ENTRY_SIZE,
+                                                         .kind = OBJECT_RELOCATION_ABSOLUTE64};
+            relocations[slots * 3 + 2] = (ObjectRelocation){.section = (u32)kind, .offset = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+            relocations[slots * 3 + 3] = (ObjectRelocation){.section = (u32)(section_index ? OBJECT_SECTION_INIT_ARRAY : OBJECT_SECTION_FINI_ARRAY),
+                                                         .offset = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+            memcpy(snapshot, relocations, (u64)relocation_count * sizeof(*snapshot));
+            LinkInitializerEntry* storage = arena_allocate(arena, LinkInitializerEntry, slots + 2);
+            LinkInitializerEntry* reference = arena_allocate(arena, LinkInitializerEntry, slots + 1);
+            LinkInitializerEntry* alternative = arena_allocate(arena, LinkInitializerEntry, slots + 1);
+            memset(storage, 0xa5, (u64)(slots + 2) * sizeof(*storage));
+            LinkInitializerEntry canary = storage[0];
+            for (u32 reverse = 0; reverse < 2; reverse += 1)
+            {
+                // Reuse without clearing: output occupancy cannot depend on a
+                // fresh arena or on the previous direction's compacted entries.
+                u32 expected = link_test_initializer_reference(&object, kind, reference, reverse != 0);
+                u32 indexed = link_test_initializer_index(arena, &object, kind, alternative, reverse != 0);
+                u32 actual = link_initializer_entries_collect_test(&object, kind, storage + 1, reverse != 0);
+                BUSTER_TEST(arguments, expected == slots - (slots + 2) / 5);
+                BUSTER_TEST(arguments, indexed == expected);
+                if (BUSTER_REQUIRE(arguments, actual == expected && actual <= slots))
+                {
+                    for (u32 index = 0; index < actual; index += 1)
+                    {
+                        BUSTER_TEST(arguments, storage[index + 1].symbol == reference[index].symbol);
+                        BUSTER_TEST(arguments, storage[index + 1].addend == reference[index].addend);
+                        BUSTER_TEST(arguments, storage[index + 1].reserved == 0);
+                        BUSTER_TEST(arguments, alternative[index].symbol == reference[index].symbol &&
+                                               alternative[index].addend == reference[index].addend && alternative[index].reserved == 0);
+                    }
+                }
+                BUSTER_TEST(arguments, memcmp(storage, &canary, sizeof(canary)) == 0);
+                BUSTER_TEST(arguments, memcmp(storage + slots + 1, &canary, sizeof(canary)) == 0);
+                BUSTER_TEST(arguments, memcmp(relocations, snapshot, (u64)relocation_count * sizeof(*snapshot)) == 0);
+                BUSTER_TEST(arguments, object.sections == sections && object.relocations == relocations &&
+                                       sections[kind].data.length == (u64)slots * OBJECT_INITIALIZER_ENTRY_SIZE + shape % OBJECT_INITIALIZER_ENTRY_SIZE);
+            }
+            if (slots >= 257)
+            {
+                ObjectRelocation sparse_relocations[] = {
+                    {.section = (u32)kind, .offset = (u64)(slots - 1) * OBJECT_INITIALIZER_ENTRY_SIZE, .symbol = 3,
+                     .addend = -17, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+                    {.section = (u32)kind, .offset = 0, .symbol = UINT32_MAX, .addend = 12, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+                    {.section = (u32)kind, .offset = (u64)(slots - 1) * OBJECT_INITIALIZER_ENTRY_SIZE, .symbol = 99,
+                     .addend = 42, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+                    {.section = (u32)kind, .offset = 8, .symbol = 0, .addend = -1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+                    {.section = OBJECT_SECTION_TEXT, .offset = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+                    {.section = (u32)kind, .offset = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+                };
+                object.relocations = sparse_relocations;
+                object.relocation_count = BUSTER_ARRAY_LENGTH(sparse_relocations);
+                for (u32 reverse = 0; reverse < 2; reverse += 1)
+                {
+                    memset(storage, 0xa5, (u64)(slots + 2) * sizeof(*storage));
+                    u32 expected = link_test_initializer_reference(&object, kind, reference, reverse != 0);
+                    u32 actual = link_initializer_entries_collect_test(&object, kind, storage + 1, reverse != 0);
+                    if (BUSTER_REQUIRE(arguments, actual == expected && actual == 3))
+                    {
+                        for (u32 index = 0; index < actual; index += 1)
+                        {
+                            BUSTER_TEST(arguments, storage[index + 1].symbol == reference[index].symbol &&
+                                                   storage[index + 1].addend == reference[index].addend && storage[index + 1].reserved == 0);
+                        }
+                    }
+                    // Sorting a sparse prefix must not dirty the rest of the
+                    // reservation, even when a selected slot is at its far end.
+                    for (u32 index = BUSTER_ARRAY_LENGTH(sparse_relocations) + 1; index < slots + 2; index += 1)
+                    {
+                        BUSTER_TEST(arguments, memcmp(storage + index, &canary, sizeof(canary)) == 0);
+                    }
+                }
+            }
+            object.relocation_count = 0;
+            BUSTER_TEST(arguments, link_initializer_entries_collect_test(&object, kind, 0, false) == 0);
+            arena_reset_to_start(arena);
+        }
+    }
+    arena_destroy(arena, 1);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_initializer_order(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3991,6 +4169,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult thread_local_identity = link_test_thread_local_symbol_identity(arguments);
     result.succeeded_test_count += thread_local_identity.succeeded_test_count;
     result.test_count += thread_local_identity.test_count;
+    UnitTestResult initializer_collection = link_test_initializer_collection(arguments);
+    result.succeeded_test_count += initializer_collection.succeeded_test_count;
+    result.test_count += initializer_collection.test_count;
     UnitTestResult initializer_order = link_test_initializer_order(arguments);
     result.succeeded_test_count += initializer_order.succeeded_test_count;
     result.test_count += initializer_order.test_count;

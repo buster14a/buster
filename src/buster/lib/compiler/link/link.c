@@ -30,7 +30,8 @@
 //
 // `__attribute__((constructor))` follows the same split. A writer with an
 // entry stub calls the registered functions from it and takes the two array
-// sections off the object first (link_initializer_plan_build), because every
+// sections off the object first (link_initializer_plan_build). Its collector
+// joins relocations to slots in bounded linear work using output storage; every
 // writer places every non-debug section it is given. Mach-O has no stub and
 // needs none for its constructors: it keeps `__DATA,__mod_init_func`, gives
 // it a section command of the type dyld dispatches on, and lets the loader
@@ -390,20 +391,6 @@ enum
     LINK_ELF_FREESTANDING_ENTRY_STUB_SIZE = 35,
 };
 
-// One function an image has to call before or after `main`, as the merged
-// object spells it: the symbol its `.init_array`/`.fini_array` slot is
-// relocated against, plus that relocation's addend.  Buster's own objects
-// name the function itself with a zero addend; Clang's name the section
-// symbol plus the function's offset inside it, which is why the addend is
-// carried rather than assumed away.
-typedef struct LinkInitializerEntry LinkInitializerEntry;
-struct LinkInitializerEntry
-{
-    s64 addend;
-    u32 symbol;
-    u32 reserved;
-};
-
 // Every initializer of an image, in the order it runs.  The linker writes the
 // entry point itself -- there is no libc startup object in an image it
 // produces, so nothing else would walk the arrays -- and it knows every
@@ -423,29 +410,150 @@ struct LinkInitializerPlan
     u32 destructor_count;
 };
 
-// The entries of one array section, ordered by slot.  A slot with no
-// relocation is a null pointer, which every startup implementation skips and
-// which this therefore drops too.
+// Sparse arrays must not turn an otherwise untouched output reservation into
+// resident pages. Sort only a small prefix of matching relocation indices;
+// the dense path below uses the full reservation as its slot table instead.
+// A prefix has at most E/32 entries. With 32-bit slot/relocation identities,
+// its worst-case heap height is at most 32, keeping sorting work bounded by E.
+enum
+{
+    LINK_INITIALIZER_SPARSE_RATIO = 32,
+};
+
+BUSTER_GLOBAL_LOCAL bool link_initializer_slot_above(LinkInitializerEntry left, LinkInitializerEntry right)
+{
+    // During sparse collection, reserved is the slot and symbol the original
+    // relocation index. The tie-break keeps the incumbent's first match.
+    return left.reserved > right.reserved || (left.reserved == right.reserved && left.symbol > right.symbol);
+}
+
+BUSTER_GLOBAL_LOCAL void link_initializer_slot_sift(LinkInitializerEntry* entries, u32 count, u32 root)
+{
+    while (root < count / 2)
+    {
+        u32 child = 2 * root + 1;
+        if (child + 1 < count && link_initializer_slot_above(entries[child + 1], entries[child]))
+        {
+            child += 1;
+        }
+        if (!link_initializer_slot_above(entries[child], entries[root]))
+        {
+            break;
+        }
+        LinkInitializerEntry swapped = entries[root];
+        entries[root] = entries[child];
+        entries[child] = swapped;
+        root = child;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void link_initializer_slots_sort(LinkInitializerEntry* entries, u32 count)
+{
+    for (u32 root = count / 2; root > 0; root -= 1)
+    {
+        link_initializer_slot_sift(entries, count, root - 1);
+    }
+    for (u32 remaining = count; remaining > 1; remaining -= 1)
+    {
+        LinkInitializerEntry swapped = entries[0];
+        entries[0] = entries[remaining - 1];
+        entries[remaining - 1] = swapped;
+        link_initializer_slot_sift(entries, remaining - 1, 0);
+    }
+}
+
+// The entries of one array section, ordered by slot. The caller reserves one
+// output entry per complete slot and bounds that capacity to UINT32_MAX.
+// Missing relocations are omitted and the first matching ABSOLUTE64 wins.
+// All transient keys/occupancy live in that existing output reservation, and
+// reserved is zero in every returned entry. No input metadata is changed.
 BUSTER_GLOBAL_LOCAL u32 link_initializer_entries_collect(ObjectFile* object, ObjectSectionKind kind, LinkInitializerEntry* entries, bool reverse)
 {
     u32 count = 0;
-    u64 length = object->sections[kind].data.length;
-    for (u64 offset = 0; offset + OBJECT_INITIALIZER_ENTRY_SIZE <= length; offset += OBJECT_INITIALIZER_ENTRY_SIZE)
+    u64 slots = object->sections[kind].data.length / OBJECT_INITIALIZER_ENTRY_SIZE;
+    if (slots == 1)
     {
-        for (u32 index = 0; index < object->relocation_count; index += 1)
+        // Keep the common one-entry case's early exit and avoid table setup.
+        for (u32 index = 0; index < object->relocation_count && !count; index += 1)
         {
             ObjectRelocation relocation = object->relocations[index];
-            if (relocation.section == (u32)kind && relocation.offset == offset && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64)
+            if (relocation.section == (u32)kind && relocation.offset == 0 && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64)
             {
-                entries[count++] = (LinkInitializerEntry){
-                    .addend = relocation.addend,
-                    .symbol = relocation.symbol,
-                };
-                break;
+                entries[count++] = (LinkInitializerEntry){.addend = relocation.addend, .symbol = relocation.symbol};
             }
         }
     }
-    for (u32 index = 0; reverse && index * 2 + 1 < count; index += 1)
+    else if (slots && object->relocation_count)
+    {
+        u64 sparse_capacity = slots / LINK_INITIALIZER_SPARSE_RATIO;
+        bool dense = sparse_capacity == 0;
+        for (u32 index = 0; !dense && index < object->relocation_count; index += 1)
+        {
+            ObjectRelocation relocation = object->relocations[index];
+            u64 slot = relocation.offset / OBJECT_INITIALIZER_ENTRY_SIZE;
+            if (relocation.section == (u32)kind && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 &&
+                relocation.offset % OBJECT_INITIALIZER_ENTRY_SIZE == 0 && slot < slots)
+            {
+                if (count == sparse_capacity)
+                {
+                    dense = true;
+                }
+                else
+                {
+                    entries[count++] = (LinkInitializerEntry){.symbol = index, .reserved = (u32)slot};
+                }
+            }
+        }
+        if (dense)
+        {
+            count = 0;
+            for (u64 slot = 0; slot < slots; slot += 1)
+            {
+                entries[slot].reserved = 0;
+            }
+            for (u32 index = 0; index < object->relocation_count; index += 1)
+            {
+                ObjectRelocation relocation = object->relocations[index];
+                if (relocation.section == (u32)kind && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 &&
+                    relocation.offset % OBJECT_INITIALIZER_ENTRY_SIZE == 0)
+                {
+                    u64 slot = relocation.offset / OBJECT_INITIALIZER_ENTRY_SIZE;
+                    if (slot < slots && !entries[slot].reserved)
+                    {
+                        entries[slot] = (LinkInitializerEntry){.addend = relocation.addend, .symbol = relocation.symbol, .reserved = 1};
+                    }
+                }
+            }
+            for (u64 slot = 0; slot < slots; slot += 1)
+            {
+                if (entries[slot].reserved)
+                {
+                    LinkInitializerEntry entry = entries[slot];
+                    entry.reserved = 0;
+                    // count <= slot: compaction cannot overwrite an unread entry.
+                    entries[count++] = entry;
+                }
+            }
+        }
+        else
+        {
+            link_initializer_slots_sort(entries, count);
+            u32 prefix_count = count;
+            u32 previous_slot = UINT32_MAX;
+            count = 0;
+            for (u32 index = 0; index < prefix_count; index += 1)
+            {
+                LinkInitializerEntry key = entries[index];
+                if (key.reserved != previous_slot)
+                {
+                    ObjectRelocation relocation = object->relocations[key.symbol];
+                    entries[count++] = (LinkInitializerEntry){.addend = relocation.addend, .symbol = relocation.symbol};
+                    previous_slot = key.reserved;
+                }
+            }
+        }
+    }
+    for (u32 index = 0; reverse && index < count / 2; index += 1)
     {
         LinkInitializerEntry swapped = entries[index];
         entries[index] = entries[count - 1 - index];
@@ -454,6 +562,13 @@ BUSTER_GLOBAL_LOCAL u32 link_initializer_entries_collect(ObjectFile* object, Obj
 
     return count;
 }
+
+#if BUSTER_INCLUDE_TESTS
+u32 link_initializer_entries_collect_test(ObjectFile* object, ObjectSectionKind kind, LinkInitializerEntry* entries, bool reverse)
+{
+    return link_initializer_entries_collect(object, kind, entries, reverse);
+}
+#endif
 
 // Reads the two array sections into a plan and hands back the same object
 // with them, and the relocations that filled them, removed: the writers below
