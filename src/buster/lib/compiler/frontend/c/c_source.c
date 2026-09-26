@@ -8057,8 +8057,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     // returned and then copied by value all the way down the frontend, and
     // every copy shares this one block.
     result.detail = arena_allocate(arena, CPreprocessDetail, 1);
+    // Resolved for `result.target` before the result reaches any reader.
+    CTargetBuiltinFacts* builtin_facts = arena_allocate(arena, CTargetBuiltinFacts, 1);
+    c_target_builtin_facts_resolve(result.target, builtin_facts);
     *result.detail = (CPreprocessDetail){
         .data_layout = options.data_layout,
+        .builtin_facts = builtin_facts,
     };
     // The spelling space lives in its own commit-on-demand arena so its
     // offsets stay contiguous under one base without stealing reserve from

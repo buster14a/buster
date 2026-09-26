@@ -1444,7 +1444,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
         CType requested_type = result->types[requested.value];
         u64 direct_size = 0;
         u32 direct_alignment = 0;
-        if (c_parse_builtin_type_layout(preprocess.target, requested_type.kind, &direct_size, &direct_alignment))
+        if (c_builtin_facts_type_layout(c_builtin_facts_from_preprocess(&preprocess), preprocess.target, requested_type.kind, &direct_size, &direct_alignment))
         {
             if (direct_alignment)
             {
@@ -1534,6 +1534,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
         .provisional = provisional,
         .type_count = type_count,
     };
+    CTargetBuiltinFacts const* builtin_facts = c_builtin_facts_from_preprocess(&preprocess);
     for (u32 pending_index = 0; pending_index < pending_count; pending_index += 1)
     {
         u32 type_index = pending[pending_index];
@@ -1544,7 +1545,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
         CTypeKind kind = result->types[type_index].kind;
         u64 size = 0;
         u32 alignment = 0;
-        if (!c_parse_builtin_type_layout(preprocess.target, kind, &size, &alignment) && kind == C_TYPE_ENUM &&
+        if (!c_builtin_facts_type_layout(builtin_facts, preprocess.target, kind, &size, &alignment) && kind == C_TYPE_ENUM &&
             result->types[type_index].element_type.value == C_ID_UNDERLYING_INVALID)
         {
             size = 4;
@@ -1841,7 +1842,8 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
                             }
                             if (!operand_resolved && kind_determines_layout)
                             {
-                                operand_resolved = c_parse_builtin_type_layout(preprocess.target, operand_kind, &operand_size, &operand_alignment);
+                                operand_resolved = c_builtin_facts_type_layout(c_builtin_facts_from_preprocess(&preprocess), preprocess.target, operand_kind,
+                                                                               &operand_size, &operand_alignment);
                             }
                         }
                         else
@@ -2958,6 +2960,18 @@ bool c_test_parse_direct_expression_type(Arena* scratch, CPreprocessResult prepr
 {
     return c_parse_direct_expression_type_core(scratch, preprocess, result, (CScopeId){.value = 0}, start, end, type_out);
 }
+
+bool c_test_builtin_facts_match_target(CPreprocessResult preprocess)
+{
+    CTargetBuiltinFacts const* facts = c_builtin_facts_from_preprocess(&preprocess);
+    bool result = facts != 0;
+    for (u32 kind = 0; result && kind < C_TYPE_COUNT; kind += 1)
+    {
+        result = c_builtin_facts_layout_agrees(preprocess.target, (CTypeKind)kind, facts->layouts[kind]) &&
+                 facts->literal_limits[kind] == c_semantic_integer_literal_kind_limit(preprocess.target, (CTypeKind)kind);
+    }
+    return result;
+}
 #endif
 
 BUSTER_C_INTERNAL u32 c_parse_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
@@ -3406,7 +3420,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
         {
             u64 integer = 0;
             kind = c_conditional_number(first_spelling, &integer)
-                       ? c_semantic_integer_literal_kind(preprocess.target, 0, first_spelling, integer)
+                       ? c_semantic_integer_literal_kind(preprocess.target, c_builtin_facts_literal_limits(c_builtin_facts_from_preprocess(&preprocess)),
+                                                         first_spelling, integer)
                        : C_TYPE_INVALID;
         }
         return end == start + 1 && kind != C_TYPE_INVALID ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
@@ -3513,6 +3528,13 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
                ? c_parse_direct_expression_base(preprocess, result, scope, start, end)
                : c_parse_direct_expression_type(arena, preprocess, result, scope, start, end, &type) ? type : C_TYPE_ID_INVALID;
 }
+
+#if BUSTER_INCLUDE_TESTS
+CTypeId c_test_parse_expression_leaf_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, u32 start, u32 end)
+{
+    return c_parse_expression_leaf_without_cast(arena, preprocess, result, (CScopeId){.value = 0}, start, end);
+}
+#endif
 
 BUSTER_C_INTERNAL u32 c_parse_expression_bit_field_width(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
                                                            u32 start, u32 end)
@@ -6122,7 +6144,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_string_element_compatible(CPreprocess
     CTypeKind kind = result->types[element_type.value].kind;
     u64 size = 0;
     u32 alignment = 0;
-    if (!c_parse_builtin_type_layout(preprocess.target, kind, &size, &alignment) || size != decoded.element_width)
+    if (!c_builtin_facts_type_layout(c_builtin_facts_from_preprocess(&preprocess), preprocess.target, kind, &size, &alignment) || size != decoded.element_width)
     {
         return false;
     }
@@ -13986,7 +14008,8 @@ BUSTER_C_INTERNAL bool c_parse_record_constexpr_integer(CTypeParseMachine* machi
             u64 magnitude = negative ? 0 - value : value;
             u64 size = 0;
             u32 alignment = 0;
-            bool representable = c_parse_builtin_type_layout(preprocess.target, value_type.kind, &size, &alignment);
+            bool representable =
+                c_builtin_facts_type_layout(c_builtin_facts_from_preprocess(&preprocess), preprocess.target, value_type.kind, &size, &alignment);
             BUSTER_UNUSED(alignment);
             if (representable && size <= 8)
             {
@@ -19609,7 +19632,8 @@ BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range(CTypeParseMachine* ma
             u64 integer_size = 0;
             u32 ignored_alignment = 0;
             if (value.type.value < result->type_count &&
-                c_parse_builtin_type_layout(preprocess.target, result->types[value.type.value].kind, &integer_size, &ignored_alignment) &&
+                c_builtin_facts_type_layout(c_builtin_facts_from_preprocess(&preprocess), preprocess.target, result->types[value.type.value].kind,
+                                            &integer_size, &ignored_alignment) &&
                 integer_size && integer_size < 8)
             {
                 requested &= (1ull << (integer_size * 8)) - 1;
@@ -20727,8 +20751,10 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
             controlling_kind = c_parse_expression_promoted_kind(c_parse_expression_value_kind(result, controlling_type));
             u64 size = 0;
             u32 alignment = 0;
-            controlling_type_resolved = c_parse_expression_integer_kind(controlling_kind) &&
-                                        c_parse_builtin_type_layout(preprocess.target, controlling_kind, &size, &alignment) && size && size <= sizeof(u64);
+            controlling_type_resolved =
+                c_parse_expression_integer_kind(controlling_kind) &&
+                c_builtin_facts_type_layout(c_builtin_facts_from_preprocess(&preprocess), preprocess.target, controlling_kind, &size, &alignment) && size &&
+                size <= sizeof(u64);
             BUSTER_UNUSED(alignment);
             if (controlling_type_resolved && size < sizeof(u64))
             {

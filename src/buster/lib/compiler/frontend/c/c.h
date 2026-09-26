@@ -371,10 +371,16 @@ struct CPreprocessedMetrics
 // Null for hand-built results (the token-space literals the integer-constant
 // evaluator takes); `c_preprocess_detail` reads those as the all-zero block
 // their inline members used to be.
+typedef struct CTargetBuiltinFacts CTargetBuiltinFacts;
 typedef struct CPreprocessDetail CPreprocessDetail;
 struct CPreprocessDetail
 {
     TargetDataLayout data_layout;
+    // The builtin-kind answers for this result's `target`, resolved once by
+    // c_preprocess and never written again (see CTargetBuiltinFacts in
+    // c_internal.h). Derived from the target, not from `data_layout`, which a
+    // caller may supply independently.
+    CTargetBuiltinFacts const* builtin_facts;
     // Every file the preprocessor lexed, summed twice: once per inclusion,
     // and once per distinct path. A header with neither #pragma once nor a
     // recognized whole-file include guard is re-read and re-lexed at every

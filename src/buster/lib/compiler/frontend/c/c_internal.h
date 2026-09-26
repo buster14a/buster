@@ -308,6 +308,86 @@ BUSTER_C_EXTERN String8 c_semantic_call_arity_message(Arena* arena, String8 name
 BUSTER_C_EXTERN CCallArityDiagnostic c_semantic_check_named_call_arities(Arena* arena, CAnalysisResult* analysis,
                                                                       CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out);
+
+// What c_parse_builtin_type_layout and c_semantic_integer_literal_fits answer
+// for every builtin kind on one target. Both helpers re-derive the whole
+// target data layout from the CPU and OS on every call and then keep one
+// field of it; the parser asks them once per integer literal it types and
+// once per type a layout query seeds, millions of times on the unity
+// self-compile, with the same target every time.
+//
+// c_preprocess resolves one record for the target it stamps on its result,
+// by calling those same helpers for each kind, and nothing writes it after.
+// Only call sites that pass `preprocess.target` may read it, through
+// c_builtin_facts_from_preprocess: lowering can lower for another target
+// than the one a unit was preprocessed for and keeps its own per-target
+// tables in CIrTypeContext. A hand-built result has no detail block, reads a
+// null record, and asks the helpers as before. Optimized builds trust the
+// record; every other build checks each answer against the helper.
+typedef struct CBuiltinKindLayout CBuiltinKindLayout;
+struct CBuiltinKindLayout
+{
+    u64 size;
+    u32 alignment;
+    // c_parse_builtin_type_layout's result; size and alignment are its
+    // outputs when true and unused when false, as they are not written then.
+    bool valid;
+    u8 reserved[3];
+};
+
+struct CTargetBuiltinFacts
+{
+    // Zero where the fallback in c_semantic_integer_literal_fits finds no
+    // integer width either, so a zero entry asks again and gets zero.
+    u64 literal_limits[C_TYPE_COUNT];
+    CBuiltinKindLayout layouts[C_TYPE_COUNT];
+};
+
+BUSTER_C_EXTERN void c_target_builtin_facts_resolve(Target target, CTargetBuiltinFacts* facts);
+BUSTER_C_EXTERN u64 c_semantic_integer_literal_kind_limit(Target target, CTypeKind kind);
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTargetBuiltinFacts const* c_builtin_facts_from_preprocess(CPreprocessResult const* preprocess)
+{
+    return preprocess->detail ? preprocess->detail->builtin_facts : 0;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE u64 const* c_builtin_facts_literal_limits(CTargetBuiltinFacts const* facts)
+{
+    return facts ? facts->literal_limits : 0;
+}
+
+// Diagnostic-only: the record's answer is the helper's answer for `target`.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool c_builtin_facts_layout_agrees(Target target, CTypeKind kind, CBuiltinKindLayout layout)
+{
+    u64 size = 0;
+    u32 alignment = 0;
+    bool valid = c_parse_builtin_type_layout(target, kind, &size, &alignment);
+    return valid == layout.valid && (!valid || (size == layout.size && alignment == layout.alignment));
+}
+
+// c_parse_builtin_type_layout(target, ...), where `facts` is null or the
+// record c_preprocess resolved for exactly `target`.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_builtin_facts_type_layout(CTargetBuiltinFacts const* facts, Target target, CTypeKind kind,
+                                                                                      u64* size_out, u32* alignment_out)
+{
+    bool result;
+    if (facts && (u32)kind < C_TYPE_COUNT)
+    {
+        CBuiltinKindLayout layout = facts->layouts[kind];
+        BUSTER_ASSERT(c_builtin_facts_layout_agrees(target, kind, layout));
+        result = layout.valid;
+        if (result)
+        {
+            *size_out = layout.size;
+            *alignment_out = layout.alignment;
+        }
+    }
+    else
+    {
+        result = c_parse_builtin_type_layout(target, kind, size_out, alignment_out);
+    }
+    return result;
+}
 // GNU vectors retain their written lane count while object size rounds to
 // the next power of two. Alignment follows the target vector ABI.
 BUSTER_C_EXTERN bool c_vector_type_layout(Target target, u64 element_size, u32 logical_byte_size, u64* element_count_out,

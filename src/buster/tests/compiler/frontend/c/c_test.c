@@ -19632,6 +19632,149 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ext80_big_live_limbs(UnitTestArguments
     return result;
 }
 
+// The builtin-kind record c_preprocess resolves once per result (see
+// CTargetBuiltinFacts). Contrasting targets run back to back in one process,
+// so a record that outlived its unit, or one keyed to anything but the
+// result's own target, answers the next unit wrongly. Each unit folds builtin
+// and aggregate sizes and types literals on the parse side, where the record
+// is read, and lowers the same literal through lowering's own tables. A false
+// assertion must fail on exactly the targets where it is false, with the same
+// diagnostic each time. A hand-built result (no detail block) must type the
+// literal exactly as the record does, and a supplied data layout must stay
+// out of the record, as it stayed out of the per-call helpers.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_facts_target_alternation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    String8 triples[] = {
+        S8("x86_64-unknown-linux-gnu"), S8("x86_64-pc-windows-msvc"),    S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu"),
+        S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu"), S8("aarch64-apple-macos"),      S8("x86_64-pc-windows-msvc"),
+        S8("aarch64-pc-windows-msvc"),  S8("x86_64-unknown-linux-gnu"),
+    };
+    CDiagnostic first_failure = {0};
+    char8 first_failure_message[256];
+    u32 failure_count = 0;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(triples); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        TargetParseResult parsed = target_parse_triple(triples[index]);
+        BUSTER_TEST(arguments, parsed.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed.error == TARGET_PARSE_ERROR_NONE)
+        {
+            TargetDataLayout layout = target_data_layout(parsed.target);
+            u32 long_size = layout.long_integer.size;
+            // 2147483648 is past int; LP64 gives it long, LLP64 long long.
+            u32 literal_selection = long_size == 8 ? 1 : 2;
+            String8 source = string_format(temporary.arena,
+                                           S8("#define LONG_SIZE {u32}\n#define STRUCT_SIZE {u32}\n#define LONG_DOUBLE_SIZE {u32}\n"
+                                              "#define LONG_DOUBLE_ALIGNMENT {u32}\n#define POINTER_SIZE {u32}\n#define LITERAL_SELECTION {u32}\n"
+                                              "#define PLAIN_CHAR_SIGNED {u32}\n{S8}"),
+                                           long_size, 2 * long_size, layout.long_double_type.size, layout.long_double_type.alignment, layout.pointer.size,
+                                           literal_selection, (u32)layout.plain_char_is_signed,
+                                           S8("struct S { char c; long l; };\n"
+                                              "enum { ENUM_LONG_SIZE = sizeof(long), ENUM_STRUCT_SIZE = sizeof(struct S) };\n"
+                                              "_Static_assert(ENUM_LONG_SIZE == LONG_SIZE, \"long\");\n"
+                                              "_Static_assert(ENUM_STRUCT_SIZE == STRUCT_SIZE, \"struct\");\n"
+                                              "_Static_assert(sizeof(long double) == LONG_DOUBLE_SIZE && _Alignof(long double) == LONG_DOUBLE_ALIGNMENT,"
+                                              " \"long double\");\n"
+                                              "_Static_assert(sizeof(void *) == POINTER_SIZE, \"pointer\");\n"
+                                              "_Static_assert(_Generic(2147483648, long: 1, long long: 2, default: 3) == LITERAL_SELECTION, \"literal\");\n"
+                                              "_Static_assert(_Generic(0xffffffff, unsigned int: 1, default: 2) == 1, \"hex literal\");\n"
+                                              "_Static_assert(((char)-1 < 0) == PLAIN_CHAR_SIGNED, \"plain char\");\n"
+                                              "int selection(void) { return _Generic(2147483648, long: 1, long long: 2, default: 3); }\n"));
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = parsed.target, .data_layout = layout});
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, c_test_builtin_facts_match_target(preprocess));
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze(temporary.arena, S8("builtin-facts.c"), preprocess, syntax, parsed.target);
+            BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lowered.program != 0);
+            if (lowered.program)
+            {
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+            }
+
+            // The same literal typed through the record and through the
+            // per-call helpers a hand-built result falls back to.
+            CParseResult parse = c_parse(temporary.arena, preprocess);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            u32 literal = UINT32_MAX;
+            for (u32 token = 0; token < preprocess.token_count && literal == UINT32_MAX; token += 1)
+            {
+                if (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token]), S8("2147483648")))
+                {
+                    literal = token;
+                }
+            }
+            BUSTER_TEST(arguments, literal != UINT32_MAX);
+            if (literal != UINT32_MAX)
+            {
+                CPreprocessResult hand_built = preprocess;
+                hand_built.detail = 0;
+                CTypeId recorded = c_test_parse_expression_leaf_type(temporary.arena, preprocess, &parse, literal, literal + 1);
+                CTypeId derived = c_test_parse_expression_leaf_type(temporary.arena, hand_built, &parse, literal, literal + 1);
+                BUSTER_TEST(arguments, !c_test_builtin_facts_match_target(hand_built));
+                BUSTER_TEST(arguments, recorded.value < parse.type_count && derived.value < parse.type_count);
+                if (recorded.value < parse.type_count && derived.value < parse.type_count)
+                {
+                    CTypeKind expected = long_size == 8 ? C_TYPE_LONG : C_TYPE_LONG_LONG;
+                    BUSTER_TEST(arguments, parse.types[recorded.value].kind == expected);
+                    BUSTER_TEST(arguments, parse.types[derived.value].kind == expected);
+                }
+            }
+
+            // Exactly one failure where long is not eight bytes, and the same
+            // one on every such target.
+            CPreprocessResult failing = c_preprocess(temporary.arena, S8("_Static_assert(sizeof(long) == 8, \"lp64 long\");\n"),
+                                                     (CPreprocessOptions){.target = parsed.target, .data_layout = layout});
+            CParseResult failed = c_parse(temporary.arena, failing);
+            BUSTER_TEST(arguments, failed.diagnostic_count == (long_size == 8 ? 0u : 1u));
+            if (failed.diagnostic_count == 1)
+            {
+                CDiagnostic diagnostic = failed.diagnostics[0];
+                BUSTER_TEST(arguments, string_first_sequence(diagnostic.message, S8("lp64 long")) != BUSTER_STRING_NO_MATCH);
+                BUSTER_TEST(arguments, diagnostic.message.length <= sizeof(first_failure_message));
+                if (failure_count == 0 && diagnostic.message.length <= sizeof(first_failure_message))
+                {
+                    first_failure = diagnostic;
+                    memcpy(first_failure_message, diagnostic.message.pointer, diagnostic.message.length);
+                    first_failure.message = (String8){first_failure_message, diagnostic.message.length};
+                }
+                BUSTER_TEST(arguments, string_equal(diagnostic.message, first_failure.message) && diagnostic.kind == first_failure.kind &&
+                                           diagnostic.severity == first_failure.severity && diagnostic.location.offset == first_failure.location.offset);
+                failure_count += 1;
+            }
+        }
+        scratch_end(temporary);
+    }
+    // x86-64 and AArch64 Windows are the two LLP64 units above.
+    BUSTER_TEST(arguments, failure_count == 3);
+
+    // A supplied layout rides the detail block but not the record: primitive
+    // answers still come from the target, as the per-call helpers' did.
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        TargetParseResult linux_target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+        TargetParseResult windows_target = target_parse_triple(S8("x86_64-pc-windows-msvc"));
+        BUSTER_TEST(arguments, linux_target.error == TARGET_PARSE_ERROR_NONE && windows_target.error == TARGET_PARSE_ERROR_NONE);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena,
+                                                    S8("_Static_assert(sizeof(long) == 8, \"long\");\n"
+                                                       "_Static_assert(_Generic(2147483648, long: 1, default: 2) == 1, \"literal\");\n"),
+                                                    (CPreprocessOptions){
+                                                        .target = linux_target.target,
+                                                        .data_layout = target_data_layout(windows_target.target),
+                                                    });
+        BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->data_layout.long_integer.size == 4);
+        BUSTER_TEST(arguments, c_test_builtin_facts_match_target(preprocess));
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bfloat16_type(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23268,6 +23411,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_braces);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_folding);
     BUSTER_TEST_FIXTURE(arguments, c_test_float16_type);
+    BUSTER_TEST_FIXTURE(arguments, c_test_builtin_facts_target_alternation);
     BUSTER_TEST_FIXTURE(arguments, c_test_bfloat16_type);
     BUSTER_TEST_FIXTURE(arguments, c_test_bfloat16_semantic_acceptance);
     BUSTER_TEST_FIXTURE(arguments, c_test_ext80_big_live_limbs);

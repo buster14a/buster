@@ -8846,21 +8846,43 @@ BUSTER_C_INTERNAL CArrayBound c_ir_vla_bound_expression(CPreprocessResult prepro
 BUSTER_C_INTERNAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CTypeId array_type, CToken token, bool parameter, bool pointer,
                                                 CIrVlaLayout* result);
 
+BUSTER_C_SHARED u64 c_semantic_integer_literal_kind_limit(Target target, CTypeKind kind)
+{
+    u64 limit = 0;
+    IrTypeKind ir_kind = IR_TYPE_VOID;
+    u32 width = 0;
+    u32 alignment = 0;
+    bool sign = false;
+    if (c_ir_scalar_type_properties(target, kind, &ir_kind, &width, &sign, &alignment) && width)
+    {
+        limit = c_semantic_integer_literal_limit(width, sign);
+    }
+    return limit;
+}
+
+// `limits` is null, the lowering's per-kind cache or a CTargetBuiltinFacts
+// record, each for `target`; a zero entry is answered from the target.
 BUSTER_C_INTERNAL bool c_semantic_integer_literal_fits(Target target, u64 const* limits, CTypeKind kind, u64 value)
 {
     u64 limit = limits ? limits[kind] : 0;
+    BUSTER_ASSERT(!limit || limit == c_semantic_integer_literal_kind_limit(target, kind));
     if (!limit)
     {
-        IrTypeKind ir_kind = IR_TYPE_VOID;
-        u32 width = 0;
-        u32 alignment = 0;
-        bool sign = false;
-        if (c_ir_scalar_type_properties(target, kind, &ir_kind, &width, &sign, &alignment) && width)
-        {
-            limit = c_semantic_integer_literal_limit(width, sign);
-        }
+        limit = c_semantic_integer_literal_kind_limit(target, kind);
     }
     return limit && value <= limit;
+}
+
+// One CTargetBuiltinFacts record, asked of the helpers it stands in for.
+BUSTER_C_SHARED void c_target_builtin_facts_resolve(Target target, CTargetBuiltinFacts* facts)
+{
+    for (u32 kind = 0; kind < C_TYPE_COUNT; kind += 1)
+    {
+        CBuiltinKindLayout layout = {0};
+        layout.valid = c_parse_builtin_type_layout(target, (CTypeKind)kind, &layout.size, &layout.alignment);
+        facts->layouts[kind] = layout;
+        facts->literal_limits[kind] = c_semantic_integer_literal_kind_limit(target, (CTypeKind)kind);
+    }
 }
 
 BUSTER_C_SHARED CTypeKind c_semantic_integer_literal_kind(Target target, u64 const* limits, String8 spelling, u64 value)
@@ -10843,7 +10865,8 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CPreprocessResult preprocess, u32 
         u64 integer = 0;
         if (c_conditional_number(spelling, &integer))
         {
-            CTypeKind kind = c_semantic_integer_literal_kind(preprocess.target, 0, spelling, integer);
+            CTypeKind kind = c_semantic_integer_literal_kind(preprocess.target, c_builtin_facts_literal_limits(c_builtin_facts_from_preprocess(&preprocess)),
+                                                             spelling, integer);
             IrType integer_type = {0};
             u32 alignment = 0;
             if (!c_ir_scalar_type_properties(preprocess.target, kind, &integer_type.kind, &integer_type.bit_width, &integer_type.is_signed, &alignment) ||
