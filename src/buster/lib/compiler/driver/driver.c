@@ -3649,6 +3649,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
+    result.type_layout = lowered.type_layout;
     if (!lowered.program || lowered.diagnostic_count)
     {
         result.error = COMPILER_DRIVER_ERROR_ANALYSIS;
@@ -4535,6 +4536,17 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.direct_ssa.writes += unit.direct_ssa.writes;
         result.direct_ssa.parameters_created += unit.direct_ssa.parameters_created;
         result.direct_ssa.parameters_removed += unit.direct_ssa.parameters_removed;
+        result.type_layout.solves += unit.type_layout.solves;
+        result.type_layout.pass_solves += unit.type_layout.pass_solves;
+        result.type_layout.pass_state_types += unit.type_layout.pass_state_types;
+        result.type_layout.pass_attempts += unit.type_layout.pass_attempts;
+        result.type_layout.agenda_solves += unit.type_layout.agenda_solves;
+        result.type_layout.agenda_types += unit.type_layout.agenda_types;
+        result.type_layout.agenda_attempts += unit.type_layout.agenda_attempts;
+        result.type_layout.agenda_edges += unit.type_layout.agenda_edges;
+        result.type_layout.agenda_notifications += unit.type_layout.agenda_notifications;
+        result.type_layout.agenda_pushes += unit.type_layout.agenda_pushes;
+        result.type_layout.agenda_fallbacks += unit.type_layout.agenda_fallbacks;
         result.local_promotion.candidate_locals += unit.local_promotion.candidate_locals;
         result.local_promotion.promoted_locals += unit.local_promotion.promoted_locals;
         result.local_promotion.removed_loads += unit.local_promotion.removed_loads;

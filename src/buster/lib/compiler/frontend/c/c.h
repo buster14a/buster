@@ -1244,6 +1244,34 @@ struct CTokenPositionIndex
     bool built;
 };
 
+// Work of the parse-side layout fold (c_parse_type_layout_core), the
+// sizeof/_Alignof/offsetof answers semantic analysis computes before any IR
+// exists. Counts of actual operations, not timings; see
+// docs/agents/frontend/layout.md for each field's exact meaning.
+typedef struct CTypeLayoutStatistics CTypeLayoutStatistics;
+struct CTypeLayoutStatistics
+{
+    // Queries that needed a solve: not a builtin kind, not a committed entry.
+    u64 solves;
+    // Ordered-pass solves, the types their per-query state covered (the whole
+    // table without a cache, the uncommitted list with one) and their
+    // per-type attempts.
+    u64 pass_solves;
+    u64 pass_state_types;
+    u64 pass_attempts;
+    // Demand-driven solves, the entries each created (the distinct types it
+    // reached that the seed rule does not answer), their attempts,
+    // prerequisite edges registered, edge completions delivered, agenda pushes
+    // and solves abandoned to the ordered passes.
+    u64 agenda_solves;
+    u64 agenda_types;
+    u64 agenda_attempts;
+    u64 agenda_edges;
+    u64 agenda_notifications;
+    u64 agenda_pushes;
+    u64 agenda_fallbacks;
+};
+
 typedef struct CParseResult CParseResult;
 struct CParseResult
 {
@@ -1274,6 +1302,10 @@ struct CParseResult
     CEntityId* name_lookup_buckets;
     CAggregateLookup* aggregate_lookup;
     CTokenPositionIndex* position_index;
+    // Outside the checkpointed body, like position_index, so a rollback or a
+    // by-value operand copy keeps counting into the same record. Null for
+    // hand-built results, which then count nothing.
+    CTypeLayoutStatistics* type_layout_statistics;
     CIdentifierUse* identifier_uses;
     // First recorded use of each token, plus one, so an unused token is the
     // zero the operating system already supplied; c_parse_identifier_use_index
@@ -1392,6 +1424,7 @@ typedef struct CIRLowerResult CIRLowerResult;
 struct CIRLowerResult
 {
     CIRDirectSsaStatistics direct_ssa;
+    CTypeLayoutStatistics type_layout;
     IrProgram* program;
     CDiagnostic* diagnostics;
     u32 diagnostic_count;

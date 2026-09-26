@@ -1065,6 +1065,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/metamorphic/metamorphic_test.c
     src/buster/tests/compiler/frontend/c/c_test.c
     src/buster/tests/compiler/frontend/c/once_test.c
+    src/buster/tests/compiler/frontend/c/type_layout_test.c
     src/buster/tests/compiler/frontend/c/macro_conditional_test.c
     src/buster/tests/compiler/assembly/aarch64_encoding_test.c
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c
@@ -1123,6 +1124,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/codegen/ebpf_test_vm.h
     src/buster/tests/compiler/frontend/c/c_test.h
     src/buster/tests/compiler/frontend/c/once_test.h
+    src/buster/tests/compiler/frontend/c/type_layout_test.h
     src/buster/tests/compiler/frontend/c/macro_conditional_test.h
     src/buster/tests/compiler/assembly/aarch64_encoding_test.h
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.h
