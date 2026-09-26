@@ -13,6 +13,7 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/codegen/codegen.h>
+#include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_internal.h>
 #include <buster/lib/compiler/codegen/machine_schedule_internal.h>
@@ -6331,13 +6332,16 @@ BUSTER_GLOBAL_LOCAL u32 machine_test_debug_random(u32* state, u32 bound)
 // below cover what the lookups replaced: values in zero, one, two and more
 // virtual registers, promoted (mutable) places, parameters whose place is only
 // an IR_OPCODE_ARGUMENT result, canonical locals past the place array, and
-// place-less locals that emit one value per block.
+// place-less locals that emit one value per block. The second half of the
+// cases attaches no local_values to any block, as canonical construction
+// never does, so only parameters give place-less locals their block values.
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_values_differential(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     enum
     {
-        CASE_COUNT = 48,
+        CASE_COUNT = 96,
+        DENSE_CASE_COUNT = 48,
         VALUE_COUNT = 40,
         BLOCK_COUNT = 5,
         LOCAL_COUNT = 10,
@@ -6389,7 +6393,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_values_differential(UnitTe
                 local_values[local_index] = choice < VALUE_COUNT ? (IrValueId){.value = choice} : IR_VALUE_ID_INVALID;
             }
             blocks[block_index] = (IrBlock){
-                .local_values = local_values,
+                .local_values = case_index < DENSE_CASE_COUNT ? local_values : 0,
                 .first_instruction = {.value = block_index * (VALUE_COUNT / BLOCK_COUNT)},
                 .id = {.value = block_index},
             };
@@ -6480,6 +6484,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_values_differential(UnitTe
         }
         scratch_end(temporary);
     }
+    return result;
+}
+
+// A place-less local per block, each filled by that block's one parameter:
+// the table matches the whole-array reference, and in the counting build the
+// work is three entry visits per block (fill, row, reset), not every
+// unresolved local twice per block.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_values_sparse_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SPARSE_BLOCKS = 256 };
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    IrType types[] = {
+        {.kind = IR_TYPE_INTEGER, .is_signed = true, .bit_width = 64, .layout = {.resolved = true, .size = 8, .alignment = 8}},
+    };
+    IrProgram program = {.types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+    IrValue* values = arena_allocate(temporary.arena, IrValue, SPARSE_BLOCKS);
+    IrInstruction* instructions = arena_allocate(temporary.arena, IrInstruction, SPARSE_BLOCKS);
+    u64* immediates = arena_allocate(temporary.arena, u64, SPARSE_BLOCKS);
+    IrBlock* blocks = arena_allocate(temporary.arena, IrBlock, SPARSE_BLOCKS);
+    IrCfgBlock* cfg_blocks = arena_allocate(temporary.arena, IrCfgBlock, SPARSE_BLOCKS);
+    IrCfgParameter* cfg_parameters = arena_allocate(temporary.arena, IrCfgParameter, SPARSE_BLOCKS);
+    IrDebugLocal* debug_locals = arena_allocate(temporary.arena, IrDebugLocal, SPARSE_BLOCKS);
+    u32* stack_slots = arena_allocate(temporary.arena, u32, SPARSE_BLOCKS);
+    u32* indirect_slots = arena_allocate(temporary.arena, u32, SPARSE_BLOCKS);
+    for (u32 index = 0; index < SPARSE_BLOCKS; index += 1)
+    {
+        // Constants with no canonical local leave every debug local place-less.
+        immediates[index] = index;
+        values[index] = (IrValue){.definition = {.value = index}, .canonical_type = {.value = 0}};
+        instructions[index] = (IrInstruction){
+            .opcode = IR_OPCODE_CONSTANT_INTEGER,
+            .result = {.value = index},
+            .canonical_local = IR_LOCAL_ID_INVALID,
+            .immediates = immediates + index,
+            .immediate_count = 1,
+        };
+        blocks[index] = (IrBlock){.first_instruction = {.value = index}, .id = {.value = index}};
+        cfg_blocks[index] = (IrCfgBlock){.first_instruction = index, .instruction_count = 1, .parameter_offset = index, .parameter_count = 1};
+        cfg_parameters[index] = (IrCfgParameter){.canonical_local = {.value = index}, .value = {.value = index}};
+        debug_locals[index] = (IrDebugLocal){.id = {.value = index}, .type = {.value = 0}};
+        stack_slots[index] = UINT32_MAX;
+        indirect_slots[index] = UINT32_MAX;
+    }
+    IrPublishedCfg published = {.blocks = cfg_blocks, .parameters = cfg_parameters, .block_count = SPARSE_BLOCKS,
+                                .parameter_count = SPARSE_BLOCKS};
+    IrFunction function = {
+        .instructions = instructions,
+        .values = values,
+        .blocks = blocks,
+        .debug_locals = debug_locals,
+        .published_cfg = &published,
+        .instruction_count = SPARSE_BLOCKS,
+        .value_count = SPARSE_BLOCKS,
+        .block_count = SPARSE_BLOCKS,
+        .local_count = SPARSE_BLOCKS,
+        .debug_local_count = SPARSE_BLOCKS,
+    };
+    MachineFunction indexed = {0};
+    MachineFunction reference = {0};
+#if BUSTER_BENCH_ALLOCATIONS
+    IrConstructionCounters before = ir_construction_counters();
+#endif
+    bool indexed_built = machine_test_debug_values_build(temporary.arena, &program, &function, &indexed, stack_slots, indirect_slots);
+#if BUSTER_BENCH_ALLOCATIONS
+    IrConstructionCounters after = ir_construction_counters();
+    BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_DEBUG_VALUE_BLOCKS] - before.values[IR_CONSTRUCTION_DEBUG_VALUE_BLOCKS] == SPARSE_BLOCKS);
+    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_DEBUG_VALUE_LOCAL_VISITS] - before.values[IR_CONSTRUCTION_DEBUG_VALUE_LOCAL_VISITS] ==
+                           3u * SPARSE_BLOCKS);
+#endif
+    bool reference_built = machine_test_debug_values_build_dense(temporary.arena, &program, &function, &reference, stack_slots, indirect_slots);
+    BUSTER_TEST(arguments, indexed_built && reference_built);
+    BUSTER_TEST(arguments, indexed.debug_value_count == SPARSE_BLOCKS && reference.debug_value_count == SPARSE_BLOCKS);
+    if (indexed_built && reference_built && indexed.debug_value_count == SPARSE_BLOCKS && reference.debug_value_count == SPARSE_BLOCKS)
+    {
+        bool same = true;
+        for (u32 index = 0; index < SPARSE_BLOCKS; index += 1)
+        {
+            MachineDebugValue a = indexed.debug_values[index];
+            MachineDebugValue b = reference.debug_values[index];
+            same = same && a.local.value == index && a.first_instruction == index && a.instruction_count == 1 &&
+                   a.local.value == b.local.value && a.first_instruction == b.first_instruction &&
+                   a.instruction_count == b.instruction_count && a.kind == b.kind && a.constant == b.constant;
+        }
+        BUSTER_TEST(arguments, same);
+    }
+    scratch_end(temporary);
     return result;
 }
 
@@ -7054,6 +7146,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_trace_equivalence);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_capacity);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_sparse_work);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_traffic);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_widths);

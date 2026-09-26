@@ -84,6 +84,8 @@
     X(CFG_PARAMETER_VISITS, cfg_parameter_visits) \
     X(CFG_INCOMING_VISITS, cfg_incoming_visits) \
     X(CFG_COPY_SOURCES, cfg_copy_sources) \
+    X(DEBUG_VALUE_BLOCKS, debug_value_blocks) \
+    X(DEBUG_VALUE_LOCAL_VISITS, debug_value_local_visits) \
     X(VALIDATION_CALLS, validation_calls) \
     X(VALIDATION_OWNERSHIP_FUNCTION_SCANS, validation_ownership_function_scans) \
     X(VALIDATION_PUBLISHED_CFG_CHECKS, validation_published_cfg_checks) \
