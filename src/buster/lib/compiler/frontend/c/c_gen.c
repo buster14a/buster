@@ -43057,9 +43057,6 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
     CIrConstantInitializerRange* range_work = context->range_work;
     u8* bytes = context->bytes;
     u64 byte_count = context->byte_count;
-    IrGlobalRelocation* relocations = context->relocations;
-    u32* relocation_count = context->relocation_count;
-    u32 relocation_capacity = context->relocation_capacity;
     u32 capacity = context->frame_capacity;
     u32 frame_count = context->frame_count;
     u64 span = context->span;
@@ -43146,9 +43143,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
         {
             return c_ir_constant_initializer_fail(builder, S8("designated initializer exceeds the target object"), value_start);
         }
-        relocations = context->relocations;
-        relocation_count = context->relocation_count;
-        relocation_capacity = context->relocation_capacity;
+        // A clear may move the relocations to the index's scratch.
+        IrGlobalRelocation* relocations = context->relocations;
+        u32* relocation_count = context->relocation_count;
+        u32 relocation_capacity = context->relocation_capacity;
         if (designator.clear_union)
         {
             frame->has_last_union = true;
