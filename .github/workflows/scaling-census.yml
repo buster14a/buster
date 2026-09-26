@@ -1,0 +1,68 @@
+name: Scaling census
+
+# Branch-only operation-count census for superlinear-work investigations.
+# Builds the pinned refs in census/plan.json on a standard GitHub-hosted
+# runner, runs generated growth families and real repository workloads, and
+# uploads raw JSONL evidence. Not a merge gate, benchmark admission, or
+# dedicated-host timing claim.
+
+on:
+  push:
+    branches:
+      - claude/amazing-dijkstra-ozpi5l-scaling-census
+
+concurrency:
+  group: scaling-census-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  census:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare pinned cJSON input
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: external/cjson
+          persist-credentials: false
+      - name: Prepare pinned Lua and SQLite inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p external
+          curl --fail --location https://www.lua.org/ftp/lua-5.4.8.tar.gz -o external/lua.tar.gz
+          printf '%s  %s\n' 4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae external/lua.tar.gz | sha256sum --check
+          tar -xzf external/lua.tar.gz -C external
+          curl --fail --location https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip -o external/sqlite-amalgamation.zip
+          printf '%s  %s\n' 1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d external/sqlite-amalgamation.zip | sha256sum --check
+          unzip -q external/sqlite-amalgamation.zip -d external
+      - name: Run census
+        shell: bash
+        env:
+          CENSUS_INPUTS: ${{ github.workspace }}/external
+        run: |
+          set -euo pipefail
+          clang --version
+          python3 census/run.py census/plan.json "$RUNNER_TEMP/census" 2>&1 | tee "$RUNNER_TEMP/census-run.log"
+          cp "$RUNNER_TEMP/census-run.log" "$RUNNER_TEMP/census/logs/"
+          python3 census/summarize.py "$RUNNER_TEMP/census/results.jsonl" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: scaling-census-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/census/results.jsonl
+            ${{ runner.temp }}/census/logs
+            ${{ runner.temp }}/census/inputs
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,0 +1,980 @@
+{
+ "refs": {
+  "base": "ade6ac4b6ecb21f30b61b656439bac476c145e2f",
+  "reloc": "32f4ea808de447900508382d76242a00cd0c6fdf"
+ },
+ "census_ref": "base",
+ "variants": [
+  "count",
+  "plain"
+ ],
+ "build_jobs": 3,
+ "timing_repeats": 3,
+ "workload_source": "base",
+ "experiments": [
+  {
+   "name": "reloc",
+   "generator": "gen_reloc.py",
+   "refs": [
+    "base",
+    "reloc"
+   ],
+   "grid": [
+    [
+     "ptr",
+     500,
+     1
+    ],
+    [
+     "ptr",
+     1000,
+     1
+    ],
+    [
+     "ptr",
+     2000,
+     1
+    ],
+    [
+     "ptr",
+     4000,
+     1
+    ],
+    [
+     "ptr",
+     8000,
+     1
+    ],
+    [
+     "ptr",
+     16000,
+     1
+    ],
+    [
+     "ptr",
+     32000,
+     1
+    ],
+    [
+     "str",
+     500,
+     1
+    ],
+    [
+     "str",
+     1000,
+     1
+    ],
+    [
+     "str",
+     2000,
+     1
+    ],
+    [
+     "str",
+     4000,
+     1
+    ],
+    [
+     "str",
+     8000,
+     1
+    ],
+    [
+     "str",
+     16000,
+     1
+    ],
+    [
+     "str",
+     32000,
+     1
+    ],
+    [
+     "struct",
+     500,
+     1
+    ],
+    [
+     "struct",
+     1000,
+     1
+    ],
+    [
+     "struct",
+     2000,
+     1
+    ],
+    [
+     "struct",
+     4000,
+     1
+    ],
+    [
+     "struct",
+     8000,
+     1
+    ],
+    [
+     "struct",
+     16000,
+     1
+    ],
+    [
+     "struct",
+     32000,
+     1
+    ],
+    [
+     "reverse",
+     500,
+     1
+    ],
+    [
+     "reverse",
+     1000,
+     1
+    ],
+    [
+     "reverse",
+     2000,
+     1
+    ],
+    [
+     "reverse",
+     4000,
+     1
+    ],
+    [
+     "reverse",
+     8000,
+     1
+    ],
+    [
+     "reverse",
+     16000,
+     1
+    ],
+    [
+     "reverse",
+     32000,
+     1
+    ],
+    [
+     "shuffle",
+     500,
+     1
+    ],
+    [
+     "shuffle",
+     1000,
+     1
+    ],
+    [
+     "shuffle",
+     2000,
+     1
+    ],
+    [
+     "shuffle",
+     4000,
+     1
+    ],
+    [
+     "shuffle",
+     8000,
+     1
+    ],
+    [
+     "shuffle",
+     16000,
+     1
+    ],
+    [
+     "shuffle",
+     32000,
+     1
+    ],
+    [
+     "control",
+     500,
+     1
+    ],
+    [
+     "control",
+     1000,
+     1
+    ],
+    [
+     "control",
+     2000,
+     1
+    ],
+    [
+     "control",
+     4000,
+     1
+    ],
+    [
+     "control",
+     8000,
+     1
+    ],
+    [
+     "control",
+     16000,
+     1
+    ],
+    [
+     "control",
+     32000,
+     1
+    ],
+    [
+     "ptr",
+     2000,
+     2
+    ],
+    [
+     "ptr",
+     2000,
+     4
+    ],
+    [
+     "ptr",
+     2000,
+     8
+    ],
+    [
+     "ptr",
+     2000,
+     16
+    ],
+    [
+     "shuffle",
+     2000,
+     2
+    ],
+    [
+     "shuffle",
+     2000,
+     4
+    ],
+    [
+     "shuffle",
+     2000,
+     8
+    ],
+    [
+     "shuffle",
+     2000,
+     16
+    ]
+   ],
+   "show": [
+    "validation_global_relocations",
+    "validation_global_relocation_pairs",
+    "validation_global_relocation_sorts",
+    "validation_global_relocation_sort_rows"
+   ]
+  }
+ ],
+ "workloads": [
+  {
+   "name": "selfhost-g",
+   "argv": [
+    "-g",
+    "-I$BASE_SRC/src",
+    "-I$BASE_SRC/build/generated",
+    "-DBUSTER_UNITY_BUILD=1",
+    "-DBUSTER_INCLUDE_TESTS=0",
+    "-c",
+    "$BASE_SRC/src/buster/apps/ide/ide.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ]
+  },
+  {
+   "name": "selfhost-g0",
+   "argv": [
+    "-g0",
+    "-I$BASE_SRC/src",
+    "-I$BASE_SRC/build/generated",
+    "-DBUSTER_UNITY_BUILD=1",
+    "-DBUSTER_INCLUDE_TESTS=0",
+    "-c",
+    "$BASE_SRC/src/buster/apps/ide/ide.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ]
+  },
+  {
+   "name": "sqlite3-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/sqlite-amalgamation-3530400",
+    "-DSQLITE_THREADSAFE=1",
+    "-DSQLITE_ENABLE_MATH_FUNCTIONS",
+    "-DSQLITE_ENABLE_COLUMN_METADATA",
+    "-c",
+    "$INPUTS/sqlite-amalgamation-3530400/sqlite3.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ]
+  },
+  {
+   "name": "sqlite3-g",
+   "argv": [
+    "-g",
+    "-O2",
+    "-I$INPUTS/sqlite-amalgamation-3530400",
+    "-DSQLITE_THREADSAFE=1",
+    "-DSQLITE_ENABLE_MATH_FUNCTIONS",
+    "-DSQLITE_ENABLE_COLUMN_METADATA",
+    "-c",
+    "$INPUTS/sqlite-amalgamation-3530400/sqlite3.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ]
+  },
+  {
+   "name": "sqlite-shell-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/sqlite-amalgamation-3530400",
+    "-DSQLITE_THREADSAFE=1",
+    "-DSQLITE_ENABLE_MATH_FUNCTIONS",
+    "-DSQLITE_ENABLE_COLUMN_METADATA",
+    "-c",
+    "$INPUTS/sqlite-amalgamation-3530400/shell.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ]
+  },
+  {
+   "name": "cjson-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/cjson",
+    "-c",
+    "$INPUTS/cjson/cJSON.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ]
+  },
+  {
+   "name": "cjson-utils-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/cjson",
+    "-c",
+    "$INPUTS/cjson/cJSON_Utils.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ]
+  },
+  {
+   "name": "lua-lapi-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lapi.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lauxlib-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lauxlib.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lbaselib-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lbaselib.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lcode-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lcode.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lcorolib-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lcorolib.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lctype-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lctype.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-ldblib-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/ldblib.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-ldebug-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/ldebug.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-ldo-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/ldo.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-ldump-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/ldump.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lfunc-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lfunc.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lgc-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lgc.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-linit-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/linit.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-liolib-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/liolib.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-llex-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/llex.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lmathlib-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lmathlib.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lmem-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lmem.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-loadlib-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/loadlib.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lobject-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lobject.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lopcodes-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lopcodes.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-loslib-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/loslib.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lparser-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lparser.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lstate-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lstate.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lstring-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lstring.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lstrlib-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lstrlib.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-ltable-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/ltable.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-ltablib-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/ltablib.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-ltm-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/ltm.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lua-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lua.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-luac-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/luac.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lundump-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lundump.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lutf8lib-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lutf8lib.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lvm-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lvm.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  },
+  {
+   "name": "lua-lzio-g0",
+   "argv": [
+    "-g0",
+    "-O2",
+    "-I$INPUTS/lua-5.4.8/src",
+    "-DLUA_USE_LINUX",
+    "-c",
+    "$INPUTS/lua-5.4.8/src/lzio.c"
+   ],
+   "refs": [
+    "base",
+    "reloc",
+    "census"
+   ],
+   "timing_repeats": 1
+  }
+ ]
+}
