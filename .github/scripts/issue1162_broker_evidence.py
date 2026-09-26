@@ -1604,6 +1604,25 @@ def _validate_manager_population(
             "joined_processes": started_count}
 
 
+def _check_complete_capture_conservation(
+        full_captures: list[dict[str, Any]], diagnostic_profile: dict[str, Any],
+        start_ticks: int, unit: str) -> None:
+    require(bool(full_captures), f"no complete process capture for {unit}")
+    # Every retained complete capture must agree. Selecting only the first
+    # witness would hide a later contradictory socket or security fact.
+    for full in full_captures:
+        require(full["start_ticks"] == start_ticks and
+                full["socket"] is not None and
+                full["socket"]["inode"] == diagnostic_profile["socket"]["ino"] and
+                full["socket"]["device"] == diagnostic_profile["socket"]["dev"] and
+                full["socket"]["mode"] == diagnostic_profile["socket"]["mode"] and
+                full["proc"] is not None and
+                _same_security_status(full["proc"]["status"], diagnostic_profile["status"]) and
+                full["proc"]["cgroup_path"] == diagnostic_profile["cgroup_path"] and
+                full["proc"]["ro_mounts"] == diagnostic_profile["ro_mounts"],
+                f"C diagnostic and external process captures disagree for {unit}")
+
+
 def _validate_external_population(
         unit_rows: dict[tuple[str, str, str, int], dict[str, Any]],
         snapshots: list[dict[str, Any]],
@@ -1665,19 +1684,10 @@ def _validate_external_population(
                 f"full process witness has no exact trusted stdout diagnostic for {key[1]}")
         diagnostic_profile = diagnostic_profiles[diagnostic_key]
         full_captures = [item for item in process_verifications if item["complete"]]
-        # Every retained complete capture must agree. Selecting only the first
-        # witness would hide a later contradictory socket or security fact.
-        for full in full_captures:
-            require(full["start_ticks"] == diagnostics[diagnostic_key]["sequence"]["start_ticks"] == identity[8] and
-                    full["socket"] is not None and
-                    full["socket"]["inode"] == diagnostic_profile["socket"]["ino"] and
-                    full["socket"]["device"] == diagnostic_profile["socket"]["dev"] and
-                    full["socket"]["mode"] == diagnostic_profile["socket"]["mode"] and
-                    full["proc"] is not None and
-                    _same_security_status(full["proc"]["status"], diagnostic_profile["status"]) and
-                    full["proc"]["cgroup_path"] == diagnostic_profile["cgroup_path"] and
-                    full["proc"]["ro_mounts"] == diagnostic_profile["ro_mounts"],
-                    f"C diagnostic and external process captures disagree for {key[1]}")
+        require(diagnostics[diagnostic_key]["sequence"]["start_ticks"] == identity[8],
+                f"C diagnostic start ticks differ from observer for {key[1]}")
+        _check_complete_capture_conservation(
+            full_captures, diagnostic_profile, identity[8], key[1])
         full = full_captures[0]
         full_witnesses[key] = {"process_identity": identity, "socket": full["socket"],
                                "status": full["proc"]["status"], "proc": full["proc"]}
@@ -2000,6 +2010,26 @@ def self_test() -> int:
     expected_bad_uid = json.loads(json.dumps(expected))
     expected_bad_uid["profile"]["client_uids"] = [0, 65000]
     rejects(parse_expected, json.dumps(expected_bad_uid).encode())
+
+    # Two retained full witnesses must both agree; a valid first one cannot
+    # erase a later contradictory socket or security observation.
+    diagnostic_profile = {"socket": {"ino": 12345, "dev": 8, "mode": stat.S_IFSOCK | 0o777},
+        "status": sequence["status"], "cgroup_path": "/synthetic-broker",
+        "ro_mounts": {"/": True}}
+    capture = {"start_ticks": 5812,
+        "socket": {"inode": 12345, "device": 8, "mode": stat.S_IFSOCK | 0o777},
+        "proc": {"status": sequence["status"], "cgroup_path": "/synthetic-broker",
+                 "ro_mounts": {"/": True}}}
+    second = json.loads(json.dumps(capture))
+    _check_complete_capture_conservation([capture, second], diagnostic_profile, 5812, "fixture")
+    checks += 1
+    second["socket"]["inode"] = 54321
+    rejects(_check_complete_capture_conservation, [capture, second], diagnostic_profile, 5812, "fixture")
+    rejects(_check_complete_capture_conservation, [second, capture], diagnostic_profile, 5812, "fixture")
+    second = json.loads(json.dumps(capture))
+    second["proc"]["status"]["Seccomp"] = "0"
+    rejects(_check_complete_capture_conservation, [capture, second], diagnostic_profile, 5812, "fixture")
+    rejects(_check_complete_capture_conservation, [], diagnostic_profile, 5812, "fixture")
 
     print(f"issue1162 broker evidence self-test: {checks} checks passed")
     return 0
