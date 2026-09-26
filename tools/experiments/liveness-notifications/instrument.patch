@@ -1,6 +1,6 @@
 --- a/src/buster/lib/compiler/codegen/register_allocator_fast.c
 +++ b/src/buster/lib/compiler/codegen/register_allocator_fast.c
-@@ -1,91 +1,119 @@
+@@ -1665,91 +1665,119 @@
  // themselves; this only widens them.
 +#define BUSTER_LIVENESS_REPLAY 1
 +#include <buster/lib/compiler/codegen/liveness_notification_probe_internal.h>
@@ -56,7 +56,7 @@
          for (u32 entry = first; entry < limit; entry += 1)
          {
 +            lp_add(&lp_evidence.actual, &lp_evidence.actual.edge_visits, 1);
-             u32 predecessor = prepass->predecessor_list[entry];
+             u32 predecessor = prepass->predecessors[entry];
              u64* predecessor_out = live_out + (u64)predecessor * words;
              bool predecessor_changed = false;
              for (u32 word = 0; word < words; word += 1)
