@@ -3,8 +3,10 @@
 // wasm_emit owns direct WebAssembly output for Memory64 freestanding and
 // wasm32 WASI Preview 1. wasm64_emit keeps the original Memory64 API. Both
 // consume canonical IR; all temporary vectors and encoded bytes belong to
-// the caller supplied arena. wasm64_prepare_wasi_imports reserves command
-// imports before definitions, and wasm64_fe_emit_wasi_start writes the adapter.
+// the caller supplied arena. wasm64_collect_functions derives which symbols are
+// defined and which are called once per module, not once per symbol, before it
+// orders imports; wasm64_prepare_wasi_imports reserves command imports before
+// definitions, and wasm64_fe_emit_wasi_start writes the adapter.
 // Local aggregate snapshots use private shadow-stack slots. Their SSA locals
 // carry slot addresses; loads copy immediately, so later stores cannot change
 // an earlier value. Function ABIs and block parameters remain scalar-only.
@@ -695,35 +697,6 @@ static IrTypeId wasm64_function_type_from_symbol(Wasm64Context* context, IrSymbo
     return symbol_type && symbol_type->kind == IR_TYPE_FUNCTION ? symbol_type->id : IR_TYPE_ID_INVALID;
 }
 
-static bool wasm64_symbol_is_function_definition(Wasm64Context* context, IrSymbolId symbol_id, IrFunction** function_out, u32* module_out)
-{
-    if (context->program && symbol_id.value < context->program->symbols.count)
-    {
-        for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
-        {
-            IrModule* module = context->modules + module_index;
-            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
-            {
-                IrFunction* function = module->functions + function_index;
-                if (function->symbol.value == symbol_id.value && function->state == IR_FUNCTION_LOWERED)
-                {
-                    if (function_out)
-                    {
-                        *function_out = function;
-                    }
-                    if (module_out)
-                    {
-                        *module_out = module_index;
-                    }
-                    return true;
-                }
-            }
-        }
-    }
-
-    return false;
-}
-
 static String8 wasm64_import_module(String8 link_name)
 {
     u64 hash = 0;
@@ -1066,27 +1039,6 @@ static bool wasm64_prepare_wasi_imports(Wasm64Context* context)
     return valid && !wasm64_failed(context);
 }
 
-static bool wasm64_symbol_is_called(Wasm64Context* context, IrSymbolId symbol_id)
-{
-    for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
-    {
-        IrModule* module = context->modules + module_index;
-        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
-        {
-            IrFunction* function = module->functions + function_index;
-            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-            {
-                IrInstruction* instruction = function->instructions + instruction_index;
-                if (instruction->opcode == IR_OPCODE_CALL && instruction->symbol.value == symbol_id.value)
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
 static bool wasm64_collect_functions(Wasm64Context* context)
 {
     u32 symbol_count = context->program->symbols.count;
@@ -1098,17 +1050,69 @@ static bool wasm64_collect_functions(Wasm64Context* context)
         context->symbol_seen[symbol_index] = 0;
     }
 
+    // Which symbols a lowered function defines, and which some CALL names,
+    // are facts of the whole module, not of one symbol. Derive them once:
+    // definitions from one pass over the functions, then calls from one pass
+    // over every row, taken only when some function symbol is neither defined
+    // nor an import or external (only those ask), instead of rescanning every
+    // function, and every row, for each symbol asked about.
+    enum
+    {
+        WASM64_SYMBOL_DEFINED = 1,
+        WASM64_SYMBOL_CALLED = 2,
+    };
+    u8* symbol_facts = arena_allocate(context->arena, u8, symbol_count ? symbol_count : 1);
+    memset(symbol_facts, 0, symbol_count ? symbol_count : 1);
+    for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
+    {
+        IrModule* module = context->modules + module_index;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            if (function->state == IR_FUNCTION_LOWERED && function->symbol.value < symbol_count)
+            {
+                symbol_facts[function->symbol.value] |= WASM64_SYMBOL_DEFINED;
+            }
+        }
+    }
+    bool calls_asked = false;
+    for (u32 symbol_index = 0; symbol_index < symbol_count; symbol_index += 1)
+    {
+        IrSymbol* symbol = context->program->symbols.symbols + symbol_index;
+        u8 facts = symbol->id.value < symbol_count ? symbol_facts[symbol->id.value] : 0;
+        calls_asked |= symbol->kind == IR_SYMBOL_FUNCTION && !(facts & WASM64_SYMBOL_DEFINED) &&
+                       symbol->linkage != IR_LINKAGE_IMPORT && symbol->linkage != IR_LINKAGE_EXTERNAL;
+    }
+    for (u32 module_index = 0; calls_asked && module_index < context->module_count; module_index += 1)
+    {
+        IrModule* module = context->modules + module_index;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = function->instructions + instruction_index;
+                if (instruction->opcode == IR_OPCODE_CALL && instruction->symbol.value < symbol_count)
+                {
+                    symbol_facts[instruction->symbol.value] |= WASM64_SYMBOL_CALLED;
+                }
+            }
+            context->stats.call_fact_instruction_visits += function->instruction_count;
+        }
+    }
+
     // Imports occupy the first function indices. Walk symbol ids, which are
     // stable across module emission, and retain only symbols used by the IR or
     // explicitly declared as imports/externals.
     for (u32 symbol_index = 0; symbol_index < symbol_count; symbol_index += 1)
     {
         IrSymbol* symbol = context->program->symbols.symbols + symbol_index;
-        if (symbol->kind != IR_SYMBOL_FUNCTION || wasm64_symbol_is_function_definition(context, symbol->id, 0, 0))
+        u8 facts = symbol->id.value < symbol_count ? symbol_facts[symbol->id.value] : 0;
+        if (symbol->kind != IR_SYMBOL_FUNCTION || (facts & WASM64_SYMBOL_DEFINED))
         {
             continue;
         }
-        bool needed = symbol->linkage == IR_LINKAGE_IMPORT || symbol->linkage == IR_LINKAGE_EXTERNAL || wasm64_symbol_is_called(context, symbol->id);
+        bool needed = symbol->linkage == IR_LINKAGE_IMPORT || symbol->linkage == IR_LINKAGE_EXTERNAL || (facts & WASM64_SYMBOL_CALLED);
         if (!needed)
         {
             continue;

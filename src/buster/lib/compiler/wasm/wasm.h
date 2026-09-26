@@ -66,6 +66,10 @@ struct Wasm64Stats
     u64 stack_upper_bound;
     u64 code_bytes;
     u64 binary_bytes;
+    // Instruction rows read to learn which function symbols some call names:
+    // one pass over every function when any undefined internal function symbol
+    // asks, however many do, and none when no symbol asks.
+    u64 call_fact_instruction_visits;
 };
 
 typedef struct Wasm64Artifact Wasm64Artifact;

@@ -8744,6 +8744,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_direct_emitter_preparati
     return result;
 }
 
+// Import collection asks, for every function symbol, whether a lowered
+// function defines it and whether any call names it. Both are answered once
+// per module: the rows read equal the module's row count however many unused
+// static functions ask, and are zero when none does. The imports equal the old
+// per-symbol rescans, recomputed here as the oracle.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_import_facts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 symbol_counts[] = {0, 4, 64};
+    for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(symbol_counts); variant += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 source = S8("extern int imported_called(int);\nextern int imported_uncalled(int);\n"
+                            "int defined(int value) { return imported_called(value) + 1; }\n");
+        for (u32 index = 0; index < symbol_counts[variant]; index += 1)
+        {
+            source = string_format(arena, S8("{S8}static int unused_{u32}(int value) {{ return value * {u32}; }}\nextern int declared_{u32}(int);\n"),
+                                   source, index, index + 2, index);
+        }
+        Target target = {.cpu_arch = CPU_ARCH_WASM64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_FREESTANDING};
+        CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+        CParserResult syntax = c_parse_ast(arena, preprocess);
+        CIRLowerResult lowered = c_analyze(arena, S8("wasm-import-facts.c"), preprocess, syntax, target);
+        // Prepare first, as the driver does, so the rows counted below are
+        // the rows the emitter reads; its own re-preparation leaves them as is.
+        if (BUSTER_REQUIRE(arguments, !preprocess.error_count && lowered.program && !lowered.diagnostic_count) &&
+            BUSTER_REQUIRE(arguments, ir_prepare_canonical_module(lowered.program, lowered.program->modules, false).error == IR_VALIDATION_NONE))
+        {
+            IrProgram* program = lowered.program;
+            IrModule* module = program->modules;
+            u64 rows = 0;
+            u32 expected_imports = 0;
+            bool asked = false;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                rows += module->functions[function_index].instruction_count;
+            }
+            for (u32 symbol_index = 0; symbol_index < program->symbols.count; symbol_index += 1)
+            {
+                IrSymbol* symbol = program->symbols.symbols + symbol_index;
+                bool defined = false;
+                bool called = false;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    IrFunction* function = module->functions + function_index;
+                    defined |= function->symbol.value == symbol->id.value && function->state == IR_FUNCTION_LOWERED;
+                    for (u32 row = 0; row < function->instruction_count; row += 1)
+                    {
+                        called |= function->instructions[row].opcode == IR_OPCODE_CALL && function->instructions[row].symbol.value == symbol->id.value;
+                    }
+                }
+                bool external = symbol->linkage == IR_LINKAGE_IMPORT || symbol->linkage == IR_LINKAGE_EXTERNAL;
+                expected_imports += symbol->kind == IR_SYMBOL_FUNCTION && !defined && (external || called);
+                asked |= symbol->kind == IR_SYMBOL_FUNCTION && !defined && !external;
+            }
+            WasmArtifact artifact = wasm_emit(arena, program, module, 1, WASM64_OPTIONS_DEFAULT);
+            BUSTER_TEST_RAW(arguments, artifact.success, artifact.error.message);
+            BUSTER_TEST(arguments, artifact.stats.import_count == expected_imports && expected_imports != 0);
+            BUSTER_TEST(arguments, asked == (symbol_counts[variant] != 0) && rows != 0);
+            BUSTER_TEST(arguments, artifact.stats.call_fact_instruction_visits == (asked ? rows : 0));
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // `-c` writes the object through object_write_borrowing: the ELF image borrows
 // every large section payload from the ObjectFile instead of copying it, and
 // the file is its slices written in order. The published file must equal the
@@ -9358,6 +9425,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_direct_emitter_preparation);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_borrowed_payloads);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_import_facts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_common_storage_option);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
