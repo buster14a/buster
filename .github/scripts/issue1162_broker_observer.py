@@ -56,6 +56,7 @@ DECIMAL = re.compile(r"(?:0|[1-9][0-9]{0,19})\Z")
 FDINFO_INODE = re.compile(rb"^ino:\s*([0-9]+)\s*$", re.MULTILINE)
 PREEXEC_EXECUTABLES = frozenset(("/lib/systemd/systemd-executor",
                                   "/usr/lib/systemd/systemd-executor"))
+BROKER_EXECUTABLE = "/usr/local/libexec/buster-bench-systemd-broker"
 SUPERSEDABLE_CAPTURE_STATES = frozenset(("transient_proc_disappeared",
                                          "transient_proc_interrupted",
                                          "transient_capture_deadline",
@@ -1107,20 +1108,72 @@ class BrokerObserver:
                 buffer.extend(block)
 
     @staticmethod
-    def _capture_failure_state(exc: Exception, snapshot: dict[str, object],
+    def _stable_exe_identity(before: tuple[str, int, int], first_exe: str,
+                             after: tuple[str, int, int], second_exe: str,
+                             expected_ticks: int) -> bool:
+        return (before[1:] == after[1:] and before[2] == expected_ticks and
+                expected_ticks > 0 and first_exe == second_exe and
+                0 < len(first_exe) <= 4096)
+
+    def _read_stable_process_exe(self, pid: int, expected_ticks: int, label: str) -> str:
+        import issue1162_live_probe as live_probe
+        proc = Path(f"/proc/{pid}")
+        before = live_probe._proc_stat_identity(
+            live_probe._bounded_file(proc / "stat", MAX_PROC_STAT_BYTES, self.deadline, reserve=0.0),
+            label)
+        first_exe = os.readlink(proc / "exe")
+        after = live_probe._proc_stat_identity(
+            live_probe._bounded_file(proc / "stat", MAX_PROC_STAT_BYTES, self.deadline, reserve=0.0),
+            label)
+        second_exe = os.readlink(proc / "exe")
+        if self._stable_exe_identity(before, first_exe, after, second_exe, expected_ticks):
+            return first_exe
+        # Type=exec can transition from systemd-executor to the pinned broker
+        # between the two readlinks without changing PID/start ticks. Retry
+        # exactly once and accept only a now-stable broker image.
+        require(before[1:] == after[1:] and before[2] == expected_ticks and
+                first_exe in PREEXEC_EXECUTABLES and second_exe == BROKER_EXECUTABLE,
+                "process executable or start ticks changed around read")
+        retry_before = live_probe._proc_stat_identity(
+            live_probe._bounded_file(proc / "stat", MAX_PROC_STAT_BYTES, self.deadline, reserve=0.0),
+            label)
+        retry_first_exe = os.readlink(proc / "exe")
+        retry_after = live_probe._proc_stat_identity(
+            live_probe._bounded_file(proc / "stat", MAX_PROC_STAT_BYTES, self.deadline, reserve=0.0),
+            label)
+        retry_second_exe = os.readlink(proc / "exe")
+        require(retry_first_exe == BROKER_EXECUTABLE and
+                self._stable_exe_identity(retry_before, retry_first_exe,
+                                          retry_after, retry_second_exe, expected_ticks),
+                "executor-to-broker executable transition did not stabilize")
+        return BROKER_EXECUTABLE
+
+    def _recheck_known_preexec(self, pid: int, snapshot: dict[str, object],
+                               label: str) -> bool:
+        try:
+            current_exe = self._read_stable_process_exe(pid, int(snapshot["start_ticks"]), label)
+        except (OSError, ObserverError, ValueError, RuntimeError):
+            return False
+        return current_exe == snapshot.get("initial_exe_observed") and \
+               current_exe in PREEXEC_EXECUTABLES
+
+    def _capture_failure_state(self, exc: Exception, snapshot: dict[str, object],
                                pid: int, capture_number: int) -> str:
         # The known systemd executor may occupy Type=exec's MainPID before it
         # enters the fixed broker image. It is preliminary only when the full
         # show still reports the start phase and the independently read ticks
         # later bind to a full broker witness. A different executable, cgroup,
         # hash, socket FD, or process identity is a hard contradiction.
-        expected_preexec = f"process executable path mismatch for broker-{capture_number:06d}: "
+        label = f"broker-{capture_number:06d}"
+        expected_preexec = f"process executable path mismatch for {label}: "
+        preexec_error = (str(exc) == expected_preexec + str(snapshot.get("initial_exe_observed")) or
+                         str(exc) == f"process cgroup mismatch for {label}")
         if (type(exc).__name__ == "ProbeError" and
                 snapshot.get("active_state") == "activating" and
                 snapshot.get("substate") == "start" and
                 isinstance(snapshot.get("start_ticks"), int) and
-                str(exc).startswith(expected_preexec) and
-                str(exc)[len(expected_preexec):] in PREEXEC_EXECUTABLES):
+                snapshot.get("initial_exe_observed") in PREEXEC_EXECUTABLES and
+                preexec_error and self._recheck_known_preexec(pid, snapshot, label)):
             return "known_preexec_executable_transition"
         if type(exc).__name__ == "ProbeError" and str(exc) == \
                 "submit-relative live-probe deadline exhausted":
@@ -1278,7 +1331,7 @@ class BrokerObserver:
         require(pid > 0 and isinstance(snapshot.get("cgroup"), str) and
                 snapshot["cgroup"].startswith("/"),
                 "live MainPID has no valid systemd ControlGroup")
-        expected_exe = "/usr/local/libexec/buster-bench-systemd-broker"
+        expected_exe = BROKER_EXECUTABLE
         label = f"broker-{capture_number:06d}"
         references = {}
         proc_path = Path(f"/proc/{pid}")
@@ -1287,6 +1340,8 @@ class BrokerObserver:
             label)
         require(initial_stat[2] > 0, "positive MainPID has invalid proc start ticks")
         snapshot["start_ticks"] = initial_stat[2]
+        snapshot["initial_exe_observed"] = self._read_stable_process_exe(
+            pid, initial_stat[2], label)
         with tempfile.TemporaryDirectory(prefix="issue1162-broker-proc-") as temp_dir:
             old_umask = os.umask(0o077)
             try:
@@ -1842,20 +1897,29 @@ def _self_test() -> None:
     class ProbeError(RuntimeError):
         pass
 
-    for failure, active_state, substate, supersedable in (
+    executor = "/usr/lib/systemd/systemd-executor"
+    for failure, active_state, substate, initial_exe, reread_exe, supersedable in (
             (ProbeError("process executable path mismatch for broker-000004: "
-                        "/usr/lib/systemd/systemd-executor"), "activating", "start", True),
+                        "/usr/lib/systemd/systemd-executor"),
+             "activating", "start", executor, executor, True),
+            (ProbeError("process cgroup mismatch for broker-000004"),
+             "activating", "start", executor, executor, True),
+            (ProbeError("process cgroup mismatch for broker-000004"),
+             "activating", "start", executor, BROKER_EXECUTABLE, False),
+            (ProbeError("process cgroup mismatch for broker-000004"),
+             "activating", "start", BROKER_EXECUTABLE, executor, False),
             (ProbeError("process executable path mismatch for broker-000004: "
-                        "/usr/local/bin/other"), "activating", "start", False),
+                        "/usr/local/bin/other"),
+             "activating", "start", "/usr/local/bin/other", "/usr/local/bin/other", False),
             (ProbeError("process executable path mismatch for broker-000004: "
-                        "/usr/lib/systemd/systemd-executor"), "active", "running", False),
-            (ProbeError("process cgroup mismatch for broker-000004"), "activating", "start", False),
+                        "/usr/lib/systemd/systemd-executor"),
+             "active", "running", executor, executor, False),
             (ProbeError("running and installed executable hashes differ for broker-000004"),
-             "active", "running", False),
+             "active", "running", BROKER_EXECUTABLE, BROKER_EXECUTABLE, False),
             (ObserverError("accepted socket FD 0 readback is inconsistent"),
-             "active", "running", False),
+             "active", "running", BROKER_EXECUTABLE, BROKER_EXECUTABLE, False),
             (ObserverError("positive MainPID start ticks changed during capture"),
-             "active", "running", False)):
+             "active", "running", BROKER_EXECUTABLE, BROKER_EXECUTABLE, False)):
         case_lifecycle = Lifecycle(lifecycle.unit, lifecycle.object_path, 4, 10, 50)
         snap = {"boot_id": boot, "unit": lifecycle.unit,
                 "object_path": lifecycle.object_path, "generation": 4,
@@ -1877,9 +1941,11 @@ def _self_test() -> None:
         def failed_capture(_row: Lifecycle, row_snapshot: dict[str, object],
                            _pid: int, _number: int) -> None:
             row_snapshot["start_ticks"] = 5812
+            row_snapshot["initial_exe_observed"] = initial_exe
             raise failure
 
         fixture_observer._capture_process = failed_capture
+        fixture_observer._read_stable_process_exe = lambda _pid, _ticks, _label: reread_exe
         fixture_observer.current_query = query
         fixture_observer._finish_query(query)
         case_lifecycle.snapshots.append({**witness, "generation": 4})
@@ -1887,6 +1953,41 @@ def _self_test() -> None:
         assert case_lifecycle.as_json(boot, raw)["process_complete"] == supersedable
         assert (snap["process_capture_state"] in SUPERSEDABLE_CAPTURE_STATES) == supersedable
         checks += 1
+    class FixtureProcReader:
+        @staticmethod
+        def _bounded_file(path: Path, maximum: int, deadline: float,
+                          reserve: float = 0.0) -> bytes:
+            assert str(path) == "/proc/741/stat" and maximum == MAX_PROC_STAT_BYTES
+            return b"fixture-stat"
+
+        @staticmethod
+        def _proc_stat_identity(_raw: bytes, _label: str) -> tuple[str, int, int]:
+            return "S", 1, 5812
+
+    original_probe_module = sys.modules.get("issue1162_live_probe")
+    original_readlink = os.readlink
+    fixture_observer.deadline = time.monotonic() + 5.0
+    try:
+        sys.modules["issue1162_live_probe"] = FixtureProcReader()
+        links = iter((executor, BROKER_EXECUTABLE, BROKER_EXECUTABLE, BROKER_EXECUTABLE))
+        os.readlink = lambda _path: next(links)
+        assert BrokerObserver._read_stable_process_exe(
+            fixture_observer, 741, 5812, "broker-fixture") == BROKER_EXECUTABLE
+        checks += 1
+        links = iter((executor, "/usr/local/bin/other"))
+        try:
+            BrokerObserver._read_stable_process_exe(fixture_observer, 741, 5812,
+                                                     "broker-fixture")
+        except ObserverError:
+            checks += 1
+        else:
+            raise AssertionError("unknown executable transition was accepted")
+    finally:
+        os.readlink = original_readlink
+        if original_probe_module is None:
+            sys.modules.pop("issue1162_live_probe", None)
+        else:
+            sys.modules["issue1162_live_probe"] = original_probe_module
     reaped = subprocess.Popen(["/usr/bin/true"], stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True, start_new_session=True)
     reaped.wait(timeout=1.0)
