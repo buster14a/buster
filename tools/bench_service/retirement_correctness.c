@@ -176,6 +176,7 @@ bool bq_retirement_correctness_begin(BqRetirementCorrectness* gate,
         ok = bq_retirement_correctness_digest(prepared->source_sha256[side]) &&
              bq_retirement_correctness_digest(prepared->binary_sha256[side]);
     uint32_t required_kinds = 0, eligible = 0, object_rows = 0;
+    uint32_t native_link_rows = 0, native_self_host_rows = 0;
     for (uint32_t i = 0; ok && i < check_count; i += 1)
     {
         BqRetirementRequiredCheck const* check = &checks[i];
@@ -245,9 +246,17 @@ bool bq_retirement_correctness_begin(BqRetirementCorrectness* gate,
                 object_rows += 1;
             }
         }
+        if (ok && row->target == prepared->native_target && row->compiler_eligible)
+        {
+            if (row->stage == BQ_RETIREMENT_STAGE_LINK) native_link_rows += 1;
+            if (row->stage == BQ_RETIREMENT_STAGE_SELF_HOST) native_self_host_rows += 1;
+        }
         if (ok) eligible += row->compiler_eligible;
     }
-    if (ok) ok = eligible > 0 && object_rows == prepared->object_rows;
+    /* Both native executable stages are required compiler-latency cells.
+     * A generated-runtime oracle is conditional on each row's obligation. */
+    if (ok) ok = eligible > 0 && object_rows == prepared->object_rows &&
+        native_link_rows > 0 && native_self_host_rows > 0;
     for (uint32_t i = 0; ok && i < check_count; i += 1)
     {
         BqRetirementRequiredCheck const* check = &checks[i];

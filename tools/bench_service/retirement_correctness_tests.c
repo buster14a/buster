@@ -283,7 +283,7 @@ static void test_bad_rows(void)
 
 static void test_bad_import(void)
 {
-    for (unsigned fault = 0; fault < 17; fault += 1)
+    for (unsigned fault = 0; fault < 21; fault += 1)
     {
         BqCorrectnessFixture fixture;
         fixture_init(&fixture);
@@ -304,6 +304,14 @@ static void test_bad_import(void)
         if (fault == 14) fixture.required[0].receipt_sha256[0] = 0;
         if (fault == 15) fixture.prepared.aa_second_commands_sha256[0] = 0;
         if (fault == 16) fixture.prepared.aa_second_commands_sha256[0] = 'g';
+        if (fault == 17) fixture.trusted[1].stage = fixture.trusted[4].stage = BQ_RETIREMENT_STAGE_SELF_HOST;
+        if (fault == 18) fixture.trusted[5].stage = BQ_RETIREMENT_STAGE_LINK;
+        if (fault == 19) fixture.trusted[1].stage = BQ_RETIREMENT_STAGE_SELF_HOST;
+        if (fault == 20)
+        {
+            fixture.trusted[4].stage = BQ_RETIREMENT_STAGE_SELF_HOST;
+            fixture.trusted[5].stage = BQ_RETIREMENT_STAGE_LINK;
+        }
         CHECK(!bq_retirement_correctness_begin(&fixture.gate, &fixture.prepared,
             fixture.trusted, fixture.required, BQ_TEST_CHECKS,
             fixture.check_facts, fixture.facts, fixture.identity_workspace,
@@ -311,6 +319,29 @@ static void test_bad_import(void)
         launch_if_ready(&fixture.gate);
         CHECK(launches == 1);
     }
+}
+
+static void test_compile_only_stage(void)
+{
+    BqCorrectnessFixture fixture;
+    fixture_init(&fixture);
+    fixture.trusted[5].execution_obligation = 0;
+    memset(fixture.trusted[5].independent_oracle_sha256, 0, 65);
+    memset(fixture.trusted[5].runtime_command_sha256, 0,
+        sizeof(fixture.trusted[5].runtime_command_sha256));
+    fixture.supplied[5].runtime_eligible = 0;
+    for (unsigned side = 0; side < 2; side += 1)
+    {
+        BqRetirementObservedSide* observed = &fixture.supplied[5].side[side];
+        memset(observed->runtime_command_sha256, 0, 65);
+        memset(observed->runtime_output_sha256, 0, 65);
+        observed->runtime_exit = -1;
+    }
+    begin_fixture(&fixture);
+    checks_fixture(&fixture);
+    rows_fixture(&fixture);
+    CHECK(bq_retirement_correctness_finish(&fixture.gate));
+    CHECK(bq_retirement_correctness_ready(&fixture.gate));
 }
 
 static void test_partial_and_sealed(void)
@@ -350,7 +381,7 @@ static void test_partial_and_sealed(void)
  * identities and says nothing about the real census or semantic oracles. */
 static void test_large_population(void)
 {
-    enum { rows = 78912 };
+    enum { object_rows = 78912, stage_rows = 2, rows = object_rows + stage_rows };
     BqCorrectnessFixture fixture;
     fixture_init(&fixture);
     BqRetirementTrustedRow* trusted = calloc(rows, sizeof(*trusted));
@@ -363,7 +394,7 @@ static void test_large_population(void)
     if (allocated)
     {
         uint32_t eligible = 0;
-        for (uint32_t i = 0; i < rows; i += 1)
+        for (uint32_t i = 0; i < object_rows; i += 1)
         {
             BqRetirementTrustedRow* row = &trusted[i];
             BqRetirementRowFact* fact = &supplied[i];
@@ -384,15 +415,28 @@ static void test_large_population(void)
             }
             else eligible += 1;
         }
-        fixture.prepared.rows = fixture.prepared.object_rows = rows;
+        for (uint32_t stage = 0; stage < stage_rows; stage += 1)
+        {
+            uint32_t i = object_rows + stage;
+            trusted[i] = fixture.trusted[stage ? 5 : 1];
+            supplied[i] = fixture.supplied[stage ? 5 : 1];
+            trusted[i].row = supplied[i].row = i;
+            Sha256 hash;
+            sha256_init(&hash);
+            sha256_add(&hash, &i, sizeof(i));
+            sha256_finish_hex(&hash, trusted[i].identity_sha256);
+            eligible += 1;
+        }
+        fixture.prepared.rows = rows;
+        fixture.prepared.object_rows = object_rows;
         for (uint32_t i = 0; i < BQ_TEST_CHECKS; i += 1)
         {
             fixture.required[i].rows = fixture.checks[i].rows =
-                i == 2 || i == 3 ? eligible : rows;
+                i == 0 ? object_rows : i == 2 || i == 3 ? eligible : rows;
         }
         CHECK(bq_retirement_correctness_begin(&fixture.gate, &fixture.prepared,
             trusted, fixture.required, BQ_TEST_CHECKS, fixture.check_facts, facts,
-            identities, rows * 2u + 1u, census, rows));
+            identities, rows * 2u + 1u, census, object_rows));
         checks_fixture(&fixture);
         for (uint32_t i = 0; i < rows; i += 1)
             CHECK(bq_retirement_correctness_row(&fixture.gate, &supplied[i]));
@@ -988,6 +1032,7 @@ int main(int argc, char** argv)
         test_bad_checks();
         test_bad_rows();
         test_bad_import();
+        test_compile_only_stage();
         test_partial_and_sealed();
         test_large_population();
         if (argc > 0) test_independent_oracle(argv[0]);
