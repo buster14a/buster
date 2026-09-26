@@ -1,0 +1,231 @@
+name: Shared C condition validation
+on:
+  push:
+    branches: [research/shared-c-capability-20260925]
+    paths: [.github/workflows/shared-c-condition-validation.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    outputs:
+      before: ${{ steps.publish.outputs.before }}
+      after: ${{ steps.publish.outputs.after }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/c-comma-condition-capability
+          path: source
+          persist-credentials: true
+      - name: Publish only the isolated test and compiler slice
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C source rev-parse HEAD)" = ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          test "$(git -C source rev-parse 'HEAD^{tree}')" = 4c5306221fdb22fccc929b55e333163742de17d0
+          test -z "$(git -C source status --porcelain)"
+          mkdir -p evidence
+          git -C source config user.name 'github-actions[bot]'
+          git -C source config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python3 transport/tools/investigations/shared-c-capability-20260925/prepare.py tests source evidence
+          git -C source diff --check
+          test "$(git -C source diff --name-only)" = src/buster/tests/compiler/frontend/c/c_test.c
+          git -C source add src/buster/tests/compiler/frontend/c/c_test.c
+          git -C source commit -m 'test(c): cover ordered comma conditions across control contexts'
+          before=$(git -C source rev-parse HEAD)
+          git -C source push origin HEAD:refs/heads/fix/c-comma-condition-capability
+          python3 transport/tools/investigations/shared-c-capability-20260925/prepare.py fix source evidence
+          git -C source diff --check
+          test "$(git -C source diff --name-only)" = src/buster/lib/compiler/frontend/c/c_gen.c
+          git -C source add src/buster/lib/compiler/frontend/c/c_gen.c
+          git -C source commit -m 'fix(c): preserve comma sequencing before condition decomposition'
+          after=$(git -C source rev-parse HEAD)
+          git -C source push origin HEAD:refs/heads/fix/c-comma-condition-capability
+          printf 'before=%s\nafter=%s\n' "$before" "$after" | tee evidence/revisions.txt >> "$GITHUB_OUTPUT"
+          git -C source rev-parse 'HEAD^{tree}' > evidence/after-tree.txt
+          git -C source diff ade6ac4b6ecb21f30b61b656439bac476c145e2f HEAD > evidence/source.patch
+          git -C source archive HEAD > evidence/candidate-source.tar
+          sha256sum evidence/candidate-source.tar evidence/family.c > evidence/manifest.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: shared-c-condition-source
+          path: evidence
+          retention-days: 30
+  validate:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: [before, after]
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ matrix.phase == 'before' && needs.publish.outputs.before || needs.publish.outputs.after }}
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: transport
+          persist-credentials: false
+      - name: Build exact source
+        id: compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence .ci-tools
+          git rev-parse HEAD 'HEAD^{tree}' > evidence/revision.txt
+          clang --version > evidence/clang.txt
+          gcc --version > evidence/gcc.txt
+          clang -dumpmachine > evidence/target.txt
+          uname -a > evidence/host.txt
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o .ci-tools/build
+          .ci-tools/build generate --ci --cc clang --linker DEFAULT > evidence/generate.log 2>&1
+          .ci-tools/build build --config Release -t ide > evidence/build.log 2>&1
+          sha256sum build/Release/ide > evidence/compiler.sha256
+      - name: Independent references and strict native semantic family
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 transport/tools/investigations/shared-c-capability-20260925/observe.py build/Release/ide evidence/family --references > evidence/family-observer.log 2>&1
+      - name: Full registered suite without denominator changes
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set +e
+          .ci-tools/build build --config Release -t test_all > evidence/test-all.log 2>&1
+          result=$?
+          printf '%s\n' "$result" > evidence/test-all.exit
+          tail -80 evidence/test-all.log
+          exit "$result"
+      - name: Ordinary self-host fixed point
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          .ci-tools/build test_self_host --config Release 2>&1 | tee evidence/selfhost.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: shared-c-condition-${{ matrix.phase }}-validation
+          path: evidence
+          retention-days: 30
+          if-no-files-found: error
+  workloads:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: [before, after]
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ matrix.phase == 'before' && needs.publish.outputs.before || needs.publish.outputs.after }}
+          persist-credentials: false
+      - name: Build exact source and existing host dependency
+        id: compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence .ci-tools external
+          git rev-parse HEAD 'HEAD^{tree}' > evidence/revision.txt
+          clang --version > evidence/clang.txt
+          gcc --version > evidence/gcc.txt
+          clang -dumpmachine > evidence/target.txt
+          python3 tools/ci_apt.py readline --out evidence/apt-readline
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o .ci-tools/build
+          .ci-tools/build generate --ci --cc clang --linker DEFAULT > evidence/generate.log 2>&1
+          .ci-tools/build build --config Release -t ide > evidence/build.log 2>&1
+          sha256sum build/Release/ide > evidence/compiler.sha256
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        if: ${{ !cancelled() }}
+        with:
+          repository: lua/lua
+          ref: 6e22fedb74cf0c9b6656e9fce8b7331db847c605
+          path: external/lua-git
+          persist-credentials: false
+      - name: Pristine approved Lua release
+        id: lua_input
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location https://www.lua.org/ftp/lua-5.4.8.tar.gz -o external/lua.tar.gz
+          printf '%s  %s\n' 4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae external/lua.tar.gz | sha256sum --check
+          tar -xzf external/lua.tar.gz -C external
+          sha256sum external/lua.tar.gz > evidence/lua.sha256
+      - name: Existing complete Lua harness
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && steps.lua_input.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          .ci-tools/build test_lua --config Release "$PWD/external/lua-5.4.8/src" "$PWD/external/lua-git" 2>&1 | tee evidence/lua.log
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        id: quickjs_input
+        if: ${{ !cancelled() }}
+        with:
+          repository: bellard/quickjs
+          ref: 3d5e064e9dd67c70f7962836505a7fa067bf0a4e
+          path: external/quickjs
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        id: test262_input
+        if: ${{ !cancelled() }}
+        with:
+          repository: tc39/test262
+          ref: 5c8206929d81b2d3d727ca6aac56c18358c8d790
+          path: external/test262
+          persist-credentials: false
+      - name: Existing complete QuickJS harness with approved Test262 subset
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && steps.quickjs_input.outcome == 'success' && steps.test262_input.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C external/quickjs rev-parse HEAD 'HEAD^{tree}' > evidence/quickjs-source.txt
+          git -C external/test262 rev-parse HEAD 'HEAD^{tree}' > evidence/test262-source.txt
+          test -z "$(git -C external/quickjs status --porcelain --untracked-files=all)"
+          test -z "$(git -C external/test262 status --porcelain --untracked-files=all)"
+          git -C external/quickjs archive HEAD > evidence/quickjs-source.tar
+          .ci-tools/build test_quickjs --config Release "$PWD/external/quickjs" "$PWD/external/test262" 2>&1 | tee evidence/quickjs.log
+      - name: Confirm unchanged upstream source
+        if: ${{ !cancelled() && steps.quickjs_input.outcome == 'success' && steps.test262_input.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git -C external/quickjs status --porcelain --untracked-files=all)"
+          test -z "$(git -C external/test262 status --porcelain --untracked-files=all)"
+          git -C external/lua-git diff --exit-code
+          mkdir -p verify-lua
+          tar -xzf external/lua.tar.gz -C verify-lua
+          diff -r verify-lua/lua-5.4.8 external/lua-5.4.8
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: shared-c-condition-${{ matrix.phase }}-workloads
+          path: |
+            evidence
+            build/lua-v5.4.8-*/
+            build/quickjs-2026-06-04-*/
+          retention-days: 30
+          if-no-files-found: error
