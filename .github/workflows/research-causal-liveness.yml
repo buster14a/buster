@@ -1,0 +1,174 @@
+name: Research causal liveness
+
+# Research branch only. Not a production check, benchmark route, or acceptance
+# policy. Every attempt has a distinct artifact; none is auto-cancelled.
+on:
+  push:
+    branches: [research/causal-liveness-ade6ac4-20260925]
+    paths:
+      - tools/experiments/liveness-notifications/**
+      - .github/workflows/research-causal-liveness.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  solver:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Build and run registered graph and operation-count cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/liveness-evidence"
+          clang --version > "$RUNNER_TEMP/liveness-evidence/clang.txt"
+          gcc --version > "$RUNNER_TEMP/liveness-evidence/gcc.txt"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/liveness-evidence/research-source.txt"
+          clang -std=c11 -O2 -g -Wall -Wextra -Werror -Wpedantic -fwrapv -fno-strict-aliasing -funsigned-char -fsanitize=address,undefined -fno-sanitize-recover=all tools/experiments/liveness-notifications/experiment.c -o "$RUNNER_TEMP/liveness-clang"
+          "$RUNNER_TEMP/liveness-clang" > "$RUNNER_TEMP/liveness-evidence/clang.log" 2>&1
+          "$RUNNER_TEMP/liveness-clang" > "$RUNNER_TEMP/liveness-evidence/clang-repeat.log" 2>&1
+          cmp "$RUNNER_TEMP/liveness-evidence/clang.log" "$RUNNER_TEMP/liveness-evidence/clang-repeat.log"
+          gcc -std=c11 -O2 -g -Wall -Wextra -Werror -Wpedantic -fwrapv -fno-strict-aliasing -funsigned-char tools/experiments/liveness-notifications/experiment.c -o "$RUNNER_TEMP/liveness-gcc"
+          "$RUNNER_TEMP/liveness-gcc" > "$RUNNER_TEMP/liveness-evidence/gcc.log" 2>&1
+          cmp "$RUNNER_TEMP/liveness-evidence/clang.log" "$RUNNER_TEMP/liveness-evidence/gcc.log"
+          tail -n 1 "$RUNNER_TEMP/liveness-evidence/clang.log"
+          printf 'SOLVER_COMPLETED deterministic=1 independent_producers=2 sanitizers=address,undefined\n' > "$RUNNER_TEMP/liveness-evidence/complete.txt"
+      - name: Retain raw solver attempts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: causal-liveness-solver-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/liveness-evidence
+          if-no-files-found: warn
+          retention-days: 30
+
+  census:
+    needs: solver
+    if: ${{ !cancelled() && needs.solver.result == 'success' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cohort: main
+            source: ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          - cohort: post-1320
+            source: 908a9c906a960130b7b3f7b50f19c2bff8aff3ff
+    env:
+      SOURCE_SHA: ${{ matrix.source }}
+      INPUT_SHA: ade6ac4b6ecb21f30b61b656439bac476c145e2f
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Isolated source and frozen input worktrees
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/liveness-evidence"
+          git worktree add --detach "$RUNNER_TEMP/liveness-src" "$SOURCE_SHA"
+          git worktree add --detach "$RUNNER_TEMP/liveness-input" "$INPUT_SHA"
+          git -C "$RUNNER_TEMP/liveness-src" rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/liveness-evidence/compiler-source.txt"
+          git -C "$RUNNER_TEMP/liveness-input" rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/liveness-evidence/input-source.txt"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/liveness-evidence/research-source.txt"
+          clang --version > "$RUNNER_TEMP/liveness-evidence/clang.txt"
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+      - name: Baseline self-host before any instrumentation
+        id: baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/liveness-src"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/liveness-driver"
+          "$RUNNER_TEMP/liveness-driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/liveness-evidence/baseline-self-host.log"
+          cp build/Release/ide "$RUNNER_TEMP/liveness-evidence/baseline-ide"
+          cp build/compile_commands.json "$RUNNER_TEMP/liveness-evidence/baseline-compile-commands.json"
+          sha256sum "$RUNNER_TEMP/liveness-evidence/baseline-ide" > "$RUNNER_TEMP/liveness-evidence/baseline-compiler.sha256"
+      - name: Apply diagnostic hook only to this disposable checkout
+        id: instrument
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/liveness-src"
+          git apply --check "$GITHUB_WORKSPACE/tools/experiments/liveness-notifications/instrument.patch"
+          cp "$GITHUB_WORKSPACE/tools/experiments/liveness-notifications/experiment.c" src/buster/lib/compiler/codegen/liveness_notification_probe_internal.h
+          git apply "$GITHUB_WORKSPACE/tools/experiments/liveness-notifications/instrument.patch"
+          git diff --check
+          git diff --binary > "$RUNNER_TEMP/liveness-evidence/applied.patch"
+          cp src/buster/lib/compiler/codegen/liveness_notification_probe_internal.h "$RUNNER_TEMP/liveness-evidence/diagnostic-header.h"
+          "$RUNNER_TEMP/liveness-driver" build --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/liveness-evidence/diagnostic-build.log"
+          sha256sum build/Release/ide > "$RUNNER_TEMP/liveness-evidence/diagnostic-compiler.sha256"
+          cp build/compile_commands.json "$RUNNER_TEMP/liveness-evidence/diagnostic-compile-commands.json"
+      - name: Frozen real unity input - FAST
+        id: fast
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/liveness-src"
+          "$RUNNER_TEMP/liveness-evidence/baseline-ide" cc -I"$RUNNER_TEMP/liveness-input/src" -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -fregister-allocator=fast -g0 -c "$RUNNER_TEMP/liveness-input/src/buster/apps/ide/ide.c" -o "$RUNNER_TEMP/liveness-evidence/frozen-fast-base.o" > "$RUNNER_TEMP/liveness-evidence/frozen-fast-base.log" 2>&1
+          BUSTER_LIVENESS_REPORT=1 build/Release/ide cc -I"$RUNNER_TEMP/liveness-input/src" -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -fregister-allocator=fast -fsource-metrics="$RUNNER_TEMP/liveness-evidence/frozen-fast.metrics" -g0 -c "$RUNNER_TEMP/liveness-input/src/buster/apps/ide/ide.c" -o "$RUNNER_TEMP/liveness-evidence/frozen-fast-probe.o" > "$RUNNER_TEMP/liveness-evidence/frozen-fast-probe.log" 2>&1
+          cmp "$RUNNER_TEMP/liveness-evidence/frozen-fast-base.o" "$RUNNER_TEMP/liveness-evidence/frozen-fast-probe.o"
+          sha256sum "$RUNNER_TEMP/liveness-evidence/frozen-fast-base.o" "$RUNNER_TEMP/liveness-evidence/frozen-fast-probe.o" > "$RUNNER_TEMP/liveness-evidence/frozen-fast.sha256"
+          printf 'CENSUS_COMPLETED workload=frozen-unity allocator=fast objects_equal=1\n' > "$RUNNER_TEMP/liveness-evidence/frozen-fast.complete"
+      - name: Frozen real unity input - QUALITY
+        id: quality
+        if: ${{ !cancelled() && steps.instrument.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/liveness-src"
+          "$RUNNER_TEMP/liveness-evidence/baseline-ide" cc -I"$RUNNER_TEMP/liveness-input/src" -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -fregister-allocator=quality -g0 -c "$RUNNER_TEMP/liveness-input/src/buster/apps/ide/ide.c" -o "$RUNNER_TEMP/liveness-evidence/frozen-quality-base.o" > "$RUNNER_TEMP/liveness-evidence/frozen-quality-base.log" 2>&1
+          BUSTER_LIVENESS_REPORT=1 build/Release/ide cc -I"$RUNNER_TEMP/liveness-input/src" -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -fregister-allocator=quality -g0 -c "$RUNNER_TEMP/liveness-input/src/buster/apps/ide/ide.c" -o "$RUNNER_TEMP/liveness-evidence/frozen-quality-probe.o" > "$RUNNER_TEMP/liveness-evidence/frozen-quality-probe.log" 2>&1
+          cmp "$RUNNER_TEMP/liveness-evidence/frozen-quality-base.o" "$RUNNER_TEMP/liveness-evidence/frozen-quality-probe.o"
+          sha256sum "$RUNNER_TEMP/liveness-evidence/frozen-quality-base.o" "$RUNNER_TEMP/liveness-evidence/frozen-quality-probe.o" > "$RUNNER_TEMP/liveness-evidence/frozen-quality.sha256"
+          printf 'CENSUS_COMPLETED workload=frozen-unity allocator=quality objects_equal=1\n' > "$RUNNER_TEMP/liveness-evidence/frozen-quality.complete"
+      - name: Diagnostic compiler self-host
+        id: self_host
+        if: ${{ !cancelled() && steps.instrument.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/liveness-src"
+          "$RUNNER_TEMP/liveness-driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/liveness-evidence/diagnostic-self-host.log"
+      - name: Registered compiler and machine tests
+        id: tests
+        if: ${{ !cancelled() && steps.instrument.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/liveness-src"
+          "$RUNNER_TEMP/liveness-driver" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/liveness-evidence/test-all.log"
+      - name: Existing allocator and frontend mode matrix
+        id: modes
+        if: ${{ !cancelled() && steps.instrument.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/liveness-src"
+          "$RUNNER_TEMP/liveness-driver" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/liveness-evidence/modes.log"
+      - name: Existing real-source cJSON oracle and population
+        id: cjson
+        if: ${{ !cancelled() && steps.instrument.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/liveness-src"
+          BUSTER_LIVENESS_REPORT=1 "$RUNNER_TEMP/liveness-driver" test_cjson --config Release 2>&1 | tee "$RUNNER_TEMP/liveness-evidence/cjson.log"
+      - name: Retain raw census attempts including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: causal-liveness-${{ matrix.cohort }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/liveness-evidence
+          if-no-files-found: warn
+          retention-days: 30
