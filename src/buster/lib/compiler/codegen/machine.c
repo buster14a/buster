@@ -3043,13 +3043,33 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
         u32* block_value_counts = arena_allocate(scratch.arena, u32, debug_count);
         memset(block_value_counts, 0, sizeof(*block_value_counts) * (u64)debug_count);
         IrValueId* block_values = arena_allocate(scratch.arena, IrValueId, unresolved_count ? unresolved_count : 1u);
+        // Canonical construction never attaches local_values to a block, so
+        // a block holds a value for an unresolved local only through one of
+        // its parameters. Such blocks start from all-invalid values, record
+        // the entries their parameters fill and reset just those, costing
+        // their parameters instead of every unresolved local per block. A
+        // function whose blocks do carry local_values reloads every entry
+        // per block as before. Either way the rows below are regrouped by
+        // debug index and a local yields at most one row per block, so
+        // emitting filled entries in parameter order builds the same table.
+        bool dense = false;
+        for (u32 block_index = 0; unresolved_count && block_index < ir_function->block_count && !dense; block_index += 1)
+        {
+            dense = ir_function->blocks[block_index].local_values != 0;
+        }
+        u32* filled = arena_allocate(scratch.arena, u32, unresolved_count ? unresolved_count : 1u);
+        for (u32 unresolved_index = 0; unresolved_index < unresolved_count; unresolved_index += 1)
+        {
+            block_values[unresolved_index] = IR_VALUE_ID_INVALID;
+        }
         MachineBuilderStream block_value_stream;
         machine_stream_initialize(&block_value_stream, sizeof(MachineDebugBlockValue));
         for (u32 block_index = 0; result && unresolved_count && block_index < ir_function->block_count; block_index += 1)
         {
             IrBlock const* block = ir_function->blocks + block_index;
             IrCfgBlock const* published = ir_function->published_cfg->blocks + block_index;
-            for (u32 unresolved_index = 0; unresolved_index < unresolved_count; unresolved_index += 1)
+            u32 filled_count = 0;
+            for (u32 unresolved_index = 0; dense && unresolved_index < unresolved_count; unresolved_index += 1)
             {
                 IrDebugLocal const* local = ir_function->debug_locals + unresolved[unresolved_index];
                 block_values[unresolved_index] = block->local_values && local->id.value < ir_function->local_count
@@ -3065,7 +3085,7 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
                 {
                     slot = (slot + 1u) & local_slot_mask;
                 }
-                if (local_heads[slot] != UINT32_MAX)
+                if (local_heads[slot] != UINT32_MAX && parameter->value.value != IR_ID_UNDERLYING_INVALID)
                 {
                     for (u32 unresolved_index = local_heads[slot]; unresolved_index != UINT32_MAX;
                          unresolved_index = local_next[unresolved_index])
@@ -3073,14 +3093,20 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
                         if (block_values[unresolved_index].value == IR_ID_UNDERLYING_INVALID)
                         {
                             block_values[unresolved_index] = parameter->value;
+                            filled[filled_count++] = unresolved_index;
                         }
                     }
                 }
             }
+            u32 row_candidates = dense ? unresolved_count : filled_count;
+            IR_CONSTRUCTION_RECORD(DEBUG_VALUE_BLOCKS, 1);
+            IR_CONSTRUCTION_RECORD(DEBUG_VALUE_LOCAL_VISITS,
+                                   (dense ? unresolved_count : 2u * filled_count) + (published->instruction_count ? row_candidates : 0));
             if (published->instruction_count)
             {
-                for (u32 unresolved_index = 0; result && unresolved_index < unresolved_count; unresolved_index += 1)
+                for (u32 candidate = 0; result && candidate < row_candidates; candidate += 1)
                 {
+                    u32 unresolved_index = dense ? candidate : filled[candidate];
                     IrValueId value = block_values[unresolved_index];
                     if (value.value != IR_ID_UNDERLYING_INVALID)
                     {
@@ -3099,6 +3125,10 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
                         }
                     }
                 }
+            }
+            for (u32 index = 0; !dense && index < filled_count; index += 1)
+            {
+                block_values[filled[index]] = IR_VALUE_ID_INVALID;
             }
         }
 
