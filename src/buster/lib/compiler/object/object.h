@@ -320,10 +320,25 @@ struct ObjectFile
     u32* initializer_priorities[2];
 };
 
+// A section payload that an artifact names in place instead of copying. The
+// payload's bytes belong at file offset `offset` and stay owned by the
+// ObjectFile section they came from.
+typedef struct ObjectBorrowedPayload ObjectBorrowedPayload;
+struct ObjectBorrowedPayload
+{
+    u64 offset;
+    ByteSlice bytes;
+};
+
 typedef struct ObjectArtifact ObjectArtifact;
 struct ObjectArtifact
 {
     ByteSlice bytes;
+    // Nonzero only for object_write_borrowing. `bytes` then spans the whole
+    // file but leaves each borrowed range unwritten; object_artifact_slices
+    // yields the file in order, and the ObjectFile must outlive the artifact.
+    ObjectBorrowedPayload const* borrowed_payloads;
+    u32 borrowed_payload_count;
     ObjectError error;
     ObjectFormat format;
 };
@@ -350,6 +365,8 @@ BUSTER_F_DECL ObjectFormat object_format_for_target(Target target);
 BUSTER_F_DECL ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program, CodegenModule* module, Target target);
 BUSTER_F_DECL String8 object_print_assembly(Arena* arena, ObjectFile* object);
 BUSTER_F_DECL ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat format);
+BUSTER_F_DECL ObjectArtifact object_write_borrowing(Arena* arena, ObjectFile* object, ObjectFormat format);
+BUSTER_F_DECL ByteSlice* object_artifact_slices(Arena* arena, ObjectArtifact artifact, u32* slice_count_out);
 BUSTER_F_DECL ObjectFile object_read(Arena* arena, ByteSlice bytes, Target target);
 BUSTER_F_DECL ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target);
 BUSTER_F_DECL ObjectExecutable object_link_executable(ObjectFile* object);

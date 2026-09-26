@@ -88,6 +88,8 @@ struct FilePublishResult
 };
 
 BUSTER_F_DECL FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPermissions permissions);
+BUSTER_F_DECL FilePublishResult file_publish_slices_checked(String8 path, ByteSlice const* slices, u64 slice_count, OpenPermissions permissions);
+BUSTER_F_DECL bool file_publish_slices(String8 path, ByteSlice const* slices, u64 slice_count);
 BUSTER_F_DECL bool file_publish(String8 path, ByteSlice content);
 BUSTER_F_DECL bool file_publish_executable(String8 path, ByteSlice content);
 

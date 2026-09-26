@@ -1,6 +1,7 @@
 // File content ownership and transfer policy: file_write_checked preserves
 // transfer/close failures; file_publish_checked atomically replaces complete
-// in-memory artifacts; file_read owns padded arena and normalized APK asset
+// in-memory artifacts, and file_publish_slices_checked does the same for an
+// artifact held as ordered slices; file_read owns padded arena and normalized APK asset
 // reads; file_map_read and file_map_unmap own optional mappings; file_copy_checked
 // streams into a staging file beside its destination and publishes it with
 // os_file_replace. The staging path and publication boundary are kept together
@@ -108,7 +109,10 @@ BUSTER_GLOBAL_LOCAL void file_publish_record(FilePublishResult* result, OsError 
     }
 }
 
-FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPermissions permissions)
+// The artifact is the concatenation of `slices`, written in order into one
+// staging file, so a writer can hand over bytes it already owns in place
+// instead of first copying them into one contiguous image.
+FilePublishResult file_publish_slices_checked(String8 path, ByteSlice const* slices, u64 slice_count, OpenPermissions permissions)
 {
     FilePublishResult result = {0};
     FileStats target = os_file_replacement_target_stats(path);
@@ -156,11 +160,11 @@ FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPerm
             result.error = os_file_set_permissions(staging.file, final_permissions);
         }
 #endif
-        if (!result.error.v)
+        for (u64 index = 0; index < slice_count && !result.error.v && result.status != FILE_PUBLISH_INVALID_STAGING; index += 1)
         {
-            OsFileTransferResult written = os_file_write_checked(staging.file, content);
+            OsFileTransferResult written = os_file_write_checked(staging.file, slices[index]);
             result.error = written.error;
-            if (!result.error.v && written.transferred != content.length)
+            if (!result.error.v && written.transferred != slices[index].length)
             {
                 result.status = FILE_PUBLISH_INVALID_STAGING;
             }
@@ -185,6 +189,17 @@ FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPerm
     }
     scratch_end(scratch);
     return result;
+}
+
+FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPermissions permissions)
+{
+    return file_publish_slices_checked(path, &content, 1, permissions);
+}
+
+bool file_publish_slices(String8 path, ByteSlice const* slices, u64 slice_count)
+{
+    FilePublishResult result = file_publish_slices_checked(path, slices, slice_count, (OpenPermissions){.read = 1, .write = 1});
+    return result.status == FILE_PUBLISH_PUBLISHED;
 }
 
 bool file_publish(String8 path, ByteSlice content)

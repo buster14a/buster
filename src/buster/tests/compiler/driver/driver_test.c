@@ -8744,6 +8744,89 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_direct_emitter_preparati
     return result;
 }
 
+// `-c` writes the object through object_write_borrowing: the ELF image borrows
+// every large section payload from the ObjectFile instead of copying it, and
+// the file is its slices written in order. The published file must equal the
+// contiguous object_write image of the same object, for relocations, debug
+// sections, constructor priority groups and zero-fill sections alike. COFF
+// and Mach-O keep contiguous images and borrow nothing.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_object_borrowed_payloads(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static const unsigned char blob[6144] = {1, 2, 3, 4, 5, 6, 7, 8};\n"
+        "unsigned char state[64];\n"
+        "const unsigned char* blob_address = blob;\n"
+        "__attribute__((constructor(101))) static void early(void) { state[0] = 1; }\n"
+        "#define STEP(n) total = (total * 3u + blob[(total + (n)) & 4095u]) ^ state[(n) & 63];\n"
+        "#define STEP8(n) STEP(n) STEP(n + 1) STEP(n + 2) STEP(n + 3) STEP(n + 4) STEP(n + 5) STEP(n + 6) STEP(n + 7)\n"
+        "#define STEP64(n) STEP8(n) STEP8(n + 8) STEP8(n + 16) STEP8(n + 24) STEP8(n + 32) STEP8(n + 40) STEP8(n + 48) STEP8(n + 56)\n"
+        "unsigned first(unsigned total) { STEP64(0) return total; }\n"
+        "unsigned second(unsigned total) { STEP64(64) return total; }\n"
+        "unsigned third(unsigned total) { STEP64(128) return total + first(total) + second(total); }\n");
+    struct { String8 triple; bool borrows; } targets[] = {
+        {S8("x86_64-unknown-linux-gnu"), true},
+        {S8("aarch64-unknown-linux-gnu"), true},
+        {S8("x86_64-pc-windows-msvc"), false},
+        {S8("x86_64-apple-macos"), false},
+    };
+    String8 debug_forms[] = {S8("-g0"), S8("-g")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 debug = 0; debug < BUSTER_ARRAY_LENGTH(debug_forms); debug += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-object-borrowed-payloads"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-object-borrowed-payloads"), S8(".o"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+            {
+                String8 command[] = {S8("-target"), targets[target_index].triple, S8("-nostdinc"), debug_forms[debug], S8("-c"), S8("-o"), output, input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+                if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object))
+                {
+                    ObjectFormat format = object_format_for_target(compiled.object.target);
+                    ObjectArtifact contiguous = object_write(arena, &compiled.object, format);
+                    ObjectArtifact borrowed = object_write_borrowing(arena, &compiled.object, format);
+                    ByteSlice published = file_read(arena, output, (FileReadOptions){0});
+                    BUSTER_TEST(arguments, contiguous.error == OBJECT_ERROR_NONE && borrowed.error == OBJECT_ERROR_NONE);
+                    BUSTER_TEST(arguments, contiguous.borrowed_payload_count == 0 && !contiguous.borrowed_payloads);
+                    BUSTER_TEST(arguments, published.length != 0 && published.length == contiguous.bytes.length &&
+                                               memcmp(published.pointer, contiguous.bytes.pointer, published.length) == 0);
+                    BUSTER_TEST(arguments, borrowed.bytes.length == contiguous.bytes.length);
+                    u32 slice_count = 0;
+                    ByteSlice* slices = object_artifact_slices(arena, borrowed, &slice_count);
+                    u64 cursor = 0;
+                    bool equal = true;
+                    for (u32 index = 0; index < slice_count && equal; index += 1)
+                    {
+                        equal = slices[index].length <= contiguous.bytes.length - cursor &&
+                                memcmp(slices[index].pointer, contiguous.bytes.pointer + cursor, slices[index].length) == 0;
+                        cursor += slices[index].length;
+                    }
+                    BUSTER_TEST(arguments, equal && cursor == contiguous.bytes.length);
+                    u64 borrowed_bytes = 0;
+                    for (u32 index = 0; index < borrowed.borrowed_payload_count; index += 1)
+                    {
+                        ObjectBorrowedPayload payload = borrowed.borrowed_payloads[index];
+                        BUSTER_TEST(arguments, payload.bytes.length >= 4096 && (!index || payload.offset > borrowed.borrowed_payloads[index - 1].offset));
+                        borrowed_bytes += payload.bytes.length;
+                    }
+                    // .text and the 6 KiB constant blob at least; debug
+                    // sections add more under -g.
+                    BUSTER_TEST(arguments, targets[target_index].borrows ? borrowed.borrowed_payload_count >= 2 && borrowed_bytes >= 2 * 4096
+                                                                         : borrowed.borrowed_payload_count == 0);
+                    BUSTER_TEST(arguments, borrowed.borrowed_payload_count || slice_count == 1);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // #666: inspect the bytes the selected object writer actually emitted, not
 // just IrSymbol.is_weak (which COFF accepts but cannot serialize). The same
 // guarded fixture must also survive native source/object linking and exit.
@@ -9274,6 +9357,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_direct_emitter_preparation);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_borrowed_payloads);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_common_storage_option);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
