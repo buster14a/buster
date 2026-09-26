@@ -2846,6 +2846,79 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_growth(UnitTestArgume
     return result;
 }
 
+// Where a search for rows defined at a token may start (CDefinitionIndex):
+// never-recorded starts skip the table, recorded starts answer the lowest id
+// ever recorded through growth, rollback keeps a rolled-back id as a lower
+// bound, and an exhausted or absent index answers 0 so the search covers
+// every row.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_definition_index(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    // Four slots force two growths while 16 starts are recorded.
+    CDefinitionIndex index = {.slot_count = 4};
+    index.slots = arena_allocate_zeroed(temporary.arena, CDefinitionIndexSlot, index.slot_count);
+    CParseResult parse = {.arena = temporary.arena, .definition_index = &index,
+        .types = arena_allocate(temporary.arena, CType, 64), .type_capacity = 64};
+    CTypeId ids[16];
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(ids); row += 1)
+    {
+        BUSTER_TEST(arguments, c_test_definition_scan_start(&parse, 100 + row) == parse.type_count);
+        ids[row] = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .definition_start = 100 + row});
+        c_test_definition_index_record(&parse, 100 + row, ids[row]);
+    }
+    BUSTER_TEST(arguments, !index.incomplete && index.fill == BUSTER_ARRAY_LENGTH(ids) && index.slot_count >= 2 * index.fill);
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(ids); row += 1)
+    {
+        BUSTER_TEST(arguments, c_test_definition_scan_start(&parse, 100 + row) == ids[row].value);
+    }
+    BUSTER_TEST(arguments, c_test_definition_scan_start(&parse, 7) == parse.type_count);
+    // A younger row recorded for a start keeps the older bound; an older one lowers it.
+    c_test_definition_index_record(&parse, 103, ids[9]);
+    BUSTER_TEST(arguments, c_test_definition_scan_start(&parse, 103) == ids[3].value);
+    c_test_definition_index_record(&parse, 103, ids[1]);
+    BUSTER_TEST(arguments, c_test_definition_scan_start(&parse, 103) == ids[1].value);
+    // Rolled-back rows leave their start recorded: a search starting past the
+    // restored table finds nothing, and a reused id is only a lower bound.
+    CParseResult checkpoint = parse;
+    CTypeId speculative = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_UNION, .definition_start = 500});
+    c_test_definition_index_record(&parse, 500, speculative);
+    c_test_aggregate_lookup_rollback(&parse, checkpoint);
+    BUSTER_TEST(arguments, parse.type_count == checkpoint.type_count && speculative.value == parse.type_count);
+    BUSTER_TEST(arguments, c_test_definition_scan_start(&parse, 500) == speculative.value);
+    CTypeId reused = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_ENUM, .definition_start = 600});
+    BUSTER_TEST(arguments, reused.value == speculative.value && c_test_definition_scan_start(&parse, 500) <= reused.value);
+    index.incomplete = true;
+    BUSTER_TEST(arguments, c_test_definition_scan_start(&parse, 7) == 0 && c_test_definition_scan_start(&parse, 105) == 0);
+    parse.definition_index = 0;
+    BUSTER_TEST(arguments, c_test_definition_scan_start(&parse, 105) == 0);
+
+    // A real parse: 64 array typedefs, then 64 declarations that each define
+    // an aggregate. Every reuse search finds its start unrecorded and visits
+    // no type row, where a whole-table scan would visit 64 * 128 + 64 * 63 / 2.
+    String8 source = {0};
+    for (u32 row = 0; row < 64; row += 1)
+    {
+        source = string_format(temporary.arena, S8("{S8}typedef int A{u32}[{u32}];\n"), source, row, row + 1);
+    }
+    for (u32 row = 0; row < 64; row += 1)
+    {
+        source = string_format(temporary.arena, S8("{S8}struct {{ int a{u32}; }} v{u32};\n"), source, row, row);
+    }
+    CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+    CParseResult parsed = c_parse(temporary.arena, tokens);
+    BUSTER_TEST(arguments, tokens.error_count == 0 && parsed.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, parsed.definition_index != 0))
+    {
+        BUSTER_TEST(arguments, !parsed.definition_index->incomplete && parsed.definition_index->fill == 64);
+#if BUSTER_BENCH_ALLOCATIONS
+        BUSTER_TEST(arguments, parsed.definition_index->search_count == 64 && parsed.definition_index->scan_row_count == 0);
+#endif
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_identity(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23289,6 +23362,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 
     BUSTER_TEST_FIXTURE(arguments, c_test_fresh_binding_publication);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_growth);
+    BUSTER_TEST_FIXTURE(arguments, c_test_definition_index);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_tag_scope_typedef_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
