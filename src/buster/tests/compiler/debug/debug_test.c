@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/debug/debug_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/codegen/machine_schedule_internal.h>
+#include <buster/lib/compiler/ir/ir_construction.h>
 
 BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_scheduled_line_marks(UnitTestArguments* arguments)
 {
@@ -294,9 +295,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_location_index_validation(UnitTest
     return result;
 }
 
+// Seeds arrive in code-layout order and must each find the IR function with
+// their symbol -- the first one when two share it -- through the symbol index.
+// Seeds here run backwards over a permuted module, two name symbols no
+// function has, and one hand-built seed outside the symbol table keeps the
+// search it always had. The counting build pins the index at one row per IR
+// function instead of one search per seed.
+BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_function_seed_index(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SEED_SYMBOLS = 512, SEED_FUNCTIONS = SEED_SYMBOLS + 1, SEED_COUNT = SEED_SYMBOLS + 1, SEED_LOCALS_MAX = 3 };
+    Arena* arena = arguments->arena;
+    IrSymbol* symbols = arena_allocate(arena, IrSymbol, SEED_SYMBOLS);
+    IrFunction* functions = arena_allocate(arena, IrFunction, SEED_FUNCTIONS);
+    IrDebugLocal* locals = arena_allocate(arena, IrDebugLocal, SEED_FUNCTIONS * SEED_LOCALS_MAX);
+    DebugFunctionSeed* seeds = arena_allocate(arena, DebugFunctionSeed, SEED_COUNT);
+    u32* expected = arena_allocate(arena, u32, SEED_COUNT);
+    for (u32 index = 0; index < SEED_SYMBOLS; index += 1)
+    {
+        symbols[index] = (IrSymbol){.name = S8("f"), .id = {.value = index}, .type = IR_TYPE_ID_INVALID,
+                                    .kind = IR_SYMBOL_FUNCTION, .is_definition = true};
+    }
+    for (u32 index = 0; index < SEED_FUNCTIONS * SEED_LOCALS_MAX; index += 1)
+    {
+        locals[index] = (IrDebugLocal){.name = S8("v"), .type = IR_TYPE_ID_INVALID, .id = {.value = index % SEED_LOCALS_MAX}};
+    }
+    // Functions 0..508 hold symbol (7f + 3) mod 509, a permutation of 0..508.
+    // Functions 509 and 510 repeat symbols 5 and 11 with other local counts,
+    // 511 holds 509, and 512 names a symbol past the table. Nothing holds
+    // symbols 510 and 511.
+    for (u32 index = 0; index < SEED_FUNCTIONS; index += 1)
+    {
+        u32 symbol = index < 509 ? (7 * index + 3) % 509 : index == 509 ? 5 : index == 510 ? 11 : index == 511 ? 509 : SEED_SYMBOLS + 7;
+        functions[index] = (IrFunction){
+            .symbol = {.value = symbol},
+            .debug_locals = locals + index * SEED_LOCALS_MAX,
+            .debug_local_count = index % SEED_LOCALS_MAX + 1,
+        };
+    }
+    IrModule module = {.functions = functions, .function_count = SEED_FUNCTIONS};
+    IrProgram program = {.symbols = {.symbols = symbols, .count = SEED_SYMBOLS}};
+    for (u32 index = 0; index < SEED_COUNT; index += 1)
+    {
+        // Backwards over every symbol, then the seed outside the table.
+        u32 symbol = index < SEED_SYMBOLS ? SEED_SYMBOLS - 1 - index : SEED_SYMBOLS + 7;
+        seeds[index] = (DebugFunctionSeed){.name = S8("f"), .symbol = {.value = symbol}, .code_offset = index * 16, .code_size = 16};
+        expected[index] = 0;
+        for (u32 function = 0; function < SEED_FUNCTIONS && !expected[index]; function += 1)
+        {
+            expected[index] = functions[function].symbol.value == symbol ? functions[function].debug_local_count : 0;
+        }
+    }
+    BUSTER_TEST(arguments, expected[0] == 0 && expected[1] == 0 && expected[SEED_COUNT - 1] == SEED_LOCALS_MAX);
+    DebugLocationIndex empty_index = {0};
+#if BUSTER_BENCH_ALLOCATIONS
+    IrConstructionCounters before = ir_construction_counters();
+#endif
+    DebugModel model = debug_model_build(arena, (DebugModelInput){
+        .program = &program, .module = &module, .functions = seeds, .function_count = SEED_COUNT, .location_index = &empty_index,
+    });
+#if BUSTER_BENCH_ALLOCATIONS
+    IrConstructionCounters after = ir_construction_counters();
+    BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_DEBUG_FUNCTION_INDEX_ROWS] - before.values[IR_CONSTRUCTION_DEBUG_FUNCTION_INDEX_ROWS] ==
+                           SEED_FUNCTIONS);
+    // Only the seed outside the table searches, and it matches the last row.
+    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_DEBUG_FUNCTION_SEED_SCAN_ROWS] -
+                               before.values[IR_CONSTRUCTION_DEBUG_FUNCTION_SEED_SCAN_ROWS] == SEED_FUNCTIONS);
+#endif
+    if (BUSTER_REQUIRE(arguments, model.valid && model.function_count == SEED_COUNT))
+    {
+        bool matches = true;
+        for (u32 index = 0; index < SEED_COUNT; index += 1)
+        {
+            matches = matches && model.functions[index].variable_count == expected[index] &&
+                      model.functions[index].symbol.value == seeds[index].symbol.value;
+        }
+        BUSTER_TEST(arguments, matches);
+    }
+    return result;
+}
+
 UnitTestResult debug_model_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = debug_test_location_index_validation(arguments);
+    UnitTestResult seed_index = debug_test_function_seed_index(arguments);
+    result.succeeded_test_count += seed_index.succeeded_test_count;
+    result.test_count += seed_index.test_count;
     UnitTestResult local_index = debug_test_location_local_index(arguments);
     result.succeeded_test_count += local_index.succeeded_test_count;
     result.test_count += local_index.test_count;

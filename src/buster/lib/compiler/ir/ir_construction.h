@@ -121,7 +121,9 @@
     X(PREPARATION_FAST_OUTPUT_VALIDATIONS, preparation_fast_output_validations) \
     X(PREPARATION_PROMOTION_FUNCTIONS, preparation_promotion_functions) \
     X(PREPARATION_FAST_FUNCTIONS, preparation_fast_functions) \
-    X(PREPARATION_PUBLICATION_FUNCTIONS, preparation_publication_functions)
+    X(PREPARATION_PUBLICATION_FUNCTIONS, preparation_publication_functions) \
+    X(DEBUG_FUNCTION_INDEX_ROWS, debug_function_index_rows) \
+    X(DEBUG_FUNCTION_SEED_SCAN_ROWS, debug_function_seed_scan_rows)
 
 typedef enum IrConstructionCounter
 {
