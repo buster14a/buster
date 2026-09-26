@@ -65,6 +65,10 @@ jobs:
           grep -m1 "model name" /proc/cpuinfo
 
       - name: Build baseline and candidate compilers
+        env:
+          # As ci.yml does: some hosted CPUs make Clang 18's -march=native
+          # report an AVX10 feature combination that -Werror would reject.
+          CFLAGS: -Wno-invalid-feature-combination
         run: |
           for tree in baseline candidate; do
             (
