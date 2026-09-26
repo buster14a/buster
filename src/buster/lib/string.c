@@ -203,12 +203,24 @@ String8 string_join_arena(Arena* arena, SliceString8 strings, bool zero_terminat
     return result;
 }
 
+#if BUSTER_BENCH_ALLOCATIONS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL StringEqualCensus string_equal_totals;
+
+StringEqualCensus string_equal_census(void)
+{
+    return string_equal_totals;
+}
+#endif
+
 bool string_equal(String8 s1, String8 s2)
 {
     // Length, emptiness and pointer identity settle the answer without looking
     // at any byte; only a same-length, distinct, non-empty pair reaches the
     // comparison itself.
     bool result = s1.length == s2.length;
+#if BUSTER_BENCH_ALLOCATIONS
+    string_equal_totals.calls += 1;
+#endif
     if (result && s1.length)
     {
         if (!s1.pointer || !s2.pointer)
@@ -217,6 +229,9 @@ bool string_equal(String8 s1, String8 s2)
         }
         else if (s1.pointer != s2.pointer)
         {
+#if BUSTER_BENCH_ALLOCATIONS
+            string_equal_totals.compared_bytes += s1.length;
+#endif
 #if BUSTER_OPTIMIZE
             result = memory_compare(s1.pointer, s2.pointer, s1.length * sizeof(char8));
 #else

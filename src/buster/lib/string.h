@@ -18,6 +18,19 @@ struct StringOsListIterator
 
 BUSTER_F_DECL String8 string_from_pointer(const char8* pointer);
 BUSTER_F_DECL bool string_equal(String8 s1, String8 s2);
+#if BUSTER_BENCH_ALLOCATIONS
+// Calling-thread string_equal traffic for the frontend source-fact census
+// (compiler/frontend/c/c_census.h): every call, and the bytes of the
+// same-length, distinct, non-empty pairs that reach the byte comparison.
+// Cumulative since process start; reporting never resets it.
+typedef struct StringEqualCensus StringEqualCensus;
+struct StringEqualCensus
+{
+    u64 calls;
+    u64 compared_bytes;
+};
+BUSTER_F_DECL StringEqualCensus string_equal_census(void);
+#endif
 BUSTER_F_DECL void string_print(String8 format, ...);
 BUSTER_F_DECL String8 string_format(Arena* arena, String8 format, ...);
 BUSTER_F_DECL bool string_ends_with_sequence(String8 string, String8 ending);

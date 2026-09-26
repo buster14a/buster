@@ -16907,7 +16907,7 @@ BUSTER_C_INTERNAL u32 c_parser_declarator_list_segment_end(CPreprocessResult pre
     return end;
 }
 
-CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
+BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult preprocess)
 {
     CParserResult result = {0};
     CTokenShape const* token_shapes = c_preprocess_token_shapes(&preprocess);
@@ -17187,6 +17187,14 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
         }
     }
 
+    return result;
+}
+
+CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
+{
+    C_CENSUS_PHASE_BEGIN(PARSE);
+    CParserResult result = c_parse_ast_run(arena, preprocess);
+    C_CENSUS_PHASE_END();
     return result;
 }
 BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out);
@@ -23256,12 +23264,18 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
 }
 BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)
 {
-    return c_analyze_semantics_core(arena, preprocess, syntax, false);
+    C_CENSUS_PHASE_BEGIN(SEMANTIC);
+    CAnalysisResult result = c_analyze_semantics_core(arena, preprocess, syntax, false);
+    C_CENSUS_PHASE_END();
+    return result;
 }
 
 CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)
 {
-    return c_analyze_semantics_core(arena, preprocess, syntax, true);
+    C_CENSUS_PHASE_BEGIN(SEMANTIC);
+    CAnalysisResult result = c_analyze_semantics_core(arena, preprocess, syntax, true);
+    C_CENSUS_PHASE_END();
+    return result;
 }
 
 CParseResult c_parse(Arena* arena, CPreprocessResult preprocess)

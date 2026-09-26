@@ -875,6 +875,7 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
     ArenaBenchmarkCounters allocations = arena_benchmark_counters();
     MachineQualityCensus quality = machine_quality_census_snapshot();
     IrConstructionCounters construction = ir_construction_counters();
+    CCensusCounters source_census = c_census_counters();
 #endif
     String8 text = {0};
     source_metrics_append_line(&text, string_format(arena, S8("version={u32}\n"), (u32)SOURCE_METRICS_FILE_VERSION));
@@ -899,6 +900,30 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
     {
         source_metrics_append_field(arena, &text, S8("ir_construction"), ir_construction_counter_name((IrConstructionCounter)index),
                                     construction.values[index]);
+    }
+    source_metrics_append_field(arena, &text, S8("c_census"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("c_census"), S8("overflowed"), source_census.overflowed);
+    for (u32 index = 0; index < C_CENSUS_COUNT; index += 1)
+    {
+        source_metrics_append_field(arena, &text, S8("c_census"), c_census_counter_name((CCensusCounter)index), source_census.values[index]);
+    }
+    // Literal groups: formatting one here would interleave its bytes with the
+    // contiguous report text the append helper extends.
+    String8 const census_groups[C_CENSUS_PHASE_COUNT] = {
+        [C_CENSUS_PHASE_OTHER] = S8("c_census.other"),
+        [C_CENSUS_PHASE_PREPROCESS] = S8("c_census.preprocess"),
+        [C_CENSUS_PHASE_PARSE] = S8("c_census.parse"),
+        [C_CENSUS_PHASE_SEMANTIC] = S8("c_census.semantic"),
+        [C_CENSUS_PHASE_LOWER] = S8("c_census.lower"),
+    };
+    for (u32 phase = 0; phase < C_CENSUS_PHASE_COUNT; phase += 1)
+    {
+        String8 group = census_groups[phase];
+        for (u32 index = 0; index < C_CENSUS_PHASE_COUNTER_COUNT; index += 1)
+        {
+            source_metrics_append_field(arena, &text, group, c_census_phase_counter_name((CCensusPhaseCounter)index),
+                                        source_census.phase_values[phase][index]);
+        }
     }
 #endif
     return file_publish(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
