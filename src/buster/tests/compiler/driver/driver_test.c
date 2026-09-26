@@ -8586,6 +8586,164 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_has_builtin_targets(Unit
     return result;
 }
 
+// The driver's ir_prepare_canonical_module is the validation boundary for the
+// direct Wasm and eBPF emitters, as it already is for native code generation
+// and LLVM bitcode: they consume that preparation instead of re-preparing
+// uncertified and scanning the whole module a second time. On a prepared
+// module the rescan changes nothing, so both option forms emit the same
+// bytes, and an emitter called with zero options still validates.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_direct_emitter_preparation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static int table[8] = {1, 2, 3, 5, 8, 13, 21, 34};\n"
+        "int* table_address = table;\n"
+        "static int step(int value, int limit)\n{\n"
+        "    int total = 0;\n"
+        "    for (int index = 0; index < limit; index += 1)\n    {\n"
+        "        if ((value + index) & 1) total += table[index & 7];\n"
+        "        else total -= index;\n"
+        "        switch (total & 3) { case 0: total += 5; break; case 1: total ^= value; break; default: total -= 1; }\n"
+        "    }\n"
+        "    return total;\n}\n"
+        "int entry(int value)\n{\n    int x = step(value, 5);\n    if (value > 3) x = step(x, 3);\n    return x + table_address[1];\n}\n"
+        "int main(void)\n{\n    return entry(3) & 1;\n}\n");
+    String8 target_names[] = {S8("wasm64-unknown-freestanding"), S8("wasm32-wasip1"), S8("bpfel-unknown-linux")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_names); target_index += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-direct-emitter-preparation"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-direct-emitter-preparation"), S8(".bin"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+            {
+                String8 command[] = {S8("-target"), target_names[target_index], S8("-nostdinc"), forms[form], S8("-o"), output, input};
+#if BUSTER_BENCH_ALLOCATIONS
+                IrConstructionCounters before = ir_construction_counters();
+#endif
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+#if BUSTER_BENCH_ALLOCATIONS
+                IrConstructionCounters after = ir_construction_counters();
+                BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+                // The driver's preparation and the emitter's certified one.
+                // Neither rescans its certified input; the emitter's former
+                // uncertified preparation recorded one input validation here.
+                BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_PREPARATION_CALLS] - before.values[IR_CONSTRUCTION_PREPARATION_CALLS] == 2);
+                BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_PREPARATION_INPUT_VALIDATIONS] ==
+                                           before.values[IR_CONSTRUCTION_PREPARATION_INPUT_VALIDATIONS]);
+#endif
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    BUSTER_TEST(arguments, target_index == 2 ? compiled.has_ebpf : compiled.has_wasm && compiled.has_wasm64 == (target_index == 0));
+                    BUSTER_TEST(arguments, file_read(arena, output, (FileReadOptions){0}).length != 0);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    // Variant 0 emits one prepared module with zero options and again with
+    // assume_validated: the same bytes, one validation scan versus none.
+    // Variant 1 injects a fault after preparation. Zero options still find it;
+    // assume_validated trusts the caller, so the preparation-failure message
+    // cannot appear.
+    Target direct_targets[] = {
+        {.cpu_arch = CPU_ARCH_WASM64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_FREESTANDING},
+        {.cpu_arch = CPU_ARCH_BPFEL, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(direct_targets); target_index += 1)
+    {
+        for (u32 variant = 0; variant < 2; variant += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            Target target = direct_targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParserResult syntax = c_parse_ast(arena, preprocess);
+            CIRLowerResult lowered = c_analyze(arena, S8("direct-emitter-preparation.c"), preprocess, syntax, target);
+            if (BUSTER_REQUIRE(arguments, !preprocess.error_count && lowered.program && !lowered.diagnostic_count))
+            {
+                IrProgram* program = lowered.program;
+                IrModule* module = program->modules;
+                program->fast_passes = IR_FAST_ALL;
+                BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
+                IrGlobal* table = 0;
+                for (u32 index = 0; index < module->global_count; index += 1)
+                {
+                    IrSymbol* symbol = ir_symbol_from_id(&program->symbols, module->globals[index].symbol);
+                    if (symbol && string_equal(symbol->name, S8("table"))) table = module->globals + index;
+                }
+                if (BUSTER_REQUIRE(arguments, table != 0))
+                {
+                    if (variant)
+                    {
+                        table->alignment = 3;
+                    }
+                    ByteSlice bytes[2] = {0};
+                    String8 messages[2] = {0};
+                    bool succeeded[2] = {0};
+#if BUSTER_BENCH_ALLOCATIONS
+                    u64 validations[2] = {0};
+#endif
+                    for (u32 assumed = 0; assumed < 2; assumed += 1)
+                    {
+#if BUSTER_BENCH_ALLOCATIONS
+                        IrConstructionCounters before = ir_construction_counters();
+#endif
+                        if (target.cpu_arch == CPU_ARCH_WASM64)
+                        {
+                            WasmOptions options = WASM64_OPTIONS_DEFAULT;
+                            options.assume_validated = assumed != 0;
+                            WasmArtifact artifact = wasm_emit(arena, program, module, 1, options);
+                            bytes[assumed] = artifact.bytes;
+                            messages[assumed] = artifact.error.message;
+                            succeeded[assumed] = artifact.success;
+                        }
+                        else
+                        {
+                            EbpfOptions options = EBPF_OPTIONS_DEFAULT;
+                            options.assume_validated = assumed != 0;
+                            EbpfArtifact artifact = ebpf_emit_with_options(arena, program, module, 1, options);
+                            bytes[assumed] = artifact.bytes;
+                            messages[assumed] = artifact.error.message;
+                            succeeded[assumed] = artifact.success;
+                        }
+#if BUSTER_BENCH_ALLOCATIONS
+                        IrConstructionCounters after = ir_construction_counters();
+                        BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+                        validations[assumed] = after.values[IR_CONSTRUCTION_VALIDATION_CALLS] - before.values[IR_CONSTRUCTION_VALIDATION_CALLS];
+#endif
+                    }
+#if BUSTER_BENCH_ALLOCATIONS
+                    BUSTER_TEST(arguments, validations[0] == 1 && validations[1] == 0);
+#endif
+                    bool rescan_failed = string_equal(messages[0], S8("canonical IR validation failed before WebAssembly emission")) ||
+                                         string_equal(messages[0], S8("canonical IR validation failed before eBPF emission"));
+                    bool trusted_failed = string_equal(messages[1], S8("canonical IR validation failed before WebAssembly emission")) ||
+                                          string_equal(messages[1], S8("canonical IR validation failed before eBPF emission"));
+                    BUSTER_TEST(arguments, !trusted_failed);
+                    if (variant)
+                    {
+                        BUSTER_TEST(arguments, !succeeded[0] && rescan_failed);
+                    }
+                    else
+                    {
+                        BUSTER_TEST_RAW(arguments, succeeded[0] && succeeded[1], messages[0]);
+                        BUSTER_TEST(arguments, bytes[0].length != 0 && bytes[0].length == bytes[1].length &&
+                                                   memcmp(bytes[0].pointer, bytes[1].pointer, bytes[0].length) == 0);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // #666: inspect the bytes the selected object writer actually emitted, not
 // just IrSymbol.is_weak (which COFF accepts but cannot serialize). The same
 // guarded fixture must also survive native source/object linking and exit.
@@ -9115,6 +9273,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_coff_section_alignment);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_direct_emitter_preparation);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_common_storage_option);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC

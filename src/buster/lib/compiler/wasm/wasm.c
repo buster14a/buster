@@ -3819,7 +3819,7 @@ static bool wasm64_validate_inputs(Wasm64Context* context)
     for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
     {
         IrModule* module = context->modules + module_index;
-        IrValidationResult validation = ir_prepare_canonical_module(context->program, module, false);
+        IrValidationResult validation = ir_prepare_canonical_module(context->program, module, context->options.assume_validated);
         if (validation.error != IR_VALIDATION_NONE)
         {
             IrFunction* function = validation.function.value < module->function_count ? module->functions + validation.function.value : 0;

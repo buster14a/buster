@@ -77,7 +77,12 @@ struct EbpfOptions
     // .BTF.ext or CO-RE relocation records yet.
     bool emit_btf;
     bool deterministic;
-    u8 reserved[6];
+    // The caller already ran ir_prepare_canonical_module on these modules and
+    // has not mutated them since, as the driver does; like
+    // CodegenModuleOptions.assume_validated it skips the emitter's own
+    // uncertified re-preparation. Zero keeps the validating default.
+    bool assume_validated;
+    u8 reserved[5];
 };
 
 #define EBPF_OPTIONS_DEFAULT ((EbpfOptions){.emit_btf = true, .deterministic = true})
