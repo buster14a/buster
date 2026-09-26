@@ -23496,6 +23496,43 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_condition_evaluation(UnitTestArg
     return result;
 }
 
+// A comma is never an lvalue, even when its final operand was a place.
+// Keep these in the registered suite alongside the VLA-row negative cases.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_result_constraints(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 invalid_sources[] = {
+        S8("int test(void) { int a = 0, b = 0; (a, b) = 1; return b; }"),
+        S8("int test(void) { int a = 0, b = 0; return ((a, b) = 1); }"),
+        S8("int test(void) { int a = 0, b = 0; (a, b) += 1; return b; }"),
+        S8("int *test(int *p) { return &(0, *p); }"),
+        S8("int test(int *p) { return (0, *p)++; }"),
+        S8("int test(int *p) { return ++(0, *p); }"),
+        S8("void *test(int n, char rows[][n]) { return &(0, rows[1]); }"),
+        S8("int test(void) { int a[3]; return sizeof &(0, a); }"),
+        S8("struct S { int x; }; struct S *test(struct S *p) { return &(0, *p); }"),
+        S8("static void side(void) {} int test(void) { if (1, side()) return 1; return 0; }"),
+        S8("struct S { int x; }; int test(void) { while (1, (struct S){0}) {} return 0; }"),
+    };
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_sources); index += 1)
+        {
+            Arena* conflicts[] = {arguments->arena};
+            TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            CPreprocessResult tokens = c_preprocess(temporary.arena, invalid_sources[index],
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            BUSTER_TEST(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("comma-constraint.c"), tokens, parsed, target_native,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0, invalid_sources[index]);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23571,6 +23608,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
     BUSTER_TEST_FIXTURE(arguments, c_test_comma_condition_evaluation);
+    BUSTER_TEST_FIXTURE(arguments, c_test_comma_result_constraints);
     BUSTER_TEST_FIXTURE(arguments, c_test_pointer_width_integer_conversion);
     BUSTER_TEST_FIXTURE(arguments, c_test_statement_expression_control_call);
     BUSTER_TEST_FIXTURE(arguments, c_test_statement_expression_nested_call);

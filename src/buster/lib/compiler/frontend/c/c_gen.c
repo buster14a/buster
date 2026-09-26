@@ -8576,6 +8576,55 @@ BUSTER_C_INTERNAL IrValueId c_ir_vla_pointer_rvalue(CIntegerIrBuilder* builder, 
     return result;
 }
 
+// A comma yields its right operand's value, not that operand's lvalue.
+// Keep dynamic array extents, but remove both the array-lvalue witness and
+// recoverable scalar-load provenance. The existing canonical identity cast
+// supplies a value boundary only when place recovery would otherwise be
+// possible; constants and computed values need no extra instruction.
+BUSTER_C_INTERNAL IrValueId c_ir_comma_result(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
+{
+    if (value.value >= builder->function->value_count)
+    {
+        return value;
+    }
+    value = c_ir_vla_pointer_rvalue(builder, value, source);
+    value = c_ir_decay_array_value_if_needed(builder, value, source);
+    if (value.value >= builder->function->value_count)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    if (builder->function->values[value.value].category == IR_VALUE_PLACE)
+    {
+        IrTypeId type = builder->function->values[value.value].canonical_type;
+        value = c_ir_emit_load_place(builder, value, type, source);
+    }
+    if (value.value >= builder->function->value_count)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    IrValue* operand = builder->function->values + value.value;
+    bool recoverable = c_ir_ssa_read_place(builder, value, false).value != IR_ID_UNDERLYING_INVALID;
+    if (operand->definition.value < builder->function->instruction_count)
+    {
+        IrInstruction* definition = builder->function->instructions + operand->definition.value;
+        IrType* type = ir_type_from_id(&builder->program->types, operand->canonical_type);
+        IrType* element = type && type->kind == IR_TYPE_POINTER ? ir_type_from_id(&builder->program->types, type->element_type) : 0;
+        recoverable = recoverable || definition->opcode == IR_OPCODE_LOAD || definition->opcode == IR_OPCODE_ATOMIC_LOAD ||
+                      definition->opcode == IR_OPCODE_FUNCTION ||
+                      (definition->opcode == IR_OPCODE_ADDRESS_OF && element && element->kind == IR_TYPE_VA_LIST);
+    }
+    if (recoverable)
+    {
+        CIrVlaValue shape = c_ir_vla_value(builder, value);
+        value = c_ir_emit_cast_instruction(builder, value, operand->canonical_type, IR_CONVERSION_IDENTITY, source);
+        if (shape.counts && value.value != IR_ID_UNDERLYING_INVALID)
+        {
+            c_ir_vla_value_set(builder, value, shape);
+        }
+    }
+    return value;
+}
+
 BUSTER_C_INTERNAL void c_ir_vla_conditional_shape(CIntegerIrBuilder* builder, IrValueId place, IrValueId value)
 {
     CIrVlaValue shape = c_ir_vla_value(builder, value);
@@ -13021,6 +13070,7 @@ typedef enum CIrLowerFrameKind
 {
     C_IR_LOWER_FRAME_ASSIGNMENT_COMPLETION,
     C_IR_LOWER_FRAME_COMMA_COMPLETION,
+    C_IR_LOWER_FRAME_COMMA_RESULT,
     C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_LEFT,
     C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_COMPLETION,
     C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_FALSE_COMPLETION,
@@ -22354,7 +22404,7 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
         {
             return false;
         }
-        values[*value_count - 2] = c_ir_vla_pointer_rvalue(builder, values[*value_count - 1], source);
+        values[*value_count - 2] = c_ir_comma_result(builder, values[*value_count - 1], source);
         *value_count -= 1;
         return true;
     }
@@ -32236,7 +32286,9 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
             // core is intentionally assignment-free, so inspect the whole
             // leaf before choosing it; otherwise the call is emitted but the
             // assignment side effect is silently dropped.
-            bool assignment_leaf = c_ir_has_assignment_anywhere(builder, leaf_start, leaf_end);
+            // A comma arm also owns sequencing, even without an assignment.
+            bool assignment_leaf = c_ir_has_assignment_anywhere(builder, leaf_start, leaf_end) ||
+                                   c_ir_has_root_comma(builder, leaf_start, leaf_end);
             if (!(assignment_leaf ? c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                                                     .kind = C_IR_LOWER_FRAME_EXPRESSION,
                                                                     .as.expression =
@@ -32533,8 +32585,28 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                 frame->as.expression.value = value;
                 continue;
             }
+            if (task.kind == C_IR_LOWER_FRAME_COMMA_RESULT)
+            {
+                IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[task.as.range.start]);
+                IrValueId result = c_ir_comma_result(builder, value, source);
+                if (value.value != IR_ID_UNDERLYING_INVALID && result.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                frame->as.expression.value = result;
+                continue;
+            }
             if (task.kind == C_IR_LOWER_FRAME_COMMA_COMPLETION)
             {
+                // Resume the right operand only after the left completes, then
+                // form the same non-lvalue result as the arithmetic comma path.
+                task.kind = C_IR_LOWER_FRAME_COMMA_RESULT;
+                if (!c_ir_expression_task_push(builder, frame, task, task.as.range.start))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
                 frame->as.expression.start = task.as.range.start;
                 frame->as.expression.end = task.as.range.end;
                 frame->as.expression.value = IR_VALUE_ID_INVALID;
