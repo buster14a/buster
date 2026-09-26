@@ -1,0 +1,94 @@
+name: Preprocessing packing law (research only)
+
+on:
+  push:
+    branches: [research/20260925-pp-pack-law-ade6ac4-astra]
+    paths:
+      - tools/investigations/pp-pack-law-20260925/**
+      - .github/workflows/pp-pack-law-probe.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-pp-pack-law-ade6ac4
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          path: pinned-source
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: research-definition
+          persist-credentials: false
+      - name: Isolate source and record identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/pp-pack-law-evidence"
+          mkdir -p "$OUT"
+          exec > >(tee "$OUT/provenance.txt") 2>&1
+          cd pinned-source
+          test "$(git rev-parse HEAD)" = ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          test "$(git rev-parse 'HEAD^{tree}')" = 4c5306221fdb22fccc929b55e333163742de17d0
+          test "$(uname -m)" = x86_64
+          git worktree add --detach "$RUNNER_TEMP/pp-pack-law-source" HEAD
+          git rev-parse HEAD 'HEAD^{tree}'
+          printf 'workflow_commit=%s run_id=%s attempt=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          clang --version
+          gcc --version
+          gcc -dumpmachine
+          printf '\n' | gcc -dM -E - > "$OUT/gcc-identity.macros"
+          ! grep -q '__clang__' "$OUT/gcc-identity.macros"
+          git ls-tree HEAD src/buster/lib/compiler/driver/driver.c src/buster/lib/compiler/frontend/c/c_source.c src/buster/lib/compiler/frontend/c/c_parse.c src/buster/lib/compiler/frontend/c/c.h > "$OUT/source-blobs.txt"
+          git grep -n -A12 -B8 -e c_pack_alignment_record -e c_preprocess_pack_alignment -e c_preprocess_process_expanded_line -e compiler_driver_preprocess_text -e already_preprocessed -- src/buster/lib/compiler/driver/driver.c src/buster/lib/compiler/frontend/c/c_source.c src/buster/lib/compiler/frontend/c/c_parse.c src/buster/lib/compiler/frontend/c/c.h > "$OUT/source-context.txt"
+          cp "$GITHUB_WORKSPACE/research-definition/tools/investigations/pp-pack-law-20260925/probe.c" "$OUT/probe.c"
+          cp "$GITHUB_WORKSPACE/research-definition/.github/workflows/pp-pack-law-probe.yml" "$OUT/workflow.yml"
+      - name: Build unchanged compiler through native build driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/pp-pack-law-evidence"
+          cd "$RUNNER_TEMP/pp-pack-law-source"
+          exec > >(tee "$OUT/build.log") 2>&1
+          mkdir -p .cache/pp-pack-law
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o .cache/pp-pack-law/build
+          .cache/pp-pack-law/build generate --ci --linker DEFAULT --build-directory build-pp-pack-law -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF
+          .cache/pp-pack-law/build build --config Release --build-directory build-pp-pack-law -t ide
+          sha256sum .cache/pp-pack-law/build build-pp-pack-law/Release/ide > "$OUT/compiler.sha256"
+          git diff --exit-code
+      - name: Build C probe and execute law, reducer, controls and native matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/pp-pack-law-evidence"
+          exec > >(tee "$OUT/transcript.log") 2>&1
+          clang -std=c17 -Wall -Wextra -Werror -Wpedantic -fwrapv -fno-strict-aliasing -funsigned-char "$OUT/probe.c" -o "$RUNNER_TEMP/pp-pack-law-probe"
+          sha256sum "$OUT/probe.c" "$RUNNER_TEMP/pp-pack-law-probe" > "$OUT/probe.sha256"
+          "$RUNNER_TEMP/pp-pack-law-probe" "$RUNNER_TEMP/pp-pack-law-source/build-pp-pack-law/Release/ide" "$OUT/results"
+      - name: Hash and retain evidence including failed observations
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/pp-pack-law-evidence"
+          if [ -d "$OUT" ]; then
+            cd "$OUT"
+            find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pp-pack-law-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pp-pack-law-evidence
+          if-no-files-found: error
+          retention-days: 14
