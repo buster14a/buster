@@ -3164,6 +3164,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_worker_begin(BqWorkerFixture* fixture, BqWorker
     fixture->fake.observed.syscall_architectures_native = true;
     fixture->fake.observed.syscall_filter_system_service = true;
     fixture->fake.observed.syscall_error_number_eperm = true;
+    fixture->fake.observed.capability_sets_empty = true;
     fixture->fake.observed.security_properties_valid = true;
     fixture->fake.observed.paths_valid = true;
     u32 inaccessible_root_length = (u32)strlen(fixture->material.workspaces);
@@ -3382,8 +3383,14 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_drained_unit(void)
         identity.unit_found = true;
         identity.active = true;
         identity.populated = true;
-        BQ_CHECK(bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &identity, false));
+        BQ_CHECK(bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &identity, false) &&
+                 bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &identity, true));
         BqWorkerObserved wrong_policy = identity;
+        wrong_policy.capability_sets_empty = false;
+        BQ_CHECK(bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &wrong_policy, false) &&
+                 !bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &wrong_policy, true) &&
+                 bq_worker_instance_matches(&fixture.config, &identity, &wrong_policy));
+        wrong_policy = identity;
         snprintf(wrong_policy.collect_mode, sizeof(wrong_policy.collect_mode), "%s", "inactive-or-failed");
         BQ_CHECK(!bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &wrong_policy, false));
         wrong_policy.collect_mode[0] = 0;
@@ -3885,6 +3892,28 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_deploy_policy(void)
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_systemd_results(void)
 {
+    /* Capability/User lines from Attempt 9's service, broker and outer
+     * systemctl-show receipts. */
+    char service_receipt[] = "CapabilityBoundingSet=\nAmbientCapabilities=\nUser=buster-bench\n";
+    char broker_receipt[] = "CapabilityBoundingSet=\nAmbientCapabilities=\nUser=root\n";
+    char missing_bounding[] = "AmbientCapabilities=\nUser=buster-bench\n";
+    char missing_ambient[] = "CapabilityBoundingSet=\nUser=buster-bench\n";
+    char old_outer_receipt[] =
+        "CapabilityBoundingSet=cap_chown cap_dac_override cap_dac_read_search cap_fowner cap_fsetid cap_kill "
+        "cap_setgid cap_setuid cap_setpcap cap_linux_immutable cap_net_bind_service cap_net_broadcast "
+        "cap_net_admin cap_net_raw cap_ipc_lock cap_ipc_owner cap_sys_chroot cap_sys_ptrace cap_sys_pacct "
+        "cap_sys_admin cap_sys_boot cap_sys_nice cap_sys_resource cap_sys_tty_config cap_lease cap_audit_write "
+        "cap_audit_control cap_setfcap cap_mac_override cap_mac_admin cap_block_suspend cap_audit_read "
+        "cap_perfmon cap_bpf cap_checkpoint_restore\nAmbientCapabilities=\nUser=buster-bench\n";
+    char nonempty_ambient[] = "CapabilityBoundingSet=\nAmbientCapabilities=cap_net_bind_service\n";
+    char numeric_zero[] = "CapabilityBoundingSet=0\nAmbientCapabilities=0\n";
+    BQ_CHECK(bq_worker_systemd_capabilities_empty(service_receipt) &&
+             bq_worker_systemd_capabilities_empty(broker_receipt));
+    BQ_CHECK(!bq_worker_systemd_capabilities_empty(missing_bounding) &&
+             !bq_worker_systemd_capabilities_empty(missing_ambient) &&
+             !bq_worker_systemd_capabilities_empty(old_outer_receipt) &&
+             !bq_worker_systemd_capabilities_empty(nonempty_ambient) &&
+             !bq_worker_systemd_capabilities_empty(numeric_zero));
     char collected[] = "LoadState=not-found\nActiveState=inactive\nControlGroup=\n";
     char loaded[] = "LoadState=loaded\nActiveState=inactive\nControlGroup=\n";
     BQ_CHECK(bq_worker_systemd_collected(collected) && !bq_worker_systemd_collected(loaded));
@@ -3894,6 +3923,46 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_systemd_results(void)
     BQ_CHECK(bq_worker_systemd_result("timeout", false) == BQ_WORKER_TIMED_OUT);
     BQ_CHECK(bq_worker_systemd_result("canceled", false) == BQ_WORKER_CANCELLED_RESULT);
     BQ_CHECK(bq_worker_systemd_result("exit-code", true) == BQ_WORKER_EXECUTION_FAILED);
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_worker_capability_admission(void)
+{
+    BqWorkerFixture fixture;
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+    {
+        BqRequest request = bq_test_real_request(168);
+        u64 id = 0;
+        fixture.fake.observed.capability_sets_empty = false;
+        BQ_CHECK(bq_submit(&fixture.material.queue.queue, &request, &id) == BQ_OK);
+        BQ_CHECK(bq_worker_run(&fixture.material.queue.queue, &fixture.config, &id) == BQ_RESOURCE_MISMATCH);
+        BqJob* job = bq_job(&fixture.material.queue.queue.state, id);
+        BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_FAILED &&
+                 bq_failure_evidence(&fixture.material.queue.queue, job) == BQ_RESOURCE_MISMATCH &&
+                 !fixture.material.queue.queue.needs_reconciliation && !fixture.material.queue.queue.state.active_id &&
+                 fixture.fake.starts == 1 && fixture.fake.continues == 0 && fixture.fake.terms == 1 &&
+                 fixture.fake.kills == 1 && fixture.fake.joins == 1);
+        bq_test_worker_end(&fixture);
+    }
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_EXECUTION_FAILED, false))
+    {
+        BqQueue* queue = &fixture.material.queue.queue;
+        BqRequest request = bq_test_real_request(169);
+        u64 id = 0, token = 0;
+        BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK &&
+                 bq_materialize(queue, fixture.config.installed_root, fixture.config.workspace_root, &id, &token) == BQ_OK);
+        BqJob* job = bq_job(&queue->state, id);
+        BQ_CHECK(bq_test_worker_bind(&fixture, job));
+        fixture.fake.observed.capability_sets_empty = false;
+        bq_close(queue);
+        BQ_CHECK(bq_open(queue, fixture.material.queue.path) == BQ_OK && queue->needs_reconciliation);
+        BQ_CHECK(bq_worker_run(queue, &fixture.config, &id) == BQ_OK);
+        job = bq_job(&queue->state, id);
+        BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_INTERRUPTED &&
+                 bq_failure_evidence(queue, job) == BQ_WORKER_INTERRUPTED &&
+                 !queue->needs_reconciliation && fixture.fake.starts == 0 && fixture.fake.continues == 0 &&
+                 fixture.fake.terms == 1 && fixture.fake.joins == 1);
+        bq_test_worker_end(&fixture);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_outcomes(void)
@@ -5076,6 +5145,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_cgroup_paths();
     bq_test_worker_deploy_policy();
     bq_test_worker_systemd_results();
+    bq_test_worker_capability_admission();
     bq_test_worker_outcomes();
     bq_test_worker_quarantine_and_recovery();
     bq_test_worker_ancestor_budget();

@@ -1204,7 +1204,10 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_observed(BqWorkerConfig const* config, char c
               observed->syscall_error_number_eperm;
     if (ok && resources)
     {
-        ok = !strcmp(observed->allowed_cpus, cpu) && observed->memory_max == config->limits.memory_max &&
+        /* A fresh launch must satisfy the current sandbox. Identity checks
+         * without resources still authorize cleanup of older exact units. */
+        ok = observed->capability_sets_empty &&
+             !strcmp(observed->allowed_cpus, cpu) && observed->memory_max == config->limits.memory_max &&
              observed->memory_swap_max == config->limits.memory_swap_max &&
              observed->tasks_max == config->limits.tasks_max &&
              observed->runtime_max_usec == config->limits.runtime_max_usec &&
@@ -1433,6 +1436,16 @@ BUSTER_GLOBAL_LOCAL char* bq_worker_property(char* text, char const* name)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool bq_worker_systemd_capabilities_empty(char* output)
+{
+    char* bounding = bq_worker_property(output, "CapabilityBoundingSet");
+    char* ambient = bq_worker_property(output, "AmbientCapabilities");
+    /* systemctl show renders an empty set as an empty property value. */
+    bool ok = bounding && ambient && (bounding[0] == '\n' || bounding[0] == 0) &&
+              (ambient[0] == '\n' || ambient[0] == 0);
+    return ok;
+}
+
 /* systemd exposes the expanded syscall set, not the @system-service token.
  * Compare it with the installed trusted service, which carries the same fixed
  * filter on the same manager and architecture. Cache only a successful read. */
@@ -1493,6 +1506,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_observe_once(BqWorkerBackend* backend, ch
         "--property=MemoryMax", "--property=MemorySwapMax", "--property=TasksMax", "--property=RuntimeMaxUSec",
         "--property=TimeoutStopUSec", "--property=KillMode", "--property=SendSIGKILL", "--property=InvocationID",
         "--property=Result", "--property=NoNewPrivileges", "--property=PrivateTmp", "--property=PrivateDevices",
+        "--property=CapabilityBoundingSet", "--property=AmbientCapabilities",
         "--property=PrivateNetwork", "--property=ProtectHome", "--property=ProtectSystem", "--property=ProtectProc",
         "--property=RestrictSUIDSGID", "--property=ProtectControlGroups", "--property=ProtectKernelTunables",
         "--property=ProtectKernelModules", "--property=ProtectKernelLogs", "--property=ProtectClock",
@@ -1508,6 +1522,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_observe_once(BqWorkerBackend* backend, ch
     *observed = (BqWorkerObserved){0};
     bool missing = error == BQ_OK && (!WIFEXITED(status) || WEXITSTATUS(status) != 0);
     if (error == BQ_OK && !missing && bq_worker_systemd_collected(output)) missing = true;
+    if (error == BQ_OK && !missing) observed->capability_sets_empty = bq_worker_systemd_capabilities_empty(output);
     enum { BQ_SYSTEMD_FIELD_COUNT = 48 };
     char* fields[BQ_SYSTEMD_FIELD_COUNT] = {0};
     char const* names[] = {"Id", "LoadState", "ActiveState", "SubState", "ControlGroup", "AllowedCPUs",
