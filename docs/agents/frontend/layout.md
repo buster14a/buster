@@ -18,11 +18,13 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   selectors to reject the function. `tests/basic_c_pointer_to_vla.c` covers row
   addresses, runtime strides, local arrays and indirect comparison calls.
 - **Bit-field allocation is a target ABI fact, placed by one authority**
-  (#1439). `TargetDataLayout.record_layout` names the rule:
-  `TARGET_RECORD_LAYOUT_MICROSOFT` for every Windows target (MSVC and MinGW
-  spellings alike), `TARGET_RECORD_LAYOUT_AAPCS64` for AArch64 outside Darwin
-  and Windows, and `TARGET_RECORD_LAYOUT_ITANIUM` otherwise; x86-64 UEFI stays
-  Itanium because PE/COFF does not imply the Windows C layout. Both engines --
+  (#1439). `c_record_layout_rule` derives the rule from the `Target` alone:
+  `C_RECORD_LAYOUT_MICROSOFT` for every Windows target (MSVC and MinGW
+  spellings alike), `C_RECORD_LAYOUT_AAPCS64` for AArch64 outside Darwin and
+  Windows, and `C_RECORD_LAYOUT_ITANIUM` otherwise; x86-64 UEFI stays Itanium
+  because PE/COFF does not imply the Windows C layout, as Clang agrees. The
+  rule lives in the C frontend, its only reader, rather than in
+  `TargetDataLayout`. Both engines --
   `c_parse_type_layout_core` (the `sizeof`/`offsetof` fold) and the aggregate
   branch of `c_lower_to_ir_with_options` (`IrType`) -- evaluate a member's own
   facts and hand it to `c_record_layout_place`, which follows Clang's

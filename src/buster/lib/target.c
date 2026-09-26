@@ -235,13 +235,6 @@ TargetDataLayout target_data_layout(Target target)
     u32 va_list_size = wasm32 ? 4 : llp64 || wasm64 || bpfel || aarch64_pointer_list ? 8 :
                        target.cpu_arch == CPU_ARCH_X86_64 ? TARGET_X86_64_SYSV_VA_LIST_SIZE : 32;
     u32 va_list_alignment = wasm32 ? 4 : 8;
-    // Clang's MicrosoftRecordLayoutBuilder for every Windows environment, and
-    // its AArch64 targets' zero-length/unnamed bit-field alignment everywhere
-    // but Darwin. UEFI keeps its architecture's rule: PE/COFF output does not
-    // imply the Windows C layout (docs/uefi-target.md).
-    TargetRecordLayout record_layout = windows ? TARGET_RECORD_LAYOUT_MICROSOFT
-                                       : target.cpu_arch == CPU_ARCH_AARCH64 && !apple ? TARGET_RECORD_LAYOUT_AAPCS64
-                                                                                       : TARGET_RECORD_LAYOUT_ITANIUM;
 
     TargetDataLayout layout = {
         .boolean = {.size = 1, .alignment = 1, .bit_width = 1},
@@ -273,7 +266,6 @@ TargetDataLayout target_data_layout(Target target)
         .endianness = TARGET_ENDIAN_LITTLE,
         .plain_char_is_signed = !arm_plain_char_unsigned,
         .has_128_bit_integer = !wasm && !bpfel,
-        .record_layout = (u8)record_layout,
     };
     return layout;
 }
@@ -321,7 +313,7 @@ bool target_data_layout_is_valid(TargetDataLayout layout)
            layout.pointer.alignment == layout.pointer.size && layout.atomic_min_width &&
            layout.atomic_min_width <= layout.atomic_max_width && layout.atomic_max_width <= 128 && target_layout_alignment_valid(layout.atomic_alignment) &&
            target_layout_alignment_valid(layout.abi_stack_alignment) && target_layout_alignment_valid(layout.abi_max_alignment) &&
-           layout.abi_stack_alignment <= layout.abi_max_alignment && layout.record_layout < TARGET_RECORD_LAYOUT_COUNT;
+           layout.abi_stack_alignment <= layout.abi_max_alignment;
 }
 
 bool cpu_is_native(CpuModel model)

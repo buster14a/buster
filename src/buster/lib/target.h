@@ -214,32 +214,6 @@ typedef enum TargetEndianness
     TARGET_ENDIAN_COUNT,
 } TargetEndianness;
 
-// How a record's bit-fields claim storage. C leaves bit-field allocation to
-// the implementation and each platform ABI fixes it, so this is a target fact
-// like plain char's signedness rather than a frontend preference. Both of the
-// frontend's layout engines read it here, through c_record_layout_place.
-//
-// ITANIUM    The System V generic rule, which the x86-64 psABI, Darwin and
-//            bpf follow: a bit-field takes the next bit at which it does not
-//            straddle an aligned storage unit of its declared type, and an
-//            unnamed bit-field does not raise the record's alignment.
-// AAPCS64    The same placement, but every bit-field's container -- named,
-//            unnamed or zero-width -- raises the record's alignment (AAPCS64
-//            10.1.8). AArch64 Linux, Android, UEFI and bare metal; not Darwin.
-// MICROSOFT  The Windows rule, for the MSVC and MinGW environments alike: a
-//            bit-field occupies a storage unit of its declared type's size,
-//            and the next one shares it only while its declared type has the
-//            same size and its bits still fit. A zero-width bit-field matters
-//            only after a non-zero one, and a union's bit-fields do not raise
-//            the union's alignment.
-typedef enum TargetRecordLayout
-{
-    TARGET_RECORD_LAYOUT_ITANIUM,
-    TARGET_RECORD_LAYOUT_AAPCS64,
-    TARGET_RECORD_LAYOUT_MICROSOFT,
-    TARGET_RECORD_LAYOUT_COUNT,
-} TargetRecordLayout;
-
 // System V exposes two 32-bit offsets and two pointers, not a fourth word.
 #define TARGET_X86_64_SYSV_VA_LIST_SIZE 24u
 
@@ -290,9 +264,7 @@ struct TargetDataLayout
     TargetEndianness endianness;
     bool plain_char_is_signed;
     bool has_128_bit_integer;
-    // A TargetRecordLayout, narrowed to keep the record's size.
-    u8 record_layout;
-    u8 reserved;
+    u8 reserved[2];
 };
 
 typedef enum TargetCpuFeature

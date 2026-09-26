@@ -49030,7 +49030,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                     continue;
                 }
                 // Members are placed by c_record_layout_place, under the
-                // target's record-layout rule (TargetRecordLayout): the System
+                // target's record-layout rule (CRecordLayoutRule): the System
                 // V rule on Itanium targets, where a bit-field takes the next
                 // available bits and only moves on to the next storage unit of
                 // its declared type when it would otherwise straddle one; the

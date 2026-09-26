@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Independent record-layout oracle: Clang-derived data images per target.
 
-Buster lays a record out with one rule per target (TargetRecordLayout), placed
+Buster lays a record out with one rule per target (CRecordLayoutRule), placed
 by one authority that both of its layout engines call. Agreement between the
 engines, or between Buster's own targets, is not evidence that the rule is the
 target ABI's (issue #1439). This tool derives the expected answers from Clang,

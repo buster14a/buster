@@ -37,7 +37,7 @@
 //   c_record_layout_place,                        sizes/alignments, the one
 //   c_parse_type_layout                           member-placement authority
 //                                                 both layout engines use
-//                                                 (TargetRecordLayout), and
+//                                                 (CRecordLayoutRule), and
 //                                                 aggregate/bit-field layout
 //   c_semantic_check_named_call_arities          bound call constraints without IR
 //   c_parse_bfloat16_builtin,                    target builtin signatures
@@ -1337,12 +1337,26 @@ BUSTER_C_SHARED void c_atomic_promoted_layout(u32 atomic_max_width, u64* size, u
    records, `__attribute__((packed))` records with bit-fields, and a union's
    zero-width bit-field. Buster's Windows targets are the MSVC ABI (they
    predefine _MSC_VER). */
+
+// Clang's MicrosoftRecordLayoutBuilder for every Windows environment, and its
+// AArch64 targets' unnamed and zero-width bit-field alignment everywhere but
+// Darwin. UEFI keeps its architecture's rule: PE/COFF output does not imply
+// the Windows C layout (docs/uefi-target.md), and Clang agrees for both UEFI
+// triples. record_layout_tests pins the choice for each target against Clang.
+BUSTER_C_SHARED CRecordLayoutRule c_record_layout_rule(Target target)
+{
+    bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+    return target.os == OPERATING_SYSTEM_WINDOWS ? C_RECORD_LAYOUT_MICROSOFT
+           : target.cpu_arch == CPU_ARCH_AARCH64 && !apple ? C_RECORD_LAYOUT_AAPCS64
+                                                            : C_RECORD_LAYOUT_ITANIUM;
+}
+
 BUSTER_C_SHARED CRecordLayoutCursor c_record_layout_begin(Target target, bool is_union, u32 pack_alignment)
 {
     CRecordLayoutCursor cursor = {
         .alignment = 1,
         .pack_alignment = pack_alignment,
-        .policy = target_data_layout(target).record_layout,
+        .policy = (u8)c_record_layout_rule(target),
         .is_union = is_union,
     };
     return cursor;
@@ -1376,7 +1390,7 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
         }
         placement.unit_offset = placement.bit_position / 8;
     }
-    else if (cursor->policy == TARGET_RECORD_LAYOUT_MICROSOFT)
+    else if (cursor->policy == C_RECORD_LAYOUT_MICROSOFT)
     {
         if (!member.bit_width)
         {
@@ -1474,7 +1488,7 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
         // through once the record's size is known.
         cursor->needs_unit_fitting |= next_bit;
         placement.unit_offset = unit_bits && member.bit_width && !next_bit ? placement.bit_position / unit_bits * member.size : placement.bit_position / 8;
-        if (member.is_named || cursor->policy == TARGET_RECORD_LAYOUT_AAPCS64)
+        if (member.is_named || cursor->policy == C_RECORD_LAYOUT_AAPCS64)
         {
             cursor->alignment = BUSTER_MAX(cursor->alignment, contribution);
         }
@@ -1492,7 +1506,7 @@ BUSTER_C_SHARED u64 c_record_layout_size(CRecordLayoutCursor const* cursor, u32 
     }
     // An empty C record is four bytes under the Microsoft rule, or its
     // alignment when an aligned attribute asked for more.
-    if (!size && cursor->policy == TARGET_RECORD_LAYOUT_MICROSOFT)
+    if (!size && cursor->policy == C_RECORD_LAYOUT_MICROSOFT)
     {
         size = BUSTER_MAX(alignment, 4u);
     }

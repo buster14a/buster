@@ -2,7 +2,7 @@
 //
 // Buster's two layout engines -- the sizeof/offsetof folding in c_parse.c and
 // the IrType layout in c_gen.c -- place members through one authority,
-// c_record_layout_place, under the target's TargetRecordLayout. They used to
+// c_record_layout_place, under the target's CRecordLayoutRule. They used to
 // hold a copy each of the System V bit-field rule and were tested only against
 // each other, so both answered System V on Windows and missed AAPCS64's
 // unnamed-container alignment (#1439, #1344, #1318). Agreement between the
@@ -21,13 +21,16 @@
 //
 // Entry: record_layout_tests. Map: record_layout_test_symbol finds a probe in
 // the canonical object, record_layout_test_clang_corpus compiles the corpus
-// for every target through the real driver and compares every probe.
+// for every target through the real driver and compares every probe, and
+// record_layout_test_rule_selection checks which rule each target selects,
+// including targets Buster writes no object for.
 //
 // Regenerate the expectations with `tools/record_layout_oracle.py generate`
 // and a Clang that knows every target triple; never from Buster's output.
 #include <buster/tests/compiler/frontend/c/record_layout_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/file.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
@@ -138,10 +141,83 @@ BUSTER_GLOBAL_LOCAL UnitTestResult record_layout_test_clang_corpus(UnitTestArgum
     return result;
 }
 
+// Whether `sizeof(struct rule_witness) == size` holds for the target, as
+// folded by the frontend.
+BUSTER_GLOBAL_LOCAL bool record_layout_test_witness_holds(Arena* arena, Target target, String8 size)
+{
+    String8 pieces[] = {
+        S8("struct rule_witness { char a; int : 4; };\n_Static_assert(sizeof(struct rule_witness) == "),
+        size,
+        S8(", \"rule\");\n"),
+    };
+    String8 source = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pieces), false);
+    CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){.target = target});
+    CParserResult syntax = c_parse_ast(arena, preprocess);
+    CAnalysisResult analysis = c_analyze_semantics_only(arena, preprocess, syntax);
+    return preprocess.diagnostic_count == 0 && analysis.diagnostic_count == 0;
+}
+
+// Which record-layout rule each target selects (#1439). The witness
+// `struct { char a; int : 4; }` is 2 bytes under the Itanium rule (the unnamed
+// field does not raise the alignment), 4 under AAPCS64 (it does) and 8 under
+// Microsoft (it opens an int unit after the char), so a target on the wrong
+// rule cannot pass. Each size is Clang 18.1.3's for the same triple, or for
+// the one in the comment above it. Beyond the corpus's targets this covers
+// MinGW, UEFI, freestanding AArch64, Wasm and bpf.
+BUSTER_GLOBAL_LOCAL UnitTestResult record_layout_test_rule_selection(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct RecordLayoutRuleCase RecordLayoutRuleCase;
+    struct RecordLayoutRuleCase
+    {
+        String8 triple;
+        String8 witness_size;
+    };
+    RecordLayoutRuleCase cases[] = {
+        {S8("x86_64-pc-windows-msvc"), S8("8")},
+        {S8("aarch64-pc-windows-msvc"), S8("8")},
+        {S8("x86_64-w64-mingw32"), S8("8")},
+        {S8("aarch64-unknown-linux-gnu"), S8("4")},
+        {S8("aarch64-linux-android"), S8("4")},
+        {S8("aarch64-unknown-uefi"), S8("4")},
+        // aarch64-unknown-none
+        {S8("aarch64-unknown-freestanding"), S8("4")},
+        {S8("arm64-apple-macos"), S8("2")},
+        {S8("arm64-apple-ios"), S8("2")},
+        {S8("x86_64-unknown-linux-gnu"), S8("2")},
+        {S8("x86_64-apple-macos"), S8("2")},
+        {S8("x86_64-unknown-uefi"), S8("2")},
+        // wasm64-unknown-unknown
+        {S8("wasm64-unknown-freestanding"), S8("2")},
+        // bpfel
+        {S8("bpfel-unknown-linux"), S8("2")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TargetParseResult parsed = target_parse_triple(cases[index].triple);
+        if (BUSTER_REQUIRE(arguments, parsed.error == TARGET_PARSE_ERROR_NONE))
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            bool holds = record_layout_test_witness_holds(temporary.arena, parsed.target, cases[index].witness_size);
+            // No rule gives 3 bytes; the assertion has to be able to fail.
+            bool control_holds = record_layout_test_witness_holds(temporary.arena, parsed.target, S8("3"));
+            if (!holds)
+            {
+                arguments->show(arguments, S8("record layout: {S8} does not select Clang's rule (witness size {S8})\n"), cases[index].triple,
+                                cases[index].witness_size);
+            }
+            BUSTER_TEST(arguments, holds && !control_holds);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult record_layout_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, record_layout_test_clang_corpus);
+    BUSTER_TEST_FIXTURE(arguments, record_layout_test_rule_selection);
     return result;
 }
 #endif
