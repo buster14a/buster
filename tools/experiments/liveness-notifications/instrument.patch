@@ -1,0 +1,122 @@
+--- a/src/buster/lib/compiler/codegen/register_allocator_fast.c
++++ b/src/buster/lib/compiler/codegen/register_allocator_fast.c
+@@ -1,91 +1,119 @@
+ // themselves; this only widens them.
++#define BUSTER_LIVENESS_REPLAY 1
++#include <buster/lib/compiler/codegen/liveness_notification_probe_internal.h>
++#undef BUSTER_LIVENESS_REPLAY
++
+ BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges(Arena* arena, MachineFunction const* function, MachineFastPrepass const* prepass, u64 const* reads,
+                                                         u64 const* writes, u32 words, u32* starts, u32* ends)
+ {
++    LpEvidence lp_evidence = lp_begin(arena, function, prepass, reads, writes, words);
+     u32 block_count = function->block_count;
+     u64 plane = (u64)block_count * words;
+     u64* live_in = arena_allocate(arena, u64, plane ? plane : 1);
+     u64* live_out = arena_allocate(arena, u64, plane ? plane : 1);
+     memset(live_in, 0, (plane ? plane : 1) * sizeof(*live_in));
+     memset(live_out, 0, (plane ? plane : 1) * sizeof(*live_out));
+     // Seed an explicit LIFO in ascending order so its first pulls preserve
+     // the old reverse-index sweep. After that, only a block whose
+     // live-out gained a bit is pending; converged regions are never
+     // re-swept. `queued` bounds the stack to one entry per block.
+     u32 work_axis = block_count ? block_count : 1u;
+     u32* worklist = arena_allocate(arena, u32, work_axis);
+     u8* queued = arena_allocate(arena, u8, work_axis);
+     memset(queued, 0, work_axis);
+     u32 work_count = 0;
+     for (u32 block_index = 0; block_index < block_count; block_index += 1)
+     {
+         worklist[work_count++] = block_index;
+         queued[block_index] = 1;
+     }
+     while (work_count)
+     {
+         u32 block_index = worklist[--work_count];
+         queued[block_index] = 0;
++        lp_add(&lp_evidence.actual, &lp_evidence.actual.pops, 1);
++        LpU64 lp_old_updates = lp_evidence.actual.in_updates;
+         u64 const* block_reads = reads + (u64)block_index * words;
+         u64 const* block_writes = writes + (u64)block_index * words;
+         u64* block_in = live_in + (u64)block_index * words;
+         u64 const* block_out = live_out + (u64)block_index * words;
+         for (u32 word = 0; word < words; word += 1)
+         {
++            LpU64 lp_previous_in = block_in[word];
+             block_in[word] = block_reads[word] | (block_out[word] & ~block_writes[word]);
++            lp_add(&lp_evidence.actual, &lp_evidence.actual.transfer_words, 1);
++            lp_in_update(&lp_evidence.actual, lp_previous_in, block_in[word]);
++        }
++        if (lp_old_updates == lp_evidence.actual.in_updates)
++        {
++            lp_add(&lp_evidence.actual, &lp_evidence.actual.redundant_pops, 1);
+         }
+         u32 first = prepass->predecessor_offsets[block_index];
+         u32 limit = prepass->predecessor_offsets[block_index + 1u];
+         for (u32 entry = first; entry < limit; entry += 1)
+         {
++            lp_add(&lp_evidence.actual, &lp_evidence.actual.edge_visits, 1);
+             u32 predecessor = prepass->predecessor_list[entry];
+             u64* predecessor_out = live_out + (u64)predecessor * words;
+             bool predecessor_changed = false;
+             for (u32 word = 0; word < words; word += 1)
+             {
++                lp_add(&lp_evidence.actual, &lp_evidence.actual.merge_words, 1);
+                 u64 previous = predecessor_out[word];
+                 u64 merged = previous | block_in[word];
+                 if (merged != previous)
+                 {
++                    lp_out_update(&lp_evidence.actual, previous, merged);
+                     predecessor_out[word] = merged;
+                     predecessor_changed = true;
+                 }
++            }
++            if (predecessor_changed)
++            {
++                lp_add(&lp_evidence.actual, &lp_evidence.actual.notifications, 1);
++                lp_add(&lp_evidence.actual, &lp_evidence.actual.duplicates, queued[predecessor] != 0);
+             }
+             if (predecessor_changed && !queued[predecessor])
+             {
+                 worklist[work_count++] = predecessor;
+                 queued[predecessor] = 1;
++                lp_add(&lp_evidence.actual, &lp_evidence.actual.pushes, 1);
++                if (work_count > lp_evidence.actual.max_pending)
++                {
++                    lp_evidence.actual.max_pending = work_count;
++                }
+             }
+         }
+     }
+     for (u32 block_index = 0; block_index < block_count; block_index += 1)
+     {
+         MachineBlock const* block = function->blocks + block_index;
+         u64 const* block_in = live_in + (u64)block_index * words;
+         u64 const* block_out = live_out + (u64)block_index * words;
+         u32 last = block->instruction_count ? block->first_instruction + block->instruction_count - 1u : block->first_instruction;
+         // An object arriving live occupies the block from its first row, and
+         // one leaving live occupies it through its last; an object born and
+         // consumed inside the block keeps only the rows its touches gave it.
+         for (u32 word = 0; word < words; word += 1)
+         {
+             u64 entering = block_in[word];
+             while (entering)
+             {
+                 u32 object = 64u * word + trailing_zeroes_u64(entering);
+                 entering &= entering - 1u;
+                 starts[object] = BUSTER_MIN(starts[object], block->first_instruction);
+             }
+             u64 leaving = block_out[word];
+             while (leaving)
+             {
+                 u32 object = 64u * word + trailing_zeroes_u64(leaving);
+                 leaving &= leaving - 1u;
+                 ends[object] = BUSTER_MAX(ends[object], last);
+             }
+         }
+     }
++    lp_finish(&lp_evidence, live_in, live_out);
+ }
+ 
+ #if BUSTER_INCLUDE_TESTS
+ // The removed whole-sweep solver is retained only as an exact oracle
