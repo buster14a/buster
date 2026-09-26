@@ -233,7 +233,8 @@ if (( probe_budget > 0 )); then
   probe_status=$?
   set -e
   cat "$evidence/live-probe-console.log"
-  if ! sudo docker cp "$guest:/root/issue1162-install/live-probe-output" "$evidence/live-probe-artifacts"; then
+  if ! sudo docker cp "$guest:/root/issue1162-install/live-probe-output" "$evidence/live-probe-artifacts" || \
+     ! sudo chown -R -- "$(id -u):$(id -g)" "$evidence/live-probe-artifacts"; then
     echo "LIVE_PROBE_ARTIFACT_COPY_FAILED"
     probe_status=1
   fi
