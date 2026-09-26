@@ -122,6 +122,7 @@
 #include <buster/lib/compiler/gpu/gpu.c>
 #include <buster/lib/compiler/llvm/bitcode.c>
 #include <buster/lib/compiler/ebpf/ebpf.c>
+#include <buster/lib/compiler/incremental/incremental.c>
 #include <buster/lib/compiler/driver/driver.c>
 #include <buster/lib/hash.c>
 #endif
@@ -1095,6 +1096,55 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             string_print(S8("CODEGEN_FALLBACK_STAGES verify={u32} placement={u32} encode={u32}\n"), compile.codegen_statistics.fallback_verify_count,
                          compile.codegen_statistics.fallback_placement_count, compile.codegen_statistics.fallback_encode_count);
         }
+    }
+    // Opt-in reuse records (docs/incremental-compilation.md). Printed whether
+    // or not the compile succeeded: a refused unit still reports its pack.
+    if (invocation.incremental_statistics)
+    {
+        IncrementalStatistics incremental = compile.incremental;
+        string_print(S8("INCREMENTAL version=1 enabled={u32} published={u64} retry_disabled={u32} packs_absent={u64} packs_loaded={u64} "
+                        "packs_corrupt={u64} packs_context_changed={u64} packs_unavailable={u64} pack_bytes_read={u64} pack_bytes_written={u64} "
+                        "pack_entries_read={u64} pack_entries_written={u64} record_bytes={u64} identity_bytes={u64}\n"),
+                     (u32)incremental.enabled, incremental.units_published, (u32)incremental.retry_disabled,
+                     incremental.pack_statuses[INCREMENTAL_PACK_ABSENT], incremental.pack_statuses[INCREMENTAL_PACK_LOADED],
+                     incremental.pack_statuses[INCREMENTAL_PACK_CORRUPT], incremental.pack_statuses[INCREMENTAL_PACK_CONTEXT_CHANGED],
+                     incremental.pack_statuses[INCREMENTAL_PACK_UNAVAILABLE], incremental.pack_bytes_read, incremental.pack_bytes_written,
+                     incremental.pack_entries_read, incremental.pack_entries_written, incremental.record_bytes, incremental.identity_bytes);
+        string_print(S8("INCREMENTAL_LOOKUP reused={u64} miss_no_pack={u64} miss_context={u64} miss_new={u64} miss_body={u64} miss_types={u64} "
+                        "miss_symbols={u64} miss_uncaptured={u64} miss_malformed={u64} ineligible_inline_assembly={u64} ineligible_record={u64} "
+                        "not_lowered={u64}\n"),
+                     incremental.lookups[INCREMENTAL_LOOKUP_REUSED], incremental.lookups[INCREMENTAL_LOOKUP_MISS_NO_PACK],
+                     incremental.lookups[INCREMENTAL_LOOKUP_MISS_CONTEXT], incremental.lookups[INCREMENTAL_LOOKUP_MISS_NEW],
+                     incremental.lookups[INCREMENTAL_LOOKUP_MISS_BODY], incremental.lookups[INCREMENTAL_LOOKUP_MISS_TYPES],
+                     incremental.lookups[INCREMENTAL_LOOKUP_MISS_SYMBOLS], incremental.lookups[INCREMENTAL_LOOKUP_MISS_UNCAPTURED],
+                     incremental.lookups[INCREMENTAL_LOOKUP_MISS_MALFORMED], incremental.lookups[INCREMENTAL_LOOKUP_INELIGIBLE_INLINE_ASSEMBLY],
+                     incremental.lookups[INCREMENTAL_LOOKUP_INELIGIBLE_RECORD], incremental.lookups[INCREMENTAL_LOOKUP_NOT_LOWERED]);
+        string_print(S8("INCREMENTAL_CAPTURE stored={u64} canonical={u64} foreign_symbol={u64} unsupported={u64}\n"),
+                     incremental.captures[INCREMENTAL_CAPTURE_STORED], incremental.captures[INCREMENTAL_CAPTURE_CANONICAL],
+                     incremental.captures[INCREMENTAL_CAPTURE_FOREIGN_SYMBOL], incremental.captures[INCREMENTAL_CAPTURE_UNSUPPORTED]);
+        string_print(S8("INCREMENTAL_WORK lowered_ir_instructions={u64} reused_ir_instructions={u64} compiled_ir_instructions={u64} "
+                        "reused_code_bytes={u64} reused_relocations={u64} reused_line_marks={u64} reused_debug_locations={u64}\n"),
+                     incremental.lowered_ir_instructions, incremental.reused_ir_instructions, incremental.compiled_ir_instructions,
+                     incremental.reused_code_bytes, incremental.reused_relocations, incremental.reused_line_marks, incremental.reused_debug_locations);
+        string_print(S8("INCREMENTAL_RECORD bytes={u64} body_bytes={u64} type_bytes={u64} symbol_bytes={u64} types={u64} symbols={u64}\n"),
+                     incremental.record_bytes, incremental.record_body_bytes, incremental.record_type_bytes, incremental.record_symbol_bytes,
+                     incremental.record_types, incremental.record_symbols);
+        string_print(S8("INCREMENTAL_VERIFY verified={u64} mismatches={u64}\n"), incremental.verified, incremental.verify_mismatches);
+        string_print(S8("INCREMENTAL_AUDIT functions={u64} touched_types={u64} closure_types={u64} touched_symbols={u64} closure_symbols={u64} "
+                        "type_violations={u64} symbol_violations={u64} overflows={u64}\n"),
+                     incremental.audit_functions, incremental.audit_touched_types, incremental.audit_closure_types, incremental.audit_touched_symbols,
+                     incremental.audit_closure_symbols, incremental.audit_type_violations, incremental.audit_symbol_violations, incremental.audit_overflows);
+        string_print(S8("INCREMENTAL_TIME identity_ns={u64} pack_read_ns={u64} record_ns={u64} replay_ns={u64} pack_write_ns={u64}\n"),
+                     incremental.identity_nanoseconds, incremental.pack_read_nanoseconds, incremental.record_nanoseconds,
+                     incremental.replay_nanoseconds, incremental.pack_write_nanoseconds);
+    }
+    for (u32 index = 0; invocation.incremental_trace && index < compile.incremental_trace_count; index += 1)
+    {
+        IncrementalFunctionTrace row = compile.incremental_trace[index];
+        string_print(S8("INCREMENTAL_FUNCTION name={S8} fingerprint={u64:x,no_prefix,width=[0,16]} instructions={u32} code_bytes={u32} lookup={S8} "
+                        "capture={S8} verify_mismatch={u32} audit_violation={u32}\n"),
+                     row.name, row.fingerprint, row.instruction_count, row.code_bytes, incremental_lookup_string(row.lookup),
+                     incremental_capture_string(row.capture), (u32)row.verify_mismatch, (u32)row.audit_violation);
     }
     if (invocation.record_codegen_fallbacks)
     {

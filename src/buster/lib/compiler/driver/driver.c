@@ -22,6 +22,9 @@
 // compiler_driver_publish_c_diagnostics preserves producer/stage ordering.
 // Optional fallback_records retain source/function attribution across TU arena
 // destruction; no per-function recording is allocated in ordinary compilation.
+// -fincremental-cache opens one IncrementalCodegenSession per native C unit
+// around code generation and publishes its pack only after the object exists
+// (incremental.h, docs/incremental-compilation.md).
 // compiler_driver_unit_lane owns one private TU arena/collector per stable
 // input slot. Opt-in native C link batches publish in input order only after
 // the gang returns; assembly and archive selection remain serial boundaries.
@@ -1416,6 +1419,35 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (string_equal(argument, S8("-fcodegen-fallback-census")) || string_equal(argument, S8("-fno-codegen-fallback-census")))
         {
             invocation.record_codegen_fallbacks = string_equal(argument, S8("-fcodegen-fallback-census"));
+            continue;
+        }
+        if (string_starts_with_sequence(argument, S8("-fincremental-cache=")))
+        {
+            invocation.incremental_cache_directory = compiler_driver_option_value(argument, S8("-fincremental-cache="));
+            if (!invocation.incremental_cache_directory.length)
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("missing directory after {S8}"), argument);
+            }
+            continue;
+        }
+        if (string_equal(argument, S8("-fno-incremental-cache")))
+        {
+            invocation.incremental_cache_directory = (String8){0};
+            continue;
+        }
+        if (string_equal(argument, S8("-fincremental-stats")))
+        {
+            invocation.incremental_statistics = true;
+            continue;
+        }
+        if (string_equal(argument, S8("-fincremental-verify")))
+        {
+            invocation.incremental_verify = true;
+            continue;
+        }
+        if (string_equal(argument, S8("-fincremental-trace")))
+        {
+            invocation.incremental_trace = true;
             continue;
         }
         if (string_starts_with_sequence(argument, S8("-O")))
@@ -3518,6 +3550,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         .diagnostic = invocation.diagnostic,
     };
     FileMapRead source_file = {0};
+    IncrementalCodegenSession* incremental = 0;
     if (!arena || invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
         return result;
@@ -3733,7 +3766,19 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             goto end;
         }
     }
-    CodegenModule code = codegen_generate_canonical_module_with_trace(arena, lowered.program, module, invocation.target,
+    // Opened only for the native object path; every other consumer of the
+    // canonical module above ran without it.
+    if (invocation.incremental_cache_directory.length)
+    {
+        incremental = incremental_session_open(arena, (IncrementalSessionOptions){
+                                                          .cache_directory = invocation.incremental_cache_directory,
+                                                          .input_path = invocation.input_paths[0],
+                                                          .compiler = invocation.incremental_compiler,
+                                                          .verify = invocation.incremental_verify,
+                                                          .trace = invocation.incremental_trace,
+                                                      });
+    }
+    CodegenModule code = codegen_generate_canonical_module_incremental(arena, lowered.program, module, invocation.target,
                                                            (CodegenModuleOptions){
                                                                .debug_info = invocation.debug_info,
                                                                .assume_validated = true,
@@ -3742,7 +3787,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                .position_independent = invocation.position_independent,
                                                                .register_allocator = invocation.register_allocator,
                                                                .assembly_syntax = (u8)invocation.assembly_syntax,
-                                                           }, invocation.bootstrap_trace_prefix.length ? &mir_trace : 0);
+                                                           }, invocation.bootstrap_trace_prefix.length ? &mir_trace : 0, incremental);
     if (invocation.bootstrap_trace_prefix.length)
     {
         if (!bootstrap_trace_close(&mir_trace))
@@ -3883,7 +3928,19 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     result.object = object;
     result.has_object = true;
     compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result);
+    // Publication follows a complete object: a failed or partial compilation
+    // leaves the previous pack in place.
+    if (incremental && result.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        incremental_session_publish(incremental);
+    }
 end:
+    if (incremental)
+    {
+        result.incremental = incremental_session_statistics(incremental);
+        result.incremental_trace = incremental_session_trace(incremental, arena, &result.incremental_trace_count);
+        incremental_session_close(incremental);
+    }
     file_map_unmap(source_file);
     return result;
 }
@@ -4162,6 +4219,12 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     {
         result = compiler_driver_execute_gpu(arena, invocation, &warnings);
         goto finish;
+    }
+    // Identified once per invocation: every unit, including parallel lanes,
+    // copies the same identity into its session.
+    if (invocation.incremental_cache_directory.length && !invocation.emit_llvm_bitcode)
+    {
+        invocation.incremental_compiler = incremental_compiler_identity(arena);
     }
     if (invocation.emit_llvm_bitcode)
     {
@@ -4568,6 +4631,23 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.fast.instructions_before += unit.fast.instructions_before;
         result.fast.instructions_after += unit.fast.instructions_after;
         codegen_statistics_add(&result.codegen_statistics, &unit.codegen_statistics);
+        incremental_statistics_add(&result.incremental, &unit.incremental);
+        if (unit.incremental_trace_count)
+        {
+            IncrementalFunctionTrace* rows = arena_allocate(arena, IncrementalFunctionTrace, (u64)result.incremental_trace_count + unit.incremental_trace_count);
+            if (result.incremental_trace_count)
+            {
+                memcpy(rows, result.incremental_trace, sizeof(*rows) * result.incremental_trace_count);
+            }
+            for (u32 index = 0; index < unit.incremental_trace_count; index += 1)
+            {
+                IncrementalFunctionTrace row = unit.incremental_trace[index];
+                row.name = string_duplicate_arena(arena, row.name, false);
+                rows[result.incremental_trace_count + index] = row;
+            }
+            result.incremental_trace = rows;
+            result.incremental_trace_count += unit.incremental_trace_count;
+        }
         if (unit.fallback_record_count)
         {
             u64 needed = (u64)result.fallback_record_count + unit.fallback_record_count;

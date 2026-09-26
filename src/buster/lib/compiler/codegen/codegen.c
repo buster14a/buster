@@ -51,9 +51,15 @@
 //                                                change-point timeline per
 //                                                referenced virtual register,
 //                                                seeds clipped from them
+//   codegen_incremental_capture_machine,         opt-in reuse seam
+//   codegen_incremental_replay                   (incremental.h): record what a
+//                                                machine-emitted function
+//                                                appended, and append it again
+//                                                at a new offset
 
 #include <buster/lib/compiler/codegen/codegen_internal.h>
 #include <buster/lib/compiler/codegen/bootstrap_trace.h>
+#include <buster/lib/compiler/incremental/incremental.h>
 
 bool codegen_module_relocation_kind_valid(u8 kind)
 {
@@ -144,6 +150,7 @@ bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
 #include <buster/lib/integer.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
+#include <buster/lib/time.h>
 
 #define X64_VALUE_SLOT_SIZE 32
 #define X64_VALUE_SLOT_COMPONENT_COUNT 4
@@ -11209,6 +11216,362 @@ bool codegen_test_record_machine_locations_dense(Arena* arena, CodegenModule* re
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// Incremental reuse seam (incremental.h). Only functions the machine path
+// emits are captured; canonical-path functions are always generated. A capture
+// records what one function appended to the module and replay appends the
+// same rows again at the function's new offset, resolving line positions and
+// symbol slots against the current program.
+
+typedef struct CodegenIncrementalBaseline CodegenIncrementalBaseline;
+struct CodegenIncrementalBaseline
+{
+    u64 statistics[INCREMENTAL_STATISTIC_COUNT];
+    u32 fallback_function_count;
+    u32 verified_mir_function_count;
+    u32 verified_scheduled_function_count;
+    u32 relocation_count;
+    u32 debug_location_count;
+    u8 reserved[4];
+};
+
+typedef struct CodegenIncrementalMachine CodegenIncrementalMachine;
+struct CodegenIncrementalMachine
+{
+    IncrementalLineMark* marks;
+    u32* block_offsets;
+    u32 mark_count;
+    u32 block_count;
+};
+
+// The CodegenStatistics fields a machine-emitted function adds, in
+// IncrementalStatistic order. FRAME is the caller's to fill.
+BUSTER_GLOBAL_LOCAL void codegen_incremental_statistics(CodegenStatistics const* statistics, u64 values[INCREMENTAL_STATISTIC_COUNT])
+{
+    values[INCREMENTAL_STATISTIC_STACK_VALUE_BYTES] = statistics->stack_value_bytes;
+    values[INCREMENTAL_STATISTIC_STACK_FRAME_BYTES] = statistics->stack_frame_bytes;
+    values[INCREMENTAL_STATISTIC_FRAME] = 0;
+    values[INCREMENTAL_STATISTIC_NATIVE_VECTOR_OPERATIONS] = statistics->native_vector_operation_count;
+    values[INCREMENTAL_STATISTIC_SPLIT_VECTOR_OPERATIONS] = statistics->split_vector_operation_count;
+    values[INCREMENTAL_STATISTIC_VZEROUPPER] = statistics->vzeroupper_count;
+    values[INCREMENTAL_STATISTIC_FORWARDED_WIDE_VECTOR_LOADS] = statistics->forwarded_wide_vector_load_count;
+    values[INCREMENTAL_STATISTIC_SIMD_OPERATIONS] = statistics->simd_operation_count;
+    values[INCREMENTAL_STATISTIC_ALLOCATOR_RELOADS] = statistics->allocator_reload_count;
+    values[INCREMENTAL_STATISTIC_ALLOCATOR_SPILLS] = statistics->allocator_spill_count;
+    values[INCREMENTAL_STATISTIC_ALLOCATOR_COPIES] = statistics->allocator_copy_count;
+    values[INCREMENTAL_STATISTIC_ALLOCATOR_BOUNDARY_SPILLS] = statistics->allocator_boundary_spill_count;
+    values[INCREMENTAL_STATISTIC_ALLOCATOR_BOUNDARY_RELOADS] = statistics->allocator_boundary_reload_count;
+    values[INCREMENTAL_STATISTIC_ALLOCATOR_BOUNDARY_COPIES] = statistics->allocator_boundary_copy_count;
+    values[INCREMENTAL_STATISTIC_ALLOCATOR_REMATERIALIZATIONS] = statistics->allocator_rematerialize_count;
+    values[INCREMENTAL_STATISTIC_ALLOCATOR_PINS] = statistics->allocator_pinned_register_count;
+    values[INCREMENTAL_STATISTIC_ALLOCATOR_SPLITS] = statistics->allocator_split_register_count;
+    values[INCREMENTAL_STATISTIC_ALLOCATOR_SCHEDULED] = statistics->allocator_scheduled_function_count;
+    values[INCREMENTAL_STATISTIC_ALLOCATOR_SCHEDULE_KEPT] = statistics->allocator_schedule_kept_count;
+    values[INCREMENTAL_STATISTIC_EXACT_ATTEMPTS] = statistics->exact_attempts;
+    values[INCREMENTAL_STATISTIC_EXACT_SUCCESSES] = statistics->exact_successes;
+    values[INCREMENTAL_STATISTIC_EXACT_FAILURES] = statistics->exact_failures;
+    values[INCREMENTAL_STATISTIC_MUTABLE_VIRTUAL_REGISTERS] = statistics->mutable_virtual_register_count;
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_incremental_baseline(CodegenModule const* result, CodegenIncrementalBaseline* baseline)
+{
+    codegen_incremental_statistics(&result->statistics, baseline->statistics);
+    baseline->fallback_function_count = result->statistics.fallback_function_count;
+    baseline->verified_mir_function_count = result->statistics.verified_mir_function_count;
+    baseline->verified_scheduled_function_count = result->statistics.verified_scheduled_function_count;
+    baseline->relocation_count = result->relocation_count;
+    baseline->debug_location_count = result->debug_location_count;
+}
+
+// The selector's line marks as function-relative (offset, canonical row)
+// pairs, and the encoder's block offsets, copied out of the machine scratch
+// arena before it is released. Only marks with an encoded row are kept: the
+// same rows codegen_record_machine_line_marks considers.
+BUSTER_GLOBAL_LOCAL CodegenIncrementalMachine codegen_incremental_retain_machine(Arena* arena, IrFunction const* ir_function, MachineFunction const* function,
+                                                                                 u32 const* row_offsets, u32 const* block_offsets, bool line_marks)
+{
+    CodegenIncrementalMachine result = {0};
+    if (line_marks && function->line_mark_count)
+    {
+        result.marks = arena_allocate(arena, IncrementalLineMark, function->line_mark_count);
+        for (u32 mark_index = 0; mark_index < function->line_mark_count; mark_index += 1)
+        {
+            MachineLineMark mark = function->line_marks[mark_index];
+            if (mark.row < function->instruction_count)
+            {
+                result.marks[result.mark_count++] = (IncrementalLineMark){.code_offset = row_offsets[mark.row], .instruction = mark.instruction};
+            }
+        }
+    }
+    if (block_offsets && ir_function->block_count)
+    {
+        result.block_offsets = arena_allocate(arena, u32, ir_function->block_count);
+        memcpy(result.block_offsets, block_offsets, sizeof(u32) * (u64)ir_function->block_count);
+        result.block_count = ir_function->block_count;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 codegen_incremental_symbol_slot(IrSymbolId const* slots, u32 slot_count, IrSymbolId symbol)
+{
+    u32 low = 0;
+    u32 high = slot_count;
+    u32 result = UINT32_MAX;
+    while (low < high && result == UINT32_MAX)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (slots[middle].value < symbol.value)
+        {
+            low = middle + 1;
+        }
+        else if (slots[middle].value > symbol.value)
+        {
+            high = middle;
+        }
+        else
+        {
+            result = middle;
+        }
+    }
+    return result;
+}
+
+// Records what a machine-emitted function appended since `baseline`. Anything
+// outside the artifact's vocabulary -- a relocation that is not a plain code
+// relocation, a symbol the function's record does not reference, a counter
+// the artifact does not carry -- leaves the function uncaptured.
+BUSTER_GLOBAL_LOCAL void codegen_incremental_capture_machine(IncrementalCodegenSession* incremental, u32 function_index, Arena* arena,
+                                                             CodegenModule const* result, CodegenBuffer const* buffer,
+                                                             CodegenFunctionDescriptor const* descriptor, IrFunction const* function,
+                                                             CodegenIncrementalBaseline const* baseline, CodegenIncrementalMachine const* machine,
+                                                             u32 frame_size)
+{
+    IncrementalCapture capture = INCREMENTAL_CAPTURE_STORED;
+    u32 slot_count = 0;
+    IrSymbolId const* slots = incremental_session_symbol_slots(incremental, function_index, &slot_count);
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    u32 code_offset = descriptor->code_offset;
+    u32 code_size = descriptor->code_size;
+    if (!slots || code_offset > buffer->count || code_size > buffer->count - code_offset || machine->block_count != function->block_count ||
+        result->statistics.fallback_function_count != baseline->fallback_function_count ||
+        result->statistics.verified_mir_function_count != baseline->verified_mir_function_count ||
+        result->statistics.verified_scheduled_function_count != baseline->verified_scheduled_function_count)
+    {
+        capture = INCREMENTAL_CAPTURE_UNSUPPORTED;
+    }
+    IncrementalFunctionArtifact artifact = {
+        .code = {.pointer = buffer->bytes + code_offset, .length = code_size},
+        .unwind_actions = descriptor->unwind_actions,
+        .epilog_offsets = descriptor->epilog_offsets,
+        .block_offsets = machine->block_offsets,
+        .line_marks = machine->marks,
+        .unwind_action_count = descriptor->unwind_action_count,
+        .epilog_count = descriptor->epilog_count,
+        .block_count = machine->block_count,
+        .line_mark_count = machine->mark_count,
+        .prolog_size = descriptor->prolog_size,
+        .symbol_slot_count = slot_count,
+    };
+    u32 relocation_count = result->relocation_count - baseline->relocation_count;
+    artifact.relocations = arena_allocate(scratch.arena, IncrementalRelocation, relocation_count ? relocation_count : 1);
+    for (u32 index = 0; capture == INCREMENTAL_CAPTURE_STORED && index < relocation_count; index += 1)
+    {
+        CodegenModuleRelocation relocation = result->relocations[baseline->relocation_count + index];
+        u32 slot = codegen_incremental_symbol_slot(slots, slot_count, relocation.symbol);
+        if (relocation.source != CODEGEN_MODULE_RELOCATION_CODE || relocation.label_address || relocation.label_block.value != 0 ||
+            relocation.offset < code_offset || relocation.offset - code_offset > code_size)
+        {
+            capture = INCREMENTAL_CAPTURE_UNSUPPORTED;
+        }
+        else if (slot == UINT32_MAX)
+        {
+            capture = INCREMENTAL_CAPTURE_FOREIGN_SYMBOL;
+        }
+        else
+        {
+            artifact.relocations[index] = (IncrementalRelocation){
+                .addend = relocation.addend, .offset = relocation.offset - code_offset, .symbol_slot = slot, .kind = relocation.kind};
+        }
+    }
+    artifact.relocation_count = relocation_count;
+    u32 location_count = result->debug_location_count - baseline->debug_location_count;
+    artifact.debug_locations = arena_allocate(scratch.arena, IncrementalDebugLocation, location_count ? location_count : 1);
+    for (u32 index = 0; capture == INCREMENTAL_CAPTURE_STORED && index < location_count; index += 1)
+    {
+        DebugLocationSeed seed = result->debug_locations[baseline->debug_location_count + index];
+        if (seed.function_symbol.value != function->symbol.value || seed.start < code_offset || seed.end < seed.start ||
+            seed.end - code_offset > code_size)
+        {
+            capture = INCREMENTAL_CAPTURE_UNSUPPORTED;
+        }
+        else
+        {
+            artifact.debug_locations[index] = (IncrementalDebugLocation){
+                .location = seed.location, .local = seed.local, .start = seed.start - code_offset, .end = seed.end - code_offset};
+        }
+    }
+    artifact.debug_location_count = location_count;
+    u64 after[INCREMENTAL_STATISTIC_COUNT];
+    codegen_incremental_statistics(&result->statistics, after);
+    for (u32 index = 0; index < INCREMENTAL_STATISTIC_COUNT; index += 1)
+    {
+        artifact.statistics[index] = after[index] - baseline->statistics[index];
+    }
+    artifact.statistics[INCREMENTAL_STATISTIC_FRAME] = frame_size;
+    incremental_session_capture(incremental, function_index, capture, capture == INCREMENTAL_CAPTURE_STORED ? &artifact : 0);
+    scratch_end(scratch);
+}
+
+// Appends a reused function exactly as the machine path would have: code at
+// the function's entry offset, line rows through the same drop rules against
+// the current source map, relocations bound through the current symbol slots,
+// debug seeds rebased, the descriptor's unwind shape, global label-address
+// addends and the counters. False leaves `result->error` or the exhausted flag
+// set for the caller's usual failure and retry handling.
+BUSTER_GLOBAL_LOCAL bool codegen_incremental_replay(IncrementalCodegenSession* incremental, u32 function_index, Arena* arena, IrProgram* program,
+                                                    IrFunction* function, Target target, CodegenModule* result, CodegenBuffer* buffer,
+                                                    CodegenDebugLocationSink* sink, CodegenFunctionDescriptor* descriptor,
+                                                    IncrementalFunctionArtifact const* artifact, u32 const* label_address_relocation_indices,
+                                                    u32 label_address_relocation_count, u32 line_entry_capacity, u32 line_source_limit,
+                                                    u32 relocation_capacity)
+{
+    TimeDataType start = timestamp_take();
+    u32 slot_count = 0;
+    IrSymbolId const* slots = incremental_session_symbol_slots(incremental, function_index, &slot_count);
+    u32 code_base = (u32)buffer->count;
+    u8* destination = 0;
+    bool replayed = slots && slot_count == artifact->symbol_slot_count && code_base == descriptor->code_offset &&
+                    codegen_buffer_reserve(buffer, artifact->code.length, &destination);
+    if (replayed)
+    {
+        if (artifact->code.length)
+        {
+            memcpy(destination, artifact->code.pointer, artifact->code.length);
+        }
+        CodegenLineEntry* entries = result->line_entries;
+        for (u32 mark_index = 0; entries && mark_index < artifact->line_mark_count; mark_index += 1)
+        {
+            IncrementalLineMark mark = artifact->line_marks[mark_index];
+            IrSourceRange mark_source = ir_instruction_canonical_source(function, (IrInstructionId){.value = mark.instruction});
+            if (mark_source.source.value != IR_ID_UNDERLYING_INVALID)
+            {
+                u32 code_offset = code_base + mark.code_offset;
+                u32 count = result->line_entry_count;
+                bool dropped = count >= line_entry_capacity || (count && entries[count - 1].code_offset == code_offset);
+                if (!dropped)
+                {
+                    IrSourcePosition position = ir_source_position(program, mark_source);
+                    codegen_record_line_hot(entries, &result->line_entry_count, line_entry_capacity, code_offset, mark_source.source.value,
+                                            line_source_limit, position.line, position.column);
+                }
+            }
+        }
+        replayed = result->relocation_count <= relocation_capacity && artifact->relocation_count <= relocation_capacity - result->relocation_count;
+        for (u32 index = 0; replayed && index < artifact->relocation_count; index += 1)
+        {
+            IncrementalRelocation relocation = artifact->relocations[index];
+            result->relocations[result->relocation_count++] = (CodegenModuleRelocation){
+                .addend = relocation.addend,
+                .symbol = slots[relocation.symbol_slot],
+                .offset = code_base + relocation.offset,
+                .source = CODEGEN_MODULE_RELOCATION_CODE,
+                .kind = relocation.kind,
+            };
+        }
+        if (!replayed)
+        {
+            result->error = CODEGEN_ERROR_CAPACITY;
+        }
+    }
+    if (replayed && result->debug_locations)
+    {
+        replayed = codegen_debug_locations_reserve(result, sink, artifact->debug_location_count);
+        for (u32 index = 0; replayed && index < artifact->debug_location_count; index += 1)
+        {
+            IncrementalDebugLocation const* location = artifact->debug_locations + index;
+            DebugLocation copy = location->location;
+            if (copy.piece_count)
+            {
+                copy.pieces = arena_allocate(arena, DebugLocationPiece, copy.piece_count);
+                memcpy(copy.pieces, location->location.pieces, sizeof(DebugLocationPiece) * (u64)copy.piece_count);
+            }
+            result->debug_locations[result->debug_location_count++] = (DebugLocationSeed){
+                .function_symbol = function->symbol, .local = location->local,
+                .start = code_base + location->start, .end = code_base + location->end, .location = copy,
+            };
+        }
+    }
+    if (replayed)
+    {
+        descriptor->prolog_size = artifact->prolog_size;
+        descriptor->code_size = (u32)buffer->count - descriptor->code_offset;
+        descriptor->unwind_action_count = artifact->unwind_action_count;
+        descriptor->unwind_actions = artifact->unwind_action_count ? arena_allocate(arena, CodegenUnwindAction, artifact->unwind_action_count) : 0;
+        if (artifact->unwind_action_count)
+        {
+            memcpy(descriptor->unwind_actions, artifact->unwind_actions, sizeof(CodegenUnwindAction) * (u64)artifact->unwind_action_count);
+        }
+        // The machine path gives an AArch64 descriptor its epilog array even
+        // when it stays empty; keep that shape.
+        u32 epilog_capacity = target.cpu_arch == CPU_ARCH_AARCH64 ? BUSTER_MAX(function->instruction_count, artifact->epilog_count) : artifact->epilog_count;
+        descriptor->epilog_count = artifact->epilog_count;
+        descriptor->epilog_offsets = epilog_capacity ? arena_allocate(arena, u32, epilog_capacity) : 0;
+        if (artifact->epilog_count)
+        {
+            memcpy(descriptor->epilog_offsets, artifact->epilog_offsets, sizeof(u32) * (u64)artifact->epilog_count);
+        }
+        for (u32 side_index = 0; replayed && side_index < label_address_relocation_count; side_index += 1)
+        {
+            CodegenModuleRelocation* relocation = result->relocations + label_address_relocation_indices[side_index];
+            if (relocation->symbol.value == function->symbol.value)
+            {
+                s64 block_addend = relocation->label_block.value < artifact->block_count ? (s64)artifact->block_offsets[relocation->label_block.value] : 0;
+                replayed = relocation->label_block.value < artifact->block_count &&
+                           !(block_addend > 0 && relocation->addend > INT64_MAX - block_addend);
+                if (replayed)
+                {
+                    relocation->addend += block_addend;
+                    relocation->label_address = false;
+                }
+                else
+                {
+                    result->error = CODEGEN_ERROR_INVALID_IR;
+                }
+            }
+        }
+    }
+    if (replayed)
+    {
+        CodegenStatistics* statistics = &result->statistics;
+        u64 const* values = artifact->statistics;
+        statistics->stack_value_bytes += values[INCREMENTAL_STATISTIC_STACK_VALUE_BYTES];
+        statistics->stack_frame_bytes += values[INCREMENTAL_STATISTIC_STACK_FRAME_BYTES];
+        statistics->maximum_stack_frame_bytes = BUSTER_MAX(statistics->maximum_stack_frame_bytes, (u32)values[INCREMENTAL_STATISTIC_FRAME]);
+        statistics->native_vector_operation_count += values[INCREMENTAL_STATISTIC_NATIVE_VECTOR_OPERATIONS];
+        statistics->split_vector_operation_count += values[INCREMENTAL_STATISTIC_SPLIT_VECTOR_OPERATIONS];
+        statistics->vzeroupper_count += values[INCREMENTAL_STATISTIC_VZEROUPPER];
+        statistics->forwarded_wide_vector_load_count += values[INCREMENTAL_STATISTIC_FORWARDED_WIDE_VECTOR_LOADS];
+        statistics->simd_operation_count += values[INCREMENTAL_STATISTIC_SIMD_OPERATIONS];
+        statistics->allocator_reload_count += values[INCREMENTAL_STATISTIC_ALLOCATOR_RELOADS];
+        statistics->allocator_spill_count += values[INCREMENTAL_STATISTIC_ALLOCATOR_SPILLS];
+        statistics->allocator_copy_count += values[INCREMENTAL_STATISTIC_ALLOCATOR_COPIES];
+        statistics->allocator_boundary_spill_count += values[INCREMENTAL_STATISTIC_ALLOCATOR_BOUNDARY_SPILLS];
+        statistics->allocator_boundary_reload_count += values[INCREMENTAL_STATISTIC_ALLOCATOR_BOUNDARY_RELOADS];
+        statistics->allocator_boundary_copy_count += values[INCREMENTAL_STATISTIC_ALLOCATOR_BOUNDARY_COPIES];
+        statistics->allocator_rematerialize_count += values[INCREMENTAL_STATISTIC_ALLOCATOR_REMATERIALIZATIONS];
+        statistics->allocator_pinned_register_count += values[INCREMENTAL_STATISTIC_ALLOCATOR_PINS];
+        statistics->allocator_split_register_count += values[INCREMENTAL_STATISTIC_ALLOCATOR_SPLITS];
+        statistics->allocator_scheduled_function_count += values[INCREMENTAL_STATISTIC_ALLOCATOR_SCHEDULED];
+        statistics->allocator_schedule_kept_count += values[INCREMENTAL_STATISTIC_ALLOCATOR_SCHEDULE_KEPT];
+        statistics->exact_attempts += values[INCREMENTAL_STATISTIC_EXACT_ATTEMPTS];
+        statistics->exact_successes += values[INCREMENTAL_STATISTIC_EXACT_SUCCESSES];
+        statistics->exact_failures += values[INCREMENTAL_STATISTIC_EXACT_FAILURES];
+        statistics->mutable_virtual_register_count += values[INCREMENTAL_STATISTIC_MUTABLE_VIRTUAL_REGISTERS];
+        incremental_session_note_replay(incremental, function_index, timestamp_ns_between(start, timestamp_take()));
+    }
+    return replayed;
+}
+
 // One generation of the whole module -- globals, functions and global assembly
 // -- into a code buffer reserved at `capacity_scale` times the flat estimate
 // below. Everything it produces comes out of `arena`, so a caller that does not
@@ -11220,7 +11583,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                            Target target, CodegenModuleOptions options, u64 capacity_scale,
                                                                            bool* code_buffer_exhausted,
                                                                            CodegenX64MetadataCache* x64_metadata_cache,
-                                                                           MachineSelectionModule* machine_module, BootstrapTrace* bootstrap_trace)
+                                                                           MachineSelectionModule* machine_module, BootstrapTrace* bootstrap_trace,
+                                                                           IncrementalCodegenSession* incremental_session)
 {
     CodegenModule result = {
         .ir_module = module,
@@ -11229,6 +11593,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         .failed_instruction = IR_INSTRUCTION_ID_INVALID,
         .failed_opcode = IR_OPCODE_COUNT,
     };
+    incremental_session_begin_attempt(incremental_session);
+    IncrementalCodegenSession* incremental = incremental_session_active(incremental_session) ? incremental_session : 0;
     // The one place -fPIC is turned into a fact about this module. It is a
     // statement about which references `ld` will place in a shared object, so
     // it is scoped to the format and architecture whose relocations say that:
@@ -11683,6 +12049,31 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         bool machine_function_emitted = false;
         CodegenFallbackReason fallback_reason = CODEGEN_FALLBACK_TARGET_EXCLUDED;
         IrOpcode fallback_opcode = IR_OPCODE_COUNT;
+        IncrementalFunctionArtifact const* reused_artifact = incremental ? incremental_session_reused(incremental, function_index) : 0;
+        if (reused_artifact)
+        {
+            if (!codegen_incremental_replay(incremental, function_index, arena, program, function, target, &result, &buffer, &debug_location_sink,
+                                            descriptor, reused_artifact, label_address_relocation_indices, label_address_relocation_count,
+                                            line_entry_capacity, line_source_limit, relocation_capacity))
+            {
+                // A refusal nothing explains is an invariant break, never a
+                // module returned short without an error.
+                result.error = result.error != CODEGEN_ERROR_NONE   ? result.error
+                               : buffer.error != CODEGEN_ERROR_NONE ? buffer.error
+                                                                    : CODEGEN_ERROR_INVALID_IR;
+                return result;
+            }
+            continue;
+        }
+        CodegenIncrementalBaseline incremental_baseline = {0};
+        CodegenIncrementalMachine incremental_machine = {0};
+        if (incremental)
+        {
+            codegen_incremental_baseline(&result, &incremental_baseline);
+#if BUSTER_INCREMENTAL_AUDIT
+            incremental_session_audit_open(incremental, function_index);
+#endif
+        }
         // Selection is attempted before canonical-only frame, ABI, and call
         // metadata is built. A supported machine function never needs that
         // preparation; the fallback edge below enters it exactly once.
@@ -12550,6 +12941,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 descriptor->prolog_size = machine_prologue_cursor;
                                 descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
                                 machine_function_emitted = true;
+                                if (incremental)
+                                {
+                                    incremental_machine = codegen_incremental_retain_machine(arena, function, &selected.function, encoded.row_offsets,
+                                                                                             encoded.block_offsets, options.debug_info);
+                                }
                                 if (label_address_relocation_count)
                                 {
                                     machine_block_offsets = arena_allocate(machine_scratch.arena, u32, function->block_count);
@@ -12739,6 +13135,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 descriptor->prolog_size = machine_prologue_cursor;
                                 descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
                                 machine_function_emitted = true;
+                                if (incremental)
+                                {
+                                    incremental_machine = codegen_incremental_retain_machine(arena, function, &selected.function, encoded.row_offsets,
+                                                                                             encoded.block_offsets, options.debug_info);
+                                }
                                 if (label_address_relocation_count)
                                 {
                                     machine_block_offsets = arena_allocate(machine_scratch.arena, u32, function->block_count);
@@ -12803,6 +13204,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             result.statistics.stack_value_bytes += machine_stack_frame_size;
             result.statistics.stack_frame_bytes += machine_stack_frame_size;
             result.statistics.maximum_stack_frame_bytes = BUSTER_MAX(result.statistics.maximum_stack_frame_bytes, machine_stack_frame_size);
+            if (incremental)
+            {
+#if BUSTER_INCREMENTAL_AUDIT
+                incremental_session_audit_close(incremental, function_index);
+#endif
+                codegen_incremental_capture_machine(incremental, function_index, arena, &result, &buffer, descriptor, function, &incremental_baseline,
+                                                    &incremental_machine, machine_stack_frame_size);
+            }
             continue;
         }
         if (options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE)
@@ -23627,6 +24036,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             codegen_record_canonical_locations(&result, function, value_offsets, block_offsets, descriptor->code_offset, (u32)buffer.count, target, frame_size,
                                                (s32)canonical_x64_frame_base_offset, &debug_location_sink);
         }
+        if (incremental)
+        {
+#if BUSTER_INCREMENTAL_AUDIT
+            incremental_session_audit_close(incremental, function_index);
+#endif
+            incremental_session_capture(incremental, function_index, INCREMENTAL_CAPTURE_CANONICAL, 0);
+        }
     }
     for (u32 relocation_index = 0; relocation_index < result.relocation_count; relocation_index += 1)
     {
@@ -23675,7 +24091,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     return result;
 }
 
-CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options, BootstrapTrace* bootstrap_trace)
+CodegenModule codegen_generate_canonical_module_incremental(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options,
+                                                           BootstrapTrace* bootstrap_trace, IncrementalCodegenSession* incremental)
 {
     CodegenModule result = {
         .ir_module = module,
@@ -23712,6 +24129,15 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
                 return result;
             }
         }
+    }
+    // Records are built from the program as the first attempt will read it:
+    // prepared IR, predeclared assembly labels, reserved ABI contexts. Bootstrap
+    // tracing wants every function generated, so it binds no program.
+    if (incremental)
+    {
+        bool incremental_position_independent =
+            options.position_independent && target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(target) == OBJECT_FORMAT_ELF64;
+        incremental_session_bind_module(incremental, bootstrap_trace ? 0 : program, module, target, options, result.abi, incremental_position_independent);
     }
     CodegenCanonicalX64F80Cache f80_cache = {0};
     CodegenX64MetadataCache* x64_metadata_cache = 0;
@@ -23770,7 +24196,7 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
             bootstrap_trace_u64(bootstrap_trace, capacity_scale);
         }
         result = codegen_generate_canonical_module_attempt(arena, program, &f80_cache, slot_costs, module, target, options, capacity_scale,
-                                                           &code_buffer_exhausted, x64_metadata_cache, machine_module, bootstrap_trace);
+                                                           &code_buffer_exhausted, x64_metadata_cache, machine_module, bootstrap_trace, incremental);
         // Every other capacity failure -- a frame displacement out of range, a
         // frame past `UINT32_MAX`, a reserve that cannot be addressed -- is one
         // more room cannot fix, and is reported as it stands.
@@ -23787,9 +24213,14 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
     }
 }
 
+CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options, BootstrapTrace* bootstrap_trace)
+{
+    return codegen_generate_canonical_module_incremental(arena, program, module, target, options, bootstrap_trace, 0);
+}
+
 CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options)
 {
-    return codegen_generate_canonical_module_with_trace(arena, program, module, target, options, 0);
+    return codegen_generate_canonical_module_incremental(arena, program, module, target, options, 0, 0);
 }
 
 CodegenExecutable codegen_make_executable(CodegenFunction function)

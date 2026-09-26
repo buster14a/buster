@@ -1034,6 +1034,7 @@ buster_register_module(compiler_wasm "${BUSTER_SOURCE_DIR}/compiler/wasm/wasm${C
 buster_register_module(compiler_gpu "${BUSTER_SOURCE_DIR}/compiler/gpu/gpu${COMMON_EXTENSION}")
 buster_register_module(compiler_llvm_bitcode "${BUSTER_SOURCE_DIR}/compiler/llvm/bitcode${COMMON_EXTENSION}")
 buster_register_module(compiler_ebpf "${BUSTER_SOURCE_DIR}/compiler/ebpf/ebpf${COMMON_EXTENSION}")
+buster_register_module(compiler_incremental "${BUSTER_SOURCE_DIR}/compiler/incremental/incremental${COMMON_EXTENSION}")
 buster_register_module(compiler_driver "${BUSTER_SOURCE_DIR}/compiler/driver/driver${COMMON_EXTENSION}")
 buster_register_module(simd "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
 buster_register_module(target "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
@@ -1095,6 +1096,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/codegen/aarch64_stride_test.c
     src/buster/tests/compiler/debug/debug_test.c
     src/buster/tests/compiler/dwarf/dwarf_test.c
+    src/buster/tests/compiler/incremental/incremental_test.c
     src/buster/tests/compiler/codeview/codeview_test.c
     src/buster/tests/compiler/pdb/pdb_test.c
     src/buster/tests/compiler/object/object_test.c
@@ -1153,6 +1155,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/codegen/aarch64_stride_test.h
     src/buster/tests/compiler/debug/debug_test.h
     src/buster/tests/compiler/dwarf/dwarf_test.h
+    src/buster/tests/compiler/incremental/incremental_test.h
     src/buster/tests/compiler/codeview/codeview_test.h
     src/buster/tests/compiler/pdb/pdb_test.h
     src/buster/tests/compiler/object/object_test.h
@@ -2061,6 +2064,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_gpu
     compiler_llvm_bitcode
     compiler_ebpf
+    compiler_incremental
     compiler_driver
     simd
     file

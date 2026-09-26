@@ -496,6 +496,7 @@ BUSTER_GLOBAL_LOCAL MachineSelectionAddress machine_selection_address_step(IrPro
             u32 kind = IR_TYPE_COUNT;
             if (cache->type_classes && value->canonical_type.value < cache->type_count)
             {
+                IR_ACCESS_AUDIT_TYPE(value->canonical_type.value);
                 kind = cache->type_classes[value->canonical_type.value].kind;
             }
             else
@@ -549,6 +550,7 @@ BUSTER_GLOBAL_LOCAL MachineSelectionAddress machine_selection_address_step(IrPro
                          definition->operands[1].value < function->value_count)
                 {
                     IrTypeId index_type_id = function->values[definition->operands[1].value].canonical_type;
+                    IR_ACCESS_AUDIT_TYPE(index_type_id.value);
                     u32 index_bits = 0;
                     bool index_signed = false;
                     if (cache->type_classes && index_type_id.value < cache->type_count &&

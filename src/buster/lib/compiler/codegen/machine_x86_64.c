@@ -487,6 +487,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_vector_register(IrProgram* program,
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE MachineTypeClass machine_x64_type_class(MachineX64Selector const* selector, IrTypeId type_id)
 {
     MachineTypeClass result;
+    IR_ACCESS_AUDIT_TYPE(type_id.value);
     if (type_id.value < selector->type_class_count)
     {
         result = selector->type_classes[type_id.value];
@@ -6131,6 +6132,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_signature_plans_prepare(Arena* arena, IrPro
 BUSTER_GLOBAL_LOCAL MachineX64SignaturePlan const* machine_x64_signature_plan(MachineX64Selector* selector, IrTypeId callee_type_id, IrType* callee_type)
 {
     MachineSelectionModule* module = selector->module;
+    IR_ACCESS_AUDIT_TYPE(callee_type_id.value);
     MachineX64SignaturePlan* plan = module->x64_signature_plans + module->x64_signature_slots[callee_type_id.value];
     if (!plan->built)
     {

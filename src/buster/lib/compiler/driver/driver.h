@@ -8,6 +8,7 @@
 #include <buster/lib/compiler/wasm/wasm.h>
 #include <buster/lib/compiler/llvm/bitcode.h>
 #include <buster/lib/compiler/ebpf/ebpf.h>
+#include <buster/lib/compiler/incremental/incremental.h>
 
 // A unity C translation unit retains preprocessing, semantic, typed IR, and
 // object/debug data through the driver call. The reservation is virtual and
@@ -183,6 +184,18 @@ struct CompilerDriverInvocation
     // source identity. It does not enable or disable production fallback.
     bool record_codegen_fallbacks;
     bool c_dialect_explicit;
+    // -fincremental-stats, -fincremental-verify and -fincremental-trace: see
+    // incremental_cache_directory. They have no effect without it.
+    bool incremental_statistics;
+    bool incremental_verify;
+    bool incremental_trace;
+    // -fincremental-cache=DIR opts native C code generation into
+    // function-granular reuse (docs/incremental-compilation.md); empty, the
+    // default and what -fno-incremental-cache restores, disables it completely.
+    String8 incremental_cache_directory;
+    // Filled once per invocation by compiler_driver_execute_invocation when a
+    // cache directory is set; callers leave it zero.
+    IncrementalCompilerIdentity incremental_compiler;
 };
 
 typedef struct CompilerDriverFallbackRecord CompilerDriverFallbackRecord;
@@ -218,6 +231,10 @@ struct CompilerDriverResult
     EbpfArtifact ebpf;
     ObjectFile object;
     CodegenStatistics codegen_statistics;
+    IncrementalStatistics incremental;
+    // Per-function outcomes, only under -fincremental-trace.
+    IncrementalFunctionTrace* incremental_trace;
+    u32 incremental_trace_count;
     CompilerDriverFallbackRecord* fallback_records;
     u32 fallback_record_count;
     // What the C frontend consumed, per inclusion and per distinct file, and
