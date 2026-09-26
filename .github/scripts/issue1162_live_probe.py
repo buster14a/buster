@@ -328,8 +328,12 @@ def _proc_stat_identity(raw: bytes, name: str) -> tuple[str, int, int]:
 
 
 def _expected_executable(unit: str) -> str | None:
-    if unit == "buster-bench.service" or re.fullmatch(r"buster-bench-[0-9]+-[0-9]+\.service", unit):
+    if unit == "buster-bench.service":
         return "/usr/local/libexec/buster-bench-service"
+    # The outer service entry adopts the lease, then execs the fixed recipe
+    # driver before any build-stage checkpoint can be observed.
+    if re.fullmatch(r"buster-bench-[0-9]+-[0-9]+\.service", unit):
+        return "/usr/local/libexec/buster-bench-build"
     if re.fullmatch(r"buster-bench-[0-9]+-[0-9]+-(base-generate|base-build|candidate-generate|candidate-build)\.service", unit):
         return "/usr/local/libexec/buster-bench-build"
     if re.fullmatch(r"buster-bench-[0-9]+-[0-9]+-throughput\.service", unit):
@@ -1121,6 +1125,34 @@ def _payload_absent(result_fd: int) -> bool | None:
         return False
 
 
+def _record_discovery_failure(output: Path, failures: dict[str, object], reason: str,
+                              records: tuple[bytes, bytes, dict[str, object]] | None) -> None:
+    """Retain bounded first observations when later retries overwrite snapshots."""
+    reason = reason[:1024]
+    counts = failures["reason_counts"]
+    if reason in counts or len(counts) < 16:
+        counts[reason] = counts.get(reason, 0) + 1
+    else:
+        failures["other_reason_count"] += 1
+    failures["attempts"] += 1
+    failures["last_reason"] = reason
+    if records is not None and not failures["first_records_retained"]:
+        _write_private(output, "discovery-worker-record.bin", records[0])
+        _write_private(output, "discovery-instance-record.bin", records[1])
+        failures["first_records_retained"] = True
+    for label in ("outer-before", "base-build-before"):
+        saved = output / f"discovery-first-{label}.systemctl-show"
+        current = output / f"{label}.systemctl-show"
+        if not saved.exists() and current.exists():
+            with current.open("rb") as source:
+                raw = source.read(65537)
+            _write_private(output, saved.name, raw[:65536])
+            failures["first_snapshots"][label] = {"reason": reason,
+                                                "truncated": len(raw) > 65536}
+    (output / "discovery-failures.json").write_text(
+        json.dumps(failures, sort_keys=True, indent=2) + "\n")
+
+
 def _run_probe(job: int, request_sha: str, baseline: str, subject: str,
                budget: float, output: Path) -> dict[str, object]:
     coverage = {
@@ -1154,6 +1186,9 @@ def _run_probe(job: int, request_sha: str, baseline: str, subject: str,
     before_outer: dict[str, object] | None = None
     before_build: dict[str, object] | None = None
     build_identity: dict[str, object] | None = None
+    discovery_failures = {"job": job, "request_sha256": request_sha, "attempts": 0,
+                          "reason_counts": {}, "other_reason_count": 0,
+                          "first_records_retained": False, "first_snapshots": {}}
     while time.monotonic() < discovery_deadline:
         remain = discovery_deadline - time.monotonic()
         try:
@@ -1162,6 +1197,7 @@ def _run_probe(job: int, request_sha: str, baseline: str, subject: str,
             break
         except (OSError, ProbeError, subprocess.TimeoutExpired) as exc:
             last_error = str(exc)
+            _record_discovery_failure(output, discovery_failures, last_error, records)
             records = None
             before_outer = before_build = build_identity = None
             time.sleep(min(1.0, max(0.0, discovery_deadline - time.monotonic())))
@@ -1393,6 +1429,36 @@ def self_test() -> None:
     parsed = parse_records(worker, instance, 7, digest, boot)
     assert parsed["attempt"] == 2  # Submit's token=0 is never treated as attempt.
     checks += 1
+    # The production worker-unit entry execs the recipe driver before builds;
+    # the long-lived daemon retains the service executable.
+    assert _expected_executable("buster-bench.service") == "/usr/local/libexec/buster-bench-service"
+    assert _expected_executable("buster-bench-7-2.service") == "/usr/local/libexec/buster-bench-build"
+    assert _expected_executable("buster-bench-7-2-base-build.service") == "/usr/local/libexec/buster-bench-build"
+    assert _expected_executable("buster-bench-unrelated.service") is None
+    checks += 4
+    with tempfile.TemporaryDirectory() as temp:
+        output = Path(temp)
+        failures = {"job": 7, "request_sha256": digest, "attempts": 0,
+                    "reason_counts": {}, "other_reason_count": 0,
+                    "first_records_retained": False, "first_snapshots": {}}
+        (output / "outer-before.systemctl-show").write_text("ActiveState=active\nMainPID=310\n")
+        _record_discovery_failure(output, failures, "first executable mismatch", (worker, instance, parsed))
+        (output / "outer-before.systemctl-show").write_text("ActiveState=inactive\nMainPID=0\n")
+        for index in range(20):
+            _record_discovery_failure(output, failures, "later reason " + str(index), None)
+        retained = json.loads((output / "discovery-failures.json").read_text())
+        assert retained["attempts"] == 21 and len(retained["reason_counts"]) == 16
+        assert retained["other_reason_count"] == 5 and retained["last_reason"] == "later reason 19"
+        assert (output / "discovery-worker-record.bin").read_bytes() == worker
+        assert (output / "discovery-instance-record.bin").read_bytes() == instance
+        assert (output / "discovery-first-outer-before.systemctl-show").read_text() == "ActiveState=active\nMainPID=310\n"
+        checks += 1  # Later terminal observations cannot erase the first live failure.
+        (output / "base-build-before.systemctl-show").write_bytes(b"x" * 70000)
+        _record_discovery_failure(output, failures, "r" * 2000, None)
+        assert len((output / "discovery-first-base-build-before.systemctl-show").read_bytes()) == 65536
+        assert failures["first_snapshots"]["base-build-before"]["truncated"]
+        assert len(failures["last_reason"]) == 1024
+        checks += 1
     service_ok = {"properties": {"ActiveState": "active", "MainPID": "210",
                                  "ControlGroup": SERVICE_CGROUP},
                   "unit_cgroup": {"device": 7, "inode": 8, "main_pid_member": True,
