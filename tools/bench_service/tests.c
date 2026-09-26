@@ -10,8 +10,15 @@
 #undef main
 #include <stdlib.h>
 #include <stddef.h>
+#ifndef _WIN32
+#include <pwd.h>
+#endif
 #ifdef __linux__
 #include <sys/time.h>
+#include <sys/prctl.h>
+#include <grp.h>
+#include <sys/wait.h>
+#include "sgid_sandbox_test.h"
 #endif
 
 BUSTER_GLOBAL_LOCAL u32 bq_test_assertions;
@@ -659,6 +666,283 @@ BUSTER_GLOBAL_LOCAL void bq_material_test_end(BqMaterialFixture* fixture)
     bq_test_end(&fixture->queue);
 }
 
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+BUSTER_GLOBAL_LOCAL void bq_test_sgid_sandbox_child(void)
+{
+    char root[] = "/tmp/buster-sgid-filter-XXXXXX";
+    bool ok = mkdtemp(root) != NULL;
+    gid_t inherited_group = getegid();
+    bool distinct = false;
+    if (ok) ok = bq_test_sgid_fixture_group(root, &inherited_group, &distinct);
+    BQ_CHECK(ok);
+    BqMaterialFixture* fixtures = calloc(3, sizeof(*fixtures));
+    bool started[3] = {0};
+    BQ_CHECK(fixtures != NULL);
+    for (u32 index = 0; ok && fixtures && index < 3; index += 1)
+    {
+        started[index] = bq_material_test_begin(fixtures + index, 0);
+        ok = started[index] && (!distinct || chown(fixtures[index].workspaces, (uid_t)-1, inherited_group) == 0) &&
+             chmod(fixtures[index].workspaces, 02710) == 0;
+        BQ_CHECK(ok);
+    }
+    char collision[512] = {0};
+    if (ok)
+    {
+        int length = snprintf(collision, sizeof(collision), "%s/job-1-attempt-2", fixtures[1].workspaces);
+        ok = length > 0 && (size_t)length < sizeof(collision) && mkdir(collision, 0700) == 0;
+        BQ_CHECK(ok);
+    }
+    int parent = ok ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    BQ_CHECK(parent >= 0);
+    if (ok) ok = bq_test_install_sgid_restriction();
+    BQ_CHECK(ok);
+    if (ok)
+    {
+        mode_t modes[] = {02710, 02750, 02700, 02770};
+        mode_t masks[] = {0077, 0022, 0000, 0777};
+        bool created = false;
+        int controlled = bq_create_inherited_group_directory(parent, "controlled", 02770, &created);
+        BQ_CHECK(controlled >= 0 && created && bq_test_sgid_controls(parent, "controlled"));
+        if (controlled >= 0) close(controlled);
+        for (u32 m = 0; m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+        {
+            for (u32 u = 0; u < BUSTER_ARRAY_LENGTH(masks); u += 1)
+            {
+                char name[32];
+                snprintf(name, sizeof(name), "mode-%u-umask-%u", m, u);
+                mode_t old = umask(masks[u]);
+                created = false;
+                int child = bq_create_inherited_group_directory(parent, name, modes[m], &created);
+                mode_t observed = umask(masks[u]);
+                umask(old);
+                struct stat info = {0};
+                BQ_CHECK(child >= 0 && created && observed == masks[u] && fstat(child, &info) == 0 &&
+                         info.st_uid == geteuid() && info.st_gid == inherited_group &&
+                         (info.st_mode & 07777) == modes[m]);
+                if (child >= 0) close(child);
+                created = true;
+                old = umask(masks[u]);
+                child = bq_create_inherited_group_directory(parent, name, modes[m], &created);
+                observed = umask(masks[u]);
+                umask(old);
+                BQ_CHECK(child < 0 && !created && observed == masks[u] && errno == EEXIST);
+                if (child >= 0) close(child);
+                BQ_CHECK(unlinkat(parent, name, AT_REMOVEDIR) == 0);
+            }
+        }
+        created = true;
+        mode_t old = umask(0022);
+        int invalid = bq_create_inherited_group_directory(-1, "invalid", 02770, &created);
+        mode_t observed = umask(old);
+        BQ_CHECK(invalid < 0 && !created && observed == 0022);
+        if (invalid >= 0) close(invalid);
+        int missing = openat(parent, "missing", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        BQ_CHECK(missing < 0 && errno == ENOENT);
+        BQ_CHECK(mkdirat(parent, "no-sgid", 0700) == 0);
+        int no_sgid = openat(parent, "no-sgid", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        BQ_CHECK(no_sgid >= 0 && fchmod(no_sgid, 0700) == 0);
+        created = true;
+        old = umask(0077);
+        int refused = bq_create_inherited_group_directory(no_sgid, "child", 02770, &created);
+        observed = umask(old);
+        BQ_CHECK(refused < 0 && !created && observed == 0077);
+        if (refused >= 0) close(refused);
+        if (no_sgid >= 0) close(no_sgid);
+        BQ_CHECK(unlinkat(parent, "no-sgid", AT_REMOVEDIR) == 0);
+        bq_test_unverify_next_create = true;
+        created = false;
+        old = umask(0777);
+        refused = bq_create_inherited_group_directory(parent, "unverified", 02770, &created);
+        observed = umask(old);
+        struct stat unverified = {0};
+        BQ_CHECK(refused < 0 && created && !bq_test_unverify_next_create && observed == 0777 &&
+                 fstatat(parent, "unverified", &unverified, AT_SYMLINK_NOFOLLOW) == 0 &&
+                 (unverified.st_mode & 07777) == 0700);
+        if (refused >= 0) close(refused);
+        BQ_CHECK(unlinkat(parent, "unverified", AT_REMOVEDIR) == 0);
+        BQ_CHECK(unlinkat(parent, "controlled", AT_REMOVEDIR) == 0);
+
+        for (u32 index = 0; index < 3; index += 1)
+        {
+            BqRequest request = bq_test_real_request(1);
+            u64 id = 0, token = 0;
+            BQ_CHECK(bq_submit(&fixtures[index].queue.queue, &request, &id) == BQ_OK);
+            if (index == 2) bq_test_unverify_next_create = true;
+            BqError result = bq_materialize(&fixtures[index].queue.queue,
+                                            string_from_pointer(fixtures[index].installed),
+                                            string_from_pointer(fixtures[index].workspaces), &id, &token);
+            BqJob* job = bq_job(&fixtures[index].queue.queue.state, id);
+            if (index == 0)
+            {
+                BQ_CHECK(result == BQ_OK && job && job->phase == BQ_PREPARING &&
+                         !fixtures[index].queue.queue.needs_reconciliation);
+            }
+            else
+            {
+                BQ_CHECK(result == BQ_WORKSPACE_MISMATCH && job && job->phase == BQ_RESERVED &&
+                         fixtures[index].queue.queue.needs_reconciliation &&
+                         bq_failure_evidence(&fixtures[index].queue.queue, job) == BQ_WORKSPACE_MISMATCH);
+                char name[64], path[512];
+                BQ_CHECK(bq_workspace_name(name, id, token));
+                int length = snprintf(path, sizeof(path), "%s/%s", fixtures[index].workspaces, name);
+                BQ_CHECK(length > 0 && (size_t)length < sizeof(path) && access(path, F_OK) == 0);
+                if (index == 2)
+                {
+                    BQ_CHECK(!bq_test_unverify_next_create &&
+                             bq_workspace_reconcile(&fixtures[index].queue.queue,
+                                                    string_from_pointer(fixtures[index].workspaces), id, token) != BQ_OK &&
+                             fixtures[index].queue.queue.needs_reconciliation && access(path, F_OK) == 0);
+                }
+            }
+        }
+    }
+    if (parent >= 0) close(parent);
+    for (u32 index = 0; fixtures && index < 3; index += 1)
+        if (started[index]) bq_material_test_end(fixtures + index);
+    free(fixtures);
+    if (root[0]) BQ_CHECK(rmdir(root) == 0);
+    char const* required = getenv("BQ_REQUIRE_DISTINCT_GROUP");
+    BQ_CHECK(!required || strcmp(required, "1") || distinct);
+    printf("SGID_SANDBOX_TEST service assertions=%u failures=%u group=%s arch=%s\n",
+           bq_test_assertions, bq_test_failures, distinct ? "different-primary" : "unsupported-different-primary",
+#if defined(__x86_64__)
+           "x86_64");
+#else
+           "aarch64");
+#endif
+    fflush(stdout);
+    _exit(bq_test_failures ? 1 : 0);
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_sgid_sandbox(void)
+{
+    pid_t child = fork();
+    BQ_CHECK(child >= 0);
+    if (child == 0) bq_test_sgid_sandbox_child();
+    if (child > 0)
+    {
+        int status = 0;
+        pid_t waited = waitpid(child, &status, 0);
+        BQ_CHECK(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL void bq_test_cleanup_candidate_identity(void)
+{
+    struct stat child = {.st_mode = S_IFDIR | 0770, .st_uid = 65001, .st_gid = 65001};
+    for (u32 sgid = 0; sgid < 2; sgid += 1)
+    {
+        child.st_mode = S_IFDIR | (sgid ? 02770 : 0770);
+        BQ_CHECK(bq_cleanup_candidate_directory(&child, 65001, 65000, 65001, 65001));
+        child.st_uid = 65002;
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, 65001, 65001));
+        child.st_uid = 0;
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, 65001, 65001));
+        child.st_uid = 65001;
+        child.st_gid = 65003;
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, 65001, 65001));
+        child.st_gid = 65001;
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65003, 65000, 65001, 65001));
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, (uid_t)-1, 65001));
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, 65000, 65001));
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, 0, 65001));
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, 65001, (gid_t)-1));
+    }
+    mode_t refused[] = {0750, 0700, 0777, 01770, 04770};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
+    {
+        child.st_mode = S_IFDIR | refused[index];
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, 65001, 65001));
+    }
+    child.st_mode = S_IFREG | 0770;
+    BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, 65001, 65001));
+}
+
+#ifdef __linux__
+/* Opt-in only: the root fixture runs on disposable test infrastructure, never
+ * as part of the ordinary unprivileged suite or on the protected host. The
+ * cleanup child uses the real production resolver and traversal. */
+BUSTER_GLOBAL_LOCAL void bq_test_cleanup_identity_filesystem(void)
+{
+    struct passwd* account = getpwnam("buster-bench");
+    uid_t service_uid = account ? account->pw_uid : (uid_t)-1;
+    gid_t service_gid = account ? account->pw_gid : (gid_t)-1;
+    account = getpwnam("buster-bench-candidate");
+    uid_t candidate_uid = account ? account->pw_uid : (uid_t)-1;
+    gid_t candidate_gid = account ? account->pw_gid : (gid_t)-1;
+    account = getpwnam("buster-github-runner");
+    uid_t foreign_uid = account ? account->pw_uid : (uid_t)-1;
+    gid_t foreign_gid = account ? account->pw_gid : (gid_t)-1;
+    bool provisioned = geteuid() == 0 && service_uid != (uid_t)-1 && service_uid != 0 &&
+                       candidate_uid != (uid_t)-1 && candidate_uid != 0 && candidate_uid != service_uid &&
+                       foreign_uid != (uid_t)-1 && foreign_uid != 0 &&
+                       foreign_uid != service_uid && foreign_uid != candidate_uid &&
+                       service_gid != candidate_gid && foreign_gid != candidate_gid;
+    BQ_CHECK(provisioned);
+    struct { uid_t uid; gid_t gid; mode_t mode; bool removed; } cases[] = {
+        {service_uid, candidate_gid, 0550, true},
+        {candidate_uid, candidate_gid, 0770, true},
+        {candidate_uid, candidate_gid, 02770, true},
+        {foreign_uid, candidate_gid, 0770, false},
+        {foreign_uid, candidate_gid, 02770, false},
+        {candidate_uid, candidate_gid, 0750, false},
+        {candidate_uid, foreign_gid, 0770, false},
+        {0, candidate_gid, 0770, false},
+    };
+    for (u32 index = 0; provisioned && index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        char path[] = "/tmp/buster-cleanup-identity-XXXXXX";
+        bool made = mkdtemp(path) != NULL;
+        int root = made ? open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        bool ready = root >= 0 && fchown(root, service_uid, candidate_gid) == 0 &&
+                     mkdirat(root, "child", 0700) == 0;
+        int child = ready ? openat(root, "child", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        int file = child >= 0 ? openat(child, "payload", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600) : -1;
+        ready = ready && file >= 0 && fchown(child, cases[index].uid, cases[index].gid) == 0 &&
+                fchmod(child, cases[index].mode) == 0;
+        if (file >= 0) close(file);
+        if (child >= 0) close(child);
+        BQ_CHECK(ready);
+        pid_t process = ready ? fork() : -1;
+        if (process == 0)
+        {
+            bool dropped = setgroups(1, &candidate_gid) == 0 && setgid(service_gid) == 0 &&
+                           setuid(service_uid) == 0 && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0;
+            bool removed = dropped && bq_remove_workspace_payload(root);
+            _exit(!dropped ? 127 : removed ? 0 : 1);
+        }
+        if (process > 0)
+        {
+            int status = 0;
+            pid_t waited;
+            do { waited = waitpid(process, &status, 0); } while (waited < 0 && errno == EINTR);
+            int expected = cases[index].removed ? 0 : 1;
+            BQ_CHECK(waited == process && WIFEXITED(status) && WEXITSTATUS(status) == expected);
+            struct stat info;
+            bool remains = fstatat(root, "child", &info, AT_SYMLINK_NOFOLLOW) == 0;
+            BQ_CHECK(remains == !cases[index].removed);
+            printf("CLEANUP_IDENTITY case=%u owner=%u group=%u mode=%04o expected=%s actual=%s\n",
+                   index, (unsigned)cases[index].uid, (unsigned)cases[index].gid, (unsigned)cases[index].mode,
+                   cases[index].removed ? "removed" : "refused", remains ? "refused" : "removed");
+        }
+        else BQ_CHECK(process >= 0);
+        /* Known fixture names only; do not use the function under test to
+         * erase the foreign-owned negative controls. */
+        child = root >= 0 ? openat(root, "child", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        if (child >= 0)
+        {
+            BQ_CHECK(unlinkat(child, "payload", 0) == 0);
+            close(child);
+            BQ_CHECK(unlinkat(root, "child", AT_REMOVEDIR) == 0);
+        }
+        if (root >= 0) close(root);
+        if (made) BQ_CHECK(rmdir(path) == 0);
+    }
+    printf("CLEANUP_IDENTITY_TEST assertions=%u failures=%u\n", bq_test_assertions, bq_test_failures);
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL void bq_test_materialization_failures(void)
 {
     BqError expected[] = {BQ_OK, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH,
@@ -754,7 +1038,10 @@ BUSTER_GLOBAL_LOCAL void bq_test_materialization_and_recovery(void)
         memcpy(body + 8 + installed.length, workspaces.pointer, (size_t)workspaces.length);
         BqPacket packet, response;
         bq_packet(&packet, BQ_OP_MATERIALIZE, 91, body, 8 + (u32)installed.length + (u32)workspaces.length);
-        BQ_CHECK(bq_dispatch(&fixture.queue.queue, packet.bytes, packet.size, &response) == BQ_OK);
+        mode_t prior_umask = umask(0077);
+        BqError materialized = bq_dispatch(&fixture.queue.queue, packet.bytes, packet.size, &response);
+        mode_t remaining_umask = umask(prior_umask);
+        BQ_CHECK(materialized == BQ_OK && remaining_umask == 0077);
         id = bq_u64(response.bytes + BQ_CONTROL_HEADER + 4);
         u64 token = bq_u64(response.bytes + BQ_CONTROL_HEADER + 12);
         BqJob* job = bq_job(&fixture.queue.queue.state, id);
@@ -769,7 +1056,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_materialization_and_recovery(void)
         BQ_CHECK(stat(fixture.workspaces, &workspace_root_info) == 0 && stat(workspace, &workspace_info) == 0 &&
                  workspace_info.st_gid == workspace_root_info.st_gid);
         BQ_CHECK(stat(base_source, &base) == 0 && stat(candidate_source, &candidate) == 0 && base.st_ino != candidate.st_ino);
-        BQ_CHECK((base.st_mode & 0222) == 0 && (candidate.st_mode & 0222) == 0);
+        BQ_CHECK((base.st_mode & 07777) == 0440 && (candidate.st_mode & 07777) == 0440);
         struct stat attempt_info = {0}, base_subject = {0}, candidate_subject = {0};
         char base_subject_path[1024], candidate_subject_path[1024], base_source_dir[1024], candidate_source_dir[1024];
         snprintf(base_subject_path, sizeof(base_subject_path), "%s/base", workspace);
@@ -779,7 +1066,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_materialization_and_recovery(void)
         BQ_CHECK(stat(workspace, &attempt_info) == 0 && stat(base_subject_path, &base_subject) == 0 &&
                  stat(candidate_subject_path, &candidate_subject) == 0 &&
                  (attempt_info.st_mode & 07777) == 02710 && attempt_info.st_gid == workspace_root_info.st_gid &&
-                 (base_subject.st_mode & 07777) == 02750 && base_subject.st_gid == workspace_root_info.st_gid &&
+                 (base_subject.st_mode & 07777) == 02710 && base_subject.st_gid == workspace_root_info.st_gid &&
                  (candidate_subject.st_mode & 07777) == 02710 &&
                  candidate_subject.st_gid == workspace_root_info.st_gid);
         struct stat base_source_info = {0}, candidate_source_info = {0};
@@ -797,7 +1084,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_materialization_and_recovery(void)
         BQ_CHECK(chmod(base_source, 0400) == 0);
         char copied_manifest[1024];
         snprintf(copied_manifest, sizeof(copied_manifest), "%s/base/source/.source-manifest", workspace);
-        BQ_CHECK(stat(copied_manifest, &base) == 0 && (base.st_mode & 0222) == 0);
+        BQ_CHECK(stat(copied_manifest, &base) == 0 && (base.st_mode & 07777) == 0440);
         char identity[1024];
         snprintf(identity, sizeof(identity), "%s/.identity", workspace);
         BQ_CHECK(stat(identity, &base) == 0 && (base.st_mode & 0222) == 0);
@@ -2433,6 +2720,8 @@ typedef struct BqWorkerFake
     u32 child_kills;
     u32 child_collect_polls;
     u32 child_collect_after;
+    u32 cgroup_release_polls;
+    u32 cgroup_release_after;
     u32 delays;
     u32 term_polls;
     u32 observe_failures;
@@ -2452,9 +2741,12 @@ typedef struct BqWorkerFake
     bool kill_clears;
     bool child_term_clears;
     bool child_kill_clears;
+    bool child_collect_without_kill;
     bool argv_valid;
     bool start_error;
     bool skip_inherited_lease;
+    bool drain_on_join;
+    bool collect_on_join;
     bool replace_slice_on_cleanup_join;
     bool launcher_cleanup_failure;
 } BqWorkerFake;
@@ -2492,7 +2784,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_start(BqWorkerBackend* backend, char 
         bq_test_worker_probe_locked(fixture->lease);
     fake->inherited_lease = -1;
     snprintf(fake->observed.unit, sizeof(fake->observed.unit), "buster-bench-%s-%s.service", argv[2], argv[3]);
-    snprintf(fake->observed.cgroup, sizeof(fake->observed.cgroup), "/buster-bench.slice/%s", fake->observed.unit);
+    snprintf(fake->observed.cgroup, sizeof(fake->observed.cgroup), "/buster.slice/buster-bench.slice/%s", fake->observed.unit);
     fake->observed.unit_found = true;
     fake->observed.active = true;
     fake->observed.populated = true;
@@ -2555,7 +2847,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_worker_replace_slice(BqWorkerFake* fake)
 {
     BqWorkerFixture* fixture = (BqWorkerFixture*)((char*)fake - offsetof(BqWorkerFixture, fake));
     char slice[768], old[768];
-    snprintf(slice, sizeof(slice), "%s/buster-bench.slice", fixture->root);
+    snprintf(slice, sizeof(slice), "%s/buster.slice/buster-bench.slice", fixture->root);
     snprintf(old, sizeof(old), "%s/retired.slice", fixture->root);
     return rename(slice, old) == 0 && bq_test_worker_limits(fixture->root, fake->observed.unit);
 }
@@ -2582,7 +2874,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_observe(BqWorkerBackend* backend, cha
             fake->term_polls += 1;
             if (fake->term_clear_after && fake->term_polls >= fake->term_clear_after) bq_test_worker_reap(fake);
         }
-        if (child && fake->child_collect_after && fake->child_kills && fake->child.unit_found &&
+        if (child && fake->child_collect_after &&
+            (fake->child_kills || fake->child_collect_without_kill) && fake->child.unit_found &&
             !fake->child.active && !fake->child.populated)
         {
             fake->child_collect_polls += 1;
@@ -2633,7 +2926,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_reap(BqWorkerFake* fake)
     fake->observed.populated = false;
     BqWorkerFixture* fixture = (BqWorkerFixture*)((char*)fake - offsetof(BqWorkerFixture, fake));
     char events[1024];
-    snprintf(events, sizeof(events), "%s/buster-bench.slice/%s/cgroup.events",
+    snprintf(events, sizeof(events), "%s/buster.slice/buster-bench.slice/%s/cgroup.events",
              fixture->root, fake->observed.unit);
     if (fake->observed.unit[0] && chmod(events, 0600) == 0)
     {
@@ -2712,6 +3005,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_join(BqWorkerBackend* backend, int* s
     fake->observed.active = false;
     fake->observed.populated = fake->detached > 0;
     fake->observed.result = fake->completion;
+    if (fake->drain_on_join && !fake->observed.populated && fake->observed.cgroup[0])
+    {
+        BQ_CHECK(bq_test_worker_remove_cgroup(fixture->root, fake->observed.unit));
+        fake->observed.cgroup[0] = 0;
+    }
+    if (fake->collect_on_join && !fake->observed.populated) fake->observed.unit_found = false;
     if (fake->detached <= 0 && fake->inherited_lease >= 0)
     {
         close(fake->inherited_lease);
@@ -2719,7 +3018,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_join(BqWorkerBackend* backend, int* s
     }
     if (fake->replace_slice_on_cleanup_join && fake->joins == 2)
         BQ_CHECK(bq_test_worker_replace_slice(fake));
-    *status = 0;
+    *status = fake->completion == BQ_WORKER_SUCCEEDED ? 0 :
+              fake->completion == BQ_WORKER_OOM ? SIGKILL : 1 << 8;
     return error;
 }
 
@@ -2729,6 +3029,16 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_delay(BqWorkerBackend* backend, u32 m
     BQ_CHECK(milliseconds == 100);
     fake->delays += 1;
     fake->elapsed += milliseconds;
+    if (fake->cgroup_release_after && !fake->observed.unit_found)
+    {
+        fake->cgroup_release_polls += 1;
+        if (fake->cgroup_release_polls == fake->cgroup_release_after)
+        {
+            BqWorkerFixture* fixture = (BqWorkerFixture*)((char*)fake - offsetof(BqWorkerFixture, fake));
+            BQ_CHECK(bq_test_worker_remove_cgroup(fixture->root, fixture->unit));
+            fake->observed.cgroup[0] = 0;
+        }
+    }
     return BQ_OK;
 }
 
@@ -2758,20 +3068,23 @@ BUSTER_GLOBAL_LOCAL u64 bq_test_worker_clock(BqWorkerBackend* backend)
 
 BUSTER_GLOBAL_LOCAL bool bq_test_worker_limits(char const* root, char const* unit)
 {
-    char slice[512], leaf[768], path[1024];
-    snprintf(slice, sizeof(slice), "%s/buster-bench.slice", root);
+    char parent[512], slice[768], leaf[1024], path[1152];
+    snprintf(parent, sizeof(parent), "%s/buster.slice", root);
+    snprintf(slice, sizeof(slice), "%s/buster.slice/buster-bench.slice", root);
     snprintf(leaf, sizeof(leaf), "%s/%s", slice, unit);
-    bool ok = (mkdir(slice, 0700) == 0 || errno == EEXIST) && mkdir(leaf, 0700) == 0;
-    char const* directories[] = {slice, leaf};
+    bool ok = (mkdir(parent, 0700) == 0 || errno == EEXIST) &&
+              (mkdir(slice, 0700) == 0 || errno == EEXIST) && mkdir(leaf, 0700) == 0;
+    char const* directories[] = {parent, slice, leaf};
     char const* names[] = {"cpuset.cpus.effective", "memory.max", "memory.swap.max", "pids.max"};
-    char const* parent[] = {"0-7\n", "max\n", "max\n", "max\n"};
+    char const* ancestor_limits[] = {"0-7\n", "max\n", "max\n", "max\n"};
     char const* child[] = {"2\n", "8589934592\n", "0\n", "256\n"};
-    for (u32 directory = 0; ok && directory < 2; directory += 1)
+    for (u32 directory = 0; ok && directory < BUSTER_ARRAY_LENGTH(directories); directory += 1)
     {
         for (u32 file = 0; ok && file < BUSTER_ARRAY_LENGTH(names); file += 1)
         {
             snprintf(path, sizeof(path), "%s/%s", directories[directory], names[file]);
-            ok = access(path, F_OK) == 0 || bq_test_write_path(path, directory ? child[file] : parent[file], 0400);
+            ok = access(path, F_OK) == 0 ||
+                 bq_test_write_path(path, directory == 2 ? child[file] : ancestor_limits[file], 0400);
         }
     }
     snprintf(path, sizeof(path), "%s/cgroup.events", leaf);
@@ -2781,11 +3094,13 @@ BUSTER_GLOBAL_LOCAL bool bq_test_worker_limits(char const* root, char const* uni
 BUSTER_GLOBAL_LOCAL bool bq_test_worker_remove_cgroup(char const* root, char const* unit)
 {
     int root_fd = bq_open_absolute_directory(string_from_pointer(root));
-    int slice = root_fd >= 0 ? openat(root_fd, "buster-bench.slice", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int parent = root_fd >= 0 ? openat(root_fd, "buster.slice", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int slice = parent >= 0 ? openat(parent, "buster-bench.slice", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     int leaf = slice >= 0 ? openat(slice, unit, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     bool ok = leaf >= 0 && bq_remove_workspace_payload(leaf) && unlinkat(slice, unit, AT_REMOVEDIR) == 0;
     if (leaf >= 0) close(leaf);
     if (slice >= 0) close(slice);
+    if (parent >= 0) close(parent);
     if (root_fd >= 0) close(root_fd);
     return ok;
 }
@@ -2849,6 +3164,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_worker_begin(BqWorkerFixture* fixture, BqWorker
     fixture->fake.observed.syscall_architectures_native = true;
     fixture->fake.observed.syscall_filter_system_service = true;
     fixture->fake.observed.syscall_error_number_eperm = true;
+    fixture->fake.observed.capability_sets_empty = true;
     fixture->fake.observed.security_properties_valid = true;
     fixture->fake.observed.paths_valid = true;
     u32 inaccessible_root_length = (u32)strlen(fixture->material.workspaces);
@@ -2869,6 +3185,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_worker_begin(BqWorkerFixture* fixture, BqWorker
     snprintf(fixture->fake.observed.read_write_paths, sizeof(fixture->fake.observed.read_write_paths), "%s",
              fixture->material.workspaces);
     snprintf(fixture->fake.observed.kill_mode, sizeof(fixture->fake.observed.kill_mode), "%s", "control-group");
+    snprintf(fixture->fake.observed.collect_mode, sizeof(fixture->fake.observed.collect_mode), "%s", "inactive");
     fixture->backend = (BqWorkerBackend){&fixture->fake, bq_test_worker_start, bq_test_worker_observe,
                                         bq_test_worker_signal, bq_test_worker_join,
                                         bq_test_worker_cleanup_launcher, bq_test_worker_delay,
@@ -2908,7 +3225,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_worker_bind(BqWorkerFixture* fixture, BqJob* jo
 {
     snprintf(fixture->fake.observed.unit, sizeof(fixture->fake.observed.unit), "%s", fixture->unit);
     snprintf(fixture->fake.observed.cgroup, sizeof(fixture->fake.observed.cgroup),
-             "/buster-bench.slice/%s", fixture->unit);
+             "/buster.slice/buster-bench.slice/%s", fixture->unit);
     fixture->fake.observed.unit_found = true;
     fixture->fake.observed.active = true;
     fixture->fake.observed.populated = true;
@@ -2996,6 +3313,108 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_success_and_tree_cleanup(void)
     }
 }
 
+BUSTER_GLOBAL_LOCAL void bq_test_worker_drained_unit(void)
+{
+    BqWorkerFixture fixture;
+    struct { BqWorkerResult result; BqError reason; } cases[] = {
+        {BQ_WORKER_SUCCEEDED, BQ_NOT_FOUND},
+        {BQ_WORKER_EXECUTION_FAILED, BQ_WORKER_FAILED},
+        {BQ_WORKER_OOM, BQ_WORKER_OOM_FAILURE},
+        {BQ_WORKER_TIMED_OUT, BQ_WORKER_TIMEOUT}};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        for (u32 collected = 0; collected < 2; collected += 1)
+        {
+            if (bq_test_worker_begin(&fixture, cases[index].result, false))
+            {
+                BqRequest request = bq_test_real_request(146 + index * 2 + collected);
+                u64 id = 0;
+                fixture.fake.drain_on_join = true;
+                fixture.fake.collect_on_join = collected != 0;
+                /* A failed outer unit must be retained. Losing its manager
+                 * result is an identity/evidence failure, not an exit-code verdict. */
+                bool lost_result = collected && cases[index].result != BQ_WORKER_SUCCEEDED;
+                BqError expected_error = lost_result ? BQ_WORKER_MISMATCH : BQ_OK;
+                BQ_CHECK(bq_submit(&fixture.material.queue.queue, &request, &id) == BQ_OK &&
+                         bq_worker_run(&fixture.material.queue.queue, &fixture.config, &id) == expected_error);
+                BqJob* job = bq_job(&fixture.material.queue.queue.state, id);
+                BqError expected_reason = lost_result ? BQ_WORKER_MISMATCH : cases[index].reason;
+                BQ_CHECK(job && bq_failure_evidence(&fixture.material.queue.queue, job) == expected_reason);
+                if (lost_result)
+                {
+                    BQ_CHECK(job && job->phase != BQ_FINISHED &&
+                             fixture.material.queue.queue.needs_reconciliation &&
+                             fixture.material.queue.queue.state.active_id == id);
+                }
+                else
+                {
+                    BqOutcome expected = cases[index].result == BQ_WORKER_SUCCEEDED ? BQ_SUCCEEDED : BQ_FAILED;
+                    BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == expected &&
+                             fixture.fake.joins >= 2 && !fixture.fake.observed.cgroup[0] &&
+                             fixture.fake.observed.unit_found == (collected == 0));
+                }
+                /* Check the durable reason after replay, not just the fake's result. */
+                bq_close(&fixture.material.queue.queue);
+                BQ_CHECK(bq_open(&fixture.material.queue.queue, fixture.material.queue.path) == BQ_OK);
+                job = bq_job(&fixture.material.queue.queue.state, id);
+                BQ_CHECK(job && bq_failure_evidence(&fixture.material.queue.queue, job) == expected_reason);
+                bq_test_worker_end(&fixture);
+            }
+        }
+    }
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+    {
+        BqRequest request = bq_test_real_request(149);
+        u64 id = 0;
+        fixture.fake.collect_on_join = true;
+        fixture.fake.cgroup_release_after = 3;
+        BQ_CHECK(bq_submit(&fixture.material.queue.queue, &request, &id) == BQ_OK &&
+                 bq_worker_run(&fixture.material.queue.queue, &fixture.config, &id) == BQ_OK);
+        BqJob* job = bq_job(&fixture.material.queue.queue.state, id);
+        BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_SUCCEEDED &&
+                 fixture.fake.cgroup_release_polls == 3 && fixture.fake.kills == 0);
+        bq_test_worker_end(&fixture);
+    }
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+    {
+        BqWorkerObserved identity = fixture.fake.observed;
+        snprintf(identity.unit, sizeof(identity.unit), "%s", fixture.unit);
+        snprintf(identity.cgroup, sizeof(identity.cgroup), "/buster.slice/buster-bench.slice/%s", fixture.unit);
+        identity.unit_found = true;
+        identity.active = true;
+        identity.populated = true;
+        BQ_CHECK(bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &identity, false) &&
+                 bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &identity, true));
+        BqWorkerObserved wrong_policy = identity;
+        wrong_policy.capability_sets_empty = false;
+        BQ_CHECK(bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &wrong_policy, false) &&
+                 !bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &wrong_policy, true) &&
+                 bq_worker_instance_matches(&fixture.config, &identity, &wrong_policy));
+        wrong_policy = identity;
+        snprintf(wrong_policy.collect_mode, sizeof(wrong_policy.collect_mode), "%s", "inactive-or-failed");
+        BQ_CHECK(!bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &wrong_policy, false));
+        wrong_policy.collect_mode[0] = 0;
+        BQ_CHECK(!bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &wrong_policy, false));
+        BqWorkerObserved drained = identity;
+        drained.active = false;
+        drained.populated = false;
+        drained.result = BQ_WORKER_SUCCEEDED;
+        drained.cgroup[0] = 0;
+        BQ_CHECK(bq_test_worker_remove_cgroup(fixture.root, fixture.unit) &&
+                 bq_worker_instance_matches(&fixture.config, &identity, &drained));
+        wrong_policy = drained;
+        snprintf(wrong_policy.collect_mode, sizeof(wrong_policy.collect_mode), "%s", "inactive-or-failed");
+        BQ_CHECK(!bq_worker_instance_matches(&fixture.config, &identity, &wrong_policy));
+        snprintf(drained.invocation_id, sizeof(drained.invocation_id), "%s",
+                 "ffffffffffffffffffffffffffffffff");
+        BQ_CHECK(!bq_worker_instance_matches(&fixture.config, &identity, &drained));
+        snprintf(drained.invocation_id, sizeof(drained.invocation_id), "%s", identity.invocation_id);
+        BQ_CHECK(bq_test_worker_limits(fixture.root, fixture.unit) &&
+                 !bq_worker_instance_matches(&fixture.config, &identity, &drained));
+        bq_test_worker_end(&fixture);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_worker_term_grace(void)
 {
     BqWorkerFixture fixture;
@@ -3023,7 +3442,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_child_survives_parent_kill(void)
         snprintf(fixture.fake.child.unit, sizeof(fixture.fake.child.unit),
                  "buster-bench-1-2-throughput.service");
         snprintf(fixture.fake.child.cgroup, sizeof(fixture.fake.child.cgroup),
-                 "/buster-bench.slice/%s", fixture.fake.child.unit);
+                 "/buster.slice/buster-bench.slice/%s", fixture.fake.child.unit);
         snprintf(fixture.fake.child.invocation_id, sizeof(fixture.fake.child.invocation_id),
                  "%s", "fedcba9876543210fedcba9876543210");
         snprintf(fixture.fake.child.part_of, sizeof(fixture.fake.child.part_of), "%s", fixture.unit);
@@ -3048,6 +3467,39 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_child_survives_parent_kill(void)
                  fixture.fake.child_collect_polls == 3 && fixture.fake.child_observes > 1 &&
                  !fixture.fake.child.unit_found &&
                  !fixture.fake.child.populated && !bq_test_worker_probe_locked(fixture.lease));
+        bq_test_worker_end(&fixture);
+    }
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+    {
+        BqRequest request = bq_test_real_request(150);
+        u64 id = 0;
+        fixture.fake.child = fixture.fake.observed;
+        snprintf(fixture.fake.child.unit, sizeof(fixture.fake.child.unit),
+                 "buster-bench-1-2-throughput.service");
+        snprintf(fixture.fake.child.cgroup, sizeof(fixture.fake.child.cgroup),
+                 "/buster.slice/buster-bench.slice/%s", fixture.fake.child.unit);
+        snprintf(fixture.fake.child.invocation_id, sizeof(fixture.fake.child.invocation_id),
+                 "%s", "fedcba9876543210fedcba9876543210");
+        snprintf(fixture.fake.child.part_of, sizeof(fixture.fake.child.part_of), "%s", fixture.unit);
+        snprintf(fixture.fake.child.binds_to, sizeof(fixture.fake.child.binds_to), "%s", fixture.unit);
+        snprintf(fixture.fake.child.after, sizeof(fixture.fake.child.after), "%s", fixture.unit);
+        snprintf(fixture.fake.child.collect_mode, sizeof(fixture.fake.child.collect_mode),
+                 "%s", "inactive-or-failed");
+        fixture.fake.child.unit_found = true;
+        fixture.fake.child.active = false;
+        fixture.fake.child.populated = false;
+        fixture.fake.child.result = BQ_WORKER_SUCCEEDED;
+        fixture.fake.child_collect_after = 3;
+        fixture.fake.child_collect_without_kill = true;
+        BQ_CHECK(bq_test_worker_limits(fixture.root, fixture.fake.child.unit) &&
+                 bq_test_worker_remove_cgroup(fixture.root, fixture.fake.child.unit));
+        fixture.fake.child.cgroup[0] = 0;
+        BQ_CHECK(bq_submit(&fixture.material.queue.queue, &request, &id) == BQ_OK &&
+                 bq_worker_run(&fixture.material.queue.queue, &fixture.config, &id) == BQ_OK);
+        BqJob* job = bq_job(&fixture.material.queue.queue.state, id);
+        BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_SUCCEEDED &&
+                 fixture.fake.child_collect_polls == 3 && fixture.fake.child_kills == 0 &&
+                 !fixture.fake.child.unit_found);
         bq_test_worker_end(&fixture);
     }
 }
@@ -3308,14 +3760,14 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_instance_reuse(void)
     {
         BqWorkerObserved identity = fixture.fake.observed;
         snprintf(identity.unit, sizeof(identity.unit), "%s", fixture.unit);
-        snprintf(identity.cgroup, sizeof(identity.cgroup), "/buster-bench.slice/%s", fixture.unit);
+        snprintf(identity.cgroup, sizeof(identity.cgroup), "/buster.slice/buster-bench.slice/%s", fixture.unit);
         identity.unit_found = true;
         identity.active = true;
         identity.populated = true;
         BQ_CHECK(bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &identity, false));
         char leaf[1024], old[1024];
-        snprintf(leaf, sizeof(leaf), "%s/buster-bench.slice/%s", fixture.root, fixture.unit);
-        snprintf(old, sizeof(old), "%s/buster-bench.slice/replaced.scope", fixture.root);
+        snprintf(leaf, sizeof(leaf), "%s/buster.slice/buster-bench.slice/%s", fixture.root, fixture.unit);
+        snprintf(old, sizeof(old), "%s/buster.slice/buster-bench.slice/replaced.scope", fixture.root);
         BQ_CHECK(rename(leaf, old) == 0 && bq_test_worker_limits(fixture.root, fixture.unit));
         BqWorkerObserved replacement = identity;
         replacement.cgroup_device = 0;
@@ -3327,11 +3779,11 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_instance_reuse(void)
     {
         BqWorkerObserved identity = fixture.fake.observed;
         snprintf(identity.unit, sizeof(identity.unit), "%s", fixture.unit);
-        snprintf(identity.cgroup, sizeof(identity.cgroup), "/buster-bench.slice/%s", fixture.unit);
+        snprintf(identity.cgroup, sizeof(identity.cgroup), "/buster.slice/buster-bench.slice/%s", fixture.unit);
         identity.unit_found = true;
         BQ_CHECK(bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &identity, false));
         char slice[768], old[768];
-        snprintf(slice, sizeof(slice), "%s/buster-bench.slice", fixture.root);
+        snprintf(slice, sizeof(slice), "%s/buster.slice/buster-bench.slice", fixture.root);
         snprintf(old, sizeof(old), "%s/foreign.slice", fixture.root);
         BQ_CHECK(bq_test_worker_remove_cgroup(fixture.root, fixture.unit) &&
                  rename(slice, old) == 0 && mkdir(slice, 0700) == 0 &&
@@ -3354,21 +3806,21 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_instance_reuse(void)
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_cgroup_paths(void)
 {
-    char const* invalid[] = {"/buster-bench.slice/../foreign.scope", "/buster-bench.slice/./x.scope",
-                             "/buster-bench.slice//x.scope", "/buster-bench.slice/x.scope/",
-                             "/buster-bench.slice/x.scope\nforeign"};
+    char const* invalid[] = {"/buster.slice/buster-bench.slice/../foreign.scope", "/buster.slice/buster-bench.slice/./x.scope",
+                             "/buster.slice/buster-bench.slice//x.scope", "/buster.slice/buster-bench.slice/x.scope/",
+                             "/buster.slice/buster-bench.slice/x.scope\nforeign"};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
         BQ_CHECK(!bq_worker_cgroup_path_valid(invalid[index]));
     BqWorkerFixture fixture;
     if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
     {
         char slice[1024], real[1024];
-        snprintf(slice, sizeof(slice), "%s/buster-bench.slice", fixture.root);
+        snprintf(slice, sizeof(slice), "%s/buster.slice/buster-bench.slice", fixture.root);
         snprintf(real, sizeof(real), "%s/real.slice", fixture.root);
         BQ_CHECK(rename(slice, real) == 0 && symlink("real.slice", slice) == 0);
         BqWorkerObserved observed = fixture.fake.observed;
         snprintf(observed.unit, sizeof(observed.unit), "%s", fixture.unit);
-        snprintf(observed.cgroup, sizeof(observed.cgroup), "/buster-bench.slice/%s", fixture.unit);
+        snprintf(observed.cgroup, sizeof(observed.cgroup), "/buster.slice/buster-bench.slice/%s", fixture.unit);
         observed.unit_found = true;
         BQ_CHECK(!bq_worker_observed(&fixture.config, observed.boot_id, observed.unit, &observed, false));
         bq_test_worker_end(&fixture);
@@ -3396,7 +3848,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_cgroup_paths(void)
         linked.cgroup_root = string_from_pointer(link);
         BqWorkerObserved observed = fixture.fake.observed;
         snprintf(observed.unit, sizeof(observed.unit), "%s", fixture.unit);
-        snprintf(observed.cgroup, sizeof(observed.cgroup), "/buster-bench.slice/%s", fixture.unit);
+        snprintf(observed.cgroup, sizeof(observed.cgroup), "/buster.slice/buster-bench.slice/%s", fixture.unit);
         observed.unit_found = true;
         BQ_CHECK(!bq_worker_observed(&linked, observed.boot_id, observed.unit, &observed, false));
         char dotdot_root[768];
@@ -3409,7 +3861,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_cgroup_paths(void)
                  bq_worker_lease_acquire(fixture.lease, &lease) != 0 &&
                  !bq_worker_observed(&fixture.config, observed.boot_id, observed.unit, &observed, false));
         char slice[768];
-        snprintf(slice, sizeof(slice), "%s/buster-bench.slice", fixture.root);
+        snprintf(slice, sizeof(slice), "%s/buster.slice/buster-bench.slice", fixture.root);
         BQ_CHECK(chmod(fixture.root, 01777) == 0 &&
                  !bq_worker_observed(&fixture.config, observed.boot_id, observed.unit, &observed, false));
         BQ_CHECK(chmod(fixture.root, 0700) == 0 && chmod(slice, 0777) == 0 &&
@@ -3436,6 +3888,81 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_deploy_policy(void)
     BQ_CHECK(read);
     for (u32 index = 0; read && index < BUSTER_ARRAY_LENGTH(required); index += 1)
         BQ_CHECK(strstr(service, required[index]) != NULL);
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_worker_systemd_results(void)
+{
+    /* Capability/User lines from Attempt 9's service, broker and outer
+     * systemctl-show receipts. */
+    char service_receipt[] = "CapabilityBoundingSet=\nAmbientCapabilities=\nUser=buster-bench\n";
+    char broker_receipt[] = "CapabilityBoundingSet=\nAmbientCapabilities=\nUser=root\n";
+    char missing_bounding[] = "AmbientCapabilities=\nUser=buster-bench\n";
+    char missing_ambient[] = "CapabilityBoundingSet=\nUser=buster-bench\n";
+    char old_outer_receipt[] =
+        "CapabilityBoundingSet=cap_chown cap_dac_override cap_dac_read_search cap_fowner cap_fsetid cap_kill "
+        "cap_setgid cap_setuid cap_setpcap cap_linux_immutable cap_net_bind_service cap_net_broadcast "
+        "cap_net_admin cap_net_raw cap_ipc_lock cap_ipc_owner cap_sys_chroot cap_sys_ptrace cap_sys_pacct "
+        "cap_sys_admin cap_sys_boot cap_sys_nice cap_sys_resource cap_sys_tty_config cap_lease cap_audit_write "
+        "cap_audit_control cap_setfcap cap_mac_override cap_mac_admin cap_block_suspend cap_audit_read "
+        "cap_perfmon cap_bpf cap_checkpoint_restore\nAmbientCapabilities=\nUser=buster-bench\n";
+    char nonempty_ambient[] = "CapabilityBoundingSet=\nAmbientCapabilities=cap_net_bind_service\n";
+    char numeric_zero[] = "CapabilityBoundingSet=0\nAmbientCapabilities=0\n";
+    BQ_CHECK(bq_worker_systemd_capabilities_empty(service_receipt) &&
+             bq_worker_systemd_capabilities_empty(broker_receipt));
+    BQ_CHECK(!bq_worker_systemd_capabilities_empty(missing_bounding) &&
+             !bq_worker_systemd_capabilities_empty(missing_ambient) &&
+             !bq_worker_systemd_capabilities_empty(old_outer_receipt) &&
+             !bq_worker_systemd_capabilities_empty(nonempty_ambient) &&
+             !bq_worker_systemd_capabilities_empty(numeric_zero));
+    char collected[] = "LoadState=not-found\nActiveState=inactive\nControlGroup=\n";
+    char loaded[] = "LoadState=loaded\nActiveState=inactive\nControlGroup=\n";
+    BQ_CHECK(bq_worker_systemd_collected(collected) && !bq_worker_systemd_collected(loaded));
+    BQ_CHECK(bq_worker_systemd_result("success", true) == BQ_WORKER_RUNNING);
+    BQ_CHECK(bq_worker_systemd_result("success", false) == BQ_WORKER_SUCCEEDED);
+    BQ_CHECK(bq_worker_systemd_result("oom-kill", true) == BQ_WORKER_OOM);
+    BQ_CHECK(bq_worker_systemd_result("timeout", false) == BQ_WORKER_TIMED_OUT);
+    BQ_CHECK(bq_worker_systemd_result("canceled", false) == BQ_WORKER_CANCELLED_RESULT);
+    BQ_CHECK(bq_worker_systemd_result("exit-code", true) == BQ_WORKER_EXECUTION_FAILED);
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_worker_capability_admission(void)
+{
+    BqWorkerFixture fixture;
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+    {
+        BqRequest request = bq_test_real_request(168);
+        u64 id = 0;
+        fixture.fake.observed.capability_sets_empty = false;
+        BQ_CHECK(bq_submit(&fixture.material.queue.queue, &request, &id) == BQ_OK);
+        BQ_CHECK(bq_worker_run(&fixture.material.queue.queue, &fixture.config, &id) == BQ_RESOURCE_MISMATCH);
+        BqJob* job = bq_job(&fixture.material.queue.queue.state, id);
+        BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_FAILED &&
+                 bq_failure_evidence(&fixture.material.queue.queue, job) == BQ_RESOURCE_MISMATCH &&
+                 !fixture.material.queue.queue.needs_reconciliation && !fixture.material.queue.queue.state.active_id &&
+                 fixture.fake.starts == 1 && fixture.fake.continues == 0 && fixture.fake.terms == 1 &&
+                 fixture.fake.kills == 1 && fixture.fake.joins == 1);
+        bq_test_worker_end(&fixture);
+    }
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_EXECUTION_FAILED, false))
+    {
+        BqQueue* queue = &fixture.material.queue.queue;
+        BqRequest request = bq_test_real_request(169);
+        u64 id = 0, token = 0;
+        BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK &&
+                 bq_materialize(queue, fixture.config.installed_root, fixture.config.workspace_root, &id, &token) == BQ_OK);
+        BqJob* job = bq_job(&queue->state, id);
+        BQ_CHECK(bq_test_worker_bind(&fixture, job));
+        fixture.fake.observed.capability_sets_empty = false;
+        bq_close(queue);
+        BQ_CHECK(bq_open(queue, fixture.material.queue.path) == BQ_OK && queue->needs_reconciliation);
+        BQ_CHECK(bq_worker_run(queue, &fixture.config, &id) == BQ_OK);
+        job = bq_job(&queue->state, id);
+        BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_INTERRUPTED &&
+                 bq_failure_evidence(queue, job) == BQ_WORKER_INTERRUPTED &&
+                 !queue->needs_reconciliation && fixture.fake.starts == 0 && fixture.fake.continues == 0 &&
+                 fixture.fake.terms == 1 && fixture.fake.joins == 1);
+        bq_test_worker_end(&fixture);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_outcomes(void)
@@ -3546,7 +4073,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_ancestor_budget(void)
     if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
     {
         char path[768];
-        snprintf(path, sizeof(path), "%s/buster-bench.slice/memory.max", fixture.root);
+        snprintf(path, sizeof(path), "%s/buster.slice/buster-bench.slice/memory.max", fixture.root);
         BQ_CHECK(chmod(path, 0600) == 0);
         int fd = open(path, O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW);
         char const tighter[] = "4096\n";
@@ -4462,7 +4989,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_recipe_materialized_bridge(char const* driver)
         ok = manifest_length > 0 && base_length > 0 && candidate_length > 0 &&
              stat(copied_manifest, &manifest_info) == 0 && manifest_info.st_size > 4096 &&
              stat(workspace, &attempt_info) == 0 && (attempt_info.st_mode & 07777) == 02710 &&
-             stat(base_subject, &base_info) == 0 && (base_info.st_mode & 07777) == 02750 &&
+             stat(base_subject, &base_info) == 0 && (base_info.st_mode & 07777) == 02710 &&
              stat(candidate_subject, &candidate_info) == 0 && (candidate_info.st_mode & 07777) == 02710;
         BQ_CHECK(ok);
     }
@@ -4563,6 +5090,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 #ifndef _WIN32
     bq_test_physical_temp_paths();
     bq_test_workspace_root_group_policy();
+    bq_test_cleanup_candidate_identity();
     bq_test_closed_handle();
     bq_test_admission();
     bq_test_prefixes_and_corruption();
@@ -4587,6 +5115,12 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_cancelled_failure_recovery();
     bq_test_cleanup_bounds_and_failure();
 #ifdef __linux__
+    /* The filter is confined to a child; supported Linux CI must execute it. */
+#if defined(__x86_64__) || defined(__aarch64__)
+    bq_test_sgid_sandbox();
+#else
+    printf("SGID_SANDBOX_TEST service status=unsupported-architecture\n");
+#endif
     bq_test_transport_boundaries();
     bq_test_worker_deadlines();
     bq_test_worker_lease_handoff();
@@ -4598,6 +5132,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_lease_handoff_cleanup_failure(2);
     bq_test_worker_lease_handoff_cleanup_failure(3);
     bq_test_worker_success_and_tree_cleanup();
+    bq_test_worker_drained_unit();
     bq_test_worker_term_grace();
     bq_test_worker_child_survives_parent_kill();
     bq_test_worker_late_cancel();
@@ -4609,6 +5144,8 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_instance_reuse();
     bq_test_worker_cgroup_paths();
     bq_test_worker_deploy_policy();
+    bq_test_worker_systemd_results();
+    bq_test_worker_capability_admission();
     bq_test_worker_outcomes();
     bq_test_worker_quarantine_and_recovery();
     bq_test_worker_ancestor_budget();
@@ -4650,6 +5187,21 @@ int main(int argc, char** argv)
         bq_test_export(false);
         printf("EXPORT_SELF_TEST assertions=%u failures=%u\n", bq_test_assertions, bq_test_failures);
         result = bq_test_failures ? 1 : 0;
+    }
+    else if (argc == 2 && !strcmp(argv[1], "--cleanup-identity-only"))
+    {
+        bq_test_cleanup_identity_filesystem();
+        result = bq_test_failures ? 1 : 0;
+    }
+    else if (argc == 2 && !strcmp(argv[1], "--sgid-only"))
+    {
+#if defined(__x86_64__) || defined(__aarch64__)
+        bq_test_sgid_sandbox();
+        result = bq_test_failures ? 1 : 0;
+#else
+        printf("SGID_SANDBOX_TEST service status=unsupported-architecture\n");
+        result = 0;
+#endif
     }
     else result = helper ? bq_test_fixed_recipe_helper(argc, argv) : bq_test_run_all(argc, argv);
 #else

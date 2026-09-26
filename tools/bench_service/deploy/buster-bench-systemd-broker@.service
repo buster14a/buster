@@ -5,7 +5,8 @@ ConditionPathExists=/etc/buster-bench/systemd-broker-lease.identity
 [Service]
 Type=exec
 User=root
-Group=root
+Group=buster-bench
+SupplementaryGroups=buster-bench-candidate
 UMask=0077
 ExecStart=/usr/local/libexec/buster-bench-systemd-broker serve-connection
 StandardInput=socket
