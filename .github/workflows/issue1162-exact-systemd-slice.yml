@@ -2,7 +2,8 @@ name: Issue 1162 exact-source isolated systemd slice
 
 on:
   push:
-    branches: [codex/1162-exact-systemd-slice-20260925]
+    branches:
+      - codex/1162-exact-systemd-slice-20260925
     paths:
       - .github/workflows/issue1162-exact-systemd-slice.yml
       - .github/scripts/issue1162_exact_systemd_slice.sh
