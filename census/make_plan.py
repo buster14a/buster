@@ -19,7 +19,10 @@ def main():
     for item in sys.argv[1:]:
         name, _, commit = item.partition("=")
         refs[name] = commit
-    census_refs = [name for name in ("defidx", "tag") if name in refs]
+    census_refs = [name for name in ("defidx", "tag", "relcomp") if name in refs]
+    # "combined" is a scratch merge of every candidate, never a pull request:
+    # it runs every family to show the candidates together.
+    combined = ["combined"] if "combined" in refs else []
     workload_refs = list(refs) + ["census"] + [f"{name}@census" for name in census_refs]
     workloads = [
         {"name": "selfhost-g", "argv": ["-g"] + SELF, "refs": workload_refs},
@@ -37,11 +40,11 @@ def main():
                    for r in (500, 1000, 2000, 4000, 8000, 16000, 32000)] +
                   [[family, 2000, g] for family in ("ptr", "shuffle") for g in (2, 4, 8, 16)])
     experiments = []
-    if "reloc" in refs:
-        experiments.append({"name": "reloc", "generator": "gen_reloc.py", "refs": ["base", "reloc"], "grid": reloc_grid,
+    if "reloc" in refs or combined:
+        experiments.append({"name": "reloc", "generator": "gen_reloc.py", "refs": ["base"] + [n for n in ("reloc",) if n in refs] + combined, "grid": reloc_grid,
                             "show": ["validation_global_relocations", "validation_global_relocation_pairs",
                                      "validation_global_relocation_sorts", "validation_global_relocation_sort_rows"]})
-    debug_refs = [name for name in ("dbgseed", "dbgval") if name in refs]
+    debug_refs = [name for name in ("dbgseed", "dbgval") if name in refs] + combined
     if debug_refs:
         grid = ([["funcs", n] for n in (500, 1000, 2000, 4000, 8000, 16000)] +
                 [["locals", n] for n in (25, 50, 100, 200, 400, 800)] +
@@ -50,21 +53,24 @@ def main():
                             "flag_sets": [["-g", "-c"]],
                             "show": ["census_dbg_seed_scan_visits", "census_dbgv_block_unresolved_visits", "debug_function_index_rows",
                                      "debug_function_seed_scan_rows", "debug_value_blocks", "debug_value_local_visits"]})
-    if "defidx" in refs:
+    if "defidx" in refs or combined:
         grid = ([["defs", t, 1000] for t in (0, 1000, 4000, 16000)] + [["defs", 4000, q] for q in (250, 4000)] +
                 [["defs_multi", 4000, 1000], ["local", 4000, 1000], ["local", 4000, 4000]])
-        experiments.append({"name": "defidx", "generator": "gen_defs.py", "refs": ["base", "census", "defidx", "defidx@census"], "grid": grid,
+        experiments.append({"name": "defidx", "generator": "gen_defs.py", "refs": ["base", "census"] + [n for n in ("defidx", "defidx@census") if n.split("@")[0] in refs] + combined, "grid": grid,
                             "show": ["census_core_step_def_visits", "census_bind_agg_visits", "census_tnp_anon_visits"]})
-    if "tag" in refs:
+    if "tag" in refs or combined:
         grid = ([["unique", t, 1000] for t in (250, 1000, 4000, 16000)] + [["unique", 4000, q] for q in (250, 4000)] +
                 [["shadow", t, 1000] for t in (1000, 4000)])
-        experiments.append({"name": "tag", "generator": "gen_tags.py", "refs": ["base", "census", "tag", "tag@census"], "grid": grid,
+        experiments.append({"name": "tag", "generator": "gen_tags.py", "refs": ["base", "census"] + [n for n in ("tag", "tag@census") if n.split("@")[0] in refs] + combined, "grid": grid,
                             "show": ["census_tnp_tag_calls", "census_tnp_tag_searches", "census_tnp_tag_visits"]})
-    # Initializer relocation compaction (#1450): main only, no candidate yet.
-    grid = [[family, n] for family in ("ordered", "reverse", "shuffle", "override") for n in (1000, 2000, 4000, 8000)] + \
-           [["range", n] for n in (1000, 4000, 16000)]
-    experiments.append({"name": "designated", "generator": "gen_designated.py", "refs": ["base", "census"], "grid": grid,
-                        "show": ["census_clear_calls", "census_clear_compactions", "census_clear_compaction_rows"]})
+    # Initializer relocation compaction (#1450).
+    grid = [[family, n] for family in ("ordered", "reverse", "shuffle", "override") for n in (1000, 2000, 4000, 8000, 16000)] + \
+           [["shuffle", 32000]] + [["range", n] for n in (1000, 4000, 16000)]
+    experiments.append({"name": "designated", "generator": "gen_designated.py",
+                        "refs": ["base", "census"] + [n for n in ("relcomp", "relcomp@census") if n.split("@")[0] in refs] + combined, "grid": grid,
+                        "show": ["census_clear_calls", "census_clear_compactions", "census_clear_compaction_rows", "census_clear_index_inserts",
+                                 "census_clear_index_buckets", "census_clear_index_groups", "census_clear_index_removed",
+                                 "census_clear_index_compaction_rows"]})
     plan = {"refs": refs, "census_ref": "base", "census_refs": census_refs, "variants": ["count", "plain"], "build_jobs": 3, "timing_repeats": 3,
             "workload_source": "base", "experiments": experiments, "workloads": workloads}
     json.dump(plan, open("plan.json", "w"), indent=1)

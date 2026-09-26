@@ -27,6 +27,7 @@ COUNTERS = [
     "INIT_SLOT_STEPS", "INIT_AT_CALLS", "INIT_AT_STEPS",
     "TNP_ANON_VISITS", "TNP_TAG_CALLS", "TNP_TAG_SEARCHES", "TNP_TAG_VISITS",
     "CLEAR_CALLS", "CLEAR_COMPACTIONS", "CLEAR_COMPACTION_ROWS",
+    "CLEAR_INDEX_INSERTS", "CLEAR_INDEX_BUCKETS", "CLEAR_INDEX_GROUPS", "CLEAR_INDEX_REMOVED", "CLEAR_INDEX_COMPACTION_ROWS",
     "AGG_FIELD_PAIRS",
     "AGG_LOOKUP_SCANS", "AGG_LOOKUP_VISITS",
     "GPLACE_MODULE_VISITS", "GPLACE_ENTITY_VISITS",
@@ -191,6 +192,24 @@ CANDIDATE_EDITS = [
     ("src/buster/lib/compiler/frontend/c/c_gen.c",
      "                C_AGGREGATE_TAG_SEARCH_COUNT(builder->parse.aggregate_lookup);\n", "after",
      f"                {R}(CENSUS_TNP_TAG_VISITS, 1);\n"),
+    # Initializer relocation index (#1450): records indexed, buckets and
+    # offset groups a clear visits, records it removes, and rows its lazy
+    # compaction reads. The whole-array compaction keeps the main counters.
+    ("src/buster/lib/compiler/frontend/c/c_gen.c",
+     "    u64 offset = index->records[record].offset;\n    u32 bucket = c_ir_initializer_relocation_bucket(index, offset);\n", "before",
+     f"    {R}(CENSUS_CLEAR_INDEX_INSERTS, 1);\n"),
+    ("src/buster/lib/compiler/frontend/c/c_gen.c",
+     "            C_IR_INITIALIZER_RELOCATION_COUNT(index, bucket_visits, 1);\n", "after",
+     f"            {R}(CENSUS_CLEAR_INDEX_BUCKETS, 1);\n"),
+    ("src/buster/lib/compiler/frontend/c/c_gen.c",
+     "                C_IR_INITIALIZER_RELOCATION_COUNT(index, group_visits, 1);\n", "after",
+     f"                {R}(CENSUS_CLEAR_INDEX_GROUPS, 1);\n"),
+    ("src/buster/lib/compiler/frontend/c/c_gen.c",
+     "                        C_IR_INITIALIZER_RELOCATION_COUNT(index, removed_rows, 1);\n", "after",
+     f"                        {R}(CENSUS_CLEAR_INDEX_REMOVED, 1);\n"),
+    ("src/buster/lib/compiler/frontend/c/c_gen.c",
+     "            C_IR_INITIALIZER_RELOCATION_COUNT(index, compaction_rows, 1);\n", "after",
+     f"            {R}(CENSUS_CLEAR_INDEX_COMPACTION_ROWS, 1);\n"),
 ]
 
 

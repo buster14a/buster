@@ -1,16 +1,12 @@
 {
  "refs": {
   "base": "ade6ac4b6ecb21f30b61b656439bac476c145e2f",
-  "reloc": "32f4ea808de447900508382d76242a00cd0c6fdf",
-  "dbgseed": "12c4d577f700211fae20a95ef70d2fc49a4435a5",
-  "dbgval": "78c3d48815623b52825fe5a443a474c4fbbc76f4",
-  "defidx": "ea04c03859c503c6dbd5adcc4f6a70ceead1ca99",
-  "tag": "43090d04b7df19745ab8f42a972c29a2df06abec"
+  "relcomp": "36262ac0c3d74c868c360722d6b01c5fb06291eb",
+  "combined": "2a9383be379c5290065e4730655cf3b06801dac0"
  },
  "census_ref": "base",
  "census_refs": [
-  "defidx",
-  "tag"
+  "relcomp"
  ],
  "variants": [
   "count",
@@ -25,7 +21,7 @@
    "generator": "gen_reloc.py",
    "refs": [
     "base",
-    "reloc"
+    "combined"
    ],
    "grid": [
     [
@@ -292,8 +288,7 @@
    "refs": [
     "base",
     "census",
-    "dbgseed",
-    "dbgval"
+    "combined"
    ],
    "grid": [
     [
@@ -374,8 +369,7 @@
    "refs": [
     "base",
     "census",
-    "defidx",
-    "defidx@census"
+    "combined"
    ],
    "grid": [
     [
@@ -436,8 +430,7 @@
    "refs": [
     "base",
     "census",
-    "tag",
-    "tag@census"
+    "combined"
    ],
    "grid": [
     [
@@ -492,7 +485,10 @@
    "generator": "gen_designated.py",
    "refs": [
     "base",
-    "census"
+    "census",
+    "relcomp",
+    "relcomp@census",
+    "combined"
    ],
    "grid": [
     [
@@ -512,6 +508,10 @@
      8000
     ],
     [
+     "ordered",
+     16000
+    ],
+    [
      "reverse",
      1000
     ],
@@ -528,6 +528,10 @@
      8000
     ],
     [
+     "reverse",
+     16000
+    ],
+    [
      "shuffle",
      1000
     ],
@@ -544,6 +548,10 @@
      8000
     ],
     [
+     "shuffle",
+     16000
+    ],
+    [
      "override",
      1000
     ],
@@ -558,6 +566,14 @@
     [
      "override",
      8000
+    ],
+    [
+     "override",
+     16000
+    ],
+    [
+     "shuffle",
+     32000
     ],
     [
      "range",
@@ -575,7 +591,12 @@
    "show": [
     "census_clear_calls",
     "census_clear_compactions",
-    "census_clear_compaction_rows"
+    "census_clear_compaction_rows",
+    "census_clear_index_inserts",
+    "census_clear_index_buckets",
+    "census_clear_index_groups",
+    "census_clear_index_removed",
+    "census_clear_index_compaction_rows"
    ]
   }
  ],
@@ -593,14 +614,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ]
   },
   {
@@ -616,14 +633,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ]
   },
   {
@@ -640,14 +653,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ]
   },
   {
@@ -664,14 +673,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ]
   },
   {
@@ -688,14 +693,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ]
   },
   {
@@ -709,14 +710,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ]
   },
   {
@@ -730,14 +727,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ]
   },
   {
@@ -752,14 +745,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -775,14 +764,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -798,14 +783,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -821,14 +802,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -844,14 +821,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -867,14 +840,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -890,14 +859,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -913,14 +878,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -936,14 +897,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -959,14 +916,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -982,14 +935,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1005,14 +954,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1028,14 +973,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1051,14 +992,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1074,14 +1011,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1097,14 +1030,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1120,14 +1049,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1143,14 +1068,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1166,14 +1087,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1189,14 +1106,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1212,14 +1125,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1235,14 +1144,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1258,14 +1163,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1281,14 +1182,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1304,14 +1201,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1327,14 +1220,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1350,14 +1239,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1373,14 +1258,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1396,14 +1277,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1419,14 +1296,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1442,14 +1315,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1465,14 +1334,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1488,14 +1353,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   },
@@ -1511,14 +1372,10 @@
    ],
    "refs": [
     "base",
-    "reloc",
-    "dbgseed",
-    "dbgval",
-    "defidx",
-    "tag",
+    "relcomp",
+    "combined",
     "census",
-    "defidx@census",
-    "tag@census"
+    "relcomp@census"
    ],
    "timing_repeats": 1
   }
