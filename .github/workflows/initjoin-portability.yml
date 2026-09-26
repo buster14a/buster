@@ -1,0 +1,107 @@
+name: Initializer test portability
+on:
+  push:
+    branches: [research/1319-initjoin-portability-20260925-astra]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.source.outputs.source }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fd9f313ee99a26d1b283bdfd43fbb056b7d36744
+      - name: Commit only explicit test-field casts on a new ref
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          p=Path('src/buster/tests/compiler/link/link_test.c')
+          s=p.read_text(); a=s.index('BUSTER_GLOBAL_LOCAL UnitTestResult link_test_initializer_collection('); b=s.index('\nBUSTER_GLOBAL_LOCAL UnitTestResult link_test_initializer_order(',a)
+          f=s[a:b]
+          assert f.count('.section = kind')==10 and f.count('.section = section_index ?')==1
+          f=f.replace('.section = kind','.section = (u32)kind').replace('.section = section_index ? OBJECT_SECTION_INIT_ARRAY : OBJECT_SECTION_FINI_ARRAY','.section = (u32)(section_index ? OBJECT_SECTION_INIT_ARRAY : OBJECT_SECTION_FINI_ARRAY)')
+          p.write_text(s[:a]+f+s[b:])
+          assert hashlib.sha256(p.read_bytes()).hexdigest()=='5df0a6e7aed71af14de982185e3922bef9cbc6cb437eabe34dd55a1a3d7e5212'
+          PY
+          git diff --check
+          test "$(git diff --name-only)" = src/buster/tests/compiler/link/link_test.c
+          git config user.name 'GPT-6 Astra Pro research integrator'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/buster/tests/compiler/link/link_test.c
+          git commit -m 'test(link): explicitly convert initializer section enums on Windows'
+          branch=research/1319-initjoin-casts-20260925-astra
+          git push "--force-with-lease=refs/heads/$branch:" origin "HEAD:refs/heads/$branch"
+          printf 'source=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  validate:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      BUSTER_TEST_JOBS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      CFLAGS: -Wno-invalid-feature-combination
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          persist-credentials: false
+      - name: Linux trusted build and registered tests
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p portability-evidence
+          git rev-parse HEAD > portability-evidence/source.txt
+          git rev-parse HEAD^{tree} > portability-evidence/tree.txt
+          clang --version > portability-evidence/clang.txt
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/initjoin-build" 2>&1 | tee portability-evidence/bootstrap.log
+          "$RUNNER_TEMP/initjoin-build" generate --ci --cc clang --linker DEFAULT --build-directory build-portability -- -DBUSTER_UNITY_BUILD=OFF 2>&1 | tee portability-evidence/configure.log
+          "$RUNNER_TEMP/initjoin-build" build --build-directory build-portability --config Release -t ide 2>&1 | tee portability-evidence/build.log
+          sha256sum build-portability/Release/ide > portability-evidence/compiler.sha256
+          build-portability/Release/ide test --verbose=1 --ci=1 2>&1 | tee portability-evidence/tests.log
+      - name: Windows trusted build and registered tests
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force portability-evidence | Out-Null
+          git rev-parse HEAD | Out-File -Encoding utf8 portability-evidence/source.txt
+          git rev-parse 'HEAD^{tree}' | Out-File -Encoding utf8 portability-evidence/tree.txt
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPath = (& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          clang --version | Out-File -Encoding utf8 portability-evidence/clang.txt
+          $Driver = Join-Path $env:RUNNER_TEMP 'initjoin-build.exe'
+          & clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o $Driver
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $Generate = "`"$Driver`" generate --ci --cc clang --linker DEFAULT --build-directory build-portability -- -DBUSTER_UNITY_BUILD=OFF 2>&1"
+          cmd /d /s /c $Generate | Tee-Object -FilePath portability-evidence/configure.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $Build = "`"$Driver`" build --build-directory build-portability --config Release -t ide 2>&1"
+          cmd /d /s /c $Build | Tee-Object -FilePath portability-evidence/build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-FileHash build-portability/Release/ide.exe -Algorithm SHA256 | Format-List | Out-File -Encoding utf8 portability-evidence/compiler.sha256
+          cmd /d /s /c 'build-portability\Release\ide.exe test --verbose=1 --ci=1 2>&1' | Tee-Object -FilePath portability-evidence/tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain portability evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: initializer-portability-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: portability-evidence
+          if-no-files-found: error
+          retention-days: 30
