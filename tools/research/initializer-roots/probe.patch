@@ -1,0 +1,187 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -93,2 +93,3 @@
+ #include "c_internal.h"
++#include <stdio.h> // Disposable initializer-root census; stderr only.
+ #include <buster/lib/compiler/ir/ir_construction.h>
+@@ -49937,6 +49938,18 @@
+             function_referenced_outside[use.entity.value] = true;
+         }
+     }
++    // Snapshot alias/outside-use roots before the initializer lexical scan.
++    bool* init_root_without_member = arena_allocate(temporary_arena, bool, parse.entity_count ? parse.entity_count : 1);
++    if (parse.entity_count)
++    {
++        memcpy(init_root_without_member, function_referenced_outside, sizeof(*init_root_without_member) * parse.entity_count);
++    }
++    u32* init_root_member_counts = arena_allocate(temporary_arena, u32, parse.entity_count ? parse.entity_count : 1);
++    memset(init_root_member_counts, 0, sizeof(*init_root_member_counts) * parse.entity_count);
++    enum { INIT_ROOT_ROW_LIMIT = 128 };
++    u32* init_root_hit_tokens = arena_allocate(temporary_arena, u32, INIT_ROOT_ROW_LIMIT);
++    u32* init_root_hit_entities = arena_allocate(temporary_arena, u32, INIT_ROOT_ROW_LIMIT);
++    u64 init_root_member_hits = 0;
+     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+     {
+         CDeclaration declaration = parse.declarations[declaration_index];
+@@ -49957,10 +49970,27 @@
+             {
+                 continue;
+             }
++            bool member_name = token_index > initializer_start &&
++                               (c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_DOT) ||
++                                c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_ARROW));
+             CEntityId referenced = c_parse_lookup_entity_token(&parse, preprocess.spelling_base, (CScopeId){.value = 0}, &token);
+             if (referenced.value < parse.entity_count && parse.entities[referenced.value].kind == C_ENTITY_FUNCTION)
+             {
+                 function_referenced_outside[referenced.value] = true;
++                if (member_name)
++                {
++                    init_root_member_counts[referenced.value] += 1;
++                    if (init_root_member_hits < INIT_ROOT_ROW_LIMIT)
++                    {
++                        init_root_hit_tokens[init_root_member_hits] = token_index;
++                        init_root_hit_entities[init_root_member_hits] = referenced.value;
++                    }
++                    init_root_member_hits += 1;
++                }
++                else
++                {
++                    init_root_without_member[referenced.value] = true;
++                }
+             }
+         }
+     }
+@@ -50407,6 +50437,132 @@
+             }
+         }
+     }
++    // Replay the existing dependency graph, omitting only initializer
++    // member-name seeds; no production reachability state is modified.
++    bool* init_root_replay_needed = arena_allocate(temporary_arena, bool, parse.declaration_count ? parse.declaration_count : 1);
++    memset(init_root_replay_needed, 0, sizeof(*init_root_replay_needed) * parse.declaration_count);
++    u32* init_root_replay_worklist = arena_allocate(temporary_arena, u32, parse.declaration_count ? parse.declaration_count : 1);
++    u32 init_root_replay_count = 0;
++    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
++    {
++        CDeclaration declaration = parse.declarations[declaration_index];
++        if (declaration.kind != C_DECLARATION_FUNCTION || !declaration.is_definition)
++        {
++            continue;
++        }
++        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
++        bool inline_definition = declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
++        bool referenced_outside = declaration.entity.value < parse.entity_count && init_root_without_member[declaration.entity.value];
++        bool registered = declaration.entity.value < parse.entity_count &&
++                          (entity_constructor[declaration.entity.value] || entity_destructor[declaration.entity.value]);
++        if ((!internal && !inline_definition) || referenced_outside || registered)
++        {
++            init_root_replay_needed[declaration_index] = true;
++            init_root_replay_worklist[init_root_replay_count++] = declaration_index;
++        }
++    }
++    for (u32 use_index = 0; use_index < parse.identifier_use_count; use_index += 1)
++    {
++        CIdentifierUse use = parse.identifier_uses[use_index];
++        if (use.entity.value >= parse.entity_count)
++        {
++            continue;
++        }
++        u32 candidate_index = entity_function_declarations[use.entity.value];
++        if (candidate_index == UINT32_MAX)
++        {
++            continue;
++        }
++        u32 owner_index = use.token_index < preprocess.token_count ? token_function_declarations_plus_one[use.token_index] - 1 : UINT32_MAX;
++        if (owner_index == UINT32_MAX && !init_root_replay_needed[candidate_index])
++        {
++            init_root_replay_needed[candidate_index] = true;
++            init_root_replay_worklist[init_root_replay_count++] = candidate_index;
++        }
++    }
++    while (init_root_replay_count)
++    {
++        u32 owner_index = init_root_replay_worklist[--init_root_replay_count];
++        for (u32 dependency_index = function_dependency_heads[owner_index]; dependency_index != UINT32_MAX;
++             dependency_index = function_dependency_next[dependency_index])
++        {
++            u32 candidate_index = function_dependency_targets[dependency_index];
++            if (!init_root_replay_needed[candidate_index])
++            {
++                init_root_replay_needed[candidate_index] = true;
++                init_root_replay_worklist[init_root_replay_count++] = candidate_index;
++            }
++        }
++    }
++    u64 init_root_current_functions = 0, init_root_replay_functions = 0;
++    u64 init_root_current_body_tokens = 0, init_root_replay_body_tokens = 0;
++    u64 init_root_newly_dead = 0, init_root_replay_extra = 0;
++    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
++    {
++        CDeclaration declaration = parse.declarations[declaration_index];
++        if (declaration.kind != C_DECLARATION_FUNCTION || !declaration.is_definition)
++        {
++            continue;
++        }
++        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
++        bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
++        bool public_definition = !internal && !inline_definition;
++        // Section names independently retain functions at IR creation time.
++        bool section_definition = (internal || inline_definition) &&
++                                  c_declaration_section_name(temporary_arena, preprocess, declaration).length != 0;
++        bool current = public_definition || function_needed[declaration_index] || section_definition;
++        bool replay = public_definition || init_root_replay_needed[declaration_index] || section_definition;
++        init_root_current_functions += current;
++        init_root_replay_functions += replay;
++        init_root_current_body_tokens += current ? declaration.body_token_count : 0;
++        init_root_replay_body_tokens += replay ? declaration.body_token_count : 0;
++        init_root_replay_extra += replay && !current;
++        if (current && !replay)
++        {
++            if (init_root_newly_dead < INIT_ROOT_ROW_LIMIT)
++            {
++                fprintf(stderr, "INIT_ROOT_DEAD\t%.*s\t%.*s\t%u\t%u\n", (int)source_path.length,
++                        source_path.pointer ? (char const*)source_path.pointer : "", (int)declaration.name.length,
++                        declaration.name.pointer ? (char const*)declaration.name.pointer : "", declaration_index, declaration.body_token_count);
++            }
++            init_root_newly_dead += 1;
++        }
++    }
++    u64 init_root_member_entities = 0, init_root_member_only_entities = 0;
++    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
++    {
++        if (init_root_member_counts[entity_index])
++        {
++            init_root_member_entities += 1;
++            init_root_member_only_entities += !init_root_without_member[entity_index];
++        }
++    }
++    u64 init_root_reported_hits = BUSTER_MIN(init_root_member_hits, (u64)INIT_ROOT_ROW_LIMIT);
++    for (u32 hit_index = 0; hit_index < init_root_reported_hits; hit_index += 1)
++    {
++        u32 token_index = init_root_hit_tokens[hit_index];
++        u32 entity_index = init_root_hit_entities[hit_index];
++        String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]);
++        u32 definition_index = entity_function_declarations[entity_index];
++        bool current = definition_index != UINT32_MAX && function_needed[definition_index];
++        bool replay = definition_index != UINT32_MAX && init_root_replay_needed[definition_index];
++        fprintf(stderr, "INIT_ROOT_MARK\t%.*s\t%u\t%.*s\t%u\t%u\t%u\t%u\t%u\n", (int)source_path.length,
++                source_path.pointer ? (char const*)source_path.pointer : "", token_index, (int)name.length,
++                name.pointer ? (char const*)name.pointer : "", entity_index, init_root_member_counts[entity_index],
++                (u32)init_root_without_member[entity_index], (u32)current, (u32)replay);
++    }
++    fprintf(stderr, "INIT_ROOT_SUMMARY\t%.*s\tmember_hits=%llu\tmember_entities=%llu\tmember_only_entities=%llu"
++                    "\thits_suppressed=%llu\tcurrent_functions=%llu\treplay_functions=%llu"
++                    "\tcurrent_body_tokens=%llu\treplay_body_tokens=%llu\tnewly_dead=%llu\tdead_rows_suppressed=%llu"
++                    "\treplay_extra=%llu\n",
++            (int)source_path.length, source_path.pointer ? (char const*)source_path.pointer : "",
++            (unsigned long long)init_root_member_hits, (unsigned long long)init_root_member_entities,
++            (unsigned long long)init_root_member_only_entities, (unsigned long long)(init_root_member_hits - init_root_reported_hits),
++            (unsigned long long)init_root_current_functions, (unsigned long long)init_root_replay_functions,
++            (unsigned long long)init_root_current_body_tokens, (unsigned long long)init_root_replay_body_tokens,
++            (unsigned long long)init_root_newly_dead,
++            (unsigned long long)(init_root_newly_dead - BUSTER_MIN(init_root_newly_dead, (u64)INIT_ROOT_ROW_LIMIT)),
++            (unsigned long long)init_root_replay_extra);
+     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+     {
+         CDeclaration declaration = parse.declarations[declaration_index];
