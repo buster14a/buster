@@ -43,6 +43,7 @@ on:
       - tools/native_retirement_integration_security_test.py
       - tools/native_retirement_integration_test.py
       - tools/native-retirement-mingw/**
+      - tools/native-retirement-darwin/**
       - docs/native-retirement-sdks-v1.json
       - tools/native_retirement_external_test.py
       - tools/native_retirement_result_input.py
