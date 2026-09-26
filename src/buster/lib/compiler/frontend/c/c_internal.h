@@ -184,11 +184,11 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_named_label_at(CP
            c_ir_named_label_proven_at(preprocess, body_start, index, body_end);
 }
 BUSTER_C_EXTERN bool c_ir_decode_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
-                                                                  u32 start, u32 end, CIrDecodedString* decoded_out);
+                                                                  u32 start, u32 end, CStringLiteralMemo const* memo, CIrDecodedString* decoded_out);
 // The same answer without the bytes, for the callers that only size or type
 // the literal; see the definition.
 BUSTER_C_EXTERN bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
-                                                                 u32 start, u32 end, CStringCountMemo* memo, CIrDecodedString* decoded_out);
+                                                                 u32 start, u32 end, CStringLiteralMemo* memo, CIrDecodedString* decoded_out);
 BUSTER_C_EXTERN String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out);
 BUSTER_C_EXTERN CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start,
                                                    u32* invalid_specifier);
@@ -292,24 +292,38 @@ BUSTER_C_EXTERN CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId 
 BUSTER_C_EXTERN u32 c_parse_scope_distance(CParseResult* result, CScopeId candidate, CScopeId scope);
 BUSTER_C_EXTERN bool c_token_spelling_equal(char8 const* spelling_base, CToken token, String8 spelling);
 
-// Element counts of narrow string-literal fragments, recorded the first time
-// semantic analysis counts a final-stream token so every later consumer that
-// sizes or types the same literal reads the count instead of walking the
-// spelling again (see c_ir_count_string_literal_range_for_target). Keys are
-// token indices of `tokens`, the one stream the memo answers for; a query
-// against any other token array bypasses it. The header and its slots live
-// in the parse arena, which is never rewound, so the wholesale CParseResult
-// restore of speculative rollback keeps a valid pointer.
-struct CStringCountMemo
+// The decoded bytes of narrow string-literal fragments, decoded once per
+// final-stream token. Semantic analysis records a fragment the first time a
+// consumer sizes or types it (c_ir_count_string_literal_range_for_target), so
+// every later consumer that sizes, types or reads the same literal -- the
+// remaining semantic queries and every lowering decode -- takes the recorded
+// bytes instead of walking the spelling again. Keys are token indices of
+// `tokens`, the one stream the memo answers for; a query against any other
+// token array bypasses it. The header, its slots and every recorded buffer
+// live in the parse arena, which is never rewound and outlives lowering, so
+// speculative rollback's wholesale CParseResult restore keeps a valid pointer
+// and lowering reads buffers that stay valid for the translation unit. Only
+// semantic analysis records; lowering reads, and every reader copies the
+// bytes it keeps, so a recorded buffer is never written after it is made.
+typedef struct CStringLiteralMemoSlot CStringLiteralMemoSlot;
+struct CStringLiteralMemoSlot
+{
+    u8* bytes;
+    // Decoded byte count, which is the element count of a narrow fragment.
+    u32 length;
+    // token_index + 1; zero marks an empty slot.
+    u32 key;
+};
+
+struct CStringLiteralMemo
 {
     Arena* arena;
     CToken const* tokens;
-    // (token_index + 1) << 32 | element_count; zero marks an empty slot.
-    u64* slots;
+    CStringLiteralMemoSlot* slots;
     u32 capacity;
     u32 count;
 };
-BUSTER_C_EXTERN CStringCountMemo* c_string_count_memo_create(Arena* arena, CToken const* tokens);
+BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
 
