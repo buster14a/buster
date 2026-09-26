@@ -78,6 +78,8 @@ MAX_STDERR_BYTES = 32 * 1024
 MAX_EVIDENCE_BYTES = 16 * 1024 * 1024
 MAX_READY_BYTES = 64 * 1024
 MAX_SUMMARY_BYTES = 4 * 1024 * 1024
+MAX_DISPATCH_DIAGNOSTIC_BYTES = 32 * 1024
+MAX_NONCANONICAL_SAMPLES = 4
 SUMMARY_RESERVE_BYTES = MAX_READY_BYTES + MAX_SUMMARY_BYTES
 SHOW_TIMEOUT_SECONDS = 2.0
 SELECT_QUANTUM_SECONDS = 0.10
@@ -381,6 +383,7 @@ class SdBus:
         self.armed = False
         self.manager_sender: str | None = None
         self.connection_unique_name: str | None = None
+        self.last_dispatch_kind = "unclassified_without_message"
 
     def _function(self, name: str, arguments: list[object], result: object) -> object:
         function = getattr(self.lib, name)
@@ -570,10 +573,13 @@ class SdBus:
         return interface, names, main_pids, invalidated
 
     def process_one(self) -> tuple[int, dict[str, object] | None]:
+        self.last_dispatch_kind = "unclassified_without_message"
         message = ctypes.c_void_p()
         result = int(self.process(self.bus, ctypes.byref(message)))
         require(result >= 0, f"sd_bus_process failed ({result})")
         if not message.value:
+            if result > 0:
+                self.last_dispatch_kind = "positive_null"
             return result, None
         try:
             message_type = ctypes.c_uint8()
@@ -593,6 +599,7 @@ class SdBus:
                 acquired = self._read_string(message, "observer NameAcquired name")
                 require(acquired == self.connection_unique_name,
                         f"unexpected observer NameAcquired name; {metadata}")
+                self.last_dispatch_kind = "observer_control"
                 return result, None
             require(UNIQUE_BUS_NAME.fullmatch(sender) is not None and
                     sender == self.manager_sender,
@@ -613,7 +620,8 @@ class SdBus:
                         f"unexpected Manager unit-signal metadata; {metadata}")
                 unit, unit_path = self._read_unit_path(message)
                 return result, {"member": member, "interface": interface, "path": path,
-                                "sender": sender, "unit": unit, "object_path": unit_path}
+                                "sender": sender, "signature": signature,
+                                "unit": unit, "object_path": unit_path}
             if member == "PropertiesChanged":
                 require(interface == "org.freedesktop.DBus.Properties" and
                         path.startswith(BASE_UNIT_PATH + "/") and signature == "sa{sv}as",
@@ -622,6 +630,7 @@ class SdBus:
                 # enter the broker-specific body parser; malformed broker paths
                 # still reach the lifecycle's fail-closed orphan handling.
                 if not path.startswith(BASE_UNIT_PATH_ENCODED_BROKER_PREFIX):
+                    self.last_dispatch_kind = "ignored_unrelated_properties"
                     return result, None
                 changed_interface, names, pids, invalidated = self._read_changed(message, metadata)
                 return result, {"member": member, "interface": interface, "path": path,
@@ -837,6 +846,18 @@ def _safe_stop_file(writer: EvidenceWriter) -> bool:
 
 
 class BrokerObserver:
+    @staticmethod
+    def _new_dispatch_diagnostics() -> dict[str, object]:
+        # These five disjoint counters sum to bus_dispatch_count. Unit-signal
+        # counters below are subsets of positive_with_message, not a partition.
+        return {"positive_with_message": 0, "positive_null": 0,
+                "ignored_unrelated_properties": 0, "observer_control": 0,
+                "unclassified_without_message": 0,
+                "subsets": {"ignored_unrelated_unit_new": 0,
+                            "ignored_unrelated_unit_removed": 0,
+                            "noncanonical_broker_unit_signals": 0},
+                "noncanonical_samples": [], "noncanonical_samples_omitted": 0}
+
     def __init__(self, bus: SdBus, writer: EvidenceWriter, boot_id: str, boot_id_raw: str,
                  deadline: float, run_id: str | None, run_attempt: int | None):
         self.bus = bus
@@ -848,6 +869,7 @@ class BrokerObserver:
         self.run_attempt = run_attempt
         self.event_seq = 0
         self.bus_dispatch_count = 0
+        self.dispatch_diagnostics = self._new_dispatch_diagnostics()
         self.bus_budget_exhausted = False
         self.units: list[Lifecycle] = []
         self.current_by_path: dict[str, Lifecycle] = {}
@@ -868,6 +890,42 @@ class BrokerObserver:
         if reason not in self.global_reasons:
             self.global_reasons.append(reason[:512])
         self.event_loss_detected = self.event_loss_detected or event_loss
+
+    def _record_dispatch(self, message: dict[str, object] | None) -> None:
+        self.bus_dispatch_count += 1
+        kind = ("positive_with_message" if message is not None else
+                getattr(self.bus, "last_dispatch_kind", "unclassified_without_message"))
+        if kind not in ("positive_with_message", "positive_null",
+                        "ignored_unrelated_properties", "observer_control",
+                        "unclassified_without_message"):
+            kind = "unclassified_without_message"
+        self.dispatch_diagnostics[kind] += 1
+
+    def _record_noncanonical_unit(self, message: dict[str, object]) -> None:
+        diagnostics = self.dispatch_diagnostics
+        diagnostics["subsets"]["noncanonical_broker_unit_signals"] += 1
+        samples = diagnostics["noncanonical_samples"]
+        if len(samples) >= MAX_NONCANONICAL_SAMPLES:
+            diagnostics["noncanonical_samples_omitted"] += 1
+            return
+        # The sender and manager signal header were authenticated by SdBus.
+        # Retain only the two bounded identity arguments, never property data.
+        sample = {key: message[key] for key in
+                  ("sender", "interface", "member", "path", "signature",
+                   "unit", "object_path")}
+        for key, byte_limit in (("unit", 255), ("object_path", 4096)):
+            value = str(sample[key]).encode("utf-8")
+            if len(value) > byte_limit:
+                sample[key] = value[:64].decode("utf-8", "replace")
+                sample[key + "_truncated"] = True
+                sample[key + "_utf8_bytes"] = len(value)
+                sample[key + "_sha256"] = hashlib.sha256(value).hexdigest()
+        candidate = {**diagnostics, "noncanonical_samples": [*samples, sample]}
+        if len(json.dumps(candidate, ensure_ascii=True, separators=(",", ":")).encode()) <= \
+                MAX_DISPATCH_DIAGNOSTIC_BYTES:
+            samples.append(sample)
+        else:
+            diagnostics["noncanonical_samples_omitted"] += 1
 
     def _emit(self, body: dict[str, object], unit: str | None = None) -> tuple[int, int]:
         self.event_seq += 1
@@ -901,6 +959,41 @@ class BrokerObserver:
         lifecycle.triggers.add(trigger)
         self.queue.append((lifecycle, trigger, seq))
 
+    def _schedule_preexec_retry(self, lifecycle: Lifecycle, pid: int,
+                                seq: int, event_ns: int) -> None:
+        # A later same-PID Service signal can expose the completed Type=exec
+        # transition after the first three immediate snapshots saw executor.
+        # A retry does not turn a partial into proof; as_json still requires an
+        # exact full witness for every positive-PID snapshot identity.
+        if (pid <= 0 or lifecycle.removed or 0 in lifecycle.main_pid_values or
+                self.stop_seen or time.monotonic() >= self.deadline or
+                len(lifecycle.triggers) >= MAX_SNAPSHOTS_PER_GENERATION or
+                not lifecycle.snapshots or lifecycle.manager_incomplete_reasons or
+                lifecycle.process_incomplete_reasons or
+                (self.current_query is not None and
+                 self.current_query.get("lifecycle") is lifecycle) or
+                any(row is lifecycle for row, _trigger, _seq in self.queue)):
+            return
+        latest = lifecycle.snapshots[-1]
+        identity = Lifecycle.positive_pid_identity(latest)
+        if (latest.get("process_capture_state") != "known_preexec_executable_transition" or
+                latest.get("active_state") != "activating" or latest.get("substate") != "start" or
+                latest.get("initial_exe_observed") not in PREEXEC_EXECUTABLES or
+                latest.get("main_pid") != pid or identity is None or
+                latest.get("finished_monotonic_ns", event_ns) >= event_ns or
+                latest.get("trigger_event_seq", seq) >= seq or
+                lifecycle.invocation_id != latest.get("invocation_id") or
+                lifecycle.main_pid != pid or lifecycle.cgroup != latest.get("cgroup")):
+            return
+        positive = [row for row in lifecycle.snapshots
+                    if isinstance(row.get("main_pid"), int) and row["main_pid"] > 0]
+        if any(Lifecycle.positive_pid_identity(row) != identity or
+               (not row.get("complete") and
+                row.get("process_capture_state") not in SUPERSEDABLE_CAPTURE_STATES)
+               for row in positive):
+            return
+        self._schedule(lifecycle, f"preexec-retry:{len(lifecycle.snapshots)}", seq)
+
     def _unit_signal(self, message: dict[str, object]) -> None:
         member = str(message["member"])
         unit = str(message["unit"])
@@ -909,7 +1002,12 @@ class BrokerObserver:
             parse_broker_unit(unit)
         except ObserverError:
             if path.startswith(BASE_UNIT_PATH_ENCODED_BROKER_PREFIX):
+                self._record_noncanonical_unit(message)
                 self.mark_global("noncanonical_broker_unit_signal", event_loss=True)
+            else:
+                key = ("ignored_unrelated_unit_new" if member == "UnitNew" else
+                       "ignored_unrelated_unit_removed")
+                self.dispatch_diagnostics["subsets"][key] += 1
             return
         expected = self.bus.object_path(unit)
         require(path == expected, "manager unit signal path does not encode its exact unit name")
@@ -989,6 +1087,9 @@ class BrokerObserver:
                 if key not in lifecycle.main_pid_values:
                     lifecycle.main_pid_values.add(key)
                     self._schedule(lifecycle, "mainpid:" + str(key), seq)
+        if (message["unit_interface"] == "org.freedesktop.systemd1.Service" and
+                "MainPID" in changed and len(main_pids) == 1):
+            self._schedule_preexec_retry(lifecycle, int(main_pids[0]), seq, event_ns)
 
     def handle_message(self, message: dict[str, object]) -> None:
         member = str(message["member"])
@@ -1010,7 +1111,7 @@ class BrokerObserver:
             result, message = self.bus.process_one()
             if result == 0:
                 break
-            self.bus_dispatch_count += 1
+            self._record_dispatch(message)
             if self.bus_dispatch_count > MAX_BUS_DISPATCHES:
                 self.bus_budget_exhausted = True
                 self.mark_global("manager_bus_dispatch_budget_exceeded", event_loss=True)
@@ -1510,7 +1611,7 @@ class BrokerObserver:
             result, message = self.bus.process_one()
             if result == 0:
                 break
-            self.bus_dispatch_count += 1
+            self._record_dispatch(message)
             if self.bus_dispatch_count > MAX_BUS_DISPATCHES:
                 self.bus_budget_exhausted = True
                 self.mark_global("manager_bus_dispatch_budget_exceeded", event_loss=True)
@@ -1591,6 +1692,10 @@ class BrokerObserver:
             not self.global_reasons and all(bool(row["manager_lifecycle_complete"]) for row in units))
         process_complete = (bool(units) and self.stop_seen and not self.global_reasons and
                             all(bool(row["process_complete"]) for row in units))
+        require(len(json.dumps(self.dispatch_diagnostics, ensure_ascii=True,
+                               separators=(",", ":")).encode()) <=
+                MAX_DISPATCH_DIAGNOSTIC_BYTES,
+                "dispatch diagnostic summary exceeds bound")
         return {"schema": SCHEMA, "kind": "SUMMARY", "boot_id": self.boot_id,
                 "boot_id_raw": self.boot_id_raw, "run_id": self.run_id,
                 "run_attempt": self.run_attempt, "observer_pid": self.observer_pid,
@@ -1600,6 +1705,7 @@ class BrokerObserver:
                 "ended_monotonic_ns": time.monotonic_ns(), "stop_seen": self.stop_seen,
                 "event_count": self.writer.event_count, "event_bytes": self.writer.event_bytes,
                 "bus_dispatch_count": self.bus_dispatch_count,
+                "dispatch_diagnostics": self.dispatch_diagnostics,
                 "capture_bytes": self.writer.capture_bytes,
                 "event_loss_detected": self.event_loss_detected,
                 "event_stream_complete": event_stream_complete,
@@ -2366,6 +2472,9 @@ def _self_test() -> None:
     event_observer.queue = deque()
     event_observer.global_reasons = []
     event_observer.event_loss_detected = False
+    event_observer.dispatch_diagnostics = BrokerObserver._new_dispatch_diagnostics()
+    event_observer.deadline = time.monotonic() + 5.0
+    event_observer.stop_seen = False
     event_observer.handle_message({"member": "UnitNew", "interface": "org.freedesktop.systemd1.Manager",
         "sender": ":1.4", "unit": lifecycle.unit, "object_path": lifecycle.object_path})
     event_observer.handle_message({"member": "PropertiesChanged",
@@ -2391,6 +2500,153 @@ def _self_test() -> None:
         assert event_observer.event_loss_detected
         assert "manager_reloading_during_observation" in event_observer.global_reasons
         checks += 1
+    # Attempt 20's @3 sequence: three same-generation, same-PID queries all
+    # completed in the known systemd-executor pre-exec phase, then the manager
+    # emitted another Service MainPID=760 signal after the third completion.
+    # The first/unique MainPID triggers are already consumed at that point.
+    retry_unit = "buster-bench-systemd-broker@3-758-65000.service"
+    retry_path = (BASE_UNIT_PATH_ENCODED_BROKER_PREFIX +
+                  "3_2d758_2d65000_2eservice")
+    retry_row = Lifecycle(retry_unit, retry_path, 1, 40, time.monotonic_ns() - 80_000_000)
+    retry_row.triggers = {"unit-new", "properties-first", "mainpid:760"}
+    retry_row.main_pid_values = {760}
+    retry_row.invocation_id = "a" * 32
+    retry_row.main_pid = 760
+    retry_row.cgroup = "/system.slice/broker.instance"
+    retry_row.snapshots = [{"boot_id": boot, "unit": retry_unit,
+                            "object_path": retry_path, "generation": 1,
+                            "trigger": trigger, "trigger_event_seq": seq,
+                            "manager_properties_complete": True,
+                            "process_capture_complete": False, "complete": False,
+                            "process_capture_state": "known_preexec_executable_transition",
+                            "active_state": "activating", "substate": "start",
+                            "main_pid": 760, "invocation_id": "a" * 32,
+                            "exec_main_start_timestamp_monotonic": 120570000,
+                            "cgroup": "/system.slice/broker.instance", "start_ticks": 12056,
+                            "initial_exe_observed": "/usr/lib/systemd/systemd-executor",
+                            "finished_monotonic_ns": time.monotonic_ns() - 20_000_000}
+                           for trigger, seq in (("unit-new", 40), ("properties-first", 41),
+                                                ("mainpid:760", 41))]
+    retry_observer = object.__new__(BrokerObserver)
+    retry_observer.bus = FixturePathBus()
+    retry_observer.writer = FixtureEventWriter()
+    retry_observer.boot_id = boot
+    retry_observer.boot_id_raw = raw
+    retry_observer.event_seq = 46
+    retry_observer.event_count_by_unit = {}
+    retry_observer.current_query = None
+    retry_observer.current_by_path = {retry_path: retry_row}
+    retry_observer.queue = deque()
+    retry_observer.deadline = time.monotonic() + 5.0
+    retry_observer.global_reasons = []
+    retry_observer.event_loss_detected = False
+    retry_observer.dispatch_diagnostics = BrokerObserver._new_dispatch_diagnostics()
+    retry_observer.stop_seen = False
+    later_service = {"member": "PropertiesChanged", "path": retry_path,
+                     "unit_interface": "org.freedesktop.systemd1.Service",
+                     "sender": ":1.4", "changed_properties": ["MainPID"],
+                     "invalidated_properties": [], "main_pids": [760]}
+    retry_observer.handle_message(later_service)
+    assert len(retry_observer.queue) == 1
+    assert retry_observer.queue[0][0] is retry_row and \
+           retry_observer.queue[0][1] == "preexec-retry:3"
+    assert len(retry_row.snapshots) == 3 and len(retry_row.triggers) == 4
+    checks += 1
+    retry_observer.handle_message(later_service)
+    assert len(retry_observer.queue) == 1 and len(retry_row.snapshots) == 3
+    checks += 1
+    retry_observer.queue.clear()
+    retry_row.snapshots.append({**retry_row.snapshots[-1],
+                                "trigger": "preexec-retry:3",
+                                "trigger_event_seq": retry_observer.event_seq,
+                                "finished_monotonic_ns": time.monotonic_ns() - 1_000_000})
+    retry_observer.handle_message(later_service)
+    assert len(retry_observer.queue) == 1 and retry_observer.queue[0][1] == \
+           "preexec-retry:4"
+    checks += 1
+    retry_observer.queue.clear()
+    retry_row.snapshots[0]["start_ticks"] += 1
+    retry_observer.handle_message(later_service)
+    assert not retry_observer.queue  # An earlier positive capture had another identity.
+    retry_row.snapshots[0]["start_ticks"] -= 1
+    checks += 1
+    retry_row.snapshots[0]["invocation_id"] = "b" * 32
+    retry_observer.handle_message(later_service)
+    assert not retry_observer.queue
+    retry_row.snapshots[0]["invocation_id"] = "a" * 32
+    checks += 1
+    for blocked in ("hard", "zero", "removed", "deadline", "stop", "full", "cap"):
+        saved_deadline = retry_observer.deadline
+        saved_stop = retry_observer.stop_seen
+        saved_snapshot = retry_row.snapshots[-1]
+        saved_triggers = retry_row.triggers.copy()
+        if blocked == "hard":
+            retry_row.process_incomplete_reasons.append("identity_contradiction")
+        elif blocked == "zero":
+            retry_row.main_pid_values.add(0)
+        elif blocked == "removed":
+            retry_row.removed = True
+        elif blocked == "deadline":
+            retry_observer.deadline = time.monotonic() - 1.0
+        elif blocked == "stop":
+            retry_observer.stop_seen = True
+        elif blocked == "full":
+            retry_row.snapshots[-1] = {**saved_snapshot, "complete": True,
+                                       "process_capture_state": "full_process_witness"}
+        else:
+            retry_row.triggers.update(("bounded-extra-1", "bounded-extra-2"))
+        retry_observer._schedule_preexec_retry(retry_row, 760,
+                                               retry_observer.event_seq + 1,
+                                               time.monotonic_ns())
+        assert not retry_observer.queue, blocked
+        retry_observer.deadline = saved_deadline
+        retry_observer.stop_seen = saved_stop
+        retry_row.snapshots[-1] = saved_snapshot
+        retry_row.triggers = saved_triggers
+        retry_row.process_incomplete_reasons.clear()
+        retry_row.main_pid_values.discard(0)
+        retry_row.removed = False
+        checks += 1
+    retry_observer.bus.last_dispatch_kind = "positive_null"
+    retry_observer.bus_dispatch_count = 0
+    retry_observer._record_dispatch(None)
+    retry_observer.bus.last_dispatch_kind = "observer_control"
+    retry_observer._record_dispatch(None)
+    retry_observer.bus.last_dispatch_kind = "ignored_unrelated_properties"
+    retry_observer._record_dispatch(None)
+    retry_observer._record_dispatch({"member": "UnitNew"})
+    counters = retry_observer.dispatch_diagnostics
+    assert sum(counters[key] for key in ("positive_with_message", "positive_null",
+           "ignored_unrelated_properties", "observer_control",
+           "unclassified_without_message")) == retry_observer.bus_dispatch_count == 4
+    checks += 1
+    for member in ("UnitNew", "UnitRemoved"):
+        retry_observer._unit_signal({"member": member, "unit": "unrelated.socket",
+            "object_path": "/org/freedesktop/systemd1/unit/unrelated_2esocket"})
+    assert counters["subsets"]["ignored_unrelated_unit_new"] == 1
+    assert counters["subsets"]["ignored_unrelated_unit_removed"] == 1
+    checks += 1
+    rejected = {"member": "UnitNew", "interface": "org.freedesktop.systemd1.Manager",
+                "path": "/org/freedesktop/systemd1", "signature": "so", "sender": ":1.4",
+                "unit": "buster-bench-systemd-broker@notcanonical.service",
+                "object_path": retry_path + "_2dbad"}
+    for _ in range(MAX_NONCANONICAL_SAMPLES + 1):
+        retry_observer._unit_signal(rejected)
+    assert counters["subsets"]["noncanonical_broker_unit_signals"] == 5
+    assert len(counters["noncanonical_samples"]) == MAX_NONCANONICAL_SAMPLES
+    assert counters["noncanonical_samples_omitted"] == 1
+    assert counters["noncanonical_samples"][0] == rejected
+    assert "noncanonical_broker_unit_signal" in retry_observer.global_reasons
+    assert len(json.dumps(counters).encode()) <= MAX_DISPATCH_DIAGNOSTIC_BYTES
+    checks += 1
+    bounded_observer = object.__new__(BrokerObserver)
+    bounded_observer.dispatch_diagnostics = BrokerObserver._new_dispatch_diagnostics()
+    bounded_observer._record_noncanonical_unit({**rejected, "unit": "x" * 256})
+    bounded_sample = bounded_observer.dispatch_diagnostics["noncanonical_samples"][0]
+    assert bounded_sample["unit_truncated"] is True
+    assert bounded_sample["unit_utf8_bytes"] == 256
+    assert bounded_sample["unit_sha256"] == hashlib.sha256(b"x" * 256).hexdigest()
+    checks += 1
     class FixtureFinalBus:
         def __init__(self, messages: int):
             self.remaining = messages
@@ -2407,6 +2663,7 @@ def _self_test() -> None:
         final_observer.bus = FixtureFinalBus(queued)
         final_observer.deadline = time.monotonic() + 5.0
         final_observer.bus_dispatch_count = 0
+        final_observer.dispatch_diagnostics = BrokerObserver._new_dispatch_diagnostics()
         final_observer.bus_budget_exhausted = False
         final_observer.global_reasons = []
         final_observer.event_loss_detected = False
