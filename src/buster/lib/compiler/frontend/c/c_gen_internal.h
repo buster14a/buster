@@ -25,7 +25,64 @@ struct CIrExt80Big
     u32 count;
 };
 
+// Work performed by direct-SSA trivial-parameter simplification. Parameter and
+// incoming visits count the same evaluation events for the notification agenda
+// and its full-sweep test reference. `removed` counts every unlinked parameter
+// and `trivial` the subset whose removal changed a root. The remaining fields
+// charge the agenda's own witness recording, survivor classification, watch,
+// notification and dirty-set work.
+typedef struct CIrSsaSimplifyWork CIrSsaSimplifyWork;
+struct CIrSsaSimplifyWork
+{
+    u64 sweeps;
+    u64 block_visits;
+    u64 empty_block_visits;
+    u64 parameter_visits;
+    u64 incoming_visits;
+    u64 removed;
+    u64 trivial;
+    u64 survivors;
+    u64 classified;
+    u64 watch_links;
+    u64 notifications;
+    u64 agenda_words;
+};
+
 #if BUSTER_INCLUDE_TESTS
+// A synthetic simplification input. Parameter p lives in parameter_blocks[p],
+// and each block's list keeps ascending parameter order. Its incoming values
+// are incoming_values[incoming_offsets[p] .. incoming_offsets[p + 1]).
+// `replacements` is the initial forest over value_count values (forwarded
+// parameters point away from themselves); `memory_parameters`, when present,
+// marks parameters whose owner stays in memory.
+typedef struct CTestSsaSimplifyCase CTestSsaSimplifyCase;
+struct CTestSsaSimplifyCase
+{
+    u32 const* parameter_blocks;
+    u32 const* parameter_values;
+    u32 const* incoming_offsets;
+    u32 const* incoming_values;
+    u32 const* replacements;
+    u8 const* memory_parameters;
+    u32 value_count;
+    u32 block_count;
+    u32 parameter_count;
+};
+
+// Production and reference results on independent copies of one case.
+// `identical` compares every value's final root and every block's parameter
+// list, first/last links and count. `retained` counts surviving parameters.
+typedef struct CTestSsaSimplifyResult CTestSsaSimplifyResult;
+struct CTestSsaSimplifyResult
+{
+    CIrSsaSimplifyWork agenda;
+    CIrSsaSimplifyWork reference;
+    u32 retained;
+    bool valid;
+    bool identical;
+};
+
+BUSTER_F_DECL CTestSsaSimplifyResult c_test_ssa_simplify_parameters(Arena* arena, CTestSsaSimplifyCase const* input);
 BUSTER_F_DECL IrValueId c_test_ir_member_place(Arena* arena, Arena* temporary_arena, IrProgram* program,
                                                IrFunction* function, IrValueId operand, String8 member, CPunctuator access,
                                                String8* failure_message);
