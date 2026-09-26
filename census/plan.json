@@ -6,7 +6,7 @@
   "dbgval": "3cf2b016ab04a735bb38b5f2446d4652aa12bb43",
   "defidx": "62088cdb7241c863196069e5b65f48a2296100ad",
   "tag": "a1aa070a54fa7a9abdb669c4e64cfd28d002dd9d",
-  "relcomp": "36262ac0c3d74c868c360722d6b01c5fb06291eb",
+  "relcomp": "d8841829fc134d32f6cfaaccf081920b35643f6f",
   "combined": "2a9383be379c5290065e4730655cf3b06801dac0"
  },
  "variants": [
@@ -14,6 +14,7 @@
  ],
  "build_jobs": 3,
  "timing_repeats": 0,
+ "compact_workloads": true,
  "workload_source": "base",
  "experiments": [],
  "workloads": [

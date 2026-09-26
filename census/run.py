@@ -215,6 +215,7 @@ def main():
                     print(experiment["name"], row, ref, flags, counted["status"],
                           {k: v for k, v in (counted["counters"] or {}).items() if k in experiment.get("show", [])},
                           [t["seconds"] for t in timings], flush=True)
+    outcomes = {}
     for workload in plan.get("workloads", []):
         argv_tail = [arg.replace("$BASE_SRC", builds[f"{plan['workload_source']}-count"]["source"]).replace("$INPUTS", os.environ.get("CENSUS_INPUTS", ""))
                      for arg in workload["argv"]]
@@ -234,8 +235,17 @@ def main():
                         timed = compile_once(builds[f"{ref}-plain"]["binary"], argv_tail, out, tag + "-plain", False, True)
                         timings.append({k: timed[k] for k in ("status", "seconds", "instructions", "object_sha256")})
                 record["plain"] = timings
-                emit(record)
-                print(workload["name"], ref, variant, counted["status"], counted["object_sha256"], [t["seconds"] for t in timings], flush=True)
+                if plan.get("compact_workloads"):
+                    # A sweep's per-record lines outgrow the job log the API
+                    # returns; keep them in results.jsonl and print one line
+                    # per input below.
+                    results.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+                    outcomes.setdefault(workload["name"], {})[ref] = [counted["status"], (counted["object_sha256"] or "-")[:16]]
+                else:
+                    emit(record)
+                    print(workload["name"], ref, variant, counted["status"], counted["object_sha256"], [t["seconds"] for t in timings], flush=True)
+    for name, by_ref in outcomes.items():
+        print("FIXTURE_JSON " + json.dumps({"input": name, "refs": by_ref}, sort_keys=True, separators=(",", ":")), flush=True)
     results.close()
 
 

@@ -20,7 +20,7 @@ def main():
         for name in fixtures:
             workloads.append({"name": f"fixture-{target}-{name[:-2]}",
                               "argv": ["-target", target, "-g0", "-c", f"$BASE_SRC/tests/{name}"], "refs": list(refs)})
-    plan = {"refs": refs, "variants": ["count"], "build_jobs": 3, "timing_repeats": 0,
+    plan = {"refs": refs, "variants": ["count"], "build_jobs": 3, "timing_repeats": 0, "compact_workloads": True,
             "workload_source": "base", "experiments": [], "workloads": workloads}
     json.dump(plan, open(os.path.join(HERE, "plan.json"), "w"), indent=1)
     print(len(workloads), "workloads,", len(refs), "refs")
