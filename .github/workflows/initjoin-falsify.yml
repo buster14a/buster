@@ -1,0 +1,25 @@
+name: Initializer join falsification
+on:
+  push:
+    branches: [research/1319-initjoin-falsify-20260925-astra]
+permissions:
+  contents: read
+jobs:
+  falsification:
+    if: github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Compare exact helpers and separate index under two compilers
+        run: python3 -u tools/investigations/initjoin-20260925/falsify.py
+      - name: Retain all probe attempts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: initjoin-falsification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: initjoin-falsification
+          if-no-files-found: error
+          retention-days: 30
