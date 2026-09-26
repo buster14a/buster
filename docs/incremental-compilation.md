@@ -8,6 +8,7 @@ question: can Buster reuse compilation work at function granularity, safely and
 deterministically, without a daemon, hidden global state, an external database
 or a second permanent IR? The answer comes with evidence.
 
+- Tracking issue: [#1470](https://github.com/buster14a/buster/issues/1470).
 - Source pin: `main` at `ade6ac4b6ecb21f30b61b656439bac476c145e2f`, tree
   `4c5306221fdb22fccc929b55e333163742de17d0`.
 - Code: `src/buster/lib/compiler/incremental/` holds the records, artifact,
