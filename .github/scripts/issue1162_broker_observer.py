@@ -524,10 +524,12 @@ class SdBus:
         self._check(self.exit_container(message), "exit invalidated property array")
         return names
 
-    def _read_changed(self, message: ctypes.c_void_p) -> tuple[str, list[str], list[int], list[str]]:
+    def _read_changed(self, message: ctypes.c_void_p,
+                      metadata: str) -> tuple[str, list[str], list[int], list[str]]:
         interface = self._read_string(message, "PropertiesChanged interface")
         require(interface in ("org.freedesktop.systemd1.Unit", "org.freedesktop.systemd1.Service"),
-                "unexpected interface in unit PropertiesChanged")
+                "unexpected interface in unit PropertiesChanged; " + metadata +
+                "; unit_interface=" + json.dumps(interface[:128], ensure_ascii=True))
         self._check(self.enter_container(message, b"a", b"{sv}"), "enter changed property array")
         names: list[str] = []
         main_pids: list[int] = []
@@ -616,7 +618,12 @@ class SdBus:
                 require(interface == "org.freedesktop.DBus.Properties" and
                         path.startswith(BASE_UNIT_PATH + "/") and signature == "sa{sv}as",
                         f"unexpected unit PropertiesChanged metadata; {metadata}")
-                changed_interface, names, pids, invalidated = self._read_changed(message)
+                # The match covers all systemd units. Only broker-prefix paths
+                # enter the broker-specific body parser; malformed broker paths
+                # still reach the lifecycle's fail-closed orphan handling.
+                if not path.startswith(BASE_UNIT_PATH_ENCODED_BROKER_PREFIX):
+                    return result, None
+                changed_interface, names, pids, invalidated = self._read_changed(message, metadata)
                 return result, {"member": member, "interface": interface, "path": path,
                                 "sender": sender, "unit_interface": changed_interface,
                                 "changed_properties": names, "main_pids": pids,
@@ -1845,6 +1852,32 @@ def _self_test() -> None:
             checks += 1
         else:
             raise AssertionError("untrusted bus or manager signal was accepted")
+    # The unit namespace match also receives legal Socket signals from other
+    # units. Keep their bodies out of the broker-only parser after validating
+    # the frozen manager sender and the complete PropertiesChanged header.
+    property_header = ("PropertiesChanged", "org.freedesktop.DBus.Properties",
+                       BASE_UNIT_PATH + "/avahi_2ddaemon_2esocket", ":1.0", "sa{sv}as")
+    unrelated, released, reads = dispatch_fixture(*property_header,
+                                                    body="org.freedesktop.systemd1.Socket")
+    assert unrelated.process_one() == (1, None)
+    assert released == [True] and reads == []
+    checks += 1
+    brokerish_header = ("PropertiesChanged", "org.freedesktop.DBus.Properties",
+                        BASE_UNIT_PATH_ENCODED_BROKER_PREFIX + "noncanonical",
+                        ":1.0", "sa{sv}as")
+    brokerish, released, reads = dispatch_fixture(*brokerish_header,
+                                                  body="org.freedesktop.systemd1.Socket")
+    try:
+        brokerish.process_one()
+    except ObserverError as exc:
+        reason = str(exc)
+        assert "unit_interface=\"org.freedesktop.systemd1.Socket\"" in reason
+        assert "path=\"" + brokerish_header[2] + "\"" in reason
+        assert len(reason.encode("utf-8")) < 4096
+        assert released == [True] and reads == [b"s"]
+        checks += 1
+    else:
+        raise AssertionError("noncanonical broker path escaped body validation")
     long_metadata = SdBus._signal_metadata("\U0001f62e" * 1000, "org.freedesktop.DBus",
                                            "NameAcquired", "/x" * 1000, "s" * 1000)
     assert len(long_metadata.encode("utf-8")) < 1500
