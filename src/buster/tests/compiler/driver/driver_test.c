@@ -16050,6 +16050,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // The declarator beside list_noreturn carries no marker of its own, so its
     // own call returns. Scanning the whole declarator list marked it too and
     // replaced the explicit return after this call with a noreturn terminator.
+    // The zero return value is the zero idiom: the flags are dead before RET.
     u64 sibling_body = string_first_sequence(noreturn_assembly.output, S8("through_list_sibling:\n"));
     BUSTER_TEST(arguments, sibling_body != BUSTER_STRING_NO_MATCH);
     if (sibling_body != BUSTER_STRING_NO_MATCH)
@@ -16060,7 +16061,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         if (sibling_call != BUSTER_STRING_NO_MATCH)
         {
             String8 after_sibling_call = string_slice(sibling_assembly, sibling_call + S8("call \"list_returns\"\n").length, sibling_assembly.length);
-            BUSTER_TEST(arguments, string_starts_with_sequence(after_sibling_call, S8("\tmov eax, 0x0")));
+            BUSTER_TEST(arguments, string_starts_with_sequence(after_sibling_call, S8("\txor eax, eax")));
         }
     }
     // SQLite compatibility reduced its own set of frontend, lowering and
@@ -16138,6 +16139,44 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             };
             CompilerDriverResult fixture = compiler_driver_execute_invocation(
                 fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+            BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+            if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 fixture_arguments[] = {fixture_path};
+                ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                if (fixture_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(fixture_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(fixture_temporary);
+        }
+    }
+    // Verified machine rewrites (docs/machine-rewrite-campaign.md): each
+    // fixture computes its own expectations and exits zero. The MIR
+    // allocators compile strictly, so a fallback cannot hide the rewritten
+    // encoder paths; NONE (index 1) is the direct-emitter control.
+    String8 c_machine_rewrite_paths[] = {
+        S8("tests/basic_c_machine_rewrites.c"),
+    };
+    for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_machine_rewrite_paths); fixture_index += 1)
+    {
+        for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        {
+            TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
+            String8 fixture_path = buster_test_temporary_path(fixture_temporary.arena, S8("buster-c-machine-rewrite"), S8(""));
+            String8 fixture_command_line[] = {
+                c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_machine_rewrite_paths[fixture_index],
+                S8("-fno-machine-fallback"),
+            };
+            SliceString8 fixture_arguments_slice = {
+                .pointer = fixture_command_line,
+                .length = BUSTER_ARRAY_LENGTH(fixture_command_line) - (allocator_index == 1 ? 1u : 0u),
+            };
+            CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, fixture_arguments_slice));
             BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
             if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
             {
@@ -18284,8 +18323,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // that the call is followed by a trap rather than by a return sequence,
     // and the fixture supplies the control -- die_marked and die_plain differ
     // in nothing but the attribute.  0x0f 0x0b is ud2, which the emitter
-    // writes as raw bytes rather than as a mnemonic.  Pinning an explicit
-    // target keeps the assertion deterministic on any host.
+    // writes as raw bytes rather than as a mnemonic.  The plain call's return
+    // sequence opens with its zero result as the zero idiom (flags are dead
+    // before RET).  Pinning an explicit target keeps the assertion
+    // deterministic on any host.
     String8 c23_noreturn_assembly_command_line[] = {
         S8("-S"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_c23_noreturn.c"),
     };
@@ -18295,7 +18336,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c23_noreturn_assembly.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_marked\"\n\t.byte 0x0f, 0x0b")) != BUSTER_STRING_NO_MATCH);
     BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_scoped\"\n\t.byte 0x0f, 0x0b")) != BUSTER_STRING_NO_MATCH);
-    BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_plain\"\n\tmov eax, 0x0")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_plain\"\n\txor eax, eax")) != BUSTER_STRING_NO_MATCH);
     // The x86-64 byte rows of XCHG and CMPXCHG (#806). `xchg r/m8, r8` is
     // opcode 0x86 and `cmpxchg r/m8, r8` is 0x0F 0xB0 -- a different metadata
     // form from the 0x87 / 0x0F 0xB1 sibling each shares a recipe with, not an

@@ -128,6 +128,19 @@
   variadic signature checks the general incoming-address expansion past 4095
   bytes. Darwin callers extend narrow integer register arguments to 32 bits
   before physical-register staging, as required by its public ABI.
+- The x86-64 encoder applies the verified local rewrites of the
+  [machine rewrite campaign](../machine-rewrite-campaign.md), each an encoding
+  choice under a precondition it decides locally: frame chunks use disp8
+  when the final RBP displacement is a nonzero signed byte; an allocator
+  `COPY` onto its own register and a `RELOAD`/`TEMP_RELOAD` right after the
+  64-bit spill of the same register to the same offset (same block) emit
+  nothing; `MOV_RI` rows and `REMATERIALIZE` edits of zero use `XOR r32, r32`
+  where `machine_x64_flags_dead_at` proves no reader observes the flags;
+  System V frames without callee-saved pushes return through `LEAVE`. The
+  flag proof treats only `CMP`, `TEST`, two-operand ALU rows and `NEG` as
+  killers and only `MACHINE_OPCODE_ROW_FLAGS_USE` rows and inline assembly as
+  readers; keep new flag readers marked, or the proof becomes unsound. New
+  forms come from metadata-published fixed templates, never literal bytes.
 - x86 ADD/SUB/AND/OR/XOR/IMUL rows are three-operand machine SSA with operand
   0 tied to operand 1. Allocators satisfy the physical two-address constraint;
   selectors must not reintroduce a MOV plus mutable USE_DEFINE result.
