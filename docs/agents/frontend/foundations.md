@@ -428,6 +428,19 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   one platform's CI failure.
   `c_test_pointer_width_integer_conversion` lowers the same source for an LLP64
   target and an LP64 one and checks both.
+- Parse-side builtin-kind answers keyed to `preprocess.target` come from one
+  immutable `CTargetBuiltinFacts` record, which `c_preprocess` resolves for the
+  target it stamps on its result and hangs off `CPreprocessDetail`. It holds
+  each kind's `c_parse_builtin_type_layout` answer and integer-literal limit,
+  and is built by calling those helpers, so it cannot disagree with them. Read
+  it through `c_builtin_facts_from_preprocess` only at a call site whose target
+  argument is that result's own `target`: lowering's `target` can differ and
+  keeps its own `CIrTypeContext` tables, a caller-supplied `data_layout` never
+  feeds it, and a hand-built result has no detail block and falls back to the
+  helpers. Non-optimized builds check every record read against the helper.
+  `c_test_builtin_facts_target_alternation` alternates LP64, LLP64 and
+  AArch64 units in one process and compares the record, the hand-built
+  fallback and a failing assertion's diagnostic on each.
 - `IrFunction.opcode_summary` answers *may this function contain opcode X*
   without a scan, and it answers only for the `IR_OPCODE_SUMMARY_TRACKED`
   list: an opcode outside that list is never recorded, so

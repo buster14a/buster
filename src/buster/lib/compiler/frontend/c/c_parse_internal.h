@@ -1,6 +1,7 @@
 #pragma once
 
-// Private test seams for production constexpr, call arity, expression typing, binding, aggregate-tag and label-provenance gate queries.
+// Private test seams for production constexpr, call arity, expression typing, binding, aggregate-tag, label-provenance gate and
+// builtin-kind record queries.
 // Tests own their storage and observe production behavior, not a duplicate
 // implementation. No declarations enter production builds.
 #include <buster/lib/compiler/frontend/c/c.h>
@@ -20,4 +21,10 @@ BUSTER_F_DECL bool c_test_parse_direct_expression_type(Arena* scratch, CPreproce
 // Whether c_parse_validate_label_values would walk this function body's
 // values; the analysis must already have built the scope index.
 BUSTER_F_DECL bool c_test_parse_label_values_needed(CParseResult* result, CPreprocessResult preprocess, CDeclaration const* declaration);
+// The parser's type for one leaf token range at file scope, as expression
+// typing asks for it (literals, names, string and character constants).
+BUSTER_F_DECL CTypeId c_test_parse_expression_leaf_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, u32 start, u32 end);
+// Whether the result carries the builtin-kind record c_preprocess resolves and
+// every entry equals the per-call helpers' answer for the result's target.
+BUSTER_F_DECL bool c_test_builtin_facts_match_target(CPreprocessResult preprocess);
 #endif
