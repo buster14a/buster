@@ -22,8 +22,14 @@ def replace(old, new):
 replace('#include <buster/lib/compiler/llvm/bitcode.h>',
         '#include <buster/lib/compiler/llvm/bitcode.h>\n#include "research_trace.h"')
 replace('struct LlvmBcContext\n{', 'struct LlvmBcContext\n{\n#if R7_TRACE\n    R7Counts r7;\n#endif')
-replace('        LlvmBcTypeRecord* record = context->types + index;',
-        '        R7_ADD(context, intern_rows, 1);\n        LlvmBcTypeRecord* record = context->types + index;')
+a = s.index('static u32 llvm_bc_add_type_record(')
+b = s.index('static u32 llvm_bc_integer_type(', a)
+f = s[a:b]
+old = '        LlvmBcTypeRecord* record = context->types + index;'
+if f.count(old) != 1:
+    raise SystemExit('ambiguous type-interner anchor')
+f = f.replace(old, '        R7_ADD(context, intern_rows, 1);\n' + old)
+s = s[:a] + f + s[b:]
 replace('            equal &= record->operands[operand] == operands[operand];',
         '            R7_ADD(context, intern_operands, 1);\n            equal &= record->operands[operand] == operands[operand];')
 a = s.index('static bool llvm_bc_type_dependencies_ready(')

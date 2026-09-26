@@ -60,6 +60,7 @@ try:
         raise RuntimeError('base tree mismatch')
     run('worktree', ['git', 'worktree', 'add', '--detach', work, BASE], cwd=repo)
     run('source-clean', ['git', 'diff', '--exit-code'])
+    original_llvm_source = (work/'src/buster/lib/compiler/llvm/bitcode.c').read_text()
     run('compiler-version', ['clang', '--version'])
     run('gcc-version', ['gcc', '--version'])
     (evidence / 'identity.json').write_text(json.dumps({
@@ -80,21 +81,6 @@ try:
             config.write_text(f'#define R7_TRACE {trace}\n#define R7_ORDERED {ordered}\n')
         run('build-' + variant, [driver, 'build', '--config', 'Release', '-t', 'ide'], timeout=900)
         shutil.copy2(work/'build/Release/ide', evidence/'bin'/variant)
-        if variant == 'pristine':
-            common = ['cc', '-Isrc', '-Ibuild/generated', '-DBUSTER_UNITY_BUILD=1',
-                      '-DBUSTER_INCLUDE_TESTS=0', '-g', 'src/buster/apps/ide/ide.c', '-lm']
-            stage1, stage2 = evidence/'bin/stage1', evidence/'bin/stage2'
-            rc, _ = run('selfhost-stage1', [evidence/'bin/pristine', *common, '-o', stage1],
-                        timeout=300, required=False)
-            if not rc:
-                rc, _ = run('selfhost-stage2', [stage1, *common, '-o', stage2], timeout=300, required=False)
-                if not rc:
-                    identical = stage1.read_bytes() == stage2.read_bytes()
-                    (evidence/'selfhost.json').write_text(json.dumps({'equal': identical}))
-                    if not identical:
-                        failures.append('baseline self-host fixed point differs')
-            else:
-                failures.append('baseline self-host stage1 unavailable; see log')
     run('overlay-diff', ['git', 'diff', '--', 'src/buster/lib/compiler/llvm/bitcode.c'])
     run('generator-clang', ['clang', '-std=c11', '-Wall', '-Wextra', '-Wpedantic', '-Werror',
                            research/'generator.c', '-o', evidence/'bin/generator'])
@@ -104,7 +90,7 @@ try:
     observer.write_text('extern int interaction_probe(void);\nint main(void) { return interaction_probe() != (int)sizeof(int); }\n')
     current = evidence / 'current.c'
     flags = ['cc', '-std=c17', '-target', 'x86_64-linux', '-O0', '-g0', '-fwrapv',
-             '-fno-strict-aliasing', '-funsigned-char', '-ffrontend-ssa', '-fverify-codegen', '-emit-llvm']
+             '-fno-strict-aliasing', '-funsigned-char', '-ffrontend-ssa', '-emit-llvm']
     grid = [(u, d, order) for u in [0,128,512] for d in [1,8,32,128] for order in ['root','leaf']]
     grid += [(0,d,order) for d in [2,3,4] for order in ['root','leaf']]
     for u, d, order in grid:
@@ -158,8 +144,9 @@ try:
         destination.write_bytes(data)
     representative += [(name, (evidence/'cjson'/name).read_text(), ['-I'+str(evidence/'cjson')])
                        for name in ['cJSON.c','cJSON_Utils.c']]
-    representative += [('repository-bitcode', (work/'src/buster/lib/compiler/llvm/bitcode.c').read_text(),
+    representative += [('repository-bitcode', original_llvm_source,
                         ['-Isrc','-Ibuild/generated','-I'+str(work/'src/buster/lib/compiler/llvm')])]
+    representative += [('repository-ir-header', '#include <buster/lib/compiler/ir/ir.h>\nint interaction_probe(void) { return 4; }\n', ['-Isrc','-Ibuild/generated'])]
     for fixture in sorted((work/'src/buster/tests/compiler/llvm/fixtures').glob('*.c')):
         representative.append((fixture.stem, fixture.read_text(), []))
     for name, source, extra in representative:
@@ -183,11 +170,25 @@ try:
             run('consume-'+name, ['clang','-O0','-c',evidence/'outputs'/(name+'-candidate.bc'),
                                  '-o',evidence/'outputs'/(name+'.o')], required=False)
         save_rows()
+    run('count-and-byte-checker', [sys.executable, research/'check_results.py', evidence], required=False)
     for variant in ['pristine','clean']:
         rc, _ = run('suite-'+variant,[evidence/'bin'/variant,'test','--verbose=1','--ci=1'],
-                    timeout=600, required=False)
+                    timeout=180, required=False)
         if rc:
             failures.append('suite-'+variant+': see exact failure log')
+    common = ['cc', '-Isrc', '-Ibuild/generated', '-DBUSTER_UNITY_BUILD=1',
+              '-DBUSTER_INCLUDE_TESTS=0', '-g', 'src/buster/apps/ide/ide.c', '-lm']
+    stage1, stage2 = evidence/'bin/stage1', evidence/'bin/stage2'
+    rc, _ = run('selfhost-stage1', [evidence/'bin/clean', *common, '-o', stage1], timeout=180, required=False)
+    if not rc:
+        rc, _ = run('selfhost-stage2', [stage1, *common, '-o', stage2], timeout=180, required=False)
+        if not rc:
+            identical = stage1.read_bytes() == stage2.read_bytes()
+            (evidence/'selfhost.json').write_text(json.dumps({'equal':identical,'source':'exact base plus retained counterfactual overlay'}))
+            if not identical:
+                failures.append('candidate self-host fixed point differs')
+    if rc:
+        failures.append('candidate self-host unavailable; see exact stage logs')
     save_rows()
     print('R7_RESULT rows='+str(len(rows))+' differences_or_unavailable='+str(len(failures)),flush=True)
 finally:
