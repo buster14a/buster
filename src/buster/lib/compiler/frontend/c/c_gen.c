@@ -39146,7 +39146,6 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
         {
             return false;
         }
-        block = &builder->function->blocks[builder->current_block.value];
         if (task.restore_before_continuation && task.has_stack_checkpoint && !c_ir_emit_stack_restore(builder, task.stack_checkpoint, declaration_source))
         {
             return false;
