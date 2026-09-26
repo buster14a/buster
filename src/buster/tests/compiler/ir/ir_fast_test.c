@@ -96,9 +96,148 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_span_tests(UnitTestArguments* 
     return result;
 }
 
+// Preparation validates and publishes each function straight after
+// transforming it. What it decides must not move: FAST's input guard is
+// answered for the whole module before any function is rewritten, the
+// promotion-output check still rejects the module before FAST or publication
+// starts, the output check covers every function, and statistics and
+// publication cover the whole module exactly once. Direct frontend SSA leaves
+// promotion nothing to change, so its planted fault reaches the guard; shared
+// promotion changes every function, so test builds reject the same fault at
+// the promotion-output boundary.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_preparation_order_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("int first(int x){return x+0;}int second(int x){return (x*1)+(2*3);}int last(int x){return x+(4-4);}");
+    for (u32 variant = 0; variant < 4; variant += 1)
+    {
+        bool shared_promotion = variant >= 2;
+        bool guarded = variant & 1;
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        CIRLowerResult lowered = {0};
+        if (shared_promotion)
+        {
+            lowered = ir_promotion_lower(arguments->arena, source, target_native);
+        }
+        else
+        {
+            CPreprocessResult preprocess = c_preprocess(arguments->arena, source,
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+            CAnalysisResult analysis = c_parse(arguments->arena, preprocess);
+            lowered = c_lower_to_ir_with_options(arguments->arena, S8("preparation-order.c"), preprocess, analysis, target_native,
+                                                 (CIRLowerOptions){0});
+        }
+        BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+        if (lowered.program && !lowered.diagnostic_count && BUSTER_REQUIRE(arguments, lowered.program->modules->function_count == 3))
+        {
+            IrProgram* program = lowered.program;
+            IrModule* module = program->modules;
+            if (guarded)
+            {
+                // Only the last function is a shape the strict validator
+                // rejects; the two before it are visited and pass first.
+                IrFunction* last = module->functions + 2;
+                bool corrupted = false;
+                for (u32 index = 0; index < last->instruction_count && !corrupted; index += 1)
+                {
+                    if (last->instructions[index].opcode == IR_OPCODE_BINARY)
+                    {
+                        last->instructions[index].binary_operation = IR_BINARY_COUNT;
+                        corrupted = true;
+                    }
+                }
+                BUSTER_TEST(arguments, corrupted);
+            }
+            program->fast_passes = IR_FAST_ALL;
+#if BUSTER_BENCH_ALLOCATIONS
+            IrConstructionCounters before = ir_construction_counters();
+#endif
+            u32 counts[3];
+            for (u32 index = 0; index < 3; index += 1)
+            {
+                counts[index] = module->functions[index].instruction_count;
+            }
+            IrValidationResult prepared = ir_prepare_canonical_module(program, module, true);
+            BUSTER_TEST(arguments, (module->local_promotion.promoted_locals != 0) == shared_promotion);
+            bool rejected = guarded && shared_promotion && BUSTER_IR_TRANSFORM_CHECKS;
+            if (rejected)
+            {
+                BUSTER_TEST(arguments, prepared.error != IR_VALIDATION_NONE && prepared.function.value == 2);
+                BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT);
+                BUSTER_TEST(arguments, !module->local_promotion_complete && !module->fast_complete);
+                BUSTER_TEST(arguments, module->fast.functions == 0);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, module->local_promotion_complete && module->fast_complete);
+                if (guarded)
+                {
+                    BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.functions == 0);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, module->fast.validation_skips == 0 && module->fast.functions == 3);
+                    BUSTER_TEST(arguments, module->fast.passes[IR_FAST_FOLD].changes != 0);
+                    BUSTER_TEST(arguments, prepared.boundary == (BUSTER_IR_TRANSFORM_CHECKS ? IR_VALIDATION_BOUNDARY_FAST_OUTPUT
+                                                                                             : IR_VALIDATION_BOUNDARY_UNSPECIFIED));
+                }
+            }
+            IrPublishedCfg const* published[3];
+            for (u32 index = 0; index < 3; index += 1)
+            {
+                IrFunction* function = module->functions + index;
+                published[index] = function->published_cfg;
+                BUSTER_TEST(arguments, (published[index] != 0) == !rejected);
+                if (guarded && !shared_promotion)
+                {
+                    BUSTER_TEST(arguments, function->instruction_count == counts[index]);
+                }
+                else if (!guarded)
+                {
+                    BUSTER_TEST(arguments, function->instruction_count < counts[index]);
+                }
+            }
+            if (!guarded)
+            {
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+            }
+#if BUSTER_BENCH_ALLOCATIONS && BUSTER_IR_TRANSFORM_CHECKS
+            IrConstructionCounters after = ir_construction_counters();
+            BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+#define IR_PREPARATION_EXPECT(counter, expected) \
+    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_##counter] - before.values[IR_CONSTRUCTION_##counter] == (expected))
+            IR_PREPARATION_EXPECT(PREPARATION_PROMOTION_OUTPUT_VALIDATIONS, shared_promotion ? 1 : 0);
+            IR_PREPARATION_EXPECT(PREPARATION_FAST_INPUT_VALIDATIONS, shared_promotion ? 0 : 1);
+            IR_PREPARATION_EXPECT(PREPARATION_FAST_OUTPUT_VALIDATIONS, guarded ? 0 : 1);
+            IR_PREPARATION_EXPECT(PREPARATION_PROMOTION_FUNCTIONS, 3);
+            IR_PREPARATION_EXPECT(PREPARATION_FAST_FUNCTIONS, guarded ? 0 : 3);
+            IR_PREPARATION_EXPECT(PREPARATION_PUBLICATION_FUNCTIONS, rejected ? 0 : 3);
+            IR_PREPARATION_EXPECT(VALIDATION_CALLS, guarded ? 1 : 3);
+            IR_PREPARATION_EXPECT(VALIDATION_OWNERSHIP_FUNCTIONS, guarded ? 3 : 9);
+#undef IR_PREPARATION_EXPECT
+#endif
+            if (!rejected)
+            {
+                // The backend's own preparation call finds nothing left to do.
+                BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, true).error == IR_VALIDATION_NONE);
+                for (u32 index = 0; index < 3; index += 1)
+                {
+                    BUSTER_TEST(arguments, module->functions[index].published_cfg == published[index]);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_publication_span_tests(arguments);
+    UnitTestResult preparation_order = ir_fast_preparation_order_tests(arguments);
+    result.test_count += preparation_order.test_count;
+    result.succeeded_test_count += preparation_order.succeeded_test_count;
     String8 source = S8("volatile int observed;int effect(int);"
                        "int test(int input,int* p){int x=input+0;int unused=x*9;"
                        "int a=3,b=4;int* q=&*p;observed=effect(x);return x+(a+b)+*q+observed;}");

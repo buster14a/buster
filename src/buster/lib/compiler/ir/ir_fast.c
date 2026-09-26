@@ -3,8 +3,9 @@
 // ir_instruction_is_pure is the semantic DCE authority. ir_fast_fold performs
 // one forward pass; ir_fast_dce uses counts plus a deletion queue (no use CSR);
 // ir_fast_parameters has a hard sweep cap. ir_prepare_canonical_module owns
-// input, promotion-output and FAST-output certification boundaries, then
-// publishes the final canonical CFG after all selected transformations.
+// input, promotion-output and FAST-output certification boundaries and
+// publishes the final canonical CFG after all selected transformations,
+// validating and publishing each function straight after transforming it.
 #include <buster/lib/time.h>
 
 String8 ir_fast_pass_name(IrFastPass pass)
@@ -502,6 +503,21 @@ IrFastStatistics ir_test_fast_function(IrProgram* program, IrFunction* function)
 }
 #endif
 
+// Each boundary below validates the whole module, and FAST and publication
+// touch every row, so the unity self-compile's rows (several times the
+// last-level cache) used to stream from memory once per sweep: promotion, its
+// output check (or FAST's input guard), FAST, FAST's output check and
+// publication. The sweeps that need nothing from later functions now run a
+// function at a time instead, while the function's rows are cached. Promotion
+// visits the validation pass (ir_validation_pass_visit) straight after
+// promoting each function when a post-promotion validation is certain, and
+// FAST visits its output check and publishes each function straight after
+// rewriting it. Neither changes what is decided or reported: the pass keeps
+// the whole-module first-error precedence, FAST's all-or-none input guard is
+// still answered before any function is rewritten, the output check is
+// reported only when FAST changed something, and a boundary failure still
+// stops publication before any function the check rejects. Statistics are
+// accumulated over every function exactly as before.
 IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool input_certified)
 {
     IrValidationResult result = ir_validation_ok();
@@ -526,9 +542,26 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             result.boundary = IR_VALIDATION_BOUNDARY_CANONICAL_INPUT;
             validated = result.error == IR_VALIDATION_NONE;
         }
+        // The optimized production fast path trusts each pass's own contract,
+        // not the producer's certificate. Debug/test/sanitizer consumers check
+        // transformed rows before publication instead.
+        bool checked = !input_certified || BUSTER_IR_TRANSFORM_CHECKS;
+        bool run_fast = program->fast_passes && !module->fast_complete;
+        // Set when promotion's visited pass already answered FAST's input
+        // guard for the rows as they now stand.
+        bool fast_input_answered = false;
+        bool fast_input_valid = true;
         if (result.error == IR_VALIDATION_NONE && !program->disable_local_promotion && !module->local_promotion_complete)
         {
             module->local_promotion = (IrLocalPromotionStatistics){0};
+            // FAST about to run on rows nothing has proven means the
+            // post-promotion module is certain to be validated, by the
+            // promotion-output check or by FAST's input guard, so validate
+            // each function while promotion has just touched it. Otherwise
+            // (FAST off, or rows already proven) a check happens only if
+            // promotion changes something, which is not known yet.
+            bool visit = run_fast && !validated;
+            IrValidationPass pass = visit ? ir_validation_pass_begin(program, module) : (IrValidationPass){0};
             for (u32 index = 0; index < module->function_count; index += 1)
             {
                 IrFunction* function = module->functions + index;
@@ -537,38 +570,49 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                     IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_FUNCTIONS, 1);
                     ir_promote_function(program, function, &module->local_promotion);
                 }
+                if (visit)
+                {
+                    ir_validation_pass_visit(program, &pass, function);
+                }
             }
+            IrValidationResult promoted = visit ? ir_validation_pass_result(&pass) : ir_validation_ok();
             if (module->local_promotion.promoted_locals)
             {
-                // Mutation ends the input certificate's scope. The optimized
-                // production fast path trusts this pass's own contract, not
-                // the producer's certificate. Debug/test/sanitizer consumers
-                // check the transformed rows before publication instead.
-                bool checked = !input_certified || BUSTER_IR_TRANSFORM_CHECKS;
+                // Mutation ends the input certificate's scope.
                 if (checked)
                 {
                     IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_OUTPUT_VALIDATIONS, 1);
-                    result = ir_validate_canonical_module(program, module);
+                    result = visit ? promoted : ir_validate_canonical_module(program, module);
                     result.boundary = IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT;
                 }
                 validated = checked && result.error == IR_VALIDATION_NONE;
             }
+            if (visit && !validated)
+            {
+                fast_input_answered = true;
+                fast_input_valid = promoted.error == IR_VALIDATION_NONE;
+            }
             module->local_promotion_complete = result.error == IR_VALIDATION_NONE;
         }
-        if (result.error == IR_VALIDATION_NONE && program->fast_passes && !module->fast_complete)
+        bool published_with_fast = false;
+        IrValidationResult publication = ir_validation_ok();
+        if (result.error == IR_VALIDATION_NONE && run_fast)
         {
             module->fast = (IrFastStatistics){0};
             // A producer certificate is sufficient for the ordinary backend,
             // but some legacy accepted shapes do not yet satisfy the stricter
             // canonical validator. Optional rewrites decline those modules as
             // a unit: this keeps explicit/default FAST safe without turning an
-            // existing accepted source into a diagnostic.
-            bool fast_input_valid = true;
+            // existing accepted source into a diagnostic. The guard is decided
+            // for the whole module before any function is rewritten.
             if (!validated)
             {
                 IR_CONSTRUCTION_RECORD(PREPARATION_FAST_INPUT_VALIDATIONS, 1);
-                IrValidationResult fast_input = ir_validate_canonical_module(program, module);
-                fast_input_valid = fast_input.error == IR_VALIDATION_NONE;
+                if (!fast_input_answered)
+                {
+                    IrValidationResult fast_input = ir_validate_canonical_module(program, module);
+                    fast_input_valid = fast_input.error == IR_VALIDATION_NONE;
+                }
             }
             if (!fast_input_valid)
             {
@@ -576,6 +620,13 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             }
             else
             {
+                // The output check covers every function whenever FAST changed
+                // any, so it is visited for all of them and reported only if
+                // something changed. Publication stops at the first function
+                // either the check or publication itself has rejected so far;
+                // a check fault always outranks a publication fault, since
+                // the check used to finish before publication began.
+                IrValidationPass output = checked ? ir_validation_pass_begin(program, module) : (IrValidationPass){0};
                 for (u32 index = 0; index < module->function_count; index += 1)
                 {
                     IrFunction* function = module->functions + index;
@@ -584,22 +635,37 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                         IR_CONSTRUCTION_RECORD(PREPARATION_FAST_FUNCTIONS, 1);
                         ir_fast_function(program, function, &module->fast);
                     }
+                    if (checked)
+                    {
+                        ir_validation_pass_visit(program, &output, function);
+                    }
+                    if (function->state == IR_FUNCTION_LOWERED && publication.error == IR_VALIDATION_NONE &&
+                        (!checked || ir_validation_pass_result(&output).error == IR_VALIDATION_NONE))
+                    {
+                        IR_CONSTRUCTION_RECORD(PREPARATION_PUBLICATION_FUNCTIONS, 1);
+                        publication = ir_function_publish_cfg(program->arena, function);
+                    }
                 }
+                published_with_fast = true;
                 u64 changes = 0;
                 for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1) changes += module->fast.passes[pass].changes;
-                if (changes && (!input_certified || BUSTER_IR_TRANSFORM_CHECKS))
+                if (changes && checked)
                 {
                     IR_CONSTRUCTION_RECORD(PREPARATION_FAST_OUTPUT_VALIDATIONS, 1);
-                    result = ir_validate_canonical_module(program, module);
+                    result = ir_validation_pass_result(&output);
                     result.boundary = IR_VALIDATION_BOUNDARY_FAST_OUTPUT;
                 }
             }
             module->fast_complete = result.error == IR_VALIDATION_NONE;
         }
+        if (result.error == IR_VALIDATION_NONE && publication.error != IR_VALIDATION_NONE)
+        {
+            result = publication;
+        }
         for (u32 index = 0; index < module->function_count && result.error == IR_VALIDATION_NONE; index += 1)
         {
             IrFunction* function = module->functions + index;
-            if (function->state == IR_FUNCTION_LOWERED)
+            if (function->state == IR_FUNCTION_LOWERED && !(published_with_fast && function->published_cfg))
             {
                 IR_CONSTRUCTION_RECORD(PREPARATION_PUBLICATION_FUNCTIONS, 1);
                 IrValidationResult published = ir_function_publish_cfg(program->arena, function);
