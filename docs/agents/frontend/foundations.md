@@ -617,27 +617,32 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   `c_test_type_specifier_diagnostics` and `compiler_driver_test_type_specifiers`,
   which also verify a refused compilation preserves or never creates the output.
 
-## String literal counts
+## String literal memo
 
 Semantic analysis sizes, types and validates a string literal through
 several independent consumers: expression typing, array-bound inference,
 braced string initializers, member initializers and initializer validation.
-Each of them asks `c_ir_count_string_literal_range_for_target`.
-`CParseResult.string_counts` (a `CStringCountMemo`) records a narrow
-fragment's element count, keyed by final-stream token index, the first time
-it is counted. Later queries read the record instead of walking the spelling.
+Each of them asks `c_ir_count_string_literal_range_for_target`. Lowering then
+needs the same literal's bytes. `CParseResult.string_literals` (a
+`CStringLiteralMemo`) records a narrow fragment's decoded bytes, keyed by
+final-stream token index, the first time semantic analysis sizes it. Later
+semantic queries read the recorded length, and lowering's
+`c_ir_decode_string_literal_range_for_target` reads the recorded bytes.
 
-- Only narrow fragments (plain and `u8`) are recorded, because their count
-  does not depend on the target. Wide fragments are decoded every time.
+- Only narrow fragments (plain and `u8`) are recorded, because their bytes do
+  not depend on the target. Wide fragments are decoded every time.
 - Rejected fragments are never recorded.
 - The memo answers only for the token array it was created for.
-- It is allocated once at the start of semantic analysis. Its slots grow in
-  the never-rewound parse arena, so rollback's wholesale `CParseResult`
-  restore keeps a valid pointer.
-- Semantic analysis clears the pointer before returning.
+- The header, its slots and every recorded buffer live in the never-rewound
+  parse arena, which outlives lowering. Rollback's wholesale `CParseResult`
+  restore therefore keeps a valid pointer.
+- Only semantic analysis records; lowering only reads. Every reader copies
+  the bytes it keeps, so a recorded buffer is never written. Keep it that
+  way: a consumer that edits decoded bytes in place must copy them first.
 
-The decode/count differential checks memoized counts on a miss and on a hit,
-and `c_test_string_count_memo` crosses several rebuilds.
+The decode/count differential checks memoized counts and decodes on a miss
+and on a hit, byte for byte, and `c_test_string_literal_memo` crosses
+several rebuilds.
 
 ## Immutable aggregate and complex construction
 
