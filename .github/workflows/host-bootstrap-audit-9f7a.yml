@@ -1,0 +1,51 @@
+name: Host bootstrap research 9f7a
+
+# Temporary, isolated research transport. No production or benchmark gate.
+on:
+  push:
+    branches: [codex/host-bootstrap-audit-ade6ac4b-9f7a]
+    paths: [.github/workflows/host-bootstrap-audit-9f7a.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Isolate and identify inspected source
+        shell: bash
+        env:
+          SOURCE_COMMIT: ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          SOURCE_TREE: 4c5306221fdb22fccc929b55e333163742de17d0
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          git worktree add --detach "$RUNNER_TEMP/host-audit-source" "$SOURCE_COMMIT"
+          mkdir -p "$RUNNER_TEMP/host-audit-evidence"
+          git -C "$RUNNER_TEMP/host-audit-source" archive --format=tar.gz --output="$RUNNER_TEMP/host-audit-evidence/pinned-source.tar.gz" HEAD
+          {
+            printf 'source_commit=%s\nsource_tree=%s\n' "$SOURCE_COMMIT" "$SOURCE_TREE"
+            printf 'experiment_commit=%s\nrun_id=%s\nrun_attempt=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'evidence=source inspection only; no compiler execution or performance measurement\n'
+            uname -a
+            clang --version
+            gcc --version
+            cmake --version
+            ninja --version
+            sha256sum "$RUNNER_TEMP/host-audit-evidence/pinned-source.tar.gz"
+          } | tee "$RUNNER_TEMP/host-audit-evidence/identity.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: host-bootstrap-source-9f7a-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/host-audit-evidence
+          if-no-files-found: error
+          retention-days: 3
