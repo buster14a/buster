@@ -1,0 +1,45 @@
+name: Place construction experiment
+on:
+  push:
+    branches: [codex/1241-place-construction-20260925-astra-probes]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    env:
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin production source and build with hosted Clang exception
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          git rev-parse HEAD HEAD^{tree} > evidence/transport.txt
+          git worktree add --detach "$RUNNER_TEMP/place-production" ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          cd "$RUNNER_TEMP/place-production"
+          test "$(git rev-parse HEAD^{tree})" = 4c5306221fdb22fccc929b55e333163742de17d0
+          git diff --exit-code
+          git rev-parse HEAD HEAD^{tree} > "$GITHUB_WORKSPACE/evidence/production.txt"
+          clang --version > "$GITHUB_WORKSPACE/evidence/host-clang.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/place-build"
+          "$RUNNER_TEMP/place-build" generate --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF 2>&1 | tee "$GITHUB_WORKSPACE/evidence/generate.log"
+          "$RUNNER_TEMP/place-build" build --config Release -t ide 2>&1 | tee "$GITHUB_WORKSPACE/evidence/build.log"
+          git diff --exit-code
+          sha256sum build/Release/ide > "$GITHUB_WORKSPACE/evidence/compiler.sha256"
+      - name: Independent baseline observations
+        shell: bash
+        run: python3 tools/investigations/place-construction-20260925/probe.py "$RUNNER_TEMP/place-production/build/Release/ide" "$GITHUB_WORKSPACE/evidence/baseline"
+      - name: Retain every attempt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: place-construction-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 30
