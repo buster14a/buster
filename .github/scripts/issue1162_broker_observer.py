@@ -1352,6 +1352,8 @@ class BrokerObserver:
             reason = reason or str(query["cancel_reason"])
         elif status != 0:
             reason = reason or f"terminal_systemctl_exit_{status}"
+        elif query["stderr"]:
+            reason = reason or "terminal_systemctl_stderr_not_empty"
         elif reason is None:
             try:
                 properties = _parse_terminal_properties(bytes(query["stdout"]), lifecycle.unit)
@@ -3042,6 +3044,29 @@ def _self_test() -> None:
                 assert terminal_row.as_json(boot, raw)["process_complete"]
                 assert terminal_row.retained_failed_terminal is terminal_record
                 checks += 1
+        stderr_row = Lifecycle(lifecycle.unit, lifecycle.object_path, 9, 2,
+                               time.monotonic_ns() - 50_000_000)
+        stderr_row.last_event_seq = 5
+        stderr_row.snapshots = [{**terminal_witness}]
+        stderr_row.invocation_id = "b" * 32
+        stderr_row.main_pid = 741
+        stderr_row.process_started = True
+        globals()["systemctl_show_argv"] = lambda _unit: [
+            sys.executable, "-c", "import sys;sys.stdout.buffer.write(" +
+            repr(terminal_show.encode()) +
+            ");sys.stderr.buffer.write(b'terminal-stderr\\n')"]
+        terminal_observer.units = [stderr_row]
+        terminal_observer.writer = TerminalWriter()
+        terminal_observer.snapshot_number = 2
+        terminal_observer.stop_monotonic_ns = time.monotonic_ns()
+        terminal_observer._run_terminal_phase()
+        assert terminal_observer.writer.contents["show-000003.stderr"] == b"terminal-stderr\n"
+        assert stderr_row.retained_failed_terminal["raw_show"] is not None
+        assert stderr_row.retained_failed_terminal["raw_stderr"] is not None
+        assert not stderr_row.retained_failed_terminal["manager_properties_complete"]
+        assert "terminal_systemctl_stderr_not_empty" in \
+               stderr_row.retained_failed_terminal["incomplete_reasons"]
+        checks += 1
         globals()["systemctl_show_argv"] = lambda _unit: [
             sys.executable, "-c",
             "import sys;sys.stdout.buffer.write(" + repr(terminal_show.encode()) + ")"]
