@@ -1,0 +1,104 @@
+name: CodeView provenance research
+
+on:
+  push:
+    branches:
+      - research/codeview-provenance-20260926
+    paths:
+      - tools/research/codeview-provenance/**
+      - .github/workflows/research-codeview-provenance.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-codeview-provenance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  equivalence:
+    if: ${{ vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 32
+      - name: Verify pin and run isolated correctness experiment
+        shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          base=ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          evidence="$RUNNER_TEMP/codeview-provenance-evidence"
+          tree="$RUNNER_TEMP/codeview-provenance-worktree"
+          mkdir -p "$evidence"
+          git worktree add --detach "$tree" "$GITHUB_SHA"
+          cd "$tree"
+          test "$(git rev-parse "$base^{tree}")" = 4c5306221fdb22fccc929b55e333163742de17d0
+          git merge-base --is-ancestor "$base" HEAD
+          test "$(git hash-object src/buster/lib/compiler/link/link.c)" = ceef10d857cfdf3fe20a09d10407077563baa84e
+          git diff --name-only "$base" HEAD > "$evidence/changed-paths.txt"
+          if grep -Ev '^(tools/research/codeview-provenance/[^/]+|\.github/workflows/research-codeview-provenance\.yml)$' "$evidence/changed-paths.txt"; then
+            echo 'Unexpected non-research path in experiment' >&2
+            exit 1
+          fi
+          {
+            printf 'head='; git rev-parse HEAD
+            printf 'tree='; git rev-parse HEAD^{tree}
+            printf 'base=%s\n' "$base"
+            printf 'runner=%s os=%s arch=%s\n' "$RUNNER_NAME" "$RUNNER_OS" "$RUNNER_ARCH"
+            clang --version
+            gcc --version
+          } > "$evidence/identity.txt"
+          awk '
+            /^ByteSlice link_pe_resolved_codeview\(/ { capture = 1 }
+            /^BUSTER_GLOBAL_LOCAL bool link_pe_aarch64_tls_index_symbol\(/ { capture = 0 }
+            capture { print }
+          ' src/buster/lib/compiler/link/link.c > "$evidence/reference.original.inc"
+          test "$(grep -c '^ByteSlice link_pe_resolved_codeview(' "$evidence/reference.original.inc")" = 1
+          awk '
+            { print }
+            /ObjectRelocation\* relocation = object->relocations \+ relocation_index;/ {
+              print "            resolver_visits += 1;"
+            }
+          ' "$evidence/reference.original.inc" > "$evidence/reference.inc"
+          test "$(grep -c 'resolver_visits += 1;' "$evidence/reference.inc")" = 1
+          source=tools/research/codeview-provenance/probe.c
+          cp "$source" "$evidence/probe.c"
+          flags=(-std=c17 -g -Wall -Wextra -Wpedantic -Werror -fwrapv -fno-strict-aliasing -funsigned-char -I"$evidence")
+          set -x
+          clang "${flags[@]}" -O2 "$source" -o "$evidence/probe-clang"
+          gcc "${flags[@]}" -O2 "$source" -o "$evidence/probe-gcc"
+          clang "${flags[@]}" -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer "$source" -o "$evidence/probe-sanitized"
+          "$evidence/probe-clang" > "$evidence/clang.csv"
+          "$evidence/probe-gcc" > "$evidence/gcc.csv"
+          "$evidence/probe-sanitized" > "$evidence/sanitized.csv"
+          cmp "$evidence/clang.csv" "$evidence/gcc.csv"
+          cmp "$evidence/clang.csv" "$evidence/sanitized.csv"
+          set +x
+          # The unsafe control must fail with a semantic mismatch, not merely crash.
+          sed 's/bool certified = certificate_current(&fixture);/bool certified = source->debug_module_count > 1; (void)certificate_current;/' "$source" > "$evidence/unsafe-control.c"
+          clang "${flags[@]}" -O2 "$evidence/unsafe-control.c" -o "$evidence/unsafe-control"
+          status=0
+          "$evidence/unsafe-control" > "$evidence/unsafe-control.csv" 2> "$evidence/unsafe-control.stderr" || status=$?
+          test "$status" = 1
+          grep -q 'mismatch family=adversarial mode=2 ' "$evidence/unsafe-control.stderr"
+          printf 'UNSAFE_CONTROL rejected-with-semantic-mismatch\n' | tee "$evidence/control-result.txt"
+          tail -n 1 "$evidence/clang.csv"
+          grep -E '^(separate_inputs,(1|2|32|128|1024),|fixed_M_R,)' "$evidence/clang.csv"
+          sha256sum "$evidence"/probe.c "$evidence"/reference*.inc "$evidence"/probe-clang "$evidence"/probe-gcc "$evidence"/probe-sanitized "$evidence"/*.csv > "$evidence/sha256.txt"
+          cat "$evidence/identity.txt"
+          cat "$evidence/sha256.txt"
+      - name: Retain exact-source correctness and count evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeview-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codeview-provenance-evidence
+          if-no-files-found: error
+          retention-days: 14
