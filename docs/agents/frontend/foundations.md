@@ -651,6 +651,28 @@ Boolean value result. Integer bitwise opcodes still require integer operands.
 Both native canonical emitters implement these Boolean operations as well as
 the existing machine selectors, including canonical fallback for x87 functions.
 
+A `_Bool` destination is one rule for every scalar source (C 6.3.1.2): the
+result is 0 exactly when the whole value compares equal to 0.
+`c_ir_truth_value` is its one runtime owner, and `c_ir_emit_cast` answers a
+`_Bool` destination before any arm that dispatches on the source's
+representation (complex halves, binary16 runtime calls, x87 checks); only the
+representation-independent identity, qualifier and aggregate arms and the
+label-provenance refusal come first. A complex value therefore converts as
+`re != 0 || im != 0` in initializers (aggregate members included), assignments,
+arguments, returns, casts, compound assignments, atomic stores and VLA bounds,
+exactly as conditions already did. The complex arm had preceded the `_Bool`
+arm and kept only the real half, so `_Bool b = z` disagreed with `if (z)`
+(#1371). `c_ir_emit_complex_conversion` is the C 6.3.1.7p2 projection onto the
+other real targets and never receives `_Bool`; an explicit `(_Bool)(double)z`
+still projects first. `c_test_complex_bool_conversion` checks that canonical
+shape on six target layouts in both frontend forms and runs literal
+float/double/long double rows (signed zeros, subnormal, infinite and NaN
+halves, projection controls) in every native allocator at O0/O2. Imaginary
+constants remain outside parse-side integer constant expressions
+(`enum { E = (_Bool)2.0i }` is refused) and complex static initializers are
+not folded to real targets; `_Bool` bit-field stores fail canonical validation
+independently of this conversion.
+
 ## ABI decomposition ownership
 
 `IrType` holds language identity and layout only. Each `IrAbiContext` owns one

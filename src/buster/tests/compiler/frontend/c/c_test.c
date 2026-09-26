@@ -22829,6 +22829,269 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_result(UnitTestArgumen
     return result;
 }
 
+// C 6.3.1.2 converts every scalar -- a complex value too -- to _Bool by
+// comparing the whole value with zero; 6.3.1.7p2's discarded imaginary half
+// is the rule for the other real targets. The truths and projections below are
+// literal rows derived from those rules, not answers computed by the lowering
+// under test, and every value context is checked beside the truth contexts that
+// were already correct and the projections that must stay projections.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL String8 c_test_complex_bool_source(Arena* arena)
+{
+    typedef struct CComplexBoolRow CComplexBoolRow;
+    struct CComplexBoolRow
+    {
+        String8 real;
+        String8 imaginary;
+        u32 truth;
+        u32 real_truth;
+        String8 projection;
+    };
+    CComplexBoolRow rows[] = {
+        {S8("K(zero)"), S8("K(two)"), 1, 0, S8("0")},
+        {S8("K(zero)"), S8("-K(half)"), 1, 0, S8("0")},
+        {S8("K(zero)"), S8("K(tiny)"), 1, 0, S8("0")},
+        {S8("K(zero)"), S8("K(infinity)"), 1, 0, S8("0")},
+        {S8("K(zero)"), S8("K(nan)"), 1, 0, S8("0")},
+        {S8("-K(zero)"), S8("-K(zero)"), 0, 0, S8("0")},
+        {S8("K(zero)"), S8("K(zero)"), 0, 0, S8("0")},
+        {S8("K(three)"), S8("K(zero)"), 1, 1, S8("3")},
+        {S8("-(K(two) + K(half))"), S8("K(seven)"), 1, 1, S8("-2")},
+        {S8("K(nan)"), S8("K(zero)"), 1, 1, S8("")},
+    };
+    // Each element type gets its own constants, reached through K(). The
+    // infinities and NaNs come from IEEE bit patterns (Annex F) rather than
+    // from an overflowing or dividing expression.
+    struct
+    {
+        String8 element;
+        String8 prefix;
+        String8 guard;
+        String8 constants;
+    } elements[] = {
+        {S8("float"), S8("f"), S8("1"),
+         S8("static union { unsigned bits; float value; } const f_infinity_bits = {0x7f800000u}, f_nan_bits = {0x7fc00000u};\n"
+            "static volatile float f_zero = 0.0f, f_half = 0.5f, f_two = 2.0f, f_three = 3.0f, f_seven = 7.0f, f_tiny = 0x1p-149f;\n"
+            "static volatile float f_infinity, f_nan;\n"
+            "static void f_setup(void) { f_infinity = f_infinity_bits.value; f_nan = f_nan_bits.value; }\n")},
+        {S8("double"), S8("d"), S8("1"),
+         S8("static union { unsigned long long bits; double value; } const d_infinity_bits = {0x7ff0000000000000ull}, d_nan_bits = {0x7ff8000000000000ull};\n"
+            "static volatile double d_zero = 0.0, d_half = 0.5, d_two = 2.0, d_three = 3.0, d_seven = 7.0, d_tiny = 0x1p-1074;\n"
+            "static volatile double d_infinity, d_nan;\n"
+            "static void d_setup(void) { d_infinity = d_infinity_bits.value; d_nan = d_nan_bits.value; }\n")},
+        // binary128 long double has no complex lowering on AArch64 Linux yet.
+        {S8("long double"), S8("l"), S8("__LDBL_MANT_DIG__ != 113"),
+         S8("static volatile long double l_zero = 0.0L, l_half = 0.5L, l_two = 2.0L, l_three = 3.0L, l_seven = 7.0L;\n"
+            "#if __LDBL_MANT_DIG__ == 64\nstatic volatile long double l_tiny = 0x1p-16445L;\n"
+            "#else\nstatic volatile long double l_tiny = 0x1p-1074L;\n#endif\n"
+            "static volatile long double l_infinity, l_nan;\n"
+            "static void l_setup(void) { l_infinity = d_infinity_bits.value; l_nan = d_nan_bits.value; }\n")},
+    };
+    u32 row_count = BUSTER_ARRAY_LENGTH(rows);
+    u32 element_count = BUSTER_ARRAY_LENGTH(elements);
+    String8* parts = arena_allocate(arena, String8, element_count * (row_count + 4) + row_count * element_count + 4);
+    u32 count = 0;
+    for (u32 element = 0; element < element_count; element += 1)
+    {
+        parts[count++] = string_format(arena, S8(
+            "#if {S8}\n{S8}#define ELEMENT {S8}\n#define K(name) {S8}_##name\n"
+            "static _Bool K(pass)(_Bool value) {{ return value; }}\n"
+            "static _Bool K(give)(ELEMENT _Complex value) {{ return value; }}\n"),
+            elements[element].guard, elements[element].constants, elements[element].element, elements[element].prefix);
+        for (u32 row = 0; row < row_count; row += 1)
+        {
+            CComplexBoolRow item = rows[row];
+            String8 projection = item.projection.length
+                ? string_format(arena, S8("    {{ int projected = u.value; failures |= (projected != {S8}) << 12; }}\n"), item.projection)
+                : S8("");
+            parts[count++] = string_format(arena, S8(
+                "static int K(check_{u32})(void)\n{{\n"
+                "    union {{ ELEMENT _Complex value; ELEMENT part[2]; }} u;\n"
+                "    u.part[0] = {S8};\n    u.part[1] = {S8};\n"
+                "    int failures = 0;\n"
+                "    _Bool initialized = u.value;\n"
+                "    _Bool assigned;\n    assigned = u.value;\n"
+                "    _Bool added = 0;\n    added += u.value;\n"
+                "    _Bool scaled = 1;\n    scaled *= u.value;\n"
+                "    _Atomic _Bool shared;\n    shared = u.value;\n"
+                "    char bounded[(_Bool)u.value + 1];\n"
+                "    struct {{ _Bool first; int middle; _Bool last; }} record = {{u.value, 0, u.value}};\n"
+                "    struct {{ _Bool first; int middle; _Bool last; }} named = {{.last = u.value}};\n"
+                "    _Bool elements[2] = {{u.value, u.value}};\n"
+                "    _Bool target = 0;\n    _Bool* through = &target;\n    *through = u.value;\n"
+                "    failures |= (initialized != {u32}) << 0;\n"
+                "    failures |= (assigned != {u32}) << 1;\n"
+                "    failures |= (K(pass)(u.value) != {u32}) << 2;\n"
+                "    failures |= (K(give)(u.value) != {u32}) << 3;\n"
+                "    failures |= ((_Bool)u.value != {u32}) << 4;\n"
+                "    failures |= (added != {u32}) << 5;\n"
+                "    failures |= (scaled != {u32}) << 6;\n"
+                "    failures |= (shared != {u32}) << 7;\n"
+                "    failures |= (sizeof bounded != {u32}u) << 8;\n"
+                "    failures |= ((!u.value) != {u32}) << 9;\n"
+                "    failures |= ((u.value ? 1 : 0) != {u32}) << 10;\n"
+                "    failures |= ((_Bool)(ELEMENT)u.value != {u32}) << 11;\n"
+                "{S8}"
+                "    failures |= (record.first != {u32} || record.last != {u32}) << 13;\n"
+                "    failures |= (named.last != {u32} || named.first != 0) << 14;\n"
+                "    failures |= (elements[0] != {u32} || elements[1] != {u32}) << 15;\n"
+                "    failures |= (((struct {{ _Bool flag; }}){{u.value}}).flag != {u32}) << 16;\n"
+                "    failures |= (target != {u32}) << 17;\n"
+                "    return failures;\n}}\n"),
+                row, item.real, item.imaginary, item.truth, item.truth, item.truth, item.truth, item.truth, item.truth, item.truth,
+                item.truth, item.truth + 1, (u32)!item.truth, item.truth, item.real_truth, projection, item.truth, item.truth, item.truth,
+                item.truth, item.truth, item.truth, item.truth);
+        }
+        parts[count++] = S8("#undef K\n#undef ELEMENT\n#endif\n");
+    }
+    parts[count++] = S8("int main(void)\n{\n    int status = 0;\n");
+    for (u32 element = 0; element < element_count; element += 1)
+    {
+        parts[count++] = string_format(arena, S8("#if {S8}\n    {S8}_setup();\n"), elements[element].guard, elements[element].prefix);
+        for (u32 row = 0; row < row_count; row += 1)
+        {
+            // A failing run's exit status names its element and row.
+            parts[count++] = string_format(arena, S8("    if ({S8}_check_{u32}()) status = {u32};\n"), elements[element].prefix, row,
+                                           1 + element * row_count + row);
+        }
+        parts[count++] = S8("#endif\n");
+    }
+    parts[count++] = S8("    return status;\n}\n");
+    return string_join_arena(arena, (SliceString8){.pointer = parts, .length = count}, false);
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_complex_bool_conversion(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Canonical shape on every native target layout: a _Bool destination
+    // compares both halves with zero and joins them, exactly as a condition
+    // does; an integer destination and an explicit real projection keep the
+    // imaginary half out of the answer.
+    typedef struct CComplexBoolIrCase CComplexBoolIrCase;
+    struct CComplexBoolIrCase
+    {
+        String8 name;
+        u32 not_equal;
+        u32 boolean_or;
+        u32 float_to_integer;
+    };
+    String8 source = S8(
+        "_Bool to_bool(double _Complex z) { return z; }\n"
+        "_Bool to_bool_float(float _Complex z) { _Bool b; b = z; return b; }\n"
+        "int in_condition(double _Complex z) { return z ? 1 : 0; }\n"
+        "int to_int(double _Complex z) { return z; }\n"
+        "_Bool to_real_bool(double _Complex z) { return (_Bool)(double)z; }\n");
+    CComplexBoolIrCase cases[] = {
+        {S8("to_bool"), 2, 1, 0},
+        {S8("to_bool_float"), 2, 1, 0},
+        {S8("in_condition"), 2, 1, 0},
+        {S8("to_int"), 0, 0, 1},
+        {S8("to_real_bool"), 1, 0, 0},
+    };
+    Target targets[] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        targets[target_index].cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[target_index].os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17,
+            });
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("complex-bool.c"), tokens, parse, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                {
+                    IrProgram* program = lowered.program;
+                    IrModule* module = program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+                    {
+                        CComplexBoolIrCase expected = cases[case_index];
+                        IrFunction* function = c_test_find_ir_function(module, expected.name);
+                        if (BUSTER_REQUIRE(arguments, function != 0))
+                        {
+                            u32 not_equal = 0;
+                            u32 boolean_or = 0;
+                            u32 float_to_integer = 0;
+                            for (u32 index = 0; index < function->instruction_count; index += 1)
+                            {
+                                IrInstruction* instruction = function->instructions + index;
+                                not_equal += instruction->opcode == IR_OPCODE_BINARY && instruction->binary_operation == IR_BINARY_FLOAT_NOT_EQUAL;
+                                boolean_or += instruction->opcode == IR_OPCODE_BINARY && instruction->binary_operation == IR_BINARY_BOOLEAN_OR;
+                                float_to_integer += instruction->opcode == IR_OPCODE_CAST &&
+                                                    (instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER ||
+                                                     instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER);
+                            }
+                            BUSTER_TEST_RAW(arguments,
+                                not_equal == expected.not_equal && boolean_or == expected.boolean_or && float_to_integer == expected.float_to_integer,
+                                string_format(temporary.arena, S8("COMPLEX_BOOL_IR {S8} target={u32} form={u32}: ne={u32}/{u32} or={u32}/{u32} f2i={u32}/{u32}"),
+                                              expected.name, target_index, form, not_equal, expected.not_equal, boolean_or, expected.boolean_or,
+                                              float_to_integer, expected.float_to_integer));
+                        }
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena source_temporary = scratch_begin(&arguments->arena, 1);
+    String8 family = c_test_complex_bool_source(source_temporary.arena);
+    String8 family_path = buster_test_temporary_path(source_temporary.arena, S8("complex-bool-family"), S8(".c"));
+    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    if (BUSTER_REQUIRE(arguments, file_write(family_path, BUSTER_SLICE_TO_BYTE_SLICE(family))))
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                {
+                    Arena* conflicts[] = {arguments->arena, source_temporary.arena};
+                    TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("complex-bool-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), S8("-std=c17"), S8("-fverify-codegen"), allocators[allocator], frontends[form],
+                                         optimizations[optimization], S8("-o"), output, family_path};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = allocator != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("complex bool {S8} {S8} {S8}: {S8}"),
+                                      allocators[allocator], frontends[form], optimizations[optimization], compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("complex bool runtime {S8} {S8} {S8}: status={u32} timed_out={u32}"),
+                                              allocators[allocator], frontends[form], optimizations[optimization],
+                                              execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    scratch_end(source_temporary);
+#endif
+    return result;
+}
+
 // Buster deliberately selects signed __int128 for decimal magnitudes above
 // INT64_MAX. Test that established extension, not Clang's different raw-literal
 // policy, and retain explicit unsigned suffixes/casts as independent controls.
@@ -23187,6 +23450,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_typedef_fallback_lookup);
     BUSTER_TEST_FIXTURE(arguments, c_test_compound_assignment_conversions);
     BUSTER_TEST_FIXTURE(arguments, c_test_atomic_compound_result);
+    BUSTER_TEST_FIXTURE(arguments, c_test_complex_bool_conversion);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_global_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
     BUSTER_TEST_FIXTURE(arguments, c_test_typed_enum_integer_constants);
