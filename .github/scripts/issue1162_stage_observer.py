@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import issue1162_live_probe as probe
+import issue1162_workspace_observer as workspace_observer
 
 STAGES = ("base-generate", "base-build", "candidate-generate", "candidate-build", "throughput")
 BUILD_STAGES = ("base-build", "candidate-build")
@@ -75,6 +76,20 @@ def capture_stage(stage: str, identity: dict, output: Path, deadline: float) -> 
             snapshot.get("bench_slice", {}).get("device") == identity["slice_device"] and
             snapshot.get("bench_slice", {}).get("inode") == identity["slice_inode"],
             "stage cgroup ancestry changed")
+    workspace_artifact = None
+    workspace_sha256 = None
+    if stage in ("candidate-build", "throughput"):
+        observed = workspace_observer.stage_handoff(identity, stage, deadline)
+        after_workspace = probe.capture_unit(unit, output, f"{label}-after-workspace",
+                                             min(1.5, probe._remaining(deadline)), deadline, reserve=0)
+        require(probe.same_build(captured, probe.validate_build(after_workspace, unit)),
+                "stage invocation, process, or cgroup changed during workspace observation")
+        workspace_artifact = f"{stage}-workspace.json"
+        content = (json.dumps(observed, sort_keys=True, indent=2) + "\n").encode()
+        require(len(content) <= workspace_observer.MAX_EVIDENCE,
+                "stage workspace artifact exceeds byte bound")
+        probe._write_private(output, workspace_artifact, content)
+        workspace_sha256 = hashlib.sha256(content).hexdigest()
     after = record_identity(identity["job"], identity["request_sha256"], before,
                             output, f"{label}-after-")
     require(after == before, "stage record identity changed during capture")
@@ -84,7 +99,9 @@ def capture_stage(stage: str, identity: dict, output: Path, deadline: float) -> 
             "boot_id": identity["boot_id"],
             "exec_main_start_monotonic_us": int(props["ExecMainStartTimestampMonotonic"]),
             "record_worker_sha256": identity["worker_sha256"],
-            "record_instance_sha256": identity["instance_sha256"]}
+            "record_instance_sha256": identity["instance_sha256"],
+            "workspace_artifact": workspace_artifact,
+            "workspace_sha256": workspace_sha256}
 
 
 def write_json(output: Path, name: str, obj: object) -> None:
