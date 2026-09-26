@@ -1,0 +1,15 @@
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -21902,6 +21902,12 @@
+         u64 mask = c_ir_integer_type_mask(type);
+         if (instruction->opcode == IR_OPCODE_CAST)
+         {
++            if (instruction->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND)
++            {
++                IrType* source_type = ir_type_from_id(&builder->program->types,
++                                                      builder->function->values[instruction->operands[0].value].canonical_type);
++                right = (u64)c_ir_integer_signed_value(right, source_type);
++            }
+             result = right & mask;
+         }
+         else if (instruction->opcode == IR_OPCODE_UNARY)

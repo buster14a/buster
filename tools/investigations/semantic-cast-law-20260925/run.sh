@@ -3,6 +3,10 @@ set -euo pipefail
 ide=$(realpath "$1")
 out=$(realpath -m "$2")
 probe=$(cd -- "$(dirname -- "$0")" && pwd)
+read -r -a compilers <<< "${PROBE_COMPILERS:-clang gcc buster}"
+optimization=${PROBE_OPTIMIZATION:--O0}
+allocator=${PROBE_ALLOCATOR:-fast}
+frontend=${PROBE_FRONTEND:--ffrontend-ssa}
 mkdir -p "$out/sources" "$out/results"
 cp "$probe/probe.c" "$probe/observer.c" "$out/sources/"
 expressions=(
@@ -36,15 +40,20 @@ for e in "${!expressions[@]}"; do
  for k in {0..8}; do
   src="$out/sources/e${e}-k${k}.c"
   printf '#define Z %s\n#define CASE_KIND %s\n#include "probe.c"\n' "${expressions[$e]}" "$k" > "$src"
-  for compiler in clang gcc buster; do
+  for compiler in "${compilers[@]}"; do
    dir="$out/results/e${e}-k${k}-${compiler}"; mkdir -p "$dir"
-   args=(-std=gnu17 -O0 -g0 -c "$src" -o "$dir/subject.o")
+   args=(-std=gnu17 "$optimization" -g0 -c "$src" -o "$dir/subject.o")
    command=("$compiler")
    if [[ $compiler == buster ]]; then
     command=("$ide" cc)
-    args+=(-target x86_64-linux -fverify-codegen -fregister-allocator=fast -ffrontend-ssa -fno-machine-fallback)
+    args+=(-target x86_64-linux -fverify-codegen "-fregister-allocator=$allocator" "$frontend")
+    if [[ $allocator != none ]]; then args+=(-fno-machine-fallback); fi
    else
     args+=(-Wall -Wextra -Werror)
+    # Preserve these diagnostics, but do not classify style warnings about
+    # independently proved C integer-zero expressions as semantic failures.
+    if [[ $compiler == clang ]]; then args+=(-Wno-error=non-literal-null-conversion); fi
+    if [[ $compiler == gcc ]]; then args+=(-Wno-error=pointer-compare); fi
    fi
    printf '%q ' "${command[@]}" "${args[@]}" > "$dir/compile.argv"; printf '\n' >> "$dir/compile.argv"
    status=0; timeout 40 "${command[@]}" "${args[@]}" > "$dir/compile.stdout" 2> "$dir/compile.stderr" || status=$?

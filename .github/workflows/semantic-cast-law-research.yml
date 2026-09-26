@@ -17,36 +17,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Pin isolated production worktree
+      - name: Build isolated baseline and prototype; run independent probes
         shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p evidence
-          git rev-parse HEAD HEAD^{tree} > evidence/probe-identity.txt
-          git worktree add --detach ../cast-law-production ade6ac4b6ecb21f30b61b656439bac476c145e2f
-          cd ../cast-law-production
-          test "$(git rev-parse HEAD^{tree})" = 4c5306221fdb22fccc929b55e333163742de17d0
-          git rev-parse HEAD HEAD^{tree} > "$GITHUB_WORKSPACE/evidence/production-identity.txt"
-          git diff --exit-code
-      - name: Build exact unmodified compiler on hosted executor
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd ../cast-law-production
-          mkdir -p .cache/cast-law
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o .cache/cast-law/build > "$GITHUB_WORKSPACE/evidence/bootstrap.stdout" 2> "$GITHUB_WORKSPACE/evidence/bootstrap.stderr"
-          .cache/cast-law/build generate --cc clang --ci --linker DEFAULT --build-directory build-cast-law -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF > "$GITHUB_WORKSPACE/evidence/generate.stdout" 2> "$GITHUB_WORKSPACE/evidence/generate.stderr"
-          .cache/cast-law/build build --config Release --build-directory build-cast-law -t ide > "$GITHUB_WORKSPACE/evidence/build.stdout" 2> "$GITHUB_WORKSPACE/evidence/build.stderr"
-          cp build-cast-law/CMakeCache.txt "$GITHUB_WORKSPACE/evidence/"
-          git diff --exit-code
-      - name: Execute independent semantic probes
-        shell: bash
-        run: |
-          bash tools/investigations/semantic-cast-law-20260925/run.sh ../cast-law-production/build-cast-law/Release/ide "$GITHUB_WORKSPACE/evidence/probes"
-      - name: Check production source unchanged
-        if: always()
-        shell: bash
-        run: git -C ../cast-law-production diff --exit-code
+        run: bash tools/investigations/semantic-cast-law-20260925/followup.sh
       - name: Retain complete research evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
