@@ -453,6 +453,37 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_protocol_edit_tests(UnitTestArguments* arg
                                    function->instructions[head.value].next.value == 5 && function->blocks[1].terminated &&
                                    function->values[inserted.value].definition.value == head.value);
 
+        // Only an edge-less UNREACHABLE that is still the newest row can be
+        // retracted from a closed block: a RETURN tail is final, and the
+        // reopened block takes the next row where the marker stood.
+        IrBlock* fifth = ir_function_add_block(arena, function, (IrBlock){.first_instruction = IR_INSTRUCTION_ID_INVALID,
+                                                                           .last_instruction = IR_INSTRUCTION_ID_INVALID, .sealed = true});
+        IrBlockId b5 = fifth ? fifth->id : IR_BLOCK_ID_INVALID;
+        IrValueId guarded = ir_protocol_value(arena, function, fixture.integer_type);
+        IrInstructionId guard = IR_INSTRUCTION_ID_INVALID;
+        BUSTER_TEST(arguments, ir_protocol_commit(arena, function, b5.value, ir_protocol_constant(arena, fixture.integer_type, guarded, 7), &guard) ==
+                                   IR_COMMIT_ACCEPTED);
+        IrInstructionId closing = IR_INSTRUCTION_ID_INVALID;
+        BUSTER_TEST(arguments, ir_protocol_commit(arena, function, b5.value, ir_protocol_return(arena, fixture.void_type, guarded), &closing) ==
+                                   IR_COMMIT_ACCEPTED);
+        IrProtocolSnapshot returned = ir_protocol_snapshot(arena, function);
+        BUSTER_TEST(arguments, function->blocks[b5.value].terminated && !ir_block_retract_tail(function, b5, guard));
+        BUSTER_TEST(arguments, ir_protocol_unchanged(returned, function));
+        // Rebuild the same block ending in UNREACHABLE instead.
+        function->blocks[b5.value].terminated = false;
+        function->blocks[b5.value].last_instruction = guard;
+        function->instructions[guard.value].next = IR_INSTRUCTION_ID_INVALID;
+        function->instruction_count = closing.value;
+        IrInstructionId marker = IR_INSTRUCTION_ID_INVALID;
+        BUSTER_TEST(arguments, ir_protocol_commit(arena, function, b5.value, ir_protocol_row(IR_OPCODE_UNREACHABLE, fixture.void_type, IR_VALUE_ID_INVALID),
+                                                  &marker) == IR_COMMIT_ACCEPTED);
+        BUSTER_TEST(arguments, function->blocks[b5.value].terminated && ir_block_retract_tail(function, b5, guard));
+        BUSTER_TEST(arguments, !function->blocks[b5.value].terminated && function->blocks[b5.value].last_instruction.value == guard.value &&
+                                   function->instruction_count == marker.value);
+        BUSTER_TEST(arguments, ir_protocol_commit(arena, function, b5.value, ir_protocol_return(arena, fixture.void_type, guarded), &closing) ==
+                                   IR_COMMIT_ACCEPTED);
+        BUSTER_TEST(arguments, closing.value == marker.value && function->instructions[guard.value].next.value == closing.value);
+
         // Finalization names the first open block until every block closes.
         BUSTER_TEST(arguments, ir_function_first_open_block(function).value == b3.value);
         BUSTER_TEST(arguments, ir_protocol_commit(arena, function, b3.value, ir_protocol_return(arena, fixture.void_type, values[0]), 0) ==
