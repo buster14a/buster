@@ -11263,6 +11263,12 @@ enum
     // V epilogue without callee-saved pushes.
     MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF = MACHINE_X64_FIXED_TEMPLATE_MOV_RAX_RDX + 2,
     MACHINE_X64_FIXED_TEMPLATE_LEAVE = MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF + 16,
+    // movups xmm0 <-> [rbp + disp8/disp32] with the displacement patched: one
+    // sixteen-byte aggregate-copy chunk at a frame offset (frame-copy-16).
+    MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD8,
+    MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD32,
+    MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE8,
+    MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE32,
     MACHINE_X64_FIXED_TEMPLATE_STATIC_COUNT,
 };
 // Recipe variants and sequence steps whose operands are all fixed -- a zero
@@ -12483,6 +12489,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ShapeMnemonic const machine_x64_shape_mnemonics[] 
     {S8_INITIALIZER("MOVDQU"), 76},
     {S8_INITIALIZER("FNSTCW"), 66},
     {S8_INITIALIZER("SETNBE"), 72},
+    {S8_INITIALIZER("MOVUPS"), 83},
     {S8_INITIALIZER("CMPXCHG"), 34},
     {S8_INITIALIZER("UCOMISD"), 35},
     {S8_INITIALIZER("UCOMISS"), 36},
@@ -12502,9 +12509,9 @@ BUSTER_GLOBAL_LOCAL MachineX64ShapeMnemonic const machine_x64_shape_mnemonics[] 
 
 // First row of each length, indexed by length - 2, with a closing bound. There
 // Closing bound for each mnemonic length group.
-BUSTER_GLOBAL_LOCAL u8 const machine_x64_shape_mnemonic_spans[] = {0, 3, 27, 40, 65, 70, 75, 78, 80, 82};
+BUSTER_GLOBAL_LOCAL u8 const machine_x64_shape_mnemonic_spans[] = {0, 3, 27, 40, 65, 71, 76, 79, 81, 83};
 
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonics) == 82);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonics) == 83);
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonic_spans) ==
                 MACHINE_X64_SHAPE_MNEMONIC_MAX_LENGTH - MACHINE_X64_SHAPE_MNEMONIC_MIN_LENGTH + 2u);
 
@@ -13126,9 +13133,11 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_float_vector_a
         memory_operands[0] = xmm_operand;
         memory_operands[1] = memory_operand;
         (void)machine_x64_metadata_shape_cache_add(S8("MOVDQU"), memory_operands, 2, sse2, attributes);
+        (void)machine_x64_metadata_shape_cache_add(S8("MOVUPS"), memory_operands, 2, sse, attributes);
         memory_operands[0] = memory_operand;
         memory_operands[1] = xmm_operand;
         (void)machine_x64_metadata_shape_cache_add(S8("MOVDQU"), memory_operands, 2, sse2, attributes);
+        (void)machine_x64_metadata_shape_cache_add(S8("MOVUPS"), memory_operands, 2, sse, attributes);
         memory_operand.width = 256;
         BusterX86MetadataPhysicalOperand ymm_operand = machine_x64_exact_ymm_operand(0);
         BusterX86MetadataFeatureInput avx = {.names = machine_x64_avx_features, .count = BUSTER_ARRAY_LENGTH(machine_x64_avx_features)};
@@ -13281,7 +13290,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_instruction(MachineX64Encoder
     if (!features.count)
     {
         if (string_equal(mnemonic, S8("CVTSI2SS")) || string_equal(mnemonic, S8("ADDSS")) || string_equal(mnemonic, S8("UCOMISS")) ||
-            string_equal(mnemonic, S8("SUBSS")) || string_equal(mnemonic, S8("CVTTSS2SI")) || string_equal(mnemonic, S8("MOVSS")))
+            string_equal(mnemonic, S8("SUBSS")) || string_equal(mnemonic, S8("CVTTSS2SI")) || string_equal(mnemonic, S8("MOVSS")) ||
+            string_equal(mnemonic, S8("MOVUPS")))
         {
             features.names = machine_x64_sse_features;
             features.count = BUSTER_ARRAY_LENGTH(machine_x64_sse_features);
@@ -13590,6 +13600,23 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_static_fixed_templates(void)
     scratch = machine_x64_fixed_template_scratch(scratch_bytes);
     (void)machine_x64_emit_metadata_instruction(&scratch, S8("LEAVE"), 0, 0, no_features, attributes, 0);
     machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_LEAVE, &scratch, 0);
+    for (u32 store = 0; store < 2; store += 1)
+    {
+        u32 short_row = store ? MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE8 : MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD8;
+        u32 wide_row = store ? MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE32 : MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD32;
+        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        (void)machine_x64_emit_metadata_xmm_memory(&scratch, S8("MOVUPS"), 0, MACHINE_X64_RBP, -8, store != 0, 128, 0);
+        machine_x64_fixed_template_publish(short_row, &scratch, 1);
+        probe = machine_x64_fixed_template_scratch(probe_bytes);
+        (void)machine_x64_emit_metadata_xmm_memory(&probe, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x5b, store != 0, 128, 0);
+        machine_x64_fixed_template_prove(short_row, &probe, (u8)(-0x5b));
+        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        (void)machine_x64_emit_metadata_xmm_memory(&scratch, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x1000, store != 0, 128, 0);
+        machine_x64_fixed_template_publish(wide_row, &scratch, 4);
+        probe = machine_x64_fixed_template_scratch(probe_bytes);
+        (void)machine_x64_emit_metadata_xmm_memory(&probe, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x5aa55aa5, store != 0, 128, 0);
+        machine_x64_fixed_template_prove(wide_row, &probe, (u32)-0x5aa55aa5);
+    }
     scratch = machine_x64_fixed_template_scratch(scratch_bytes);
     (void)machine_x64_emit_metadata_registers(&scratch, S8("CMP"), MACHINE_X64_RAX, MACHINE_X64_RCX, 32, 0);
     machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_CMP32_RAX_RCX, &scratch, 0);
@@ -14991,6 +15018,29 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* enco
     return true;
 }
 
+// Aggregate copies move whole sixteen-byte chunks first, through XMM0 with
+// MOVUPS (frame-copy-16 and pointer-*-copy-16 in
+// tools/machine_rewrite_search.py): an unaligned, uninterpreted data move of
+// the same bytes two 8-byte chunk pairs move, valid because a copy's source
+// and destination objects are disjoint or identical (distinct frame slots
+// never partially overlap, and C11 6.5.16.1p3 leaves any other overlapping
+// assignment undefined). The rows declare XMM0 clobbered and join the
+// implicit vector-state chain, so no staged XMM argument or result can be
+// live across them. The remainder keeps the general-register chunks.
+#define MACHINE_X64_COPY_VECTOR_CHUNK 16u
+
+BUSTER_GLOBAL_LOCAL void machine_x64_emit_frame_vector_chunk(MachineX64Encoder* encoder, bool load, u32 offset)
+{
+    u32 value = (0u - offset) + encoder->frame_base_offset;
+    bool short_form = machine_x64_frame_displacement_is_short(offset, encoder->frame_base_offset);
+    u32 row = load ? (short_form ? MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD8 : MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD32)
+                   : (short_form ? MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE8 : MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE32);
+    if (machine_x64_emit_fixed_template(encoder, row, short_form ? (u8)value : value) == MACHINE_X64_FIXED_TEMPLATE_UNPUBLISHED)
+    {
+        (void)machine_x64_emit_metadata_xmm_memory(encoder, S8("MOVUPS"), 0, MACHINE_X64_RBP, -(s64)(s32)offset, !load, 128, 0);
+    }
+}
+
 // Sized chunk moves shared by the aggregate copy loops, chunked 8/4/2/1
 // exactly like the canonical copy code: narrow loads zero-extend through
 // movzx, narrow stores write their exact width.
@@ -16388,6 +16438,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         u32 destination_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])];
                         u32 source_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])];
                         u32 copied = 0;
+                        for (; instruction->payload - copied >= MACHINE_X64_COPY_VECTOR_CHUNK; copied += MACHINE_X64_COPY_VECTOR_CHUNK)
+                        {
+                            machine_x64_emit_frame_vector_chunk(&encoder, true, source_offset - copied);
+                            machine_x64_emit_frame_vector_chunk(&encoder, false, destination_offset - copied);
+                        }
                         while (copied < instruction->payload)
                         {
                             u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
@@ -16401,6 +16456,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         u32 destination_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])];
                         u32 source_register = operand_registers[1];
                         u32 copied = 0;
+                        for (; instruction->payload - copied >= MACHINE_X64_COPY_VECTOR_CHUNK; copied += MACHINE_X64_COPY_VECTOR_CHUNK)
+                        {
+                            (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVUPS"), 0, source_register, (s64)copied, false, 128, 0);
+                            machine_x64_emit_frame_vector_chunk(&encoder, false, destination_offset - copied);
+                        }
                         while (copied < instruction->payload)
                         {
                             u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
@@ -16414,6 +16474,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         u32 destination_register = operand_registers[0];
                         u32 source_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])];
                         u32 copied = 0;
+                        for (; instruction->payload - copied >= MACHINE_X64_COPY_VECTOR_CHUNK; copied += MACHINE_X64_COPY_VECTOR_CHUNK)
+                        {
+                            machine_x64_emit_frame_vector_chunk(&encoder, true, source_offset - copied);
+                            (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVUPS"), 0, destination_register, (s64)copied, true, 128, 0);
+                        }
                         while (copied < instruction->payload)
                         {
                             u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);

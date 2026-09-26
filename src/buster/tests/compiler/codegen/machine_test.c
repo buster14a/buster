@@ -7688,9 +7688,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         [MACHINE_X64_CALL_DIRECT] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_TLS_GENERAL_DYNAMIC] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_SWITCH] = MACHINE_SCHEDULE_UNIT_BARRIER,
-        [MACHINE_X64_COPY_FRAME_FROM_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY,
-        [MACHINE_X64_COPY_FRAME_FROM_PTR] = MACHINE_SCHEDULE_UNIT_MEMORY,
-        [MACHINE_X64_COPY_PTR_FROM_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        // x86 aggregate copies move sixteen-byte chunks through XMM0.
+        [MACHINE_X64_COPY_FRAME_FROM_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY | MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_COPY_FRAME_FROM_PTR] = MACHINE_SCHEDULE_UNIT_MEMORY | MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_COPY_PTR_FROM_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY | MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_X64_FARITH] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_X64_FCMP_SET] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_X64_CVT_F32_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
@@ -8353,8 +8354,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // Every fixed-shape template row prewarm allots must be one the
     // metadata authority accepted; a refused row would silently keep the
     // slower metadata lane for its shape.
-    BUSTER_TEST_RAW(arguments, exact_map.fixed_template_rows == 1482,
-                    string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1482 (rows: {u32})"), exact_map.fixed_template_rows));
+    BUSTER_TEST_RAW(arguments, exact_map.fixed_template_rows == 1486,
+                    string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1486 (rows: {u32})"), exact_map.fixed_template_rows));
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
     BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_movabs);
@@ -8362,7 +8363,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
     // Atomic NAND adds the 8-, 16-, 32- and 64-bit NOT register shapes.
-    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 268);
+    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 274);
     BUSTER_TEST(arguments, metadata_shape_cache.invalid_rows == 0);
 
     // Canonical metadata authorities and neutral patch helpers are separate

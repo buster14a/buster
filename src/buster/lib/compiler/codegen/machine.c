@@ -98,6 +98,9 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
 // them keeps vector values clear of rows that scribble the low XMM file.
 #define MACHINE_X64_FLOAT_SCRATCH_CLOBBER ((1u << MACHINE_X64_ZMM0) | (1u << MACHINE_X64_ZMM1))
 #define MACHINE_X64_FLOAT_BRIDGE_CLOBBER (0xffu << MACHINE_X64_ZMM0)
+// Aggregate copies move whole sixteen-byte chunks through XMM0 (MOVUPS) and
+// the remainder through their general data scratch.
+#define MACHINE_X64_COPY_VECTOR_CLOBBER (1u << MACHINE_X64_ZMM0)
 
 // Shorthand rows for the x86-64 scalar subset: destination-and-source
 // moves, read-modify-write arithmetic, flag producers/consumers, frame and
@@ -431,22 +434,25 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_X64_COPY_FRAME_FROM_FRAME] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME},
-        .clobber_mask = 1u << MACHINE_X64_RAX,
+        .clobber_mask = (1u << MACHINE_X64_RAX) | MACHINE_X64_COPY_VECTOR_CLOBBER,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .implicit_vector_state = 1,
     },
     [MACHINE_X64_COPY_FRAME_FROM_PTR] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_USE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
-        .clobber_mask = 1u << MACHINE_X64_RAX,
+        .clobber_mask = (1u << MACHINE_X64_RAX) | MACHINE_X64_COPY_VECTOR_CLOBBER,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .implicit_vector_state = 1,
     },
     [MACHINE_X64_COPY_PTR_FROM_FRAME] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_FRAME},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
-        .clobber_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RDX),
+        .clobber_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RDX) | MACHINE_X64_COPY_VECTOR_CLOBBER,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .implicit_vector_state = 1,
     },
     [MACHINE_X64_FARITH] = {
         .operand_count = 3,

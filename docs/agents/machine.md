@@ -149,6 +149,15 @@
   the terminator, an asm-goto landing addend on the `JMP`, or a `JCC` payload
   that is not a plain condition nibble keep the two-branch form. Block order
   therefore affects size, never semantics.
+- x86-64 `COPY_FRAME_FROM_FRAME`, `COPY_FRAME_FROM_PTR` and
+  `COPY_PTR_FROM_FRAME` move whole sixteen-byte chunks through XMM0 with
+  `MOVUPS` (RBP-frame sides from patched fixed templates), then 8/4/2/1-byte
+  general-register tails, ascending, each chunk loaded whole before it is
+  stored. That plan is exact for disjoint or identical objects, which C
+  assignment requires (C11 6.5.16.1p3), and for every overlap where the
+  former eight-byte plan was exact. The rows declare XMM0 clobbered and join
+  the implicit vector-state chain; selection must keep placing copies before
+  XMM argument staging and after result capture.
 - x86 ADD/SUB/AND/OR/XOR/IMUL rows are three-operand machine SSA with operand
   0 tied to operand 1. Allocators satisfy the physical two-address constraint;
   selectors must not reintroduce a MOV plus mutable USE_DEFINE result.

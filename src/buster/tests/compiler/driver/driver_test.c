@@ -16161,6 +16161,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     String8 c_machine_rewrite_paths[] = {
         S8("tests/basic_c_machine_rewrites.c"),
         S8("tests/basic_c_branch_layout.c"),
+        S8("tests/basic_c_aggregate_copies.c"),
     };
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_machine_rewrite_paths); fixture_index += 1)
     {
