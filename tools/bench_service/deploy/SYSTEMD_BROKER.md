@@ -52,6 +52,42 @@ and mode `0770` or `02770`. Another UID with that GID is an identity mismatch,
 not a candidate payload. A missing/aliased candidate account disables this
 exception; service-owned cleanup remains available.
 
+### Per-connection diagnostic evidence
+
+Each `serve-connection` process attempts a bounded, read-only snapshot before
+peer and request checks. It reads its own `/proc/self/{stat,status,mountinfo,cgroup}`,
+the executable link/inode and the inherited socket inode. The existing
+`StandardError=journal` stream receives `BQ-BROKER-DIAG-V1` lines: `BEGIN`,
+hex-encoded `DATA` chunks with field/offset/total length, `SNAPSHOT_END`, then
+`REQUEST` and `OUTCOME`. Every line carries PID and process start ticks.
+`REQUEST` has explicit presence flags for peer, receive and parsed request;
+unparsed bytes are never echoed. The snapshot limits are 4 KiB stat, 16 KiB
+status, 128 KiB mountinfo, 4 KiB cgroup, a 512-byte executable link and a
+256-byte socket identity. Each line is under 1,200 bytes and the per-process
+diagnostic has a 512 KiB output and 500 ms cumulative work bound. Journal
+writes use nonblocking, no-signal `send` on stderr only. A read, bound, short
+write or journal failure leaves an incomplete sequence; it does not change
+peer authorization, manager arguments, the framed response or the business
+exit. There is no producer-side lifetime connection-count assertion: the
+socket's `MaxConnections=8` bounds concurrent connections, not total starts.
+`SNAPSHOT_END` follows the aggregate time check and records `elapsed_ms`
+before its own send, with 25 ms reserved for the line. The 500 ms limit is a
+measured diagnostic work budget, not a guarantee of journal delivery time or
+of no scheduler preemption after the last byte. A collector requires all of
+`SNAPSHOT_END`, `REQUEST` and `OUTCOME`, and treats any observed budget or
+write failure as incomplete. Trusted journal timestamps aid correlation but
+do not prove the absence of a post-send scheduling delay.
+
+For isolated evidence, retain journal export with trusted boot, unit,
+invocation and PID fields and reconcile every accepted socket instance to
+one complete diagnostic sequence, exact installed executable inode/hash and
+the request/manager outcome. Missing, repeated, truncated or ambiguous
+records are incomplete. This is a self-report of kernel `/proc/self` bytes by
+the reviewed broker, not an independent observer of every process. Compare
+overlapping external `/proc/PID` captures. The separate required external
+`systemctl show --all` for every connection unit and the service/security
+owner's residual-authority decision are not supplied by this diagnostic.
+
 ## Build and review
 
 From the reviewed checkout, run `./build.sh bench_service_broker self-test` and
