@@ -12971,6 +12971,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_function_pointer(CIntegerIrBuilder* builde
 
 BUSTER_C_INTERNAL bool c_ir_group_is_statement_expression(CIntegerIrBuilder* builder, u32 start, u32 end);
 
+BUSTER_C_INTERNAL bool c_ir_has_root_comma(CIntegerIrBuilder* builder, u32 start, u32 end);
+
 BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditionalOperator operation, IrValueId* values, u32* value_count,
                                              IrSourceRange source, IrTypeId cast_type);
 
@@ -28757,14 +28759,15 @@ c_ir_expression_core_loop:
                 index = prepared->close_index;
                 continue;
             }
-            // A control/assignment expression can be nested as an operand
+            // A control/assignment/comma expression can be nested as an operand
             // of a comparison or bitwise operation.  If the preparation pass
             // did not record it (for example while descending from another
             // prepared group), evaluate the group through the full
             // expression machine instead of leaving a C_CONDITIONAL_OPEN
             // marker for the arithmetic reducer.
             if (close < end && (c_ir_has_root_control_operator(builder, index + 1, close) ||
-                                c_ir_has_assignment_anywhere(builder, index + 1, close)))
+                                c_ir_has_assignment_anywhere(builder, index + 1, close) ||
+                                c_ir_has_root_comma(builder, index + 1, close)))
             {
                 c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types, value_count, operation_count,
                                           close + 1, expect_operand);
@@ -29453,10 +29456,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_condition_branch_on_leaf(CIntegerIrBuilder* bu
     return branched;
 }
 
-// A controlling expression still obeys comma precedence. Only commas outside
+// Conditions and nested operands still obey comma precedence. Only commas outside
 // delimiter groups and the middle operand of ?: belong to its root. The full
 // expression machine already owns their ordered evaluation and result type.
-BUSTER_C_INTERNAL bool c_ir_condition_has_root_comma(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_has_root_comma(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     bool found = false;
     while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
@@ -29675,7 +29678,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
                 continue;
             }
         }
-        if (c_ir_condition_has_root_comma(builder, task.start, task.end))
+        if (c_ir_has_root_comma(builder, task.start, task.end))
         {
             // Split the sequence before ?: or &&/||. In particular, a false
             // left operand cannot suppress the final comma operand, and a
