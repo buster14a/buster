@@ -416,6 +416,10 @@ nothing. No extra arena storage or whole-function row stream is retained.
   means no work at this hook, not absence of all CFG work.
 - `operand_slots_appended` sums appended rows' operand counts. It does
   not count unique operands or repeated downstream decoding passes.
+- `debug_function_index_rows` counts IR functions entered into the
+  per-model symbol index that matches `-g` debug seeds to their canonical
+  locals; `debug_function_seed_scan_rows` counts rows examined by the
+  search kept for a seed without a program symbol, which codegen never emits.
 
 The additive direct-SSA census for #447 separates work inside `c_ir_ssa_*`:
 
