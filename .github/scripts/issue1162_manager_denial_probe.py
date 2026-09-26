@@ -303,8 +303,11 @@ def denial(result: dict, unit: str) -> str:
     output = result["stderr"]
     lines = output.splitlines()
     expected = f"Failed to start {unit}: "
+    status_hint = f"See system logs and 'systemctl status {unit}' for details."
+    expected_lines = (len(lines) == 1 or
+                      (len(lines) == 2 and lines[1] == status_hint))
     require(result["exit"] != 0 and result["exit"] is not None and not result["timed_out"] and
-            UNIT_NAME.fullmatch(unit) is not None and len(lines) == 1 and
+            UNIT_NAME.fullmatch(unit) is not None and expected_lines and
             lines[0].startswith(expected) and lines[0][len(expected):].rstrip(".") in DENIED_TEXT and
             not result["stdout"].strip(),
             "direct manager result is not an explicit authorization denial")
@@ -493,6 +496,24 @@ def self_test() -> None:
                       "Failed to start other.service: Access denied"):
             reject(lambda error=error: denial({**deny, "stderr": error}, unit), "not an explicit")
         reject(lambda: denial({**deny, "exit": 0}, unit), "not an explicit")
+        receipt_unit = unit_name(36251707272, 1, "service")
+        receipt_stderr = (f"Failed to start {receipt_unit}: Access denied\n"
+                          f"See system logs and 'systemctl status {receipt_unit}' for details.\n")
+        actual_receipt = {"exit": 4, "stdout": "", "stderr": receipt_stderr,
+                          "timed_out": False}
+        assert denial(actual_receipt, receipt_unit) == "AccessDenied"
+        checks += 1
+        wrong_hint = receipt_stderr.replace(
+            f"systemctl status {receipt_unit}", f"systemctl status {unit}")
+        reject(lambda: denial({**actual_receipt, "stderr": wrong_hint}, receipt_unit),
+               "not an explicit")
+        reject(lambda: denial({**actual_receipt, "stderr": receipt_stderr + "extra output\n"},
+                              receipt_unit), "not an explicit")
+        reject(lambda: denial({**actual_receipt, "stderr": receipt_stderr.replace(
+            "for details.", "for details")}, receipt_unit), "not an explicit")
+        reject(lambda: denial({**actual_receipt, "stdout": "unexpected stdout\n"}, receipt_unit),
+               "not an explicit")
+        reject(lambda: denial({**actual_receipt, "timed_out": True}, receipt_unit), "not an explicit")
         for bad in ("0", "01", "-1", "1;touch /tmp/x", str(2**64)):
             reject(lambda bad=bad: number(bad), "run identity")
         executable = root / "systemctl"
