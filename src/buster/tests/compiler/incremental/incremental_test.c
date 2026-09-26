@@ -339,6 +339,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult incremental_test_driver(UnitTestArguments* ar
     String8 cached = incremental_test_path(arena, S8("incremental-cached"), target_index, S8(".o"));
     String8 cache = incremental_test_path(arena, S8("incremental-cache"), target_index, S8(""));
     String8 disabled_cache = incremental_test_path(arena, S8("incremental-disabled"), target_index, S8(""));
+    // The identity path reaches file APIs that require termination; only the
+    // read fallback (Android, iOS) checks it, so check it here on every host.
+    String8 executable = os_executable_path(arena);
+    BUSTER_TEST(arguments, !executable.length || !executable.pointer[executable.length]);
     BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(incremental_test_source_v1)));
     CompilerDriverResult oracle = incremental_test_compile(arena, target, input, clean, (String8){0}, (String8){0});
     BUSTER_TEST_RAW(arguments, oracle.error == COMPILER_DRIVER_ERROR_NONE, oracle.diagnostic);

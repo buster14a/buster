@@ -1196,7 +1196,7 @@ String8 os_executable_path(Arena* arena)
         }
         else if ((u64)length < capacity)
         {
-            result = string_duplicate_arena(arena, (String8){.pointer = buffer, .length = (u64)length}, false);
+            result = string_duplicate_arena(arena, (String8){.pointer = buffer, .length = (u64)length}, true);
             done = true;
         }
         scratch_end(scratch);
@@ -1215,7 +1215,7 @@ String8 os_executable_path(Arena* arena)
             {
                 length += 1;
             }
-            result = string_duplicate_arena(arena, (String8){.pointer = buffer, .length = length}, false);
+            result = string_duplicate_arena(arena, (String8){.pointer = buffer, .length = length}, true);
         }
         scratch_end(scratch);
     }
@@ -1232,7 +1232,7 @@ String8 os_executable_path(Arena* arena)
         }
         else if (length < capacity)
         {
-            result = string8_from_string16(arena, (String16){.pointer = buffer, .length = length}, false);
+            result = string8_from_string16(arena, (String16){.pointer = buffer, .length = length}, true);
             done = true;
         }
         scratch_end(scratch);
