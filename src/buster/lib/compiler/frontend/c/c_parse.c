@@ -5144,7 +5144,7 @@ BUSTER_C_SHARED bool c_ir_tokens_are_string_literals(CPreprocessResult preproces
 typedef struct CParseInitializerContinuation CParseInitializerContinuation;
 
 BUSTER_C_SHARED bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target, u32 start, u32 end,
-                                                                    CStringCountMemo* memo, CIrDecodedString* decoded_out);
+                                                                    CStringLiteralMemo* memo, CIrDecodedString* decoded_out);
 
 BUSTER_C_INTERNAL bool c_parse_arena_can_allocate(Arena* arena, u64 size, u64 alignment)
 {
@@ -5435,7 +5435,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_add_type_alignment(CParseResult* result, CType
 BUSTER_C_INTERNAL CTypeId c_parse_string_literal_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, u32 start, u32 end)
 {
     CIrDecodedString decoded = {0};
-    if (!c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, result->string_counts, &decoded) || decoded.element_count == UINT64_MAX ||
+    if (!c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, result->string_literals, &decoded) || decoded.element_count == UINT64_MAX ||
         !c_parse_result_reserve_array_bounds(result, 1))
     {
         return C_TYPE_ID_INVALID;
@@ -6161,7 +6161,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
     if (c_ir_tokens_are_string_literals(preprocess, start, end))
     {
         CIrDecodedString decoded = {0};
-        if (!c_ir_count_string_literal_range_for_target(temporary_arena, preprocess, preprocess.target, start, end, result->string_counts, &decoded) ||
+        if (!c_ir_count_string_literal_range_for_target(temporary_arena, preprocess, preprocess.target, start, end, result->string_literals, &decoded) ||
             decoded.element_count == UINT64_MAX || !c_parse_initializer_string_element_compatible(preprocess, result, element_type, decoded))
         {
             return false;
@@ -6191,7 +6191,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
     if (string_start < string_end && c_ir_tokens_are_string_literals(preprocess, string_start, string_end))
     {
         CIrDecodedString decoded = {0};
-        if (!c_ir_count_string_literal_range_for_target(temporary_arena, preprocess, preprocess.target, string_start, string_end, result->string_counts, &decoded) ||
+        if (!c_ir_count_string_literal_range_for_target(temporary_arena, preprocess, preprocess.target, string_start, string_end, result->string_literals, &decoded) ||
             decoded.element_count == UINT64_MAX || !c_parse_initializer_string_element_compatible(preprocess, result, element_type, decoded))
         {
             return false;
@@ -11040,7 +11040,7 @@ BUSTER_C_INTERNAL bool c_parse_sizeof_operand_expression_layout(Arena* arena, CP
                 if (element && c_ir_tokens_are_string_literals(preprocess, initializer, declaration_end))
                 {
                     CIrDecodedString decoded = {0};
-                    if (c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, initializer, declaration_end, result->string_counts, &decoded) &&
+                    if (c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, initializer, declaration_end, result->string_literals, &decoded) &&
                         decoded.element_count != UINT64_MAX &&
                         c_parse_initializer_string_element_compatible(preprocess, result, record->element_type, decoded))
                     {
@@ -19916,7 +19916,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_initializer_shape
                 CIrDecodedString decoded = {0};
                 CParseInitializerInferenceFrame array = {.type = type};
                 u64 count = 0;
-                bool valid_string = c_ir_count_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, string_start, string_end, result->string_counts, &decoded);
+                bool valid_string = c_ir_count_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, string_start, string_end, result->string_literals, &decoded);
                 if (!valid_string || (c_parse_initializer_type_slots(machine, machine->scratch_arena, preprocess, result, scope, &array, &count) &&
                     decoded.element_count > count))
                 {
@@ -21896,7 +21896,7 @@ BUSTER_C_INTERNAL String8 c_parse_asm_bound_register(CTypeParseMachine* machine,
                 !c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
                 preprocess.tokens[cursor + 2].kind != C_TOKEN_STRING_LITERAL) continue;
             CIrDecodedString decoded = {0};
-            if (c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, cursor + 2, cursor + 3, &decoded))
+            if (c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, cursor + 2, cursor + 3, result->string_literals, &decoded))
             {
                 String8 name = {.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count};
                 if (name.length > 1 && name.pointer[0] == '%') name = string_slice(name, 1, name.length);
@@ -22024,7 +22024,7 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
                     bool output = separator_count == 1 || cursor < separators[1];
                     CIrDecodedString decoded = {0};
                     String8 text = {0};
-                    if (c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, cursor, cursor + 1, &decoded))
+                    if (c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, cursor, cursor + 1, result->string_literals, &decoded))
                     {
                         text = (String8){.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count};
                         message = c_parse_asm_constraint_shape(text, output);
@@ -22148,7 +22148,7 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
                 if (preprocess.tokens[cursor].kind == C_TOKEN_STRING_LITERAL)
                 {
                     CIrDecodedString decoded = {0};
-                    bool valid = c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, cursor, cursor + 1, &decoded);
+                    bool valid = c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, cursor, cursor + 1, result->string_literals, &decoded);
                     valid &= decoded.element_width == 1;
                     stack_clobber |= valid && string_equal((String8){.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count}, S8("st"));
                     rbx_clobber |= valid && c_semantic_asm_clobber_matches_constraint(preprocess.target,
@@ -22172,7 +22172,7 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
         if (!message.length && separator_count <= 4)
         {
             CIrDecodedString decoded = {0};
-            bool valid = c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, open + 1, template_end, &decoded);
+            bool valid = c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, open + 1, template_end, result->string_literals, &decoded);
             String8 assembly = {.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count};
             if (valid) message = c_semantic_asm_special_operands_message(preprocess.target, assembly, constraints, operands,
                 operand_count, output_count, rbx_clobber);
@@ -22862,7 +22862,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     }
     result.position_index = arena_allocate(arena, CTokenPositionIndex, 1);
     *result.position_index = (CTokenPositionIndex){0};
-    result.string_counts = c_string_count_memo_create(arena, preprocess.tokens);
+    result.string_literals = c_string_literal_memo_create(arena, preprocess.tokens);
     result.identifier_uses = arena_allocate(arena, CIdentifierUse, result.identifier_use_capacity);
     result.identifier_use_by_token_plus_one = arena_allocate_zeroed(arena, u32, result.identifier_use_by_token_capacity);
     result.token_classes = arena_allocate_zeroed(arena, u8, result.identifier_use_by_token_capacity);
@@ -23438,8 +23438,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         c_parse_validate_lowering_constraints(&machine, arena, &result, preprocess);
     }
     result.analysis_complete = true;
-    // The count memo is semantic-analysis state: lowering never reads it.
-    result.string_counts = 0;
+    // The literal memo stays published: lowering reads the recorded bytes
+    // and never records.
     scratch_end(machine_temporary);
     BUSTER_VALIDATE(arena_destroy(machine_buffer_arena, 1));
     return result;
