@@ -16514,6 +16514,377 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
     }
+    // Modification destinations: a store through a pre-updated pointer,
+    // `*--q = c`, converts to the pointee (C17 6.5.3.1p2, 6.5.16p3,
+    // 6.5.16.1p2), and `++`/`--` on a parameter declared as an array updates
+    // the pointer it is adjusted to (6.7.6.3p7), unless the brackets make that
+    // pointer const. The constraint pass refused both shapes in every
+    // allocator (QuickJS, zlib, musl, libpng, zstd; sbase, lmdb, mbedtls). The
+    // native-retirement ledger pins tests/ fixture bytes, so the sources are
+    // embedded, each literal below C99's minimum length limit. Each one runs
+    // and checks the objects it wrote; `-O` is given before the allocator
+    // because an optimization level restores the default allocator.
+    String8 c_prefix_pointer_store_parts[] = {
+        S8(
+            "// A store through a pointer that the same expression pre-increments or\n"
+            "// pre-decrements: `*--q = c`. `--q` is `q -= 1` (C17 6.5.3.1p2) and not an\n"
+            "// lvalue (6.5.16p3), so the destination is the object the updated pointer\n"
+            "// designates (6.5.3.2p4), and the right operand converts to that object's\n"
+            "// type (6.5.16.1p2), never to the pointer's. The constraint pass read the\n"
+            "// identifier in front of `=` as the whole destination and refused every one\n"
+            "// of these as a conversion to the pointer type: QuickJS's `js_u64toa`\n"
+            "// (`*--q = '0' + digit`, int to char),\n"
+            "// libpng's `png_format_number` (`*--end = digits[...]`, const char to char),\n"
+            "// zstd's `tr_copy` (`*++d = s`, int to int) and musl's `vfprintf`.\n"
+            "//\n"
+            "// Each shape runs and its objects are checked afterwards, because a store\n"
+            "// that landed on the pointer or on the neighbouring element still compiles.\n"
+            "\n"
+            "struct Pair\n"
+            "{\n"
+            "    int first;\n"
+            "    int second;\n"
+            "};\n"
+            "\n"
+            "static const char digit_table[] = \"0123456789abcdef\";\n"
+            "\n"
+            "// QuickJS: the character is an int expression converted on store.\n"
+            "static char* format_backward(char* q, unsigned long long n, unsigned base)\n"
+            "{\n"
+            "    int digit;\n"
+            "    if (base == 10)\n"
+            "    {\n"
+            "        do\n"
+            "        {\n"
+            "            digit = (int)(n % 10);\n"
+            "            n /= 10;\n"
+            "            *--q = '0' + digit;\n"
+            "        } while (n != 0);\n"
+            "    }\n"
+            "    else\n"
+            "    {\n"
+            "        do\n"
+            "        {\n"
+            "            digit = (int)(n % base);\n"
+            "            n /= base;\n"
+            "            *--q = digit_table[digit];\n"
+            "        } while (n != 0);\n"
+            "    }\n"
+            "    return q;\n"
+            "}\n"
+            "\n"
+            "// zstd: an int store through a pre-incremented cursor into the same array.\n"
+            "static int* copy_forward(int* d, int const* source, int count)\n"
+            "{\n"
+            "    for (int index = 0; index < count; index += 1)\n"
+            "    {\n"
+            "        *++d = source[index];\n"
+            "    }\n"
+            "    return d;\n"
+            "}\n"
+            "\n"
+            "static int text_equal(char const* left, char const* right)\n"
+            "{\n"
+            "    while (*left && *left == *right)\n"
+            "    {\n"
+            "        left += 1;\n"
+            "        right += 1;\n"
+            "    }\n"
+            "    return *left == *right;\n"
+            "}\n"
+            "\n"
+            "static int answer(void)\n"
+            "{\n"
+            "    return 42;\n"
+            "}\n"
+            "\n"
+            "int main(void)\n"
+            "{\n"
+            "    char buffer[32];\n"
+            "    buffer[31] = 0;\n"
+            "    char* text = format_backward(buffer + 31, 1234567890123ull, 10);\n"
+            "    if (!text_equal(text, \"1234567890123\") || text != buffer + 18)\n"
+            "    {\n"
+            "        return 1;\n"
+            "    }\n"
+            "    text = format_backward(buffer + 31, 0xbeefu, 16);\n"
+            "    if (!text_equal(text, \"beef\") || text != buffer + 27)\n"
+            "    {\n"
+            "        return 2;\n"
+            "    }\n"
+            "\n"
+            "    int values[6] = {0, 0, 0, 0, 0, -1};\n"
+            "    int const source[4] = {7, 8, 9, 10};\n"
+            "    int* last = copy_forward(values, source, 4);\n"
+            "    if (last != values + 4 || values[0] != 0 || values[1] != 7 || values[4] != 10 || values[5] != -1)\n"
+            "    {\n"
+            "        return 3;\n"
+            "    }\n"
+            "\n"
+            "    // A chained assignment takes the stored element's value, converted to\n"
+            "    // the element type, not the pointer's.\n"
+            "    unsigned char bytes[3] = {1, 2, 3};\n"
+            "    unsigned char* cursor = bytes + 2;\n"
+            "    int chained = *--cursor = 0x1ff;\n"
+            "    if (chained != 0xff || cursor != bytes + 1 || bytes[0] != 1 || bytes[1] != 0xff || bytes[2] != 3)\n"
+            "    {\n"
+            "        return 4;\n"
+            "    }\n"
+            "\n"
+        ),
+        S8(
+            "    // Floating, pointer, aggregate and function-pointer elements.\n"
+            "    double reals[2] = {0.0, 0.0};\n"
+            "    double* real = reals;\n"
+            "    *++real = 3;\n"
+            "    if (real != reals + 1 || reals[0] != 0.0 || reals[1] != 3.0)\n"
+            "    {\n"
+            "        return 5;\n"
+            "    }\n"
+            "    char* names[3] = {0, 0, 0};\n"
+            "    char** name = names + 3;\n"
+            "    *--name = buffer;\n"
+            "    if (name != names + 2 || names[2] != buffer || names[1] != 0)\n"
+            "    {\n"
+            "        return 6;\n"
+            "    }\n"
+            "    struct Pair pairs[2] = {{0, 0}, {0, 0}};\n"
+            "    struct Pair* pair = pairs;\n"
+            "    struct Pair filled = {5, 6};\n"
+            "    *++pair = filled;\n"
+            "    if (pair != pairs + 1 || pairs[1].first != 5 || pairs[1].second != 6 || pairs[0].first != 0)\n"
+            "    {\n"
+            "        return 7;\n"
+            "    }\n"
+            "    int (*calls[2])(void) = {0, 0};\n"
+            "    int (**call)(void) = calls + 2;\n"
+            "    *--call = answer;\n"
+            "    if (call != calls + 1 || calls[1]() != 42 || calls[0] != 0)\n"
+            "    {\n"
+            "        return 8;\n"
+            "    }\n"
+            "\n"
+            "    // A pre-updated store beside a plain one: both designate elements.\n"
+            "    _Bool flags[2] = {0, 0};\n"
+            "    _Bool* flag = flags;\n"
+            "    *flag = 2;\n"
+            "    *++flag = 5;\n"
+            "    if (flags[0] != 1 || flags[1] != 1)\n"
+            "    {\n"
+            "        return 9;\n"
+            "    }\n"
+            "    return 0;\n"
+            "}\n"
+        ),
+    };
+    String8 c_array_parameter_update_parts[] = {
+        S8(
+            "// C17 6.7.6.3p7: a parameter declared as an array is adjusted to a pointer to\n"
+            "// the element type, so it is a modifiable lvalue and `++`/`--` step it by one\n"
+            "// element (6.5.2.4, 6.5.3.1). The parameter entity keeps its declared array\n"
+            "// spelling, and the constraint pass read that spelling as an array object and\n"
+            "// refused every update as \"not a modifiable place\" -- while `+=` and `= p + 1`\n"
+            "// on the same parameter were accepted. `char *argv[]` with `argv++` is the\n"
+            "// ordinary command-line loop (lmdb's `mdb_copy`, sbase's ARGBEGIN), and\n"
+            "// mbedtls's `des_setkey` writes its key schedule through `uint32_t SK[32]` as\n"
+            "// `*SK++ = ...`.\n"
+            "//\n"
+            "// Every update runs and the element it lands on is checked, including a\n"
+            "// multidimensional parameter whose step is a whole row.\n"
+            "\n"
+            "typedef int Quad[4];\n"
+            "\n"
+            "static int count_options(int argc, char* argv[])\n"
+            "{\n"
+            "    int options = 0;\n"
+            "    for (; argc > 1 && argv[1][0] == '-'; argc--, argv++)\n"
+            "    {\n"
+            "        options += 1;\n"
+            "    }\n"
+            "    return options * 10 + argc;\n"
+            "}\n"
+            "\n"
+            "static void schedule(unsigned int SK[4], unsigned int seed)\n"
+            "{\n"
+            "    for (int index = 0; index < 4; index += 1)\n"
+            "    {\n"
+            "        *SK++ = seed + (unsigned int)index;\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "static int prefix_and_postfix(int values[])\n"
+            "{\n"
+            "    int first = *values++;\n"
+            "    int second = *++values;\n"
+            "    --values;\n"
+            "    int middle = *values--;\n"
+            "    return first * 100 + second * 10 + middle + (values[0] == first ? 1000 : 0);\n"
+            "}\n"
+            "\n"
+            "static int bounded(int values[static 3])\n"
+            "{\n"
+            "    values++;\n"
+            "    return values[1];\n"
+            "}\n"
+            "\n"
+            "static int variable(int n, int values[n])\n"
+            "{\n"
+            "    values += n - 1;\n"
+            "    values--;\n"
+            "    return values[0];\n"
+            "}\n"
+            "\n"
+            "static int rows(int matrix[][3])\n"
+            "{\n"
+            "    matrix++;\n"
+            "    return matrix[0][2];\n"
+            "}\n"
+            "\n"
+            "static int typedef_parameter(Quad quad)\n"
+            "{\n"
+            "    ++quad;\n"
+            "    return quad[0];\n"
+            "}\n"
+            "\n"
+            "static int qualified_elements(const char* names[])\n"
+            "{\n"
+            "    int total = 0;\n"
+            "    while (*names)\n"
+            "    {\n"
+            "        total += (*names)[0];\n"
+            "        (names)++;\n"
+            "    }\n"
+            "    return total;\n"
+            "}\n"
+            "\n"
+            "// `const` inside the brackets makes the pointer const; its elements are not.\n"
+            "static int bracket_const(int values[const 2])\n"
+            "{\n"
+            "    values[1]++;\n"
+            "    return values[0] * 10 + values[1];\n"
+            "}\n"
+            "\n"
+            "static int unevaluated(int values[])\n"
+            "{\n"
+            "    // The operand of sizeof is not evaluated: `values` is not stepped.\n"
+            "    int size = (int)sizeof(values++);\n"
+            "    return size == (int)sizeof(int*) ? values[0] : -1;\n"
+            "}\n"
+            "\n"
+            "int main(void)\n"
+            "{\n"
+            "    char program[] = \"tool\";\n"
+            "    char flag_a[] = \"-a\";\n"
+            "    char flag_b[] = \"-b\";\n"
+            "    char operand[] = \"file\";\n"
+            "    char* argv[] = {program, flag_a, flag_b, operand, 0};\n"
+            "    if (count_options(4, argv) != 22)\n"
+            "    {\n"
+            "        return 1;\n"
+            "    }\n"
+            "\n"
+            "    unsigned int keys[5] = {0, 0, 0, 0, 99};\n"
+            "    schedule(keys, 40);\n"
+            "    if (keys[0] != 40 || keys[3] != 43 || keys[4] != 99)\n"
+            "    {\n"
+            "        return 2;\n"
+            "    }\n"
+            "\n"
+            "    int values[4] = {1, 2, 3, 4};\n"
+            "    if (prefix_and_postfix(values) != 1132)\n"
+            "    {\n"
+            "        return 3;\n"
+            "    }\n"
+            "    if (bounded(values) != 3)\n"
+            "    {\n"
+            "        return 4;\n"
+            "    }\n"
+            "    if (variable(4, values) != 3)\n"
+            "    {\n"
+            "        return 5;\n"
+            "    }\n"
+            "\n"
+            "    int matrix[2][3] = {{1, 2, 3}, {4, 5, 6}};\n"
+        ),
+        S8(
+            "    if (rows(matrix) != 6)\n"
+            "    {\n"
+            "        return 6;\n"
+            "    }\n"
+            "\n"
+            "    Quad quad = {10, 20, 30, 40};\n"
+            "    if (typedef_parameter(quad) != 20)\n"
+            "    {\n"
+            "        return 7;\n"
+            "    }\n"
+            "\n"
+            "    char const* names[] = {\"a\", \"b\", 0};\n"
+            "    if (qualified_elements(names) != 'a' + 'b')\n"
+            "    {\n"
+            "        return 8;\n"
+            "    }\n"
+            "\n"
+            "    if (unevaluated(values) != 1)\n"
+            "    {\n"
+            "        return 9;\n"
+            "    }\n"
+            "\n"
+            "    int pair[2] = {4, 5};\n"
+            "    if (bracket_const(pair) != 46 || pair[1] != 6)\n"
+            "    {\n"
+            "        return 10;\n"
+            "    }\n"
+            "    return 0;\n"
+            "}\n"
+        ),
+    };
+
+    String8 c_modification_destination_sources[] = {
+        string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_prefix_pointer_store_parts), false),
+        string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_array_parameter_update_parts), false),
+    };
+    String8 c_modification_destination_names[] = {S8("buster-c-prefix-pointer-store"), S8("buster-c-array-parameter-update")};
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(c_modification_destination_sources); source_index += 1)
+    {
+        for (u32 frontend_index = 0; frontend_index < BUSTER_ARRAY_LENGTH(c_flat_initializer_frontends); frontend_index += 1)
+        {
+            for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+            {
+                for (u32 optimization_index = 0; optimization_index < BUSTER_ARRAY_LENGTH(c_designator_optimizations); optimization_index += 1)
+                {
+                    TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
+                    String8 fixture_path = buster_test_temporary_path(
+                        fixture_temporary.arena, c_modification_destination_names[source_index],
+                        string_format(fixture_temporary.arena, S8("-{u32}-{u32}-{u32}"), frontend_index, allocator_index, optimization_index));
+                    String8 source_path = string_format_z(fixture_temporary.arena, S8("{S8}.c"), fixture_path);
+                    BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(c_modification_destination_sources[source_index])));
+                    bool native_allocator = !string_equal(c_lz4_regression_allocators[allocator_index], S8("-fregister-allocator=none"));
+                    String8 fixture_command_line[] = {
+                        S8("-std=c17"), c_designator_optimizations[optimization_index], c_flat_initializer_frontends[frontend_index],
+                        c_lz4_regression_allocators[allocator_index], S8("-fverify-codegen"),
+                        native_allocator ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"), S8("-o"), fixture_path, source_path,
+                    };
+                    CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                        fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+                    BUSTER_TEST_RAW(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE,
+                                    string_format(fixture_temporary.arena, S8("{S8} {S8}: {S8}"), c_modification_destination_names[source_index],
+                                                  c_lz4_regression_allocators[allocator_index], fixture.diagnostic));
+                    if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 fixture_arguments[] = {fixture_path};
+                        ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0},
+                                                                            (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                        BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                        if (fixture_spawn.handle)
+                        {
+                            BUSTER_TEST(arguments, os_process_wait_sync(fixture_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                        }
+                    }
+                    scratch_end(fixture_temporary);
+                }
+            }
+        }
+    }
     // #792: on a PE target that fixture used to be unlinkable.  `atexit` and
     // `at_quick_exit` are not ucrtbase.dll exports -- UCRT keeps them in its
     // import library as one call apiece to `_crt_atexit` and
@@ -18784,8 +19155,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_designated_subscript_initializer.c"),
         S8("tests/basic_c_conditional_array_branch.c"),
         S8("tests/basic_c_array_parameter_assignment.c"),
-        S8("tests/basic_c_array_parameter_update.c"),
-        S8("tests/basic_c_prefix_pointer_store.c"),
         S8("tests/basic_c_unparenthesized_sizeof_initializer.c"),
         S8("tests/basic_c_incrementing_assignment_condition.c"),
         S8("tests/basic_c_null_pointer_offsetof.c"),
@@ -18807,8 +19176,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-designated-subscript-initializer"),
         S8("buster-c-conditional-array-branch"),
         S8("buster-c-array-parameter-assignment"),
-        S8("buster-c-array-parameter-update"),
-        S8("buster-c-prefix-pointer-store"),
         S8("buster-c-unparenthesized-sizeof-initializer"),
         S8("buster-c-incrementing-assignment-condition"),
         S8("buster-c-null-pointer-offsetof"),

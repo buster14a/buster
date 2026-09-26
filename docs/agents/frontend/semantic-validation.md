@@ -70,9 +70,9 @@ inside the brackets (`CArrayBound.is_const`, `int a[const 2]`) makes that
 pointer read-only here and in `c_ir_mark_local_read_only`. A qualified
 typedef'd array parameter (`const L2 v`) is still treated as a const pointer
 on both paths; C17 6.7.3p10 qualifies its element instead.
-`tests/basic_c_prefix_pointer_store.c` and
-`tests/basic_c_array_parameter_update.c` run these shapes under every
-allocator.
+The embedded modification-destination sources in `compiler_driver_tests`
+run these shapes under every allocator and both frontend forms; the
+equivalence table holds their rejected neighbours.
 
 `c_parse_validate_label_values` walks a body's assignment, return and call
 values -- one scope-chain entity lookup per identifier -- only when
