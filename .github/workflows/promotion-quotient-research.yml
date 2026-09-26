@@ -2,6 +2,7 @@ name: Promotion quotient research
 on:
   push:
     branches: [research/promotion-quotient-20260925-astra-c74e]
+    paths: [tools/investigations/promotion-quotient-20260925/**]
 permissions:
   contents: read
 concurrency:
