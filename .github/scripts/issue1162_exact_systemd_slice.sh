@@ -7,6 +7,7 @@ evidence="${RUNNER_TEMP:?}/issue1162-exact-slice-evidence"
 source_root="$RUNNER_TEMP/issue1162-source"
 repo_root="$(git rev-parse --show-toplevel)"
 live_probe_helper="$repo_root/.github/scripts/issue1162_live_probe.py"
+stage_observer_helper="$repo_root/.github/scripts/issue1162_stage_observer.py"
 payload="$RUNNER_TEMP/issue1162-install"
 guest="issue1162-exact-${GITHUB_RUN_ID:?}"
 image="issue1162-exact:${GITHUB_RUN_ID}"
@@ -14,12 +15,36 @@ mkdir -p "$evidence" "$payload/binaries" "$payload/sources" "$payload/units"
 chmod 0700 "$evidence"
 exec > >(tee "$evidence/run.log") 2>&1
 python3 "$live_probe_helper" --self-test | tee "$evidence/live-probe-self-test.txt"
+python3 "$stage_observer_helper" --self-test | tee "$evidence/stage-observer-self-test.txt"
+observer_pid=
+observer_collected=false
+collect_stage_observer() {
+  if [[ -n "$observer_pid" && "$observer_collected" != true ]]; then
+    # A failure-path snapshot may overlap the observer's last writes and is
+    # retained as partial evidence, never as a completed observation.
+    printf 'snapshot=%s\n' "${1:-completed}" >"$evidence/stage-observer-retention.txt"
+    mkdir -p "$evidence/stage-observer-artifacts"
+    if sudo docker cp "$guest:/root/issue1162-install/stage-observer-output/." "$evidence/stage-observer-artifacts" &&
+       sudo chown -R -- "$(id -u):$(id -g)" "$evidence/stage-observer-artifacts"; then
+      observer_collected=true
+    else
+      echo "STAGE_OBSERVER_ARTIFACT_COPY_FAILED"
+      return 1
+    fi
+  fi
+}
 retain() {
-  result=$?
+  original_result=$?
+  result=$original_result
   trap - EXIT
   set +e
   echo "RETAIN original_exit=$result"
   if sudo docker inspect "$guest" >/dev/null 2>&1; then
+    # Preserve partial observer diagnostics even when RESULT/export failed.
+    # The observer is read-only and its own deadline is submit-relative.
+    if ! collect_stage_observer partial; then
+      if (( result == 0 )); then result=1; fi
+    fi
     sudo docker inspect "$guest" >"$evidence/container.json" 2>&1
     sudo docker logs "$guest" >"$evidence/container.log" 2>&1
     sudo docker exec "$guest" journalctl --no-pager -b -u buster-bench.service -u 'buster-bench-*.service' -u 'buster-bench-systemd-broker@*.service' >"$evidence/journal.log" 2>&1
@@ -40,7 +65,7 @@ retain() {
     sudo docker rm -f "$guest" >"$evidence/container-removal.txt" 2>&1
     if sudo docker ps -a --format '{{.Names}}' | grep -Fx "$guest"; then result=1; fi
   fi
-  echo "FINAL original_exit=$result" | tee "$evidence/final.txt"
+  echo "FINAL original_exit=$original_result final_exit=$result" | tee "$evidence/final.txt"
   exit "$result"
 }
 trap retain EXIT
@@ -133,8 +158,10 @@ cp tools/bench_service/deploy/{buster-bench.service,buster-bench.slice,buster-be
 mkdir -p "$payload/recipes"
 cp tools/bench_service/profiles/validate-buster-v1.recipe "$payload/recipes/"
 sha256sum "$payload"/binaries/* "$payload"/units/* "$payload"/recipes/* | tee "$evidence/installed-sha256.txt"
-cp "$live_probe_helper" "$payload/live-probe.py"
-sha256sum "$live_probe_helper" "$payload/live-probe.py" | tee "$evidence/live-probe-helper-sha256.txt"
+cp "$live_probe_helper" "$payload/issue1162_live_probe.py"
+cp "$stage_observer_helper" "$payload/issue1162_stage_observer.py"
+sha256sum "$live_probe_helper" "$payload/issue1162_live_probe.py" | tee "$evidence/live-probe-helper-sha256.txt"
+sha256sum "$stage_observer_helper" "$payload/issue1162_stage_observer.py" | tee "$evidence/stage-observer-helper-sha256.txt"
 clang --version | head -1 | tee "$evidence/toolchains.txt"
 cmake --version | head -1 | tee -a "$evidence/toolchains.txt"
 ninja --version | tee -a "$evidence/toolchains.txt"
@@ -206,7 +233,8 @@ cat "$evidence/manager.txt"
 sudo docker exec "$guest" sh -ec 'test "$(cat /proc/1/comm)" = systemd; test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs; test -w /sys/fs/cgroup/cgroup.subtree_control; grep -qw cpu /sys/fs/cgroup/cgroup.controllers; grep -qw cpuset /sys/fs/cgroup/cgroup.controllers; grep -qw memory /sys/fs/cgroup/cgroup.controllers; grep -qw pids /sys/fs/cgroup/cgroup.controllers'
 sudo docker cp "$payload" "$guest:/root/issue1162-install"
 sudo docker exec "$guest" sh /root/issue1162-install/provision.sh | tee "$evidence/provision.txt"
-sudo docker exec "$guest" python3 /root/issue1162-install/live-probe.py --self-test | tee "$evidence/guest-live-probe-self-test.txt"
+sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_live_probe.py --self-test | tee "$evidence/guest-live-probe-self-test.txt"
+sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_stage_observer.py --self-test | tee "$evidence/guest-stage-observer-self-test.txt"
 sudo docker exec "$guest" systemctl start dbus.socket
 sudo docker exec "$guest" systemctl start buster-bench-systemd-broker.socket
 sudo docker exec "$guest" systemctl start buster-bench.service
@@ -228,11 +256,25 @@ request_sha="$(sed -nE 's/.*request-sha256=([a-f0-9]{64}).*/\1/p' "$evidence/sub
 test -n "$job"
 test -n "$request_sha"
 echo "JOB=$job"
+observer_valid=false
+observer_budget=$((wait_deadline - SECONDS - 35))
+if (( observer_budget > 0 )); then
+  # Observe concurrently before waiting for the separate active base-build
+  # probe. The timeout owns only this observer client, never a service unit.
+  timeout --signal=TERM --kill-after=5 "$observer_budget" \
+    sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_stage_observer.py --run \
+      --job "$job" --request-sha256 "$request_sha" --baseline "$baseline" --subject "$subject" \
+      --budget-seconds "$observer_budget" --output /root/issue1162-install/stage-observer-output \
+      >"$evidence/stage-observer-console.log" 2>&1 &
+  observer_pid=$!
+else
+  echo "STAGE_OBSERVER_INCONCLUSIVE insufficient submit-relative deadline budget" | tee "$evidence/stage-observer-console.log"
+fi
 probe_valid=false
 probe_budget=$((wait_deadline - SECONDS - 35))
 if (( probe_budget > 0 )); then
   set +e
-  sudo docker exec "$guest" python3 /root/issue1162-install/live-probe.py --run \
+  sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_live_probe.py --run \
     --job "$job" --request-sha256 "$request_sha" --baseline "$baseline" --subject "$subject" \
     --budget-seconds "$probe_budget" --output /root/issue1162-install/live-probe-output \
     >"$evidence/live-probe-console.log" 2>&1
@@ -293,7 +335,7 @@ terminal_budget=$((wait_deadline - SECONDS - 35))
 if (( terminal_budget > 60 )); then terminal_budget=60; fi
 if (( terminal_budget > 0 )); then
   set +e
-  sudo docker exec "$guest" python3 /root/issue1162-install/live-probe.py --terminal \
+  sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_live_probe.py --terminal \
     --job "$job" --attempt "$token" --request-sha256 "$request_sha" \
     --baseline "$baseline" --subject "$subject" --lease-device "$lease_device" --lease-inode "$lease_inode" \
     --budget-seconds "$terminal_budget" --output /root/issue1162-install/terminal-proof-output \
@@ -320,8 +362,18 @@ test -n "$receipt"
 sha256sum "$evidence/result.bqexport" | tee "$evidence/archive-sha256.txt"
 mkdir -m 0700 "$evidence/replay"
 build/bench-service-tools/service unpack-export "$evidence/result.bqexport" "$evidence/replay/result" "$receipt" | tee "$evidence/replay.txt"
-if [[ "$probe_valid" != true || "$terminal_valid" != true ]]; then
-  echo "SERVICE_RESULT_SUCCEEDED source=$subject job=$job token=$token; live_probe_valid=$probe_valid terminal_proof_valid=$terminal_valid; full acceptance pending"
+if [[ -n "$observer_pid" ]]; then
+  set +e
+  wait "$observer_pid"
+  observer_status=$?
+  set -e
+  printf 'exit_status=%s\n' "$observer_status" >"$evidence/stage-observer-exit.txt"
+  cat "$evidence/stage-observer-console.log"
+  if ! collect_stage_observer; then observer_status=1; fi
+  if (( observer_status == 0 )); then observer_valid=true; fi
+fi
+if [[ "$probe_valid" != true || "$terminal_valid" != true || "$observer_valid" != true ]]; then
+  echo "SERVICE_RESULT_SUCCEEDED source=$subject job=$job token=$token; live_probe_valid=$probe_valid terminal_proof_valid=$terminal_valid stage_observer_valid=$observer_valid; full acceptance pending"
   exit 1
 fi
-echo "NORMAL_PATH_EXECUTION_PASS source=$subject job=$job token=$token; live and terminal checkpoint probes passed; full acceptance pending"
+echo "NORMAL_PATH_EXECUTION_PASS source=$subject job=$job token=$token; live, terminal and stage observation probes passed; full acceptance pending"
