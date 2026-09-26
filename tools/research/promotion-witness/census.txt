@@ -1,0 +1,118 @@
+Shared-promotion workload census, 2026-09-26 UTC
+
+Source commit: ade6ac4b6ecb21f30b61b656439bac476c145e2f
+Source tree: 4c5306221fdb22fccc929b55e333163742de17d0
+Workflow head: ae176667890dae46d8402b06881a0fe18090862b
+Workflow tree: 40fc42d5e1c4dc5b0c4b7a239896348110246e4b
+Run: https://github.com/buster14a/buster/actions/runs/36206222943
+Job: https://github.com/buster14a/buster/actions/runs/36206222943/job/108303227939
+Job conclusion: success; all eight compile-only invocations completed.
+Artifact: https://github.com/buster14a/buster/actions/runs/36206222943/artifacts/10894340547
+Artifact ZIP SHA256: 8e258d239d12e60245268655394110b1186e52837cfaeda08939dd7dca82bf4e
+Artifact expiry: 2026-10-10T00:52:37Z
+census.log SHA256: 508a54328e7685bc0dce3bf1a7da4f450beee04ba86308b734b9ff482dfd2ca3
+
+Executor: GitHub-hosted ubuntu-26.04 x86_64, separate detached source worktree.
+Bootstrap/application compiler: Ubuntu clang 21.1.8 (6ubuntu1).
+CMake 4.4.3; Ninja 1.13.2; documented hosted Clang bootstrap exception.
+No Buster source edits, dependency installation, candidate compiler, program execution,
+self-host fixed-point check, performance acceptance run, or external benchmark occurred.
+The source worktree passed git diff --exit-code after the census.
+The first census attempt in run 36206085627 failed during CMake configuration:
+the default MOLD linker was absent from the hosted image. This retry selected the
+existing documented --linker DEFAULT option; it did not suppress a compiler/test failure.
+
+Build in the isolated source worktree:
+  clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/witness-build"
+  "$RUNNER_TEMP/witness-build" generate --cc clang --linker DEFAULT
+  "$RUNNER_TEMP/witness-build" build --config Release -t ide
+
+Build/Release/ide SHA256: 9648a1e47b0e88aee89ecb841eae780b1c39dd73c8c8af6535ea913ad793e227
+ir_promote.c SHA256: 8a02397d698438caab077b05c55c6b01c8ecdb66a365d37ad4235b12a63eb874
+
+Each invocation: build/Release/ide cc -c -g0 -v [frontend option] [subject options] SOURCE -o OUTPUT
+Direct: no frontend option (default direct frontend SSA).
+Memory: -fno-frontend-ssa (explicit reference path).
+Unity subject options: -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0
+This was the ordinary Release developer build, not a matched production performance build.
+Repository identity is pinned; host headers/resource closure were not frozen for an acceptance claim.
+Counters below aggregate functions in each translation unit. In particular, sweeps=14
+for unity-direct does NOT mean fourteen sweeps in each function. Frontend and shared
+promotion counts describe distinct algorithms; they must not be added as one population.
+
+Source identities:
+7f930ebda53ab297b4c98fa564d4d052f169e227f9c1f98bd2aa90a22b861111  tests/basic_c_operations.c
+d1b297e8cdc45c7ef395b89199d76a3b7e3799dcf4d33e9163a23cc0b76b4971  tests/basic_c_frontend_ssa.c
+13681f038517c883af7098cc00158655313572db95abd890b81c3627df18fc07  src/buster/apps/ide/ide.c
+035fdd88af769c0395860161f3c4fa51ead2393e0509eed68cf6a270f4abfe73  cascade.c
+The temporary cascade.c contents (one line, final newline):
+int test(int n,int x){int v=x;while(n--){if(n&1)v=x;}return v;}
+
+Verbatim selected stdout lines:
+
+[operations-direct]
+IR_FRONTEND_SSA functions=31 locals=97 reads=185 writes=134 parameters_created=103 parameters_removed=86 temporaries=11 fallback_locals=10
+IR_LOCAL_PROMOTION candidates=52 promoted=3 loads_removed=3 stores_removed=5 parameters_inserted=2 parameters_removed=0 uninitialized=0 barriers=4 instructions_before=2812 instructions_after=2801 values_before=2461 values_after=2457
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=2 block_visits=19 parameter_visits=2 incoming_visits=4
+
+[operations-memory]
+IR_FRONTEND_SSA functions=0 locals=0 reads=0 writes=0 parameters_created=0 parameters_removed=0 temporaries=0 fallback_locals=0
+IR_LOCAL_PROMOTION candidates=149 promoted=100 loads_removed=188 stores_removed=139 parameters_inserted=30 parameters_removed=11 uninitialized=0 barriers=4 instructions_before=3228 instructions_after=2801 values_before=2726 values_after=2457
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=18 block_visits=198 parameter_visits=35 incoming_visits=70
+
+[frontend-ssa-direct]
+IR_FRONTEND_SSA functions=26 locals=77 reads=148 writes=163 parameters_created=197 parameters_removed=114 temporaries=5 fallback_locals=9
+IR_LOCAL_PROMOTION candidates=9 promoted=0 loads_removed=0 stores_removed=0 parameters_inserted=0 parameters_removed=0 uninitialized=0 barriers=1 instructions_before=1093 instructions_after=1093 values_before=925 values_after=925
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=0 block_visits=0 parameter_visits=0 incoming_visits=0
+
+[frontend-ssa-memory]
+IR_FRONTEND_SSA functions=0 locals=0 reads=0 writes=0 parameters_created=0 parameters_removed=0 temporaries=0 fallback_locals=0
+IR_LOCAL_PROMOTION candidates=86 promoted=77 loads_removed=148 stores_removed=163 parameters_inserted=129 parameters_removed=44 uninitialized=0 barriers=1 instructions_before=1481 instructions_after=1093 values_before=1067 values_after=927
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=36 block_visits=368 parameter_visits=209 incoming_visits=420
+
+[cascade-direct]
+IR_FRONTEND_SSA functions=1 locals=3 reads=5 writes=5 parameters_created=7 parameters_removed=4 temporaries=0 fallback_locals=0
+IR_LOCAL_PROMOTION candidates=0 promoted=0 loads_removed=0 stores_removed=0 parameters_inserted=0 parameters_removed=0 uninitialized=0 barriers=0 instructions_before=16 instructions_after=16 values_before=13 values_after=13
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=0 block_visits=0 parameter_visits=0 incoming_visits=0
+
+[cascade-memory]
+IR_FRONTEND_SSA functions=0 locals=0 reads=0 writes=0 parameters_created=0 parameters_removed=0 temporaries=0 fallback_locals=0
+IR_LOCAL_PROMOTION candidates=3 promoted=3 loads_removed=5 stores_removed=5 parameters_inserted=6 parameters_removed=3 uninitialized=0 barriers=0 instructions_before=29 instructions_after=16 values_before=18 values_after=13
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=3 block_visits=18 parameter_visits=13 incoming_visits=26
+
+[unity-direct]
+IR_FRONTEND_SSA functions=4915 locals=45949 reads=168347 writes=74477 parameters_created=459450 parameters_removed=425626 temporaries=12341 fallback_locals=2300
+IR_LOCAL_PROMOTION candidates=32148 promoted=193 loads_removed=592 stores_removed=350 parameters_inserted=1374 parameters_removed=1236 uninitialized=0 barriers=8 instructions_before=1524459 instructions_after=1523324 values_before=1315443 values_after=1314796
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=14 block_visits=3824 parameter_visits=2538 incoming_visits=5795
+
+[unity-memory]
+IR_FRONTEND_SSA functions=0 locals=0 reads=0 writes=0 parameters_created=0 parameters_removed=0 temporaries=0 fallback_locals=0
+IR_LOCAL_PROMOTION candidates=78097 promoted=45803 loads_removed=162292 stores_removed=74158 parameters_inserted=370401 parameters_removed=339245 uninitialized=339 barriers=8 instructions_before=1813232 instructions_after=1530979 values_before=1495915 values_after=1318976
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=11568 block_visits=1114206 parameter_visits=811100 incoming_visits=1791741
+
+stdout SHA256:
+cd23d09a78847e516d9e523d5c7bbfeca9a818a6d15407cce6d4e910e236d89e  operations-direct.stdout
+c9911f677b644e25ba72e5452687eb2e0161cea007d5b6c6b0368297716b22c9  operations-memory.stdout
+1e61337cb63519e74ab796ae6ada5a7b7e9525a6fbbb1b479d2f98b9ede7813f  frontend-ssa-direct.stdout
+a5497bdd9092bc6029720be87c3b38db3fed7f21ea8e3308a037db17feb4d188  frontend-ssa-memory.stdout
+12f00503e65efbed916094b26539d7182d8f9a7677e58a4f20956052e252274c  cascade-direct.stdout
+ef6e200e11abc7007355ecd8c46e637e3f7ed33a6402da83a6ea2a920dbc349e  cascade-memory.stdout
+dc7b22e1e878a9e3a7e8b580874145cfea9118856ee5b3395268e061fc8acac9  unity-direct.stdout
+5149ccd2411d8fce8c0e93642c0ad04563f63914d12ac279db20b5716b19c0b1  unity-memory.stdout
+All eight stderr files are empty, SHA256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.
+
+Object SHA256 (identities only; cross-form equality is NOT a general acceptance rule):
+6f6dda9b3f13e2650a0844fd5857b16bbf36c100a8ea5185d8a60d4096b30cc9  operations-direct.o
+cf3c6dcc81d586adeaabdd55fe41b1cb1fff975af1677e667b86165563dd0298  operations-memory.o
+3092a68cec041be8a386c94226745259845f3607d42246904ae55e1ceda70a2d  frontend-ssa-direct.o
+936cf934a2f88661c1efa9167fb79e3f1d12604e597f05b3c5a500b8da6c84b2  frontend-ssa-memory.o
+13d593265c56b3f66b363dab11d8b6d55770de53c496d842d8ccda0d4cac8787  cascade-direct.o
+13d593265c56b3f66b363dab11d8b6d55770de53c496d842d8ccda0d4cac8787  cascade-memory.o
+f6e177b1b25f951a5d9021aacdf66309b74012cdc223e77e24331c31c3972840  unity-direct.o
+8aa7f5da1ead33ed2c28a2e22f9c5cac63ebdb714d6f8ba994e4f054cd0a7fee  unity-memory.o
+
+Interpretation: the nonempty shared cleanup remains live, especially in the explicit
+memory-form reference. The default unity workload has only 5,795 incoming visits in
+this shared phase, not the reference's 1,791,741. This does not establish a hot default
+bottleneck. These existing counters cannot reveal late-conflict prefix lengths, witness
+invalidations, cache hits or candidate speed. PERFORMANCE REMAINS UNMEASURED.

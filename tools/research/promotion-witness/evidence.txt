@@ -1,0 +1,54 @@
+Promotion-witness reduced-state correctness evidence, 2026-09-26 UTC
+
+Source main: ade6ac4b6ecb21f30b61b656439bac476c145e2f
+Source tree: 4c5306221fdb22fccc929b55e333163742de17d0
+Execution head: 65778fc849dd3dcc98812056bf5e1eac75c19833
+Execution tree: 37eb6d5a14db312917cd5bc8e1039f7c2155a276
+Run: https://github.com/buster14a/buster/actions/runs/36206085627
+Model job: https://github.com/buster14a/buster/actions/runs/36206085627/job/108302813100
+Model job conclusion: success
+Whole run conclusion: failure (separate baseline-census job lacked mold)
+Artifact: https://github.com/buster14a/buster/actions/runs/36206085627/artifacts/10893469576
+Artifact ZIP SHA256: 3023c84065aab820d216d670b9fbc1f1a15a45dad2a7452ee582c0999f189218
+Artifact retention: expires 2026-10-10T00:47:19Z; this text preserves the essential results.
+
+Executor: GitHub-hosted ubuntu-26.04, x86_64; isolated detached base/candidate worktrees.
+Clang: Ubuntu clang version 21.1.8 (6ubuntu1)
+GCC: gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+Common flags: -std=c17 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror -fwrapv -fno-strict-aliasing -funsigned-char
+Variants: Clang -O2; Clang -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all; GCC -O2.
+Sanitized model environment: ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1.
+These are model-only settings, not replacements for Buster's sanitizer policy.
+All three stdout files compared byte-identical by cmp in the successful model job.
+Stdout SHA256: e054ca2d860b5bc33b694e95718c690511d676ada5ec386377b41ea191f565ef
+Source ir_promote.c SHA256: 8a02397d698438caab077b05c55c6b01c8ecdb66a365d37ad4235b12a63eb874
+probe.c SHA256: 40515d445def02db9f9e681f3080c8b2b0d81c06370a9ee7f0dcac070d2a62bb
+prepare.py SHA256: af6126afd3d64e36f2f3cd875e6fdd8f9c70e21ec2b1b7e72213e32127c501e0
+Uninstrumented generated candidate SHA256: 6b747681ca511ad9b324dab1f8f23c2898b86f99df66eef37fbc300b89cb4978
+
+Verbatim model stdout follows. Counts are logical work, not timing or speedup.
+Root calls count cleanup predicate/certificate lookups, excluding the independent
+oracle and the common final flattening seam. Extra payload is logical witness
+storage, excluding allocator alignment, fixed-capacity harness arrays and RSS.
+
+CASE no-candidates sweeps=0 incoming=0/0 roots=0/0 checks=0 hits=0 witness_stores=0 extra_payload=0
+CASE preexisting-only sweeps=0 incoming=0/0 roots=0/0 checks=0 hits=0 witness_stores=0 extra_payload=0
+CASE two-input-no-revisit sweeps=1 incoming=2/2 roots=2/2 checks=0 hits=0 witness_stores=3 extra_payload=8
+CASE empty sweeps=1 incoming=0/0 roots=0/0 checks=0 hits=0 witness_stores=1 extra_payload=8
+CASE self-only sweeps=1 incoming=2/2 roots=2/2 checks=0 hits=0 witness_stores=1 extra_payload=8
+NEGATIVE stale-witness rejected oracle_failures=1
+CASE stale-witness sweeps=3 incoming=5/5 roots=5/7 checks=1 hits=0 witness_stores=5 extra_payload=16
+NEGATIVE witness-becomes-self rejected oracle_failures=1
+CASE witness-becomes-self sweeps=3 incoming=5/5 roots=5/7 checks=1 hits=0 witness_stores=5 extra_payload=16
+CASE early-conflict-long-chain sweeps=17 incoming=306/64 roots=306/336 checks=136 hits=121 witness_stores=64 extra_payload=136
+CASE late-conflict-long-prefix sweeps=17 incoming=4624/318 roots=4624/590 checks=136 hits=121 witness_stores=64 extra_payload=136
+CASE dense-immediately-trivial sweeps=2 incoming=4096/4096 roots=4096/4096 checks=0 hits=0 witness_stores=32 extra_payload=256
+EXHAUSTIVE two-parameter length<=2 cases=882 PASS
+RANDOM exploration seed=0x59062307 cases=5000 PASS
+RANDOM held-out seed=0xc0f1a57e cases=20000 PASS
+PASS total=25892 negative_controls=2 performance=UNMEASURED canonical_validation=NOT_RUN
+
+Not established: real-workload candidate-compiler correctness, dense remapping,
+canonical verifier acceptance, generated-code identity, supported target matrix,
+Buster self-host fixed point, production arena/sanitizer integration, or performance.
+No local compiler/test execution, desktop benchmark, ad-hoc SSH, or 9700X run occurred.
