@@ -1,0 +1,142 @@
+name: Shared C capability probe
+
+# Temporary investigation only. No acceptance, deployment, or performance policy.
+on:
+  push:
+    branches: [research/shared-c-capability-20260925]
+    paths: [.github/workflows/shared-c-capability-probe.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          persist-credentials: false
+      - name: Record exact baseline and environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          test "$(git rev-parse 'HEAD^{tree}')" = 4c5306221fdb22fccc929b55e333163742de17d0
+          mkdir -p evidence .ci-tools
+          git rev-parse HEAD > evidence/revision.txt
+          git rev-parse 'HEAD^{tree}' > evidence/tree.txt
+          git archive --format=tar HEAD > evidence/source.tar
+          sha256sum evidence/source.tar > evidence/source.tar.sha256
+          clang --version > evidence/clang.txt
+          clang -dumpmachine > evidence/target.txt
+          clang -print-resource-dir > evidence/resource-dir.txt
+          gcc --version > evidence/gcc.txt
+          uname -a > evidence/host.txt
+      - name: Publish baseline source for independent inspection
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: shared-c-capability-baseline-source
+          path: evidence
+          retention-days: 14
+          if-no-files-found: error
+      - name: Prepare documented readline dependency
+        id: dependencies
+        shell: bash
+        run: python3 tools/ci_apt.py readline --out evidence/apt-readline
+      - name: Build compiler through existing hosted bootstrap
+        id: compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o .ci-tools/build
+          .ci-tools/build generate --ci --cc clang --linker DEFAULT 2>&1 | tee evidence/generate.log
+          .ci-tools/build build --config Release -t ide 2>&1 | tee evidence/build.log
+          sha256sum build/Release/ide > evidence/compiler.sha256
+      - name: Baseline self-host fixed point
+        id: selfhost
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/build test_self_host --config Release 2>&1 | tee evidence/selfhost.log
+      - name: Prepare pristine Lua Git input
+        id: lua_git
+        if: ${{ !cancelled() }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lua/lua
+          ref: 6e22fedb74cf0c9b6656e9fce8b7331db847c605
+          path: external/lua-git
+          persist-credentials: false
+      - name: Prepare authenticated Lua release
+        id: lua_release
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p external
+          curl --fail --location https://www.lua.org/ftp/lua-5.4.8.tar.gz -o external/lua.tar.gz
+          printf '%s  %s\n' 4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae external/lua.tar.gz | sha256sum --check
+          tar -xzf external/lua.tar.gz -C external
+      - name: Existing full Lua harness
+        id: lua
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && steps.dependencies.outcome == 'success' && steps.lua_git.outcome == 'success' && steps.lua_release.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/build test_lua --config Release "$PWD/external/lua-5.4.8/src" "$PWD/external/lua-git" 2>&1 | tee evidence/lua.log
+      - name: Prepare authenticated SQLite inputs
+        id: sqlite_inputs
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p external
+          curl --fail --location https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip -o external/sqlite-amalgamation.zip
+          curl --fail --location https://www.sqlite.org/2026/sqlite-src-3530400.zip -o external/sqlite-src.zip
+          printf '%s  %s\n' 1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d external/sqlite-amalgamation.zip | sha256sum --check
+          printf '%s  %s\n' d18fa15aec74d8c17e1463f861095adc01b5ad190256acb4f91d22f0368d232b external/sqlite-src.zip | sha256sum --check
+          sha256sum external/sqlite-amalgamation.zip external/sqlite-src.zip > evidence/sqlite-archives.sha256
+          unzip -q external/sqlite-amalgamation.zip -d external
+          unzip -q external/sqlite-src.zip -d external
+      - name: Existing full SQLite harness
+        id: sqlite
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && steps.sqlite_inputs.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/build test_sqlite --config Release "$PWD/external/sqlite-amalgamation-3530400" "$PWD/external/sqlite-src-3530400" 2>&1 | tee evidence/sqlite.log
+      - name: Record distinct outcomes
+        if: always()
+        shell: bash
+        env:
+          COMPILER: ${{ steps.compiler.outcome }}
+          SELFHOST: ${{ steps.selfhost.outcome }}
+          LUA_INPUTS: ${{ steps.lua_release.outcome }}
+          LUA: ${{ steps.lua.outcome }}
+          SQLITE_INPUTS: ${{ steps.sqlite_inputs.outcome }}
+          SQLITE: ${{ steps.sqlite.outcome }}
+        run: |
+          printf 'compiler=%s\nselfhost=%s\nlua-inputs=%s\nlua=%s\nsqlite-inputs=%s\nsqlite=%s\n' "$COMPILER" "$SELFHOST" "$LUA_INPUTS" "$LUA" "$SQLITE_INPUTS" "$SQLITE" | tee evidence/outcomes.txt
+          printf 'Functional investigation only. Skipped checks remain unexecuted; timings are not performance acceptance.\n' >> "$GITHUB_STEP_SUMMARY"
+          cat evidence/outcomes.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain raw compiler and workload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: shared-c-capability-baseline-results
+          path: |
+            evidence
+            build/Release/ide
+            build/lua-v5.4.8-*/
+            build/sqlite-3.53.4-*/
+            build/ide-self*
+          retention-days: 14
+          if-no-files-found: error
