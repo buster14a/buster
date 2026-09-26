@@ -1,7 +1,10 @@
 {
  "refs": {
   "base": "ade6ac4b6ecb21f30b61b656439bac476c145e2f",
-  "reloc": "32f4ea808de447900508382d76242a00cd0c6fdf"
+  "reloc": "32f4ea808de447900508382d76242a00cd0c6fdf",
+  "dbgseed": "12c4d577f700211fae20a95ef70d2fc49a4435a5",
+  "dbgval": "78c3d48815623b52825fe5a443a474c4fbbc76f4",
+  "defidx": "d7239eb1298f542c4133722cc6222c0672fbd304"
  },
  "census_ref": "base",
  "variants": [
@@ -277,6 +280,152 @@
     "validation_global_relocation_sorts",
     "validation_global_relocation_sort_rows"
    ]
+  },
+  {
+   "name": "debug",
+   "generator": "gen_debug.py",
+   "refs": [
+    "base",
+    "census",
+    "dbgseed",
+    "dbgval"
+   ],
+   "grid": [
+    [
+     "funcs",
+     500
+    ],
+    [
+     "funcs",
+     1000
+    ],
+    [
+     "funcs",
+     2000
+    ],
+    [
+     "funcs",
+     4000
+    ],
+    [
+     "funcs",
+     8000
+    ],
+    [
+     "funcs",
+     16000
+    ],
+    [
+     "locals",
+     25
+    ],
+    [
+     "locals",
+     50
+    ],
+    [
+     "locals",
+     100
+    ],
+    [
+     "locals",
+     200
+    ],
+    [
+     "locals",
+     400
+    ],
+    [
+     "locals",
+     800
+    ],
+    [
+     "locals_split",
+     200
+    ],
+    [
+     "locals_split",
+     800
+    ]
+   ],
+   "flag_sets": [
+    [
+     "-g",
+     "-c"
+    ]
+   ],
+   "show": [
+    "census_dbg_seed_scan_visits",
+    "census_dbgv_block_unresolved_visits",
+    "debug_function_index_rows",
+    "debug_function_seed_scan_rows",
+    "debug_value_blocks",
+    "debug_value_local_visits"
+   ]
+  },
+  {
+   "name": "defidx",
+   "generator": "gen_defs.py",
+   "refs": [
+    "base",
+    "census",
+    "defidx"
+   ],
+   "grid": [
+    [
+     "defs",
+     0,
+     1000
+    ],
+    [
+     "defs",
+     1000,
+     1000
+    ],
+    [
+     "defs",
+     4000,
+     1000
+    ],
+    [
+     "defs",
+     16000,
+     1000
+    ],
+    [
+     "defs",
+     4000,
+     250
+    ],
+    [
+     "defs",
+     4000,
+     4000
+    ],
+    [
+     "defs_multi",
+     4000,
+     1000
+    ],
+    [
+     "local",
+     4000,
+     1000
+    ],
+    [
+     "local",
+     4000,
+     4000
+    ]
+   ],
+   "show": [
+    "census_core_step_def_visits",
+    "census_bind_agg_visits",
+    "census_tnp_anon_visits",
+    "c_definition_scans",
+    "c_definition_index_probes",
+    "c_definition_scan_rows"
+   ]
   }
  ],
  "workloads": [
@@ -294,6 +443,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ]
   },
@@ -311,6 +463,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ]
   },
@@ -329,6 +484,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ]
   },
@@ -347,6 +505,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ]
   },
@@ -365,6 +526,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ]
   },
@@ -380,6 +544,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ]
   },
@@ -395,6 +562,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ]
   },
@@ -411,6 +581,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -428,6 +601,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -445,6 +621,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -462,6 +641,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -479,6 +661,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -496,6 +681,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -513,6 +701,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -530,6 +721,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -547,6 +741,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -564,6 +761,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -581,6 +781,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -598,6 +801,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -615,6 +821,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -632,6 +841,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -649,6 +861,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -666,6 +881,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -683,6 +901,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -700,6 +921,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -717,6 +941,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -734,6 +961,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -751,6 +981,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -768,6 +1001,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -785,6 +1021,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -802,6 +1041,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -819,6 +1061,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -836,6 +1081,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -853,6 +1101,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -870,6 +1121,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -887,6 +1141,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -904,6 +1161,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -921,6 +1181,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -938,6 +1201,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -955,6 +1221,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1
@@ -972,6 +1241,9 @@
    "refs": [
     "base",
     "reloc",
+    "dbgseed",
+    "dbgval",
+    "defidx",
     "census"
    ],
    "timing_repeats": 1

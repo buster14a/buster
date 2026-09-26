@@ -40,6 +40,21 @@ def main():
         experiments.append({"name": "reloc", "generator": "gen_reloc.py", "refs": ["base", "reloc"], "grid": reloc_grid,
                             "show": ["validation_global_relocations", "validation_global_relocation_pairs",
                                      "validation_global_relocation_sorts", "validation_global_relocation_sort_rows"]})
+    debug_refs = [name for name in ("dbgseed", "dbgval") if name in refs]
+    if debug_refs:
+        grid = ([["funcs", n] for n in (500, 1000, 2000, 4000, 8000, 16000)] +
+                [["locals", n] for n in (25, 50, 100, 200, 400, 800)] +
+                [["locals_split", n] for n in (200, 800)])
+        experiments.append({"name": "debug", "generator": "gen_debug.py", "refs": ["base", "census"] + debug_refs, "grid": grid,
+                            "flag_sets": [["-g", "-c"]],
+                            "show": ["census_dbg_seed_scan_visits", "census_dbgv_block_unresolved_visits", "debug_function_index_rows",
+                                     "debug_function_seed_scan_rows", "debug_value_blocks", "debug_value_local_visits"]})
+    if "defidx" in refs:
+        grid = ([["defs", t, 1000] for t in (0, 1000, 4000, 16000)] + [["defs", 4000, q] for q in (250, 4000)] +
+                [["defs_multi", 4000, 1000], ["local", 4000, 1000], ["local", 4000, 4000]])
+        experiments.append({"name": "defidx", "generator": "gen_defs.py", "refs": ["base", "census", "defidx"], "grid": grid,
+                            "show": ["census_core_step_def_visits", "census_bind_agg_visits", "census_tnp_anon_visits",
+                                     "c_definition_scans", "c_definition_index_probes", "c_definition_scan_rows"]})
     plan = {"refs": refs, "census_ref": "base", "variants": ["count", "plain"], "build_jobs": 3, "timing_repeats": 3,
             "workload_source": "base", "experiments": experiments, "workloads": workloads}
     json.dump(plan, open("plan.json", "w"), indent=1)

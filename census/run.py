@@ -169,8 +169,16 @@ def main():
     results = open(os.path.join(out, "results.jsonl"), "w")
 
     def emit(record):
-        results.write(json.dumps(record, sort_keys=True) + "\n")
+        line = json.dumps(record, sort_keys=True, separators=(",", ":"))
+        results.write(line + "\n")
         results.flush()
+        # The job log is the durable copy when artifact storage is unreachable:
+        # drop only zero counters there, and keep every nonzero one.
+        compact = json.loads(line)
+        for key in ("count",):
+            if isinstance(compact.get(key), dict) and compact[key].get("counters"):
+                compact[key]["counters"] = {k: v for k, v in compact[key]["counters"].items() if v}
+        print("CENSUS_JSON " + json.dumps(compact, sort_keys=True, separators=(",", ":")), flush=True)
 
     emit({"kind": "host", **host})
     for key, value in sorted(builds.items()):
@@ -188,10 +196,12 @@ def main():
                     tag = f"{experiment['name']}-{'-'.join(str(p) for p in row)}-{ref}-{'_'.join(f.strip('-') for f in flags)}"
                     record = {"kind": "experiment", "experiment": experiment["name"], "row": row, "flags": flags,
                               "ref": ref, "source_sha256": source_hash}
-                    counted = compile_once(builds[f"{ref}-count"]["binary"], flags + [source], out, tag + "-count", True, False)
+                    count_key = "census-census" if ref == "census" else f"{ref}-count"
+                    counted = compile_once(builds[count_key]["binary"], flags + [source], out, tag + "-count", True, False)
                     record["count"] = counted
                     timings = []
-                    for repeat in range(repeats if "plain" in plan.get("variants", ["count", "plain"]) else 0):
+                    timed_refs = repeats if ref != "census" and "plain" in plan.get("variants", ["count", "plain"]) else 0
+                    for repeat in range(timed_refs):
                         timed = compile_once(builds[f"{ref}-plain"]["binary"], flags + [source], out, tag + "-plain", False, True)
                         timings.append({k: timed[k] for k in ("status", "seconds", "instructions", "object_sha256")})
                     record["plain"] = timings
