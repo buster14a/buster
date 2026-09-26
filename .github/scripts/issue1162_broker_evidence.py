@@ -21,14 +21,23 @@ from typing import Any
 
 SCHEMA = "issue1162-broker-evidence-expectation-v1"
 OBS_SCHEMA = "issue1162-broker-observer-v1"
+SUPERSEDABLE_CAPTURE_STATES = frozenset(("transient_proc_disappeared",
+                                        "transient_proc_interrupted",
+                                        "transient_capture_deadline",
+                                        "known_preexec_executable_transition"))
 MAX_FILE = 128 * 1024 * 1024
 MAX_JSON_LINE = 4 * 1024 * 1024
+MAX_OBSERVER_EVENTS = 16 * 1024 * 1024
+MAX_OBSERVER_SUMMARY = 4 * 1024 * 1024
+MAX_OVERLAP = 16 * 1024 * 1024
 MAX_INSTANCES = 128
 MAX_DIAG_BYTES = 512 * 1024
 MAX_DIAG_LINE = 1200
 DATA_FIELDS = ("stat", "status", "mountinfo", "cgroup", "exe", "socket")
 DATA_LIMITS = {"stat": 4096, "status": 16384, "mountinfo": 131072,
                "cgroup": 4096, "exe": 767, "socket": 255}
+PREEXEC_EXECUTABLES = frozenset(("/lib/systemd/systemd-executor",
+                                 "/usr/lib/systemd/systemd-executor"))
 UNIT_RE = re.compile(
     r"buster-bench-systemd-broker@(?P<counter>0|[1-9][0-9]*)-"
     r"(?P<peer_pid>[1-9][0-9]*)-(?P<peer_uid>0|[1-9][0-9]*)\.service\Z")
@@ -265,7 +274,11 @@ def _parse_message(message: str) -> tuple[str, dict[str, Any]]:
         }
         # The flags group precedes the boolean groups; keep the explicit index map auditable.
         for name, index in zip(names, positions):
-            if name in ("peer_pid", "operation", "stage", "job", "attempt"):
+            if name == "peer_pid":
+                result[name] = canonical_uint(match.group(index), name, (1 << 31) - 1)
+            elif name == "peer_uid":
+                result[name] = canonical_uint(match.group(index), name, (1 << 32) - 1)
+            elif name in ("operation", "stage", "job", "attempt"):
                 result[name] = canonical_uint(match.group(index), name, (1 << 64) - 1)
             else:
                 result[name] = canonical_uint(match.group(index), name, 1)
@@ -537,9 +550,10 @@ def collect_diagnostics(records: list[dict[str, Any]], expected_boot: str) -> di
 def collect_manager_start_rows(records: list[dict[str, Any]], expected_boot: str) -> dict[tuple[str, str], dict[str, Any]]:
     rows: dict[tuple[str, str], dict[str, Any]] = {}
     progress: dict[tuple[str, str], int] = {}
+    invocations: dict[tuple[str, str], str] = {}
     for record_number, record in enumerate(records, 1):
         unit_value = record.get("UNIT")
-        if not isinstance(unit_value, str) or UNIT_RE.fullmatch(unit_value) is None:
+        if not isinstance(unit_value, str) or not unit_value.startswith("buster-bench-systemd-broker@"):
             continue
         parse_broker_unit(unit_value, f"manager record {record_number} UNIT")
         message_id_value = record.get("MESSAGE_ID")
@@ -556,6 +570,15 @@ def collect_manager_start_rows(records: list[dict[str, Any]], expected_boot: str
                 f"broker start record {record_number} has wrong boot ID")
         message_id = _field_text(record, "MESSAGE_ID", "manager start message ID")
         key = (boot, unit_value)
+        invocation = record.get("INVOCATION_ID")
+        if invocation is not None:
+            require(isinstance(invocation, str) and HEX32.fullmatch(invocation) is not None and
+                    invocation != "0" * 32,
+                    f"manager start record {record_number} has malformed invocation ID")
+            prior_invocation = invocations.get(key)
+            require(prior_invocation is None or prior_invocation == invocation,
+                    f"manager invocation changed for {unit_value}")
+            invocations[key] = invocation
         if message_id == STARTING_MESSAGE_ID:
             require(record.get("JOB_RESULT") in (None, ""),
                     f"manager Starting record {record_number} has an unexpected result")
@@ -572,15 +595,13 @@ def collect_manager_start_rows(records: list[dict[str, Any]], expected_boot: str
                     f"manager Failed record {record_number} is malformed")
         else:
             raise EvidenceError(f"unknown manager start-result message ID for {unit_value}")
-        invocation = record.get("INVOCATION_ID")
-        if invocation is not None:
-            require(isinstance(invocation, str) and HEX32.fullmatch(invocation) is not None,
-                    f"manager start record {record_number} has malformed invocation ID")
+        require(progress.get(key) == 1,
+                f"manager terminal start record precedes or lacks Starting for {unit_value}")
         require(key not in rows, f"duplicate terminal manager start record for {unit_value}")
         rows[key] = {"boot_id": boot, "unit": unit_value, "result": result,
                      "invocation_id": invocation, "message_id": message_id,
                      "record_number": record_number}
-    require(set(progress) <= set(rows), "manager Starting record lacks a terminal start result")
+    require(set(progress) == set(rows), "manager start records lack a matching Starting or terminal result")
     return rows
 
 
@@ -660,9 +681,23 @@ def _status_identity(status: dict[str, str], pid: int, profile: dict[str, Any], 
 
 
 def _unescape_mount_path(value: str) -> str:
-    def replace(match: re.Match[str]) -> str:
-        return chr(int(match.group(1), 8))
-    return re.sub(r"\\([0-7]{3})", replace, value)
+    allowed = {"040": " ", "011": "\t", "012": "\n", "134": "\\"}
+    result: list[str] = []
+    index = 0
+    while index < len(value):
+        if value[index] != "\\":
+            result.append(value[index])
+            index += 1
+            continue
+        require(index + 4 <= len(value) and value[index + 1:index + 4] in allowed,
+                "mountinfo path contains an invalid octal escape")
+        result.append(allowed[value[index + 1:index + 4]])
+        index += 4
+    result_text = "".join(result)
+    require(result_text.startswith("/") and "\x00" not in result_text and
+            "//" not in result_text and "." not in result_text.split("/") and
+            ".." not in result_text.split("/"), "mountinfo path is not canonical")
+    return result_text
 
 
 def _readonly_mounts(raw: bytes, targets: list[str], label: str) -> dict[str, bool]:
@@ -671,7 +706,7 @@ def _readonly_mounts(raw: bytes, targets: list[str], label: str) -> dict[str, bo
         lines = raw.decode("ascii", "strict").splitlines()
     except UnicodeDecodeError as exc:
         raise EvidenceError(f"{label} mountinfo is not ASCII") from exc
-    mounts: dict[str, list[tuple[int, set[str]]]] = {}
+    mounts: dict[str, list[tuple[int, int, set[str]]]] = {}
     mount_ids: set[int] = set()
     for line in lines:
         columns = line.split()
@@ -679,21 +714,32 @@ def _readonly_mounts(raw: bytes, targets: list[str], label: str) -> dict[str, bo
         require(separator >= 6 and len(columns) >= separator + 4,
                 f"{label} mountinfo record is malformed")
         mount_id = canonical_uint(columns[0], f"{label} mount ID", (1 << 31) - 1, False)
+        parent_id = canonical_uint(columns[1], f"{label} parent mount ID", (1 << 31) - 1, False)
         require(mount_id not in mount_ids, f"{label} duplicate mount ID")
         mount_ids.add(mount_id)
         mountpoint = _unescape_mount_path(columns[4])
-        require(mountpoint.startswith("/") and "\x00" not in mountpoint,
-                f"{label} mountpoint is malformed")
         options = set(columns[5].split(","))
         require(("ro" in options) != ("rw" in options),
                 f"{label} mountinfo has ambiguous read/write options")
-        mounts.setdefault(mountpoint, []).append((mount_id, options))
+        mounts.setdefault(mountpoint, []).append((mount_id, parent_id, options))
     result: dict[str, bool] = {}
     for target in targets:
-        matches = mounts.get(target, [])
-        require(bool(matches), f"{label} required mount target is absent: {target}")
-        active_id, active_options = max(matches, key=lambda item: item[0])
-        del active_id
+        require(target.startswith("/") and ".." not in target.split("/"),
+                f"{label} required mount target is malformed: {target}")
+        matching_paths = [mountpoint for mountpoint in mounts
+                          if mountpoint == "/" or target == mountpoint or
+                          target.startswith(mountpoint.rstrip("/") + "/")]
+        require(bool(matching_paths), f"{label} required mount target is absent: {target}")
+        most_specific_length = max(len(mountpoint) for mountpoint in matching_paths)
+        most_specific_paths = {mountpoint for mountpoint in matching_paths
+                               if len(mountpoint) == most_specific_length}
+        require(len(most_specific_paths) == 1,
+                f"{label} has ambiguous covering mountpoints for {target}")
+        active_path = next(iter(most_specific_paths))
+        active_entries = mounts[active_path]
+        require(len(active_entries) == 1,
+                f"{label} has duplicate ambiguous covering mount for {target}")
+        _active_id, _parent_id, active_options = active_entries[0]
         result[target] = "ro" in active_options
         require(result[target], f"{label} required mount target is writable: {target}")
     return result
@@ -723,13 +769,16 @@ def _same_security_status(first: dict[str, str], second: dict[str, str]) -> bool
     return all(first[key] == second[key] for key in keys)
 
 
-def _safe_ref(root_fd: int, ref: Any, label: str, maximum: int) -> bytes:
+def _safe_ref(root_fd: int, ref: Any, label: str, maximum: int,
+              require_success: bool = True) -> bytes:
     require(isinstance(ref, dict) and set(ref) == {"path", "sha256", "bytes", "exit", "timed_out"},
             f"{label} reference has unknown or missing fields")
     require(isinstance(ref["path"], str) and isinstance(ref["sha256"], str) and
             HEX64.fullmatch(ref["sha256"]) is not None and type(ref["bytes"]) is int and
-            0 <= ref["bytes"] <= maximum and ref["exit"] == 0 and
-            ref["timed_out"] is False,
+            0 <= ref["bytes"] <= maximum and
+            (ref["exit"] is None or type(ref["exit"]) is int and -255 <= ref["exit"] <= 255) and
+            type(ref["timed_out"]) is bool and
+            (not require_success or (ref["exit"] == 0 and ref["timed_out"] is False)),
             f"{label} capture metadata is incomplete")
     raw = read_regular_at(root_fd, ref["path"], maximum, allow_empty=True)
     require(len(raw) == ref["bytes"] and hashlib.sha256(raw).hexdigest() == ref["sha256"],
@@ -752,13 +801,15 @@ def _parse_systemctl_show(raw: bytes, unit: str, invocation: str | None,
         require(bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", key)) and key not in properties,
                 f"invalid or duplicate systemctl property for {unit}")
         properties[key] = value
-    required = {"Id", "LoadState", "InvocationID", "MainPID", "ExecMainPID", "ControlGroup",
-                "ExecMainStartTimestampMonotonic", "ExecMainStatus", "Result", "SubState"}
+    required = {"Id", "LoadState", "ActiveState", "InvocationID", "MainPID", "ExecMainPID", "ControlGroup",
+                "ExecMainStartTimestampMonotonic", "ExecMainStatus", "Result", "SubState",
+                "ProtectSystem", "ReadOnlyPaths"}
     require(required <= properties.keys(), f"systemctl show lacks required identity for {unit}")
     require(properties["Id"] == unit and properties["LoadState"] == "loaded",
             f"systemctl show unit/load state mismatch for {unit}")
     show_invocation = properties["InvocationID"] or None
-    require(show_invocation is None or HEX32.fullmatch(show_invocation) is not None,
+    require(show_invocation is None or
+            (HEX32.fullmatch(show_invocation) is not None and show_invocation != "0" * 32),
             f"systemctl show invocation ID malformed for {unit}")
     if invocation is not None:
         require(show_invocation == invocation, f"systemctl show invocation differs for {unit}")
@@ -775,12 +826,25 @@ def _parse_systemctl_show(raw: bytes, unit: str, invocation: str | None,
                 ".." not in control_group.split("/"), f"systemctl show cgroup differs for {unit}")
     else:
         require(not snapshot["process_started"], f"running process has empty ControlGroup for {unit}")
+    expected_read_only_paths = expected["profile"]["read_only_mount_targets"][1:]
+    require(properties["ProtectSystem"] == "strict" and
+            properties["ReadOnlyPaths"].split() == expected_read_only_paths,
+            f"systemctl show read-only sandbox properties differ for {unit}")
     for key in ("result", "substate", "exec_main_status"):
         prop = {"result": "Result", "substate": "SubState", "exec_main_status": "ExecMainStatus"}[key]
         require(isinstance(snapshot.get(key), str) and snapshot[key] == properties[prop],
                 f"systemctl show {prop} differs from snapshot for {unit}")
+    require(isinstance(snapshot.get("active_state"), str) and
+            snapshot["active_state"] == properties["ActiveState"],
+            f"systemctl show ActiveState differs from snapshot for {unit}")
     require(re.fullmatch(r"0|[1-9][0-9]*", properties["ExecMainStartTimestampMonotonic"]) is not None,
             f"systemctl show monotonic start timestamp malformed for {unit}")
+    exec_start = canonical_uint(properties["ExecMainStartTimestampMonotonic"],
+                                f"{unit} ExecMainStartTimestampMonotonic", (1 << 64) - 1)
+    snapshot_exec_start = snapshot.get("exec_main_start_timestamp_monotonic")
+    require(type(snapshot_exec_start) is int and exec_start == snapshot_exec_start and
+            (not snapshot["process_started"] or exec_start > 0),
+            f"systemctl show execution timestamp differs from snapshot for {unit}")
     return properties
 
 
@@ -794,56 +858,114 @@ def _validate_snapshot_capture(snapshot: dict[str, Any], unit_row: dict[str, Any
             snapshot["generation"] == unit_row["generation"],
             f"snapshot lifecycle identity differs for {unit}")
     require(invocation is None or
-            (isinstance(invocation, str) and HEX32.fullmatch(invocation) is not None),
+            (isinstance(invocation, str) and HEX32.fullmatch(invocation) is not None and
+             invocation != "0" * 32),
             f"snapshot invocation ID is malformed for {unit}")
-    require(not snapshot["process_started"] or invocation is not None,
-            f"started process lacks snapshot invocation ID for {unit}")
-    if not snapshot["complete"]:
-        return {"complete": False, "reason": snapshot["incomplete_reasons"]}
-    require(snapshot.get("systemctl_cancelled") is None and
-            snapshot.get("systemctl_exit") == 0 and snapshot.get("systemctl_timed_out") is False,
-            f"completed systemctl attempt has exit/timeout/cancel failure for {unit}")
-    show_raw = _safe_ref(observer_fd, snapshot.get("raw_show"), f"{unit} systemctl show", 4 * 1024 * 1024)
-    stderr_raw = _safe_ref(observer_fd, snapshot.get("raw_stderr"), f"{unit} systemctl stderr", 1024 * 1024)
-    require(snapshot["raw_show"]["exit"] == snapshot["systemctl_exit"] and
-            snapshot["raw_stderr"]["exit"] == snapshot["systemctl_exit"] and
-            snapshot["raw_show"]["timed_out"] == snapshot["systemctl_timed_out"] and
-            snapshot["raw_stderr"]["timed_out"] == snapshot["systemctl_timed_out"] and
-            not stderr_raw.strip(), f"systemctl raw references disagree or stderr is nonempty for {unit}")
-    properties = _parse_systemctl_show(show_raw, unit, invocation, snapshot, expected)
-    verified: dict[str, Any] = {"complete": True, "properties": properties,
-                                "main_pid": snapshot["main_pid"], "start_ticks": snapshot["start_ticks"],
-                                "proc": None, "socket": None}
-    if snapshot["process_started"]:
-        require(snapshot.get("exe") == expected["broker_executable_path"] and
-                snapshot.get("exe_sha256") == expected["broker_binary_sha256"] and
-                isinstance(snapshot.get("cgroup"), str) and
-                properties["ControlGroup"] == snapshot["cgroup"],
-                f"process executable/hash/cgroup identity differs for {unit}")
-        proc_refs = snapshot.get("proc_capture")
-        require(isinstance(proc_refs, dict) and
-                set(proc_refs) == {"proc-status", "proc-mountinfo", "proc-cgroup", "fd0_link", "fd0_info"},
-                f"process proc references are incomplete for {unit}")
-        status_raw = _safe_ref(observer_fd, proc_refs["proc-status"], f"{unit} proc status", 1024 * 1024)
-        mount_raw = _safe_ref(observer_fd, proc_refs["proc-mountinfo"], f"{unit} proc mountinfo", 16 * 1024 * 1024)
-        cgroup_raw = _safe_ref(observer_fd, proc_refs["proc-cgroup"], f"{unit} proc cgroup", 1024 * 1024)
-        status = _check_profile_status(status_raw, snapshot["main_pid"], expected["profile"], f"{unit} external")
-        cgroup_path = _parse_cgroup(cgroup_raw, expected["profile"]["cgroup_prefix"], f"{unit} external")
-        require(cgroup_path == properties["ControlGroup"] and
-                snapshot["cgroup"] == cgroup_path,
-                f"external cgroup does not match full manager show for {unit}")
-        ro_mounts = _readonly_mounts(mount_raw, expected["profile"]["read_only_mount_targets"],
-                                     f"{unit} external")
-        _validate_fd0(snapshot, proc_refs, observer_fd, None, unit)
-        verified.update({"proc": {"status_raw": status_raw, "status": status,
-                                   "mountinfo_raw": mount_raw, "ro_mounts": ro_mounts,
-                                   "cgroup_raw": cgroup_raw, "cgroup_path": cgroup_path},
-                         "socket": snapshot["socket_fd0"]})
+    main_pid = snapshot["main_pid"]
+    started = snapshot["process_started"]
+    start_ticks = snapshot.get("start_ticks")
+    exec_start = snapshot.get("exec_main_start_timestamp_monotonic")
+    require(type(main_pid) is int and 0 <= main_pid <= (1 << 31) - 1 and
+            type(started) is bool and started == (main_pid > 0) and
+            (start_ticks is None or type(start_ticks) is int and start_ticks > 0 and started) and
+            (exec_start is None or type(exec_start) is int and exec_start >= 0),
+            f"snapshot process identity types are malformed for {unit}")
+    if started:
+        require(isinstance(snapshot.get("cgroup"), str) and
+                snapshot["cgroup"].startswith(expected["profile"]["cgroup_prefix"]) and
+                ".." not in snapshot["cgroup"].split("/"),
+                f"started process has a malformed cgroup for {unit}")
+        if snapshot.get("manager_properties_complete") is True:
+            require(invocation is not None and type(exec_start) is int and exec_start > 0,
+                    f"manager-complete process identity lacks invocation or exec time for {unit}")
+    props_complete = snapshot.get("manager_properties_complete", False)
+    require(type(props_complete) is bool, f"manager completeness is malformed for {unit}")
+    systemctl_exit = snapshot.get("systemctl_exit")
+    timed_out = snapshot.get("systemctl_timed_out")
+    cancelled = snapshot.get("systemctl_cancelled")
+    require(type(timed_out) is bool and (cancelled is None or isinstance(cancelled, str)),
+            f"systemctl completion metadata is malformed for {unit}")
+    raw_show_ref = snapshot.get("raw_show")
+    raw_stderr_ref = snapshot.get("raw_stderr")
+    require((raw_show_ref is None) == (raw_stderr_ref is None),
+            f"systemctl show/stderr raw references are unpaired for {unit}")
+    properties: dict[str, str] | None = None
+    stderr_raw = b""
+    if raw_show_ref is not None:
+        show_raw = _safe_ref(observer_fd, raw_show_ref, f"{unit} systemctl show", 4 * 1024 * 1024,
+                             require_success=False)
+        stderr_raw = _safe_ref(observer_fd, raw_stderr_ref, f"{unit} systemctl stderr", 1024 * 1024,
+                               require_success=False)
+        require(raw_show_ref["exit"] == raw_stderr_ref["exit"] == systemctl_exit and
+                raw_show_ref["timed_out"] == raw_stderr_ref["timed_out"] == timed_out,
+                f"systemctl raw references disagree with summary for {unit}")
+        if props_complete:
+            require(cancelled is None and systemctl_exit == 0 and not timed_out and not stderr_raw.strip(),
+                    f"completed systemctl attempt has exit/timeout/cancel/stderr failure for {unit}")
+            properties = _parse_systemctl_show(show_raw, unit, invocation, snapshot, expected)
+        elif systemctl_exit == 0 and not timed_out and cancelled is None:
+            try:
+                properties = _parse_systemctl_show(show_raw, unit, invocation, snapshot, expected)
+            except EvidenceError:
+                properties = None
     else:
-        require(snapshot.get("start_ticks") is None and snapshot.get("proc_capture") in (None, {}) and
-                snapshot.get("socket_fd0") is None,
-                f"no-PID snapshot contains process captures for {unit}")
-    return verified
+        require(not props_complete, f"manager-complete snapshot lacks systemctl raw references for {unit}")
+    if properties is not None and snapshot.get("cgroup") is not None:
+        require(properties["ControlGroup"] == snapshot["cgroup"],
+                f"systemctl show cgroup differs from snapshot for {unit}")
+    proc_refs = snapshot.get("proc_capture")
+    require(proc_refs is None or isinstance(proc_refs, dict),
+            f"process proc references are malformed for {unit}")
+    proc: dict[str, Any] | None = None
+    socket_identity = snapshot.get("socket_fd0")
+    if proc_refs:
+        allowed_proc_refs = {"proc-status", "proc-mountinfo", "proc-cgroup", "fd0_link", "fd0_info"}
+        require(started and type(start_ticks) is int and set(proc_refs) <= allowed_proc_refs and
+                ("fd0_link" in proc_refs) == ("fd0_info" in proc_refs),
+                f"partial process capture references have invalid names or identity for {unit}")
+        status_raw = (_safe_ref(observer_fd, proc_refs["proc-status"], f"{unit} proc status", 1024 * 1024)
+                      if "proc-status" in proc_refs else None)
+        mount_raw = (_safe_ref(observer_fd, proc_refs["proc-mountinfo"], f"{unit} proc mountinfo", 16 * 1024 * 1024)
+                     if "proc-mountinfo" in proc_refs else None)
+        cgroup_raw = (_safe_ref(observer_fd, proc_refs["proc-cgroup"], f"{unit} proc cgroup", 1024 * 1024)
+                      if "proc-cgroup" in proc_refs else None)
+        status = (_check_profile_status(status_raw, main_pid, expected["profile"], f"{unit} external")
+                  if status_raw is not None else None)
+        cgroup_path = (_parse_cgroup(cgroup_raw, expected["profile"]["cgroup_prefix"], f"{unit} external")
+                       if cgroup_raw is not None else None)
+        if cgroup_path is not None:
+            require(cgroup_path == snapshot["cgroup"] and
+                    snapshot.get("proc_cgroup_raw") in (None, f"0::{cgroup_path}"),
+                    f"external cgroup does not match manager cgroup for {unit}")
+        ro_mounts = (_readonly_mounts(mount_raw, expected["profile"]["read_only_mount_targets"],
+                                     f"{unit} external") if mount_raw is not None else None)
+        if "fd0_link" in proc_refs:
+            require(socket_identity is not None,
+                    f"partial fd0 files lack their socket identity for {unit}")
+            _validate_fd0(snapshot, proc_refs, observer_fd, None, unit)
+        else:
+            require(socket_identity is None,
+                    f"snapshot has fd0 identity without fd0 files for {unit}")
+        proc = {"status_raw": status_raw, "status": status,
+                "mountinfo_raw": mount_raw, "ro_mounts": ro_mounts,
+                "cgroup_raw": cgroup_raw, "cgroup_path": cgroup_path}
+    else:
+        require(socket_identity is None,
+                f"snapshot has fd0 identity without proc captures for {unit}")
+    if snapshot["complete"]:
+        require(props_complete and snapshot.get("process_capture_complete") is True and
+                started and invocation is not None and type(start_ticks) is int and start_ticks > 0 and
+                properties is not None and proc is not None and
+                proc["status"] is not None and proc["mountinfo_raw"] is not None and
+                proc["cgroup_path"] is not None and proc["ro_mounts"] is not None and
+                socket_identity is not None and
+                snapshot.get("exe") == expected["broker_executable_path"] and
+                snapshot.get("exe_sha256") == expected["broker_binary_sha256"],
+                f"complete process snapshot lacks manager/proc/exe/fd0 witnesses for {unit}")
+    return {"complete": snapshot["complete"], "properties": properties,
+            "main_pid": main_pid, "start_ticks": start_ticks,
+            "process_identity": _snapshot_process_identity(snapshot),
+            "proc": proc, "socket": socket_identity, "stderr": stderr_raw}
 
 
 def _check_profile_status(raw: bytes, pid: int, profile: dict[str, Any], label: str) -> dict[str, str]:
@@ -890,10 +1012,13 @@ def _validate_fd0(snapshot: dict[str, Any], proc_refs: dict[str, Any], root_fd: 
 
 def _observer_documents(observer_fd: int, expected: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     ready = strict_json(read_regular_at(observer_fd, "ready.json", 1024 * 1024), "observer ready.json")
-    events = parse_jsonl(read_regular_at(observer_fd, "events.jsonl", MAX_FILE), "observer events.jsonl")
-    summary = strict_json(read_regular_at(observer_fd, "summary.json", 16 * 1024 * 1024), "observer summary.json")
+    event_raw = read_regular_at(observer_fd, "events.jsonl", MAX_OBSERVER_EVENTS, allow_empty=True)
+    events = parse_jsonl(event_raw, "observer events.jsonl") if event_raw else []
+    summary = strict_json(read_regular_at(observer_fd, "summary.json", MAX_OBSERVER_SUMMARY),
+                          "observer summary.json")
     require(isinstance(ready, dict) and ready.get("schema") == OBS_SCHEMA and ready.get("kind") == "READY",
             "observer readiness schema mismatch")
+    require(isinstance(summary, dict), "observer summary is not an object")
     for document, label in ((ready, "ready"), (summary, "summary")):
         boot = document.get("boot_id")
         raw_boot = document.get("boot_id_raw")
@@ -905,6 +1030,7 @@ def _observer_documents(observer_fd: int, expected: dict[str, Any]) -> tuple[dic
             ready.get("run_attempt") == expected["run_attempt"] and
             ready.get("match_ack") is True and ready.get("subscribe_ack") is True and
             ready.get("population_complete") is False and
+            ready.get("manager_object_reload_possible") is True and
             type(ready.get("ready_monotonic_ns")) is int and ready["ready_monotonic_ns"] > 0 and
             type(ready.get("observer_pid")) is int and ready["observer_pid"] > 0 and
             type(ready.get("observer_start_ticks")) is int and ready["observer_start_ticks"] > 0 and
@@ -914,10 +1040,29 @@ def _observer_documents(observer_fd: int, expected: dict[str, Any]) -> tuple[dic
     require(summary.get("schema") == OBS_SCHEMA and summary.get("run_id") == expected["run_id"] and
             summary.get("run_attempt") == expected["run_attempt"] and
             summary.get("population_complete") is False and
-            summary.get("event_loss_detected") is False and
-            summary.get("event_stream_complete") is True,
-            "observer summary reports loss, incomplete stream, or wrong run")
-    require(len(events) <= 100_000, "observer event count exceeds bound")
+            summary.get("manager_object_reload_possible") is True and
+            type(summary.get("event_loss_detected")) is bool and
+            type(summary.get("event_stream_complete")) is bool and
+            summary["event_stream_complete"] == (not summary["event_loss_detected"]),
+            "observer summary event-loss status or run identity is malformed")
+    require(type(summary.get("run_attempt")) is int and
+            type(summary.get("observer_pid")) is int and summary["observer_pid"] == ready["observer_pid"] and
+            type(summary.get("observer_start_ticks")) is int and
+            summary["observer_start_ticks"] == ready["observer_start_ticks"] and
+            summary.get("manager_sender") == ready["manager_sender"] and
+            type(summary.get("ready_monotonic_ns")) is int and
+            summary["ready_monotonic_ns"] == ready["ready_monotonic_ns"] and
+            type(summary.get("ended_monotonic_ns")) is int and
+            summary["ended_monotonic_ns"] >= summary["ready_monotonic_ns"] and
+            summary.get("stop_seen") is True and
+            type(summary.get("event_count")) is int and summary["event_count"] == len(events) and
+            type(summary.get("event_bytes")) is int and summary["event_bytes"] == len(event_raw) and
+            type(summary.get("capture_bytes")) is int and
+            0 <= summary["capture_bytes"] <= MAX_OBSERVER_EVENTS,
+            "observer summary counters or stop/identity fields disagree")
+    require(len(events) <= 512 and type(summary.get("bus_dispatch_count")) is int and
+            0 <= summary["bus_dispatch_count"] <= 4096,
+            "observer event or dispatch count exceeds bound")
     for number, event in enumerate(events, 1):
         require(event.get("schema") == OBS_SCHEMA and event.get("boot_id") == expected["boot_id"] and
                 event.get("boot_id_raw") == expected["boot_id_raw"] and
@@ -927,6 +1072,13 @@ def _observer_documents(observer_fd: int, expected: dict[str, Any]) -> tuple[dic
     return ready, events, summary
 
 
+def _unit_object_path(unit: str) -> str:
+    parse_broker_unit(unit, "observer lifecycle unit")
+    escaped = "".join(chr(byte) if (48 <= byte <= 57 or 65 <= byte <= 90 or 97 <= byte <= 122)
+                      else f"_{byte:02x}" for byte in unit.encode("ascii"))
+    return "/org/freedesktop/systemd1/unit/" + escaped
+
+
 def _generation_key(row: dict[str, Any]) -> tuple[str, str, str, int]:
     boot = row.get("boot_id")
     unit = row.get("unit")
@@ -934,28 +1086,88 @@ def _generation_key(row: dict[str, Any]) -> tuple[str, str, str, int]:
     generation = row.get("generation")
     require(isinstance(boot, str) and HEX32.fullmatch(boot) is not None and
             isinstance(path, str) and len(path) <= 512 and
-            path.startswith("/org/freedesktop/systemd1/unit/") and path.count("/") == 6 and
-            ".." not in path.split("/") and type(generation) is int and generation > 0,
+            path.startswith("/org/freedesktop/systemd1/unit/") and
+            ".." not in path.split("/") and type(generation) is int and
+            0 < generation <= (1 << 64) - 1,
             "observer lifecycle identity is malformed")
     parse_broker_unit(unit, "observer lifecycle unit")
+    require(path == _unit_object_path(unit), "observer object path does not encode its exact unit")
     return boot, unit, path, generation
+
+
+def _snapshot_process_identity(snapshot: dict[str, Any]) -> tuple[Any, ...] | None:
+    invocation = snapshot.get("invocation_id")
+    pid = snapshot.get("main_pid")
+    exec_start = snapshot.get("exec_main_start_timestamp_monotonic")
+    cgroup = snapshot.get("cgroup")
+    ticks = snapshot.get("start_ticks")
+    if (type(pid) is not int or pid <= 0 or not isinstance(invocation, str) or
+            HEX32.fullmatch(invocation) is None or invocation == "0" * 32 or
+            type(exec_start) is not int or exec_start <= 0 or
+            not isinstance(cgroup, str) or not cgroup.startswith("/") or
+            type(ticks) is not int or ticks <= 0):
+        return None
+    return (*_generation_key(snapshot), invocation, pid, exec_start, cgroup, ticks)
 
 
 def _validate_event_rows(ready: dict[str, Any], events: list[dict[str, Any]],
                          summary: dict[str, Any]) -> tuple[dict[tuple[str, str, str, int], dict[str, Any]],
                                                           list[dict[str, Any]]]:
     ready_ns = ready["ready_monotonic_ns"]
+    global_reasons = summary.get("global_incomplete_reasons")
+    require(isinstance(global_reasons, list) and
+            len(global_reasons) <= 64 and len(global_reasons) == len(set(global_reasons)) and
+            all(isinstance(item, str) and item and len(item) <= 512 for item in global_reasons),
+            "observer global incomplete reasons are malformed")
     lifecycles: dict[tuple[str, str, str, int], dict[str, Any]] = {}
     last_ns = ready_ns
+    manager_reloading_seen = False
     for event in events:
         require(boot_uuid(event.get("boot_id_raw"), "event boot_id_raw") == event["boot_id"],
                 "observer event raw boot UUID differs")
-        key = _generation_key(event)
         require(event["monotonic_ns"] >= last_ns, "observer monotonic event order regressed")
         last_ns = event["monotonic_ns"]
         require(event.get("sender") == ready["manager_sender"] and
                 isinstance(event.get("member"), str), "observer event sender/member is missing")
         kind = event.get("event")
+        if kind == "Reloading":
+            expected_fields = {"schema", "boot_id", "boot_id_raw", "seq", "monotonic_ns",
+                               "observer_show_query_inflight", "event", "member", "interface",
+                               "path", "sender", "reloading"}
+            require(set(event) == expected_fields,
+                    "manager Reloading event has unknown or missing fields")
+            require(event.get("member") == "Reloading" and
+                    event.get("interface") == "org.freedesktop.systemd1.Manager" and
+                    event.get("path") == "/org/freedesktop/systemd1" and
+                    type(event.get("reloading")) is bool,
+                    "malformed system manager Reloading event")
+            require("manager_reloading_during_observation" in global_reasons,
+                    "manager Reloading event lacks a global incomplete reason")
+            manager_reloading_seen = True
+            continue
+        if kind in ("UnitNew", "UnitRemoved"):
+            expected_fields = {"schema", "boot_id", "boot_id_raw", "seq", "monotonic_ns",
+                               "observer_show_query_inflight", "event", "member", "interface",
+                               "sender", "unit", "object_path", "generation"}
+        elif kind == "PropertiesChanged":
+            expected_fields = {"schema", "boot_id", "boot_id_raw", "seq", "monotonic_ns",
+                               "observer_show_query_inflight", "event", "member", "interface",
+                               "unit_interface", "sender", "unit", "object_path", "generation",
+                               "changed_properties", "invalidated_properties", "main_pids"}
+        else:
+            raise EvidenceError("observer has an unknown lifecycle event")
+        require(set(event) == expected_fields,
+                "observer lifecycle event has unknown or missing fields")
+        query_context = event.get("observer_show_query_inflight")
+        require(query_context is None or
+                (isinstance(query_context, dict) and
+                 set(query_context) == {"unit", "generation", "started_monotonic_ns"} and
+                 isinstance(query_context.get("unit"), str) and
+                 type(query_context.get("generation")) is int and query_context["generation"] > 0 and
+                 type(query_context.get("started_monotonic_ns")) is int and
+                 query_context["started_monotonic_ns"] > 0),
+                "observer in-flight query context is malformed")
+        key = _generation_key(event)
         if kind == "UnitNew":
             require(event.get("member") == "UnitNew" and
                     event.get("interface") == "org.freedesktop.systemd1.Manager" and
@@ -964,7 +1176,8 @@ def _validate_event_rows(ready: dict[str, Any], events: list[dict[str, Any]],
         elif kind == "PropertiesChanged":
             require(event.get("member") == "PropertiesChanged" and
                     event.get("interface") == "org.freedesktop.DBus.Properties" and
-                    isinstance(event.get("unit_interface"), str) and
+                    event.get("unit_interface") in ("org.freedesktop.systemd1.Unit",
+                                                     "org.freedesktop.systemd1.Service") and
                     isinstance(event.get("changed_properties"), list) and
                     len(event["changed_properties"]) == len(set(event["changed_properties"])) and
                     all(isinstance(item, str) and item for item in event["changed_properties"]) and
@@ -974,6 +1187,9 @@ def _validate_event_rows(ready: dict[str, Any], events: list[dict[str, Any]],
                     isinstance(event.get("main_pids"), list) and
                     all(type(item) is int and 0 <= item <= (1 << 31) - 1 for item in event["main_pids"]),
                     "malformed PropertiesChanged event")
+            if "MainPID" in event["changed_properties"] or "MainPID" in event["invalidated_properties"]:
+                require(event["unit_interface"] == "org.freedesktop.systemd1.Service",
+                        "MainPID event is not from the systemd Service interface")
             require(key in lifecycles and lifecycles[key]["removed"] is None,
                     "PropertiesChanged is outside its observed generation")
             lifecycles[key]["properties"].append(event)
@@ -983,12 +1199,11 @@ def _validate_event_rows(ready: dict[str, Any], events: list[dict[str, Any]],
                     key in lifecycles and lifecycles[key]["removed"] is None,
                     "duplicate or unpaired UnitRemoved event")
             lifecycles[key]["removed"] = event
-        else:
-            raise EvidenceError("observer has an unknown lifecycle event")
+    require(manager_reloading_seen ==
+            ("manager_reloading_during_observation" in global_reasons),
+            "manager Reloading event and global incomplete reason disagree")
     units = summary.get("units")
-    snapshots = summary.get("snapshots")
-    require(isinstance(units, list) and isinstance(snapshots, list) and
-            len(units) <= MAX_INSTANCES and len(snapshots) <= 100_000,
+    require(isinstance(units, list) and len(units) <= MAX_INSTANCES,
             "observer summary units/snapshots missing or oversized")
     unit_rows: dict[tuple[str, str, str, int], dict[str, Any]] = {}
     nested_snapshots: list[dict[str, Any]] = []
@@ -1014,36 +1229,85 @@ def _validate_event_rows(ready: dict[str, Any], events: list[dict[str, Any]],
                 unit_row.get("removed_monotonic_ns") == (removed["monotonic_ns"] if removed else None),
                 f"observer lifecycle bounds disagree for {key[1]}")
         invocation = unit_row.get("invocation_id")
-        require(invocation is None or (isinstance(invocation, str) and HEX32.fullmatch(invocation) is not None),
+        require(invocation is None or
+                (isinstance(invocation, str) and HEX32.fullmatch(invocation) is not None and
+                 invocation != "0" * 32),
                 f"observer invocation ID is malformed for {key[1]}")
         main_pid = unit_row.get("main_pid")
         started = unit_row.get("process_started")
         ticks = unit_row.get("start_ticks")
         require(type(main_pid) is int and 0 <= main_pid <= (1 << 31) - 1 and
-                type(started) is bool and started == (main_pid > 0) and
-                ((started and type(ticks) is int and ticks > 0 and invocation is not None) or
-                 (not started and ticks is None)),
+                type(started) is bool and (main_pid == 0 or started) and
+                (ticks is None or (type(ticks) is int and ticks > 0 and main_pid > 0 and
+                                   started and invocation is not None)),
                 f"observer process identity is malformed for {key[1]}")
         require(type(unit_row.get("complete")) is bool and
+                type(unit_row.get("manager_lifecycle_complete")) is bool and
+                type(unit_row.get("process_complete")) is bool and
+                unit_row["complete"] == unit_row["process_complete"] and
+                type(unit_row.get("process_start_seen")) is bool and
+                (not started or unit_row["process_start_seen"]) and
                 isinstance(unit_row.get("incomplete_reasons"), list) and
-                all(isinstance(item, str) and item for item in unit_row["incomplete_reasons"]),
+                all(isinstance(item, str) and item for item in unit_row["incomplete_reasons"]) and
+                isinstance(unit_row.get("manager_incomplete_reasons"), list) and
+                all(isinstance(item, str) and item for item in unit_row["manager_incomplete_reasons"]) and
+                isinstance(unit_row.get("process_incomplete_reasons"), list) and
+                all(isinstance(item, str) and item for item in unit_row["process_incomplete_reasons"]) and
+                isinstance(unit_row.get("preliminary_property_misses"), list) and
+                len(unit_row["preliminary_property_misses"]) <= 6,
                 f"observer unit completeness is malformed for {key[1]}")
         row_snaps = unit_row.get("snapshots")
-        require(isinstance(row_snaps, list), f"observer unit snapshot list missing for {key[1]}")
+        require(isinstance(row_snaps, list) and 1 <= len(row_snaps) <= 6,
+                f"observer unit snapshot list missing or out of bounds for {key[1]}")
         for snapshot in row_snaps:
             require(isinstance(snapshot, dict) and _generation_key(snapshot) == key,
                     f"nested observer snapshot identity mismatch for {key[1]}")
             require(isinstance(snapshot.get("boot_id_raw"), str) and
                     boot_uuid(snapshot["boot_id_raw"], "snapshot boot_id_raw") == key[0],
                     f"snapshot raw boot ID differs for {key[1]}")
+            require(snapshot.get("manager_object_reload_possible") is True,
+                    f"snapshot lost manager-object reload caveat for {key[1]}")
             nested_snapshots.append(snapshot)
+        manager_reasons = unit_row["manager_incomplete_reasons"]
+        process_reasons = unit_row["process_incomplete_reasons"]
+        event_loss = summary.get("event_loss_detected") is True
+        expected_unit_manager_complete = (
+            life["removed"] is not None and bool(row_snaps) and not manager_reasons and not event_loss and
+            any(snapshot.get("manager_properties_complete") is True for snapshot in row_snaps) and
+            all(snapshot.get("manager_properties_complete", False) is True or
+                snapshot.get("preliminary_property_miss", False) is True for snapshot in row_snaps))
+        require(unit_row["manager_lifecycle_complete"] == expected_unit_manager_complete,
+                f"observer manager lifecycle completeness is inconsistent for {key[1]}")
+        positive_snapshots = [snapshot for snapshot in row_snaps
+                              if type(snapshot.get("main_pid")) is int and snapshot["main_pid"] > 0]
+        positive_event_pids = {pid for event in life["properties"]
+                               for pid in event["main_pids"] if pid > 0}
+        positive_event_pid = bool(positive_event_pids)
+        witness_identities = {_snapshot_process_identity(snapshot) for snapshot in positive_snapshots
+                              if snapshot.get("complete") is True and
+                              _snapshot_process_identity(snapshot) is not None}
+        require(unit_row["process_start_seen"] == (unit_row["process_started"] or positive_event_pid),
+                f"observer process-start event summary differs for {key[1]}")
+        witness_pid = next(iter(witness_identities))[5] if len(witness_identities) == 1 else None
+        positive_identities_match = (len(witness_identities) == 1 and
+            all(_snapshot_process_identity(snapshot) in witness_identities
+                for snapshot in positive_snapshots) and
+            all(snapshot.get("complete") is True or
+                (snapshot.get("process_capture_state") in SUPERSEDABLE_CAPTURE_STATES and
+                 snapshot.get("manager_properties_complete") is True and
+                 snapshot.get("process_capture_complete") is False)
+                for snapshot in positive_snapshots) and
+            not any(pid != witness_pid for pid in positive_event_pids))
+        expected_unit_process_complete = (expected_unit_manager_complete and
+                                          positive_identities_match and not process_reasons)
+        require(unit_row["process_complete"] ==
+                expected_unit_process_complete,
+                f"observer positive PID evidence conflicts with process witness for {key[1]}")
         unit_rows[key] = unit_row
     require(set(unit_rows) == set(lifecycles),
             "observer summary omitted or invented a manager lifecycle generation")
-    nested_sorted = sorted((json.dumps(row, sort_keys=True, separators=(",", ":")) for row in nested_snapshots))
-    top_sorted = sorted((json.dumps(row, sort_keys=True, separators=(",", ":")) for row in snapshots))
-    require(nested_sorted == top_sorted, "observer top-level snapshots differ from per-generation snapshots")
-    for snapshot in snapshots:
+    require(len(nested_snapshots) <= 100_000, "observer snapshot count exceeds bound")
+    for snapshot in nested_snapshots:
         require(isinstance(snapshot, dict), "observer snapshot is not an object")
         key = _generation_key(snapshot)
         require(key in unit_rows and snapshot.get("trigger_event_seq") in
@@ -1060,27 +1324,89 @@ def _validate_event_rows(ready: dict[str, Any], events: list[dict[str, Any]],
                 isinstance(snapshot.get("incomplete_reasons"), list) and
                 all(isinstance(item, str) and item for item in snapshot["incomplete_reasons"]),
                 f"snapshot completeness fields are malformed for {key[1]}")
+        capture_state = snapshot.get("process_capture_state")
+        require(capture_state is None or isinstance(capture_state, str),
+                f"snapshot process capture state is malformed for {key[1]}")
+        manager_properties_complete = snapshot.get("manager_properties_complete", False)
+        process_capture_complete = snapshot.get("process_capture_complete", False)
+        require(type(manager_properties_complete) is bool and type(process_capture_complete) is bool and
+                (snapshot["complete"] == (manager_properties_complete and process_capture_complete)) and
+                type(snapshot.get("preliminary_property_miss", False)) is bool,
+                f"snapshot component completeness flags disagree for {key[1]}")
         if snapshot["complete"]:
             require(not snapshot["incomplete_reasons"],
                     f"snapshot claims complete with incomplete reasons for {key[1]}")
         else:
-            require(bool(snapshot["incomplete_reasons"]),
-                    f"incomplete snapshot lacks a reason for {key[1]}")
+            require(bool(snapshot["incomplete_reasons"]) or
+                    (not snapshot.get("process_started") and
+                     snapshot.get("manager_properties_complete") is True and
+                     snapshot.get("process_capture_complete") is False),
+                    f"incomplete snapshot lacks a reason or expected PID-zero partial for {key[1]}")
         main_pid = snapshot.get("main_pid")
         started = snapshot.get("process_started")
         ticks = snapshot.get("start_ticks")
         require(type(main_pid) is int and 0 <= main_pid <= (1 << 31) - 1 and
                 type(started) is bool and started == (main_pid > 0) and
-                ((started and type(ticks) is int and ticks > 0 and
-                  isinstance(snapshot.get("invocation_id"), str) and
-                  HEX32.fullmatch(snapshot["invocation_id"]) is not None) or
-                 (not started and ticks is None)),
+                (ticks is None or (type(ticks) is int and ticks > 0 and started)),
                 f"snapshot process identity is malformed for {key[1]}")
-        require(snapshot.get("invocation_id") is None or
-                (isinstance(snapshot.get("invocation_id"), str) and
-                 HEX32.fullmatch(snapshot["invocation_id"]) is not None),
+        if started and not snapshot["complete"]:
+            require(capture_state in SUPERSEDABLE_CAPTURE_STATES and
+                    snapshot.get("manager_properties_complete") is True and
+                    snapshot.get("process_capture_complete") is False,
+                    f"positive partial process capture is not explicitly supersedable for {key[1]}")
+        initial_exe = snapshot.get("initial_exe_observed")
+        require(initial_exe is None or
+                (isinstance(initial_exe, str) and len(initial_exe) <= 4096 and
+                 initial_exe.startswith("/") and "\x00" not in initial_exe),
+                f"snapshot initial executable is malformed for {key[1]}")
+        if capture_state == "known_preexec_executable_transition":
+            known_failure = any(
+                isinstance(reason, str) and reason.startswith("process_capture_failed:ProbeError:") and
+                (re.fullmatch(r"process cgroup mismatch for broker-[0-9]{6}",
+                              reason.split("process_capture_failed:ProbeError:", 1)[1]) is not None or
+                 re.fullmatch(r"process executable path mismatch for broker-[0-9]{6}: " +
+                              re.escape(initial_exe or ""),
+                              reason.split("process_capture_failed:ProbeError:", 1)[1]) is not None)
+                for reason in snapshot["incomplete_reasons"])
+            require(started and type(ticks) is int and ticks > 0 and
+                    initial_exe in PREEXEC_EXECUTABLES and
+                    snapshot.get("active_state") == "activating" and
+                    snapshot.get("substate") == "start" and
+                    snapshot.get("manager_properties_complete") is True and
+                    snapshot.get("process_capture_complete") is False and known_failure,
+                    f"known pre-exec transition lacks its exact process/show witness for {key[1]}")
+        invocation = snapshot.get("invocation_id")
+        invocation_observed = snapshot.get("invocation_id_observed")
+        require(invocation is None or
+                (isinstance(invocation, str) and HEX32.fullmatch(invocation) is not None and
+                 invocation != "0" * 32),
                 f"snapshot invocation ID is malformed for {key[1]}")
-    return unit_rows, snapshots
+        require(invocation_observed is None or invocation_observed == "" or
+                (isinstance(invocation_observed, str) and
+                 HEX32.fullmatch(invocation_observed) is not None),
+                f"snapshot observed invocation ID is malformed for {key[1]}")
+        require(not snapshot["complete"] or
+                (started and invocation is not None and type(ticks) is int and ticks > 0 and
+                 type(snapshot.get("exec_main_start_timestamp_monotonic")) is int and
+                 snapshot["exec_main_start_timestamp_monotonic"] > 0),
+                f"complete snapshot lacks a full process identity for {key[1]}")
+    if manager_reloading_seen:
+        require(summary.get("event_loss_detected") is True,
+                "manager Reloading signal was not treated as event loss")
+    expected_manager_complete = (bool(unit_rows) and summary.get("stop_seen") is True and
+        not global_reasons and summary.get("event_loss_detected") is False and
+        all(row["manager_lifecycle_complete"] for row in unit_rows.values()))
+    expected_process_complete = (bool(unit_rows) and summary.get("stop_seen") is True and
+        not global_reasons and summary.get("event_loss_detected") is False and
+        all(row["process_complete"] for row in unit_rows.values()))
+    require(type(summary.get("manager_observation_complete")) is bool and
+            summary["manager_observation_complete"] == expected_manager_complete and
+            type(summary.get("process_complete")) is bool and
+            summary["process_complete"] == expected_process_complete and
+            type(summary.get("observer_complete")) is bool and
+            summary["observer_complete"] == expected_process_complete,
+            "observer summary completeness disagrees with its unit populations")
+    return unit_rows, nested_snapshots
 
 
 def parse_expected(raw: bytes) -> dict[str, Any]:
@@ -1112,6 +1438,8 @@ def parse_expected(raw: bytes) -> dict[str, Any]:
             value["broker_executable_path"].startswith("/") and "\x00" not in value["broker_executable_path"] and
             ".." not in PurePosixPath(value["broker_executable_path"]).parts,
             "broker executable path is malformed")
+    require(value["broker_executable_path"] == "/usr/local/libexec/buster-bench-systemd-broker",
+            "broker executable path differs from the installed service policy")
     require(isinstance(value["allowed_requests"], list) and 1 <= len(value["allowed_requests"]) <= 32,
             "allowed request tuple list is missing or oversized")
     seen_requests: set[tuple[int, int, int, int]] = set()
@@ -1151,7 +1479,7 @@ def parse_expected(raw: bytes) -> dict[str, Any]:
             profile["groups"] == sorted(set(profile["groups"])), "profile groups are invalid")
     require(profile["broker_uid"] == 0 and profile["broker_gid"] == 65000 and
             profile["candidate_gid"] == 65001 and profile["groups"] == [65000, 65001] and
-            65000 in profile["client_uids"] and 0 not in profile["client_uids"] and
+            profile["client_uids"] == [65000] and
             profile["no_new_privs"] == 1 and profile["seccomp"] == 2 and
             profile["seccomp_filters_min"] >= 1,
             "expected profile differs from the fixed broker identity policy")
@@ -1165,6 +1493,8 @@ def parse_expected(raw: bytes) -> dict[str, Any]:
     require(isinstance(targets, list) and targets and len(targets) <= 32 and
             all(isinstance(item, str) and item.startswith("/") and
                 ".." not in PurePosixPath(item).parts for item in targets) and
+            targets == ["/", "/etc/buster-bench", "/opt/buster-bench/installed",
+                        "/var/lib/buster-bench"] and
             len(targets) == len(set(targets)), "read-only mount target profile is invalid")
     require(isinstance(profile["cgroup_prefix"], str) and profile["cgroup_prefix"].startswith("/") and
             profile["cgroup_prefix"].endswith("/") and
@@ -1182,6 +1512,277 @@ def parse_expected(raw: bytes) -> dict[str, Any]:
     return value
 
 
+def _validate_journal_capture(raw: bytes, expected: dict[str, Any]) -> list[dict[str, Any]]:
+    capture = expected["journal_capture"]
+    require(len(raw) == capture["bytes"] and hashlib.sha256(raw).hexdigest() == capture["sha256"],
+            "journal capture byte count or SHA256 differs from expectation")
+    records = parse_jsonl(raw, "journal JSONL")
+    require(len(records) == capture["records"],
+            "journal capture record count differs from expectation")
+    return records
+
+
+def _validate_diagnostic_profiles(
+        diagnostics: dict[tuple[str, str, str, int], dict[str, Any]],
+        expected: dict[str, Any]) -> dict[tuple[str, str, str, int], dict[str, Any]]:
+    verified: dict[tuple[str, str, str, int], dict[str, Any]] = {}
+    for key, entry in diagnostics.items():
+        sequence = entry["sequence"]
+        require(sequence["exe"]["path"] == expected["broker_executable_path"],
+                f"C diagnostic executable path differs for {key[1]}")
+        _status_identity(sequence["status"], sequence["pid"], expected["profile"],
+                         f"{key[1]} C diagnostic")
+        cgroup_path = _parse_cgroup(sequence["cgroup"], expected["profile"]["cgroup_prefix"],
+                                    f"{key[1]} C diagnostic")
+        ro_mounts = _readonly_mounts(sequence["mountinfo"],
+                                     expected["profile"]["read_only_mount_targets"],
+                                     f"{key[1]} C diagnostic")
+        require(all(ro_mounts.values()), f"C diagnostic reports a writable required mount for {key[1]}")
+        verified[key] = {"cgroup_path": cgroup_path, "ro_mounts": ro_mounts,
+                         "status": sequence["status"], "socket": sequence["socket"]}
+    return verified
+
+
+def _observer_unit_index(
+        unit_rows: dict[tuple[str, str, str, int], dict[str, Any]]) -> dict[tuple[str, str], tuple[str, str, str, int]]:
+    result: dict[tuple[str, str], tuple[str, str, str, int]] = {}
+    for key, row in unit_rows.items():
+        pair = (key[0], key[1])
+        require(pair not in result,
+                f"observer has multiple lifecycle generations for one manager unit: {key[1]}")
+        result[pair] = key
+    return result
+
+
+def _validate_manager_population(
+        manager_rows: dict[tuple[str, str], dict[str, Any]],
+        unit_rows: dict[tuple[str, str, str, int], dict[str, Any]],
+        diagnostics: dict[tuple[str, str, str, int], dict[str, Any]],
+        summary: dict[str, Any]) -> dict[str, int]:
+    observer_index = _observer_unit_index(unit_rows)
+    require(bool(manager_rows) and set(manager_rows) == set(observer_index),
+            "trusted PID 1 starts and observed manager lifecycles have different populations")
+    require(summary.get("manager_observation_complete") is True,
+            "observer manager lifecycle is incomplete")
+    diagnostic_index: dict[tuple[str, str], tuple[str, str, str, int]] = {}
+    for diagnostic_key in diagnostics:
+        pair = (diagnostic_key[0], diagnostic_key[1])
+        require(pair not in diagnostic_index,
+                f"multiple diagnostic streams map to one broker unit: {diagnostic_key[1]}")
+        require(pair in manager_rows, f"diagnostic has no trusted PID 1 start result: {diagnostic_key[1]}")
+        diagnostic_index[pair] = diagnostic_key
+    started_count = 0
+    for pair, manager in manager_rows.items():
+        observer_key = observer_index[pair]
+        unit_row = unit_rows[observer_key]
+        require(unit_row["manager_lifecycle_complete"] is True,
+                f"observer manager lifecycle is incomplete for {pair[1]}")
+        manager_invocation = manager.get("invocation_id")
+        unit_invocation = unit_row.get("invocation_id")
+        require(manager_invocation is None or unit_invocation is None or
+                manager_invocation == unit_invocation,
+                f"PID 1 invocation differs from observer lifecycle for {pair[1]}")
+        diagnostic_key = diagnostic_index.get(pair)
+        if unit_row["process_start_seen"]:
+            require(unit_row["process_started"] and type(unit_row["main_pid"]) is int and
+                    unit_row["main_pid"] > 0 and type(unit_row["start_ticks"]) is int and
+                    unit_row["start_ticks"] > 0 and isinstance(unit_invocation, str) and
+                    HEX32.fullmatch(unit_invocation) is not None and diagnostic_key is not None,
+                    f"started broker lifecycle lacks a complete diagnostic identity for {pair[1]}")
+            entry = diagnostics[diagnostic_key]
+            require(diagnostic_key[2] == unit_invocation and
+                    diagnostic_key[3] == unit_row["main_pid"] and
+                    entry["sequence"]["start_ticks"] == unit_row["start_ticks"] and
+                    (manager_invocation is None or manager_invocation == unit_invocation),
+                    f"PID 1, observer and diagnostic process identities differ for {pair[1]}")
+            started_count += 1
+        else:
+            require(not unit_row["process_started"] and diagnostic_key is None,
+                    f"broker process diagnostic has no observed start event for {pair[1]}")
+    require(started_count > 0, "no started broker process was joined across evidence sources")
+    return {"manager_units": len(manager_rows), "observer_generations": len(unit_rows),
+            "joined_processes": started_count}
+
+
+def _validate_external_population(
+        unit_rows: dict[tuple[str, str, str, int], dict[str, Any]],
+        snapshots: list[dict[str, Any]],
+        diagnostics: dict[tuple[str, str, str, int], dict[str, Any]],
+        diagnostic_profiles: dict[tuple[str, str, str, int], dict[str, Any]],
+        expected: dict[str, Any], observer_fd: int,
+        summary: dict[str, Any]) -> tuple[dict[tuple[str, str, str, int], dict[str, Any]], dict[str, int]]:
+    require(summary.get("process_complete") is True and summary.get("observer_complete") is True,
+            "observer process population is incomplete")
+    verified_snapshots: dict[tuple[str, str, str, int], list[dict[str, Any]]] = {
+        key: [] for key in unit_rows}
+    for snapshot in snapshots:
+        key = _generation_key(snapshot)
+        require(key in unit_rows, "snapshot does not map to an observed lifecycle generation")
+        verified_snapshots[key].append(
+            _validate_snapshot_capture(snapshot, unit_rows[key], expected, observer_fd))
+    full_witnesses: dict[tuple[str, str, str, int], dict[str, Any]] = {}
+    for key, unit_row in unit_rows.items():
+        require(unit_row["process_complete"] is True and
+                unit_row["manager_lifecycle_complete"] is True and
+                unit_row["process_started"] is True,
+                f"observer has no complete broker process witness for {key[1]}")
+        positive = [snapshot for snapshot in unit_row["snapshots"]
+                    if snapshot["main_pid"] > 0]
+        complete_positive = [snapshot for snapshot in positive if snapshot["complete"]]
+        require(bool(complete_positive), f"broker generation lacks a full process capture: {key[1]}")
+        identities = {_snapshot_process_identity(snapshot) for snapshot in positive}
+        require(None not in identities and len(identities) == 1,
+                f"broker generation has a missing or conflicting process identity: {key[1]}")
+        identity = next(iter(identities))
+        require(all(_snapshot_process_identity(snapshot) == identity for snapshot in complete_positive),
+                f"broker full snapshots disagree on process identity for {key[1]}")
+        require(unit_row["invocation_id"] == identity[4] and unit_row["main_pid"] == identity[5] and
+                unit_row["cgroup"] == identity[7] and unit_row["start_ticks"] == identity[8] and
+                unit_row["exe"] == expected["broker_executable_path"] and
+                unit_row["exe_sha256"] == expected["broker_binary_sha256"],
+                f"observer summary identity differs from full process witness for {key[1]}")
+        process_verifications = verified_snapshots[key]
+        require(len(process_verifications) == len(unit_row["snapshots"]) and
+                any(item["complete"] and item["proc"] is not None and item["socket"] is not None
+                    for item in process_verifications),
+                f"broker generation has no verified manager/proc/fd0 witness for {key[1]}")
+        for original, checked in zip(unit_row["snapshots"], process_verifications):
+            if original["main_pid"] > 0:
+                require(checked["process_identity"] == identity,
+                        f"partial process capture changed identity within {key[1]}")
+                for field, expected_index in (("invocation_id", 4), ("main_pid", 5),
+                                              ("exec_main_start_timestamp_monotonic", 6),
+                                              ("cgroup", 7), ("start_ticks", 8)):
+                    observed = original.get(field)
+                    if observed is not None:
+                        require(observed == identity[expected_index],
+                                f"partial process capture {field} conflicts within {key[1]}")
+            elif original.get("invocation_id") is not None:
+                require(original["invocation_id"] == identity[4],
+                        f"PID-zero snapshot changed invocation identity for {key[1]}")
+        diagnostic_key = (key[0], key[1], identity[4], identity[5])
+        require(diagnostic_key in diagnostics and diagnostic_key in diagnostic_profiles,
+                f"full process witness has no exact trusted stdout diagnostic for {key[1]}")
+        diagnostic_profile = diagnostic_profiles[diagnostic_key]
+        full = next(item for item in process_verifications if item["complete"])
+        require(full["start_ticks"] == diagnostics[diagnostic_key]["sequence"]["start_ticks"] == identity[8] and
+                full["socket"] is not None and
+                full["socket"]["inode"] == diagnostic_profile["socket"]["ino"] and
+                full["socket"]["device"] == diagnostic_profile["socket"]["dev"] and
+                full["socket"]["mode"] == diagnostic_profile["socket"]["mode"] and
+                full["proc"] is not None and
+                _same_security_status(full["proc"]["status"], diagnostic_profile["status"]) and
+                full["proc"]["cgroup_path"] == diagnostic_profile["cgroup_path"] and
+                full["proc"]["ro_mounts"] == diagnostic_profile["ro_mounts"],
+                f"C diagnostic and external process captures disagree for {key[1]}")
+        full_witnesses[key] = {"process_identity": identity, "socket": full["socket"],
+                               "status": full["proc"]["status"], "proc": full["proc"]}
+    return full_witnesses, {"process_generations": len(full_witnesses),
+                            "full_snapshots": sum(1 for rows in verified_snapshots.values()
+                                                  for item in rows if item["complete"]),
+                            "partial_snapshots": sum(1 for rows in verified_snapshots.values()
+                                                     for item in rows if not item["complete"])}
+
+
+def _overlap_ref(root_fd: int, ref: Any, label: str, maximum: int) -> bytes:
+    require(isinstance(ref, dict) and set(ref) == {"path", "sha256", "bytes"} and
+            isinstance(ref.get("path"), str) and isinstance(ref.get("sha256"), str) and
+            HEX64.fullmatch(ref["sha256"]) is not None and type(ref.get("bytes")) is int and
+            0 <= ref["bytes"] <= maximum,
+            f"{label} overlap reference is malformed")
+    raw = read_regular_at(root_fd, ref["path"], maximum, allow_empty=True)
+    require(len(raw) == ref["bytes"] and hashlib.sha256(raw).hexdigest() == ref["sha256"],
+            f"{label} overlap reference byte count or SHA256 mismatch")
+    return raw
+
+
+def _validate_overlap_rows(raw: bytes, overlap_parent_fd: int,
+                           expected: dict[str, Any], unit_rows: dict[tuple[str, str, str, int], dict[str, Any]],
+                           full_witnesses: dict[tuple[str, str, str, int], dict[str, Any]],
+                           diagnostics: dict[tuple[str, str, str, int], dict[str, Any]],
+                           diagnostic_profiles: dict[tuple[str, str, str, int], dict[str, Any]]) -> dict[str, int]:
+    rows = parse_jsonl(raw, "overlap JSONL") if raw else []
+    require(len(rows) <= MAX_INSTANCES, "overlap row count exceeds bound")
+    seen: set[tuple[str, str, str, int, int]] = set()
+    for number, row in enumerate(rows, 1):
+        fields = {"schema", "boot_id", "unit", "invocation_id", "pid", "start_ticks",
+                  "capture_json", "status", "mountinfo", "cgroup"}
+        require(set(row) == fields and row.get("schema") == "issue1162-broker-overlap-v1",
+                f"overlap row {number} schema has unknown or missing fields")
+        boot = row.get("boot_id")
+        unit = row.get("unit")
+        invocation = row.get("invocation_id")
+        pid = row.get("pid")
+        ticks = row.get("start_ticks")
+        require(boot == expected["boot_id"] and isinstance(unit, str),
+                f"overlap row {number} boot or unit differs")
+        parse_broker_unit(unit, f"overlap row {number} unit")
+        require(isinstance(invocation, str) and HEX32.fullmatch(invocation) is not None and
+                invocation != "0" * 32 and type(pid) is int and 0 < pid <= (1 << 31) - 1 and
+                type(ticks) is int and 0 < ticks <= (1 << 64) - 1,
+                f"overlap row {number} process identity is malformed")
+        key = (boot, unit, invocation, pid, ticks)
+        require(key not in seen, f"duplicate overlap process identity in row {number}")
+        seen.add(key)
+        matching_generation = [generation for generation, witness in full_witnesses.items()
+                              if generation[0] == boot and generation[1] == unit and
+                              witness["process_identity"][4] == invocation and
+                              witness["process_identity"][5] == pid and
+                              witness["process_identity"][8] == ticks]
+        require(len(matching_generation) == 1,
+                f"overlap row {number} has no exact independent process witness")
+        generation = matching_generation[0]
+        diagnostic_key = (boot, unit, invocation, pid)
+        require(generation in unit_rows and diagnostic_key in diagnostics and
+                diagnostic_key in diagnostic_profiles,
+                f"overlap row {number} has no exact broker diagnostic/process join")
+        capture_raw = _overlap_ref(overlap_parent_fd, row["capture_json"],
+                                   f"row {number} capture JSON", 4 * 1024 * 1024)
+        status_raw = _overlap_ref(overlap_parent_fd, row["status"], f"row {number} status", 1024 * 1024)
+        mount_raw = _overlap_ref(overlap_parent_fd, row["mountinfo"], f"row {number} mountinfo",
+                                 16 * 1024 * 1024)
+        cgroup_raw = _overlap_ref(overlap_parent_fd, row["cgroup"], f"row {number} cgroup", 1024 * 1024)
+        capture = strict_json(capture_raw, f"overlap row {number} raw capture JSON")
+        require(isinstance(capture, dict) and isinstance(capture.get("process"), dict) and
+                isinstance(capture.get("properties"), dict),
+                f"overlap row {number} capture JSON lacks process/properties")
+        process = capture["process"]
+        properties = capture["properties"]
+        witness = full_witnesses[generation]
+        identity = witness["process_identity"]
+        require(process.get("pid") == pid and process.get("starttime_ticks") == ticks and
+                process.get("exe") == expected["broker_executable_path"] and
+                process.get("exe_sha256") == expected["broker_binary_sha256"] and
+                process.get("expected_exe") == expected["broker_executable_path"] and
+                process.get("exe_hash_matches_installed") is True and
+                process.get("cgroup_matches_unit") is True and
+                process.get("status_bytes") == len(status_raw) and
+                process.get("mountinfo_bytes") == len(mount_raw),
+                f"overlap row {number} process capture identity or size differs")
+        require(properties.get("Id") == unit and properties.get("InvocationID") == invocation and
+                properties.get("MainPID") == str(pid) and properties.get("ExecMainPID") == str(pid) and
+                properties.get("ExecMainStartTimestampMonotonic") == str(identity[6]) and
+                properties.get("ControlGroup") == identity[7] and
+                properties.get("ProtectSystem") == "strict" and
+                properties.get("ReadOnlyPaths", "").split() ==
+                expected["profile"]["read_only_mount_targets"][1:],
+                f"overlap row {number} systemd properties differ from observer")
+        cgroup_path = _parse_cgroup(cgroup_raw, expected["profile"]["cgroup_prefix"],
+                                    f"overlap row {number}")
+        require(process.get("cgroup") == f"0::{cgroup_path}" and cgroup_path == identity[7],
+                f"overlap row {number} proc cgroup differs from observer")
+        status = _check_profile_status(status_raw, pid, expected["profile"], f"overlap row {number}")
+        require(_same_security_status(status, witness["status"]),
+                f"overlap row {number} security status differs from independent process capture")
+        ro_mounts = _readonly_mounts(mount_raw, expected["profile"]["read_only_mount_targets"],
+                                     f"overlap row {number}")
+        require(ro_mounts == witness["proc"]["ro_mounts"] and
+                ro_mounts == diagnostic_profiles[diagnostic_key]["ro_mounts"],
+                f"overlap row {number} read-only mount facts differ from independent captures")
+    return {"rows": len(rows), "matched_generations": len(seen),
+            "observed_generations": len(unit_rows)}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--journal-jsonl")
@@ -1192,17 +1793,212 @@ def main() -> int:
     args = parser.parse_args()
     if args.self_test:
         return self_test()
-    print(json.dumps({"schema": "issue1162-broker-evidence-result-v1",
-                      "full_ready": False, "diagnostic_complete": False,
-                      "manager_capture_complete": False, "external_proc_complete": False,
-                      "overlap_complete": False,
-                      "errors": ["caller schema integration is pending"]}, sort_keys=True))
-    return 2
+    if not args.journal_jsonl or not args.observer_dir or not args.expected_json:
+        parser.error("--journal-jsonl, --observer-dir, and --expected-json are required")
+    errors: list[dict[str, str]] = []
+    result: dict[str, Any] = {
+        "schema": "issue1162-broker-evidence-result-v1",
+        "diagnostic_complete": False,
+        "manager_capture_complete": False,
+        "external_proc_complete": False,
+        "overlap_complete": False,
+        "full_ready": False,
+        "journal_capture_complete": False,
+        "observer_capture_complete": False,
+        "overlap_input_supplied": args.overlap_jsonl is not None,
+        "overlap_row_count": None,
+        "overlap_scope": ("not_supplied" if args.overlap_jsonl is None else "unknown"),
+        "diagnostic_counts": None,
+        "manager_counts": None,
+        "external_counts": None,
+        "overlap_counts": None,
+        "errors": errors,
+    }
+
+    def failed(component: str, exc: BaseException) -> None:
+        message = str(exc).replace("\x00", "?")[:512] or type(exc).__name__
+        errors.append({"component": component, "message": message})
+
+    expected: dict[str, Any] | None = None
+    try:
+        expected = parse_expected(read_absolute_file(args.expected_json, MAX_FILE))
+    except (EvidenceError, OSError, ValueError) as exc:
+        failed("expected", exc)
+
+    records: list[dict[str, Any]] | None = None
+    diagnostics: dict[tuple[str, str, str, int], dict[str, Any]] = {}
+    diagnostic_profiles: dict[tuple[str, str, str, int], dict[str, Any]] = {}
+    manager_rows: dict[tuple[str, str], dict[str, Any]] = {}
+    if expected is not None:
+        try:
+            journal_raw = read_absolute_file(args.journal_jsonl, MAX_FILE)
+            records = _validate_journal_capture(journal_raw, expected)
+            result["journal_capture_complete"] = True
+        except (EvidenceError, OSError, ValueError) as exc:
+            failed("journal", exc)
+        if records is not None:
+            try:
+                diagnostics = collect_diagnostics(records, expected["boot_id"])
+                diag_counts = validate_diagnostic_request_set(diagnostics, expected)
+                diagnostic_profiles = _validate_diagnostic_profiles(diagnostics, expected)
+                result["diagnostic_counts"] = diag_counts
+                result["diagnostic_complete"] = True
+            except (EvidenceError, OSError, ValueError) as exc:
+                failed("diagnostic", exc)
+            try:
+                manager_rows = collect_manager_start_rows(records, expected["boot_id"])
+            except (EvidenceError, OSError, ValueError) as exc:
+                failed("manager_journal", exc)
+
+    observer_fd: int | None = None
+    unit_rows: dict[tuple[str, str, str, int], dict[str, Any]] = {}
+    snapshots: list[dict[str, Any]] = []
+    summary: dict[str, Any] | None = None
+    if expected is not None:
+        try:
+            observer_fd = open_absolute_directory(args.observer_dir)
+            ready, events, summary = _observer_documents(observer_fd, expected)
+            unit_rows, snapshots = _validate_event_rows(ready, events, summary)
+            result["observer_capture_complete"] = True
+        except (EvidenceError, OSError, ValueError) as exc:
+            failed("observer", exc)
+
+    if expected is not None and summary is not None and result["journal_capture_complete"]:
+        try:
+            result["manager_counts"] = _validate_manager_population(
+                manager_rows, unit_rows, diagnostics, summary)
+            result["manager_capture_complete"] = True
+        except (EvidenceError, OSError, ValueError) as exc:
+            failed("manager_capture", exc)
+
+    full_witnesses: dict[tuple[str, str, str, int], dict[str, Any]] = {}
+    if expected is not None and observer_fd is not None and summary is not None:
+        try:
+            require(bool(diagnostic_profiles), "diagnostic profile evidence is unavailable")
+            full_witnesses, external_counts = _validate_external_population(
+                unit_rows, snapshots, diagnostics, diagnostic_profiles, expected, observer_fd, summary)
+            result["external_counts"] = external_counts
+            result["external_proc_complete"] = True
+        except (EvidenceError, OSError, ValueError) as exc:
+            failed("external_proc", exc)
+
+    overlap_rows_for_gate: int | None = None
+    overlap_is_consistent_for_gate = args.overlap_jsonl is None
+    overlap_parent_fd: int | None = None
+    if args.overlap_jsonl is not None:
+        try:
+            require(isinstance(args.overlap_jsonl, str) and args.overlap_jsonl.startswith("/"),
+                    "overlap JSONL path must be absolute")
+            overlap_path = PurePosixPath(args.overlap_jsonl)
+            overlap_parent_fd = open_absolute_directory(str(overlap_path.parent))
+            overlap_raw = read_regular_at(overlap_parent_fd, overlap_path.name,
+                                          MAX_OVERLAP, allow_empty=True)
+            overlap_rows = parse_jsonl(overlap_raw, "overlap JSONL") if overlap_raw else []
+            overlap_rows_for_gate = len(overlap_rows)
+            result["overlap_row_count"] = overlap_rows_for_gate
+            result["overlap_scope"] = ("sparse_legacy_rows" if overlap_rows else "sparse_no_rows")
+            if overlap_rows:
+                require(expected is not None and observer_fd is not None and summary is not None and
+                        result["external_proc_complete"],
+                        "nonempty overlap rows lack independently complete process witnesses")
+                require(bool(diagnostic_profiles), "overlap rows lack parsed C diagnostic profile evidence")
+                overlap_counts = _validate_overlap_rows(overlap_raw, overlap_parent_fd, expected,
+                    unit_rows, full_witnesses, diagnostics, diagnostic_profiles)
+                result["overlap_counts"] = overlap_counts
+                result["overlap_complete"] = True
+                overlap_is_consistent_for_gate = True
+            else:
+                result["overlap_counts"] = {"rows": 0, "matched_generations": 0,
+                                             "observed_generations": len(unit_rows)}
+                overlap_is_consistent_for_gate = True
+        except (EvidenceError, OSError, ValueError) as exc:
+            failed("overlap", exc)
+            result["overlap_scope"] = "invalid_or_unreadable"
+            overlap_is_consistent_for_gate = False
+
+    if overlap_parent_fd is not None:
+        os.close(overlap_parent_fd)
+    if observer_fd is not None:
+        os.close(observer_fd)
+
+    # The helper reports independent evidence components only. Human/source
+    # acceptance is intentionally outside this offline consumer.
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    required_complete = (result["diagnostic_complete"] and
+                        result["manager_capture_complete"] and
+                        result["external_proc_complete"])
+    return 0 if required_complete and overlap_is_consistent_for_gate else 2
 
 
 def self_test() -> int:
-    print("issue1162 broker evidence self-test: parser fixtures pending")
-    return 1
+    checks = 0
+
+    def rejects(function: Any, *args: Any) -> None:
+        nonlocal checks
+        try:
+            function(*args)
+        except (EvidenceError, OSError, ValueError):
+            checks += 1
+        else:
+            raise AssertionError(f"negative fixture unexpectedly passed: {function.__name__}")
+
+    # This embedded stream is a frozen C-producer grammar capture with
+    # synthetic fields and no trusted journal metadata. Normalize its sample
+    # PID only to make the internal /proc stat consistency check meaningful.
+    producer_messages = zlib.decompress(base64.b64decode(_PRODUCER_FIXTURE_ZLIB_B64)).decode(
+        "ascii", "strict").splitlines()
+    producer_messages = [line.replace("pid=10", "pid=459306") for line in producer_messages]
+    producer_messages = [line.replace("peer_uid=0", "peer_uid=65000") for line in producer_messages]
+    sequence = parse_sequence(producer_messages)
+    require(sequence["pid"] == 459306 and sequence["request"]["peer_uid"] == 65000,
+            "synthetic producer grammar fixture did not parse expected IDs")
+    checks += 1
+    rejects(parse_sequence, producer_messages + [producer_messages[-1]])
+    rejects(_parse_message, "BQ-BROKER-DIAG-V1 OUTCOME pid=1 ticks=2\r")
+
+    root_ro = (b"1 1 0:1 / / ro - rootfs rootfs ro\n"
+               b"2 1 0:2 / /sys/fs/cgroup/system.slice/system-buster\\134x2dbench\\134x2dsystemd\\134x2dbroker.slice/memory.pressure rw - cgroup2 cgroup rw\n")
+    targets = ["/", "/etc/buster-bench", "/opt/buster-bench/installed", "/var/lib/buster-bench"]
+    mounts = _readonly_mounts(root_ro, targets, "self-test root-cover")
+    require(all(mounts.values()), "read-only root cover fixture failed")
+    checks += 1
+    nested_rw = root_ro + b"3 1 0:3 / /etc/buster-bench rw - ext4 /dev/test rw\n"
+    rejects(_readonly_mounts, nested_rw, targets, "self-test nested writable")
+    sibling_prefix = (b"1 1 0:1 / / rw - rootfs rootfs rw\n"
+                      b"2 1 0:2 / /etc/buster-bench2 ro - ext4 /dev/test ro\n")
+    rejects(_readonly_mounts, sibling_prefix, ["/etc/buster-bench"], "self-test sibling prefix")
+    rejects(_readonly_mounts, b"1 1 0:1 / / ro - rootfs rootfs ro\n"
+            b"2 1 0:2 / /etc\\999bad rw - ext4 /dev/test rw\n",
+            ["/etc/buster-bench"], "self-test malformed escape")
+    duplicate_root = b"1 1 0:1 / / ro - rootfs rootfs ro\n2 1 0:2 / / rw - rootfs rootfs rw\n"
+    rejects(_readonly_mounts, duplicate_root, ["/"], "self-test duplicate mount")
+
+    boot_raw = "01234567-89ab-cdef-0123-456789abcdef"
+    expected = {
+        "schema": SCHEMA, "run_id": "123", "run_attempt": 1, "job_id": 11,
+        "job_attempt": 1, "boot_id": boot_raw.replace("-", ""), "boot_id_raw": boot_raw,
+        "source_commit": "a" * 40, "source_tree": "b" * 40,
+        "broker_binary_sha256": "c" * 64,
+        "broker_executable_path": "/usr/local/libexec/buster-bench-systemd-broker",
+        "profile": {"broker_uid": 0, "broker_gid": 65000, "candidate_gid": 65001,
+            "client_uids": [65000], "groups": [65000, 65001],
+            "capabilities": {key: "0000000000000000" for key in
+                              ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")},
+            "no_new_privs": 1, "seccomp": 2, "seccomp_filters_min": 1,
+            "read_only_mount_targets": targets,
+            "cgroup_prefix": "/system.slice/system-buster\\x2dbench\\x2dsystemd\\x2dbroker.slice/"},
+        "allowed_requests": [{"operation": 1, "stage": 4, "job": 11, "attempt": 1}],
+        "journal_capture": {"complete": True, "sha256": "d" * 64, "bytes": 1, "records": 1},
+    }
+    require(parse_expected(json.dumps(expected).encode())["profile"]["client_uids"] == [65000],
+            "fixed expected profile fixture failed")
+    checks += 1
+    expected_bad_uid = json.loads(json.dumps(expected))
+    expected_bad_uid["profile"]["client_uids"] = [0, 65000]
+    rejects(parse_expected, json.dumps(expected_bad_uid).encode())
+
+    print(f"issue1162 broker evidence self-test: {checks} checks passed")
+    return 0
 
 
 if __name__ == "__main__":
