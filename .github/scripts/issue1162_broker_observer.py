@@ -70,6 +70,7 @@ MAX_DISPATCHES_PER_DRAIN = 64
 MAX_GENERATIONS = 128
 MAX_CONCURRENT_QUERIES = 1
 MAX_SNAPSHOTS_PER_GENERATION = 6
+MAX_PRESTOP_SNAPSHOTS_PER_GENERATION = 5
 MAX_PROPERTY_SNAPSHOTS = MAX_GENERATIONS * MAX_SNAPSHOTS_PER_GENERATION
 MAX_PROPERTIES = 512
 MAX_PROPERTY_NAME_BYTES = 128
@@ -82,6 +83,7 @@ MAX_DISPATCH_DIAGNOSTIC_BYTES = 32 * 1024
 MAX_NONCANONICAL_SAMPLES = 4
 SUMMARY_RESERVE_BYTES = MAX_READY_BYTES + MAX_SUMMARY_BYTES
 SHOW_TIMEOUT_SECONDS = 2.0
+TERMINAL_PHASE_SECONDS = 30.0
 SELECT_QUANTUM_SECONDS = 0.10
 MAX_PROC_STAT_BYTES = 1024 * 1024
 MAX_PROC_STATUS_BYTES = 1024 * 1024
@@ -676,6 +678,7 @@ class Lifecycle:
         self.main_pid_values: set[int] = set()
         self.last_mainpid_zero_event_seq: int | None = None
         self.snapshots: list[dict[str, object]] = []
+        self.retained_failed_terminal: dict[str, object] | None = None
         self.incomplete_reasons: list[str] = []
         self.manager_incomplete_reasons: list[str] = []
         self.process_incomplete_reasons: list[str] = []
@@ -731,11 +734,40 @@ class Lifecycle:
                 invocation, pid, started, cgroup, ticks)
 
     def as_json(self, boot_id: str, boot_id_raw: str, event_loss: bool = False) -> dict[str, object]:
-        manager_complete = (self.removed and bool(self.snapshots) and
+        full_earlier = [s for s in self.snapshots if bool(s.get("complete")) and
+                        bool(s.get("manager_properties_complete")) and
+                        bool(s.get("process_capture_complete")) and
+                        self.positive_pid_identity(s) is not None]
+        def redundant_unstarted(snapshot: dict[str, object]) -> bool:
+            return (snapshot.get("post_removal_unstarted") is True and
+                    self.removed_event_seq is not None and
+                    self.removed_monotonic_ns is not None and
+                    isinstance(snapshot.get("trigger_event_seq"), int) and
+                    snapshot["trigger_event_seq"] < self.removed_event_seq and
+                    isinstance(snapshot.get("started_monotonic_ns"), int) and
+                    snapshot["started_monotonic_ns"] >= self.removed_monotonic_ns and
+                    any(isinstance(w.get("finished_monotonic_ns"), int) and
+                        0 < w["finished_monotonic_ns"] <=
+                            self.removed_monotonic_ns for w in full_earlier))
+        terminal = self.retained_failed_terminal
+        terminal_valid = (terminal is not None and
+                          bool(terminal.get("manager_properties_complete")) and
+                          not terminal.get("incomplete_reasons") and
+                          isinstance(terminal.get("finished_monotonic_ns"), int) and
+                          len(self.snapshots) + 1 <= MAX_SNAPSHOTS_PER_GENERATION)
+        if self.removed:
+            closed = (self.removed_event_seq is not None and
+                      (terminal is None or
+                       (terminal_valid and self.removed_monotonic_ns is not None and
+                        int(terminal["finished_monotonic_ns"]) <= self.removed_monotonic_ns)))
+        else:
+            closed = (terminal_valid and terminal["event_seq"] == self.last_event_seq)
+        manager_complete = (closed and bool(self.snapshots) and
                             not self.manager_incomplete_reasons and not event_loss and
                             any(bool(s.get("manager_properties_complete")) for s in self.snapshots) and
                             all(bool(s.get("manager_properties_complete")) or
-                                bool(s.get("preliminary_property_miss")) for s in self.snapshots))
+                                bool(s.get("preliminary_property_miss")) or
+                                redundant_unstarted(s) for s in self.snapshots))
         positive_snapshots = [s for s in self.snapshots if isinstance(s.get("main_pid"), int) and
                               int(s["main_pid"]) > 0]
         witness_identities = {identity for s in positive_snapshots
@@ -789,7 +821,8 @@ class Lifecycle:
                 "process_incomplete_reasons": process_reasons,
                 "preliminary_property_misses": self.preliminary_property_misses,
                 "incomplete_reasons": incomplete_reasons,
-                "snapshots": self.snapshots}
+                "snapshots": self.snapshots,
+                "retained_failed_terminal": terminal}
 
 
 def _parse_properties(raw: bytes, unit: str) -> dict[str, str]:
@@ -827,6 +860,33 @@ def _parse_properties(raw: bytes, unit: str) -> dict[str, str]:
     require(control_group == "" or (control_group.startswith("/") and ".." not in control_group.split("/")),
             "invalid systemctl ControlGroup")
     return result
+
+
+def _parse_terminal_properties(raw: bytes, unit: str) -> dict[str, str]:
+    # Parse the complete all-show first, retaining its existing uniqueness and
+    # identity checks; the terminal protocol exports only these selected keys.
+    base = _parse_properties(raw, unit)
+    extras = ("CollectMode", "ExecMainPID", "ExecMainCode",
+              "ExecMainExitTimestampMonotonic")
+    text = raw.decode("utf-8", "strict")
+    values: dict[str, list[str]] = {key: [] for key in extras}
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key in values:
+            values[key].append(value)
+    for key in extras:
+        require(len(values[key]) == 1, f"terminal show property missing or duplicated: {key}")
+    for key in ("ExecMainPID", "ExecMainCode", "ExecMainExitTimestampMonotonic"):
+        require(DECIMAL.fullmatch(values[key][0]) is not None,
+                f"invalid terminal show property: {key}")
+    require(int(values["ExecMainPID"][0]) <= (1 << 31) - 1,
+            "terminal ExecMainPID exceeds PID bound")
+    selected = ("Id", "LoadState", "CollectMode", "ActiveState", "SubState",
+                "MainPID", "InvocationID", "ExecMainPID", "ExecMainCode",
+                "ExecMainStatus", "ExecMainStartTimestampMonotonic",
+                "ExecMainExitTimestampMonotonic", "Result")
+    combined = {**base, **{key: values[key][0] for key in extras}}
+    return {key: combined[key] for key in selected}
 
 
 def _safe_stop_file(writer: EvidenceWriter) -> bool:
@@ -883,6 +943,9 @@ class BrokerObserver:
         self.event_loss_detected = False
         self.ready_ns = 0
         self.stop_seen = False
+        self.stop_monotonic_ns: int | None = None
+        self.terminal_phase_started_monotonic_ns: int | None = None
+        self.terminal_phase_finished_monotonic_ns: int | None = None
         self.snapshot_number = 0
         self.observer_pid = 0
         self.observer_start_ticks = 0
@@ -954,11 +1017,37 @@ class BrokerObserver:
             return
         if trigger in lifecycle.triggers:
             return
-        if len(lifecycle.triggers) >= MAX_SNAPSHOTS_PER_GENERATION:
+        if len(lifecycle.triggers) >= MAX_PRESTOP_SNAPSHOTS_PER_GENERATION:
             lifecycle.mark_manager_incomplete("snapshot_attempt_count_exceeds_bound")
             return
         lifecycle.triggers.add(trigger)
         self.queue.append((lifecycle, trigger, seq))
+
+    @staticmethod
+    def _record_unstarted_query(lifecycle: Lifecycle,
+                                snapshot: dict[str, object], reason: str) -> None:
+        snapshot["incomplete_reasons"].append(reason)
+        snapshot["finished_monotonic_ns"] = time.monotonic_ns()
+        lifecycle.last_snapshot_finished_monotonic_ns = int(snapshot["finished_monotonic_ns"])
+        removed_seq = lifecycle.removed_event_seq
+        removed_ns = lifecycle.removed_monotonic_ns
+        eligible = (reason == "unit_removed_before_snapshot" and
+                    isinstance(removed_seq, int) and isinstance(removed_ns, int) and
+                    int(snapshot["trigger_event_seq"]) < removed_seq and
+                    int(snapshot["started_monotonic_ns"]) >= removed_ns and
+                    any(bool(s.get("complete")) and
+                        bool(s.get("manager_properties_complete")) and
+                        bool(s.get("process_capture_complete")) and
+                        Lifecycle.positive_pid_identity(s) is not None and
+                        isinstance(s.get("finished_monotonic_ns"), int) and
+                        0 < s["finished_monotonic_ns"] <= removed_ns
+                        for s in lifecycle.snapshots if s is not snapshot))
+        if reason == "unit_removed_before_snapshot":
+            snapshot["post_removal_unstarted"] = True
+        if eligible:
+            lifecycle.mark_incomplete(reason)
+        else:
+            lifecycle.mark_manager_incomplete(reason)
 
     def _schedule_preexec_retry(self, lifecycle: Lifecycle, pid: int,
                                 seq: int, event_ns: int) -> None:
@@ -968,7 +1057,7 @@ class BrokerObserver:
         # exact full witness for every positive-PID snapshot identity.
         if (pid <= 0 or lifecycle.removed or
                 self.stop_seen or time.monotonic() >= self.deadline or
-                len(lifecycle.triggers) >= MAX_SNAPSHOTS_PER_GENERATION or
+                len(lifecycle.triggers) >= MAX_PRESTOP_SNAPSHOTS_PER_GENERATION or
                 not lifecycle.snapshots or lifecycle.manager_incomplete_reasons or
                 lifecycle.process_incomplete_reasons or
                 (self.current_query is not None and
@@ -1150,10 +1239,7 @@ class BrokerObserver:
             lifecycle.snapshots.append(snapshot)
             if lifecycle.removed:
                 reason = "unit_removed_before_snapshot"
-                snapshot["incomplete_reasons"].append(reason)
-                lifecycle.mark_manager_incomplete(reason)
-                snapshot["finished_monotonic_ns"] = time.monotonic_ns()
-                lifecycle.last_snapshot_finished_monotonic_ns = int(snapshot["finished_monotonic_ns"])
+                self._record_unstarted_query(lifecycle, snapshot, reason)
                 continue
             require(self.snapshot_number < MAX_PROPERTY_SNAPSHOTS,
                     "total broker property snapshots exceed bound")
@@ -1187,6 +1273,125 @@ class BrokerObserver:
                 "capture_number": self.snapshot_number, "cancel_reason": None,
                 "limit_reason": None}
             return
+
+    def _start_terminal_query(self, lifecycle: Lifecycle,
+                              phase_deadline: float) -> None:
+        require(self.stop_seen and not lifecycle.removed and self.current_query is None,
+                "terminal query requires a retained generation after normal stop")
+        require(len(lifecycle.snapshots) < MAX_SNAPSHOTS_PER_GENERATION and
+                self.snapshot_number < MAX_PROPERTY_SNAPSHOTS,
+                "terminal query would exceed shared snapshot bound")
+        self.snapshot_number += 1
+        terminal: dict[str, object] = {
+            "boot_id": self.boot_id, "boot_id_raw": self.boot_id_raw,
+            "unit": lifecycle.unit, "object_path": lifecycle.object_path,
+            "generation": lifecycle.generation,
+            "manager_sender": self.bus.manager_sender,
+            "event_seq": lifecycle.last_event_seq,
+            "started_monotonic_ns": time.monotonic_ns(),
+            "finished_monotonic_ns": None,
+            "raw_show": None, "raw_stderr": None,
+            "systemctl_exit": None, "systemctl_timed_out": False,
+            "systemctl_timeout_reason": None, "systemctl_cancelled": None,
+            "manager_properties_complete": False,
+            "incomplete_reasons": [], "properties": None}
+        lifecycle.retained_failed_terminal = terminal
+        args = systemctl_show_argv(lifecycle.unit)
+        env = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+               "SYSTEMD_COLORS": "0", "SYSTEMD_PAGER": "cat", "PAGER": "cat"}
+        try:
+            process = subprocess.Popen(args, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd="/",
+                close_fds=True, start_new_session=True, shell=False, bufsize=0)
+        except OSError as exc:
+            reason = f"terminal_systemctl_spawn_failed:{type(exc).__name__}"
+            terminal["incomplete_reasons"].append(reason)
+            lifecycle.mark_manager_incomplete(reason)
+            terminal["finished_monotonic_ns"] = time.monotonic_ns()
+            return
+        assert process.stdout is not None and process.stderr is not None
+        os.set_blocking(process.stdout.fileno(), False)
+        os.set_blocking(process.stderr.fileno(), False)
+        self.current_query = {"lifecycle": lifecycle, "snapshot": terminal,
+            "terminal": True, "process": process,
+            "stdout": bytearray(), "stderr": bytearray(),
+            "open": {process.stdout.fileno(): "stdout", process.stderr.fileno(): "stderr"},
+            "deadline": min(time.monotonic() + SHOW_TIMEOUT_SECONDS,
+                            phase_deadline, self.deadline),
+            "capture_number": self.snapshot_number, "cancel_reason": None,
+            "limit_reason": None}
+
+    def _finish_terminal_query(self, query: dict[str, object]) -> None:
+        lifecycle = query["lifecycle"]
+        terminal = query["snapshot"]
+        process = query["process"]
+        assert isinstance(lifecycle, Lifecycle) and isinstance(terminal, dict)
+        assert isinstance(process, subprocess.Popen)
+        status = process.poll()
+        limit_reason = query.get("limit_reason")
+        timed_out = limit_reason in ("systemctl_timeout", "terminal_phase_deadline_exceeded",
+                                     "observer_budget_expired")
+        terminal["systemctl_exit"] = status
+        terminal["systemctl_timed_out"] = timed_out
+        terminal["systemctl_timeout_reason"] = limit_reason if timed_out else None
+        terminal["systemctl_cancelled"] = query.get("cancel_reason")
+        capture_number = int(query["capture_number"])
+        reason: str | None = None
+        try:
+            terminal["raw_show"] = self.writer.capture(
+                f"show-{capture_number:06d}.txt", bytes(query["stdout"]), MAX_SHOW_BYTES)
+            terminal["raw_stderr"] = self.writer.capture(
+                f"show-{capture_number:06d}.stderr", bytes(query["stderr"]), MAX_STDERR_BYTES)
+            terminal["raw_show"].update({"exit": status, "timed_out": timed_out})
+            terminal["raw_stderr"].update({"exit": status, "timed_out": timed_out})
+        except (ObserverError, OSError) as exc:
+            reason = f"terminal_raw_capture_failed:{type(exc).__name__}:{str(exc)[:300]}"
+        if limit_reason:
+            reason = reason or str(limit_reason)
+        elif query.get("cancel_reason"):
+            reason = reason or str(query["cancel_reason"])
+        elif status != 0:
+            reason = reason or f"terminal_systemctl_exit_{status}"
+        elif reason is None:
+            try:
+                properties = _parse_terminal_properties(bytes(query["stdout"]), lifecycle.unit)
+                terminal["properties"] = properties
+                full = [s for s in lifecycle.snapshots if bool(s.get("complete")) and
+                        bool(s.get("manager_properties_complete")) and
+                        bool(s.get("process_capture_complete")) and
+                        Lifecycle.positive_pid_identity(s) is not None]
+                identities = {Lifecycle.positive_pid_identity(s) for s in full}
+                require(len(identities) == 1,
+                        "retained terminal lacks unique earlier full process witness")
+                witness = full[0]
+                require(properties["LoadState"] == "loaded" and
+                        properties["CollectMode"] == "inactive" and
+                        properties["ActiveState"] == "failed" and
+                        properties["SubState"] == "failed" and
+                        properties["MainPID"] == "0" and
+                        properties["Result"] == "exit-code" and
+                        properties["ExecMainCode"] == "1" and
+                        properties["ExecMainStatus"] == "1" and
+                        properties["InvocationID"] == witness["invocation_id"] and
+                        int(properties["ExecMainPID"]) == witness["main_pid"] and
+                        int(properties["ExecMainStartTimestampMonotonic"]) ==
+                            witness["exec_main_start_timestamp_monotonic"] and
+                        int(properties["ExecMainExitTimestampMonotonic"]) >
+                            int(properties["ExecMainStartTimestampMonotonic"]) and
+                        lifecycle.invocation_id == witness["invocation_id"] and
+                        lifecycle.main_pid == witness["main_pid"] and
+                        terminal["event_seq"] == lifecycle.last_event_seq and
+                        not lifecycle.removed,
+                        "retained terminal failed state or process identity differs")
+            except (ObserverError, UnicodeDecodeError, ValueError, KeyError) as exc:
+                reason = f"terminal_properties_invalid:{type(exc).__name__}:{str(exc)[:300]}"
+        terminal["finished_monotonic_ns"] = time.monotonic_ns()
+        if reason:
+            terminal["incomplete_reasons"].append(reason)
+            lifecycle.mark_manager_incomplete(reason)
+        else:
+            terminal["manager_properties_complete"] = True
+        self.current_query = None
 
     def _stop_query(self, query: dict[str, object], reason: str) -> None:
         process = query["process"]
@@ -1334,6 +1539,9 @@ class BrokerObserver:
         return "identity_contradiction_or_capture_error"
 
     def _finish_query(self, query: dict[str, object]) -> None:
+        if query.get("terminal"):
+            self._finish_terminal_query(query)
+            return
         lifecycle = query["lifecycle"]
         snapshot = query["snapshot"]
         process = query["process"]
@@ -1603,7 +1811,86 @@ class BrokerObserver:
 
     def _check_stop(self) -> bool:
         self.stop_seen = _safe_stop_file(self.writer)
+        if self.stop_seen and self.stop_monotonic_ns is None:
+            self.stop_monotonic_ns = time.monotonic_ns()
         return self.stop_seen
+
+    def _settle_unstarted_queue(self) -> None:
+        while self.queue:
+            lifecycle, trigger, seq = self.queue.popleft()
+            reason = ("unit_removed_before_snapshot" if lifecycle.removed else
+                      "observer_stopped_before_snapshot")
+            snapshot: dict[str, object] = {
+                "boot_id": self.boot_id, "boot_id_raw": self.boot_id_raw,
+                "unit": lifecycle.unit, "object_path": lifecycle.object_path,
+                "generation": lifecycle.generation, "trigger": trigger,
+                "trigger_event_seq": seq, "manager_object_reload_possible": True,
+                "started_monotonic_ns": time.monotonic_ns(),
+                "complete": False, "incomplete_reasons": [],
+                "manager_properties_complete": False,
+                "process_capture_complete": False,
+                "invocation_id": None, "main_pid": 0,
+                "process_started": False, "start_ticks": None,
+                "cgroup": None, "exe": None, "exe_sha256": None,
+                "result": None, "active_state": None, "substate": None,
+                "exec_main_status": None,
+                "raw_show": None, "raw_stderr": None, "proc_capture": {},
+                "socket_fd0": None, "systemctl_exit": None,
+                "systemctl_timed_out": False, "systemctl_timeout_reason": None,
+                "systemctl_cancelled": None}
+            lifecycle.snapshots.append(snapshot)
+            self._record_unstarted_query(lifecycle, snapshot, reason)
+
+    def _run_terminal_phase(self) -> None:
+        require(self.stop_seen and self.stop_monotonic_ns is not None and
+                self.current_query is None and not self.queue,
+                "terminal phase requires a settled normal stop")
+        self.terminal_phase_started_monotonic_ns = time.monotonic_ns()
+        phase_deadline = min(self.deadline,
+                             self.stop_monotonic_ns / 1_000_000_000 + TERMINAL_PHASE_SECONDS)
+        # Leave one second for bounded cancellation/reap within the 30-second
+        # stop-to-finish allowance. No manager or unit state is mutated.
+        work_deadline = phase_deadline - 1.0
+        for lifecycle in self.units:
+            if lifecycle.removed:
+                continue
+            if time.monotonic() >= work_deadline:
+                self.mark_global("terminal_phase_deadline_exceeded", event_loss=True)
+                break
+            if len(lifecycle.snapshots) >= MAX_SNAPSHOTS_PER_GENERATION:
+                lifecycle.mark_manager_incomplete("terminal_query_slot_unavailable")
+                continue
+            self._current_process_events()
+            if self.bus_budget_exhausted or self.global_reasons or self.event_loss_detected:
+                break
+            if lifecycle.removed:
+                continue
+            self._start_terminal_query(lifecycle, work_deadline)
+            while self.current_query is not None:
+                self._current_process_events()
+                query = self.current_query
+                if query is None:
+                    break
+                if (self.bus_budget_exhausted or self.global_reasons or
+                        self.event_loss_detected or time.monotonic() >= work_deadline):
+                    reason = ("manager_stream_incomplete_during_terminal" if
+                              self.global_reasons or self.event_loss_detected else
+                              "manager_bus_dispatch_budget_exceeded" if
+                              self.bus_budget_exhausted else
+                              "terminal_phase_deadline_exceeded")
+                    query["limit_reason"] = reason
+                    self._stop_query(query, reason)
+                    self._finish_query(query)
+                    if reason == "terminal_phase_deadline_exceeded":
+                        self.mark_global("terminal_phase_deadline_exceeded", event_loss=True)
+                    break
+                self._poll_once()
+            if self.bus_budget_exhausted or self.global_reasons or self.event_loss_detected:
+                break
+        self.terminal_phase_finished_monotonic_ns = time.monotonic_ns()
+        if self.terminal_phase_finished_monotonic_ns - self.stop_monotonic_ns > \
+                int(TERMINAL_PHASE_SECONDS * 1_000_000_000):
+            self.mark_global("terminal_phase_deadline_exceeded", event_loss=True)
 
     def _drain_final_events(self) -> None:
         # A stop marker bounds new work, but there may still be queued manager
@@ -1661,35 +1948,19 @@ class BrokerObserver:
                 break
             self._start_next_query()
             self._poll_once()
-        # Give queued final manager messages one bounded drain after the root's
-        # stop marker, then refuse new show subprocesses.
-        self._drain_final_events()
-        while self.queue:
-            lifecycle, _trigger, seq = self.queue.popleft()
-            reason = "observer_stopped_before_snapshot"
-            snapshot = {"boot_id": self.boot_id, "boot_id_raw": self.boot_id_raw,
-                        "unit": lifecycle.unit, "object_path": lifecycle.object_path,
-                        "generation": lifecycle.generation,
-                        "trigger": _trigger, "trigger_event_seq": seq,
-                        "manager_object_reload_possible": True,
-                        "started_monotonic_ns": time.monotonic_ns(),
-                        "finished_monotonic_ns": time.monotonic_ns(), "complete": False,
-                        "incomplete_reasons": [reason], "invocation_id": None, "main_pid": 0,
-                        "process_started": False, "start_ticks": None,
-                        "cgroup": None, "exe": None, "exe_sha256": None,
-                        "result": None, "substate": None, "exec_main_status": None,
-                        "raw_show": None, "raw_stderr": None, "proc_capture": {},
-                        "socket_fd0": None, "systemctl_exit": None,
-                        "systemctl_timed_out": False, "systemctl_timeout_reason": None,
-                        "systemctl_cancelled": None}
-            lifecycle.snapshots.append(snapshot)
-            lifecycle.mark_incomplete(reason)
-            lifecycle.last_snapshot_finished_monotonic_ns = int(snapshot["finished_monotonic_ns"])
         if self.current_query is not None:
             query = self.current_query
             self._stop_query(query, "observer_stopped_during_snapshot")
             self._read_query_pipes(query, list(query["open"].keys()))
             self._finish_query(query)
+        self._settle_unstarted_queue()
+        if (self.stop_seen and not self.global_reasons and not self.event_loss_detected and
+                time.monotonic() < self.deadline):
+            self._run_terminal_phase()
+        # The bus stays in the select loop through terminal capture, then its
+        # final bounded empty drain is the horizon for every terminal claim.
+        self._drain_final_events()
+        self._settle_unstarted_queue()
         units = [row.as_json(self.boot_id, self.boot_id_raw, self.event_loss_detected)
                  for row in self.units]
         event_stream_complete = not self.event_loss_detected
@@ -1708,6 +1979,9 @@ class BrokerObserver:
                 "manager_sender": self.bus.manager_sender,
                 "ready_monotonic_ns": self.ready_ns,
                 "ended_monotonic_ns": time.monotonic_ns(), "stop_seen": self.stop_seen,
+                "stop_monotonic_ns": self.stop_monotonic_ns,
+                "terminal_phase_started_monotonic_ns": self.terminal_phase_started_monotonic_ns,
+                "terminal_phase_finished_monotonic_ns": self.terminal_phase_finished_monotonic_ns,
                 "event_count": self.writer.event_count, "event_bytes": self.writer.event_bytes,
                 "bus_dispatch_count": self.bus_dispatch_count,
                 "dispatch_diagnostics": self.dispatch_diagnostics,
@@ -1727,6 +2001,7 @@ class BrokerObserver:
                            "max_generations": MAX_GENERATIONS,
                            "max_concurrent_queries": MAX_CONCURRENT_QUERIES,
                            "max_snapshots_per_generation": MAX_SNAPSHOTS_PER_GENERATION,
+                           "max_prestop_snapshots_per_generation": MAX_PRESTOP_SNAPSHOTS_PER_GENERATION,
                            "max_property_snapshots": MAX_PROPERTY_SNAPSHOTS,
                            "max_show_bytes": MAX_SHOW_BYTES, "max_stderr_bytes": MAX_STDERR_BYTES,
                            "max_evidence_bytes": MAX_EVIDENCE_BYTES,
@@ -1734,6 +2009,7 @@ class BrokerObserver:
                            "max_summary_bytes": MAX_SUMMARY_BYTES,
                            "summary_reserve_bytes": SUMMARY_RESERVE_BYTES,
                            "show_timeout_seconds": SHOW_TIMEOUT_SECONDS,
+                           "terminal_phase_seconds": TERMINAL_PHASE_SECONDS,
                            "max_run_seconds": MAX_RUN_SECONDS},
                 "units": units}
 
@@ -2101,6 +2377,8 @@ def _self_test() -> None:
              "manager_properties_complete": True, "complete": False}
     completed = Lifecycle(lifecycle.unit, lifecycle.object_path, 3, 5, 30)
     completed.removed = True
+    completed.removed_event_seq = 10
+    completed.removed_monotonic_ns = 100
     completed.process_started = True
     completed.snapshots = [partial, witness, ended]
     row = completed.as_json(boot, raw)
@@ -2331,6 +2609,8 @@ def _self_test() -> None:
         fixture_observer.current_query = query
         fixture_observer._finish_query(query)
     fixture_lifecycle.removed = True
+    fixture_lifecycle.removed_event_seq = 20
+    fixture_lifecycle.removed_monotonic_ns = time.monotonic_ns()
     assert fixture_lifecycle.invocation_id == "b" * 32
     assert fixture_lifecycle.main_pid == 741 and fixture_lifecycle.start_ticks == 5812
     assert fixture_lifecycle.snapshots[1]["complete"]
@@ -2394,6 +2674,8 @@ def _self_test() -> None:
         fixture_observer._finish_query(query)
         case_lifecycle.snapshots.append({**witness, "generation": 4})
         case_lifecycle.removed = True
+        case_lifecycle.removed_event_seq = 20
+        case_lifecycle.removed_monotonic_ns = time.monotonic_ns()
         assert case_lifecycle.as_json(boot, raw)["process_complete"] == supersedable
         assert (snap["process_capture_state"] in SUPERSEDABLE_CAPTURE_STATES) == supersedable
         checks += 1
@@ -2661,6 +2943,206 @@ def _self_test() -> None:
     assert bounded_sample["unit_utf8_bytes"] == 256
     assert bounded_sample["unit_sha256"] == hashlib.sha256(b"x" * 256).hexdigest()
     checks += 1
+    # A real local subprocess and production pipe/terminal adapters exercise
+    # the retained failed state; no system manager or service is contacted.
+    terminal_show = (f"Id={lifecycle.unit}\nLoadState=loaded\nCollectMode=inactive\n"
+        "ActiveState=failed\nSubState=failed\nMainPID=0\nResult=exit-code\n"
+        "InvocationID=" + "b" * 32 + "\nExecMainPID=741\nExecMainCode=1\n"
+        "ExecMainStatus=1\nExecMainStartTimestampMonotonic=912345\n"
+        "ExecMainExitTimestampMonotonic=912346\n"
+        "ControlGroup=/system.slice/broker.instance\n")
+    terminal_witness = {"boot_id": boot, "unit": lifecycle.unit,
+        "object_path": lifecycle.object_path, "generation": 9,
+        "invocation_id": "b" * 32, "main_pid": 741,
+        "exec_main_start_timestamp_monotonic": 912345,
+        "cgroup": "/system.slice/broker.instance", "start_ticks": 5812,
+        "complete": True, "manager_properties_complete": True,
+        "process_capture_complete": True,
+        "finished_monotonic_ns": time.monotonic_ns() - 10_000_000}
+    class TerminalWriter:
+        def __init__(self):
+            self.contents: dict[str, bytes] = {}
+
+        def capture(self, filename: str, content: bytes,
+                    maximum: int) -> dict[str, object]:
+            assert len(content) <= maximum and filename not in self.contents
+            self.contents[filename] = content
+            return {"path": "captures/" + filename, "bytes": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest()}
+
+    terminal_bus_read, terminal_bus_write = os.pipe()
+    class TerminalBus:
+        bus = ctypes.c_void_p(1)
+        manager_sender = ":1.4"
+        bus_fd = lambda self, _bus: terminal_bus_read
+        bus_events = lambda self, _bus: select.POLLIN
+        bus_timeout = lambda self, _bus, pointer: (
+            setattr(pointer._obj, "value", (1 << 64) - 1) or 0)
+        process_one = lambda self: (0, None)
+
+    original_show_argv = systemctl_show_argv
+    try:
+        for changed, accepted in ((None, True),
+                                  ("CollectMode=manual", False),
+                                  ("InvocationID=" + "c" * 32, False),
+                                  ("ExecMainPID=742", False),
+                                  ("ExecMainStartTimestampMonotonic=912344", False),
+                                  ("ExecMainStatus=0", False),
+                                  ("ExecMainExitTimestampMonotonic=912345", False)):
+            terminal_raw = terminal_show if changed is None else terminal_show.replace(
+                changed.split("=", 1)[0] + "=" +
+                (terminal_show.split(changed.split("=", 1)[0] + "=", 1)[1].split("\n", 1)[0]),
+                changed)
+            globals()["systemctl_show_argv"] = lambda _unit, payload=terminal_raw.encode(): [
+                sys.executable, "-c",
+                "import sys;sys.stdout.buffer.write(" + repr(payload) + ")"]
+            terminal_row = Lifecycle(lifecycle.unit, lifecycle.object_path, 9, 2,
+                                     time.monotonic_ns() - 50_000_000)
+            terminal_row.last_event_seq = 5
+            terminal_row.snapshots = [{**terminal_witness}]
+            terminal_row.invocation_id = "b" * 32
+            terminal_row.main_pid = 741
+            terminal_row.process_started = True
+            terminal_row.main_pid_values = {0, 741}
+            terminal_observer = object.__new__(BrokerObserver)
+            terminal_observer.bus = TerminalBus()
+            terminal_observer.writer = TerminalWriter()
+            terminal_observer.boot_id = boot
+            terminal_observer.boot_id_raw = raw
+            terminal_observer.deadline = time.monotonic() + 5.0
+            terminal_observer.stop_seen = True
+            terminal_observer.stop_monotonic_ns = time.monotonic_ns()
+            terminal_observer.terminal_phase_started_monotonic_ns = None
+            terminal_observer.terminal_phase_finished_monotonic_ns = None
+            terminal_observer.units = [terminal_row]
+            terminal_observer.queue = deque()
+            terminal_observer.current_query = None
+            terminal_observer.snapshot_number = 1
+            terminal_observer.bus_dispatch_count = 0
+            terminal_observer.dispatch_diagnostics = BrokerObserver._new_dispatch_diagnostics()
+            terminal_observer.bus_budget_exhausted = False
+            terminal_observer.global_reasons = []
+            terminal_observer.event_loss_detected = False
+            terminal_observer._run_terminal_phase()
+            terminal_record = terminal_row.retained_failed_terminal
+            assert terminal_record is not None and terminal_record["manager_properties_complete"] == accepted
+            assert terminal_record["event_seq"] == 5 and terminal_observer.snapshot_number == 2
+            assert len(terminal_row.snapshots) == 1
+            assert terminal_observer.writer.contents["show-000002.txt"] == terminal_raw.encode()
+            assert terminal_observer.terminal_phase_finished_monotonic_ns - \
+                terminal_observer.stop_monotonic_ns < 30_000_000_000
+            assert terminal_row.as_json(boot, raw)["process_complete"] == accepted
+            checks += 1
+            if accepted:
+                terminal_row.last_event_seq = 6
+                assert not terminal_row.as_json(boot, raw)["manager_lifecycle_complete"]
+                terminal_row.removed = True
+                terminal_row.removed_event_seq = 6
+                terminal_row.removed_monotonic_ns = int(terminal_record["finished_monotonic_ns"]) + 1
+                assert terminal_row.as_json(boot, raw)["process_complete"]
+                assert terminal_row.retained_failed_terminal is terminal_record
+                checks += 1
+        globals()["systemctl_show_argv"] = lambda _unit: [
+            sys.executable, "-c",
+            "import sys;sys.stdout.buffer.write(" + repr(terminal_show.encode()) + ")"]
+        terminal_row = Lifecycle(lifecycle.unit, lifecycle.object_path, 9, 2,
+                                 time.monotonic_ns() - 50_000_000)
+        terminal_row.last_event_seq = 5
+        terminal_row.snapshots = [{**terminal_witness, "complete": False}]
+        terminal_row.invocation_id = "b" * 32
+        terminal_row.main_pid = 741
+        terminal_observer.units = [terminal_row]
+        terminal_observer.writer = TerminalWriter()
+        terminal_observer.snapshot_number = 2
+        terminal_observer.global_reasons = []
+        terminal_observer.stop_monotonic_ns = time.monotonic_ns()
+        terminal_observer._run_terminal_phase()
+        assert terminal_row.retained_failed_terminal is not None
+        assert not terminal_row.retained_failed_terminal["manager_properties_complete"]
+        assert any("unique earlier full process witness" in reason for reason in
+                   terminal_row.retained_failed_terminal["incomplete_reasons"])
+        checks += 1
+        cancelled_row = Lifecycle(lifecycle.unit, lifecycle.object_path, 9, 2,
+                                  time.monotonic_ns() - 50_000_000)
+        cancelled_row.last_event_seq = 5
+        cancelled_row.snapshots = [{**terminal_witness}]
+        cancelled_row.invocation_id = "b" * 32
+        cancelled_row.main_pid = 741
+        terminal_observer.units = [cancelled_row]
+        terminal_observer.writer = TerminalWriter()
+        terminal_observer.snapshot_number = 2
+        terminal_observer._start_terminal_query(cancelled_row, time.monotonic() + 3.0)
+        cancelled_query = terminal_observer.current_query
+        assert cancelled_query is not None
+        terminal_observer._stop_query(cancelled_query, "unit_removed_during_snapshot")
+        terminal_observer._finish_query(cancelled_query)
+        assert cancelled_row.retained_failed_terminal["systemctl_cancelled"] == \
+               "unit_removed_during_snapshot"
+        assert not cancelled_row.retained_failed_terminal["manager_properties_complete"]
+        assert cancelled_row.manager_incomplete_reasons
+        checks += 1
+        terminal_observer.stop_seen = False
+        try:
+            terminal_observer._start_terminal_query(cancelled_row, time.monotonic() + 3.0)
+        except ObserverError:
+            checks += 1
+        else:
+            raise AssertionError("pre-stop terminal query was accepted")
+        terminal_observer.stop_seen = True
+        # Authenticated removal before a queued, never-started query preserves
+        # the record and reason; only an earlier complete witness makes it redundant.
+        removed_row = Lifecycle(lifecycle.unit, lifecycle.object_path, 10, 1,
+                                time.monotonic_ns() - 30_000_000)
+        removed_row.snapshots = [{**terminal_witness, "generation": 10}]
+        removed_row.invocation_id = "b" * 32
+        removed_row.main_pid = 741
+        removed_row.process_started = True
+        removed_row.removed = True
+        removed_row.removed_event_seq = 5
+        removed_row.removed_monotonic_ns = time.monotonic_ns() - 1_000_000
+        missing = {"trigger_event_seq": 3, "started_monotonic_ns": time.monotonic_ns(),
+                   "incomplete_reasons": [], "raw_show": None, "raw_stderr": None,
+                   "proc_capture": {}, "systemctl_exit": None,
+                   "systemctl_timed_out": False, "systemctl_timeout_reason": None,
+                   "systemctl_cancelled": None, "main_pid": 0}
+        removed_row.snapshots.append(missing)
+        BrokerObserver._record_unstarted_query(removed_row, missing,
+                                                "unit_removed_before_snapshot")
+        assert missing["post_removal_unstarted"] is True
+        assert missing["incomplete_reasons"] == ["unit_removed_before_snapshot"]
+        assert removed_row.as_json(boot, raw)["process_complete"]
+        checks += 1
+        missing["trigger_event_seq"] = removed_row.removed_event_seq
+        assert not removed_row.as_json(boot, raw)["manager_lifecycle_complete"]
+        missing["trigger_event_seq"] = 3
+        checks += 1
+        removed_row.snapshots[0]["complete"] = False
+        assert not removed_row.as_json(boot, raw)["process_complete"]
+        checks += 1
+        # Reserving the sixth slot and the stop-origin deadline both fail
+        # closed without launching a seventh or late terminal query.
+        terminal_row.retained_failed_terminal = None
+        terminal_row.removed = False
+        terminal_row.manager_incomplete_reasons.clear()
+        terminal_row.snapshots = [{**terminal_witness} for _ in range(6)]
+        terminal_observer.global_reasons = []
+        terminal_observer.units = [terminal_row]
+        terminal_observer._run_terminal_phase()
+        assert terminal_row.retained_failed_terminal is None
+        assert "terminal_query_slot_unavailable" in terminal_row.manager_incomplete_reasons
+        checks += 1
+        terminal_row.snapshots = [{**terminal_witness}]
+        terminal_row.manager_incomplete_reasons.clear()
+        terminal_observer.stop_monotonic_ns = time.monotonic_ns() - 31_000_000_000
+        terminal_observer.global_reasons = []
+        terminal_observer._run_terminal_phase()
+        assert terminal_row.retained_failed_terminal is None
+        assert "terminal_phase_deadline_exceeded" in terminal_observer.global_reasons
+        checks += 1
+    finally:
+        globals()["systemctl_show_argv"] = original_show_argv
+        os.close(terminal_bus_read)
+        os.close(terminal_bus_write)
     class FixtureFinalBus:
         def __init__(self, messages: int):
             self.remaining = messages
