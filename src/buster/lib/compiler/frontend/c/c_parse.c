@@ -34,8 +34,11 @@
 //   c_parse_position_index_build                  classification, the
 //                                                 matching-delimiter index
 //   c_parse_builtin_type_layout,                  target-dependent type
-//   c_parse_type_layout                           sizes/alignments, aggregate
-//                                                 and bit-field layout
+//   c_record_layout_place,                        sizes/alignments, the one
+//   c_parse_type_layout                           member-placement authority
+//                                                 both layout engines use
+//                                                 (CRecordLayoutRule), and
+//                                                 aggregate/bit-field layout
 //   c_semantic_check_named_call_arities          bound call constraints without IR
 //   c_parse_bfloat16_builtin,                    target builtin signatures
 //   c_parse_validate_bfloat16_builtin_calls       checked before unused pruning
@@ -1301,6 +1304,215 @@ BUSTER_C_SHARED void c_atomic_promoted_layout(u32 atomic_max_width, u64* size, u
     }
 }
 
+/* Record member placement, the rule both layout engines follow (issue #1439).
+
+   The engines evaluate what only they can -- a width's constant expression,
+   alignment specifiers, packing -- and hand the member here to be placed. They
+   used to carry a copy each of the System V bit-field rule, with comments
+   insisting the two must agree; they did agree, for every target, including
+   the Windows and AAPCS64 targets whose ABI says otherwise. Agreement between
+   the two engines is therefore not evidence of a correct layout: the oracle
+   is the Clang-derived corpus that record_layout_tests checks both
+   engines against.
+
+   ITANIUM and AAPCS64 follow Clang's ItaniumRecordLayoutBuilder::LayoutBitField.
+   A bit-field takes the next bit unless it would straddle an aligned storage
+   unit of its declared type; a zero-width one moves the next member to its
+   type's boundary; a packed one takes the next bit. `#pragma pack`, with any
+   value, suppresses the straddle padding (#1318). AAPCS64 differs only in
+   that unnamed and zero-width containers raise the record's alignment
+   (#1344), and then by the declared type's natural alignment, which neither
+   packing nor `#pragma pack` lowers for a zero-width field.
+
+   MICROSOFT follows Clang's MicrosoftRecordLayoutBuilder::layoutBitField and
+   layoutZeroWidthBitField. A bit-field opens a storage unit of its declared
+   type's size at that type's (packing-capped) alignment and the next
+   bit-field shares it only while its declared type is the same size and its
+   bits fit. A zero-width bit-field is ignored unless it closes such a unit,
+   and a union's bit-fields widen it without raising its alignment. The
+   record is always a whole number of units, so a unit never needs fitting.
+
+   One Microsoft corner is deliberately the MSVC one: GCC's MinGW `ms_struct`
+   emulation, which Clang reproduces for `*-windows-gnu`, differs for empty
+   records, `__attribute__((packed))` records with bit-fields, and a union's
+   zero-width bit-field. Buster's Windows targets are the MSVC ABI (they
+   predefine _MSC_VER). */
+
+// Clang's MicrosoftRecordLayoutBuilder for every Windows environment, and its
+// AArch64 targets' unnamed and zero-width bit-field alignment everywhere but
+// Darwin. UEFI keeps its architecture's rule: PE/COFF output does not imply
+// the Windows C layout (docs/uefi-target.md), and Clang agrees for both UEFI
+// triples. record_layout_tests pins the choice for each target against Clang.
+BUSTER_C_SHARED CRecordLayoutRule c_record_layout_rule(Target target)
+{
+    bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+    return target.os == OPERATING_SYSTEM_WINDOWS ? C_RECORD_LAYOUT_MICROSOFT
+           : target.cpu_arch == CPU_ARCH_AARCH64 && !apple ? C_RECORD_LAYOUT_AAPCS64
+                                                            : C_RECORD_LAYOUT_ITANIUM;
+}
+
+BUSTER_C_SHARED CRecordLayoutCursor c_record_layout_begin(Target target, bool is_union, u32 pack_alignment)
+{
+    CRecordLayoutCursor cursor = {
+        .alignment = 1,
+        .pack_alignment = pack_alignment,
+        .policy = (u8)c_record_layout_rule(target),
+        .is_union = is_union,
+    };
+    return cursor;
+}
+
+BUSTER_C_INTERNAL u64 c_record_layout_align_bits(u64 bit_position, u64 alignment_bits)
+{
+    u64 remainder = alignment_bits ? bit_position % alignment_bits : 0;
+    return remainder ? bit_position + (alignment_bits - remainder) : bit_position;
+}
+
+BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor* cursor, CRecordLayoutMember member)
+{
+    CRecordLayoutPlacement placement = {0};
+    u64 unit_bits = member.size * 8;
+    u64 alignment_bits = (u64)member.alignment * 8;
+    if (!member.is_bit_field)
+    {
+        // An ordinary member closes any open Microsoft unit and is placed the
+        // same way under every rule.
+        cursor->unit_open = false;
+        cursor->alignment = BUSTER_MAX(cursor->alignment, member.alignment);
+        if (cursor->is_union)
+        {
+            cursor->bit_position = BUSTER_MAX(cursor->bit_position, unit_bits);
+        }
+        else
+        {
+            placement.bit_position = c_record_layout_align_bits(cursor->bit_position, alignment_bits);
+            cursor->bit_position = placement.bit_position + unit_bits;
+        }
+        placement.unit_offset = placement.bit_position / 8;
+    }
+    else if (cursor->policy == C_RECORD_LAYOUT_MICROSOFT)
+    {
+        if (!member.bit_width)
+        {
+            // Only a zero-width field that ends a unit moves anything.
+            if (cursor->unit_open)
+            {
+                cursor->unit_open = false;
+                if (cursor->is_union)
+                {
+                    cursor->bit_position = BUSTER_MAX(cursor->bit_position, unit_bits);
+                }
+                else
+                {
+                    cursor->bit_position = c_record_layout_align_bits(cursor->bit_position, alignment_bits);
+                    cursor->alignment = BUSTER_MAX(cursor->alignment, member.alignment);
+                }
+            }
+            placement.bit_position = cursor->is_union ? 0 : cursor->bit_position;
+        }
+        else if (!cursor->is_union && cursor->unit_open && cursor->unit_bits == unit_bits && member.bit_width <= cursor->unit_remaining_bits)
+        {
+            placement.bit_position = cursor->bit_position - cursor->unit_remaining_bits;
+            cursor->unit_remaining_bits -= member.bit_width;
+        }
+        else
+        {
+            cursor->unit_open = true;
+            cursor->unit_bits = unit_bits;
+            if (cursor->is_union)
+            {
+                cursor->bit_position = BUSTER_MAX(cursor->bit_position, unit_bits);
+            }
+            else
+            {
+                placement.bit_position = c_record_layout_align_bits(cursor->bit_position, alignment_bits);
+                cursor->bit_position = placement.bit_position + unit_bits;
+                cursor->unit_remaining_bits = unit_bits - member.bit_width;
+                cursor->alignment = BUSTER_MAX(cursor->alignment, member.alignment);
+            }
+        }
+        // The open unit ends at the cursor: the field is read through it.
+        placement.unit_offset = member.bit_width && !cursor->is_union ? (cursor->bit_position - unit_bits) / 8 : placement.bit_position / 8;
+    }
+    else
+    {
+        u32 contribution = member.alignment;
+        // GNU `aligned(N)` on a bit-field starts it at the next multiple of N
+        // bytes -- unconditionally, not only when it would straddle its
+        // storage unit there, and against the operand rather than the
+        // alignment the declared type raises it to. `unsigned a : 20; unsigned
+        // b : 5 __attribute__((aligned(1)));` puts b at bit 24 where the
+        // straddle rule alone puts it at 20. Measured against clang and gcc
+        // 2026-08-30.
+        if (!cursor->is_union && member.alignment_request)
+        {
+            cursor->bit_position = c_record_layout_align_bits(cursor->bit_position, (u64)member.alignment_request * 8);
+        }
+        if (cursor->is_union)
+        {
+            // The bits the member occupies, not its declared type's width: a
+            // union member starts at bit zero and the size rounds up to the
+            // alignment afterwards, so a packed `union { char c; int b : 5; }`
+            // is one byte under Clang and GCC.
+            cursor->bit_position = BUSTER_MAX(cursor->bit_position, (u64)member.bit_width);
+            contribution = member.bit_width ? member.alignment : BUSTER_MAX(member.natural_alignment, member.alignment_request);
+        }
+        else if (!member.bit_width)
+        {
+            // A zero-width bit-field places nothing and moves the next member
+            // to its declared type's boundary. Packing moves it all the same:
+            // GCC and Clang keep aligning it even inside a packed aggregate.
+            cursor->bit_position = c_record_layout_align_bits(cursor->bit_position, (u64)member.natural_alignment * 8);
+            contribution = BUSTER_MAX(member.natural_alignment, member.alignment_request);
+        }
+        else if (member.is_packed || cursor->pack_alignment)
+        {
+            // A packed bit-field has no storage unit to straddle, and neither
+            // has one under `#pragma pack` of any value: Clang and GCC place it
+            // at the next bit (#1318).
+        }
+        else if (cursor->bit_position % alignment_bits + member.bit_width > unit_bits)
+        {
+            cursor->bit_position = c_record_layout_align_bits(cursor->bit_position, alignment_bits);
+        }
+        placement.bit_position = cursor->is_union ? 0 : cursor->bit_position;
+        if (!cursor->is_union)
+        {
+            cursor->bit_position += member.bit_width;
+        }
+        // The storage unit of the declared type that contains the first bit,
+        // or, for a field placed at the next bit, the byte it starts in.
+        bool next_bit = member.bit_width && (member.is_packed || cursor->pack_alignment);
+        // Such a field's declared-type unit may not cover its bits or may
+        // overhang the record, so the IR layout fits the unit it is read
+        // through once the record's size is known.
+        cursor->needs_unit_fitting |= next_bit;
+        placement.unit_offset = unit_bits && member.bit_width && !next_bit ? placement.bit_position / unit_bits * member.size : placement.bit_position / 8;
+        if (member.is_named || cursor->policy == C_RECORD_LAYOUT_AAPCS64)
+        {
+            cursor->alignment = BUSTER_MAX(cursor->alignment, contribution);
+        }
+    }
+    return placement;
+}
+
+BUSTER_C_SHARED u64 c_record_layout_size(CRecordLayoutCursor const* cursor, u32 alignment)
+{
+    u64 size = (cursor->bit_position + 7) / 8;
+    u64 remainder = alignment ? size % alignment : 0;
+    if (remainder)
+    {
+        size += alignment - remainder;
+    }
+    // An empty C record is four bytes under the Microsoft rule, or its
+    // alignment when an aligned attribute asked for more.
+    if (!size && cursor->policy == C_RECORD_LAYOUT_MICROSOFT)
+    {
+        size = BUSTER_MAX(alignment, 4u);
+    }
+    return size;
+}
+
 BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
                                                           u32* index_out);
 
@@ -1978,17 +2190,16 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
             {
                 continue;
             }
-            // Bits, not bytes: this mirrors the System V bit-field placement
-            // the IR layout in c_gen performs, and the two must agree or a
-            // sizeof folded during the parse contradicts the object it sizes.
-            u64 bit_position = 0;
-            u32 alignment = 1;
+            // Members are placed by c_record_layout_place, the rule the IR
+            // layout in c_gen places them by too, so a sizeof folded during the
+            // parse cannot contradict the object it sizes (#1439).
             u32 pack_alignment = type.definition_start < preprocess.token_count ? c_preprocess_pack_alignment(&preprocess, type.definition_start) : 0;
             CAggregateAttributes aggregate_attributes = c_parse_aggregate_attributes(result, (CTypeId){.value = type_index});
             if (aggregate_attributes.is_packed)
             {
                 pack_alignment = 1;
             }
+            CRecordLayoutCursor record = c_record_layout_begin(preprocess.target, type.kind == C_TYPE_UNION, pack_alignment);
             bool fields_resolved = true;
             bool aggregate_provisional = false;
             for (u32 member_index = 0; member_index < type.member_count; member_index += 1)
@@ -2037,121 +2248,37 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Aren
                     fields_resolved = false;
                     break;
                 }
-                if (member.is_bit_field)
+                if (member.is_bit_field && (member.bit_width > member_size * 8 || !member_size))
                 {
-                    u64 unit_bits = member_size * 8;
-                    u64 alignment_bits = (u64)member_alignment * 8;
-                    if (member.bit_width > unit_bits || !unit_bits)
-                    {
-                        fields_resolved = false;
-                        break;
-                    }
-                    // An unnamed bit-field's declared type does not raise the
-                    // aggregate's alignment; a named one's does, and neither
-                    // does a GNU `aligned` written on an unnamed one.
-                    if (member.name.length)
-                    {
-                        alignment = BUSTER_MAX(alignment, member_alignment);
-                    }
-                    // GNU `aligned(N)` on a bit-field starts it at the next
-                    // multiple of N bytes -- unconditionally, not only when it
-                    // would straddle its storage unit there, and against the
-                    // operand rather than the alignment the declared type
-                    // raises it to. `unsigned a : 20; unsigned b : 5
-                    // __attribute__((aligned(1)));` puts b at bit 24 where the
-                    // straddle rule alone puts it at 20, so this is the one
-                    // request that moves a bit-field *down*. Measured against
-                    // clang and gcc 2026-08-30; the IR layout in c_gen spells
-                    // the same rule.
-                    if (type.kind != C_TYPE_UNION && member_alignment_request)
-                    {
-                        u64 request_bits = (u64)member_alignment_request * 8;
-                        u64 request_remainder = bit_position % request_bits;
-                        if (request_remainder)
-                        {
-                            bit_position += request_bits - request_remainder;
-                        }
-                    }
-                    if (type.kind == C_TYPE_UNION)
-                    {
-                        if (member.bit_width)
-                        {
-                            // The bits the member occupies, not its declared
-                            // type's width: a union member starts at bit zero
-                            // and the size rounds up to the alignment below,
-                            // which is the same arm the IR layout in c_gen
-                            // takes.
-                            bit_position = BUSTER_MAX(bit_position, (u64)member.bit_width);
-                        }
-                        continue;
-                    }
-                    if (!member.bit_width)
-                    {
-                        // Packing does not move a zero-width bit-field: GCC
-                        // and Clang keep aligning it to its declared type, so
-                        // `struct __attribute__((packed)) { int a : 3; int : 0;
-                        // int b : 3; }` still measures five bytes.
-                        u64 zero_width_bits = (u64)natural_alignment * 8;
-                        u64 zero_width_remainder = zero_width_bits ? bit_position % zero_width_bits : 0;
-                        if (zero_width_remainder)
-                        {
-                            bit_position += zero_width_bits - zero_width_remainder;
-                        }
-                        continue;
-                    }
-                    if (packed_member)
-                    {
-                        // A packed bit-field takes the next bit, with no
-                        // storage unit to straddle; the IR layout picks the
-                        // unit it is read through from the same position.
-                        bit_position += member.bit_width;
-                        continue;
-                    }
-                    u64 bit_remainder = bit_position % alignment_bits;
-                    if (bit_remainder + member.bit_width > unit_bits)
-                    {
-                        bit_position += alignment_bits - bit_remainder;
-                    }
-                    bit_position += member.bit_width;
-                    continue;
+                    fields_resolved = false;
+                    break;
                 }
-                alignment = BUSTER_MAX(alignment, member_alignment);
-                if (type.kind == C_TYPE_UNION)
+                CRecordLayoutPlacement placement = c_record_layout_place(&record, (CRecordLayoutMember){
+                                                                                      .size = member_size,
+                                                                                      .natural_alignment = natural_alignment,
+                                                                                      .alignment = member_alignment,
+                                                                                      .alignment_request = member_alignment_request,
+                                                                                      .bit_width = member.bit_width,
+                                                                                      .is_bit_field = member.is_bit_field,
+                                                                                      .is_named = member.name.length != 0,
+                                                                                      .is_packed = packed_member,
+                                                                                  });
+                if (offset_out && !member.is_bit_field && type.member_start + member_index == offset_member)
                 {
-                    if (offset_out && type.member_start + member_index == offset_member)
-                    {
-                        *offset_out = 0;
-                    }
-                    bit_position = BUSTER_MAX(bit_position, member_size * 8);
-                    continue;
+                    *offset_out = placement.unit_offset;
                 }
-                u64 alignment_bits = (u64)member_alignment * 8;
-                u64 remainder = bit_position % alignment_bits;
-                if (remainder)
-                {
-                    bit_position += alignment_bits - remainder;
-                }
-                if (offset_out && type.member_start + member_index == offset_member)
-                {
-                    *offset_out = bit_position / 8;
-                }
-                bit_position += member_size * 8;
             }
             if (!fields_resolved)
             {
                 continue;
             }
+            u32 alignment = record.alignment;
             if (!c_parse_layout_alignment_specifiers(&layout_context, aggregate_attributes.alignment_start, aggregate_attributes.alignment_count,
                                                      &alignment, 0, &aggregate_provisional))
             {
                 continue;
             }
-            u64 size = (bit_position + 7) / 8;
-            u64 remainder = size % alignment;
-            if (remainder)
-            {
-                size += alignment - remainder;
-            }
+            u64 size = c_record_layout_size(&record, alignment);
             sizes[type_index] = size;
             alignments[type_index] = alignment;
             provisional[type_index] = aggregate_provisional;

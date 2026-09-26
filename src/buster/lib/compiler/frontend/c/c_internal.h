@@ -315,6 +315,98 @@ BUSTER_C_EXTERN bool c_vector_type_layout(Target target, u64 element_size, u32 l
 // `_Atomic T`'s size and alignment, given T's own; both layout engines ask it
 // (see c_atomic_promoted_layout in c_parse.c).
 BUSTER_C_EXTERN void c_atomic_promoted_layout(u32 atomic_max_width, u64* size, u32* alignment);
+
+// How a record's bit-fields claim storage. C leaves bit-field allocation to
+// the implementation and each platform ABI fixes it, so the rule is a fact of
+// the target, like plain char's signedness, that c_record_layout_rule derives
+// from it alone.
+//
+// ITANIUM    The System V generic rule, which the x86-64 psABI, Darwin, Wasm
+//            and bpf follow: a bit-field takes the next bit at which it does
+//            not straddle an aligned storage unit of its declared type, and
+//            an unnamed bit-field does not raise the record's alignment.
+// AAPCS64    The same placement, but every bit-field's container -- named,
+//            unnamed or zero-width -- raises the record's alignment (AAPCS64
+//            10.1.8). AArch64 Linux, Android, UEFI and bare metal; not Darwin.
+// MICROSOFT  The Windows rule, for the MSVC and MinGW environments alike: a
+//            bit-field occupies a storage unit of its declared type's size,
+//            and the next one shares it only while its declared type has the
+//            same size and its bits still fit. A zero-width bit-field matters
+//            only after a non-zero one, and a union's bit-fields do not raise
+//            the union's alignment.
+typedef enum CRecordLayoutRule
+{
+    C_RECORD_LAYOUT_ITANIUM,
+    C_RECORD_LAYOUT_AAPCS64,
+    C_RECORD_LAYOUT_MICROSOFT,
+    C_RECORD_LAYOUT_COUNT,
+} CRecordLayoutRule;
+
+// Record member placement, the one authority both layout engines -- the
+// sizeof/offsetof folding in c_parse.c and the IrType layout in c_gen.c --
+// place members through, so a folded size and the object it sizes cannot
+// follow different rules. The target's CRecordLayoutRule selects the rule;
+// see c_record_layout_place in c_parse.c. Each engine still evaluates the
+// member's own facts (width, alignment specifiers, packing) and hands them in.
+typedef struct CRecordLayoutMember CRecordLayoutMember;
+struct CRecordLayoutMember
+{
+    // The declared type's size in bytes; zero for a flexible array member.
+    u64 size;
+    // The declared type's own alignment.
+    u32 natural_alignment;
+    // The alignment after packing, #pragma pack and alignment specifiers.
+    u32 alignment;
+    // The largest explicit aligned(N)/_Alignas(N) written on the member.
+    u32 alignment_request;
+    u32 bit_width;
+    bool is_bit_field;
+    bool is_named;
+    // Packed by its own attribute, its record's or #pragma pack(1).
+    bool is_packed;
+    u8 reserved[5];
+};
+
+typedef struct CRecordLayoutCursor CRecordLayoutCursor;
+struct CRecordLayoutCursor
+{
+    // The next free bit. Under the Microsoft rule it is always the end of the
+    // last whole storage unit or ordinary member.
+    u64 bit_position;
+    // Microsoft: the open allocation unit's size and the bits it has left.
+    u64 unit_bits;
+    u64 unit_remaining_bits;
+    // The record's alignment so far.
+    u32 alignment;
+    // The #pragma pack ceiling around the definition, zero when none.
+    u32 pack_alignment;
+    u8 policy;
+    bool is_union;
+    // Microsoft: the previous member was a non-zero-width bit-field, whose
+    // unit a following bit-field may share.
+    bool unit_open;
+    // Set when a bit-field's natural storage unit may not cover its bits or
+    // may overhang the record, so the IR layout has to fit a unit for it.
+    bool needs_unit_fitting;
+    u8 reserved[4];
+};
+
+typedef struct CRecordLayoutPlacement CRecordLayoutPlacement;
+struct CRecordLayoutPlacement
+{
+    // The member's first bit, from the start of the record.
+    u64 bit_position;
+    // A bit-field's storage unit, a declared-type-sized access, in bytes from
+    // the start of the record; an ordinary member's own offset.
+    u64 unit_offset;
+};
+
+BUSTER_C_EXTERN CRecordLayoutRule c_record_layout_rule(Target target);
+BUSTER_C_EXTERN CRecordLayoutCursor c_record_layout_begin(Target target, bool is_union, u32 pack_alignment);
+BUSTER_C_EXTERN CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor* cursor, CRecordLayoutMember member);
+// The record's size, once `alignment` -- the cursor's, raised by any aligned
+// attribute on the definition -- is final.
+BUSTER_C_EXTERN u64 c_record_layout_size(CRecordLayoutCursor const* cursor, u32 alignment);
 BUSTER_C_EXTERN CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId base, CType qualifiers);
 BUSTER_C_EXTERN bool c_parse_atomic_drops_type_alignment(CParseResult const* result, CTypeId base, bool adds_atomic);
 BUSTER_C_EXTERN bool c_parse_type_qualifier_word(String8 spelling, CType* type);

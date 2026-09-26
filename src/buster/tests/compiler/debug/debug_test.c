@@ -307,6 +307,35 @@ UnitTestResult debug_model_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, debug_register_dwarf_number((Target){.cpu_arch = CPU_ARCH_X86_64}, DEBUG_REGISTER_X86_RSP) == 7);
     BUSTER_TEST(arguments, debug_register_dwarf_number((Target){.cpu_arch = CPU_ARCH_AARCH64}, DEBUG_REGISTER_AARCH64_X29) == 29);
     BUSTER_TEST(arguments, debug_register_codeview_number((Target){.cpu_arch = CPU_ARCH_X86_64}, DEBUG_REGISTER_X86_R15) == 343);
+    // Every register against CodeView's own enumeration (CV_HREG_e in
+    // Microsoft's cvconst.h, as LLVM's CodeViewRegisters.def mirrors it), not
+    // against our enum order: RAX and R15 alone are the two registers where
+    // "328 + hardware index" happened to agree with it (#1440).
+    typedef struct DebugCodeViewRegisterCase DebugCodeViewRegisterCase;
+    struct DebugCodeViewRegisterCase
+    {
+        CpuArch arch;
+        DebugRegister reg;
+        u32 codeview;
+    };
+    DebugCodeViewRegisterCase codeview_registers[] = {
+        {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_RAX, 328},   {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_RBX, 329},
+        {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_RCX, 330},   {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_RDX, 331},
+        {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_RSI, 332},   {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_RDI, 333},
+        {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_RBP, 334},   {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_RSP, 335},
+        {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_R8, 336},    {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_R12, 340},
+        {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_XMM0, 154},  {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_XMM7, 161},
+        {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_XMM8, 252},  {CPU_ARCH_X86_64, DEBUG_REGISTER_X86_XMM15, 259},
+        {CPU_ARCH_AARCH64, DEBUG_REGISTER_AARCH64_X0, 50}, {CPU_ARCH_AARCH64, DEBUG_REGISTER_AARCH64_X28, 78},
+        {CPU_ARCH_AARCH64, DEBUG_REGISTER_AARCH64_X29, 79}, {CPU_ARCH_AARCH64, DEBUG_REGISTER_AARCH64_X30, 80},
+        {CPU_ARCH_AARCH64, DEBUG_REGISTER_AARCH64_SP, 81}, {CPU_ARCH_AARCH64, DEBUG_REGISTER_AARCH64_V0, 180},
+        {CPU_ARCH_AARCH64, DEBUG_REGISTER_AARCH64_V31, 211},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(codeview_registers); index += 1)
+    {
+        DebugCodeViewRegisterCase expected = codeview_registers[index];
+        BUSTER_TEST(arguments, debug_register_codeview_number((Target){.cpu_arch = expected.arch}, expected.reg) == expected.codeview);
+    }
 
     // Location transitions are intentionally tested independently of a
     // backend allocator: the neutral model must retain every range and every

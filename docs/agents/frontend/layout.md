@@ -17,6 +17,36 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   operands; loading the decayed value creates invalid IR and forces both native
   selectors to reject the function. `tests/basic_c_pointer_to_vla.c` covers row
   addresses, runtime strides, local arrays and indirect comparison calls.
+- **Bit-field allocation is a target ABI fact, placed by one authority**
+  (#1439). `c_record_layout_rule` derives the rule from the `Target` alone:
+  `C_RECORD_LAYOUT_MICROSOFT` for every Windows target (MSVC and MinGW
+  spellings alike), `C_RECORD_LAYOUT_AAPCS64` for AArch64 outside Darwin and
+  Windows, and `C_RECORD_LAYOUT_ITANIUM` otherwise; x86-64 UEFI stays Itanium
+  because PE/COFF does not imply the Windows C layout, as Clang agrees. The
+  rule lives in the C frontend, its only reader, rather than in
+  `TargetDataLayout`. Both engines --
+  `c_parse_type_layout_core` (the `sizeof`/`offsetof` fold) and the aggregate
+  branch of `c_lower_to_ir_with_options` (`IrType`) -- evaluate a member's own
+  facts and hand it to `c_record_layout_place`, which follows Clang's
+  `ItaniumRecordLayoutBuilder` and `MicrosoftRecordLayoutBuilder`.
+  Microsoft: a bit-field opens a unit of its declared type's size and the next
+  one shares it only while its declared type has the same size and its bits
+  fit; a zero-width field matters only after a non-zero one; a union's
+  bit-fields do not raise its alignment; an empty record is four bytes.
+  AAPCS64: unnamed and zero-width containers raise the record's alignment
+  (#1344). Itanium: `#pragma pack` of any value suppresses straddle padding
+  (#1318), and a unit that then fails to cover its field is fitted like a
+  packed one. The two engines used to carry a copy each of the System V rule
+  and were tested only against each other, so they agreed on the wrong answer
+  for every Windows and AArch64 Linux record with mixed or unnamed bit-fields.
+  **Their agreement is not the oracle**: `record_layout_tests` compiles a
+  Clang-derived corpus for every native target and compares the folded
+  constants, member images and wrapper objects byte for byte. Regenerate it
+  with `tools/record_layout_oracle.py generate` (a Clang knowing every triple),
+  and run `tools/record_layout_oracle.py campaign --ide <ide>` for randomized
+  records. MinGW's GCC `ms_struct` emulation differs from MSVC for empty
+  records, `packed` records with bit-fields and a union's zero-width field;
+  Buster's Windows targets are the MSVC ABI.
 - **`__attribute__((packed))` and `__attribute__((aligned(N)))`** decide object
   representation, so ignoring them is an ABI divergence rather than a missing
   optimization: a Buster-only program agrees with itself whatever it agrees on,
@@ -30,11 +60,12 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `alignment_count` names, which is why the trailing scan runs immediately
   after the specifier one. `#pragma pack(N)` asks the same question -- the
   ceiling a member's alignment is clamped to -- and `packed` is that ceiling at
-  one byte, so both feed one knob. **Two layout engines read it and must agree**:
+  one byte, so both feed one knob. **Two layout engines read it**:
   `c_parse_type_layout` in `c_parse.c` folds `sizeof`/`_Alignof` during the
   parse and `c_lower_to_ir` in `c_gen.c` builds the `IrType`. They disagreed
   about `#pragma pack` before this: the fold packed and the IR did not, so a
-  folded size contradicted the object it sized.
+  folded size contradicted the object it sized. Both now place members through
+  `c_record_layout_place` (above).
   A packed bit-field takes the next bit rather than the next storage unit of
   its declared type, which is what Clang and GCC do and what makes
   `struct __attribute__((packed)) { int a : 3; int b : 30; }` five bytes. The

@@ -1198,7 +1198,14 @@ BUSTER_GLOBAL_LOCAL String8 c_test_enum_bit_field_source(Arena* arena)
     "void write_PlainPackedU40(void) { plain_packed_u.field=9; }\n"
     "_Static_assert(sizeof(enum EU32)==4 && sizeof(enum EU40)==8 && sizeof(enum ES40)==8, \"enum representation\");\n"
     "_Static_assert(sizeof(enum EU64)==8 && sizeof(enum ES64)==8, \"full width representation\");\n"
+    // A packed union spans the 40 bits; the Microsoft rule allocates the
+    // declared type's whole unit (MinGW Clang and GCC: 8 bytes, alignment 1;
+    // MSVC rejects a 40-bit enum field outright). #1439.
+    "#ifdef _WIN32\n"
+    "_Static_assert(sizeof(union PackedU40)==8 && sizeof(union PackedS40)==8, \"storage is the declared unit\");\n"
+    "#else\n"
     "_Static_assert(sizeof(union PackedU40)==5 && sizeof(union PackedS40)==5, \"storage is not the enum type\");\n"
+    "#endif\n"
     ), S8(
     "int main(void)\n"
     "{\n"
@@ -1362,10 +1369,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arg
                                     BUSTER_TEST(arguments, field_type->kind == IR_TYPE_INTEGER && field_type->bit_width == expected.semantic_width);
                                     BUSTER_TEST(arguments, field_type->is_signed == expected.is_signed);
                                     BUSTER_TEST(arguments, field_type->layout.size == expected.semantic_width / 8);
+                                    // A packed 40-bit union spans five bytes and is
+                                    // read in two pieces under the Itanium rules;
+                                    // the Microsoft rule allocates the declared
+                                    // type's whole unit, one access (#1439).
+                                    bool microsoft = target.os == OPERATING_SYSTEM_WINDOWS;
+                                    bool split = expected.packed && !microsoft;
                                     if (expected.packed)
                                     {
-                                        BUSTER_TEST(arguments, ir_record->layout.size == 5 && ir_record->layout.alignment == 1);
-                                        BUSTER_TEST(arguments, ir_field_access_size(&program->types, field) == 5);
+                                        u64 packed_size = microsoft ? 8 : 5;
+                                        BUSTER_TEST(arguments, ir_record->layout.size == packed_size && ir_record->layout.alignment == 1);
+                                        BUSTER_TEST(arguments, ir_field_access_size(&program->types, field) == packed_size);
                                     }
                                     String8 read_name = string_format(temporary.arena, S8("read_{S8}"), expected.record);
                                     IrFunction* reader = c_test_find_ir_function(module, read_name);
@@ -1384,13 +1398,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arg
                                                 IrType* loaded = ir_type_from_id(&program->types, instruction->canonical_type);
                                                 if (BUSTER_REQUIRE(arguments, loaded != 0))
                                                 {
-                                                    BUSTER_TEST(arguments, loaded->bit_width <= (expected.packed ? 32u : expected.semantic_width));
+                                                    BUSTER_TEST(arguments, loaded->bit_width <= (split ? 32u : expected.semantic_width));
                                                     BUSTER_TEST(arguments, instruction->volatile_access == expected.is_volatile);
                                                 }
                                                 loads += 1;
                                             }
                                         }
-                                        BUSTER_TEST(arguments, loads == (expected.packed ? 2u : 1u));
+                                        BUSTER_TEST(arguments, loads == (split ? 2u : 1u));
                                         if (expected.packed)
                                         {
                                             IrFunction* writer = c_test_find_ir_function(module,
@@ -1407,7 +1421,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arg
                                                         stores += 1;
                                                     }
                                                 }
-                                                BUSTER_TEST(arguments, stores == 2);
+                                                BUSTER_TEST(arguments, stores == (split ? 2u : 1u));
                                             }
                                         }
                                     }
@@ -2120,7 +2134,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_range_designators(UnitTestArgum
            " struct RangeNested { int values[3]; };"
            " union RangeUnion { int first; int second; };"
            " struct RangeEmpty {};"
+           "\n#ifndef _MSC_VER\n"
            " struct RangeZeroNested { struct RangeEmpty values[18446744073709551615ULL]; };"
+           "\n#endif\n"
            " static int range_target;"
            " static const int range_scalar[] = { [0 ... 2] = 3, [1] = 4, [2 ... 4] = 5 };"
            " static const struct RangePair range_pairs[] = { [1 ... 3] = { 7, 8 }, [2].first = 9 };"
@@ -2132,8 +2148,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_range_designators(UnitTestArgum
            " static int *range_overlap_ptrs[] = { [0 ... 2] = &range_target, [1] = 0 };"
            " static const int range_singleton[] = { [2 ... 2] = 11 };"
            " static union RangeUnion range_unions[] = { [0 ... 2].second = 7, [1].first = 9 };"
+           "\n#ifndef _MSC_VER\n"
            " static struct RangeEmpty range_zero[18446744073709551615ULL] = { [0 ... 18446744073709551614ULL] = {} };"
            " static struct RangeZeroNested range_zero_nested[18446744073709551615ULL] = { [0 ... 18446744073709551614ULL].values[0 ... 18446744073709551614ULL] = {} };"
+           "\n#endif\n"
            " static int range_probe(void) {"
            " static const int local_ranges[] = { [1 ... 3] = 4, [2] = 5 };"
            " return local_ranges[0] + local_ranges[1] + local_ranges[2] + local_ranges[3]; }"
@@ -2193,8 +2211,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_range_designators(UnitTestArgum
         BUSTER_TEST(arguments, overlap_pointers != 0);
         BUSTER_TEST(arguments, singleton != 0);
         BUSTER_TEST(arguments, unions != 0);
-        BUSTER_TEST(arguments, zero != 0);
-        BUSTER_TEST(arguments, zero_nested != 0);
+        // GNU C gives an empty struct zero bytes, so 2^64-1 of them fit. The
+        // MSVC C layout gives it four (Clang's MicrosoftRecordLayoutBuilder,
+        // #1439), where Clang rejects the arrays as too large, so the source
+        // leaves them out for _MSC_VER targets.
+        bool empty_records_are_empty = target_native.os != OPERATING_SYSTEM_WINDOWS;
+        BUSTER_TEST(arguments, (zero != 0) == empty_records_are_empty);
+        BUSTER_TEST(arguments, (zero_nested != 0) == empty_records_are_empty);
         BUSTER_TEST(arguments, locals != 0);
         if (scalar)
         {
@@ -18642,7 +18665,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
     TemporalArena temporary = scratch_begin(0, 0);
     CPreprocessResult preprocess = {0};
     CParseResult parse = {0};
-    CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("packed-layout.c"), target_native, &preprocess, &parse);
+    // These are the Itanium rule's numbers, which are Clang's for x86-64 Linux,
+    // so every host checks them there. The Microsoft and AAPCS64 rules place
+    // most of these records differently; record_layout_tests meets the same
+    // shapes on those targets, against Clang (#1439).
+    Target itanium_target = target_parse_triple(S8("x86_64-unknown-linux-gnu")).target;
+    CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("packed-layout.c"), itanium_target, &preprocess, &parse);
     BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
     BUSTER_TEST(arguments, parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
@@ -18845,7 +18873,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
                                "_Static_assert(sizeof(struct leading_bits) == 8, \"leading bits\");\n"
                                "_Static_assert(_Alignof(struct leading_bits) == 4, \"leading bits alignment\");\n"
                                "_Static_assert(__builtin_offsetof(struct leading_bits, tail) == 7, \"leading bits tail\");\n"),
-                            S8("packed-bit-attribute.c"), target_native, &bit_attribute_preprocess, &bit_attribute_parse);
+                            S8("packed-bit-attribute.c"), itanium_target, &bit_attribute_preprocess, &bit_attribute_parse);
     BUSTER_TEST(arguments, bit_attribute_preprocess.diagnostic_count == 0);
     BUSTER_TEST(arguments, bit_attribute_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, bit_attribute.diagnostic_count == 0);
@@ -18925,7 +18953,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
         TemporalArena straddle_temporary = scratch_begin(0, 0);
         CPreprocessResult straddle_preprocess = {0};
         CParseResult straddle_parse = {0};
-        CIRLowerResult straddle = c_test_lower_source(straddle_temporary.arena, split_units[index].source, S8("packed-straddle.c"), target_native,
+        CIRLowerResult straddle = c_test_lower_source(straddle_temporary.arena, split_units[index].source, S8("packed-straddle.c"), itanium_target,
                                                       &straddle_preprocess, &straddle_parse);
         BUSTER_TEST(arguments, straddle_preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, straddle_parse.diagnostic_count == 0);

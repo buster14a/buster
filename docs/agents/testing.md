@@ -304,6 +304,16 @@ for ABI fixtures, diagnostics, opt-in IR/MIR validation, sanitizer controls,
 reduction limits and evidence format. This supplements all existing gates;
 it does not replace target-matrix execution or the seeded differential corpus.
 
+## Oracle independence
+
+A differential test is evidence only when its two sides obtain the answer
+independently. [The oracle independence map](../oracle-independence.md)
+records, per route, the shared dependency and the independent oracle
+(Clang-derived layout corpus `record_layout_tests`, specification constants
+for debug information, host-compiled references). New golden data needs an
+independent producer and a regeneration command; never derive one Buster
+path's expectation from another's.
+
 ## Source-equivalence campaigns
 
 `ide test` also runs a bounded source-equivalence smoke campaign under all native

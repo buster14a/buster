@@ -49029,22 +49029,22 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 {
                     continue;
                 }
-                // The layout runs in bits, which is what the System V rule for
-                // bit-fields is written in: a bit-field takes the next
+                // Members are placed by c_record_layout_place, under the
+                // target's record-layout rule (CRecordLayoutRule): the System
+                // V rule on Itanium targets, where a bit-field takes the next
                 // available bits and only moves on to the next storage unit of
-                // its declared type when it would otherwise straddle one. A
-                // per-declared-type unit model instead started a fresh unit
-                // whenever the declared type changed, so
-                // `struct { int a:3; unsigned char b:1; }` measured 8 bytes
-                // where every other C compiler on the target measures 4.
-                u64 bit_position = 0;
-                u32 alignment = 1;
+                // its declared type when it would otherwise straddle one; the
+                // AAPCS64 variant; and the Microsoft rule, where a change of
+                // declared type size does start a fresh unit. The sizeof
+                // folding in c_parse.c places members through the same call,
+                // so a folded size cannot contradict the object it sizes; the
+                // two agreeing is not evidence the rule is the target's, which
+                // is what record_layout_tests checks (#1439).
+                //
                 // `__attribute__((packed))` on the definition and `#pragma
                 // pack(N)` around it ask the same question: the ceiling a
                 // member's alignment is clamped to. Packed is that ceiling at
-                // one byte. c_parse_type_layout folds sizeof through the same
-                // two inputs, and the two must agree or a folded size
-                // contradicts the object it sizes.
+                // one byte.
                 CAggregateAttributes aggregate_attributes = c_parse_aggregate_attributes(&parse, (CTypeId){.value = type_index});
                 u32 pack_alignment = c_type->definition_start < preprocess.token_count
                                          ? c_preprocess_pack_alignment(&preprocess, c_type->definition_start)
@@ -49053,7 +49053,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 {
                     pack_alignment = 1;
                 }
-                bool packed_fields = false;
+                CRecordLayoutCursor record = c_record_layout_begin(target, c_type->kind == C_TYPE_UNION, pack_alignment);
                 bool fields_resolved = true;
                 // One report per aggregate, whatever the definition got wrong:
                 // the diagnostic budget allows one diagnostic per type, and the
@@ -49115,7 +49115,6 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                     {
                         field_alignment = BUSTER_MIN(field_alignment, pack_alignment);
                     }
-                    packed_fields |= packed_field;
                     // A rejected specifier still hands back the alignment the
                     // member can be laid out with, so the definition finishes
                     // and the program hears about the attribute it wrote
@@ -49176,122 +49175,28 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                         definition_rejection_member = field_index;
                         definition_rejection_kind = C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH;
                     }
-                    u64 offset = 0;
-                    u32 bit_offset = 0;
-                    if (member->is_bit_field)
+                    if (member->is_bit_field && (!field_type->layout.size || member_bit_width > field_type->layout.size * 8))
                     {
-                        u64 unit_bits = field_type->layout.size * 8;
-                        u64 alignment_bits = (u64)field_alignment * 8;
-                        if (!unit_bits || member_bit_width > unit_bits)
-                        {
-                            fields_resolved = false;
-                            break;
-                        }
-                        // An unnamed bit-field's declared type does not raise
-                        // the aggregate's alignment; a named one's does, and
-                        // neither does a GNU `aligned` on an unnamed one.
-                        if (member->name.length)
-                        {
-                            alignment = BUSTER_MAX(alignment, field_alignment);
-                        }
-                        // GNU `aligned(N)` on a bit-field starts it at the next
-                        // multiple of N bytes -- unconditionally, not only when
-                        // it would straddle its storage unit there, and against
-                        // the operand rather than the alignment the declared
-                        // type raises it to. `unsigned a : 20; unsigned b : 5
-                        // __attribute__((aligned(1)));` puts b at bit 24 where
-                        // the straddle rule alone puts it at 20, so this is the
-                        // one request that moves a bit-field *down*. Measured
-                        // against clang and gcc 2026-08-30; the sizeof folding
-                        // in c_parse.c spells the same rule.
-                        if (c_type->kind != C_TYPE_UNION && field_alignment_request)
-                        {
-                            u64 request_bits = (u64)field_alignment_request * 8;
-                            u64 request_remainder = bit_position % request_bits;
-                            if (request_remainder)
-                            {
-                                bit_position += request_bits - request_remainder;
-                            }
-                        }
-                        if (c_type->kind == C_TYPE_UNION)
-                        {
-                            if (member_bit_width)
-                            {
-                                // Every union member starts at bit zero, so the
-                                // size candidate is the bits this one occupies
-                                // rather than its declared type's width: a
-                                // packed `union { char c; int b : 5; }` is one
-                                // byte under Clang and GCC. The rounding to the
-                                // aggregate's alignment below is what gives the
-                                // unpacked spelling its declared type's size
-                                // back, so one arm answers both.
-                                bit_position = BUSTER_MAX(bit_position, (u64)member_bit_width);
-                            }
-                        }
-                        else if (!member_bit_width)
-                        {
-                            // A zero-width bit-field places nothing and only
-                            // moves the next member to its type's boundary.
-                            // Packing does not move it: GCC and Clang keep
-                            // aligning it to the declared type even inside a
-                            // packed aggregate.
-                            u64 zero_width_bits = (u64)natural_alignment * 8;
-                            u64 remainder = zero_width_bits ? bit_position % zero_width_bits : 0;
-                            if (remainder)
-                            {
-                                bit_position += zero_width_bits - remainder;
-                            }
-                            offset = bit_position / 8;
-                        }
-                        else if (packed_field)
-                        {
-                            // A packed bit-field takes the next bit and has no
-                            // storage unit to straddle. The unit it is read
-                            // through is chosen once the aggregate's size is
-                            // known, below; the byte-granular pair recorded
-                            // here carries the absolute bit position until
-                            // then.
-                            offset = bit_position / 8;
-                            bit_offset = (u32)(bit_position - offset * 8);
-                            bit_position += member_bit_width;
-                        }
-                        else
-                        {
-                            if (bit_position % alignment_bits + member_bit_width > unit_bits)
-                            {
-                                u64 remainder = bit_position % alignment_bits;
-                                if (remainder)
-                                {
-                                    bit_position += alignment_bits - remainder;
-                                }
-                            }
-                            // The field is read as a whole storage unit of its
-                            // declared type, so the offset names the unit that
-                            // contains it and bit_offset the position inside.
-                            offset = bit_position / unit_bits * field_type->layout.size;
-                            bit_offset = (u32)(bit_position - offset * 8);
-                            bit_position += member_bit_width;
-                        }
+                        fields_resolved = false;
+                        break;
                     }
-                    else
-                    {
-                        alignment = BUSTER_MAX(alignment, field_alignment);
-                        if (c_type->kind == C_TYPE_STRUCT)
-                        {
-                            u64 alignment_bits = (u64)field_alignment * 8;
-                            u64 remainder = bit_position % alignment_bits;
-                            if (remainder)
-                            {
-                                bit_position += alignment_bits - remainder;
-                            }
-                            offset = bit_position / 8;
-                            bit_position += field_type->layout.size * 8;
-                        }
-                        else
-                        {
-                            bit_position = BUSTER_MAX(bit_position, field_type->layout.size * 8);
-                        }
-                    }
+                    CRecordLayoutPlacement placement = c_record_layout_place(&record, (CRecordLayoutMember){
+                                                                                          .size = field_type->layout.size,
+                                                                                          .natural_alignment = natural_alignment,
+                                                                                          .alignment = field_alignment,
+                                                                                          .alignment_request = field_alignment_request,
+                                                                                          .bit_width = member_bit_width,
+                                                                                          .is_bit_field = member->is_bit_field,
+                                                                                          .is_named = member->name.length != 0,
+                                                                                          .is_packed = packed_field,
+                                                                                      });
+                    // A bit-field is read as a whole storage unit of its
+                    // declared type, so the offset names that unit and
+                    // bit_offset the position inside it. A field placed at the
+                    // next bit has its unit fitted below, once the size is
+                    // known.
+                    u64 offset = placement.unit_offset;
+                    u32 bit_offset = member->is_bit_field ? (u32)(placement.bit_position - offset * 8) : 0;
                     aggregate_type->fields[field_index] = (IrField){
                         .name = member->name,
                         .source = c_ir_source_range(member->location, member->name.length),
@@ -49308,6 +49213,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 }
                 // The definition's own `aligned(N)` raises the aggregate above
                 // what its members ask for, and the size rounds up to it.
+                u32 alignment = record.alignment;
                 String8 aggregate_rejection = {0};
                 CIrAlignmentStatus aggregate_status = c_ir_alignment_evaluate(&constant_builder, aggregate_attributes.alignment_start,
                                                                               aggregate_attributes.alignment_count, alignment, &alignment, 0, &aggregate_rejection);
@@ -49331,13 +49237,10 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                         .kind = definition_rejection_kind,
                     };
                 }
-                u64 size = (bit_position + 7) / 8;
-                u64 remainder = size % alignment;
-                if (remainder)
-                {
-                    size += alignment - remainder;
-                }
-                // Packing can leave a bit-field's storage unit hanging off the
+                u64 size = c_record_layout_size(&record, alignment);
+                // Packing -- the attribute, or `#pragma pack` of any value,
+                // under which an Itanium bit-field takes the next bit (#1318)
+                // -- can leave a bit-field's storage unit hanging off the
                 // end of the aggregate -- `struct __attribute__((packed)) { int
                 // a : 3; int : 0; int b : 3; }` is five bytes with `b` in the
                 // fifth -- and a read-modify-write through that unit would
@@ -49349,7 +49252,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 // is three bytes, so `b` is read through the byte at offset
                 // one. A field whose bits cross every unit that fits takes the
                 // bytes they occupy instead, which is more than one access.
-                for (u32 field_index = 0; packed_fields && field_index < c_type->member_count; field_index += 1)
+                for (u32 field_index = 0; record.needs_unit_fitting && field_index < c_type->member_count; field_index += 1)
                 {
                     IrField* field = aggregate_type->fields + field_index;
                     IrType* field_type = ir_type_from_id(&program->types, field->type);

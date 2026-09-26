@@ -68,6 +68,8 @@ enum
     DW_AT_BIT_SIZE = 0x0d,
     DW_AT_ENCODING = 0x3e,
     DW_AT_UPPER_BOUND = 0x2f,
+    DW_AT_COUNT = 0x37,
+    DW_AT_DATA_BIT_OFFSET = 0x6b,
     DW_AT_DATA_MEMBER_LOCATION = 0x38,
     DW_AT_LOCATION = 0x02,
     DW_AT_FRAME_BASE = 0x40,
@@ -1216,12 +1218,21 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_abbreviations(DwarfBuffer* buffer, boo
     static const u32 padded_float_forms[] = {DW_FORM_STRP, DW_FORM_DATA8, DW_FORM_DATA8, DW_FORM_DATA1, DW_FORM_UDATA, DW_FORM_UDATA};
     static const u32 pointer_attributes[] = {DW_AT_TYPE, DW_AT_BYTE_SIZE};
     static const u32 pointer_forms[] = {DW_FORM_REF4, DW_FORM_DATA8};
-    static const u32 array_attributes[] = {DW_AT_TYPE, DW_AT_UPPER_BOUND, DW_AT_BYTE_SIZE};
-    static const u32 array_forms[] = {DW_FORM_REF4, DW_FORM_DATA8, DW_FORM_DATA8};
+    // An array's bounds belong to a DW_TAG_subrange_type child (DWARF 4
+    // 5.5.2, 5.11); an upper bound written on the array itself is invisible
+    // to debuggers, which showed every array empty (#1440).
+    static const u32 array_attributes[] = {DW_AT_TYPE, DW_AT_BYTE_SIZE};
+    static const u32 array_forms[] = {DW_FORM_REF4, DW_FORM_DATA8};
+    static const u32 subrange_attributes[] = {DW_AT_COUNT};
+    static const u32 subrange_forms[] = {DW_FORM_UDATA};
     static const u32 aggregate_attributes[] = {DW_AT_NAME, DW_AT_BYTE_SIZE, DW_AT_DECL_FILE, DW_AT_DECL_LINE};
     static const u32 aggregate_forms[] = {DW_FORM_STRP, DW_FORM_DATA8, DW_FORM_UDATA, DW_FORM_UDATA};
     static const u32 member_attributes[] = {DW_AT_NAME, DW_AT_TYPE, DW_AT_DATA_MEMBER_LOCATION, DW_AT_DECL_FILE, DW_AT_DECL_LINE};
     static const u32 member_forms[] = {DW_FORM_STRP, DW_FORM_REF4, DW_FORM_UDATA, DW_FORM_UDATA, DW_FORM_UDATA};
+    // A bit-field names its bits from the start of the record (DWARF 4
+    // 5.5.6): without them a debugger reads the whole declared type (#1440).
+    static const u32 bit_field_attributes[] = {DW_AT_NAME, DW_AT_TYPE, DW_AT_DATA_BIT_OFFSET, DW_AT_BIT_SIZE, DW_AT_DECL_FILE, DW_AT_DECL_LINE};
+    static const u32 bit_field_forms[] = {DW_FORM_STRP, DW_FORM_REF4, DW_FORM_UDATA, DW_FORM_UDATA, DW_FORM_UDATA, DW_FORM_UDATA};
     static const u32 enum_attributes[] = {DW_AT_NAME, DW_AT_BYTE_SIZE, DW_AT_DECL_FILE, DW_AT_DECL_LINE};
     static const u32 enum_forms[] = {DW_FORM_STRP, DW_FORM_DATA8, DW_FORM_UDATA, DW_FORM_UDATA};
     static const u32 enumerator_attributes[] = {DW_AT_NAME, DW_AT_CONST_VALUE, DW_AT_DECL_FILE, DW_AT_DECL_LINE};
@@ -1249,7 +1260,7 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_abbreviations(DwarfBuffer* buffer, boo
     dwarf_model_abbrev(buffer, 1, DW_TAG_COMPILE_UNIT, true, cu_attributes, cu_forms, BUSTER_ARRAY_LENGTH(cu_attributes));
     dwarf_model_abbrev(buffer, 2, DW_TAG_BASE_TYPE, false, base_attributes, base_forms, BUSTER_ARRAY_LENGTH(base_attributes));
     dwarf_model_abbrev(buffer, 3, DW_TAG_POINTER_TYPE, false, pointer_attributes, pointer_forms, BUSTER_ARRAY_LENGTH(pointer_attributes));
-    dwarf_model_abbrev(buffer, 4, DW_TAG_ARRAY_TYPE, false, array_attributes, array_forms, BUSTER_ARRAY_LENGTH(array_attributes));
+    dwarf_model_abbrev(buffer, 4, DW_TAG_ARRAY_TYPE, true, array_attributes, array_forms, BUSTER_ARRAY_LENGTH(array_attributes));
     dwarf_model_abbrev(buffer, 5, DW_TAG_STRUCTURE_TYPE, true, aggregate_attributes, aggregate_forms, BUSTER_ARRAY_LENGTH(aggregate_attributes));
     dwarf_model_abbrev(buffer, 6, DW_TAG_UNION_TYPE, true, aggregate_attributes, aggregate_forms, BUSTER_ARRAY_LENGTH(aggregate_attributes));
     dwarf_model_abbrev(buffer, 7, DW_TAG_MEMBER, false, member_attributes, member_forms, BUSTER_ARRAY_LENGTH(member_attributes));
@@ -1268,12 +1279,14 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_abbreviations(DwarfBuffer* buffer, boo
     dwarf_model_abbrev(buffer, 18, DW_TAG_INLINED_SUBROUTINE, true, inline_attributes, inline_forms, BUSTER_ARRAY_LENGTH(inline_attributes));
     dwarf_model_abbrev(buffer, 19, DW_TAG_CONST_TYPE, false, qualified_attributes, qualified_forms, BUSTER_ARRAY_LENGTH(qualified_attributes));
     dwarf_model_abbrev(buffer, 20, DW_TAG_UNSPECIFIED_TYPE, false, void_attributes, void_forms, BUSTER_ARRAY_LENGTH(void_attributes));
-    dwarf_model_abbrev(buffer, 21, DW_TAG_ARRAY_TYPE, false, array_attributes, array_forms, BUSTER_ARRAY_LENGTH(array_attributes));
+    dwarf_model_abbrev(buffer, 21, DW_TAG_ARRAY_TYPE, true, array_attributes, array_forms, BUSTER_ARRAY_LENGTH(array_attributes));
     dwarf_model_abbrev(buffer, 22, DW_TAG_SUBROUTINE_TYPE, false, function_type_attributes, function_type_forms,
                        BUSTER_ARRAY_LENGTH(function_type_attributes));
     dwarf_model_abbrev(buffer, 23, DW_TAG_SUBPROGRAM, false, function_attributes, function_forms, BUSTER_ARRAY_LENGTH(function_attributes));
     dwarf_model_abbrev(buffer, 24, DW_TAG_LEXICAL_BLOCK, false, lexical_attributes, lexical_forms, BUSTER_ARRAY_LENGTH(lexical_attributes));
     dwarf_model_abbrev(buffer, 25, DW_TAG_INLINED_SUBROUTINE, false, inline_attributes, inline_forms, BUSTER_ARRAY_LENGTH(inline_attributes));
+    dwarf_model_abbrev(buffer, 27, DW_TAG_SUBRANGE_TYPE, false, subrange_attributes, subrange_forms, BUSTER_ARRAY_LENGTH(subrange_attributes));
+    dwarf_model_abbrev(buffer, 28, DW_TAG_MEMBER, false, bit_field_attributes, bit_field_forms, BUSTER_ARRAY_LENGTH(bit_field_attributes));
     if (include_padded_float)
     {
         // Keep abbreviation 2 and the complete no-padded-float table byte for
@@ -1332,16 +1345,15 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_type(DwarfModelWriter* writer, DebugTy
         dwarf_emit_u64(&writer->info, type->size);
         break;
     case DEBUG_TYPE_ARRAY:
-        dwarf_emit_uleb128(&writer->info, 4);
-        dwarf_model_type_reference(writer, type->element_type);
-        dwarf_emit_u64(&writer->info, type->element_count ? type->element_count - 1 : 0);
-        dwarf_emit_u64(&writer->info, type->size);
-        break;
     case DEBUG_TYPE_VECTOR:
-        dwarf_emit_uleb128(&writer->info, 21);
+        // One subrange per array type: a C array of arrays is an array type
+        // whose element is another array type, each with its own count.
+        dwarf_emit_uleb128(&writer->info, type->kind == DEBUG_TYPE_ARRAY ? 4 : 21);
         dwarf_model_type_reference(writer, type->element_type);
-        dwarf_emit_u64(&writer->info, type->element_count ? type->element_count - 1 : 0);
         dwarf_emit_u64(&writer->info, type->size);
+        dwarf_emit_uleb128(&writer->info, 27);
+        dwarf_emit_uleb128(&writer->info, type->element_count);
+        dwarf_emit_u8(&writer->info, 0);
         break;
     case DEBUG_TYPE_STRUCT:
     case DEBUG_TYPE_UNION:
@@ -1352,10 +1364,18 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_type(DwarfModelWriter* writer, DebugTy
         for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
         {
             DebugTypeField* field = type->fields + field_index;
-            dwarf_emit_uleb128(&writer->info, 7);
+            dwarf_emit_uleb128(&writer->info, field->is_bit_field ? 28 : 7);
             dwarf_model_string(writer, field->name);
             dwarf_model_type_reference(writer, field->type);
-            dwarf_emit_uleb128(&writer->info, field->offset);
+            if (field->is_bit_field)
+            {
+                dwarf_emit_uleb128(&writer->info, field->offset * 8 + field->bit_offset);
+                dwarf_emit_uleb128(&writer->info, field->bit_width);
+            }
+            else
+            {
+                dwarf_emit_uleb128(&writer->info, field->offset);
+            }
             dwarf_model_emit_declaration(writer, field->declaration);
         }
         dwarf_emit_u8(&writer->info, 0);

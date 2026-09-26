@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/dwarf/dwarf_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/codegen/codegen.h>
+#include <buster/lib/string.h>
 
 
 BUSTER_GLOBAL_LOCAL bool dwarf_test_read_uleb128(ByteSlice bytes, u64* offset, u64* value)
@@ -473,9 +474,148 @@ BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_list_bases(UnitTestArguments* argu
     return result;
 }
 
+// Array bounds and bit-field geometry, checked against the DWARF 4 encodings
+// rather than against dwarf.c's own names (#1440): bounds live on a
+// DW_TAG_subrange_type child (5.5.2, 5.11) -- written on the array itself
+// they were invisible, and lldb printed every array as {} -- and a bit-field
+// names its bits from the record's start with DW_AT_data_bit_offset and
+// DW_AT_bit_size (5.5.6) -- without them lldb read the whole declared type.
+// The expected numbers are the model's; the model's layout is checked against
+// Clang by record_layout_tests.
+BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_array_and_bit_field_geometry(UnitTestArguments* arguments)
+{
+    enum
+    {
+        DWARF_SPEC_TAG_ARRAY_TYPE = 0x01,
+        DWARF_SPEC_TAG_MEMBER = 0x0d,
+        DWARF_SPEC_TAG_SUBRANGE_TYPE = 0x21,
+        DWARF_SPEC_AT_NAME = 0x03,
+        DWARF_SPEC_AT_BIT_SIZE = 0x0d,
+        DWARF_SPEC_AT_UPPER_BOUND = 0x2f,
+        DWARF_SPEC_AT_COUNT = 0x37,
+        DWARF_SPEC_AT_DATA_MEMBER_LOCATION = 0x38,
+        DWARF_SPEC_AT_DATA_BIT_OFFSET = 0x6b,
+    };
+    UnitTestResult result = {0};
+    String8 path = S8("geometry.c");
+    DebugTypeField fields[] = {
+        {.name = S8("a"), .type = 1, .offset = 0},
+        {.name = S8("b"), .type = 0, .offset = 0, .bit_offset = 8, .bit_width = 3, .is_bit_field = true},
+        {.name = S8("c"), .type = 0, .offset = 4, .bit_offset = 5, .bit_width = 13, .is_bit_field = true},
+    };
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("unsigned int"), .size = 4},
+        {.kind = DEBUG_TYPE_BASE, .name = S8("char"), .size = 1, .is_signed = true},
+        {.kind = DEBUG_TYPE_ARRAY, .element_type = 0, .element_count = 7, .size = 28},
+        {.kind = DEBUG_TYPE_ARRAY, .element_type = 2, .element_count = 3, .size = 84},
+        {.kind = DEBUG_TYPE_STRUCT, .name = S8("geometry"), .size = 8, .fields = fields, .field_count = BUSTER_ARRAY_LENGTH(fields)},
+        {.kind = DEBUG_TYPE_FUNCTION, .return_type = 0},
+    };
+    DebugFunction function = {.name = S8("geometry_function"), .type = 5, .scope = DEBUG_SCOPE_INVALID, .code_size = 0x10};
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .functions = &function, .function_count = 1, .valid = true};
+    DwarfResult built = dwarf_build(arguments->arena, (DwarfInput){.model = &model, .file_paths = &path, .file_count = 1,
+        .producer = S8("buster"), .comp_dir = S8("."), .code_size = 0x10, .target = {.cpu_arch = CPU_ARCH_X86_64}});
+    if (BUSTER_REQUIRE(arguments, built.valid))
+    {
+        ByteSlice info = built.sections[DWARF_SECTION_INFO];
+        ByteSlice abbreviations = built.sections[DWARF_SECTION_ABBREV];
+        ByteSlice strings = built.sections[DWARF_SECTION_STR];
+        // A DW_FORM_strp slot is written as zero with its .debug_str offset
+        // in a relocation, as a linker would resolve it.
+        for (u32 index = 0; index < built.relocation_count; index += 1)
+        {
+            DwarfRelocation relocation = built.relocations[index];
+            if (!relocation.address && relocation.section == DWARF_SECTION_INFO && relocation.target == DWARF_SECTION_STR &&
+                relocation.offset + 4 <= info.length)
+            {
+                u32 string_offset = (u32)relocation.addend;
+                memcpy(info.pointer + relocation.offset, &string_offset, sizeof(string_offset));
+            }
+        }
+        u64 cursor = 11;
+        u32 arrays_with_children = 0;
+        u32 arrays_with_upper_bound = 0;
+        u64 counts[4] = {0};
+        u32 count_total = 0;
+        bool b_checked = false;
+        bool c_checked = false;
+        bool valid = true;
+        while (valid && cursor < info.length)
+        {
+            u64 number = 0;
+            valid = dwarf_test_read_uleb128(info, &cursor, &number);
+            DwarfTestAbbrev abbreviation = {0};
+            if (!valid || !number)
+            {
+                continue;
+            }
+            valid = dwarf_test_find_abbrev(abbreviations, (u32)number, &abbreviation);
+            String8 name = {0};
+            u64 data_bit_offset = UINT64_MAX;
+            u64 bit_size = UINT64_MAX;
+            u64 count = UINT64_MAX;
+            bool member_location = false;
+            for (u32 index = 0; valid && index < abbreviation.attribute_count; index += 1)
+            {
+                u32 attribute = abbreviation.attributes[index];
+                u32 form = abbreviation.forms[index];
+                u64 value = 0;
+                if (form == DWARF_TEST_FORM_UDATA)
+                {
+                    valid = dwarf_test_read_uleb128(info, &cursor, &value);
+                }
+                else if (form == DWARF_TEST_FORM_STRP && cursor + 4 <= info.length)
+                {
+                    u32 string_offset = 0;
+                    memcpy(&string_offset, info.pointer + cursor, sizeof(string_offset));
+                    cursor += 4;
+                    value = string_offset;
+                    u64 end = string_offset;
+                    while (end < strings.length && strings.pointer[end])
+                    {
+                        end += 1;
+                    }
+                    name = string_offset < strings.length ? (String8){.pointer = (char8*)strings.pointer + string_offset, .length = end - string_offset}
+                                                          : (String8){0};
+                }
+                else
+                {
+                    valid = dwarf_test_skip_form(info, &cursor, form);
+                }
+                data_bit_offset = attribute == DWARF_SPEC_AT_DATA_BIT_OFFSET ? value : data_bit_offset;
+                bit_size = attribute == DWARF_SPEC_AT_BIT_SIZE ? value : bit_size;
+                count = attribute == DWARF_SPEC_AT_COUNT ? value : count;
+                member_location |= attribute == DWARF_SPEC_AT_DATA_MEMBER_LOCATION;
+                arrays_with_upper_bound += abbreviation.tag == DWARF_SPEC_TAG_ARRAY_TYPE && attribute == DWARF_SPEC_AT_UPPER_BOUND;
+            }
+            arrays_with_children += abbreviation.tag == DWARF_SPEC_TAG_ARRAY_TYPE && abbreviation.children;
+            if (abbreviation.tag == DWARF_SPEC_TAG_SUBRANGE_TYPE && count_total < BUSTER_ARRAY_LENGTH(counts))
+            {
+                counts[count_total++] = count;
+            }
+            if (abbreviation.tag == DWARF_SPEC_TAG_MEMBER && string_equal(name, S8("b")))
+            {
+                b_checked = data_bit_offset == 8 && bit_size == 3 && !member_location;
+            }
+            if (abbreviation.tag == DWARF_SPEC_TAG_MEMBER && string_equal(name, S8("c")))
+            {
+                c_checked = data_bit_offset == 4 * 8 + 5 && bit_size == 13 && !member_location;
+            }
+        }
+        BUSTER_TEST(arguments, valid);
+        BUSTER_TEST(arguments, arrays_with_children == 2 && arrays_with_upper_bound == 0);
+        BUSTER_TEST(arguments, count_total == 2 && counts[0] == 7 && counts[1] == 3);
+        BUSTER_TEST(arguments, b_checked && c_checked);
+    }
+    return result;
+}
+
 UnitTestResult dwarf_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = dwarf_test_list_bases(arguments);
+    UnitTestResult geometry = dwarf_test_array_and_bit_field_geometry(arguments);
+    result.succeeded_test_count += geometry.succeeded_test_count;
+    result.test_count += geometry.test_count;
     String8 files[] = {
         S8_INITIALIZER("main.c"),
         S8_INITIALIZER("helper.h"),

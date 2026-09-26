@@ -52,6 +52,7 @@ enum
     CV_LF_PROCEDURE = 0x1008,
     CV_LF_ARGLIST = 0x1201,
     CV_LF_FIELDLIST = 0x1203,
+    CV_LF_BITFIELD = 0x1205,
     CV_LF_INDEX = 0x1404,
     CV_LF_ENUMERATE = 0x1502,
     CV_LF_ARRAY = 0x1503,
@@ -60,7 +61,11 @@ enum
     CV_LF_ENUM = 0x1507,
     CV_LF_ALIAS = 0x150a,
     CV_LF_MEMBER = 0x150d,
-    CV_LF_ULONG = 0x8003,
+    // A numeric leaf names its payload's signedness: LF_LONG is a signed
+    // 32-bit value, LF_ULONG an unsigned one. Sizes and offsets are unsigned;
+    // they were all written as LF_LONG (#1440).
+    CV_LF_LONG = 0x8003,
+    CV_LF_ULONG = 0x8004,
 };
 
 #define CODEVIEW_LINE_STATEMENT 0x80000000u
@@ -118,6 +123,38 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_numeric_u32(ByteWriter* buffer, u64 value
 {
     byte_writer_emit_u16_le(buffer, CV_LF_ULONG);
     byte_writer_emit_u32_le(buffer, (u32)BUSTER_MIN(value, UINT32_MAX));
+}
+
+// A value of a signed type: LF_LONG, saturated to its 32-bit range like the
+// unsigned form, so every numeric keeps the six bytes the field-list budget
+// reserves.
+BUSTER_GLOBAL_LOCAL void codeview_emit_numeric(ByteWriter* buffer, u64 value, bool is_signed)
+{
+    s64 signed_value = (s64)value;
+    if (is_signed)
+    {
+        byte_writer_emit_u16_le(buffer, CV_LF_LONG);
+        byte_writer_emit_u32_le(buffer, (u32)(s32)BUSTER_MAX(BUSTER_MIN(signed_value, (s64)INT32_MAX), (s64)INT32_MIN));
+    }
+    else
+    {
+        codeview_emit_numeric_u32(buffer, value);
+    }
+}
+
+// Whether a model type's values are signed, looking through typedefs and
+// qualifiers to the base or enumeration type that decides it.
+BUSTER_GLOBAL_LOCAL bool codeview_model_type_signed(DebugModel* model, DebugTypeId type)
+{
+    bool result = false;
+    for (u32 depth = 0; depth < 16 && model && type != DEBUG_ID_INVALID && type < model->type_count; depth += 1)
+    {
+        DebugType* entry = model->types + type;
+        bool alias = entry->kind == DEBUG_TYPE_TYPEDEF || entry->kind == DEBUG_TYPE_QUALIFIED;
+        result = alias ? result : entry->is_signed;
+        type = !alias ? DEBUG_ID_INVALID : entry->unqualified_type != DEBUG_ID_INVALID ? entry->unqualified_type : entry->element_type;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u32 codeview_model_type_index(DebugModel* model, DebugTypeId type)
@@ -365,7 +402,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_debug_variable(ByteWriter* symbols, Debug
         {
             u64 record = codeview_record_begin(symbols, S_CONSTANT);
             byte_writer_emit_u32_le(symbols, codeview_model_type_index(model, variable->type));
-            codeview_emit_numeric_u32(symbols, variable->locations[0].location.constant);
+            codeview_emit_numeric(symbols, variable->locations[0].location.constant, codeview_model_type_signed(model, variable->type));
             codeview_emit_name(symbols, variable->name);
             codeview_record_end(symbols, record);
         }
@@ -632,6 +669,25 @@ BUSTER_GLOBAL_LOCAL u32 codeview_emit_field_list(ByteWriter* types, DebugModel* 
             types->overflow = true;
             break;
         }
+        // A bit-field member's type is an LF_BITFIELD naming its declared
+        // type, width and position inside the storage unit LF_MEMBER's offset
+        // names; the records precede the list that references them, one index
+        // each in member order (#1440).
+        u32 bit_field_index = *next_index;
+        for (u32 index = begin; type->kind != DEBUG_TYPE_ENUM && index < end; index += 1)
+        {
+            DebugTypeField* field = type->fields + index;
+            if (field->is_bit_field)
+            {
+                types->overflow |= field->bit_width > UINT8_MAX || field->bit_offset > UINT8_MAX;
+                u64 bit_field = codeview_type_record_begin(types, CV_LF_BITFIELD);
+                byte_writer_emit_u32_le(types, codeview_model_type_index(model, field->type));
+                byte_writer_emit_u8(types, (u8)field->bit_width);
+                byte_writer_emit_u8(types, (u8)field->bit_offset);
+                codeview_type_record_end(types, bit_field);
+                *next_index += 1;
+            }
+        }
         u64 record = codeview_type_record_begin(types, CV_LF_FIELDLIST);
         for (u32 index = begin; index < end; index += 1)
         {
@@ -640,7 +696,7 @@ BUSTER_GLOBAL_LOCAL u32 codeview_emit_field_list(ByteWriter* types, DebugModel* 
                 DebugEnumMember* member = type->enum_members + index;
                 byte_writer_emit_u16_le(types, CV_LF_ENUMERATE);
                 byte_writer_emit_u16_le(types, 0);
-                codeview_emit_numeric_u32(types, member->value);
+                codeview_emit_numeric(types, member->value, type->is_signed);
                 codeview_emit_name(types, member->name);
             }
             else
@@ -648,7 +704,7 @@ BUSTER_GLOBAL_LOCAL u32 codeview_emit_field_list(ByteWriter* types, DebugModel* 
                 DebugTypeField* field = type->fields + index;
                 byte_writer_emit_u16_le(types, CV_LF_MEMBER);
                 byte_writer_emit_u16_le(types, 0);
-                byte_writer_emit_u32_le(types, codeview_model_type_index(model, field->type));
+                byte_writer_emit_u32_le(types, field->is_bit_field ? bit_field_index++ : codeview_model_type_index(model, field->type));
                 codeview_emit_numeric_u32(types, field->offset);
                 codeview_emit_name(types, field->name);
             }
@@ -693,7 +749,8 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(ByteWriter* types, DebugModel
         {
             byte_writer_emit_u32_le(types, codeview_model_type_index(model, type->element_type));
             byte_writer_emit_u32_le(types, 0x0074);
-            codeview_emit_numeric_u32(types, type->element_count);
+            // The array's size in bytes, not its element count (#1440).
+            codeview_emit_numeric_u32(types, type->size);
             codeview_emit_name(types, type->name);
         }
         else if (type->kind == DEBUG_TYPE_STRUCT || type->kind == DEBUG_TYPE_UNION)
