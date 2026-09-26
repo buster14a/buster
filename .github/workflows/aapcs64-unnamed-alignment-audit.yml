@@ -1,0 +1,98 @@
+name: AAPCS64 unnamed-field independent oracle
+on:
+  push:
+    branches: [research/aapcs64-unnamed-alignment-20260925-astra]
+    paths:
+      - .github/workflows/aapcs64-unnamed-alignment-audit.yml
+      - tools/investigations/aapcs64-unnamed-20260925/**
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-26.04-arm
+            target: aarch64-linux
+          - runner: ubuntu-26.04
+            target: x86_64-linux
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      BUSTER_TEST_JOBS: 2
+      PROBE_TARGET: ${{ matrix.target }}
+    steps:
+      - name: Require enabled hosted correctness
+        env:
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: test "$CI_ENABLED" = true
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin untouched compiler in isolated worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/results evidence/source
+          git worktree add --detach "$RUNNER_TEMP/alignment-production" ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          cd "$RUNNER_TEMP/alignment-production"
+          test "$(git rev-parse HEAD)" = ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          test "$(git rev-parse HEAD^{tree})" = 4c5306221fdb22fccc929b55e333163742de17d0
+          git diff --exit-code
+          git status --porcelain > "$GITHUB_WORKSPACE/evidence/production-status.txt"
+          git rev-parse HEAD HEAD^{tree} > "$GITHUB_WORKSPACE/evidence/production.txt"
+          git -C "$GITHUB_WORKSPACE" rev-parse HEAD HEAD^{tree} > "$GITHUB_WORKSPACE/evidence/probe.txt"
+          cp src/buster/lib/compiler/frontend/c/c_parse.c "$GITHUB_WORKSPACE/evidence/source/"
+          cp src/buster/lib/compiler/frontend/c/c_gen.c "$GITHUB_WORKSPACE/evidence/source/"
+          cp src/buster/lib/compiler/ir/ir.c "$GITHUB_WORKSPACE/evidence/source/"
+          cp "$GITHUB_WORKSPACE/tools/investigations/aapcs64-unnamed-20260925/"*.c "$GITHUB_WORKSPACE/evidence/source/"
+          { uname -a; clang --version; gcc --version; lscpu; } > "$GITHUB_WORKSPACE/evidence/host.txt"
+      - name: Build production on this runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/alignment-production"
+          {
+            clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/alignment-build"
+            "$RUNNER_TEMP/alignment-build" generate --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF
+            "$RUNNER_TEMP/alignment-build" build --config Release -t ide
+          } 2>&1 | tee "$GITHUB_WORKSPACE/evidence/build.log"
+          git diff --exit-code
+          sha256sum build/Release/ide > "$GITHUB_WORKSPACE/evidence/compiler.sha256"
+      - name: Execute independent observer matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c17 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/investigations/aapcs64-unnamed-20260925/runner.c -o "$RUNNER_TEMP/alignment-probe"
+          "$RUNNER_TEMP/alignment-probe" "$RUNNER_TEMP/alignment-production/build/Release/ide" "$GITHUB_WORKSPACE/tools/investigations/aapcs64-unnamed-20260925" "$GITHUB_WORKSPACE/evidence/results" "$PROBE_TARGET" | tee evidence/runner.log
+      - name: Execute minimized whole-program witness
+        if: ${{ !cancelled() && steps.build.outcome != 'failure' }}
+        shell: bash
+        run: |
+          set +e
+          SRC="$GITHUB_WORKSPACE/tools/investigations/aapcs64-unnamed-20260925/minimal.c"
+          "$RUNNER_TEMP/alignment-production/build/Release/ide" cc -std=c17 -target "$PROBE_TARGET" -O0 -g0 -fwrapv -fno-strict-aliasing -funsigned-char -fverify-codegen -fregister-allocator=fast -ffrontend-ssa -fno-machine-fallback "$SRC" -o evidence/minimal-buster > evidence/minimal-buster-compile.log 2>&1
+          echo "buster compile=$?" > evidence/minimal-status.txt
+          timeout 30s evidence/minimal-buster > evidence/minimal-buster-run.log 2>&1
+          echo "buster execute=$?" >> evidence/minimal-status.txt
+          clang -std=c17 -O0 "$SRC" -o evidence/minimal-clang > evidence/minimal-clang-compile.log 2>&1
+          echo "clang compile=$?" >> evidence/minimal-status.txt
+          timeout 30s evidence/minimal-clang > evidence/minimal-clang-run.log 2>&1
+          echo "clang execute=$?" >> evidence/minimal-status.txt
+          gcc -std=c17 -O0 "$SRC" -o evidence/minimal-gcc > evidence/minimal-gcc-compile.log 2>&1
+          echo "gcc compile=$?" >> evidence/minimal-status.txt
+          timeout 30s evidence/minimal-gcc > evidence/minimal-gcc-run.log 2>&1
+          echo "gcc execute=$?" >> evidence/minimal-status.txt
+          cat evidence/minimal-status.txt
+      - name: Preserve all outcomes
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: aapcs64-unnamed-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 30
+          if-no-files-found: error
