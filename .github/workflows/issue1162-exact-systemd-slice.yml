@@ -11,6 +11,9 @@ on:
       - .github/scripts/issue1162_stage_observer.py
       - .github/scripts/issue1162_workspace_observer.py
       - .github/scripts/issue1162_manager_denial_probe.py
+      - .github/scripts/issue1162_broker_observer.py
+      - .github/scripts/issue1162_broker_evidence.py
+      - .github/scripts/issue1162_frozen_tree_evidence.py
       - .github/scripts/issue1162_ancestor_preflight_test.py
 
 concurrency:

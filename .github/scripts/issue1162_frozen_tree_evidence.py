@@ -38,15 +38,23 @@ MAX_HASHED = 2 * 1024 * 1024 * 1024
 MAX_LINE = MAX_PATH * 2 + 512
 U64 = (1 << 64) - 1
 I64 = (1 << 63) - 1
+MIN_I64 = -(1 << 63)
+MAX_STAT_NS = I64 * 1000000000 + 999999999
+MIN_STAT_NS = MIN_I64 * 1000000000
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 BOOT = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 DECIMAL = re.compile(rb"(?:0|[1-9][0-9]*)\Z")
-TIME = re.compile(rb"(0|[1-9][0-9]*)\.([0-9]{9})\Z")
+TIME = re.compile(rb"(0|[1-9][0-9]*|-[1-9][0-9]*)\.([0-9]{9})\Z")
 NODE_KEYS = frozenset(("path", "type", "device", "inode", "links", "mode", "uid", "gid",
                        "size", "mtime_ns", "ctime_ns"))
+IDENTITY_KEYS = frozenset(("job", "attempt", "request_sha256", "boot_id", "outer_unit",
+                           "outer_invocation", "outer_cgroup", "outer_cgroup_device",
+                           "outer_cgroup_inode", "cgroup_root_device", "cgroup_root_inode",
+                           "slice_device", "slice_inode", "worker_sha256", "instance_sha256"))
+MANIFEST_IDENTITY_KEYS = frozenset(("device", "inode", "mode", "uid", "gid", "links", "size"))
 
 
 class EvidenceError(ValueError):
@@ -69,9 +77,15 @@ def integer(raw: bytes, maximum: int = U64) -> int:
 def timestamp(raw: bytes) -> int:
     match = TIME.fullmatch(raw)
     require(match is not None and len(raw) <= 30, "noncanonical nanosecond timestamp")
-    seconds = integer(match.group(1), I64 // 1000000000)
+    seconds = int(match.group(1))
+    require(MIN_I64 <= seconds <= I64, "timestamp seconds overflow")
     value = seconds * 1000000000 + int(match.group(2))
-    require(value <= I64, "timestamp overflow")
+    return value
+
+
+def json_timestamp(value: object) -> int:
+    require(type(value) is int and MIN_STAT_NS <= value <= MAX_STAT_NS,
+            "external timestamp outside producer timespec range")
     return value
 
 
@@ -162,7 +176,7 @@ def receipt_node(line: bytes) -> tuple[bytes, dict]:
     require(kind is not None, "invalid node type")
     values = [integer(field) for field in parts[3:10]]
     device, inode, links, mode, uid, gid, size = values
-    require(inode > 0 and links > 0 and mode <= 0o7777 and size <= MAX_FILE and
+    require(links > 0 and mode <= 0o7777 and size <= MAX_FILE and
             uid <= 0xffffffff and gid <= 0xffffffff,
             "node metadata out of bounds")
     require((kind == "dir" and mode == 0o550) or
@@ -280,10 +294,11 @@ def external_nodes(raw_nodes: object, binary_digest: str) -> tuple[dict[bytes, d
         expected_keys = NODE_KEYS | ({"sha256"} if kind == "file" and
                                      type(item.get("mode")) is int and item["mode"] & 0o111 else set())
         require(item.keys() == expected_keys, "external inventory node fields differ")
-        numeric = {key: bounded_int(item[key], I64 if key in ("mtime_ns", "ctime_ns") else U64)
+        numeric = {key: (json_timestamp(item[key]) if key in ("mtime_ns", "ctime_ns")
+                         else bounded_int(item[key]))
                    for key in ("device", "inode", "links", "mode", "uid", "gid",
                                "size", "mtime_ns", "ctime_ns")}
-        require(numeric["inode"] > 0 and numeric["links"] > 0 and
+        require(numeric["links"] > 0 and
                 numeric["size"] <= MAX_FILE and numeric["mode"] <= 0o7777 and
                 numeric["uid"] <= 0xffffffff and numeric["gid"] <= 0xffffffff and
                 ((kind == "dir" and numeric["mode"] == 0o550) or
@@ -316,13 +331,24 @@ def stage_context(observation: dict, source_commit: str, source_tree: str,
             HEX40.fullmatch(source_tree) is not None and build_blob == PRODUCER_BUILD_BLOB,
             "integrated source identity or reviewed build.c blob mismatch")
     identity = observation.get("identity")
-    require(type(identity) is dict and type(observation.get("job")) is int and
+    require(type(identity) is dict and identity.keys() == IDENTITY_KEYS and
+            type(observation.get("job")) is int and
             observation["job"] > 0 and type(identity.get("attempt")) is int and
             identity["attempt"] > 0 and identity.get("job") == observation["job"] and
             type(observation.get("request_sha256")) is str and
             HEX64.fullmatch(observation["request_sha256"]) is not None and
             identity.get("request_sha256") == observation["request_sha256"],
             "stage observation job/attempt/request identity missing")
+    outer_unit = f"buster-bench-{observation['job']}-{identity['attempt']}.service"
+    require(identity["outer_unit"] == outer_unit and
+            identity["outer_cgroup"] == f"/buster.slice/buster-bench.slice/{outer_unit}" and
+            type(identity["outer_invocation"]) is str and
+            HEX32.fullmatch(identity["outer_invocation"]) is not None and
+            identity["outer_invocation"] != "0" * 32 and
+            all(bounded_int(identity[key]) > 0 for key in
+                ("outer_cgroup_device", "outer_cgroup_inode", "cgroup_root_device",
+                 "cgroup_root_inode", "slice_device", "slice_inode")),
+            "outer worker invocation or cgroup ancestry identity mismatch")
     baseline, subject, boot = observation.get("baseline"), observation.get("subject"), identity.get("boot_id")
     require(type(identity.get("worker_sha256")) is str and
             HEX64.fullmatch(identity["worker_sha256"]) is not None and
@@ -340,7 +366,9 @@ def stage_context(observation: dict, source_commit: str, source_tree: str,
             set(observation["inventories"]) == set(BUILD_STAGES),
             "independent stage structure or final record check incomplete")
     throughput_start = None
-    for stage, captured in observation["stages"].items():
+    previous_start = 0
+    for stage in STAGES:
+        captured = observation["stages"][stage]
         require(type(captured) is dict and captured.get("stage") == stage and
                 captured.get("unit") ==
                 f"buster-bench-{observation['job']}-{identity['attempt']}-{stage}.service" and
@@ -351,13 +379,16 @@ def stage_context(observation: dict, source_commit: str, source_tree: str,
         bounded_int(captured.get("exec_main_start_monotonic_us"))
         require(captured["exec_main_start_monotonic_us"] > 0,
                 "live stage start monotonic timestamp missing")
+        require(captured["exec_main_start_monotonic_us"] >= previous_start,
+                "live stage starts contradict recipe graph order")
+        previous_start = captured["exec_main_start_monotonic_us"]
         live = captured.get("identity")
         require(type(live) is dict and type(live.get("invocation")) is str and
                 HEX32.fullmatch(live["invocation"]) is not None and
                 live["invocation"] != "0" * 32 and
                 bounded_int(live.get("main_pid")) > 0 and
-                bounded_int(live.get("device")) > 0 and
-                bounded_int(live.get("inode")) > 0 and
+                bounded_int(live.get("device")) >= 0 and
+                bounded_int(live.get("inode")) >= 0 and
                 bounded_int(live.get("process_starttime_ticks")) > 0 and
                 live.get("cgroup") ==
                 f"/buster.slice/buster-bench.slice/{captured['unit']}",
@@ -398,11 +429,14 @@ def verify_stage(directory: Path, receipt_path: Path, observation: dict,
                              context["subject"], workspace_root)
     digest = fields[digest_key]
     manifest_sha = hashlib.sha256(raw_manifest).hexdigest()
+    manifest_identity = summary.get("manifest_identity")
     require(summary.get("manifest_sha256") == manifest_sha and
-            type(summary.get("manifest_identity")) is dict and
-            summary["manifest_identity"].get("mode") == 0o400 and
-            summary["manifest_identity"].get("links") == 1 and
-            summary["manifest_identity"].get("size") == len(raw_manifest),
+            type(manifest_identity) is dict and
+            manifest_identity.keys() == MANIFEST_IDENTITY_KEYS and
+            all(bounded_int(manifest_identity[key]) >= 0 for key in ("device", "inode")) and
+            all(bounded_int(manifest_identity[key]) <= 0xffffffff for key in ("uid", "gid")) and
+            manifest_identity["mode"] == 0o400 and manifest_identity["links"] == 1 and
+            manifest_identity["size"] == len(raw_manifest),
             "published success manifest hash or identity mismatch")
     checks["successful_stage_manifest"] = True
     require(receipt_path.name == f"validate-buster-v1.{stage}.inventory",
@@ -429,8 +463,17 @@ def verify_stage(directory: Path, receipt_path: Path, observation: dict,
     require(bounded_int(independent.get("complete_monotonic_us")) > 0 and
             summary.get("complete_monotonic_us") == independent["complete_monotonic_us"],
             "external inventory completion timestamp mismatch")
+    require(independent["complete_monotonic_us"] >=
+            observation["stages"][stage]["exec_main_start_monotonic_us"],
+            "external inventory predates its own live build stage")
     compare_maps(source["nodes"], node_map)
     checks["full_independent_map_equality"] = True
+    next_stage = "candidate-generate" if stage == "base-build" else "throughput"
+    own_start = observation["stages"][stage]["exec_main_start_monotonic_us"]
+    next_start = observation["stages"][next_stage]["exec_main_start_monotonic_us"]
+    require(own_start <= source["complete_monotonic_us"] <= next_start,
+            "source scan timestamp contradicts own build or next graph stage start")
+    checks["stage_graph_chronology"] = True
     require(source["complete_monotonic_us"] < context["throughput_start_us"],
             "source scan did not complete before exact throughput start")
     checks["source_scan_before_throughput"] = True
@@ -480,7 +523,8 @@ def verify_artifacts(directory: Path, receipts: dict[str, Path], source_commit: 
         result["original_timing_causes"] = context["timing_causes"]
         for stage in BUILD_STAGES:
             checks = {"successful_stage_manifest": False, "source_receipt_integrity": False,
-                      "full_independent_map_equality": False, "source_scan_before_throughput": False}
+                      "full_independent_map_equality": False, "stage_graph_chronology": False,
+                      "source_scan_before_throughput": False}
             result["components"]["stages"][stage] = checks
             try:
                 result.setdefault("stage_evidence", {})[stage] = verify_stage(
@@ -546,7 +590,16 @@ def self_test() -> None:
         receipts = {}
         identity = {"job": job, "attempt": attempt, "request_sha256": "b" * 64,
                     "boot_id": boot, "worker_sha256": "c" * 64,
-                    "instance_sha256": "d" * 64}
+                    "instance_sha256": "d" * 64,
+                    "outer_unit": f"buster-bench-{job}-{attempt}.service",
+                    "outer_invocation": "f" * 32,
+                    "outer_cgroup": f"/buster.slice/buster-bench.slice/"
+                                    f"buster-bench-{job}-{attempt}.service",
+                    "outer_cgroup_device": 3, "outer_cgroup_inode": 4,
+                    "cgroup_root_device": 3, "cgroup_root_inode": 2,
+                    "slice_device": 3, "slice_inode": 3}
+        starts = {"base-generate": 1, "base-build": 20, "candidate-generate": 150,
+                  "candidate-build": 175, "throughput": 300}
         observation: dict = {"verdict": "OBSERVATION_INCONCLUSIVE", "job": job,
                              "request_sha256": identity["request_sha256"],
                              "baseline": baseline, "subject": subject, "identity": identity,
@@ -558,7 +611,7 @@ def self_test() -> None:
         for stage in STAGES:
             observation["stages"][stage] = {
                 "stage": stage, "unit": f"buster-bench-{job}-{attempt}-{stage}.service",
-                "boot_id": boot, "exec_main_start_monotonic_us": 300 if stage == "throughput" else 10,
+                "boot_id": boot, "exec_main_start_monotonic_us": starts[stage],
                 "record_worker_sha256": identity["worker_sha256"],
                 "record_instance_sha256": identity["instance_sha256"],
                 "identity": {"invocation": "e" * 32, "main_pid": 100 + len(stage),
@@ -582,7 +635,8 @@ def self_test() -> None:
                         digest_field: digest}
             manifest_raw = "".join(f"{key}={value}\n" for key, value in manifest.items()).encode()
             (observer / f"{stage}-published-manifest.txt").write_bytes(manifest_raw)
-            manifest_identity = {"mode": 0o400, "links": 1, "size": len(manifest_raw)}
+            manifest_identity = {"device": 3, "inode": 400 + index, "mode": 0o400,
+                                 "uid": 0, "gid": 0, "links": 1, "size": len(manifest_raw)}
             nodes = []
             lines = []
             for number, (path, kind_node, mode, size, sha) in enumerate(
@@ -651,7 +705,7 @@ def self_test() -> None:
         reject(base, original[base].replace(b"node-lines-sha256=", b"node-lines-sha256=0"),
                "node-line checksum")
         reject(base, original[base].replace(b"scan-complete-monotonic-us=100\n",
-                                            b"scan-complete-monotonic-us=400\n"), "source scan did not complete")
+                                            b"scan-complete-monotonic-us=400\n"), "source scan timestamp contradicts")
         reject(base, original[base].replace(b"node\t2e\t", b"node\t2E\t"), "lowercase hex path")
         first_line = original[base].split(b"\n")[9] + b"\n"
         reject(base, original[base].replace(first_line, first_line * 2), "duplicate decoded node path")
@@ -682,12 +736,54 @@ def self_test() -> None:
         reject(observation_path, (json.dumps(changed, sort_keys=True, indent=2) + "\n").encode(),
                "summary differs from hashed full artifact")
         changed = json.loads(original[observation_path])
+        changed["inventories"]["base-build"]["artifact_sha256"] = 7
+        reject(observation_path, (json.dumps(changed, sort_keys=True, indent=2) + "\n").encode(),
+               "independent inventory summary identity")
+        changed = json.loads(original[observation_path])
+        del changed["identity"]["slice_inode"]
+        reject(observation_path, (json.dumps(changed, sort_keys=True, indent=2) + "\n").encode(),
+               "observation job/attempt/request identity missing")
+        changed = json.loads(original[observation_path])
+        del changed["inventories"]["base-build"]["manifest_identity"]["gid"]
+        reject(observation_path, (json.dumps(changed, sort_keys=True, indent=2) + "\n").encode(),
+               "published success manifest hash or identity mismatch")
+        changed = json.loads(original[observation_path])
+        changed["stages"]["candidate-build"]["exec_main_start_monotonic_us"] = 10
+        reject(observation_path, (json.dumps(changed, sort_keys=True, indent=2) + "\n").encode(),
+               "live stage starts contradict recipe graph order")
+        changed = json.loads(original[observation_path])
+        changed["stages"]["base-build"]["exec_main_start_monotonic_us"] = 101
+        reject(observation_path, (json.dumps(changed, sort_keys=True, indent=2) + "\n").encode(),
+               "source scan timestamp contradicts")
+        changed = json.loads(original[observation_path])
+        changed["inventories"]["base-build"]["complete_monotonic_us"] = 19
+        altered = json.loads(original[inventory_path])
+        altered["complete_monotonic_us"] = 19
+        changed_bytes = (json.dumps(altered, sort_keys=True, indent=2) + "\n").encode()
+        changed["inventories"]["base-build"]["artifact_sha256"] = hashlib.sha256(changed_bytes).hexdigest()
+        inventory_path.write_bytes(changed_bytes)
+        reject(observation_path, (json.dumps(changed, sort_keys=True, indent=2) + "\n").encode(),
+               "external inventory predates its own live build stage")
+        inventory_path.write_bytes(original[inventory_path])
+        changed = json.loads(original[observation_path])
         changed.update({"inventory_before_throughput": True, "timing_causes": [],
                         "causes": [], "verdict": "OBSERVATION_PASS"})
         reject(observation_path, (json.dumps(changed, sort_keys=True, indent=2) + "\n").encode(),
                "timing flag or cause differs from timestamps")
         duplicate_json = original[observation_path].replace(b'"job": 1,', b'"job": 1, "job": 1,', 1)
         reject(observation_path, duplicate_json, "duplicate JSON field")
+        reject(observation_path, b"[" * 1500 + b"0" + b"]" * 1500 + b"\n",
+               "maximum recursion depth")
+        assert timestamp(b"-1.999999999") == -1
+        assert timestamp(b"9223372036854775807.999999999") == MAX_STAT_NS
+        assert json_timestamp(MAX_STAT_NS) == MAX_STAT_NS
+        try:
+            timestamp(b"9223372036854775808.000000000")
+        except EvidenceError:
+            checks += 1
+        else:
+            raise AssertionError("overflowing source seconds accepted")
+        checks += 1
         missing = receipts["candidate-build"]
         missing.rename(root / "absent-receipt")
         try:
@@ -765,7 +861,19 @@ def integration_fixture(fixture: Path) -> None:
         observer = Path(temporary)
         identity = {"job": job, "attempt": attempt, "request_sha256": "b" * 64,
                     "boot_id": boot, "worker_sha256": "c" * 64,
-                    "instance_sha256": "d" * 64}
+                    "instance_sha256": "d" * 64,
+                    "outer_unit": f"buster-bench-{job}-{attempt}.service",
+                    "outer_invocation": "f" * 32,
+                    "outer_cgroup": f"/buster.slice/buster-bench.slice/"
+                                    f"buster-bench-{job}-{attempt}.service",
+                    "outer_cgroup_device": 3, "outer_cgroup_inode": 4,
+                    "cgroup_root_device": 3, "cgroup_root_inode": 2,
+                    "slice_device": 3, "slice_inode": 3}
+        starts = {"base-generate": max(1, source_times[0] - 3),
+                  "base-build": max(2, source_times[0] - 2),
+                  "candidate-generate": source_times[0] + 1,
+                  "candidate-build": source_times[1] - 1,
+                  "throughput": synthetic_start}
         timing = "base-build inventory not complete before exact throughput start"
         observation = {"verdict": "OBSERVATION_INCONCLUSIVE", "job": job,
                        "request_sha256": identity["request_sha256"],
@@ -776,7 +884,7 @@ def integration_fixture(fixture: Path) -> None:
             observation["stages"][stage] = {
                 "stage": stage, "unit": f"buster-bench-{job}-{attempt}-{stage}.service",
                 "boot_id": boot,
-                "exec_main_start_monotonic_us": synthetic_start if stage == "throughput" else 1,
+                "exec_main_start_monotonic_us": starts[stage],
                 "record_worker_sha256": identity["worker_sha256"],
                 "record_instance_sha256": identity["instance_sha256"],
                 "identity": {"invocation": "e" * 32, "main_pid": 100 + len(stage),
@@ -795,7 +903,9 @@ def integration_fixture(fixture: Path) -> None:
                     "independent fixture census node count mismatch")
             source, _ = external_nodes(nodes, digest)
             hashed = sum(node["size"] for node in nodes if "sha256" in node)
-            manifest_identity = {"mode": 0o400, "links": 1, "size": len(raw_manifest)}
+            manifest_identity = {"device": 3, "inode": 400 + BUILD_STAGES.index(stage),
+                                 "mode": 0o400, "uid": 0, "gid": 0,
+                                 "links": 1, "size": len(raw_manifest)}
             artifact = {"root": fields["base-build"] if stage == "base-build" else fields["candidate-build"],
                         "nodes": nodes, "node_count": len(source), "binary_sha256": digest,
                         "manifest_binary_sha256": digest, "hashed_executable_bytes": hashed,

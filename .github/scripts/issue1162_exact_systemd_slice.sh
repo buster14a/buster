@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Temporary, isolated #1162 validation transport. Never install on a protected host.
 set -Eeuo pipefail
-subject=4245bf988aafa6f9fe8b203387b114eb1d7ca026
+subject=fd1e80c36fb7fa4cecf7912f0ff8ad4722742ad6
+subject_tree=11d655e8f4b370f2cff7e74d63be8db2efe40c2d
+subject_build_blob=1ea24b90629a2c771c3d0e7d3d517b042ddb4c35
 baseline=ade6ac4b6ecb21f30b61b656439bac476c145e2f
 evidence="${RUNNER_TEMP:?}/issue1162-exact-slice-evidence"
 source_root="$RUNNER_TEMP/issue1162-source"
@@ -10,6 +12,9 @@ live_probe_helper="$repo_root/.github/scripts/issue1162_live_probe.py"
 stage_observer_helper="$repo_root/.github/scripts/issue1162_stage_observer.py"
 workspace_observer_helper="$repo_root/.github/scripts/issue1162_workspace_observer.py"
 manager_denial_helper="$repo_root/.github/scripts/issue1162_manager_denial_probe.py"
+broker_observer_helper="$repo_root/.github/scripts/issue1162_broker_observer.py"
+broker_evidence_helper="$repo_root/.github/scripts/issue1162_broker_evidence.py"
+frozen_tree_helper="$repo_root/.github/scripts/issue1162_frozen_tree_evidence.py"
 payload="$RUNNER_TEMP/issue1162-install"
 guest="issue1162-exact-${GITHUB_RUN_ID:?}"
 image="issue1162-exact:${GITHUB_RUN_ID}"
@@ -21,9 +26,74 @@ python3 "$live_probe_helper" --self-test | tee "$evidence/live-probe-self-test.t
 python3 "$stage_observer_helper" --self-test | tee "$evidence/stage-observer-self-test.txt"
 python3 "$workspace_observer_helper" --self-test | tee "$evidence/workspace-observer-self-test.txt"
 python3 "$manager_denial_helper" --self-test | tee "$evidence/manager-denial-self-test.txt"
+python3 "$broker_observer_helper" --self-test | tee "$evidence/broker-observer-self-test.txt"
+python3 "$broker_evidence_helper" --self-test | tee "$evidence/broker-evidence-self-test.txt"
+python3 "$frozen_tree_helper" self-test | tee "$evidence/frozen-tree-self-test.txt"
 python3 "$repo_root/.github/scripts/issue1162_ancestor_preflight_test.py" | tee "$evidence/ancestor-preflight-self-test.txt"
 observer_pid=
 observer_collected=false
+broker_observer_pid=
+broker_observer_collected=false
+broker_observer_status=1
+broker_journal_collected=false
+capture_broker_journal() {
+  if [[ "$broker_journal_collected" != true ]]; then
+    local sync_status=0
+    timeout --signal=TERM --kill-after=2 15 sudo docker exec "$guest" journalctl --sync \
+      >"$evidence/broker-journal-sync.txt" 2>&1 || sync_status=$?
+    local capture_codes
+    if timeout --signal=TERM --kill-after=2 30 sudo docker exec "$guest" \
+      timeout 25 journalctl --no-pager --all -b -o json -u 'buster-bench-systemd-broker@*.service' \
+      2>"$evidence/broker-journal-stderr.txt" | head -c 134217729 >"$evidence/broker-journal.jsonl"; then
+      capture_codes=("${PIPESTATUS[@]}")
+    else
+      capture_codes=("${PIPESTATUS[@]}")
+    fi
+    python3 - "$evidence" "$sync_status" "${capture_codes[@]}" <<'JOURNAL_CAPTURE' || return 1
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+raw = (root / "broker-journal.jsonl").read_bytes()
+statuses = [int(value) for value in sys.argv[2:]]
+complete = len(statuses) == 3 and all(value == 0 for value in statuses) and len(raw) <= 128 * 1024 * 1024
+record = {"complete": complete, "sha256": hashlib.sha256(raw).hexdigest(),
+          "bytes": len(raw), "records": len(raw.splitlines()), "command_statuses": statuses}
+(root / "broker-journal-capture.json").write_text(json.dumps(record, sort_keys=True) + "\n")
+JOURNAL_CAPTURE
+    broker_journal_collected=true
+  fi
+}
+collect_broker_observer() {
+  if [[ -n "$broker_observer_pid" && "$broker_observer_collected" != true ]]; then
+    printf 'snapshot=%s\n' "${1:-completed}" >"$evidence/broker-observer-retention.txt"
+    sudo docker exec "$guest" python3 -c '
+import os
+p="/root/issue1162-install/broker-observer-output/stop"
+try:
+    fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    os.close(fd)
+except FileExistsError:
+    pass
+' || return 1
+    local stop_deadline=$((SECONDS + 35))
+    while kill -0 "$broker_observer_pid" 2>/dev/null && (( SECONDS < stop_deadline )); do sleep 1; done
+    if kill -0 "$broker_observer_pid" 2>/dev/null; then
+      echo "BROKER_OBSERVER_STOP_TIMEOUT"
+      kill -TERM "$broker_observer_pid" 2>/dev/null || true
+      broker_observer_status=124
+    else
+      if wait "$broker_observer_pid"; then broker_observer_status=0; else broker_observer_status=$?; fi
+    fi
+    printf 'exit_status=%s\n' "$broker_observer_status" >"$evidence/broker-observer-exit.txt"
+    mkdir -p "$evidence/broker-observer-artifacts"
+    if sudo docker cp "$guest:/root/issue1162-install/broker-observer-output/." "$evidence/broker-observer-artifacts" &&
+       sudo chown -R -- "$(id -u):$(id -g)" "$evidence/broker-observer-artifacts"; then
+      broker_observer_collected=true
+    else
+      echo "BROKER_OBSERVER_ARTIFACT_COPY_FAILED"
+      return 1
+    fi
+  fi
+}
 collect_stage_observer() {
   if [[ -n "$observer_pid" && "$observer_collected" != true ]]; then
     # A failure-path snapshot may overlap the observer's last writes and is
@@ -49,6 +119,12 @@ retain() {
     # Preserve partial observer diagnostics even when RESULT/export failed.
     # The observer is read-only and its own deadline is submit-relative.
     if ! collect_stage_observer partial; then
+      if (( result == 0 )); then result=1; fi
+    fi
+    if ! collect_broker_observer partial; then
+      if (( result == 0 )); then result=1; fi
+    fi
+    if ! capture_broker_journal; then
       if (( result == 0 )); then result=1; fi
     fi
     sudo docker inspect "$guest" >"$evidence/container.json" 2>&1
@@ -77,7 +153,8 @@ retain() {
 trap retain EXIT
 printf 'SUBJECT_SHA=%s BASE_SHA=%s WORKFLOW_SHA=%s RUN=%s\n' "$subject" "$baseline" "$GITHUB_SHA" "$GITHUB_RUN_ID"
 git rev-parse "$subject" "$subject^{tree}" "$baseline" "$baseline^{tree}" | tee "$evidence/revisions.txt"
-test "$(git rev-parse "$subject^{tree}")" = ea4e65b809ebbe9592c2401e80c1414929529680
+test "$(git rev-parse "$subject^{tree}")" = "$subject_tree"
+test "$(git rev-parse "$subject:build.c")" = "$subject_build_blob"
 test "$(git rev-parse "$baseline^{tree}")" = 4c5306221fdb22fccc929b55e333163742de17d0
 git worktree add --detach "$source_root" "$subject"
 test -z "$(git -C "$source_root" status --porcelain=v1)"
@@ -177,10 +254,13 @@ cp "$live_probe_helper" "$payload/issue1162_live_probe.py"
 cp "$stage_observer_helper" "$payload/issue1162_stage_observer.py"
 cp "$workspace_observer_helper" "$payload/issue1162_workspace_observer.py"
 cp "$manager_denial_helper" "$payload/issue1162_manager_denial_probe.py"
+cp "$broker_observer_helper" "$payload/issue1162_broker_observer.py"
 sha256sum "$live_probe_helper" "$payload/issue1162_live_probe.py" | tee "$evidence/live-probe-helper-sha256.txt"
 sha256sum "$stage_observer_helper" "$payload/issue1162_stage_observer.py" | tee "$evidence/stage-observer-helper-sha256.txt"
 sha256sum "$workspace_observer_helper" "$payload/issue1162_workspace_observer.py" | tee "$evidence/workspace-observer-helper-sha256.txt"
 sha256sum "$manager_denial_helper" "$payload/issue1162_manager_denial_probe.py" | tee "$evidence/manager-denial-helper-sha256.txt"
+sha256sum "$broker_observer_helper" "$payload/issue1162_broker_observer.py" | tee "$evidence/broker-observer-helper-sha256.txt"
+sha256sum "$broker_evidence_helper" "$frozen_tree_helper" | tee "$evidence/offline-evidence-helpers-sha256.txt"
 clang --version | head -1 | tee "$evidence/toolchains.txt"
 cmake --version | head -1 | tee -a "$evidence/toolchains.txt"
 ninja --version | tee -a "$evidence/toolchains.txt"
@@ -366,6 +446,7 @@ sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_live_probe.p
 sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_stage_observer.py --self-test | tee "$evidence/guest-stage-observer-self-test.txt"
 sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_workspace_observer.py --self-test | tee "$evidence/guest-workspace-observer-self-test.txt"
 sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_manager_denial_probe.py --self-test | tee "$evidence/guest-manager-denial-self-test.txt"
+sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_broker_observer.py --self-test | tee "$evidence/guest-broker-observer-self-test.txt"
 sudo docker exec "$guest" timeout --signal=TERM --kill-after=5 120 /root/issue1162-install/cleanup-identity-tests --cleanup-identity-only | tee "$evidence/guest-cleanup-identity-tests.txt"
 sudo docker exec "$guest" systemctl start dbus.socket
 sudo docker exec "$guest" install -d -m 0700 -o 0 -g 0 /root/issue1162-install/manager-denial-output
@@ -386,6 +467,36 @@ fi
 if (( manager_denial_status == 0 )); then manager_denial_valid=true; fi
 # Keep collecting the independent service slice when a bare-account probe is
 # inconclusive. Its missing evidence still prevents the overall validator PASS.
+sudo docker exec "$guest" install -d -m 0700 -o 0 -g 0 /root/issue1162-install/broker-observer-output
+timeout --signal=TERM --kill-after=5 4005 \
+  sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_broker_observer.py --run \
+    --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --budget-seconds 4000 \
+    --output /root/issue1162-install/broker-observer-output \
+    >"$evidence/broker-observer-console.log" 2>&1 &
+broker_observer_pid=$!
+timeout --signal=TERM --kill-after=5 35 sudo docker exec -i "$guest" python3 - "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'BROKER_READY' | tee "$evidence/broker-observer-ready.txt"
+import json, os, pathlib, stat, sys, time
+ready = pathlib.Path("/root/issue1162-install/broker-observer-output/ready.json")
+deadline = time.monotonic() + 30
+while not ready.exists() and time.monotonic() < deadline:
+    time.sleep(0.05)
+fd = os.open(ready, os.O_RDONLY | os.O_NOFOLLOW)
+try:
+    info = os.fstat(fd)
+    assert stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1 and info.st_size <= 131072
+    record = json.loads(os.read(fd, 131073))
+finally:
+    os.close(fd)
+assert record["kind"] == "READY" and record["match_ack"] is True and record["subscribe_ack"] is True
+assert str(record["run_id"]) == sys.argv[1] and record["run_attempt"] == int(sys.argv[2])
+assert record["boot_id_raw"] == pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+pid = record["observer_pid"]
+assert type(pid) is int and pid > 1
+raw = pathlib.Path(f"/proc/{pid}/stat").read_text()
+assert int(raw[raw.rfind(")")+2:].split()[19]) == record["observer_start_ticks"]
+print(json.dumps(record, sort_keys=True))
+BROKER_READY
+kill -0 "$broker_observer_pid"
 sudo docker exec "$guest" systemctl start buster-bench-systemd-broker.socket
 sudo docker exec "$guest" systemctl start buster-bench.service
 sudo docker exec "$guest" systemctl show buster-bench.service -p ActiveState -p MainPID -p ControlGroup -p RestrictSUIDSGID -p NoNewPrivileges -p CapabilityBoundingSet | tee "$evidence/service-effective.txt"
@@ -522,8 +633,82 @@ if [[ -n "$observer_pid" ]]; then
   if ! collect_stage_observer; then observer_status=1; fi
   if (( observer_status == 0 )); then observer_valid=true; fi
 fi
-if [[ "$probe_valid" != true || "$terminal_valid" != true || "$observer_valid" != true || "$manager_denial_valid" != true ]]; then
-  echo "SERVICE_RESULT_SUCCEEDED source=$subject job=$job token=$token; live_probe_valid=$probe_valid terminal_proof_valid=$terminal_valid stage_observer_valid=$observer_valid manager_denial_valid=$manager_denial_valid; full acceptance pending"
+frozen_tree_valid=false
+if python3 "$frozen_tree_helper" verify \
+  --observer-dir "$evidence/stage-observer-artifacts" \
+  --base-receipt "$evidence/replay/result/validate-buster-v1.base-build.inventory" \
+  --candidate-receipt "$evidence/replay/result/validate-buster-v1.candidate-build.inventory" \
+  --source-commit "$subject" --source-tree "$subject_tree" --build-blob "$subject_build_blob" \
+  --output "$evidence/frozen-tree-reconciliation.json" \
+  >"$evidence/frozen-tree-reconciliation.log" 2>&1; then
+  frozen_tree_valid=true
+fi
+cat "$evidence/frozen-tree-reconciliation.log"
+# The legacy observer verdict and timestamps remain unchanged. The new gate
+# requires the source's reviewed durable-before-next-launch ordering plus
+# complete independent equality; a late external scan is still reported late.
+broker_valid=false
+if collect_broker_observer && capture_broker_journal; then
+  python3 - "$evidence" "$payload" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$job" "$token" "$subject" "$subject_tree" <<'BROKER_INPUTS'
+import hashlib, json, pathlib, sys
+root, payload = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+run_id, run_attempt, job, attempt = sys.argv[3], int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6])
+ready = json.loads((root / "broker-observer-artifacts/ready.json").read_text())
+assert ready["run_id"] == run_id and ready["run_attempt"] == run_attempt
+capture = json.loads((root / "broker-journal-capture.json").read_text())
+requests = [{"operation": 1, "stage": stage, "job": job, "attempt": attempt} for stage in range(6)]
+requests += [{"operation": 2, "stage": 0, "job": job, "attempt": value}
+             for value in (attempt, 999998 if attempt == 999999 else 999999)]
+expected = {"schema": "issue1162-broker-evidence-expectation-v1", "run_id": run_id,
+    "run_attempt": run_attempt, "job_id": job, "job_attempt": attempt,
+    "boot_id": ready["boot_id"], "boot_id_raw": ready["boot_id_raw"],
+    "source_commit": sys.argv[7], "source_tree": sys.argv[8],
+    "broker_binary_sha256": hashlib.sha256((payload / "binaries/buster-bench-systemd-broker").read_bytes()).hexdigest(),
+    "broker_executable_path": "/usr/local/libexec/buster-bench-systemd-broker",
+    "profile": {"broker_uid": 0, "broker_gid": 65000, "candidate_gid": 65001,
+        "client_uids": [0, 65000], "groups": [65000, 65001],
+        "capabilities": {key: "0000000000000000" for key in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")},
+        "no_new_privs": 1, "seccomp": 2, "seccomp_filters_min": 1,
+        "read_only_mount_targets": ["/", "/etc/buster-bench", "/opt/buster-bench/installed", "/var/lib/buster-bench"],
+        "cgroup_prefix": "/system.slice/system-buster\\x2dbench\\x2dsystemd\\x2dbroker.slice/"},
+    "allowed_requests": requests,
+    "journal_capture": {key: capture[key] for key in ("complete", "sha256", "bytes", "records")}}
+(root / "broker-expected.json").write_text(json.dumps(expected, sort_keys=True) + "\n")
+def reference(path):
+    raw = path.read_bytes()
+    return {"path": str(path.relative_to(root)), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+overlap = []
+for index in range(8):
+    path = root / f"live-probe-artifacts/broker-{index}.capture.json"
+    if not path.exists():
+        continue
+    value = json.loads(path.read_text())
+    process = value.get("process")
+    if not isinstance(process, dict):
+        continue
+    properties = value["properties"]
+    row = {"schema": "issue1162-broker-overlap-v1", "boot_id": ready["boot_id"],
+        "unit": properties["Id"], "invocation_id": properties["InvocationID"],
+        "pid": process["pid"], "start_ticks": process["starttime_ticks"], "capture_json": reference(path)}
+    for field, suffix in (("status", "proc-status"), ("mountinfo", "proc-mountinfo"), ("cgroup", "proc-cgroup")):
+        row[field] = reference(root / f"live-probe-artifacts/broker-{index}.{suffix}")
+    overlap.append(row)
+(root / "broker-overlap.jsonl").write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in overlap))
+BROKER_INPUTS
+  if python3 "$broker_evidence_helper" --journal-jsonl "$evidence/broker-journal.jsonl" \
+    --observer-dir "$evidence/broker-observer-artifacts" --expected-json "$evidence/broker-expected.json" \
+    --overlap-jsonl "$evidence/broker-overlap.jsonl" >"$evidence/broker-reconciliation.json" \
+    2>"$evidence/broker-reconciliation-stderr.txt"; then
+    if python3 - "$evidence/broker-reconciliation.json" <<'BROKER_VERDICT'
+import json, pathlib, sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert all(value[key] is True for key in ("diagnostic_complete", "manager_capture_complete", "external_proc_complete"))
+BROKER_VERDICT
+    then broker_valid=true; fi
+  fi
+fi
+if [[ "$probe_valid" != true || "$terminal_valid" != true || "$frozen_tree_valid" != true || "$broker_valid" != true || "$manager_denial_valid" != true ]]; then
+  echo "SERVICE_RESULT_SUCCEEDED source=$subject job=$job token=$token; live_probe_valid=$probe_valid terminal_proof_valid=$terminal_valid legacy_stage_observer_valid=$observer_valid frozen_tree_reconciled=$frozen_tree_valid broker_reconciled=$broker_valid manager_denial_valid=$manager_denial_valid; full acceptance pending"
   exit 1
 fi
-echo "NORMAL_PATH_EXECUTION_PASS source=$subject job=$job token=$token; live, terminal, stage and bare-account manager observation probes passed; full acceptance pending"
+echo "NORMAL_PATH_EXECUTION_PASS source=$subject job=$job token=$token; live, terminal, independent frozen-tree reconciliation, every-broker reconciliation and bare-account manager probes passed; legacy_stage_observer_valid=$observer_valid remains separately reported; full acceptance pending"
