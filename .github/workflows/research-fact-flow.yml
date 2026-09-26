@@ -4,7 +4,8 @@ name: Fact-flow elimination evidence
 # runner: byte identity over the fixture corpus, exact validation work counts,
 # exact page faults and callgrind instruction counts, baseline main versus
 # this branch, plus the E1+E2 commit as an intermediate so the Wasm import
-# change (E3) is measured on its own. It runs only when this workflow or its evidence scripts change
+# change (E3) is measured on its own. The LLVM constant handoff (E4) is the
+# only change on the -emit-llvm path, so baseline against branch isolates it. It runs only when this workflow or its evidence scripts change
 # and is removed before the pull request leaves draft. Timings are context,
 # never the decision.
 on:
@@ -105,6 +106,10 @@ jobs:
             python3 "$tool" ab --base "$base" --candidate "$cand" --output "$out" --name "$input-wasm64" --repetitions 3 \
               -- cc -target wasm64-unknown-freestanding -c "$out/family/$input.c" -o '{out}'
           done
+          for size in 1000 4000 16000; do
+            python3 "$tool" ab --base "$base" --candidate "$cand" --output "$out" --name "s$size-emit-llvm" --repetitions 3 \
+              -- cc -emit-llvm -c "$out/family/s$size.c" -o '{out}'
+          done
           cd "$GITHUB_WORKSPACE/baseline"
           for debug in -g0 -g; do
             python3 "$tool" ab --base "$base" --candidate "$cand" --output "$out" --name "selfhost$debug" --repetitions 5 \
@@ -129,6 +134,13 @@ jobs:
             python3 "$tool" callgrind --base "$middle" --candidate "$cand" --output "$out" --name "e3-$input-wasm64" \
               --functions wasm_emit_internal ir_validate_canonical_module \
               -- cc -target wasm64-unknown-freestanding -c "$out/family/$input.c" -o '{out}'
+          done
+          # E4 alone: only -emit-llvm reaches the bitcode writer, and E1-E3
+          # do not change that path.
+          for input in s1000 s4000 s16000; do
+            python3 "$tool" callgrind --base "$base" --candidate "$cand" --output "$out" --name "e4-$input-emit-llvm" \
+              --functions llvm_bitcode_emit_with_options llvm_bc_add_constant llvm_bc_plan_functions \
+              -- cc -emit-llvm -c "$out/family/$input.c" -o '{out}'
           done
           for target in wasm64-unknown-freestanding bpfel-unknown-linux; do
             python3 "$tool" callgrind --base "$base" --candidate "$cand" --output "$out" --name "s4000-$target" \

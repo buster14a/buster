@@ -8,8 +8,8 @@ Subcommands (all outputs are JSON under --output; nothing is timed as proof):
             with K unused static functions (h<K>.c)
   ab        alternate BASE and CANDIDATE on one command; record exit status,
             output SHA-256, exact minor page faults and peak RSS per run
-  corpus    compile every tests/*.c for eight target/debug configurations with
-            both compilers; compare exit status, stderr and output SHA-256
+  corpus    compile every tests/*.c for ten target/debug/bitcode configurations
+            with both compilers; compare exit status, stderr and output SHA-256
   census    read ir_construction.* work counters from -fsource-metrics of two
             BUSTER_BENCH_ALLOCATIONS=ON compilers over the scaling family
   callgrind run both profiling builds under callgrind and total named
@@ -112,6 +112,7 @@ CORPUS_CONFIGURATIONS = [
     ("aarch64-unknown-linux-gnu", "-g0"), ("aarch64-unknown-linux-gnu", "-g"),
     ("x86_64-pc-windows-msvc", "-g"), ("x86_64-apple-macos", "-g"),
     ("wasm64-unknown-freestanding", "-g0"), ("bpfel-unknown-linux", "-g0"),
+    ("x86_64-unknown-linux-gnu", "-emit-llvm"), ("aarch64-unknown-linux-gnu", "-emit-llvm"),
 ]
 
 
