@@ -56,6 +56,7 @@
 #if BUSTER_LINUX
 #include <linux/perf_event.h>
 #include <fcntl.h>
+#include <pwd.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -36340,6 +36341,15 @@ BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 argumen
 #define BENCH_SERVICE_RECIPE_BUNDLE_TOTAL_CAP (512ull * 1024 * 1024)
 #define BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP 256u
 #define BENCH_SERVICE_RECIPE_BUNDLE_PATH_CAP 192u
+/* The source-owned frozen-tree receipt mirrors the observer's node, depth,
+ * path, and hash bounds. Its separate serialized cap is the bundle file cap. */
+#define BENCH_SERVICE_RECIPE_RECEIPT_NODE_CAP 100000u
+#define BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP 1024u
+#define BENCH_SERVICE_RECIPE_RECEIPT_FILE_CAP (128ull * 1024 * 1024)
+#define BENCH_SERVICE_RECIPE_RECEIPT_HASH_CAP (2ull * 1024 * 1024 * 1024)
+#define BENCH_SERVICE_RECIPE_RECEIPT_BYTES_CAP BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP
+#define BENCH_SERVICE_RECIPE_BASE_RECEIPT_NAME "validate-buster-v1.base-build.inventory"
+#define BENCH_SERVICE_RECIPE_CANDIDATE_RECEIPT_NAME "validate-buster-v1.candidate-build.inventory"
 #define BENCH_SERVICE_RECIPE_CPU "2"
 #define BENCH_SERVICE_RECIPE_MEMORY "8589934592"
 #define BENCH_SERVICE_RECIPE_SWAP "0"
@@ -36418,6 +36428,15 @@ BUSTER_GLOBAL_LOCAL String8 bench_service_recipe_throughput_override;
  * never assigns this flag; recovery must bind the already-published tree on
  * the next fixed-recipe invocation. */
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_cancel_after_publish;
+#if BUSTER_LINUX
+/* Only the local synthetic recipe fixtures provide a candidate GID on hosts
+ * without the installed account. Production resolves the fixed account. */
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_candidate_gid_set;
+BUSTER_GLOBAL_LOCAL gid_t bench_service_recipe_test_candidate_gid;
+BUSTER_GLOBAL_LOCAL u64 bench_service_recipe_test_receipt_bytes_cap;
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_receipt_race;
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_receipt_partial_cap;
+#endif
 
 typedef struct BenchServiceRecipeManifest BenchServiceRecipeManifest;
 typedef struct BenchServiceRecipeStage BenchServiceRecipeStage;
@@ -36484,6 +36503,8 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_promote_throughput(Arena* arena,
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_cleanup_throughput_temps(Arena* arena,
                                                                         BenchServiceRecipeManifest* manifest);
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_lock_tree(Arena* arena, int directory, bool candidate_visible);
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_frozen_receipt(Arena* arena, BenchServiceRecipeManifest* manifest,
+                                                             String8 stage);
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_path(String8 path);
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_sync_tree(Arena* arena, int directory);
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_index(Arena* arena, BenchServiceRecipeManifest* manifest);
@@ -36623,7 +36644,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_stage_cleanup(Arena* aren
     if (result == PROCESS_RESULT_SUCCESS && string_equal(stage->name, S8("base-build")))
     {
         if (!bench_service_recipe_binary_digest(stage->manifest->base_build_directory, stage->manifest->base_digest) ||
-            !bench_service_recipe_lock_tree(arena, stage->manifest->base_build_directory, true))
+            !bench_service_recipe_lock_tree(arena, stage->manifest->base_build_directory, true) ||
+            !bench_service_recipe_frozen_receipt(arena, stage->manifest, stage->name))
             result = PROCESS_RESULT_FAILED;
     }
     else if (result == PROCESS_RESULT_SUCCESS && string_equal(stage->name, S8("candidate-build")))
@@ -36632,7 +36654,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_stage_cleanup(Arena* aren
             !bench_service_recipe_lock_tree(arena, stage->manifest->candidate_build_directory, true) ||
             !bench_service_recipe_prepare_candidate_visibility(arena, stage->manifest) ||
             !bench_service_recipe_prepare_throughput_output(arena, stage->manifest->candidate_stage_build,
-                                                             stage->manifest->throughput_output))
+                                                             stage->manifest->throughput_output) ||
+            !bench_service_recipe_frozen_receipt(arena, stage->manifest, stage->name))
             result = PROCESS_RESULT_FAILED;
     }
     else if (result == PROCESS_RESULT_SUCCESS && string_equal(stage->name, S8("throughput")))
@@ -37556,6 +37579,499 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_lock_tree(Arena* arena, int direct
     return ok;
 }
 
+typedef struct BenchServiceRecipeReceiptFrame BenchServiceRecipeReceiptFrame;
+typedef struct BenchServiceRecipeReceiptNode BenchServiceRecipeReceiptNode;
+struct BenchServiceRecipeReceiptFrame
+{
+    DIR* stream;
+    struct stat identity;
+    char path[BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP + 1];
+};
+struct BenchServiceRecipeReceiptNode
+{
+    BenchServiceRecipeReceiptNode* next;
+    struct stat identity;
+    char path[BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP + 1];
+};
+
+/* A receipt is a source-owned assertion about a frozen build tree, not an
+ * independent observation.  The stage callback cannot advance the graph to
+ * throughput until this complete file is published and its parent is synced. */
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_same(struct stat const* before, struct stat const* after)
+{
+    bool ok = before->st_dev == after->st_dev && before->st_ino == after->st_ino &&
+              before->st_mode == after->st_mode && before->st_nlink == after->st_nlink &&
+              before->st_uid == after->st_uid && before->st_gid == after->st_gid &&
+              before->st_size == after->st_size &&
+              before->st_mtim.tv_sec == after->st_mtim.tv_sec &&
+              before->st_mtim.tv_nsec == after->st_mtim.tv_nsec &&
+              before->st_ctim.tv_sec == after->st_ctim.tv_sec &&
+              before->st_ctim.tv_nsec == after->st_ctim.tv_nsec;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_policy(struct stat const* info, bool directory,
+                                                             gid_t candidate_gid)
+{
+    bool ok = info && (directory ? S_ISDIR(info->st_mode) : S_ISREG(info->st_mode)) &&
+              (info->st_uid == 0 || info->st_uid == geteuid()) &&
+              (info->st_gid == 0 || info->st_gid == getegid() || info->st_gid == candidate_gid) &&
+              (directory ? info->st_nlink >= 1 : info->st_nlink == 1) &&
+              (info->st_mode & 07777) == (directory ? 0550 : (info->st_mode & 0111) ? 0550 : 0440) &&
+              info->st_size >= 0 && (u64)info->st_size <= BENCH_SERVICE_RECIPE_RECEIPT_FILE_CAP;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_write(int descriptor, char const* bytes, u64 length,
+                                                            u64* written, Sha256* digest)
+{
+    u64 cap = bench_service_recipe_test_receipt_bytes_cap &&
+              bench_service_recipe_test_receipt_bytes_cap < BENCH_SERVICE_RECIPE_RECEIPT_BYTES_CAP ?
+              bench_service_recipe_test_receipt_bytes_cap : BENCH_SERVICE_RECIPE_RECEIPT_BYTES_CAP;
+    bool ok = descriptor >= 0 && bytes && written && *written <= cap && length <= cap - *written;
+    if (!ok && bench_service_recipe_test_receipt_bytes_cap && written && *written > 0 &&
+        *written <= cap && length > cap - *written)
+        bench_service_recipe_test_receipt_partial_cap = true;
+    for (u64 offset = 0; ok && offset < length;)
+    {
+        ssize_t count = write(descriptor, bytes + offset, (size_t)(length - offset));
+        if (count < 0 && errno == EINTR) continue;
+        ok = count > 0;
+        if (ok) offset += (u64)count;
+    }
+    if (ok)
+    {
+        *written += length;
+        if (digest) sha256_add(digest, (u8 const*)bytes, length);
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_boot(char output[37])
+{
+    int descriptor = open("/proc/sys/kernel/random/boot_id", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    char bytes[40] = {0};
+    u32 used = 0;
+    bool ok = descriptor >= 0;
+    while (ok && used < sizeof(bytes))
+    {
+        ssize_t count = read(descriptor, bytes + used, sizeof(bytes) - used);
+        if (count < 0 && errno == EINTR) continue;
+        ok = count >= 0;
+        if (!count) break;
+        if (ok) used += (u32)count;
+    }
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    ok = ok && used == 37 && bytes[36] == '\n';
+    for (u32 index = 0; ok && index < 36; index += 1)
+    {
+        u8 value = (u8)bytes[index];
+        bool hyphen = index == 8 || index == 13 || index == 18 || index == 23;
+        ok = hyphen ? value == '-' :
+             (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+    }
+    if (ok)
+    {
+        memcpy(output, bytes, 36);
+        output[36] = 0;
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_node(int descriptor, char const* path,
+                                                           struct stat const* info, char const* digest,
+                                                           u64* written, Sha256* nodes)
+{
+    char hex[BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP * 2 + 1];
+    char line[BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP * 2 + 512];
+    char const digits[] = "0123456789abcdef";
+    u64 length = path ? strlen(path) : 0;
+    bool ok = length > 0 && length <= BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP &&
+              info && info->st_size >= 0 &&
+              info->st_mtim.tv_nsec >= 0 && info->st_mtim.tv_nsec < 1000000000 &&
+              info->st_ctim.tv_nsec >= 0 && info->st_ctim.tv_nsec < 1000000000;
+    for (u64 index = 0; ok && index < length; index += 1)
+    {
+        u8 value = (u8)path[index];
+        hex[index * 2] = digits[value >> 4];
+        hex[index * 2 + 1] = digits[value & 15];
+    }
+    if (ok) hex[length * 2] = 0;
+    int count = ok ? snprintf(line, sizeof(line),
+        "node\t%s\t%c\t%llu\t%llu\t%llu\t%u\t%u\t%u\t%llu\t%lld.%09ld\t%lld.%09ld\t%s\n",
+        hex, S_ISDIR(info->st_mode) ? 'd' : 'f',
+        (unsigned long long)info->st_dev, (unsigned long long)info->st_ino,
+        (unsigned long long)info->st_nlink, (unsigned)(info->st_mode & 07777),
+        (unsigned)info->st_uid, (unsigned)info->st_gid, (unsigned long long)info->st_size,
+        (long long)info->st_mtim.tv_sec, (long)info->st_mtim.tv_nsec,
+        (long long)info->st_ctim.tv_sec, (long)info->st_ctim.tv_nsec, digest ? digest : "-") : -1;
+    ok = ok && count > 0 && (size_t)count < sizeof(line);
+    if (ok) ok = bench_service_recipe_receipt_write(descriptor, line, (u64)count, written, nodes);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_file(int parent, char const* name,
+                                                           struct stat const* expected,
+                                                           u64* hashed, char digest[SHA256_HEX_CAPACITY])
+{
+    int descriptor = openat(parent, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    struct stat before = {0}, after = {0}, path_after = {0};
+    bool executable = (expected->st_mode & 0111) != 0;
+    bool ok = descriptor >= 0 && fstat(descriptor, &before) == 0 &&
+              bench_service_recipe_receipt_same(expected, &before);
+    Sha256 sha;
+    sha256_init(&sha);
+    u8 bytes[64 * 1024];
+    u64 total = 0;
+    if (ok && executable)
+    {
+        ok = expected->st_size >= 0 && (u64)expected->st_size <= BENCH_SERVICE_RECIPE_RECEIPT_FILE_CAP &&
+             (u64)expected->st_size <= BENCH_SERVICE_RECIPE_RECEIPT_HASH_CAP - *hashed;
+        while (ok)
+        {
+            ssize_t count = read(descriptor, bytes, sizeof(bytes));
+            if (count < 0 && errno == EINTR) continue;
+            ok = count >= 0;
+            if (!count) break;
+            if (ok)
+            {
+                total += (u64)count;
+                ok = total <= (u64)expected->st_size;
+                if (ok) sha256_add(&sha, bytes, (u64)count);
+            }
+        }
+        ok = ok && total == (u64)expected->st_size;
+    }
+    if (ok && bench_service_recipe_test_receipt_race && executable && !strcmp(name, "ide"))
+    {
+        bench_service_recipe_test_receipt_race = false;
+        ok = fchmod(descriptor, 0440) == 0;
+    }
+    if (ok) ok = fstat(descriptor, &after) == 0 &&
+                 fstatat(parent, name, &path_after, AT_SYMLINK_NOFOLLOW) == 0 &&
+                 bench_service_recipe_receipt_same(expected, &after) &&
+                 bench_service_recipe_receipt_same(expected, &path_after);
+    if (ok && executable)
+    {
+        sha256_finish_hex(&sha, (char8*)digest);
+        *hashed += total;
+    }
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_root(String8 path, int pinned,
+                                                           struct stat const* expected)
+{
+    int canonical = path.length ? bench_service_recipe_open_directory(path) : -1;
+    struct stat pinned_info = {0}, canonical_info = {0};
+    bool ok = canonical >= 0 && fstat(pinned, &pinned_info) == 0 &&
+              fstat(canonical, &canonical_info) == 0 &&
+              bench_service_recipe_receipt_same(expected, &pinned_info) &&
+              bench_service_recipe_receipt_same(expected, &canonical_info) &&
+              pinned_info.st_dev == canonical_info.st_dev && pinned_info.st_ino == canonical_info.st_ino;
+    if (canonical >= 0 && close(canonical) != 0) ok = false;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_record(Arena* arena,
+                                                             BenchServiceRecipeReceiptNode** head,
+                                                             char const* path, struct stat const* identity)
+{
+    u64 length = path ? strlen(path) : 0;
+    bool ok = arena && arena->position <= arena->reserved_size &&
+              arena->reserved_size - arena->position >=
+                  sizeof(BenchServiceRecipeReceiptNode) + BUSTER_ALIGN_OF(BenchServiceRecipeReceiptNode) &&
+              head && identity && length > 0 && length <= BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP;
+    if (ok)
+    {
+        BenchServiceRecipeReceiptNode* node = arena_allocate(arena, BenchServiceRecipeReceiptNode, 1);
+        node->identity = *identity;
+        memcpy(node->path, path, (size_t)length + 1);
+        node->next = *head;
+        *head = node;
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_receipt_verify(BenchServiceRecipeReceiptNode* nodes,
+                                                             int build, String8 path,
+                                                             struct stat const* root_info)
+{
+    bool ok = bench_service_recipe_receipt_root(path, build, root_info);
+    for (BenchServiceRecipeReceiptNode* node = nodes; ok && node; node = node->next)
+    {
+        int current = openat(build, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        ok = current >= 0;
+        if (ok && strcmp(node->path, "."))
+        {
+            char const* component = node->path;
+            while (ok && component[0])
+            {
+                char const* separator = strchr(component, '/');
+                u64 length = separator ? (u64)(separator - component) : strlen(component);
+                char name[BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP + 1];
+                ok = length > 0 && length <= BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP;
+                if (ok)
+                {
+                    memcpy(name, component, (size_t)length);
+                    name[length] = 0;
+                    if (separator)
+                    {
+                        int child = openat(current, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                        if (close(current) != 0) ok = false;
+                        current = child;
+                        ok = ok && current >= 0;
+                        component = separator + 1;
+                    }
+                    else
+                    {
+                        struct stat actual = {0};
+                        ok = fstatat(current, name, &actual, AT_SYMLINK_NOFOLLOW) == 0 &&
+                             bench_service_recipe_receipt_same(&node->identity, &actual);
+                        component += length;
+                    }
+                }
+            }
+        }
+        else if (ok)
+        {
+            struct stat actual = {0};
+            ok = fstat(current, &actual) == 0 && bench_service_recipe_receipt_same(&node->identity, &actual);
+        }
+        if (current >= 0 && close(current) != 0) ok = false;
+    }
+    if (ok) ok = nodes != NULL && bench_service_recipe_receipt_root(path, build, root_info);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_frozen_receipt(Arena* arena, BenchServiceRecipeManifest* manifest,
+                                                             String8 stage)
+{
+    u64 arena_position = arena ? arena->position : 0;
+    bool base = string_equal(stage, S8("base-build"));
+    bool candidate = string_equal(stage, S8("candidate-build"));
+    int build = manifest ? base ? manifest->base_build_directory : manifest->candidate_build_directory : -1;
+    String8 path = manifest ? base ? manifest->base_build : manifest->candidate_build : (String8){0};
+    char const* expected_digest = manifest ? base ? manifest->base_digest : manifest->candidate_digest : "";
+    char const* target = base ? BENCH_SERVICE_RECIPE_BASE_RECEIPT_NAME : BENCH_SERVICE_RECIPE_CANDIDATE_RECEIPT_NAME;
+    int parent = -1, temporary_fd = -1, root = -1;
+    DIR* stream = NULL;
+    char temporary[128] = {0}, boot[37] = {0};
+    struct stat result_info = {0}, temporary_info = {0}, published_info = {0}, root_info = {0};
+    struct passwd* candidate_account = bench_service_recipe_test_candidate_gid_set ? NULL :
+                                       getpwnam("buster-bench-candidate");
+    gid_t candidate_gid = bench_service_recipe_test_candidate_gid_set ?
+                          bench_service_recipe_test_candidate_gid : candidate_account ? candidate_account->pw_gid : (gid_t)-1;
+    bool ok = (base || candidate) && manifest && manifest->result_directory >= 0 && build >= 0 &&
+              candidate_gid != (gid_t)-1 && expected_digest[0] &&
+              bench_service_recipe_receipt_boot(boot) &&
+              fstat(manifest->result_directory, &result_info) == 0 &&
+              (u64)result_info.st_dev == manifest->result_device &&
+              (u64)result_info.st_ino == manifest->result_inode && S_ISDIR(result_info.st_mode);
+    if (ok)
+    {
+        parent = fcntl(manifest->result_directory, F_DUPFD_CLOEXEC, 3);
+        ok = parent >= 0 && bench_service_recipe_temp_name(target, temporary);
+        if (ok) temporary_fd = openat(parent, temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        ok = ok && temporary_fd >= 0;
+    }
+    /* lock_tree consumed a duplicated build-directory OFD's readdir offset.
+     * Open a fresh OFD so the source inventory cannot silently skip entries. */
+    if (ok) root = openat(build, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    ok = ok && root >= 0 && fstat(root, &root_info) == 0 && S_ISDIR(root_info.st_mode) &&
+         bench_service_recipe_receipt_policy(&root_info, true, candidate_gid) &&
+         bench_service_recipe_receipt_root(path, build, &root_info);
+    u64 frame_bytes = sizeof(BenchServiceRecipeReceiptFrame) * BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP;
+    ok = ok && arena && arena->position <= arena->reserved_size &&
+         arena->reserved_size - arena->position >= frame_bytes + BUSTER_ALIGN_OF(BenchServiceRecipeReceiptFrame);
+    BenchServiceRecipeReceiptFrame* frames = ok ? arena_allocate(arena, BenchServiceRecipeReceiptFrame,
+                                                                  BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP) : NULL;
+    if (frames) memset(frames, 0, (size_t)frame_bytes);
+    if (ok)
+    {
+        stream = fdopendir(root);
+        ok = stream != NULL;
+        if (ok) root = -1;
+    }
+    u32 depth = ok ? 1 : 0, count = 0;
+    bool binary_seen = false;
+    BenchServiceRecipeReceiptNode* nodes = NULL;
+    u64 written = 0, hashed = 0;
+    Sha256 node_lines;
+    sha256_init(&node_lines);
+    if (ok)
+    {
+        frames[0].stream = stream;
+        frames[0].identity = root_info;
+        char header[BENCH_SERVICE_RECIPE_PATH_CAP + 1024];
+        int length = snprintf(header, sizeof(header),
+            "BQ-FROZEN-TREE-V1\nstage=%.*s\njob-id=%.*s\nattempt-token=%.*s\n"
+            "base-revision=%.*s\ncandidate-revision=%.*s\nbuild-root=%.*s\n"
+            "boot-id=%s\nbinary-sha256=%s\n",
+            (int)stage.length, stage.pointer, (int)manifest->job_id.length, manifest->job_id.pointer,
+            (int)manifest->attempt_token.length, manifest->attempt_token.pointer,
+            (int)manifest->base_revision.length, manifest->base_revision.pointer,
+            (int)manifest->candidate_revision.length, manifest->candidate_revision.pointer,
+            (int)path.length, path.pointer, boot, expected_digest);
+        ok = length > 0 && (size_t)length < sizeof(header) &&
+             bench_service_recipe_receipt_write(temporary_fd, header, (u64)length, &written, NULL);
+    }
+    while (ok && depth)
+    {
+        BenchServiceRecipeReceiptFrame* frame = frames + depth - 1;
+        if (!frame->path[0])
+        {
+            /* The root path is represented by '.' in the node ledger. */
+            ok = bench_service_recipe_receipt_node(temporary_fd, ".", &root_info, NULL, &written, &node_lines);
+            if (ok) ok = bench_service_recipe_receipt_record(arena, &nodes, ".", &root_info);
+            if (ok) count += 1;
+            frame->path[0] = '.';
+            frame->path[1] = 0;
+            continue;
+        }
+        errno = 0;
+        struct dirent* entry = readdir(frame->stream);
+        if (!entry)
+        {
+            struct stat after = {0}, path_after = {0};
+            ok = errno == 0 && fstat(dirfd(frame->stream), &after) == 0 &&
+                 bench_service_recipe_receipt_same(&frame->identity, &after);
+            if (ok && depth > 1)
+            {
+                BenchServiceRecipeReceiptFrame* previous = frames + depth - 2;
+                char const* name = strrchr(frame->path, '/');
+                name = name ? name + 1 : frame->path;
+                ok = fstatat(dirfd(previous->stream), name, &path_after, AT_SYMLINK_NOFOLLOW) == 0 &&
+                     bench_service_recipe_receipt_same(&frame->identity, &path_after);
+            }
+            if (closedir(frame->stream) != 0) ok = false;
+            frame->stream = NULL;
+            depth -= 1;
+        }
+        else if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, ".."))
+        {
+            char relative[BENCH_SERVICE_RECIPE_RECEIPT_PATH_CAP + 1];
+            int length = snprintf(relative, sizeof(relative), depth == 1 ? "%s" : "%s/%s",
+                                  depth == 1 ? entry->d_name : frame->path,
+                                  depth == 1 ? "" : entry->d_name);
+            ok = length > 0 && (size_t)length < sizeof(relative) &&
+                 count < BENCH_SERVICE_RECIPE_RECEIPT_NODE_CAP;
+            struct stat info = {0};
+            if (ok) ok = fstatat(dirfd(frame->stream), entry->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+                         bench_service_recipe_receipt_policy(&info, S_ISDIR(info.st_mode), candidate_gid);
+            int child = ok ? openat(dirfd(frame->stream), entry->d_name,
+                                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK |
+                                    (S_ISDIR(info.st_mode) ? O_DIRECTORY : 0)) : -1;
+            struct stat opened = {0};
+            ok = ok && child >= 0 && fstat(child, &opened) == 0 &&
+                 bench_service_recipe_receipt_same(&info, &opened);
+            if (ok && S_ISDIR(info.st_mode))
+            {
+                ok = depth < BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP;
+                DIR* child_stream = ok ? fdopendir(child) : NULL;
+                if (!child_stream && child >= 0) close(child);
+                if (ok) ok = child_stream != NULL;
+                if (ok)
+                {
+                    ok = bench_service_recipe_receipt_node(temporary_fd, relative, &info, NULL, &written, &node_lines);
+                    if (ok) ok = bench_service_recipe_receipt_record(arena, &nodes, relative, &info);
+                    if (ok)
+                    {
+                        BenchServiceRecipeReceiptFrame* next = frames + depth;
+                        next->stream = child_stream;
+                        next->identity = info;
+                        memcpy(next->path, relative, (size_t)length + 1);
+                        count += 1;
+                        depth += 1;
+                    }
+                    else if (closedir(child_stream) != 0) ok = false;
+                }
+            }
+            else if (child >= 0)
+            {
+                char digest[SHA256_HEX_CAPACITY] = {0};
+                ok = ok && bench_service_recipe_receipt_file(dirfd(frame->stream), entry->d_name,
+                                                               &info, &hashed, digest);
+                if (close(child) != 0) ok = false;
+                if (ok)
+                {
+                    ok = bench_service_recipe_receipt_node(temporary_fd, relative, &info,
+                                                            digest[0] ? digest : NULL, &written, &node_lines);
+                    if (ok) ok = bench_service_recipe_receipt_record(arena, &nodes, relative, &info);
+                    if (ok) count += 1;
+                    if (ok && !strcmp(relative, "Release/ide"))
+                    {
+                        ok = digest[0] && bench_service_recipe_digest_equal(digest, expected_digest);
+                        if (ok) binary_seen = true;
+                    }
+                }
+            }
+        }
+    }
+    while (depth)
+    {
+        if (frames[depth - 1].stream && closedir(frames[depth - 1].stream) != 0) ok = false;
+        depth -= 1;
+    }
+    if (root >= 0 && close(root) != 0) ok = false;
+    if (ok) ok = count > 0 && binary_seen &&
+                 bench_service_recipe_receipt_verify(nodes, build, path, &root_info);
+    char nodes_digest[SHA256_HEX_CAPACITY] = {0};
+    if (ok)
+    {
+        struct timespec now = {0};
+        ok = clock_gettime(CLOCK_MONOTONIC, &now) == 0 && now.tv_sec >= 0 &&
+             now.tv_nsec >= 0 && now.tv_nsec < 1000000000;
+        if (ok)
+        {
+            sha256_finish_hex(&node_lines, (char8*)nodes_digest);
+            char footer[512];
+            int length = snprintf(footer, sizeof(footer),
+                                  "node-count=%u\nhashed-executable-bytes=%llu\nnode-lines-sha256=%s\n"
+                                  "scan-complete-monotonic-us=%llu\n",
+                                  count, (unsigned long long)hashed, nodes_digest,
+                                  (unsigned long long)now.tv_sec * 1000000ull + (unsigned long long)now.tv_nsec / 1000ull);
+            ok = length > 0 && (size_t)length < sizeof(footer) &&
+                 bench_service_recipe_receipt_write(temporary_fd, footer, (u64)length, &written, NULL);
+        }
+    }
+    if (ok) ok = fchmod(temporary_fd, 0400) == 0 && fsync(temporary_fd) == 0 &&
+                 fstat(temporary_fd, &temporary_info) == 0 && S_ISREG(temporary_info.st_mode) &&
+                 temporary_info.st_nlink == 1 && temporary_info.st_size == (off_t)written &&
+                 bench_service_recipe_entry_matches(parent, temporary, &temporary_info) &&
+                 bench_service_recipe_receipt_verify(nodes, build, path, &root_info);
+    if (ok) ok = linkat(parent, temporary, parent, target, 0) == 0 &&
+                 fstatat(parent, target, &published_info, AT_SYMLINK_NOFOLLOW) == 0 &&
+                 published_info.st_dev == temporary_info.st_dev && published_info.st_ino == temporary_info.st_ino &&
+                 S_ISREG(published_info.st_mode);
+    if (ok) ok = bench_service_recipe_unlink_if_same(parent, temporary, &temporary_info) && fsync(parent) == 0;
+    if (!ok && parent >= 0 && temporary[0] && temporary_info.st_ino)
+    {
+        if (bench_service_recipe_entry_matches(parent, temporary, &temporary_info))
+            bench_service_recipe_unlink_if_same(parent, temporary, &temporary_info);
+    }
+    if (!ok && parent >= 0 && temporary[0] && !temporary_info.st_ino)
+    {
+        struct stat partial = {0};
+        if (fstatat(parent, temporary, &partial, AT_SYMLINK_NOFOLLOW) == 0 &&
+            S_ISREG(partial.st_mode) && partial.st_nlink == 1 && temporary_fd >= 0)
+        {
+            struct stat opened = {0};
+            if (fstat(temporary_fd, &opened) == 0 && opened.st_dev == partial.st_dev && opened.st_ino == partial.st_ino)
+                unlinkat(parent, temporary, 0);
+        }
+    }
+    if (temporary_fd >= 0 && close(temporary_fd) != 0) ok = false;
+    if (parent >= 0)
+    {
+        if (!ok && fsync(parent) != 0) ok = false;
+        if (close(parent) != 0) ok = false;
+    }
+    if (arena) arena_set_position(arena, arena_position);
+    return ok;
+}
+
 typedef struct BenchServiceRecipeBundleEntry BenchServiceRecipeBundleEntry;
 struct BenchServiceRecipeBundleEntry
 {
@@ -38457,6 +38973,31 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_contains(char const* path, ch
     return ok;
 }
 
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_no_receipt_temporary(char const* directory)
+{
+    DIR* stream = opendir(directory);
+    bool ok = stream != NULL;
+    if (stream)
+    {
+        errno = 0;
+        struct dirent* entry = NULL;
+        while (ok && (entry = readdir(stream)) != NULL)
+        {
+            char const* name = entry->d_name;
+            u64 length = strlen(name);
+            bool receipt = !strncmp(name, BENCH_SERVICE_RECIPE_BASE_RECEIPT_NAME,
+                                    strlen(BENCH_SERVICE_RECIPE_BASE_RECEIPT_NAME)) ||
+                           !strncmp(name, BENCH_SERVICE_RECIPE_CANDIDATE_RECEIPT_NAME,
+                                    strlen(BENCH_SERVICE_RECIPE_CANDIDATE_RECEIPT_NAME));
+            ok = !receipt || length < 4 || strcmp(name + length - 4, ".tmp") != 0;
+            if (ok) errno = 0;
+        }
+        if (errno) ok = false;
+        if (closedir(stream) != 0) ok = false;
+    }
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_child_path(char output[BENCH_SERVICE_RECIPE_PATH_CAP],
                                                                char const* parent, char const* child)
 {
@@ -38572,6 +39113,9 @@ BUSTER_GLOBAL_LOCAL void bench_service_recipe_test_fixture_cleanup(Arena* arena,
     char base_release[BENCH_SERVICE_RECIPE_PATH_CAP], candidate_release[BENCH_SERVICE_RECIPE_PATH_CAP];
     if (bench_service_recipe_test_child_path(base_release, fixture->base_build, "Release")) chmod(base_release, 0700);
     if (bench_service_recipe_test_child_path(candidate_release, fixture->candidate_build, "Release")) chmod(candidate_release, 0700);
+    char base_nested[BENCH_SERVICE_RECIPE_PATH_CAP];
+    if (bench_service_recipe_test_child_path(base_nested, fixture->base_build, "CMakeFiles/nested")) chmod(base_nested, 0700);
+    if (bench_service_recipe_test_child_path(base_nested, fixture->base_build, "CMakeFiles")) chmod(base_nested, 0700);
     remove_path_recursive(arena, string_from_pointer(fixture->root));
 }
 
@@ -38601,6 +39145,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_script_setup(Arena* arena, ch
         "  if [ -e \"%s/fail\" ] && [ \"$build\" != \"${build%%/candidate/staging}\" ]; then exit 42; fi\n"
         "  printf '#!/bin/sh\\nexit 0\\n' > \"$build/Release/ide\"\n"
         "  chmod 0755 \"$build/Release/ide\"\n"
+        "  if [ \"$build\" != \"${build%%/base/build}\" ]; then mkdir -p \"$build/CMakeFiles/nested\"; printf 'metadata\\n' > \"$build/CMakeFiles/nested/data.txt\"; fi\n"
         "  exit 0\n"
         "fi\n"
         "exit 41\n", script_root);
@@ -38613,6 +39158,8 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_script_setup(Arena* arena, ch
         "while [ $# -gt 0 ]; do\n"
         "  if [ \"$1\" = \"--baseline\" ]; then baseline=\"$2\"; shift 2; elif [ \"$1\" = \"--candidate\" ]; then candidate=\"$2\"; shift 2; elif [ \"$1\" = \"--output\" ]; then output=\"$2\"; shift 2; else shift; fi\n"
         "done\n"
+        "[ -n \"$output\" ] || exit 40\n"
+        "mkdir -p \"$output\" && printf 'started\\n' > \"$output/.throughput-started\"\n"
         "[ -n \"$output\" ] && mkdir -p \"$output/nested\" && printf 'synthetic-throughput\\n' > \"$output/result.txt\" && printf 'synthetic-nested-throughput\\n' > \"$output/nested/result.txt\"\n"
         "if [ -e \"%s/invalid-output\" ]; then printf 'invalid\\n' > \"$output/bad name\"; fi\n"
         "if [ -e \"%s/tamper\" ]; then printf 'tampered\\n' > \"$baseline\"; chmod 0555 \"$baseline\"; fi\n"
@@ -38627,6 +39174,8 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_script_setup(Arena* arena, ch
     {
         bench_service_recipe_driver_override = string_duplicate_arena(arena, string_from_pointer(driver), true);
         bench_service_recipe_throughput_override = string_duplicate_arena(arena, string_from_pointer(throughput), true);
+        bench_service_recipe_test_candidate_gid = getegid();
+        bench_service_recipe_test_candidate_gid_set = true;
     }
     return ok;
 }
@@ -38871,6 +39420,21 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
                                bench_service_recipe_test_contains(positive_bundle_path, "throughput/result.txt") &&
                                bench_service_recipe_test_contains(positive_bundle_path, "throughput/nested/result.txt");
         bool positive_bundle_digest = !bench_service_recipe_test_contains(fixture.manifest, "bundle-sha256=\n");
+        char base_receipt[BENCH_SERVICE_RECIPE_PATH_CAP], candidate_receipt[BENCH_SERVICE_RECIPE_PATH_CAP];
+        bool receipt_paths = bench_service_recipe_test_child_path(base_receipt, fixture.result,
+                                                                  BENCH_SERVICE_RECIPE_BASE_RECEIPT_NAME) &&
+                             bench_service_recipe_test_child_path(candidate_receipt, fixture.result,
+                                                                  BENCH_SERVICE_RECIPE_CANDIDATE_RECEIPT_NAME);
+        bool positive_receipts = receipt_paths &&
+                                 bench_service_recipe_test_contains(base_receipt, "BQ-FROZEN-TREE-V1\nstage=base-build\njob-id=1\nattempt-token=2\n") &&
+                                 bench_service_recipe_test_contains(candidate_receipt, "BQ-FROZEN-TREE-V1\nstage=candidate-build\njob-id=1\nattempt-token=2\n") &&
+                                 bench_service_recipe_test_contains(base_receipt, "node-count=6\n") &&
+                                 bench_service_recipe_test_contains(candidate_receipt, "node-count=3\n") &&
+                                 bench_service_recipe_test_contains(base_receipt, "434d616b6546696c65732f6e65737465642f646174612e747874") &&
+                                 bench_service_recipe_test_contains(base_receipt, "scan-complete-monotonic-us=") &&
+                                 bench_service_recipe_test_contains(candidate_receipt, "node-lines-sha256=") &&
+                                 bench_service_recipe_test_contains(positive_bundle_path, BENCH_SERVICE_RECIPE_BASE_RECEIPT_NAME) &&
+                                 bench_service_recipe_test_contains(positive_bundle_path, BENCH_SERVICE_RECIPE_CANDIDATE_RECEIPT_NAME);
         bool positive_tmp = access(fixture.temporary, F_OK) != 0;
         struct stat manifest_info = {0};
         bool positive_mode = stat(fixture.manifest, &manifest_info) == 0 && (manifest_info.st_mode & 0222) == 0;
@@ -38892,7 +39456,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
                                    bench_service_recipe_test_candidate_mode(candidate_release, true, false) &&
                                    bench_service_recipe_test_candidate_mode(fixture.base_binary, false, true) &&
                                    bench_service_recipe_test_candidate_mode(fixture.candidate_binary, false, true);
-        ok = ok && result == PROCESS_RESULT_SUCCESS && positive_status && positive_stage && positive_namespace && positive_manifest_paths && positive_base_digest &&
+        ok = ok && result == PROCESS_RESULT_SUCCESS && positive_status && positive_stage && positive_namespace && positive_manifest_paths && positive_receipts && positive_base_digest &&
              positive_candidate_digest && positive_manifest && positive_bundle && positive_bundle_digest && positive_tmp && positive_mode &&
              candidate_parent_mode && candidate_tree_mode;
         chmod(fixture.base_source, 0700);
@@ -38903,6 +39467,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
         chmod(fixture.candidate_binary, 0700);
         if (bench_service_recipe_test_child_path(base_release, fixture.base_build, "Release")) chmod(base_release, 0700);
         if (bench_service_recipe_test_child_path(candidate_release, fixture.candidate_build, "Release")) chmod(candidate_release, 0700);
+        char base_nested[BENCH_SERVICE_RECIPE_PATH_CAP];
+        if (bench_service_recipe_test_child_path(base_nested, fixture.base_build, "CMakeFiles/nested")) chmod(base_nested, 0700);
+        if (bench_service_recipe_test_child_path(base_nested, fixture.base_build, "CMakeFiles")) chmod(base_nested, 0700);
         remove_path_recursive(arena, string_from_pointer(fixture.attempt));
         bool retained = access(fixture.attempt, F_OK) != 0 && access(fixture.manifest, F_OK) == 0 &&
                         bench_service_recipe_test_contains(fixture.manifest, "status=succeeded") &&
@@ -38925,6 +39492,42 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
         unlink(fail_marker);
         cases += 1;
         bench_service_recipe_test_fixture_cleanup(arena, &fixture);
+    }
+    for (u32 scenario = 0; ok && scenario < 4; scenario += 1)
+    {
+        /* Base and candidate publication collisions, bounded serialization,
+         * and an actual post-hash metadata mutation all stop the graph before
+         * the synthetic throughput executable can write its start marker. */
+        BenchServiceRecipeTestFixture fixture;
+        bool fixture_ok = bench_service_recipe_test_fixture_make(&fixture, 13 + scenario,
+                                                                 base_revision, candidate_revision);
+        bool candidate_collision = scenario == 1;
+        char receipt[BENCH_SERVICE_RECIPE_PATH_CAP], start[BENCH_SERVICE_RECIPE_PATH_CAP];
+        fixture_ok = fixture_ok && bench_service_recipe_test_child_path(
+            receipt, fixture.result, candidate_collision ? BENCH_SERVICE_RECIPE_CANDIDATE_RECEIPT_NAME :
+                                             BENCH_SERVICE_RECIPE_BASE_RECEIPT_NAME) &&
+            bench_service_recipe_test_child_path(start, fixture.attempt,
+                                                "candidate/staging/throughput-results/.throughput-started");
+        if (fixture_ok && scenario < 2) fixture_ok = bench_service_recipe_test_write(receipt, "planted\n", 0400);
+        bench_service_recipe_test_receipt_bytes_cap = scenario == 2 ? 512 : 0;
+        bench_service_recipe_test_receipt_race = scenario == 3;
+        bench_service_recipe_test_receipt_partial_cap = false;
+        ProcessResult result = fixture_ok ? bench_service_recipe_test_run(arena, &fixture,
+                                                     string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        bool partial_cap = scenario != 2 || bench_service_recipe_test_receipt_partial_cap;
+        bench_service_recipe_test_receipt_bytes_cap = 0;
+        bench_service_recipe_test_receipt_race = false;
+        bench_service_recipe_test_receipt_partial_cap = false;
+        bool failed_stage = bench_service_recipe_test_contains(fixture.manifest,
+                                      candidate_collision ? "stage=candidate-build\n" : "stage=base-build\n");
+        bool failed_status = bench_service_recipe_test_contains(fixture.manifest, "status=failed\n") &&
+                             bench_service_recipe_test_contains(fixture.manifest, "process-result=failed\n");
+        bool receipt_state = scenario < 2 ? bench_service_recipe_test_contains(receipt, "planted\n") :
+                                               access(receipt, F_OK) != 0;
+        ok = fixture_ok && result == PROCESS_RESULT_FAILED && failed_stage && failed_status && receipt_state && partial_cap &&
+             access(start, F_OK) != 0 && bench_service_recipe_test_no_receipt_temporary(fixture.result);
+        cases += 1;
+        if (fixture.root[0]) bench_service_recipe_test_fixture_cleanup(arena, &fixture);
     }
     if (ok)
     {
@@ -39094,6 +39697,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
     unlink(invalid_output_marker);
     bench_service_recipe_driver_override = (String8){0};
     bench_service_recipe_throughput_override = (String8){0};
+    bench_service_recipe_test_candidate_gid_set = false;
     if (script_root[0]) remove_path_recursive(arena, string_from_pointer(script_root));
     string_print(S8("BENCH_SERVICE_RECIPE_SELF_TEST cases={u32} result={S8}\n"), cases, ok ? S8("pass") : S8("fail"));
     return ok ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
@@ -39124,6 +39728,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Ar
     }
     bench_service_recipe_driver_override = (String8){0};
     bench_service_recipe_throughput_override = (String8){0};
+    bench_service_recipe_test_candidate_gid_set = false;
     if (script_root[0]) remove_path_recursive(arena, string_from_pointer(script_root));
     string_print(S8("BENCH_SERVICE_RECIPE_MATERIALIZED_SELF_TEST result={S8}\n"), ok ? S8("pass") : S8("fail"));
     return ok ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
