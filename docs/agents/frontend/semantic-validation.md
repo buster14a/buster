@@ -57,6 +57,23 @@ publish cache entries. Immutable scalar query types are created before query
 checkpoints; declarator and qualified types remain independent. All borrowed
 cache pointers are cleared before the semantic model is returned.
 
+A modification destination is typed from its whole operand.
+`c_parse_assignment_identifier_is_operand` is the one rule both assignment
+scans in `c_parse_validate_const_assignments` use for when the identifier in
+front of `=` is that whole operand: a member access, indirection, address-of
+or prefix update in front of it names another object, so `*--p = c` converts
+`c` to the pointee's type, not to `p`'s. A parameter entity keeps its declared
+array spelling, so `c_parse_update_operand_modifiable` and the read-only check
+apply C17 6.7.6.3p7 themselves: `argv++` on `char *argv[]` updates the
+adjusted pointer, a local or member array stays unmodifiable, and a `const`
+inside the brackets (`CArrayBound.is_const`, `int a[const 2]`) makes that
+pointer read-only here and in `c_ir_mark_local_read_only`. A qualified
+typedef'd array parameter (`const L2 v`) is still treated as a const pointer
+on both paths; C17 6.7.3p10 qualifies its element instead.
+The embedded modification-destination sources in `compiler_driver_tests`
+run these shapes under every allocator and both frontend forms; the
+equivalence table holds their rejected neighbours.
+
 `c_parse_validate_label_values` walks a body's assignment, return and call
 values -- one scope-chain entity lookup per identifier -- only when
 `c_parse_label_values_needed` proves the body takes a label address or
