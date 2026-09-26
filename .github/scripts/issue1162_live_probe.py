@@ -8,12 +8,15 @@ through the verified result-directory fd and removed by captured inode.
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import hashlib
+import io
 import json
 import os
 import pwd
 import re
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -25,13 +28,25 @@ from unittest.mock import patch
 
 STATE = "/var/lib/buster-bench"
 QUEUE = STATE + "/queue"
+WORKSPACES = STATE + "/workspaces"
 RESULTS = STATE + "/workspaces/results"
+LEASE_PARENT = STATE + "/lease"
+LEASE_RECEIPT_DIR = "/etc/buster-bench"
+LEASE_RECEIPT_NAME = "systemd-broker-lease.identity"
 CGROUP_ROOT = "/sys/fs/cgroup"
 BENCH_SLICE_PATH = CGROUP_ROOT + "/buster.slice/buster-bench.slice"
 SERVICE_CGROUP = "/system.slice/buster-bench.service"
 LIVE_TEST = "/usr/local/libexec/systemd-broker-live-test"
+ROOT_UID = 0
+ROOT_GID = 0
+TERMINAL_STAGE_SUFFIXES = ("base-generate", "base-build", "candidate-generate",
+                           "candidate-build", "throughput")
+TERMINAL_SYSTEMD_PROPERTIES = (
+    "Id,LoadState,ActiveState,MainPID,InvocationID,CollectMode,Result,ControlGroup")
+MAX_TERMINAL_SYSTEMD_OUTPUT = 16384
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 HEX32 = re.compile(r"[0-9a-f]{32}\Z")
+HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 
 
 class ProbeError(RuntimeError):
@@ -71,12 +86,75 @@ def _read_at(directory: int, name: str, size: int, uid: int, gid: int, mode: int
             _fail(bool(block), f"short record: {name}")
             chunks.extend(block)
         after = os.fstat(fd)
+        path_after = os.stat(name, dir_fd=directory, follow_symlinks=False)
         stable_after = (after.st_dev, after.st_ino, after.st_mode, after.st_nlink,
                         after.st_uid, after.st_gid, after.st_size,
                         after.st_mtime_ns, after.st_ctime_ns)
-        _fail(os.read(fd, 1) == b"" and stable_after == stable_before,
+        stable_path = (path_after.st_dev, path_after.st_ino, path_after.st_mode, path_after.st_nlink,
+                       path_after.st_uid, path_after.st_gid, path_after.st_size,
+                       path_after.st_mtime_ns, path_after.st_ctime_ns)
+        _fail(os.read(fd, 1) == b"" and stable_after == stable_before and stable_path == stable_after,
               f"record changed while read: {name}")
         return bytes(chunks)
+    finally:
+        os.close(fd)
+
+
+def _read_variable_at(directory: int, name: str, maximum: int,
+                      uid: int, gid: int, mode: int) -> bytes:
+    return _read_variable_snapshot(directory, name, maximum, uid, gid, mode)[0]
+
+
+def _read_variable_snapshot(directory: int, name: str, maximum: int,
+                            uid: int, gid: int, mode: int) -> tuple[bytes, dict[str, int]]:
+    fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    try:
+        before = os.fstat(fd)
+        _fail(stat.S_ISREG(before.st_mode) and before.st_uid == uid and before.st_gid == gid and
+              _mode(before) == mode and before.st_nlink == 1 and 0 < before.st_size <= maximum,
+              f"invalid file metadata: {name}")
+        stable_before = (before.st_dev, before.st_ino, before.st_mode, before.st_nlink,
+                         before.st_uid, before.st_gid, before.st_size,
+                         before.st_mtime_ns, before.st_ctime_ns)
+        chunks = bytearray()
+        while len(chunks) < before.st_size:
+            block = os.read(fd, before.st_size - len(chunks))
+            _fail(bool(block), f"short file: {name}")
+            chunks.extend(block)
+        after = os.fstat(fd)
+        path_after = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        stable_after = _stable_stat_tuple(after)
+        stable_path = _stable_stat_tuple(path_after)
+        _fail(os.read(fd, 1) == b"" and stable_after == stable_before and stable_path == stable_after,
+              f"file changed while read: {name}")
+        identity = {"device": after.st_dev, "inode": after.st_ino, "mode": _mode(after),
+                    "uid": after.st_uid, "gid": after.st_gid, "links": after.st_nlink,
+                    "size": after.st_size}
+        return bytes(chunks), identity
+    finally:
+        os.close(fd)
+
+
+def _read_bounded_file(path: str, maximum: int) -> bytes:
+    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(fd)
+        _fail(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 <= before.st_size <= maximum,
+              f"invalid bounded input file: {path}")
+        data = bytearray()
+        while len(data) <= maximum:
+            block = os.read(fd, min(65536, maximum + 1 - len(data)))
+            if not block:
+                break
+            data.extend(block)
+        after = os.fstat(fd)
+        _fail(len(data) <= maximum and before.st_dev == after.st_dev and before.st_ino == after.st_ino and
+              before.st_mode == after.st_mode and before.st_nlink == after.st_nlink and
+              before.st_uid == after.st_uid and before.st_gid == after.st_gid and
+              before.st_size == after.st_size and before.st_mtime_ns == after.st_mtime_ns and
+              before.st_ctime_ns == after.st_ctime_ns,
+              f"input file changed or exceeded bound: {path}")
+        return bytes(data)
     finally:
         os.close(fd)
 
@@ -160,6 +238,53 @@ def _write_private(output: Path, name: str, content: bytes) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+RESULT_FIRST_LINE = re.compile(
+    r"job=([0-9]+) token=([0-9]+) sequence=([0-9]+) phase=([a-z-]+) outcome=([a-z-]+) "
+    r"validity=not-evaluated cancel-requested=([01]) reconciliation=([01]) pending=([0-9]{1,10}) "
+    r"retained=([0-9]{1,10}) request-sha256=([0-9a-f]{64}) failure=([a-z0-9-]+)\Z")
+
+
+def parse_result_receipt(raw: bytes, expected_job: int, request_sha: str) -> dict[str, object]:
+    _fail(0 < len(raw) <= 4096 and raw.endswith(b"\n") and not raw.endswith(b"\n\n"),
+          "result receipt is empty, oversized, or not a single newline-terminated record")
+    _fail(b"\0" not in raw and b"\r" not in raw, "result receipt has invalid control bytes")
+    try:
+        lines = raw[:-1].decode("ascii").split("\n")
+    except UnicodeDecodeError as exc:
+        raise ProbeError("result receipt is not ASCII") from exc
+    _fail(len(lines) == 6, "result receipt must contain exactly six lines")
+    first = RESULT_FIRST_LINE.fullmatch(lines[0])
+    _fail(first is not None, "result receipt first line is malformed or has duplicate/missing fields")
+    fields = first.groups()
+    job, token, sequence = int(fields[0]), int(fields[1]), int(fields[2])
+    _fail(job == expected_job and job > 0, "result receipt job mismatch")
+    _fail(token > 0, "result receipt token is zero")
+    _fail(int(fields[7]) <= 0xFFFFFFFF and int(fields[8]) <= 0xFFFFFFFF,
+          "result receipt pending/retained count exceeds the C formatter range")
+    _fail(fields[3] == "finished" and fields[4] == "succeeded", "result receipt is not finished and succeeded")
+    _fail(fields[5] == "0" and fields[6] == "0" and fields[10] == "ok",
+          "successful result receipt has cancellation, reconciliation, or failure state")
+    _fail(fields[9] == request_sha and HEX64.fullmatch(request_sha) is not None,
+          "result receipt request digest mismatch")
+    _fail(lines[1] == "result-bound=1 statistical-decision=not-evaluated",
+          "result receipt is not bound")
+    expected_root = f"{RESULTS}/job-{job}-attempt-{token}"
+    _fail(lines[2] == f"result-root={expected_root}", "result receipt root is not the canonical attempt leaf")
+    digest_values: dict[str, str] = {}
+    for line, name in zip(lines[3:], ("manifest-sha256", "bundle-sha256", "full-result-sha256")):
+        match = re.fullmatch(rf"{name}=([0-9a-f]{{64}})", line)
+        _fail(match is not None, f"result receipt {name} is missing or malformed")
+        digest_values[name] = match.group(1)
+    return {"job": job, "token": token, "sequence": sequence, "request_sha256": request_sha,
+            "result_root": expected_root, **digest_values}
+
+
+def check_result_file(path: str, expected_job: int, request_sha: str) -> tuple[int, str]:
+    raw = _read_bounded_file(path, 4096)
+    receipt = parse_result_receipt(raw, expected_job, request_sha)
+    return int(receipt["token"]), str(receipt["full-result-sha256"])
 
 
 def _systemd(unit: str, timeout: float) -> tuple[dict[str, str], str]:
@@ -503,7 +628,8 @@ def run_probe_process(command: list[str], env: dict[str, str], timeout: float,
             "leaked_children": leaked_children, "runner_error": process_error}
 
 
-def _open_records(job: int, request_sha: str) -> tuple[bytes, bytes, dict[str, object]]:
+def _open_records(job: int, request_sha: str, output: Path | None = None,
+                  record_prefix: str = "") -> tuple[bytes, bytes, dict[str, object]]:
     service = pwd.getpwnam("buster-bench")
     queue_fd = _safe_dir(QUEUE, service.pw_uid, service.pw_gid, 0o710)
     try:
@@ -511,8 +637,440 @@ def _open_records(job: int, request_sha: str) -> tuple[bytes, bytes, dict[str, o
         instance = _read_at(queue_fd, f"worker-instance-{job}", 544, service.pw_uid, service.pw_gid, 0o440)
     finally:
         os.close(queue_fd)
+    if output is not None:
+        _write_private(output, f"{record_prefix}worker-record.bin", worker)
+        _write_private(output, f"{record_prefix}instance-record.bin", instance)
     boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     return worker, instance, parse_records(worker, instance, job, request_sha, boot_id)
+
+
+def _open_dir_nofollow(path: str) -> int:
+    _fail(path.startswith("/"), f"directory path is not absolute: {path}")
+    current = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in Path(path).parts[1:]:
+            _fail(part not in ("", ".", ".."), f"unsafe directory component in {path}")
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                            dir_fd=current)
+            os.close(current)
+            current = child
+        result = current
+        current = -1
+        return result
+    finally:
+        if current >= 0:
+            os.close(current)
+
+
+def _write_json_private(output: Path, name: str, value: object) -> None:
+    _write_private(output, name, (json.dumps(value, sort_keys=True, indent=2) + "\n").encode("utf-8"))
+
+
+def _cleanup_identity(raw: bytes, job: int, attempt: int, request_sha: str,
+                      workspaces_device: int, workspaces_inode: int) -> dict[str, int]:
+    _fail(len(raw) == 128 and raw[:16] == b"BQCLEANUP0000001", "invalid cleanup record format")
+    _fail(int.from_bytes(raw[16:24], "little") == job and
+          int.from_bytes(raw[24:32], "little") == attempt, "cleanup record job/attempt mismatch")
+    _fail(int.from_bytes(raw[32:40], "little") == workspaces_device and
+          int.from_bytes(raw[40:48], "little") == workspaces_inode,
+          "cleanup record workspace-parent identity mismatch")
+    workspace_device = int.from_bytes(raw[48:56], "little")
+    workspace_inode = int.from_bytes(raw[56:64], "little")
+    _fail(workspace_device > 0 and workspace_inode > 0, "cleanup record has zero attempt-workspace identity")
+    _fail(raw[64:128] == request_sha.encode("ascii"), "cleanup record request digest mismatch")
+    return {"workspaces_device": workspaces_device, "workspaces_inode": workspaces_inode,
+            "attempt_workspace_device": workspace_device, "attempt_workspace_inode": workspace_inode}
+
+
+def _canonical_lease_receipt(raw: bytes) -> tuple[int, int]:
+    _fail(len(raw) <= 128, "lease identity receipt exceeds bound")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ProbeError("lease identity receipt is not ASCII") from exc
+    match = re.fullmatch(r"device=([1-9][0-9]*)\ninode=([1-9][0-9]*)\n", text)
+    _fail(match is not None, "lease identity receipt is malformed or non-canonical")
+    device, inode = int(match.group(1)), int(match.group(2))
+    _fail(device <= 0xFFFFFFFFFFFFFFFF and inode <= 0xFFFFFFFFFFFFFFFF,
+          "lease identity receipt value exceeds u64")
+    return device, inode
+
+
+def _stable_stat_tuple(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+            info.st_uid, info.st_gid, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _lease_snapshot(lease_dir_fd: int, lock_fd: int, service_uid: int, service_gid: int,
+                    expected_device: int, expected_inode: int) -> dict[str, int]:
+    info = os.fstat(lock_fd)
+    _fail(stat.S_ISREG(info.st_mode) and info.st_uid == service_uid and info.st_gid == service_gid and
+          _mode(info) == 0o640 and info.st_nlink == 1 and
+          (info.st_dev, info.st_ino) == (expected_device, expected_inode),
+          "stable lease fd identity or metadata mismatch")
+    path_info = os.stat("host.lock", dir_fd=lease_dir_fd, follow_symlinks=False)
+    _fail(stat.S_ISREG(path_info.st_mode) and _stable_stat_tuple(path_info) == _stable_stat_tuple(info),
+          "stable lease path does not identify the opened inode")
+    return {"device": info.st_dev, "inode": info.st_ino, "mode": _mode(info),
+            "uid": info.st_uid, "gid": info.st_gid, "links": info.st_nlink}
+
+
+def _same_directory_path(path: str, pinned_fd: int, uid: int, gid: int, mode: int) -> dict[str, int]:
+    current_fd = _safe_dir(path, uid, gid, mode)
+    try:
+        pinned = os.fstat(pinned_fd)
+        current = os.fstat(current_fd)
+        _fail(stat.S_ISDIR(current.st_mode) and
+              (current.st_dev, current.st_ino, current.st_mode, current.st_uid, current.st_gid) ==
+              (pinned.st_dev, pinned.st_ino, pinned.st_mode, pinned.st_uid, pinned.st_gid),
+              f"fixed directory path no longer names the pinned directory: {path}")
+        return {"device": current.st_dev, "inode": current.st_ino,
+                "mode": _mode(current), "uid": current.st_uid, "gid": current.st_gid}
+    finally:
+        os.close(current_fd)
+
+
+def _terminal_directory_paths(workspaces_fd: int, results_fd: int, result_leaf_fd: int,
+                              lease_dir_fd: int, receipt_dir_fd: int,
+                              service_uid: int, service_gid: int, candidate_gid: int,
+                              job: int, attempt: int, output: Path) -> dict[str, object]:
+    paths = (
+        ("workspaces", WORKSPACES, workspaces_fd, service_uid, candidate_gid, 0o2710),
+        ("results", RESULTS, results_fd, service_uid, service_gid, 0o710),
+        ("result_leaf", f"{RESULTS}/job-{job}-attempt-{attempt}", result_leaf_fd,
+         service_uid, service_gid, 0o700),
+        ("lease_parent", LEASE_PARENT, lease_dir_fd, service_uid, service_gid, 0o710),
+        ("lease_receipt_parent", LEASE_RECEIPT_DIR, receipt_dir_fd, ROOT_UID, ROOT_GID, 0o555),
+    )
+    evidence: dict[str, object] = {}
+    failures = []
+    for label, path, pinned_fd, uid, gid, mode in paths:
+        try:
+            evidence[label] = _same_directory_path(path, pinned_fd, uid, gid, mode)
+        except (ProbeError, OSError) as exc:
+            evidence[label] = {"valid": False, "error": f"{type(exc).__name__}: {exc}"}
+            failures.append(f"{label}: {exc}")
+    _write_json_private(output, "terminal-directory-paths.json", evidence)
+    _fail(not failures, "fixed directory path identity changed: " + "; ".join(failures))
+    return evidence
+
+
+def _mountinfo_has_cgroup2(raw: bytes, mountpoint: str) -> bool:
+    try:
+        lines = raw.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ProbeError("mountinfo is not ASCII") from exc
+    for line in lines:
+        before, separator, after = line.partition(" - ")
+        left, right = before.split(), after.split()
+        if separator and len(left) >= 5 and right and right[0] == "cgroup2":
+            decoded = re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), left[4])
+            if decoded == mountpoint:
+                return True
+    return False
+
+
+def _check_terminal_unit(unit: str, output: Path, deadline: float,
+                         identity: dict[str, object], outer: bool = False) -> dict[str, str]:
+    stem = re.sub(r"[^A-Za-z0-9_.-]", "_", unit)
+    timeout = min(3.0, _remaining(deadline, reserve=1.0))
+    command = ["/usr/bin/systemctl", "show", "--all", "--no-pager",
+               f"--property={TERMINAL_SYSTEMD_PROPERTIES}", unit]
+    try:
+        done = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, bytes) else (exc.stdout or "").encode()
+        stderr = exc.stderr if isinstance(exc.stderr, bytes) else (exc.stderr or "").encode()
+        _write_private(output, f"terminal-unit-{stem}.stdout", stdout)
+        _write_private(output, f"terminal-unit-{stem}.stderr", stderr)
+        _write_json_private(output, f"terminal-unit-{stem}.status.json",
+                            {"unit": unit, "exit": None, "timed_out": True, "error": str(exc)})
+        raise ProbeError(f"bounded systemd query timed out for {unit}") from exc
+    except OSError as exc:
+        _write_private(output, f"terminal-unit-{stem}.stdout", b"")
+        _write_private(output, f"terminal-unit-{stem}.stderr", str(exc).encode("utf-8", "replace"))
+        _write_json_private(output, f"terminal-unit-{stem}.status.json",
+                            {"unit": unit, "exit": None, "timed_out": False, "error": str(exc)})
+        raise ProbeError(f"bounded systemd query failed for {unit}: {exc}") from exc
+    stdout = done.stdout.encode("utf-8", "replace") if isinstance(done.stdout, str) else done.stdout
+    stderr = done.stderr.encode("utf-8", "replace") if isinstance(done.stderr, str) else done.stderr
+    output_oversized = len(stdout) > MAX_TERMINAL_SYSTEMD_OUTPUT or len(stderr) > MAX_TERMINAL_SYSTEMD_OUTPUT
+    _write_private(output, f"terminal-unit-{stem}.stdout", stdout[:MAX_TERMINAL_SYSTEMD_OUTPUT])
+    _write_private(output, f"terminal-unit-{stem}.stderr", stderr[:MAX_TERMINAL_SYSTEMD_OUTPUT])
+    _write_json_private(output, f"terminal-unit-{stem}.status.json",
+                        {"unit": unit, "exit": done.returncode, "timed_out": False,
+                         "output_oversized": output_oversized,
+                         "stdout_bytes": len(stdout), "stderr_bytes": len(stderr)})
+    _fail(not output_oversized, f"systemd query output exceeded bound for {unit}")
+    _fail(done.returncode == 0, f"systemd query for {unit} returned {done.returncode}")
+    try:
+        text = stdout.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ProbeError(f"systemd query for {unit} was not ASCII") from exc
+    properties: dict[str, str] = {}
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        _fail(separator and key and key not in properties, f"malformed or duplicate systemd property for {unit}")
+        properties[key] = value
+    _fail(properties.get("Id") == unit, f"systemd returned a different unit identity for {unit}")
+    if outer:
+        load_state = properties.get("LoadState")
+        if load_state == "not-found":
+            return properties
+        _fail(load_state == "loaded" and properties.get("ActiveState") == "inactive" and
+              properties.get("MainPID") == "0" and
+              properties.get("InvocationID") == identity["outer_invocation"] and
+              properties.get("CollectMode") == "inactive" and
+              properties.get("Result") == "success" and
+              properties.get("ControlGroup", "") in ("", identity["outer_cgroup"]),
+              "outer unit is active, changed invocation, or not collected/inactive")
+    else:
+        _fail(properties.get("LoadState") == "not-found",
+              f"stage unit is still loaded or not collected: {unit}")
+    return properties
+
+
+def _terminal_absence_snapshot(workspaces_fd: int, results_fd: int, label: str,
+                               output: Path, job: int, attempt: int) -> dict[str, object]:
+    checks = ((workspaces_fd, f"job-{job}-attempt-{attempt}", "attempt_workspace"),
+              (results_fd, ".lease-handoff", "result_leaf_lease_handoff"),
+              (results_fd, "payload", "result_leaf_payload"))
+    evidence: dict[str, object] = {"snapshot": label, "checks": []}
+    failures = []
+    for directory_fd, name, label_name in checks:
+        try:
+            info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            check = {"name": label_name, "path_component": name, "absent": False,
+                     "mode": _mode(info), "device": info.st_dev, "inode": info.st_ino,
+                     "symlink": stat.S_ISLNK(info.st_mode)}
+            failures.append(f"{label_name} is present")
+        except FileNotFoundError:
+            check = {"name": label_name, "path_component": name, "absent": True}
+        except OSError as exc:
+            check = {"name": label_name, "path_component": name, "absent": False,
+                     "error": f"{type(exc).__name__}: {exc}"}
+            failures.append(f"{label_name} could not be checked")
+        evidence["checks"].append(check)
+    _write_json_private(output, f"terminal-paths-{label}.json", evidence)
+    _fail(not failures, "; ".join(failures))
+    return evidence
+
+
+def _terminal_cgroup_snapshot(output: Path, identity: dict[str, object], label: str) -> dict[str, object]:
+    root_fd = parent_fd = slice_fd = -1
+    try:
+        root_fd = _open_dir_nofollow(CGROUP_ROOT)
+        root_info = os.fstat(root_fd)
+        parent_fd = os.open("buster.slice", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                            dir_fd=root_fd)
+        slice_fd = os.open("buster-bench.slice", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                           dir_fd=parent_fd)
+        slice_info = os.fstat(slice_fd)
+        _write_json_private(output, f"terminal-cgroup-identities-{label}.json", {
+            "root": CGROUP_ROOT, "root_device": root_info.st_dev, "root_inode": root_info.st_ino,
+            "slice": BENCH_SLICE_PATH, "slice_device": slice_info.st_dev, "slice_inode": slice_info.st_ino,
+            "expected_root_device": identity["cgroup_root_device"],
+            "expected_root_inode": identity["cgroup_root_inode"],
+            "expected_slice_device": identity["slice_device"],
+            "expected_slice_inode": identity["slice_inode"],
+        })
+        _fail((root_info.st_dev, root_info.st_ino) ==
+              (identity["cgroup_root_device"], identity["cgroup_root_inode"]),
+              "cgroup root device/inode differs from immutable instance record")
+        _fail((slice_info.st_dev, slice_info.st_ino) ==
+              (identity["slice_device"], identity["slice_inode"]),
+              "benchmark slice device/inode differs from immutable instance record")
+        leaves = [identity["outer_unit"]] + [
+            f"buster-bench-{identity['job']}-{identity['attempt']}-{suffix}.service"
+            for suffix in TERMINAL_STAGE_SUFFIXES]
+        checks: list[dict[str, object]] = []
+        failures = []
+        for unit in leaves:
+            try:
+                info = os.stat(unit, dir_fd=slice_fd, follow_symlinks=False)
+                checks.append({"unit": unit, "absent": False, "device": info.st_dev,
+                               "inode": info.st_ino, "mode": _mode(info),
+                               "symlink": stat.S_ISLNK(info.st_mode)})
+                failures.append(f"expected job cgroup leaf remains: {unit}")
+            except FileNotFoundError:
+                checks.append({"unit": unit, "absent": True})
+            except OSError as exc:
+                checks.append({"unit": unit, "absent": False,
+                               "error": f"{type(exc).__name__}: {exc}"})
+                failures.append(f"cannot prove cgroup leaf absence: {unit}")
+        snapshot = {"snapshot": label, "filesystem": "cgroup2", "root": CGROUP_ROOT,
+                    "root_device": root_info.st_dev, "root_inode": root_info.st_ino,
+                    "slice": BENCH_SLICE_PATH, "slice_device": slice_info.st_dev,
+                    "slice_inode": slice_info.st_ino, "units": checks,
+                    "recursive_absence_basis": "all six exact unit cgroup leaves are absent on the recorded cgroup2 slice"}
+        _write_json_private(output, f"terminal-cgroups-{label}.json", snapshot)
+        _fail(not failures, "; ".join(failures))
+        return snapshot
+    finally:
+        for descriptor in (slice_fd, parent_fd, root_fd):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _terminal_proof(job: int, attempt: int, request_sha: str, baseline: str, subject: str,
+                    lease_device: int, lease_inode: int, budget: float, output: Path) -> dict[str, object]:
+    _fail(is_root() and in_disposable_container(), "not root in the disposable container")
+    _fail(job > 0 and attempt > 0 and HEX64.fullmatch(request_sha) is not None,
+          "invalid terminal job, attempt, or request digest")
+    _fail(HEX40.fullmatch(baseline) is not None and HEX40.fullmatch(subject) is not None,
+          "terminal source revisions are malformed")
+    _fail(lease_device > 0 and lease_inode > 0, "pre-submit lease identity is missing")
+    _fail(0 < budget <= 60.0, "terminal proof budget must be within 60 seconds")
+    deadline = time.monotonic() + budget
+    service = pwd.getpwnam("buster-bench")
+    candidate = pwd.getpwnam("buster-bench-candidate")
+
+    worker, instance, identity = _open_records(job, request_sha, output, "terminal-")
+    _fail(identity["attempt"] == attempt, "terminal attempt differs from durable worker record")
+    _write_json_private(output, "terminal-record-identities.json", {
+        "job": job, "attempt": attempt, "request_sha256": request_sha,
+        "boot_id": identity["boot_id"], "outer_unit": identity["outer_unit"],
+        "outer_invocation": identity["outer_invocation"], "outer_cgroup": identity["outer_cgroup"],
+        "worker_record_bytes": len(worker), "worker_record_sha256": identity["worker_sha256"],
+        "instance_record_bytes": len(instance), "instance_record_sha256": identity["instance_sha256"],
+    })
+
+    queue_fd = _safe_dir(QUEUE, service.pw_uid, service.pw_gid, 0o710)
+    try:
+        cleanup_raw = _read_at(queue_fd, f"cleanup-{job}", 128, service.pw_uid, service.pw_gid, 0o400)
+    finally:
+        os.close(queue_fd)
+    _write_private(output, "terminal-cleanup-record.bin", cleanup_raw)
+
+    workspaces_fd = results_fd = result_leaf_fd = lease_dir_fd = lease_lock_fd = receipt_dir_fd = -1
+    cgroup_snapshots: list[dict[str, object]] = []
+    try:
+        workspaces_fd = _safe_dir(WORKSPACES, service.pw_uid, candidate.pw_gid, 0o2710)
+        workspaces_info = os.fstat(workspaces_fd)
+        _write_json_private(output, "terminal-workspaces-parent.json", {
+            "path": WORKSPACES, "device": workspaces_info.st_dev, "inode": workspaces_info.st_ino,
+            "uid": workspaces_info.st_uid, "gid": workspaces_info.st_gid, "mode": _mode(workspaces_info),
+            "cleanup_record_parent_device": int.from_bytes(cleanup_raw[32:40], "little"),
+            "cleanup_record_parent_inode": int.from_bytes(cleanup_raw[40:48], "little"),
+        })
+        cleanup_identity = _cleanup_identity(cleanup_raw, job, attempt, request_sha,
+                                              workspaces_info.st_dev, workspaces_info.st_ino)
+        _write_json_private(output, "terminal-cleanup-identity.json", cleanup_identity)
+
+        results_fd = _safe_dir(RESULTS, service.pw_uid, service.pw_gid, 0o710)
+        result_leaf_name = f"job-{job}-attempt-{attempt}"
+        result_leaf_fd = os.open(result_leaf_name,
+                                 os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                                 dir_fd=results_fd)
+        result_leaf_info = os.fstat(result_leaf_fd)
+        _write_json_private(output, "terminal-result-leaf.json", {
+            "path": f"{RESULTS}/{result_leaf_name}", "device": result_leaf_info.st_dev,
+            "inode": result_leaf_info.st_ino, "uid": result_leaf_info.st_uid,
+            "gid": result_leaf_info.st_gid, "mode": _mode(result_leaf_info),
+        })
+        _fail(stat.S_ISDIR(result_leaf_info.st_mode) and result_leaf_info.st_uid == service.pw_uid and
+              result_leaf_info.st_gid == service.pw_gid and _mode(result_leaf_info) == 0o700,
+              "terminal result leaf identity mismatch")
+        _terminal_absence_snapshot(workspaces_fd, result_leaf_fd, "before", output, job, attempt)
+
+        receipt_dir_fd = _safe_dir(LEASE_RECEIPT_DIR, ROOT_UID, ROOT_GID, 0o555)
+        receipt_raw, receipt_identity = _read_variable_snapshot(
+            receipt_dir_fd, LEASE_RECEIPT_NAME, 128, ROOT_UID, ROOT_GID, 0o444)
+        _write_private(output, "terminal-lease-receipt.txt", receipt_raw)
+        _write_json_private(output, "terminal-lease-receipt-identity.json", receipt_identity)
+        receipt_device, receipt_inode = _canonical_lease_receipt(receipt_raw)
+        _fail((receipt_device, receipt_inode) == (lease_device, lease_inode),
+              "pre-submit lease identity differs from the installed root receipt")
+        lease_dir_fd = _safe_dir(LEASE_PARENT, service.pw_uid, service.pw_gid, 0o710)
+        lease_lock_fd = os.open("host.lock", os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                dir_fd=lease_dir_fd)
+        lease_fd_info = os.fstat(lease_lock_fd)
+        lease_path_info = os.stat("host.lock", dir_fd=lease_dir_fd, follow_symlinks=False)
+        _write_json_private(output, "terminal-lease-open.json", {
+            "fd": {"device": lease_fd_info.st_dev, "inode": lease_fd_info.st_ino,
+                   "uid": lease_fd_info.st_uid, "gid": lease_fd_info.st_gid,
+                   "mode": _mode(lease_fd_info), "links": lease_fd_info.st_nlink},
+            "path": {"device": lease_path_info.st_dev, "inode": lease_path_info.st_ino,
+                     "uid": lease_path_info.st_uid, "gid": lease_path_info.st_gid,
+                     "mode": _mode(lease_path_info), "links": lease_path_info.st_nlink,
+                     "symlink": stat.S_ISLNK(lease_path_info.st_mode)},
+        })
+        lease_start = _lease_snapshot(lease_dir_fd, lease_lock_fd, service.pw_uid, service.pw_gid,
+                                      lease_device, lease_inode)
+        _write_json_private(output, "terminal-lease-start.json", {
+            **lease_start, "root_receipt_device": receipt_device,
+            "root_receipt_inode": receipt_inode,
+            "lease_continuity": "unproven; this is a terminal identity snapshot, no flock or /proc/locks inference",
+        })
+
+        mountinfo = _read_bounded_file("/proc/self/mountinfo", 4 * 1024 * 1024)
+        _write_private(output, "terminal-mountinfo.txt", mountinfo)
+        _fail(_mountinfo_has_cgroup2(mountinfo, CGROUP_ROOT),
+              "recorded cgroup root is not an exact cgroup2 mountpoint")
+        cgroup_snapshots.append(_terminal_cgroup_snapshot(output, identity, "before"))
+
+        units = [str(identity["outer_unit"])] + [
+            f"buster-bench-{job}-{attempt}-{suffix}.service" for suffix in TERMINAL_STAGE_SUFFIXES]
+        unit_states = []
+        for unit in units:
+            unit_states.append(_check_terminal_unit(unit, output, deadline, identity,
+                                                    outer=(unit == identity["outer_unit"])))
+
+        _terminal_absence_snapshot(workspaces_fd, result_leaf_fd, "after", output, job, attempt)
+        cgroup_snapshots.append(_terminal_cgroup_snapshot(output, identity, "after"))
+        records_after = _open_records(job, request_sha)
+        _fail(records_after[0] == worker and records_after[1] == instance,
+              "durable worker/instance record changed during terminal proof")
+        queue_fd = _safe_dir(QUEUE, service.pw_uid, service.pw_gid, 0o710)
+        try:
+            cleanup_after = _read_at(queue_fd, f"cleanup-{job}", 128,
+                                     service.pw_uid, service.pw_gid, 0o400)
+        finally:
+            os.close(queue_fd)
+        _fail(cleanup_after == cleanup_raw, "durable cleanup record changed during terminal proof")
+        receipt_after, receipt_identity_after = _read_variable_snapshot(
+            receipt_dir_fd, LEASE_RECEIPT_NAME, 128, ROOT_UID, ROOT_GID, 0o444)
+        _fail(receipt_after == receipt_raw and receipt_identity_after == receipt_identity,
+              "root-owned lease identity receipt changed during terminal proof")
+        lease_end = _lease_snapshot(lease_dir_fd, lease_lock_fd, service.pw_uid, service.pw_gid,
+                                    lease_device, lease_inode)
+        _fail(lease_end == lease_start, "stable lease identity changed during terminal proof")
+        directory_paths = _terminal_directory_paths(workspaces_fd, results_fd, result_leaf_fd,
+                                                     lease_dir_fd, receipt_dir_fd, service.pw_uid,
+                                                     service.pw_gid, candidate.pw_gid, job, attempt,
+                                                     output)
+        proof = {"disposition": "TERMINAL_SNAPSHOT_PASS", "job": job, "attempt": attempt,
+                 "request_sha256": request_sha, "boot_id": identity["boot_id"],
+                 "baseline": baseline, "subject": subject,
+                 "worker_sha256": identity["worker_sha256"],
+                 "instance_sha256": identity["instance_sha256"],
+                 "cleanup_sha256": hashlib.sha256(cleanup_raw).hexdigest(),
+                 "result_leaf": f"{RESULTS}/{result_leaf_name}",
+                 "result_leaf_device": result_leaf_info.st_dev,
+                 "result_leaf_inode": result_leaf_info.st_ino,
+                 "cleanup_identity": cleanup_identity,
+                 "lease_receipt_identity": receipt_identity,
+                 "lease_start": lease_start, "lease_end": lease_end,
+                 "directory_paths": directory_paths,
+                 "lease_continuity": "unproven; observations do not establish continuous ownership",
+                 "lock_held_by_job": "unproven; no flock or /proc/locks inspection was performed",
+                 "cgroup_snapshots": cgroup_snapshots,
+                 "systemd_unit_states": [
+                     {"unit": unit, "load_state": props.get("LoadState"),
+                      "active_state": props.get("ActiveState"),
+                      "main_pid": props.get("MainPID"),
+                      "invocation_id": props.get("InvocationID")}
+                     for unit, props in zip(units, unit_states)],
+                 "limitations": ["terminal snapshot only", "continuous lease ownership not proven",
+                                 "full all-stage lifecycle/recovery acceptance remains pending"]}
+        _remaining(deadline)
+        _write_json_private(output, "terminal-proof.json", proof)
+        return proof
+    finally:
+        for descriptor in (lease_lock_fd, lease_dir_fd, receipt_dir_fd,
+                           result_leaf_fd, results_fd, workspaces_fd):
+            if descriptor >= 0:
+                os.close(descriptor)
 
 
 def _checkpoint(job: int, identity: dict[str, object], output: Path,
@@ -1070,6 +1628,313 @@ def self_test() -> None:
                isinstance(receipt["device"], int) and \
                isinstance(receipt["inode"], int)
         checks += 1  # Actual setup failure still emits its receipt and removes the exact owned inode.
+
+    def invoke_cli(arguments: list[str]) -> tuple[int, str, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch("sys.argv", ["issue1162_live_probe.py", *arguments]), \
+             patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+            try:
+                code = main()
+            except (ProbeError, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+                print(str(exc), file=stderr)
+                code = 1
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    full_sha, manifest_sha, bundle_sha = "c" * 64, "d" * 64, "e" * 64
+    result_text = (f"job=7 token=2 sequence=9 phase=finished outcome=succeeded validity=not-evaluated "
+                   f"cancel-requested=0 reconciliation=0 pending=3 retained=5 request-sha256={digest} failure=ok\n"
+                   "result-bound=1 statistical-decision=not-evaluated\n"
+                   f"result-root={RESULTS}/job-7-attempt-2\nmanifest-sha256={manifest_sha}\n"
+                   f"bundle-sha256={bundle_sha}\nfull-result-sha256={full_sha}\n").encode("ascii")
+    with tempfile.TemporaryDirectory() as temp:
+        result_file = Path(temp) / "result.txt"
+        result_file.write_bytes(result_text)
+        code, stdout, stderr = invoke_cli(["--check-result", str(result_file), "--job", "7",
+                                           "--request-sha256", digest])
+        assert code == 0 and stdout == f"2 {full_sha}\n" and not stderr
+        checks += 1  # The CLI emits token/full SHA only after validating all six lines.
+        invalid_receipts = (
+            (result_text, 8, digest),
+            (result_text.replace(b"token=2 sequence", b"token=2 token=2 sequence"), 7, digest),
+            (result_text.replace(b"pending=3", b"pending=nope"), 7, digest),
+            (result_text.replace(b"retained=5", b"retained=4294967296"), 7, digest),
+            (result_text.replace(b"cancel-requested=0", b"cancel-requested=1"), 7, digest),
+            (result_text.replace(b"reconciliation=0", b"reconciliation=1"), 7, digest),
+            (result_text.replace(b"failure=ok", b"failure=worker-failed"), 7, digest),
+            (result_text, 7, "f" * 64),
+            (result_text.replace(b"result-bound=1", b"result-bound=0"), 7, digest),
+            (result_text + b"extra\n", 7, digest),
+        )
+        for index, (raw, expected_job, expected_digest) in enumerate(invalid_receipts):
+            result_file.write_bytes(raw)
+            code, stdout, _ = invoke_cli(["--check-result", str(result_file), "--job", str(expected_job),
+                                          "--request-sha256", expected_digest])
+            assert code != 0 and stdout == "", f"invalid check-result fixture {index} was accepted"
+            checks += 1
+        result_file.write_bytes(b"x" * 4097)
+        code, stdout, _ = invoke_cli(["--check-result", str(result_file), "--job", "7",
+                                      "--request-sha256", digest])
+        assert code != 0 and stdout == ""
+        checks += 1  # The receipt reader rejects an oversized file without output.
+
+    def terminal_case(fault: str | None = None) -> tuple[bool, str, dict[str, object] | None, bool, bool]:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            service_uid, service_gid = os.getuid(), os.getgid()
+            candidate_gid = os.getgid()
+            state = root / "state"
+            queue = state / "queue"
+            workspaces = state / "workspaces"
+            results = workspaces / "results"
+            lease_parent = state / "lease"
+            receipt_dir = root / "etc" / "buster-bench"
+            cgroup_root = root / "cgroup"
+            slice_path = cgroup_root / "buster.slice" / "buster-bench.slice"
+            def make_directory(path: Path, mode: int) -> None:
+                path.mkdir(parents=True, exist_ok=True)
+                path.chmod(mode)
+            make_directory(queue, 0o710)
+            make_directory(workspaces, 0o2710)
+            make_directory(results, 0o710)
+            result_leaf = results / "job-7-attempt-2"
+            make_directory(result_leaf, 0o750 if fault == "result-mode" else 0o700)
+            make_directory(lease_parent, 0o710)
+            make_directory(receipt_dir, 0o755)
+            make_directory(slice_path, 0o755)
+
+            lease_path = lease_parent / "host.lock"
+            lease_path.write_bytes(b"")
+            lease_path.chmod(0o640)
+            lease_stat = lease_path.stat()
+            receipt_device = lease_stat.st_dev + (1 if fault == "receipt-mismatch" else 0)
+            receipt_inode = lease_stat.st_ino
+            receipt_file = receipt_dir / LEASE_RECEIPT_NAME
+            receipt_file.write_text(f"device={receipt_device}\ninode={receipt_inode}\n", encoding="ascii")
+            receipt_file.chmod(0o444)
+            receipt_dir.chmod(0o555)
+
+            cgroup_root_stat, slice_stat = cgroup_root.stat(), slice_path.stat()
+            recorded_root_inode = cgroup_root_stat.st_ino + (1 if fault == "cgroup-root-mismatch" else 0)
+            recorded_slice_inode = slice_stat.st_ino + (1 if fault == "cgroup-slice-mismatch" else 0)
+            record_ids = (111, 222, cgroup_root_stat.st_dev, recorded_root_inode,
+                          slice_stat.st_dev, recorded_slice_inode)
+            fixture_worker = bytes(record(b"BQWORKER00000001", 7, 2, digest, record_ids))
+            fixture_instance = bytes(record(b"BQINSTANCE000002", 7, 2, digest, record_ids))
+            if fault == "record-request-mismatch":
+                fixture_worker = bytes(record(b"BQWORKER00000001", 7, 2, "f" * 64, record_ids))
+            if fault == "record-boot-mismatch":
+                changed = bytearray(fixture_instance)
+                changed[96:132] = b"00000000-0000-0000-0000-000000000000"
+                fixture_instance = bytes(changed)
+
+            def create_file(path: Path, content: bytes, mode: int) -> None:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, mode)
+                try:
+                    view = memoryview(content)
+                    while view:
+                        view = view[os.write(fd, view):]
+                    os.fchown(fd, service_uid, service_gid)
+                    os.fchmod(fd, mode)
+                finally:
+                    os.close(fd)
+            create_file(queue / "worker-7", fixture_worker, 0o440)
+            create_file(queue / "worker-instance-7", fixture_instance, 0o440)
+            workspace_info = workspaces.stat()
+            cleanup = bytearray(128)
+            cleanup[:16] = b"BQCLEANUP0000001"
+            cleanup[16:24] = (7).to_bytes(8, "little")
+            cleanup[24:32] = (2).to_bytes(8, "little")
+            cleanup[32:40] = (workspace_info.st_dev + (1 if fault == "cleanup-parent-mismatch" else 0)).to_bytes(8, "little")
+            cleanup[40:48] = workspace_info.st_ino.to_bytes(8, "little")
+            cleanup[48:56] = workspace_info.st_dev.to_bytes(8, "little")
+            cleanup[56:64] = (9001).to_bytes(8, "little")
+            cleanup[64:128] = digest.encode("ascii")
+            if fault == "cleanup-request-mismatch":
+                cleanup[64] = ord("f")
+            if fault != "cleanup-missing":
+                cleanup_mode = 0o444 if fault == "cleanup-mode" else 0o400
+                if fault == "cleanup-symlink":
+                    (queue / "cleanup-7").symlink_to("missing-record")
+                else:
+                    create_file(queue / "cleanup-7", bytes(cleanup), cleanup_mode)
+
+            if fault == "workspace-symlink":
+                (workspaces / "job-7-attempt-2").symlink_to("missing-workspace")
+            elif fault == "workspace-present":
+                make_directory(workspaces / "job-7-attempt-2", 0o700)
+            if fault == "result-socket":
+                try:
+                    sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+                    sock.bind(str(result_leaf / ".lease-handoff"))
+                    sock.close()
+                except OSError:
+                    # Some test sandboxes deny AF_UNIX creation; the checker
+                    # rejects every present nofollow inode at this path.
+                    (result_leaf / ".lease-handoff").write_bytes(b"socket-path-occupied")
+            elif fault == "result-socket-symlink":
+                (result_leaf / ".lease-handoff").symlink_to("missing-socket")
+            if fault == "result-payload":
+                (result_leaf / "payload").write_bytes(b"leftover")
+
+            live_leaf = None
+            if fault == "live-descendant":
+                live_leaf = slice_path / "buster-bench-7-2-base-build.service"
+                make_directory(live_leaf, 0o755)
+                (live_leaf / "cgroup.procs").write_text("\n", encoding="ascii")
+                (live_leaf / "cgroup.events").write_text("populated 0\n", encoding="ascii")
+
+            expected_boot = boot
+            output = root / "evidence"
+            owner = SimpleNamespace(pw_uid=service_uid, pw_gid=service_gid)
+            candidate_account = SimpleNamespace(pw_uid=service_uid, pw_gid=candidate_gid)
+            original_open = os.open
+            def guarded_open(path, flags, *positional, **keywords):
+                if fault == "permission" and path == "cleanup-7":
+                    raise PermissionError("injected cleanup record permission denial")
+                return original_open(path, flags, *positional, **keywords)
+            original_read_text = Path.read_text
+            def read_text(path, *positional, **keywords):
+                if str(path) == "/proc/sys/kernel/random/boot_id":
+                    return expected_boot + "\n"
+                return original_read_text(path, *positional, **keywords)
+            original_bounded = _read_bounded_file
+            mountinfo = f"1 0 0:77 / {cgroup_root} rw - cgroup2 cgroup rw\n".encode("ascii")
+            def bounded_file(path, maximum):
+                if path == "/proc/self/mountinfo":
+                    return mountinfo
+                return original_bounded(path, maximum)
+
+            manager_calls = 0
+            def manager(command, **kwargs):
+                nonlocal manager_calls
+                manager_calls += 1
+                unit = command[-1]
+                if manager_calls == 1 and fault == "workspace-parent-replaced":
+                    retired = workspaces.with_name("workspaces-retired")
+                    workspaces.rename(retired)
+                    make_directory(workspaces, 0o2710)
+                elif manager_calls == 1 and fault == "result-parent-replaced":
+                    retired = results.with_name("results-retired")
+                    results.rename(retired)
+                    make_directory(results, 0o710)
+                elif manager_calls == 1 and fault == "result-leaf-replaced":
+                    retired = result_leaf.with_name("result-leaf-retired")
+                    result_leaf.rename(retired)
+                    make_directory(result_leaf, 0o700)
+                elif manager_calls == 1 and fault == "lease-parent-replaced":
+                    retired = lease_parent.with_name("lease-retired")
+                    lease_parent.rename(retired)
+                    make_directory(lease_parent, 0o710)
+                    replacement = lease_parent / "host.lock"
+                    replacement.write_bytes(b"")
+                    replacement.chmod(0o640)
+                elif manager_calls == 1 and fault == "receipt-parent-replaced":
+                    retired = receipt_dir.with_name("receipt-retired")
+                    receipt_dir.rename(retired)
+                    make_directory(receipt_dir, 0o755)
+                    replacement = receipt_dir / LEASE_RECEIPT_NAME
+                    replacement.write_text(f"device={receipt_device}\ninode={receipt_inode}\n", encoding="ascii")
+                    replacement.chmod(0o444)
+                    receipt_dir.chmod(0o555)
+                if fault == "manager-error" and unit.endswith("base-build.service"):
+                    return subprocess.CompletedProcess(command, 1, "", "injected manager failure")
+                if fault == "manager-timeout" and unit.endswith("base-generate.service"):
+                    raise subprocess.TimeoutExpired(command, kwargs["timeout"], output="partial", stderr="stalled")
+                if unit == "buster-bench-7-2.service":
+                    if fault == "outer-gone":
+                        props = {"Id": unit, "LoadState": "not-found"}
+                    elif fault == "outer-active":
+                        props = {"Id": unit, "LoadState": "loaded", "ActiveState": "active",
+                                 "MainPID": "123", "InvocationID": "b" * 32,
+                                 "CollectMode": "inactive", "Result": "running",
+                                 "ControlGroup": "/buster.slice/buster-bench.slice/" + unit}
+                    elif fault == "outer-wrong-invocation":
+                        props = {"Id": unit, "LoadState": "loaded", "ActiveState": "inactive",
+                                 "MainPID": "0", "InvocationID": "c" * 32,
+                                 "CollectMode": "inactive", "Result": "success",
+                                 "ControlGroup": "/buster.slice/buster-bench.slice/" + unit}
+                    else:
+                        props = {"Id": unit, "LoadState": "loaded", "ActiveState": "inactive",
+                                 "MainPID": "0", "InvocationID": "b" * 32,
+                                 "CollectMode": "inactive", "Result": "success",
+                                 "ControlGroup": "/buster.slice/buster-bench.slice/" + unit}
+                        if fault == "outer-result-failure":
+                            props["Result"] = "exit-code"
+                        elif fault == "outer-result-missing":
+                            props.pop("Result")
+                elif fault == "stage-loaded" and unit.endswith("base-build.service"):
+                    props = {"Id": unit, "LoadState": "loaded", "ActiveState": "inactive"}
+                else:
+                    props = {"Id": unit, "LoadState": "not-found", "ActiveState": "inactive"}
+                stdout = "".join(f"{key}={value}\n" for key, value in props.items())
+                if fault == "lease-replaced-during" and manager_calls == 1:
+                    lease_path.unlink()
+                    lease_path.write_bytes(b"")
+                    lease_path.chmod(0o640)
+                return subprocess.CompletedProcess(command, 0, stdout, "")
+
+            arguments = ["--terminal", "--job", "7", "--attempt", "2", "--request-sha256", digest,
+                         "--baseline", "a" * 40, "--subject", "b" * 40,
+                         "--lease-device", str(lease_stat.st_dev), "--lease-inode", str(lease_stat.st_ino),
+                         "--budget-seconds", "60", "--output", str(output)]
+            if fault == "attempt-mismatch":
+                arguments[arguments.index("2")] = "3"
+            if fault == "deadline":
+                arguments[arguments.index("60")] = "0.5"
+            with ExitStack() as stack:
+                stack.enter_context(patch(__name__ + ".is_root", return_value=True))
+                stack.enter_context(patch(__name__ + ".in_disposable_container", return_value=True))
+                stack.enter_context(patch(__name__ + ".pwd.getpwnam", side_effect=lambda name:
+                                          owner if name == "buster-bench" else candidate_account))
+                for name, value in (("QUEUE", str(queue)), ("WORKSPACES", str(workspaces)),
+                                    ("RESULTS", str(results)), ("LEASE_PARENT", str(lease_parent)),
+                                    ("LEASE_RECEIPT_DIR", str(receipt_dir)),
+                                    ("CGROUP_ROOT", str(cgroup_root)), ("BENCH_SLICE_PATH", str(slice_path)),
+                                    ("ROOT_UID", service_uid), ("ROOT_GID", service_gid)):
+                    stack.enter_context(patch(__name__ + "." + name, value))
+                stack.enter_context(patch(__name__ + ".Path.read_text", read_text))
+                stack.enter_context(patch(__name__ + "._read_bounded_file", side_effect=bounded_file))
+                stack.enter_context(patch(__name__ + ".subprocess.run", side_effect=manager))
+                stack.enter_context(patch(__name__ + ".os.open", side_effect=guarded_open))
+                code, stdout, _ = invoke_cli(arguments)
+            response = json.loads(stdout) if stdout else {}
+            proof_file = output / "terminal-proof.json"
+            proof = json.loads(proof_file.read_text()) if proof_file.exists() else None
+            failure_receipt = (output / "disposition.json").exists()
+            manager_capture_saved = bool(list(output.glob("terminal-unit-*.stdout")))
+            return code == 0, response.get("reason", ""), proof, failure_receipt, manager_capture_saved
+
+    success, _, terminal_proof, _, _ = terminal_case()
+    assert success and terminal_proof is not None and \
+           terminal_proof["disposition"] == "TERMINAL_SNAPSHOT_PASS" and \
+           terminal_proof["lease_continuity"].startswith("unproven")
+    checks += 1  # Real --terminal entrypoint on a temporary, fully bound terminal fixture.
+    gone, _, gone_proof, _, _ = terminal_case("outer-gone")
+    assert gone and gone_proof is not None
+    checks += 1  # A collected outer unit is acceptable when the recorded cgroup leaf is absent.
+    terminal_failures = (
+        "attempt-mismatch", "record-request-mismatch", "record-boot-mismatch", "cleanup-missing",
+        "cleanup-mode", "cleanup-symlink", "cleanup-parent-mismatch", "cleanup-request-mismatch",
+        "workspace-symlink", "workspace-present", "result-socket", "result-socket-symlink",
+            "result-payload", "result-mode", "receipt-mismatch", "lease-replaced-during",
+            "workspace-parent-replaced", "result-parent-replaced", "result-leaf-replaced",
+            "lease-parent-replaced", "receipt-parent-replaced", "outer-result-failure",
+            "outer-result-missing", "deadline",
+        "cgroup-root-mismatch", "cgroup-slice-mismatch", "live-descendant", "permission",
+        "outer-active", "outer-wrong-invocation", "stage-loaded", "manager-error", "manager-timeout",
+    )
+    for fault in terminal_failures:
+        accepted, reason, _, failure_receipt, manager_capture_saved = terminal_case(fault)
+        assert not accepted and failure_receipt, \
+            f"terminal fault {fault} was accepted or lost its failure receipt"
+        checks += 1
+        if fault in ("manager-error", "manager-timeout"):
+            assert manager_capture_saved
+            checks += 1  # Failed manager response or timeout retained raw stdout/stderr evidence.
+        elif fault in ("result-socket", "result-socket-symlink"):
+            assert "result_leaf_lease_handoff is present" in reason
+        elif fault == "live-descendant":
+            assert "expected job cgroup leaf remains" in reason
     print(f"LIVE_PROBE_SELF_TEST checks={checks} failures=0 orchestration=temporary-fixture-not-live-proof")
 
 
@@ -1077,16 +1942,50 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--run", action="store_true")
+    parser.add_argument("--terminal", action="store_true")
+    parser.add_argument("--check-result")
     parser.add_argument("--job", type=int)
+    parser.add_argument("--attempt", type=int)
     parser.add_argument("--request-sha256")
     parser.add_argument("--baseline")
     parser.add_argument("--subject")
+    parser.add_argument("--lease-device", type=int)
+    parser.add_argument("--lease-inode", type=int)
     parser.add_argument("--budget-seconds", type=float, default=0)
     parser.add_argument("--output")
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return 0
+    if args.check_result is not None:
+        _fail(not args.run and not args.terminal and args.output is None,
+              "--check-result cannot be combined with a probe mode or output directory")
+        _fail(args.job is not None and args.job > 0 and args.request_sha256 is not None,
+              "--check-result requires a positive --job and --request-sha256")
+        token, full_sha = check_result_file(args.check_result, args.job, args.request_sha256)
+        print(f"{token} {full_sha}")
+        return 0
+    if args.terminal:
+        _fail(not args.run and args.output is not None and args.job is not None and
+              args.attempt is not None and args.request_sha256 is not None and
+              args.baseline is not None and args.subject is not None and
+              args.lease_device is not None and args.lease_inode is not None,
+              "--terminal requires job, attempt, request, sources, lease identity, and output")
+        output = Path(args.output)
+        output.mkdir(mode=0o700, parents=False, exist_ok=False)
+        try:
+            result = _terminal_proof(args.job, args.attempt, args.request_sha256,
+                                     args.baseline, args.subject, args.lease_device,
+                                     args.lease_inode, args.budget_seconds, output)
+            code = 0
+        except (ProbeError, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+            result = {"valid": False, "disposition": "TERMINAL_PROOF_INCONCLUSIVE",
+                      "reason": str(exc), "lease_continuity": "unproven",
+                      "full_acceptance": "pending"}
+            code = 1
+        _write_json_private(output, "disposition.json", result)
+        print(json.dumps(result, sort_keys=True), flush=True)
+        return code
     _fail(args.run and args.output is not None, "--run and --output are required")
     output = Path(args.output)
     output.mkdir(mode=0o700, parents=False, exist_ok=False)
