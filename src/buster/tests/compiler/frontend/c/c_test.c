@@ -2109,6 +2109,222 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_static_aggregates(UnitTestArgume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL u64 c_test_relocation_random(u64* state)
+{
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    return *state;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_test_relocation_replays_agree(CTestInitializerRelocationReplay const* replay, u32 operation_count)
+{
+    bool agree = replay->indexed_stop == replay->reference_stop;
+    if (agree && replay->indexed_stop == operation_count)
+    {
+        agree = replay->indexed_count == replay->reference_count;
+        for (u32 record = 0; agree && record < replay->indexed_count; record += 1)
+        {
+            agree = replay->indexed[record].symbol.value == replay->reference[record].symbol.value &&
+                    replay->indexed[record].offset == replay->reference[record].offset;
+        }
+    }
+    return agree;
+}
+
+// The indexed clear drops exactly the records the whole-array compaction
+// drops, in the same order, and fails where it fails (#1450).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_relocation_index(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    u32 const operation_capacity = 256;
+    CTestInitializerRelocationOperation* operations = arena_allocate(temporary.arena, CTestInitializerRelocationOperation, 16384);
+    CTestInitializerRelocationReplay replay = {0};
+    u64 state = 0x9e3779b97f4a7c15ull;
+    u32 disagreements = 0;
+    u32 built = 0;
+    u32 stopped = 0;
+    u32 removed = 0;
+    for (u32 trial = 0; trial < 1024; trial += 1)
+    {
+        TemporalArena trial_scratch = arena_begin_temporal(temporary.arena);
+        u32 pointer_size = c_test_relocation_random(&state) & 1 ? 8 : 4;
+        u64 slots = 1 + c_test_relocation_random(&state) % 48;
+        u64 byte_count = slots * pointer_size + c_test_relocation_random(&state) % pointer_size;
+        u32 operation_count = 1 + (u32)(c_test_relocation_random(&state) % operation_capacity);
+        u32 capacity = c_test_relocation_random(&state) % 8 ? (u32)slots + operation_count + 2 : 1 + (u32)(c_test_relocation_random(&state) % (slots + 2));
+        u64 last_append = 0;
+        for (u32 operation_index = 0; operation_index < operation_count; operation_index += 1)
+        {
+            u64 roll = c_test_relocation_random(&state) % 100;
+            CTestInitializerRelocationOperation operation = {.symbol = operation_index + 1};
+            if (roll < 45 || (operation_index && operations[operation_index - 1].clear && roll < 70))
+            {
+                u64 shape = c_test_relocation_random(&state) % 100;
+                u64 slot_offset = c_test_relocation_random(&state) % slots * pointer_size;
+                // A designated store appends where it just cleared.
+                operation.offset = operation_index && operations[operation_index - 1].clear && roll >= 45 ? operations[operation_index - 1].offset
+                                   : shape < 70                                                       ? slot_offset
+                                   : shape < 85 ? c_test_relocation_random(&state) % (byte_count - pointer_size + 1)
+                                   : shape < 95 ? last_append
+                                                : byte_count + c_test_relocation_random(&state) % (2 * pointer_size);
+                last_append = operation.offset;
+            }
+            else
+            {
+                u64 shape = c_test_relocation_random(&state) % 100;
+                operation.clear = true;
+                operation.offset = shape < 60 ? c_test_relocation_random(&state) % slots * pointer_size : c_test_relocation_random(&state) % (byte_count + 3);
+                u64 room = operation.offset <= byte_count ? byte_count - operation.offset : 0;
+                u64 size_shape = c_test_relocation_random(&state) % 100;
+                operation.size = size_shape < 30 ? pointer_size
+                                 : size_shape < 45 ? 0
+                                 : size_shape < 65 ? 2 * pointer_size
+                                 : size_shape < 95 ? c_test_relocation_random(&state) % (room + 1)
+                                                   : room + 1;
+            }
+            operations[operation_index] = operation;
+        }
+        c_test_initializer_relocation_replay(trial_scratch.arena, pointer_size, byte_count, capacity, operations, operation_count, &replay);
+        disagreements += !c_test_relocation_replays_agree(&replay, operation_count);
+        built += replay.index_built;
+        stopped += replay.reference_stop < operation_count;
+        removed += replay.index_built && replay.indexed_appends > replay.indexed_count;
+        scratch_end(trial_scratch);
+    }
+    BUSTER_TEST(arguments, disagreements == 0);
+    // The index removed records in many trials (dead marks need no counting build).
+    BUSTER_TEST(arguments, built > 256 && stopped > 64 && removed > 256);
+
+    // Designator families at N = 2048 pointer slots.
+    u32 const slot_count = 2048;
+    u32 capacity = slot_count + 1 + 3 * slot_count + 1;
+    for (u32 family = 0; family < 4; family += 1)
+    {
+        TemporalArena family_scratch = arena_begin_temporal(temporary.arena);
+        u32 operation_count = 0;
+        for (u32 index = 0; index < slot_count; index += 1)
+        {
+            // Family 0 walks a fixed permutation; the others store in order.
+            u32 slot = family == 0 ? (u32)((index * 1021u + 7u) % slot_count) : index;
+            operations[operation_count++] = (CTestInitializerRelocationOperation){.offset = (u64)slot * 8, .size = 8, .clear = true};
+            operations[operation_count++] = (CTestInitializerRelocationOperation){.offset = (u64)slot * 8, .symbol = 1};
+        }
+        u32 repeat_count = family == 1 ? slot_count : family == 2 ? slot_count / 8 : family == 3 ? 3 * slot_count : 0;
+        for (u32 index = 0; index < repeat_count; index += 1)
+        {
+            // 1: every slot designated again; 2: one override per eight
+            // slots after a range default; 3: one slot overwritten until the
+            // dead records outnumber the live ones, twice over.
+            u64 slot = family == 1 ? index : family == 2 ? (u64)index * 8 : 5;
+            operations[operation_count++] = (CTestInitializerRelocationOperation){.offset = slot * 8, .size = 8, .clear = true};
+            operations[operation_count++] = (CTestInitializerRelocationOperation){.offset = slot * 8, .symbol = 2 + index};
+        }
+        c_test_initializer_relocation_replay(family_scratch.arena, 8, (u64)slot_count * 8, capacity, operations, operation_count, &replay);
+        BUSTER_TEST(arguments, c_test_relocation_replays_agree(&replay, operation_count) && replay.indexed_stop == operation_count);
+        BUSTER_TEST(arguments, replay.indexed_count == slot_count);
+#if BUSTER_BENCH_ALLOCATIONS
+        u64 clears = operation_count / 2;
+        BUSTER_TEST(arguments, replay.index_bucket_visits <= 2 * clears && replay.index_group_visits <= 2 * clears);
+        BUSTER_TEST(arguments, replay.index_removed_rows == repeat_count);
+        BUSTER_TEST(arguments, replay.index_compaction_rows <= 4 * (u64)operation_count);
+        if (family == 0 || family == 1)
+        {
+            // The whole-array compaction reads every record per clear.
+            BUSTER_TEST(arguments, replay.reference_compaction_rows >= (u64)slot_count * slot_count / 4);
+        }
+        if (family == 3)
+        {
+            BUSTER_TEST(arguments, replay.index_compaction_rows != 0);
+        }
+#endif
+        scratch_end(family_scratch);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// Lowered tables keep the order the whole-array compaction produced:
+// survivors in the order they were stored.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_relocation_lowering(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    u32 const slot_count = 256;
+    String8 source = {0};
+    for (u32 index = 0; index < slot_count; index += 1)
+    {
+        source = string_format(temporary.arena, S8("{S8}int a{u32}, b{u32};\n"), source, index, index);
+    }
+    source = string_format(temporary.arena, S8("{S8}int d;\nint *shuffled[{u32}] = {{"), source, slot_count);
+    for (u32 index = 0; index < slot_count; index += 1)
+    {
+        u32 slot = (index * 101u + 3u) % slot_count;
+        source = string_format(temporary.arena, S8("{S8}[{u32}] = &a{u32}, "), source, slot, slot);
+    }
+    source = string_format(temporary.arena, S8("{S8}}};\nint *twice[{u32}] = {{"), source, slot_count);
+    for (u32 pass = 0; pass < 2; pass += 1)
+    {
+        for (u32 index = 0; index < slot_count; index += 1)
+        {
+            source = string_format(temporary.arena, pass ? S8("{S8}[{u32}] = &b{u32}, ") : S8("{S8}[{u32}] = &a{u32}, "), source, index, index);
+        }
+    }
+    source = string_format(temporary.arena, S8("{S8}}};\nint *ranged[{u32}] = {{[0 ... {u32}] = &d"), source, slot_count, slot_count - 1);
+    for (u32 index = 0; index < slot_count; index += 8)
+    {
+        source = string_format(temporary.arena, S8("{S8}, [{u32}] = &b{u32}"), source, index, index);
+    }
+    source = string_format(temporary.arena, S8("{S8}}};\n"), source);
+    CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                                                                       .target = target_native,
+                                                                       .data_layout = target_data_layout(target_native),
+                                                                       .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                                   });
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("initializer-relocations.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, lowered.program != 0))
+    {
+        IrModule* module = &lowered.program->modules[0];
+        u64 pointer_size = lowered.program->data_layout.pointer.size;
+        u32 checked = 0;
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            IrGlobal* global = module->globals + global_index;
+            IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, global->symbol);
+            u32 table = !symbol ? 0 : string_equal(symbol->name, S8("shuffled")) ? 1 : string_equal(symbol->name, S8("twice")) ? 2
+                                    : string_equal(symbol->name, S8("ranged"))     ? 3 : 0;
+            if (!table)
+            {
+                continue;
+            }
+            checked += 1;
+            BUSTER_TEST(arguments, global->relocation_count == slot_count);
+            for (u32 record = 0; record < global->relocation_count && record < slot_count; record += 1)
+            {
+                // Shuffled keeps store order; twice keeps only the second
+                // pass; ranged keeps the untouched defaults in index order,
+                // then the overrides.
+                u32 overrides = slot_count / 8;
+                u32 slot = table == 1 ? (record * 101u + 3u) % slot_count
+                           : table == 2 ? record
+                           : record < slot_count - overrides ? record + record / 7 + 1
+                                                               : (record - (slot_count - overrides)) * 8;
+                String8 expected = table == 1 ? string_format(temporary.arena, S8("a{u32}"), slot)
+                                   : table == 2 || record >= slot_count - overrides ? string_format(temporary.arena, S8("b{u32}"), slot)
+                                                                                     : S8("d");
+                IrSymbol* target = ir_symbol_from_id(&lowered.program->symbols, global->relocations[record].symbol);
+                BUSTER_TEST(arguments, target && string_equal(target->name, expected) && global->relocations[record].offset == slot * pointer_size);
+            }
+        }
+        BUSTER_TEST(arguments, checked == 3);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_range_designators(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23281,6 +23497,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_static_range_designators);
+    BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_index);
+    BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_lowering);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_member_search_scratch);
     BUSTER_TEST_FIXTURE(arguments, c_test_u64_initializer_slots);
