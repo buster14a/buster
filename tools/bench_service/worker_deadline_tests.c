@@ -6,6 +6,8 @@
 #define BQ_TEST_WORKER_TIMEOUT_MILLISECONDS 20u
 #define BQ_TEST_WORKER_BOUND_MILLISECONDS 1000u
 
+BUSTER_GLOBAL_LOCAL bool bq_test_worker_probe_locked(char const* path);
+
 BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_test_alarm_count;
 
 BUSTER_GLOBAL_LOCAL void bq_test_alarm_handler(int signal_number)
@@ -31,6 +33,88 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_process_state(pid_t pid)
             fprintf(stderr, "WORKER_DEADLINE pid=%ld proc_errno=%d\n", (long)pid, errno);
         }
     }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_worker_coordinator_lease_continuity(void)
+{
+    char root[] = "/tmp/buster-coordinator-lease-XXXXXX";
+    char lease_path[128] = {0};
+    int pair[2] = {-1, -1};
+    int received = -1;
+    int path_length = -1;
+    BqWorkerLease coordinator = {.descriptor = -1};
+    bool root_created = mkdtemp(root) != NULL;
+    bool rooted = root_created;
+    BQ_CHECK(root_created);
+    if (rooted)
+    {
+        path_length = snprintf(lease_path, sizeof(lease_path), "%s/host.lock", root);
+        rooted = path_length > 0 && (size_t)path_length < sizeof(lease_path) &&
+                 bq_worker_lease_acquire(lease_path, &coordinator) == 0;
+    }
+    bool paired = rooted && socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0;
+    BQ_CHECK(paired);
+    if (paired)
+    {
+        char marker = 1;
+        char sent_control[CMSG_SPACE(sizeof(int))] = {0};
+        struct iovec sent_vector = {&marker, sizeof(marker)};
+        struct msghdr sent_message = {0};
+        sent_message.msg_iov = &sent_vector;
+        sent_message.msg_iovlen = 1;
+        sent_message.msg_control = sent_control;
+        sent_message.msg_controllen = sizeof(sent_control);
+        struct cmsghdr* sent_header = CMSG_FIRSTHDR(&sent_message);
+        bool header_ready = sent_header != NULL;
+        if (header_ready)
+        {
+            sent_header->cmsg_level = SOL_SOCKET;
+            sent_header->cmsg_type = SCM_RIGHTS;
+            sent_header->cmsg_len = CMSG_LEN(sizeof(coordinator.descriptor));
+            memcpy(CMSG_DATA(sent_header), &coordinator.descriptor, sizeof(coordinator.descriptor));
+        }
+        ssize_t sent = header_ready ? sendmsg(pair[0], &sent_message, MSG_NOSIGNAL) : -1;
+        char received_control[CMSG_SPACE(sizeof(int))] = {0};
+        char received_marker = 0;
+        struct iovec received_vector = {&received_marker, sizeof(received_marker)};
+        struct msghdr received_message = {0};
+        received_message.msg_iov = &received_vector;
+        received_message.msg_iovlen = 1;
+        received_message.msg_control = received_control;
+        received_message.msg_controllen = sizeof(received_control);
+        ssize_t count = sent == sizeof(marker) ? recvmsg(pair[1], &received_message, MSG_CMSG_CLOEXEC) : -1;
+        bool transferred = count == sizeof(received_marker) &&
+                           !(received_message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) && received_marker == marker;
+        for (struct cmsghdr* header = count >= 0 ? CMSG_FIRSTHDR(&received_message) : NULL;
+             header; header = CMSG_NXTHDR(&received_message, header))
+        {
+            if (header->cmsg_level == SOL_SOCKET && header->cmsg_type == SCM_RIGHTS &&
+                header->cmsg_len == CMSG_LEN(sizeof(received)) && received < 0)
+            {
+                memcpy(&received, CMSG_DATA(header), sizeof(received));
+            }
+            else transferred = false;
+        }
+        transferred = transferred && received >= 3;
+        BQ_CHECK(transferred && bq_test_worker_probe_locked(lease_path));
+        if (received >= 0)
+        {
+            close(received);
+            received = -1;
+        }
+        /* The transient worker has closed its received descriptor. The
+         * coordinator's copy must still exclude a second worker until final
+         * cleanup completes and the coordinator releases its own reference. */
+        BQ_CHECK(transferred && bq_test_worker_probe_locked(lease_path));
+    }
+    if (pair[0] >= 0) close(pair[0]);
+    if (pair[1] >= 0) close(pair[1]);
+    bq_worker_lease_release(&coordinator);
+    bool released = rooted && !bq_test_worker_probe_locked(lease_path);
+    BQ_CHECK(released);
+    if (received >= 0) close(received);
+    if (path_length > 0 && (size_t)path_length < sizeof(lease_path)) unlink(lease_path);
+    if (root_created) rmdir(root);
 }
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_capture_result(char const* name, BqError error, BqError expected,
@@ -175,6 +259,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_group_reaping(void)
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_deadlines(void)
 {
+    bq_test_worker_coordinator_lease_continuity();
     struct sigaction action = {0}, prior = {0};
     action.sa_handler = bq_test_alarm_handler;
     sigemptyset(&action.sa_mask);

@@ -3800,7 +3800,6 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     if (error == BQ_OK && !recovering && handoff.listener >= 0)
     {
         error = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, job->id, job->token);
-        if (error == BQ_OK) bq_worker_lease_release(&lease);
     }
     if (!bq_worker_lease_handoff_close(&handoff) && error == BQ_OK) error = BQ_IO;
     BqWorkerObserved observed = {0};
