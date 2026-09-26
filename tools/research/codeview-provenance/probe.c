@@ -209,7 +209,9 @@ static Fixture fixture_build(u32 objects, u32 modules, u32 keys, u32 updates, u3
                 };
                 if (mode == 2 && input == 0 && local_module == 0 && row == 0)
                 {
-                    relocation.offset = contribution_size; /* Escapes into the next input. */
+                    /* Escape into untouched padding in the next input. A write
+                       at its first field would be masked by later local updates. */
+                    relocation.offset = contribution_size + (u64)keys * 8 + 8;
                 }
                 if (mode == 3 && codeview && row % 2)
                 {
