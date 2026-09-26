@@ -1,0 +1,98 @@
+name: Research 1341 text handoff
+
+# Temporary, branch-scoped correctness experiment. Never benchmark here.
+# The compressed source-edit payload is hash checked before execution; its
+# resulting six-file source tree and complete patch are checked independently.
+on:
+  push:
+    branches: [research/1341-text-handoff-ade6]
+
+permissions:
+  contents: read
+
+env:
+  BUSTER_TEST_JOBS: '2'
+
+jobs:
+  correctness:
+    name: ${{ matrix.name }} exact-tree correctness
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Release
+            config: Release
+            sanitize: ''
+          - name: Sanitized Debug
+            config: Debug
+            sanitize: --sanitize
+    steps:
+      - name: Require authorized hosted execution
+        env:
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: test "$CI_ENABLED" = true
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Materialize and verify isolated candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/1341-evidence"
+          gzip -dc .github/research/1341-apply.py.gz > "$RUNNER_TEMP/1341-apply.py"
+          echo "42acadfa6a275600cbac6c34394e81cff20420fd3d1d0bf5632236b7bdc184d3  $RUNNER_TEMP/1341-apply.py" | sha256sum -c -
+          git worktree add --detach "$RUNNER_TEMP/1341-source" ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          cd "$RUNNER_TEMP/1341-source"
+          test "$(git rev-parse HEAD^{tree})" = 4c5306221fdb22fccc929b55e333163742de17d0
+          python3 "$RUNNER_TEMP/1341-apply.py"
+          git add docs/agents/driver.md src/buster/lib/compiler/driver/driver.c src/buster/lib/compiler/object/object.c src/buster/lib/compiler/object/object_internal.h src/buster/tests/compiler/driver/driver_test.c src/buster/tests/compiler/object/object_test.c
+          git diff --cached --check
+          test "$(git write-tree)" = 809408ab548e5ad206669cf9431fdf66ca86aca2
+          git diff --cached --binary --full-index > "$RUNNER_TEMP/1341-evidence/prototype.patch"
+          echo "d63ddf659d55230a04374300b98392151b3a54f2579480cecbf5ec7c420027d0  $RUNNER_TEMP/1341-evidence/prototype.patch" | sha256sum -c -
+          printf 'base_commit=ade6ac4b6ecb21f30b61b656439bac476c145e2f\nbase_tree=4c5306221fdb22fccc929b55e333163742de17d0\ncandidate_tree=809408ab548e5ad206669cf9431fdf66ca86aca2\nperformance=NOT_MEASURED\n' > "$RUNNER_TEMP/1341-evidence/identity.txt"
+          cp "$RUNNER_TEMP/1341-apply.py" "$RUNNER_TEMP/1341-evidence/"
+      - name: Bootstrap and configure through build.c
+        working-directory: ${{ runner.temp }}/1341-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang --version | tee "$RUNNER_TEMP/1341-evidence/clang.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/1341-build"
+          "$RUNNER_TEMP/1341-build" generate --cc clang --ci --linker DEFAULT ${{ matrix.sanitize }} 2>&1 | tee "$RUNNER_TEMP/1341-evidence/configure.log"
+      - name: Registered production regressions
+        working-directory: ${{ runner.temp }}/1341-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/1341-build" build --config ${{ matrix.config }} -t test_all 2>&1 | tee "$RUNNER_TEMP/1341-evidence/regressions.log"
+          grep -F 'module=object_tests ' "$RUNNER_TEMP/1341-evidence/regressions.log"
+          grep -F 'module=compiler_driver_tests ' "$RUNNER_TEMP/1341-evidence/regressions.log"
+      - name: Native mode matrix
+        if: ${{ success() && matrix.config == 'Release' }}
+        working-directory: ${{ runner.temp }}/1341-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/1341-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/1341-evidence/modes.log"
+      - name: Preserve bootstrap and fixed point
+        if: ${{ success() && matrix.config == 'Release' }}
+        working-directory: ${{ runner.temp }}/1341-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/1341-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/1341-evidence/self-host.log"
+          "$RUNNER_TEMP/1341-build" test_self_host_audit --config Release 2>&1 | tee "$RUNNER_TEMP/1341-evidence/self-host-audit.log"
+      - name: Retain complete evidence on success or failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: research-1341-${{ matrix.config }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/1341-evidence/
+            ${{ runner.temp }}/1341-source/build/self-host-audit/
+          retention-days: 14
+          if-no-files-found: error
