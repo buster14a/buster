@@ -620,34 +620,55 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             }
             else
             {
-                // The output check covers every function whenever FAST changed
-                // any, so it is visited for all of them and reported only if
-                // something changed. Publication stops at the first function
-                // either the check or publication itself has rejected so far;
-                // a check fault always outranks a publication fault, since
-                // the check used to finish before publication began.
-                IrValidationPass output = checked ? ir_validation_pass_begin(program, module) : (IrValidationPass){0};
+                // The output check covers the module whenever FAST changed any
+                // function. It starts at the first function FAST changes or
+                // reopens: every function before it is untouched since the
+                // module was proven just before FAST began, so it cannot
+                // contribute a fault, and a module FAST leaves unchanged is not
+                // checked at all. From there every function is visited, and the
+                // result is reported only if something changed. Publication
+                // stops at the first function either the check or publication
+                // itself has rejected so far; a check fault always outranks a
+                // publication fault, since the check used to finish before
+                // publication began.
+                IrValidationPass output = {0};
+                bool output_started = false;
+                u64 changes = 0;
                 for (u32 index = 0; index < module->function_count; index += 1)
                 {
                     IrFunction* function = module->functions + index;
+                    // Reopening a published function rebuilds its builder links
+                    // without counting a row change; the check covers it too.
+                    bool reopened = false;
                     if (function->state == IR_FUNCTION_LOWERED)
                     {
                         IR_CONSTRUCTION_RECORD(PREPARATION_FAST_FUNCTIONS, 1);
+                        bool was_published = function->published_cfg != 0;
                         ir_fast_function(program, function, &module->fast);
+                        reopened = was_published && !function->published_cfg;
                     }
-                    if (checked)
+                    if (checked && !output_started)
+                    {
+                        for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1) changes += module->fast.passes[pass].changes;
+                        if (changes || reopened)
+                        {
+                            output = ir_validation_pass_begin(program, module);
+                            output_started = true;
+                        }
+                    }
+                    if (output_started)
                     {
                         ir_validation_pass_visit(program, &output, function);
                     }
                     if (function->state == IR_FUNCTION_LOWERED && publication.error == IR_VALIDATION_NONE &&
-                        (!checked || ir_validation_pass_result(&output).error == IR_VALIDATION_NONE))
+                        (!output_started || ir_validation_pass_result(&output).error == IR_VALIDATION_NONE))
                     {
                         IR_CONSTRUCTION_RECORD(PREPARATION_PUBLICATION_FUNCTIONS, 1);
                         publication = ir_function_publish_cfg(program->arena, function);
                     }
                 }
                 published_with_fast = true;
-                u64 changes = 0;
+                changes = 0;
                 for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1) changes += module->fast.passes[pass].changes;
                 if (changes && checked)
                 {

@@ -229,6 +229,51 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_preparation_order_tests(UnitTestArgum
         }
         scratch_end(temporary);
     }
+    // A module FAST leaves unchanged was proven just before FAST ran, so its
+    // output is not checked again; every function is still published.
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        String8 unchanged = S8("int first(int a,int b){return a*b;}int second(int a,int b){return a^b;}int last(int a,int b){return a-b;}");
+        CPreprocessResult preprocess = c_preprocess(arguments->arena, unchanged,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult analysis = c_parse(arguments->arena, preprocess);
+        CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("preparation-unchanged.c"), preprocess, analysis, target_native,
+                                                            (CIRLowerOptions){0});
+        BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+        if (lowered.program && !lowered.diagnostic_count && BUSTER_REQUIRE(arguments, lowered.program->modules->function_count == 3))
+        {
+            IrProgram* program = lowered.program;
+            IrModule* module = program->modules;
+            program->fast_passes = IR_FAST_ALL;
+#if BUSTER_BENCH_ALLOCATIONS
+            IrConstructionCounters before = ir_construction_counters();
+#endif
+            IrValidationResult prepared = ir_prepare_canonical_module(program, module, true);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && prepared.boundary == IR_VALIDATION_BOUNDARY_UNSPECIFIED);
+            BUSTER_TEST(arguments, module->fast_complete && module->fast.functions == 3);
+            for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
+            {
+                BUSTER_TEST(arguments, module->fast.passes[pass].changes == 0);
+            }
+            for (u32 index = 0; index < 3; index += 1)
+            {
+                BUSTER_TEST(arguments, module->functions[index].published_cfg != 0);
+            }
+#if BUSTER_BENCH_ALLOCATIONS
+            IrConstructionCounters after = ir_construction_counters();
+            BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+#define IR_PREPARATION_EXPECT(counter, expected) \
+    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_##counter] - before.values[IR_CONSTRUCTION_##counter] == (expected))
+            IR_PREPARATION_EXPECT(PREPARATION_FAST_INPUT_VALIDATIONS, 1);
+            IR_PREPARATION_EXPECT(PREPARATION_FAST_OUTPUT_VALIDATIONS, 0);
+            IR_PREPARATION_EXPECT(PREPARATION_PUBLICATION_FUNCTIONS, 3);
+            IR_PREPARATION_EXPECT(VALIDATION_CALLS, 1);
+            IR_PREPARATION_EXPECT(VALIDATION_OWNERSHIP_FUNCTIONS, 3);
+#undef IR_PREPARATION_EXPECT
+#endif
+        }
+        scratch_end(temporary);
+    }
     return result;
 }
 
