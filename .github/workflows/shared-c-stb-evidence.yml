@@ -1,0 +1,83 @@
+name: Shared C stb capability evidence
+on:
+  push:
+    branches: [research/shared-c-capability-20260925]
+    paths: [.github/workflows/shared-c-stb-evidence.yml]
+permissions:
+  contents: read
+jobs:
+  stb:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - phase: before
+            revision: ade6ac4b6ecb21f30b61b656439bac476c145e2f
+            tree: 4c5306221fdb22fccc929b55e333163742de17d0
+          - phase: after
+            revision: 3fbc191aa4d73579199170cd54cb2276d647cd27
+            tree: 6059ee7865e4bdb646eb4e3844d83f35adcc25cc
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ matrix.revision }}
+          persist-credentials: false
+      - name: Build exact source
+        id: compiler
+        shell: bash
+        env:
+          REVISION: ${{ matrix.revision }}
+          TREE: ${{ matrix.tree }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$REVISION"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$TREE"
+          mkdir -p evidence .ci-tools
+          git rev-parse HEAD 'HEAD^{tree}' > evidence/revision.txt
+          clang --version > evidence/clang.txt
+          gcc --version > evidence/gcc.txt
+          clang -dumpmachine > evidence/target.txt
+          uname -a > evidence/host.txt
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o .ci-tools/build
+          .ci-tools/build generate --ci --cc clang --linker DEFAULT > evidence/generate.log 2>&1
+          .ci-tools/build build --config Release -t ide > evidence/build.log 2>&1
+          sha256sum build/Release/ide > evidence/compiler.sha256
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        id: upstream
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        with:
+          repository: nothings/stb
+          ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
+          path: external/stb
+          persist-credentials: false
+      - name: Exact approved input and unchanged complete harness
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && steps.upstream.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C external/stb rev-parse HEAD)" = 2c980bb59875b0d32144a71867fbdebb2f77cd20
+          test -z "$(git -C external/stb status --porcelain --untracked-files=all)"
+          git -C external/stb rev-parse HEAD 'HEAD^{tree}' > evidence/stb-source.txt
+          git -C external/stb archive HEAD > evidence/stb-source.tar
+          sha256sum evidence/stb-source.tar > evidence/stb-source.tar.sha256
+          .ci-tools/build test_stb --config Release "$PWD/external/stb" 2>&1 | tee evidence/stb.log
+      - name: Verify untouched upstream source
+        if: ${{ !cancelled() && steps.upstream.outcome == 'success' }}
+        shell: bash
+        run: test -z "$(git -C external/stb status --porcelain --untracked-files=all)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: shared-c-stb-${{ matrix.phase }}
+          path: |
+            evidence
+            build/stb-*/
+          retention-days: 30
+          if-no-files-found: error
