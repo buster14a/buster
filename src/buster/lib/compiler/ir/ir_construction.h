@@ -121,7 +121,9 @@
     X(PREPARATION_FAST_OUTPUT_VALIDATIONS, preparation_fast_output_validations) \
     X(PREPARATION_PROMOTION_FUNCTIONS, preparation_promotion_functions) \
     X(PREPARATION_FAST_FUNCTIONS, preparation_fast_functions) \
-    X(PREPARATION_PUBLICATION_FUNCTIONS, preparation_publication_functions)
+    X(PREPARATION_PUBLICATION_FUNCTIONS, preparation_publication_functions) \
+    X(VALIDATION_GLOBAL_RELOCATION_SORTS, validation_global_relocation_sorts) \
+    X(VALIDATION_GLOBAL_RELOCATION_SORT_ROWS, validation_global_relocation_sort_rows)
 
 typedef enum IrConstructionCounter
 {
