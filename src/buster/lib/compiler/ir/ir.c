@@ -4645,6 +4645,60 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_ok(void)
     };
 }
 
+// Every relocation writes pointer_size bytes, so two of them overlap exactly
+// when their offsets differ by less than that width, and in offset order any
+// overlapping pair has an overlapping neighbour between them. A table whose
+// offsets arrive in that order is checked in ir_validate_global with one
+// comparison per row; a designated initializer can list entries in any order,
+// and such a table comes here once to have a copy of its offsets sorted.
+// Callers pass only offsets that fit the global, so no end below wraps, and
+// largest_offset bounds the radix passes to the key bytes actually in use.
+BUSTER_GLOBAL_LOCAL bool ir_validate_unordered_relocations_overlap_free(IrProgram* program, IrGlobal* global, u64 pointer_size,
+                                                                        u64 largest_offset)
+{
+    IR_CONSTRUCTION_RECORD(VALIDATION_GLOBAL_RELOCATION_SORTS, 1);
+    u32 count = global->relocation_count;
+    TemporalArena temporary = scratch_begin(&program->arena, 1);
+    u64* source = arena_allocate(temporary.arena, u64, count);
+    u64* destination = arena_allocate(temporary.arena, u64, count);
+    for (u32 index = 0; index < count; index += 1)
+    {
+        source[index] = global->relocations[index].offset;
+    }
+    enum { IR_RELOCATION_RADIX_BITS = 8, IR_RELOCATION_RADIX_BUCKETS = 1 << IR_RELOCATION_RADIX_BITS };
+    for (u32 shift = 0; shift < 64 && (largest_offset >> shift) != 0; shift += IR_RELOCATION_RADIX_BITS)
+    {
+        IR_CONSTRUCTION_RECORD(VALIDATION_GLOBAL_RELOCATION_SORT_ROWS, count);
+        u32 offsets[IR_RELOCATION_RADIX_BUCKETS] = {0};
+        for (u32 index = 0; index < count; index += 1)
+        {
+            offsets[(source[index] >> shift) & (IR_RELOCATION_RADIX_BUCKETS - 1)] += 1;
+        }
+        u32 offset = 0;
+        for (u32 bucket = 0; bucket < IR_RELOCATION_RADIX_BUCKETS; bucket += 1)
+        {
+            u32 population = offsets[bucket];
+            offsets[bucket] = offset;
+            offset += population;
+        }
+        for (u32 index = 0; index < count; index += 1)
+        {
+            destination[offsets[(source[index] >> shift) & (IR_RELOCATION_RADIX_BUCKETS - 1)]++] = source[index];
+        }
+        u64* swap = source;
+        source = destination;
+        destination = swap;
+    }
+    bool overlap_free = true;
+    for (u32 index = 1; index < count; index += 1)
+    {
+        IR_CONSTRUCTION_RECORD(VALIDATION_GLOBAL_RELOCATION_PAIRS, 1);
+        overlap_free &= source[index] >= source[index - 1] + pointer_size;
+    }
+    scratch_end(temporary);
+    return overlap_free;
+}
+
 // One global's alignment, initializer, and relocation table. Nothing here names
 // a function, a block or an instruction, so the caller keeps the invalid ids the
 // module-level result already carries and only the error kind travels back.
@@ -4716,6 +4770,11 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
         else
         {
             u64 pointer_size = program->data_layout.pointer.size;
+            // Rows up to here start at or past the previous row's end, so the
+            // previous end is the furthest any of them reaches.
+            bool ordered = true;
+            u64 ordered_end = 0;
+            u64 largest_offset = 0;
             for (u32 relocation_index = 0; relocation_index < global->relocation_count && error == IR_VALIDATION_NONE; relocation_index += 1)
             {
                 IR_CONSTRUCTION_RECORD(VALIDATION_GLOBAL_RELOCATIONS, 1);
@@ -4724,17 +4783,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
                 bool offset_valid = pointer_size != 0 && relocation->offset <= type->layout.size && pointer_size <= type->layout.size - relocation->offset;
                 bool bytes_valid = global->bytes.pointer && global->bytes.length == type->layout.size && relocation->offset <= global->bytes.length &&
                                    pointer_size <= global->bytes.length - relocation->offset;
-                bool overlap_free = true;
-                for (u32 previous_index = 0; previous_index < relocation_index; previous_index += 1)
-                {
-                    IR_CONSTRUCTION_RECORD(VALIDATION_GLOBAL_RELOCATION_PAIRS, 1);
-                    IrGlobalRelocation* previous = global->relocations + previous_index;
-                    bool previous_end_valid = previous->offset <= UINT64_MAX - pointer_size;
-                    bool relocation_end_valid = relocation->offset <= UINT64_MAX - pointer_size;
-                    overlap_free &= previous_end_valid && relocation_end_valid &&
-                                    (previous->offset >= relocation->offset + pointer_size || relocation->offset >= previous->offset + pointer_size);
-                }
-                if (!relocation_symbol || !offset_valid || !bytes_valid || !overlap_free)
+                if (!relocation_symbol || !offset_valid || !bytes_valid)
                 {
                     error = IR_VALIDATION_OPERATION;
                 }
@@ -4747,6 +4796,21 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
                         error = IR_VALIDATION_OPERATION;
                     }
                 }
+                if (error == IR_VALIDATION_NONE)
+                {
+                    if (relocation_index != 0 && ordered)
+                    {
+                        IR_CONSTRUCTION_RECORD(VALIDATION_GLOBAL_RELOCATION_PAIRS, 1);
+                        ordered = relocation->offset >= ordered_end;
+                    }
+                    ordered_end = relocation->offset + pointer_size;
+                    largest_offset = BUSTER_MAX(largest_offset, relocation->offset);
+                }
+            }
+            if (error == IR_VALIDATION_NONE && !ordered &&
+                !ir_validate_unordered_relocations_overlap_free(program, global, pointer_size, largest_offset))
+            {
+                error = IR_VALIDATION_OPERATION;
             }
         }
     }
