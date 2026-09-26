@@ -16118,6 +16118,187 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(fixture_temporary);
         }
     }
+    // Braced statements ending in `break`, `goto`, `return` or `continue` leave
+    // the block after their closing brace without a predecessor, yet the next
+    // label still receives an edge from it. That dead edge must not keep a
+    // frontend SSA merge alive: SQLite's bytecode interpreter writes nearly
+    // every opcode as `case OP_X: { ... break; }`. The braced and unbraced
+    // interpreters must agree, a genuine fallthrough must still merge both
+    // paths, and dead code after a `break` that reads the locals must change
+    // nothing, under every allocator. The source is written to a temporary
+    // file because a tracked fixture needs a reviewed native-retirement
+    // support identity.
+    String8 dead_continuation_source = S8(
+        "static long braced(unsigned char const* code, long count, long seed)\n"
+        "{\n"
+        "    long acc = seed;\n"
+        "    long mix = 1;\n"
+        "    long carry = 3;\n"
+        "    for (long pc = 0; pc < count; pc += 1)\n"
+        "    {\n"
+        "        switch (code[pc])\n"
+        "        {\n"
+        "        case 0: {\n"
+        "            acc += pc * 3;\n"
+        "            mix ^= acc;\n"
+        "            break;\n"
+        "        }\n"
+        "        case 1: {\n"
+        "            long local = acc * 5 + pc;\n"
+        "            carry += local & 255;\n"
+        "            break;\n"
+        "            acc += 1000;\n"
+        "            carry -= 1000;\n"
+        "        }\n"
+        "        case 2: {\n"
+        "            if (acc & 1)\n"
+        "            {\n"
+        "                acc += carry;\n"
+        "            }\n"
+        "            else\n"
+        "            {\n"
+        "                mix -= carry;\n"
+        "            }\n"
+        "            break;\n"
+        "        }\n"
+        "        case 3: {\n"
+        "            for (long step = 0; step < (pc & 3); step += 1)\n"
+        "            {\n"
+        "                carry += step + mix;\n"
+        "            }\n"
+        "            continue;\n"
+        "        }\n"
+        "        case 4: {\n"
+        "            acc -= 7;\n"
+        "            goto shared;\n"
+        "        }\n"
+        "        shared: {\n"
+        "            mix += acc ^ carry;\n"
+        "            break;\n"
+        "        }\n"
+        "        case 5: {\n"
+        "            if (acc > 1000000)\n"
+        "            {\n"
+        "                return acc + mix + carry;\n"
+        "            }\n"
+        "            acc *= 3;\n"
+        "        }\n"
+        "        // Genuine fallthrough: both the dispatch and case 5 reach this block.\n"
+        "        case 6: {\n"
+        "            acc += 11;\n"
+        "            mix ^= pc;\n"
+        "            break;\n"
+        "        }\n"
+        "        default: {\n"
+        "            return -1;\n"
+        "        }\n"
+        "        }\n"
+        "        acc = acc % 1000003;\n"
+        "        mix = mix % 999983;\n"
+        "    }\n"
+        "    return acc + mix + carry;\n"
+        "}\n"
+        "\n"
+        "static long unbraced(unsigned char const* code, long count, long seed)\n"
+        "{\n"
+        "    long acc = seed;\n"
+        "    long mix = 1;\n"
+        "    long carry = 3;\n"
+        "    for (long pc = 0; pc < count; pc += 1)\n"
+        "    {\n"
+        "        long local;\n"
+        "        switch (code[pc])\n"
+        "        {\n"
+        "        case 0:\n"
+        "            acc += pc * 3;\n"
+        "            mix ^= acc;\n"
+        "            break;\n"
+        "        case 1:\n"
+        "            local = acc * 5 + pc;\n"
+        "            carry += local & 255;\n"
+        "            break;\n"
+        "        case 2:\n"
+        "            if (acc & 1)\n"
+        "            {\n"
+        "                acc += carry;\n"
+        "            }\n"
+        "            else\n"
+        "            {\n"
+        "                mix -= carry;\n"
+        "            }\n"
+        "            break;\n"
+        "        case 3:\n"
+        "            for (long step = 0; step < (pc & 3); step += 1)\n"
+        "            {\n"
+        "                carry += step + mix;\n"
+        "            }\n"
+        "            continue;\n"
+        "        case 4:\n"
+        "            acc -= 7;\n"
+        "            mix += acc ^ carry;\n"
+        "            break;\n"
+        "        case 5:\n"
+        "            if (acc > 1000000)\n"
+        "            {\n"
+        "                return acc + mix + carry;\n"
+        "            }\n"
+        "            acc *= 3;\n"
+        "            acc += 11;\n"
+        "            mix ^= pc;\n"
+        "            break;\n"
+        "        case 6:\n"
+        "            acc += 11;\n"
+        "            mix ^= pc;\n"
+        "            break;\n"
+        "        default:\n"
+        "            return -1;\n"
+        "        }\n"
+        "        acc = acc % 1000003;\n"
+        "        mix = mix % 999983;\n"
+        "    }\n"
+        "    return acc + mix + carry;\n"
+        "}\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    static unsigned char const program[] = {0, 1, 2, 3, 4, 5, 6, 0, 2, 1, 5, 5, 5, 6, 4, 3, 2, 0, 1, 6, 5, 4, 3, 2, 1, 0};\n"
+        "    static unsigned char const invalid[] = {0, 1, 9, 2};\n"
+        "    long count = (long)(sizeof(program) / sizeof(program[0]));\n"
+        "    for (long seed = -3; seed < 40; seed += 7)\n"
+        "    {\n"
+        "        if (braced(program, count, seed) != unbraced(program, count, seed)) return 1;\n"
+        "    }\n"
+        "    if (braced(program, count, 5) != 428719) return 2;\n"
+        "    if (braced(program, 11, 2) != 265) return 3;\n"
+        "    if (braced(invalid, 4, 1) != -1) return 4;\n"
+        "    return 0;\n"
+        "}\n"
+    );
+    for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+    {
+        TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
+        String8 source_path = buster_test_temporary_path(fixture_temporary.arena, S8("buster-c-switch-dead-continuation"), S8(".c"));
+        String8 fixture_path = buster_test_temporary_path(fixture_temporary.arena, S8("buster-c-switch-dead-continuation"), S8(""));
+        BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(dead_continuation_source)));
+        String8 fixture_command_line[] = {
+            c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, source_path,
+        };
+        CompilerDriverResult fixture = compiler_driver_execute_invocation(
+            fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+        BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+        if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 fixture_arguments[] = {fixture_path};
+            ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+            BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+            if (fixture_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(fixture_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(fixture_temporary);
+    }
     // Static scalar conversions and automatic nested string initialization
     // exercise distinct frontend paths and must agree under every allocator.
     String8 c_initializer_regression_paths[] = {
@@ -16309,7 +16490,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
                 String8 fixture_path = buster_test_temporary_path(fixture_temporary.arena, S8("buster-c-flat-aggregate-initializers"), S8(""));
-                String8 source_path = string_format(fixture_temporary.arena, S8("{S8}.c"), fixture_path);
+                String8 source_path = string_format_z(fixture_temporary.arena, S8("{S8}.c"), fixture_path);
                 BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(c_flat_initializer_source)));
                 String8 fixture_command_line[] = {
                     c_flat_initializer_frontends[frontend_index], c_flat_initializer_optimizations[optimization_index],

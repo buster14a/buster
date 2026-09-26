@@ -5784,17 +5784,41 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                         ssa->statistics.parameters_removed += 1;
                         continue;
                     }
+                    // An edge out of an unreachable block never runs, so the
+                    // value it carries cannot reach the parameter: when every
+                    // edge that can run carries one value, the parameter is
+                    // that value. A compound statement that ends in `break`,
+                    // `goto` or `return` leaves its continuation block without
+                    // predecessors, and the next `case` or label still gets an
+                    // edge from it, whose value is an unfilled parameter of the
+                    // dead block. Counting it would keep a merge of every
+                    // variable read after that label -- and of everything
+                    // downstream -- alive. With no runnable edge carrying a
+                    // value, only the dead ones decide, as they always did.
                     u32 same = UINT32_MAX;
                     bool trivial = true;
+                    u32 dead_same = UINT32_MAX;
+                    bool dead_trivial = true;
                     for (IrIncoming* incoming = parameter->first_incoming; incoming && trivial; incoming = incoming->next)
                     {
                         IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_INCOMING_VISITS, 1);
                         u32 value = c_ir_ssa_root(replacements, incoming->value.value);
-                        if (value != parameter->value.value)
+                        bool runs = ssa->reachable[incoming->predecessor.value] != 0;
+                        if (value != parameter->value.value && runs)
                         {
                             trivial = same == UINT32_MAX || value == same;
                             same = value;
                         }
+                        else if (value != parameter->value.value)
+                        {
+                            dead_trivial = dead_same == UINT32_MAX || value == dead_same;
+                            dead_same = value;
+                        }
+                    }
+                    if (trivial && same == UINT32_MAX)
+                    {
+                        trivial = dead_trivial;
+                        same = dead_same;
                     }
                     if (trivial && same != UINT32_MAX)
                     {
