@@ -347,6 +347,32 @@ struct CSpellingSpace
     Arena* arena;
 };
 BUSTER_C_EXTERN CSpellingSpace c_space_local(Arena* arena, u64 capacity);
+// Token positions per bit of CAggregateLookup.definition_start_words, as a
+// shift.
+#define C_PARSE_DEFINITION_START_BLOCK_SHIFT 3
+
+// Record that a type in the table starts its definition at `position`; see
+// CAggregateLookup.definition_start_words.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE void c_parse_note_definition_start(CParseResult* result, u32 position)
+{
+    CAggregateLookup* lookup = result->aggregate_lookup;
+    u32 block = position >> C_PARSE_DEFINITION_START_BLOCK_SHIFT;
+    if (lookup && lookup->definition_start_words && block < lookup->definition_start_limit)
+    {
+        lookup->definition_start_words[block >> 6] |= (u64)1 << (block & 63);
+    }
+}
+
+// False only when no type in the live table can start its definition at
+// `position`; true means the caller's exact scan decides.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_parse_definition_start_possible(CParseResult const* result, u32 position)
+{
+    CAggregateLookup const* lookup = result->aggregate_lookup;
+    u32 block = position >> C_PARSE_DEFINITION_START_BLOCK_SHIFT;
+    return !lookup || !lookup->definition_start_words || block >= lookup->definition_start_limit ||
+           ((lookup->definition_start_words[block >> 6] >> (block & 63)) & 1);
+}
+
 // One compare, and deliberately no kind test: only a C_TOKEN_PUNCTUATOR token
 // ever carries a punctuator id, so the id alone answers the question.  Every
 // site that retypes a token must keep that invariant.

@@ -1194,6 +1194,19 @@ struct CAggregateLookup
     // Only an exhausted arena or unrepresentable growth makes the index
     // incomplete. Duplicate scoped tags use the separate per-slot flag.
     bool incomplete;
+    // One bit per block of C_PARSE_DEFINITION_START_BLOCK token positions,
+    // set whenever a type records a position in the block as its
+    // definition_start: at the definition itself and whenever
+    // c_parse_add_type appends a row carrying one. Bits are never cleared, so
+    // a rollback that drops the type leaves a stale bit that costs the exact
+    // scan it guards and never changes an answer. A clear bit proves that no
+    // type in the live table starts its definition anywhere in the block --
+    // the answer the whole-type-table scans keyed by definition_start gave on
+    // every self-compile query (#1382). Blocks rather than tokens keep the
+    // filter at an eighth of a bit per token; two definitions starting within
+    // one block only cost the exact scan. Null or short means unknown.
+    u64* definition_start_words;
+    u32 definition_start_limit;
 #if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
     u64 probe_count;
     u64 rehash_slot_count;

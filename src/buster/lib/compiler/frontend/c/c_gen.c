@@ -23596,7 +23596,8 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
         if (body_open < end && c_token_is_punctuator(&builder->preprocess.tokens[body_open], C_PUNCTUATOR_LEFT_BRACE))
         {
             u32 body_close = c_ir_matching_delimiter_cached(builder, body_open, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
-            for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
+            u32 scan_limit = c_parse_definition_start_possible(&builder->parse, body_open + 1) ? builder->parse.type_count : 0;
+            for (u32 type_index = 0; type_index < scan_limit; type_index += 1)
             {
                 if (builder->parse.types[type_index].definition_start == body_open + 1)
                 {

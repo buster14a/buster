@@ -6595,6 +6595,10 @@ BUSTER_C_SHARED CTypeId c_parse_add_type(CParseResult* result, CType type)
     };
     result->types[result->type_count++] = type;
     c_parse_aggregate_lookup_insert(result, id);
+    if (type.definition_start)
+    {
+        c_parse_note_definition_start(result, type.definition_start);
+    }
     return id;
 }
 
@@ -9726,7 +9730,8 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
             {
                 open += 1;
             }
-            for (u32 index = 0; index < result->type_count && type.value == C_ID_UNDERLYING_INVALID; index += 1)
+            u32 scan_limit = c_parse_definition_start_possible(result, open + 1) ? result->type_count : 0;
+            for (u32 index = 0; index < scan_limit && type.value == C_ID_UNDERLYING_INVALID; index += 1)
             {
                 if (result->types[index].definition_start == open + 1 &&
                     (result->types[index].is_complete || result->types[index].kind == C_TYPE_ENUM))
@@ -11391,6 +11396,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
     }
     aggregate->member_start = result->member_count;
     aggregate->definition_start = open + 1;
+    c_parse_note_definition_start(result, open + 1);
     aggregate->definition_token_count = close - (open + 1);
     if (kind == C_TYPE_ENUM)
     {
@@ -16404,7 +16410,8 @@ BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* mac
             open += 1;
         }
         bool defined = false;
-        for (u32 type_index = 0; type_index < result->type_count && !defined; type_index += 1)
+        u32 scan_limit = c_parse_definition_start_possible(result, open + 1) ? result->type_count : 0;
+        for (u32 type_index = 0; type_index < scan_limit && !defined; type_index += 1)
         {
             defined = result->types[type_index].definition_start == open + 1;
         }
@@ -22667,10 +22674,14 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     {
         u32 aggregate_slot_count = 16384;
         result.aggregate_lookup = arena_allocate(arena, CAggregateLookup, 1);
+        // definition_start is `{` + 1, so it never exceeds token_count.
+        u32 definition_start_words = (token_count >> C_PARSE_DEFINITION_START_BLOCK_SHIFT) / 64 + 1;
         *result.aggregate_lookup = (CAggregateLookup){
             // Reused arena bytes can be dirty; empty slots must be zeroed.
             .slots = arena_allocate_zeroed(arena, CAggregateLookupSlot, aggregate_slot_count),
             .slot_count = aggregate_slot_count,
+            .definition_start_words = arena_allocate_zeroed(arena, u64, definition_start_words),
+            .definition_start_limit = definition_start_words * 64,
         };
     }
     result.position_index = arena_allocate(arena, CTokenPositionIndex, 1);
