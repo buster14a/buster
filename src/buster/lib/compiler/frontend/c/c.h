@@ -1406,7 +1406,7 @@ struct CTokenPositionIndex
     bool built;
 };
 
-typedef struct CStringCountMemo CStringCountMemo;
+typedef struct CStringLiteralMemo CStringLiteralMemo;
 
 // Work of the parse-side layout fold (c_parse_type_layout_core), the
 // sizeof/_Alignof/offsetof answers semantic analysis computes before any IR
@@ -1470,10 +1470,10 @@ struct CParseResult
     // Borrowed from the syntax result: immutable number conversions keyed by
     // final-stream token index (see CParserResult.number_facts).
     CNumberFacts const* number_facts;
-    // Semantic analysis only: element counts of narrow string-literal
-    // fragments, counted once per final-stream token (c_string_count_memo in
-    // c_gen.c). Null outside semantic analysis and for hand-built results.
-    CStringCountMemo* string_counts;
+    // The decoded bytes of narrow string-literal fragments, decoded once per
+    // final-stream token: semantic analysis records them, lowering reads them
+    // (CStringLiteralMemo in c_internal.h). Null for hand-built results.
+    CStringLiteralMemo* string_literals;
     // Outside the checkpointed body, like position_index, so a rollback or a
     // by-value operand copy keeps counting into the same record. Null for
     // hand-built results, which then count nothing.
