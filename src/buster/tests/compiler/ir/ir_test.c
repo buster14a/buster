@@ -326,6 +326,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_construction_appends(UnitTestArgument
     return result;
 }
 
+typedef struct IrValidationPrecedenceCase IrValidationPrecedenceCase;
+struct IrValidationPrecedenceCase
+{
+    // Per function: 0 healthy, 1 structural (missing block array), 2 ownership
+    // (an unowned row), 3 semantic check (unterminated block).
+    u8 faults[3];
+    bool alias_fault;
+    IrValidationError error;
+    u32 function;
+};
+
+// The validation pass walks each function's ownership and then checks it while
+// its rows are cached. Its result must still be the one the former
+// whole-module sweeps produced: structure outranks ownership, ownership
+// outranks globals/aliases/initializers, those outrank function checks, and
+// the lowest function wins within a category. Each case plants faults of two
+// categories in different functions, the higher-ranked one later where it can.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_validation_precedence(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    IrType types[] = {
+        {.id = {.value = 0}, .kind = IR_TYPE_VOID, .layout = {.alignment = 1, .resolved = true}},
+        {.id = {.value = 1}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 0}},
+    };
+    IrValidationPrecedenceCase cases[] = {
+        {.faults = {0, 0, 0}, .error = IR_VALIDATION_NONE, .function = IR_ID_UNDERLYING_INVALID},
+        {.faults = {3, 2, 0}, .error = IR_VALIDATION_INSTRUCTION_OWNERSHIP, .function = 1},
+        {.faults = {2, 0, 1}, .error = IR_VALIDATION_INVALID_ID, .function = 2},
+        {.faults = {3, 0, 1}, .error = IR_VALIDATION_INVALID_ID, .function = 2},
+        {.faults = {3, 0, 0}, .alias_fault = true, .error = IR_VALIDATION_ALIAS_TARGET, .function = IR_ID_UNDERLYING_INVALID},
+        {.faults = {0, 0, 2}, .alias_fault = true, .error = IR_VALIDATION_INSTRUCTION_OWNERSHIP, .function = 2},
+        {.faults = {0, 3, 3}, .error = IR_VALIDATION_UNTERMINATED_BLOCK, .function = 1},
+        {.faults = {2, 2, 0}, .error = IR_VALIDATION_INSTRUCTION_OWNERSHIP, .function = 0},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        IrValidationPrecedenceCase test_case = cases[case_index];
+        IrInstruction rows[3][2];
+        IrBlock blocks[3];
+        IrFunction functions[3];
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(functions); index += 1)
+        {
+            u8 fault = test_case.faults[index];
+            for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows[index]); row += 1)
+            {
+                rows[index][row] = (IrInstruction){.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 0},
+                                                   .result = IR_VALUE_ID_INVALID, .next = IR_INSTRUCTION_ID_INVALID};
+            }
+            blocks[index] = (IrBlock){.id = {.value = 0}, .first_instruction = {.value = 0}, .last_instruction = {.value = 0},
+                                      .sealed = true, .terminated = fault != 3};
+            functions[index] = (IrFunction){.id = {.value = index}, .canonical_type = {.value = 1}, .state = IR_FUNCTION_LOWERED,
+                                            .entry = {.value = 0}, .blocks = fault == 1 ? 0 : blocks + index, .block_count = 1,
+                                            .instructions = rows[index], .instruction_count = fault == 2 ? 2 : 1};
+        }
+        IrSymbolAlias alias = {.symbol = IR_SYMBOL_ID_INVALID, .target = IR_SYMBOL_ID_INVALID};
+        IrModule module = {.functions = functions, .function_count = BUSTER_ARRAY_LENGTH(functions),
+                           .aliases = test_case.alias_fault ? &alias : 0, .alias_count = test_case.alias_fault ? 1 : 0};
+        IrProgram program = {.arena = arguments->arena, .modules = &module, .module_count = 1,
+                             .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+        IrValidationResult validation = ir_validate_canonical_module(&program, &module);
+        BUSTER_TEST(arguments, validation.error == test_case.error);
+        BUSTER_TEST(arguments, validation.function.value == test_case.function);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_validation_census(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -563,6 +629,9 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     UnitTestResult validation_census = ir_test_validation_census(arguments);
     result.test_count += validation_census.test_count;
     result.succeeded_test_count += validation_census.succeeded_test_count;
+    UnitTestResult validation_precedence = ir_test_validation_precedence(arguments);
+    result.test_count += validation_precedence.test_count;
+    result.succeeded_test_count += validation_precedence.succeeded_test_count;
 
     IrFieldAccessPiece expected_field_access[][IR_FIELD_ACCESS_PIECE_CAPACITY] = {
         {{.offset = 0, .size = 1}},
