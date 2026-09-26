@@ -525,35 +525,19 @@ def self_test() -> None:
         fake_status = lambda uid, gid: (f"Uid:\t{uid} {uid} {uid} {uid}\n"
                                          f"Gid:\t{gid} {gid} {gid} {gid}\n"
                                          f"Groups:\t{gid}\nCapEff:\t0\nNoNewPrivs:\t1\n")
-        commands = []
-        def fake_command(account, arguments, deadline):
-            commands.append((account.pw_name if account else "root", arguments))
-            if arguments == _manager_command():
-                return manager
-            if arguments[0] == "show" and arguments[-1].endswith(".service"):
-                return {**unit_show, "stdout": unit_show["stdout"].replace(unit, arguments[-1])}
-            if arguments == ("show", "-p", "Version"):
-                return {"exit": 0, "stdout": "Version=255.4\n", "stderr": "",
-                        "proc_status": fake_status(account.pw_uid, account.pw_gid)}
-            assert arguments[0] == "start" and account is not None
-            return {**deny, "stderr": f"Failed to start {arguments[1]}: Access denied\n",
-                    "proc_status": fake_status(account.pw_uid, account.pw_gid)}
-        with patch(__name__ + ".run_fixed", side_effect=fake_command) as command_mock, \
-             patch(__name__ + ".SYSTEMCTL", str(root / "systemctl")), \
-             patch("os.geteuid", return_value=0), \
-             patch.object(pwd, "getpwnam", side_effect=lambda name: actors[name]), \
-             patch("os.getgrouplist", side_effect=lambda name, gid: [gid]):
-            executable_stat = os.stat(executable)
-            if executable_stat.st_uid != 0:
-                # The fixture itself can run as a non-root developer.
-                real_stat = os.stat
-                with patch("os.stat", side_effect=lambda path, **kw: SimpleNamespace(
-                    st_mode=executable_stat.st_mode, st_uid=0,
-                    st_nlink=executable_stat.st_nlink) if path == str(executable)
-                    else real_stat(path, **kw)):
-                    report = observe(123, 2)
-            else:
-                report = observe(123, 2)
+        real_systemctl_stat = os.stat
+        def fixture_stat(owner_uid: int):
+            def stat_for_fixture(path, *args, **kwargs):
+                info = real_systemctl_stat(path, *args, **kwargs)
+                if os.fspath(path) == str(executable) and kwargs.get("follow_symlinks") is False:
+                    return SimpleNamespace(st_mode=info.st_mode, st_uid=owner_uid,
+                                            st_nlink=info.st_nlink)
+                return info
+            return stat_for_fixture
+
+        def run_orchestration_checks(command_mock, commands, fake_command) -> None:
+            nonlocal checks
+            report = observe(123, 2)
             assert report["verdict"] == "BARE_ACCOUNT_MANAGER_DENIAL_OBSERVED"
             assert len(commands) == 1 + 3 * 5
             checks += 1
@@ -580,6 +564,49 @@ def self_test() -> None:
             executable.unlink()
             executable.symlink_to(path1 / "nonexistent")
             reject(lambda: observe(123, 2), "executable identity is unsafe")
+
+        runner_owner_uid = real_systemctl_stat(executable, follow_symlinks=False).st_uid
+        if runner_owner_uid == 0:
+            runner_owner_uid = 12345
+        require(runner_owner_uid != 0, "runner-owned fixture UID was not simulated")
+        for owner_uid in (0, runner_owner_uid):
+            try:
+                executable.unlink()
+            except FileNotFoundError:
+                pass
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+            executable.chmod(0o755)
+            commands = []
+            def fake_command(account, arguments, deadline):
+                commands.append((account.pw_name if account else "root", arguments))
+                if arguments == _manager_command():
+                    return manager
+                if arguments[0] == "show" and arguments[-1].endswith(".service"):
+                    return {**unit_show, "stdout": unit_show["stdout"].replace(unit, arguments[-1])}
+                if arguments == ("show", "-p", "Version"):
+                    return {"exit": 0, "stdout": "Version=255.4\n", "stderr": "",
+                            "proc_status": fake_status(account.pw_uid, account.pw_gid)}
+                assert arguments[0] == "start" and account is not None
+                return {**deny, "stderr": f"Failed to start {arguments[1]}: Access denied\n",
+                        "proc_status": fake_status(account.pw_uid, account.pw_gid)}
+            with patch("os.stat", side_effect=fixture_stat(owner_uid)):
+                observed_owner = os.stat(executable, follow_symlinks=False).st_uid
+                assert observed_owner == owner_uid
+                checks += 1
+                with patch(__name__ + ".run_fixed", side_effect=fake_command) as command_mock, \
+                     patch(__name__ + ".SYSTEMCTL", str(executable)), \
+                     patch("os.geteuid", return_value=0), \
+                     patch.object(pwd, "getpwnam", side_effect=lambda name: actors[name]), \
+                     patch("os.getgrouplist", side_effect=lambda name, gid: [gid]):
+                    if owner_uid == 0:
+                        run_orchestration_checks(command_mock, commands, fake_command)
+                    else:
+                        # Adapt the runner-owned fixture to the root-owned
+                        # executable view expected inside the disposable guest.
+                        # The adapter stays active for every positive and
+                        # negative orchestration control.
+                        with patch("os.stat", side_effect=fixture_stat(0)):
+                            run_orchestration_checks(command_mock, commands, fake_command)
     print(f"MANAGER_DENIAL_SELF_TEST checks={checks} failures=0 fixtures-only-not-live-proof")
 
 
