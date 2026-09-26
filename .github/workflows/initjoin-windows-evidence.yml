@@ -1,0 +1,57 @@
+name: Initializer Windows repaired-head evidence
+on:
+  push:
+    branches: [research/1319-initjoin-evidence-20260925-astra]
+permissions:
+  contents: read
+jobs:
+  windows:
+    if: github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      BUSTER_TEST_JOBS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      CFLAGS: -Wno-invalid-feature-combination
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 30e068347e9d8966be6ff9b814de73dfd4b463ff
+          persist-credentials: false
+      - name: Trusted Windows build and registered suite
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force portability-evidence | Out-Null
+          # The native test temporary-path helper requires this parent even
+          # when the compiler was configured in a custom build directory.
+          New-Item -ItemType Directory -Force build | Out-Null
+          git rev-parse HEAD | Out-File -Encoding utf8 portability-evidence/source.txt
+          git rev-parse 'HEAD^{tree}' | Out-File -Encoding utf8 portability-evidence/tree.txt
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPath = (& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          clang --version | Out-File -Encoding utf8 portability-evidence/clang.txt
+          $Driver = Join-Path $env:RUNNER_TEMP 'initjoin-build.exe'
+          & clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -lws2_32 -o $Driver
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $Generate = "`"$Driver`" generate --ci --cc clang --linker DEFAULT --build-directory build-portability -- -DBUSTER_UNITY_BUILD=OFF 2>&1"
+          cmd /d /s /c $Generate | Tee-Object -FilePath portability-evidence/configure.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $Build = "`"$Driver`" build --build-directory build-portability --config Release -t ide 2>&1"
+          cmd /d /s /c $Build | Tee-Object -FilePath portability-evidence/build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-FileHash build-portability/Release/ide.exe -Algorithm SHA256 | Format-List | Out-File -Encoding utf8 portability-evidence/compiler.sha256
+          cmd /d /s /c 'build-portability\Release\ide.exe test --verbose=1 --ci=1 2>&1' | Tee-Object -FilePath portability-evidence/tests.log
+          $TestExit = $LASTEXITCODE
+          $TestExit | Out-File -Encoding utf8 portability-evidence/tests.exit
+          exit $TestExit
+      - name: Retain every repaired-head attempt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: initializer-windows-repaired-${{ github.run_id }}-${{ github.run_attempt }}
+          path: portability-evidence
+          if-no-files-found: error
+          retention-days: 30
