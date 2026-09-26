@@ -1187,12 +1187,16 @@ def _post_removal_unstarted(snapshot: dict[str, Any], row: dict[str, Any],
             snapshot.get("finished_monotonic_ns", 0) >= snapshot["started_monotonic_ns"] and
             snapshot.get("incomplete_reasons") == ["unit_removed_before_snapshot"] and
             snapshot.get("complete") is False and snapshot.get("manager_properties_complete") is False and
-            snapshot.get("process_capture_complete") is False and snapshot.get("main_pid") == 0 and
+            snapshot.get("process_capture_complete") is False and
+            type(snapshot.get("main_pid")) is int and snapshot.get("main_pid") == 0 and
             snapshot.get("process_started") is False and snapshot.get("proc_capture") == {} and
             snapshot.get("systemctl_timed_out") is False and
             all(snapshot.get(key) is None for key in ("raw_show", "raw_stderr", "systemctl_exit",
                 "systemctl_timeout_reason", "systemctl_cancelled", "socket_fd0", "invocation_id",
-                "start_ticks", "exe", "exe_sha256", "cgroup")),
+                "start_ticks", "exe", "exe_sha256", "cgroup", "result", "active_state", "substate",
+                "exec_main_status", "invocation_id_observed", "exec_main_start_timestamp_monotonic",
+                "process_capture_state", "initial_exe_observed", "proc_cgroup_raw",
+                "preliminary_property_miss", "preliminary_property_miss_reason")),
             "post-removal query was started, has payload, or disagrees with event order")
     return any(old.get("complete") is True and old.get("manager_properties_complete") is True and
                old.get("process_capture_complete") is True and
@@ -2375,6 +2379,16 @@ def self_test() -> int:
     checks += 1
     rejects(_post_removal_unstarted, {**skipped, "raw_show": {"path": "not-empty"}}, unit_row, removed)
     rejects(_post_removal_unstarted, {**skipped, "systemctl_exit": 0}, unit_row, removed)
+    for key, value in (("result", "success"), ("active_state", "active"), ("substate", "running"),
+                       ("exec_main_status", "0"), ("invocation_id_observed", invocation),
+                       ("exec_main_start_timestamp_monotonic", 1),
+                       ("process_capture_state", "full_process_witness"),
+                       ("initial_exe_observed", "/usr/local/libexec/buster-benchmark-broker"),
+                       ("proc_cgroup_raw", "0::/system.slice/example"),
+                       ("preliminary_property_miss", True),
+                       ("preliminary_property_miss_reason", "unit_new_before_process_start"),
+                       ("main_pid", False)):
+        rejects(_post_removal_unstarted, {**skipped, key: value}, unit_row, removed)
     rejects(_post_removal_unstarted, {**skipped, "trigger_event_seq": 4}, unit_row, removed)
     require(not _post_removal_unstarted(skipped, {**unit_row, "snapshots": []}, removed),
             "never-started query without earlier full witness was accepted")
