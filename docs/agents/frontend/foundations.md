@@ -62,7 +62,15 @@ The current-value table is sparse `(block, owner)` state, not a blocks × locals
 matrix. Unresolved reads create provisional block parameters. Sealing waits
 until all backedges and goto predecessors are known; an iterative queue fills
 incoming values, forwarding through single-predecessor chains. Trivial
-parameters and unused parameter cycles are removed. Disconnected empty label
+parameters and unused parameter cycles are removed. A parameter is trivial
+when every edge out of a reachable block carries the same value; an edge out
+of an unreachable block never runs, so its value decides only when no
+reachable edge carries one. A braced statement ending in `break`, `goto`,
+`return` or `continue` leaves its continuation block without predecessors,
+yet the next `case` or label still receives an edge from it; counting that
+edge kept a merge of every local read after the label, the shape of a
+`case OP_X: { ... break; }` interpreter. MIR dominance likewise ignores dead
+edges into the entry component. Disconnected empty label
 blocks have no outgoing edge. Publication includes **every** predecessor edge,
 including parameter-free destinations; selectors must never see a partial CFG.
 Condition lowering resolves a literal left operand of `||` or `&&` before
