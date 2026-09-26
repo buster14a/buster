@@ -44,6 +44,10 @@ TERMINAL_STAGE_SUFFIXES = ("base-generate", "base-build", "candidate-generate",
 TERMINAL_SYSTEMD_PROPERTIES = (
     "Id,LoadState,ActiveState,MainPID,InvocationID,CollectMode,Result,ControlGroup")
 MAX_TERMINAL_SYSTEMD_OUTPUT = 16384
+MAX_ACTIVE_LEASE_FDS = 256
+MAX_ACTIVE_LEASE_MATCHES = 8
+MAX_ACTIVE_LEASE_FDINFO = 16384
+MAX_ACTIVE_LEASE_LOCKS = 4 * 1024 * 1024
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
@@ -719,6 +723,157 @@ def _lease_snapshot(lease_dir_fd: int, lock_fd: int, service_uid: int, service_g
             "uid": info.st_uid, "gid": info.st_gid, "links": info.st_nlink}
 
 
+def _matching_lease_locks(raw: bytes, device: int, inode: int) -> list[dict[str, object]]:
+    """Parse a bounded /proc/locks snapshot without attributing an OFD to a PID."""
+    _fail(len(raw) <= MAX_ACTIVE_LEASE_LOCKS and (not raw or raw.endswith(b"\n")),
+          "incomplete /proc/locks lease snapshot")
+    try:
+        lines = raw.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ProbeError("non-ASCII /proc/locks lease snapshot") from exc
+    matches: list[dict[str, object]] = []
+    for line in lines:
+        identity = re.search(r"(?<!\S)([0-9a-fA-F]+):([0-9a-fA-F]+):([0-9]+)(?=\s|$)", line)
+        if identity is None or \
+           (int(identity.group(1), 16), int(identity.group(2), 16), int(identity.group(3))) != \
+           (os.major(device), os.minor(device), inode):
+            continue
+        match = re.fullmatch(
+            r"([0-9]+):\s+(->\s+)?(\S+)\s+(\S+)\s+(\S+)\s+(-?[0-9]+)\s+"
+            r"([0-9a-fA-F]+):([0-9a-fA-F]+):([0-9]+)\s+([0-9]+)\s+(EOF|[0-9]+)", line)
+        _fail(match is not None, "unrecognized matching /proc/locks record")
+        matches.append({"raw": line, "waiting": bool(match.group(2)), "type": match.group(3),
+                        "class": match.group(4), "access": match.group(5),
+                        "reported_pid": int(match.group(6)), "start": int(match.group(10)),
+                        "end": match.group(11)})
+        _fail(len(matches) <= MAX_ACTIVE_LEASE_MATCHES, "matching lease locks exceed bound")
+    _fail(any(not row["waiting"] and row["type"] == "FLOCK" and
+              row["class"] == "ADVISORY" and row["access"] == "WRITE" and
+              row["start"] == 0 and row["end"] == "EOF" for row in matches),
+          "exclusive advisory host lease absent from /proc/locks")
+    return matches
+
+
+def capture_active_lease(service_snapshot: dict[str, object], boot_id: str,
+                         service_uid: int, service_gid: int, output: Path,
+                         deadline: float) -> dict[str, object]:
+    """One passive service-FD observation; inode equality cannot prove shared OFD."""
+    props = service_snapshot["properties"]
+    process = service_snapshot["process"]
+    pid = int(props["MainPID"])
+    invocation = props.get("InvocationID", "")
+    start_ticks = process["starttime_ticks"]
+    _fail(HEX32.fullmatch(invocation) is not None and invocation != "0" * 32 and
+          isinstance(start_ticks, int) and start_ticks > 0,
+          "active service invocation or process start ticks missing")
+    proc = Path(f"/proc/{pid}")
+
+    def process_identity(label: str) -> None:
+        stat_raw = _bounded_file(proc / "stat", 1024 * 1024, deadline, reserve=65.0)
+        _write_private(output, f"active-lease-service-stat-{label}.txt", stat_raw)
+        state, group, ticks = _proc_stat_identity(stat_raw, "active lease service")
+        _fail(stat_raw.startswith(f"{pid} (".encode("ascii")) and state not in ("Z", "X") and
+              group == process["process_group"] and ticks == start_ticks,
+              "active lease service PID or start ticks changed")
+        cgroup_raw = _bounded_file(proc / "cgroup", 1024 * 1024, deadline, reserve=65.0)
+        _write_private(output, f"active-lease-service-cgroup-{label}.txt", cgroup_raw)
+        _fail(cgroup_raw.decode("ascii").splitlines() == [f"0::{SERVICE_CGROUP}"],
+              "active lease service cgroup changed")
+        boot_raw = _bounded_file(Path("/proc/sys/kernel/random/boot_id"), 128,
+                                 deadline, reserve=65.0)
+        _write_private(output, f"active-lease-boot-{label}.txt", boot_raw)
+        _fail(boot_raw.decode("ascii").strip() == boot_id,
+              "active lease boot differs from worker record")
+
+    process_identity("before")
+    receipt_fd = lease_dir_fd = lock_fd = -1
+    try:
+        receipt_fd = _safe_dir(LEASE_RECEIPT_DIR, ROOT_UID, ROOT_GID, 0o555)
+        receipt_raw, receipt_info = _read_variable_snapshot(
+            receipt_fd, LEASE_RECEIPT_NAME, 128, ROOT_UID, ROOT_GID, 0o444)
+        _write_private(output, "active-lease-root-receipt.txt", receipt_raw)
+        receipt_device, receipt_inode = _canonical_lease_receipt(receipt_raw)
+        lease_dir_fd = _safe_dir(LEASE_PARENT, service_uid, service_gid, 0o710)
+        # O_PATH pins only metadata. Never open the target lease for data or flock it.
+        lock_fd = os.open("host.lock", os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW,
+                          dir_fd=lease_dir_fd)
+        lock_info = _lease_snapshot(lease_dir_fd, lock_fd, service_uid, service_gid,
+                                    receipt_device, receipt_inode)
+
+        descriptors: list[dict[str, object]] = []
+        scanned = 0
+        with os.scandir(proc / "fd") as entries:
+            for entry in entries:
+                _remaining(deadline, reserve=65.0)
+                if not entry.name.isdecimal():
+                    continue
+                scanned += 1
+                _fail(scanned <= MAX_ACTIVE_LEASE_FDS, "active service descriptor count exceeds bound")
+                fd_path = proc / "fd" / entry.name
+                fd_info = os.stat(fd_path)
+                if (fd_info.st_dev, fd_info.st_ino) != (receipt_device, receipt_inode):
+                    continue
+                _fail(len(descriptors) < MAX_ACTIVE_LEASE_MATCHES,
+                      "matching active service descriptors exceed bound")
+                link = os.readlink(fd_path)
+                fdinfo_raw = _bounded_file(proc / "fdinfo" / entry.name,
+                                           MAX_ACTIVE_LEASE_FDINFO, deadline, reserve=65.0)
+                second_info = os.stat(fd_path)
+                _fail(_stable_stat_tuple(fd_info) == _stable_stat_tuple(second_info) and
+                      os.readlink(fd_path) == link,
+                      "active service lease descriptor changed during read")
+                fdinfo_text = fdinfo_raw.decode("ascii")
+                reported_inodes = re.findall(r"^ino:\s*([0-9]+)\s*$", fdinfo_text, re.MULTILINE)
+                _fail(len(reported_inodes) <= 1 and
+                      (not reported_inodes or int(reported_inodes[0]) == receipt_inode),
+                      "active service fdinfo inode mismatch")
+                _write_private(output, f"active-lease-service-fd-{entry.name}.fdinfo", fdinfo_raw)
+                descriptors.append({"fd_number": int(entry.name), "readlink": link,
+                                    "device": fd_info.st_dev, "inode": fd_info.st_ino,
+                                    "uid": fd_info.st_uid, "gid": fd_info.st_gid,
+                                    "mode": _mode(fd_info), "links": fd_info.st_nlink,
+                                    "fdinfo_bytes": len(fdinfo_raw)})
+        _fail(bool(descriptors), "active service has no descriptor matching the fixed host lease")
+        locks_raw = _bounded_file(Path("/proc/locks"), MAX_ACTIVE_LEASE_LOCKS,
+                                  deadline, reserve=65.0)
+        _write_private(output, "active-lease-proc-locks.txt", locks_raw)
+        matching_locks = _matching_lease_locks(locks_raw, receipt_device, receipt_inode)
+
+        _fail(_lease_snapshot(lease_dir_fd, lock_fd, service_uid, service_gid,
+                              receipt_device, receipt_inode) == lock_info,
+              "fixed host lease metadata changed during active capture")
+        _same_directory_path(LEASE_PARENT, lease_dir_fd, service_uid, service_gid, 0o710)
+        receipt_after, receipt_info_after = _read_variable_snapshot(
+            receipt_fd, LEASE_RECEIPT_NAME, 128, ROOT_UID, ROOT_GID, 0o444)
+        _fail(receipt_after == receipt_raw and receipt_info_after == receipt_info,
+              "root lease receipt changed during active capture")
+        _same_directory_path(LEASE_RECEIPT_DIR, receipt_fd, ROOT_UID, ROOT_GID, 0o555)
+    finally:
+        for descriptor in (lock_fd, lease_dir_fd, receipt_fd):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    process_identity("after")
+    after_props, after_raw = _systemd("buster-bench.service",
+                                      min(4.0, _remaining(deadline, reserve=65.0)))
+    _write_private(output, "active-lease-service-after.systemctl-show", after_raw.encode("utf-8"))
+    _fail(after_props.get("ActiveState") == "active" and
+          after_props.get("MainPID") == str(pid) and
+          after_props.get("InvocationID") == invocation and
+          after_props.get("ControlGroup") == SERVICE_CGROUP,
+          "active service identity changed during lease observation")
+    result = {"disposition": "PASSIVE_ACTIVE_LEASE_SNAPSHOT", "boot_id": boot_id,
+              "service_main_pid": pid, "service_starttime_ticks": start_ticks,
+              "service_invocation": invocation, "service_cgroup": SERVICE_CGROUP,
+              "lease_path": f"{LEASE_PARENT}/host.lock", "lease": lock_info,
+              "root_receipt": receipt_info, "descriptors_scanned": scanned,
+              "matching_service_descriptors": descriptors, "matching_proc_locks": matching_locks,
+              "limitation": "one bounded readback; matching inode and /proc/locks do not prove the "
+                            "same open-file description or continuous coordinator ownership"}
+    _write_json_private(output, "active-lease-snapshot.json", result)
+    return result
+
+
 def _same_directory_path(path: str, pinned_fd: int, uid: int, gid: int, mode: int) -> dict[str, int]:
     current_fd = _safe_dir(path, uid, gid, mode)
     try:
@@ -1160,6 +1315,7 @@ def _run_probe(job: int, request_sha: str, baseline: str, subject: str,
         "checkpoint_discovery_window_seconds": 300,
         "captured_when_available": [
             "installed service full systemctl show and MainPID proc status/mountinfo/cgroup/executable hash",
+            "one passive active-service lease path, descriptor/fdinfo, and /proc/locks snapshot bound to the root receipt",
             "exact active outer full systemctl show, invocation, MainPID, proc and cgroup identity",
             "one exact active base-build full systemctl show, invocation, MainPID, proc and cgroup identity before and after payload cleanup",
             "immutable worker and instance record bytes bound to submit request SHA-256",
@@ -1171,6 +1327,7 @@ def _run_probe(job: int, request_sha: str, baseline: str, subject: str,
             "recovery scenarios, authenticated publication/replay acceptance, or a complete deployment packet",
             "short-lived broker processes that exited before post-probe capture",
             "physical host readiness, host installation, or service/security acceptance",
+            "continuous coordinator FD retention or shared open-file-description identity from inode matching",
         ],
         "full_acceptance": "pending",
     }
@@ -1217,6 +1374,8 @@ def _run_probe(job: int, request_sha: str, baseline: str, subject: str,
                                     job_deadline, reserve=75.0)
     service_props = service_snapshot["properties"]
     validate_service(service_snapshot)
+    active_lease = capture_active_lease(service_snapshot, str(outer_identity["boot_id"]),
+                                        service.pw_uid, service.pw_gid, output, job_deadline)
     outer_live_start = capture_unit(str(outer_identity["outer_unit"]), output, "outer-live-start", 8.0,
                                     job_deadline, reserve=75.0)
     validate_outer(outer_live_start, outer_identity)
@@ -1387,6 +1546,7 @@ def _run_probe(job: int, request_sha: str, baseline: str, subject: str,
             "payload_inode": payload_identity[1] if payload_identity else None,
             "payload_absent_after_cleanup": True, "live_test_exit": probe_exit,
             "process_group_clean": process_group_clean,
+            "active_lease_snapshot": active_lease,
             "broker_capture_coverage": broker_coverage, "full_acceptance": "pending"}
 
 
@@ -1648,6 +1808,7 @@ def self_test() -> None:
                  patch(__name__ + ".RESULTS", str(results_root)), \
                  patch(__name__ + "._open_records", return_value=(fixture_worker, fixture_instance, identity)), \
                  patch(__name__ + ".capture_unit", side_effect=fake_capture), \
+                 patch(__name__ + ".capture_active_lease", return_value={"fixture": "passive-only"}), \
                  patch(__name__ + ".run_probe_process", side_effect=fake_process), \
                  patch(__name__ + ".subprocess.run", side_effect=fake_subprocess_run), \
                  patch(__name__ + ".os.fchmod", side_effect=maybe_fchmod), \
@@ -2004,9 +2165,138 @@ def self_test() -> None:
     print(f"LIVE_PROBE_SELF_TEST checks={checks} failures=0 orchestration=temporary-fixture-not-live-proof")
 
 
+def lease_self_test() -> None:
+    """Only a private temporary file and this process's own advisory flock."""
+    import fcntl
+
+    checks = 0
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        lease_dir = root / "lease"
+        lease_dir.mkdir(mode=0o710)
+        lease_dir.chmod(0o710)
+        receipt_dir = root / "receipt"
+        receipt_dir.mkdir(mode=0o755)
+        lock_path = lease_dir / "host.lock"
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o640)
+        try:
+            os.fchmod(fd, 0o640)
+            info = os.fstat(fd)
+            receipt = receipt_dir / LEASE_RECEIPT_NAME
+            receipt.write_text(f"device={info.st_dev}\ninode={info.st_ino}\n", encoding="ascii")
+            receipt.chmod(0o444)
+            receipt_dir.chmod(0o555)
+            lock_line = (f"1: FLOCK  ADVISORY  WRITE {os.getpid()} "
+                         f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino} 0 EOF\n")
+            assert len(_matching_lease_locks(lock_line.encode(), info.st_dev, info.st_ino)) == 1
+            checks += 1
+            for invalid in (b"", lock_line.replace("FLOCK", "POSIX").encode(),
+                            lock_line.replace("1: FLOCK", "1: -> FLOCK").encode(),
+                            lock_line.replace(f":{info.st_ino} ", f":{info.st_ino + 1} ").encode(),
+                            lock_line.replace(" ADVISORY ", " BROKEN FIELDS ").encode(),
+                            b"malformed lock record\n"):
+                try:
+                    _matching_lease_locks(invalid, info.st_dev, info.st_ino)
+                except ProbeError:
+                    checks += 1
+                else:
+                    raise AssertionError("invalid or absent lease lock was accepted")
+            try:
+                _matching_lease_locks(lock_line.encode() * (MAX_ACTIVE_LEASE_MATCHES + 1),
+                                      info.st_dev, info.st_ino)
+            except ProbeError:
+                checks += 1
+            else:
+                raise AssertionError("unbounded lease locks were accepted")
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # /proc can be mounted from the host PID namespace in this scratch runtime.
+            own_stat = (Path("/proc/self/stat")).read_bytes()
+            pid = int(own_stat.split(b" ", 1)[0])
+            _, group, ticks = _proc_stat_identity(own_stat, "lease fixture")
+            cgroup = Path("/proc/self/cgroup").read_text(encoding="ascii").strip()
+            assert cgroup.startswith("0::/")
+            service_cgroup = cgroup[3:]
+            invocation = "d" * 32
+            props = {"ActiveState": "active", "MainPID": str(pid),
+                     "InvocationID": invocation, "ControlGroup": service_cgroup}
+            snapshot = {"properties": props,
+                        "process": {"starttime_ticks": ticks, "process_group": group}}
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            with patch(__name__ + ".LEASE_PARENT", str(lease_dir)), \
+                 patch(__name__ + ".LEASE_RECEIPT_DIR", str(receipt_dir)), \
+                 patch(__name__ + ".ROOT_UID", os.getuid()), \
+                 patch(__name__ + ".ROOT_GID", os.getgid()), \
+                 patch(__name__ + ".SERVICE_CGROUP", service_cgroup):
+                output = root / "evidence"
+                output.mkdir(mode=0o700)
+                with patch(__name__ + "._systemd", return_value=(props, "fixture active service\n")):
+                    result = capture_active_lease(snapshot, boot, os.getuid(), os.getgid(),
+                                                  output, time.monotonic() + 80.0)
+                assert any(row["fd_number"] == fd for row in result["matching_service_descriptors"])
+                assert result["matching_proc_locks"] and \
+                       (output / f"active-lease-service-fd-{fd}.fdinfo").exists() and \
+                       (output / "active-lease-proc-locks.txt").exists()
+                checks += 1
+
+                bounded = root / "bounded"
+                bounded.mkdir(mode=0o700)
+                with patch(__name__ + ".MAX_ACTIVE_LEASE_FDS", 0):
+                    try:
+                        capture_active_lease(snapshot, boot, os.getuid(), os.getgid(),
+                                             bounded, time.monotonic() + 80.0)
+                    except ProbeError as exc:
+                        assert "descriptor count exceeds bound" in str(exc)
+                        checks += 1
+                    else:
+                        raise AssertionError("descriptor inventory bound was ignored")
+
+                denied = root / "denied"
+                denied.mkdir(mode=0o700)
+                with patch(__name__ + ".os.scandir", side_effect=PermissionError("fixture fd denial")):
+                    try:
+                        capture_active_lease(snapshot, boot, os.getuid(), os.getgid(),
+                                             denied, time.monotonic() + 80.0)
+                    except PermissionError as exc:
+                        assert "fixture fd denial" in str(exc)
+                        checks += 1
+                    else:
+                        raise AssertionError("descriptor permission denial was ignored")
+
+                raced = root / "raced"
+                raced.mkdir(mode=0o700)
+                changed = dict(props, InvocationID="e" * 32)
+                with patch(__name__ + "._systemd", return_value=(changed, "fixture raced service\n")):
+                    try:
+                        capture_active_lease(snapshot, boot, os.getuid(), os.getgid(),
+                                             raced, time.monotonic() + 80.0)
+                    except ProbeError as exc:
+                        assert "identity changed" in str(exc)
+                        checks += 1
+                    else:
+                        raise AssertionError("changed active service invocation was accepted")
+
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                missing = root / "missing"
+                missing.mkdir(mode=0o700)
+                with patch(__name__ + "._systemd", return_value=(props, "fixture active service\n")):
+                    try:
+                        capture_active_lease(snapshot, boot, os.getuid(), os.getgid(),
+                                             missing, time.monotonic() + 80.0)
+                    except ProbeError as exc:
+                        assert "host lease absent" in str(exc)
+                        checks += 1
+                    else:
+                        raise AssertionError("missing advisory host lease was accepted")
+        finally:
+            os.close(fd)
+    print(f"LIVE_PROBE_LEASE_SELF_TEST checks={checks} failures=0 scope=own-temporary-file")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--lease-self-test", action="store_true")
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--terminal", action="store_true")
     parser.add_argument("--check-result")
@@ -2022,6 +2312,9 @@ def main() -> int:
     args = parser.parse_args()
     if args.self_test:
         self_test()
+        return 0
+    if args.lease_self_test:
+        lease_self_test()
         return 0
     if args.check_result is not None:
         _fail(not args.run and not args.terminal and args.output is None,
