@@ -7630,23 +7630,41 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
             return result;
         }
     }
+    // A label-provenance value may not leave its original void pointer type,
+    // whatever representation the arms below would convert it through.
+    if (c_ir_value_contains_label_provenance(builder, value))
+    {
+        bool original_void_pointer = source_type.value == target_type.value && source_value->kind == IR_TYPE_POINTER && target_value->kind == IR_TYPE_POINTER &&
+                                     source_value->element_type.value < builder->program->types.count &&
+                                     ir_type_from_id(&builder->program->types, source_value->element_type)->kind == IR_TYPE_VOID;
+        if (!original_void_pointer)
+        {
+            builder->failure_message = S8("a label-provenance value may only be used with its original void pointer type");
+            return IR_VALUE_ID_INVALID;
+        }
+    }
+    // C 6.3.1.2 fixes a _Bool destination for every scalar source: 0 exactly
+    // when the whole value compares equal to 0. c_ir_truth_value is its one
+    // runtime owner -- a complex value tests both halves, binary16 widens
+    // first -- so the destination is answered here, before any arm below that
+    // dispatches on the source's representation can narrow or project the
+    // value. The complex arm used to see a _Bool destination first and kept
+    // only the real half, so `_Bool b = z` disagreed with `if (z)`.
+    if (target_value->kind == IR_TYPE_BOOLEAN)
+    {
+        return c_ir_truth_value(builder, value, source);
+    }
     // A complex type on either end converts half by half, and the halves are
     // what the ladders below can reason about: the wide-float arm sees only a
     // FLOAT kind, so a `(long double)z` -- which is how <complex.h> spells
     // `creall` -- reaches it as an aggregate paired with an f80 and is
-    // refused. The boolean target is answered before this, because a complex
-    // truth value tests both halves rather than the real one, and that arm
-    // has already returned above.
+    // refused. A _Bool destination has already returned above.
     if (source_value->is_complex || target_value->is_complex)
     {
         return c_ir_emit_complex_conversion(builder, value, target_type, source);
     }
     bool source_binary16 = c_ir_type_is_ieee_binary16(builder, source_type);
     bool target_binary16 = c_ir_type_is_ieee_binary16(builder, target_type);
-    if (source_binary16 && target_value->kind == IR_TYPE_BOOLEAN)
-    {
-        return c_ir_truth_value(builder, value, source);
-    }
     if (source_binary16 && !target_binary16)
     {
         IrValueId widened = c_ir_emit_float16_runtime_call(builder, S8("__extendhfsf2"), builder->f32_type, value, source_type, source);
@@ -7705,17 +7723,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
             return IR_VALUE_ID_INVALID;
         }
     }
-    if (c_ir_value_contains_label_provenance(builder, value))
-    {
-        bool original_void_pointer = source_type.value == target_type.value && source_value->kind == IR_TYPE_POINTER && target_value->kind == IR_TYPE_POINTER &&
-                                     source_value->element_type.value < builder->program->types.count &&
-                                     ir_type_from_id(&builder->program->types, source_value->element_type)->kind == IR_TYPE_VOID;
-        if (!original_void_pointer)
-        {
-            builder->failure_message = S8("a label-provenance value may only be used with its original void pointer type");
-            return IR_VALUE_ID_INVALID;
-        }
-    }
     if (target_value->is_nullptr && !source_value->is_nullptr)
     {
         builder->failure_message = S8("only a value of type nullptr_t may be converted to nullptr_t");
@@ -7725,10 +7732,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
     {
         builder->failure_message = S8("nullptr_t may only be converted to bool, a pointer type, or itself");
         return IR_VALUE_ID_INVALID;
-    }
-    if (target_value->kind == IR_TYPE_BOOLEAN)
-    {
-        return c_ir_truth_value(builder, value, source);
     }
     IrConversionOperation operation = IR_CONVERSION_COUNT;
     if (source_value->kind == IR_TYPE_INTEGER && target_value->kind == IR_TYPE_INTEGER)
@@ -16353,6 +16356,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_conversion(CIntegerIrBuilder* buil
         }
         if (!target_complex)
         {
+            // C 6.3.1.7p2 projects a complex value onto a real target by
+            // discarding the imaginary half. A _Bool destination is not such a
+            // projection: C 6.3.1.2 compares the whole value with zero, and
+            // c_ir_emit_cast answers it through c_ir_truth_value before this.
+            BUSTER_ASSERT(!ir_type_from_id(&builder->program->types, target_type) ||
+                          ir_type_from_id(&builder->program->types, target_type)->kind != IR_TYPE_BOOLEAN);
             return c_ir_emit_cast(builder, real, target_type, source);
         }
         IrTypeId target_element = target_complex->element_type;
