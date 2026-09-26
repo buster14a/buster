@@ -3636,29 +3636,57 @@ BUSTER_C_INTERNAL bool c_parse_expression_place_shape(CParseResult* result, CPre
     return place;
 }
 
+// A parameter keeps its declared array spelling in its entity type, so a
+// type query reports `int a[4]` or `char *argv[]` as an array. C17 6.7.6.3p7
+// adjusts it to a pointer to the element, qualified by what the brackets
+// carry: `int a[const 2]` is a const pointer. The array type's own `const`
+// is what c_ir_mark_local_read_only also keeps read-only for that pointer.
+BUSTER_C_INTERNAL bool c_parse_array_parameter_pointer_is_const(CParseResult* result, CTypeId type)
+{
+    bool is_const = false;
+    if (type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY)
+    {
+        CType array = result->types[type.value];
+        is_const = array.is_const || (array.array_bound < result->array_bound_count && result->array_bounds[array.array_bound].is_const);
+    }
+    return is_const;
+}
+
 // A type query retains the operand's qualifiers and does not evaluate it.
 // The place check is shared with address-of and asm output constraints; a
 // scalar type alone would also describe an enumerator, cast, call or rvalue.
+// An array parameter is the modifiable pointer it is adjusted to unless that
+// pointer is const: `argv++` and `*SK++` are the ordinary spellings (lmdb's
+// `mdb_copy`, mbedtls's `des_setkey`). A local or member array is not
+// adjusted and stays unmodifiable.
 BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CTypeId type)
 {
     bool valid = type.value < result->type_count && c_parse_expression_place_shape(result, preprocess, start, end);
-    if (valid)
-    {
-        CType value = result->types[type.value];
-        valid = !value.is_const && (c_parse_expression_real_kind(value.kind) || value.kind == C_TYPE_POINTER);
-    }
     while (valid && start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
            c_parse_matching_delimiter_indexed(result, preprocess, start) + 1 == end)
     {
         start += 1;
         end -= 1;
     }
-    if (valid && start + 1 == end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+    bool identifier = valid && start + 1 == end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER;
+    CEntityId entity = C_ENTITY_ID_INVALID;
+    if (identifier)
     {
         u32 use = c_parse_identifier_use_index(result, start);
         CScopeId operand_scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, start);
-        CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
-                        : c_parse_lookup_entity_token(result, preprocess.spelling_base, operand_scope, &preprocess.tokens[start]);
+        entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
+                                                : c_parse_lookup_entity_token(result, preprocess.spelling_base, operand_scope, &preprocess.tokens[start]);
+    }
+    if (valid)
+    {
+        CType value = result->types[type.value];
+        bool adjusted_parameter = value.kind == C_TYPE_ARRAY && entity.value < result->entity_count &&
+                                  result->entities[entity.value].kind == C_ENTITY_PARAMETER &&
+                                  !c_parse_array_parameter_pointer_is_const(result, type);
+        valid = !value.is_const && (c_parse_expression_real_kind(value.kind) || value.kind == C_TYPE_POINTER || adjusted_parameter);
+    }
+    if (valid && identifier)
+    {
         valid = entity.value < result->entity_count &&
                 (result->entities[entity.value].kind == C_ENTITY_OBJECT || result->entities[entity.value].kind == C_ENTITY_LOCAL ||
                  result->entities[entity.value].kind == C_ENTITY_PARAMETER) && !result->entities[entity.value].is_constexpr;
@@ -11749,6 +11777,7 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
         u32 bound_start = open + 1;
         u32 bound_count = *index - bound_start - 1;
         bool is_static = false;
+        bool is_const = false;
         // `[*]` may carry the same qualifiers and `static` any other array
         // parameter bound may -- `int a[const *]` is what a prototype writes
         // for a definition's `int a[const n]` -- so the star is looked for
@@ -11767,6 +11796,7 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
                 bound_word_index = token_index;
                 bound_word_count += 1;
             }
+            is_const |= bound_qualifiers.is_const;
         }
         bool is_star = bound_word_count == 1 && c_token_is_punctuator(&preprocess.tokens[bound_word_index], C_PUNCTUATOR_STAR);
         if (!c_parse_result_reserve_array_bounds(result, 1))
@@ -11779,6 +11809,7 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
             .token_count = bound_count,
             .is_static = is_static,
             .is_star = is_star,
+            .is_const = is_const,
         };
     }
     for (u32 bound_index = result->array_bound_count; bound_index > first_bound; bound_index -= 1)
@@ -18901,6 +18932,28 @@ BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* m
     return incompatible;
 }
 
+// Whether the identifier in front of the assignment operator at `index` is
+// the whole left operand rather than the tail of a larger unary expression.
+// A member access, indirection or address-of in front of it designates some
+// other object, and so does a prefix update: `--p` is `p -= 1` (C17
+// 6.5.3.1p2), which is not an lvalue (6.5.16p3), so in valid code `--` or
+// `++` there is the operand of an indirection, `*--p = c`, whose
+// destination is the pointee (QuickJS's
+// `js_u64toa`, musl's `vfprintf`, libpng's `png_format_number`). Taking the
+// pointer's type for it converted the character to `char *`.
+BUSTER_C_INTERNAL bool c_parse_assignment_identifier_is_operand(CPreprocessResult preprocess, u32 start, u32 index)
+{
+    bool operand = index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER;
+    if (operand && index > start + 1)
+    {
+        CToken before = preprocess.tokens[index - 2];
+        operand = !c_token_is_punctuator(&before, C_PUNCTUATOR_DOT) && !c_token_is_punctuator(&before, C_PUNCTUATOR_ARROW) &&
+                  !c_token_is_punctuator(&before, C_PUNCTUATOR_STAR) && !c_token_is_punctuator(&before, C_PUNCTUATOR_AMPERSAND) &&
+                  !c_token_is_punctuator(&before, C_PUNCTUATOR_PLUS_PLUS) && !c_token_is_punctuator(&before, C_PUNCTUATOR_MINUS_MINUS);
+    }
+    return operand;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                             CDeclaration const* declaration, u8 const* skipped, u32 first_local, u32 const* next_local, CParseLoweringConstraintDiagnostic* diagnostic)
 {
@@ -18910,17 +18963,9 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
     for (u32 assignment_index = start; assignment_index < end; assignment_index += 1)
     {
         CToken assignment_token = preprocess.tokens[assignment_index];
-        if (!c_token_is_punctuator(&assignment_token, C_PUNCTUATOR_ASSIGN) || assignment_index <= start ||
-            preprocess.tokens[assignment_index - 1].kind != C_TOKEN_IDENTIFIER)
-        {
-            continue;
-        }
-        if (assignment_index > start + 1 &&
-            (c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_DOT) ||
-             c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_ARROW) ||
-             c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_STAR) ||
-             c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_AMPERSAND) ||
-             c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_RIGHT_PARENTHESIS)))
+        if (!c_token_is_punctuator(&assignment_token, C_PUNCTUATOR_ASSIGN) ||
+            !c_parse_assignment_identifier_is_operand(preprocess, start, assignment_index) ||
+            (assignment_index > start + 1 && c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_RIGHT_PARENTHESIS)))
         {
             continue;
         }
@@ -18990,12 +19035,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        bool direct_identifier_assignment = index > start && c_parse_assignment_punctuator(token) &&
-            preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
-            !(index > start + 1 && (c_token_is_punctuator(&preprocess.tokens[index - 2], C_PUNCTUATOR_DOT) ||
-                                    c_token_is_punctuator(&preprocess.tokens[index - 2], C_PUNCTUATOR_ARROW) ||
-                                    c_token_is_punctuator(&preprocess.tokens[index - 2], C_PUNCTUATOR_STAR) ||
-                                    c_token_is_punctuator(&preprocess.tokens[index - 2], C_PUNCTUATOR_AMPERSAND)));
+        bool direct_identifier_assignment = c_parse_assignment_punctuator(token) && c_parse_assignment_identifier_is_operand(preprocess, start, index);
         if ((declaration_tokens[index - start] && !direct_identifier_assignment) ||
             ((skipped && skipped[index - start]) && !direct_identifier_assignment))
         {
@@ -19260,6 +19300,13 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
         {
             CEntityId object = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[root]);
             read_only |= object.value < result->entity_count && result->entities[object.value].is_constexpr;
+            // The operand is the parameter itself, not an element: `a = 0`
+            // or `(a)++` on `int a[const 2]` writes the const pointer.
+            u32 closer = root + 1;
+            while (closer < operand_end && c_token_is_punctuator(&preprocess.tokens[closer], C_PUNCTUATOR_RIGHT_PARENTHESIS)) closer += 1;
+            bool whole_parameter = closer == operand_end && closer - (root + 1) == root - operand_start && object.value < result->entity_count &&
+                                   result->entities[object.value].kind == C_ENTITY_PARAMETER;
+            read_only |= whole_parameter && c_parse_array_parameter_pointer_is_const(result, result->entities[object.value].type);
         }
         if (assignment && assignment_typed && c_parse_incompatible_function_initializer(machine, result, preprocess, scope, assignment_type_id,
                 index + 1, c_parse_constraint_expression_end(result, preprocess, index + 1, end)))

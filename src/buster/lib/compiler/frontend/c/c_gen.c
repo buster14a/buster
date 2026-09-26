@@ -6066,30 +6066,34 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
 
 BUSTER_C_INTERNAL void c_ir_mark_local_read_only(CIntegerIrBuilder* builder, CIntegerIrLocal* local)
 {
-    if (!local || local->place.value >= builder->function->value_count)
+    if (local && local->place.value < builder->function->value_count)
     {
-        return;
-    }
-    // A parameter written with an array type is adjusted to a pointer to the
-    // element type (C11 6.7.6.3p7), and a `const` in front of that element
-    // type qualifies what the pointer points to rather than the pointer
-    // itself. The walk in c_ir_c_type_is_read_only descends through an array
-    // into its element, which is right for an array object -- its elements
-    // are const, so it is not modifiable -- and wrong for the pointer a
-    // parameter became. musl's `utimensat` takes
-    // `const struct timespec times[2]` and assigns `times = 0`.
-    if (local->is_parameter && local->entity.value < builder->parse.entity_count)
-    {
-        CTypeId declared = builder->parse.entities[local->entity.value].type;
-        if (declared.value < builder->parse.type_count && builder->parse.types[declared.value].kind == C_TYPE_ARRAY &&
-            !builder->parse.types[declared.value].is_const)
+        // A parameter written with an array type is adjusted to a pointer to
+        // the element type (C11 6.7.6.3p7), and a `const` in front of that
+        // element type qualifies what the pointer points to rather than the
+        // pointer itself. The walk in c_ir_c_type_is_read_only descends
+        // through an array into its element, which is right for an array
+        // object -- its elements are const, so it is not modifiable -- and
+        // wrong for the pointer a parameter became. musl's `utimensat` takes
+        // `const struct timespec times[2]` and assigns `times = 0`. A `const`
+        // inside the brackets, `int a[const 2]`, is the one that does qualify
+        // the pointer.
+        bool adjusted_pointer = false;
+        bool const_pointer = false;
+        if (local->is_parameter && local->entity.value < builder->parse.entity_count)
         {
-            return;
+            CTypeId declared = builder->parse.entities[local->entity.value].type;
+            if (declared.value < builder->parse.type_count && builder->parse.types[declared.value].kind == C_TYPE_ARRAY)
+            {
+                CType array = builder->parse.types[declared.value];
+                adjusted_pointer = !array.is_const;
+                const_pointer = array.array_bound < builder->parse.array_bound_count && builder->parse.array_bounds[array.array_bound].is_const;
+            }
         }
-    }
-    if (c_ir_entity_is_read_only(builder, local->entity))
-    {
-        builder->function->values[local->place.value].is_read_only = true;
+        if (const_pointer || (!adjusted_pointer && c_ir_entity_is_read_only(builder, local->entity)))
+        {
+            builder->function->values[local->place.value].is_read_only = true;
+        }
     }
 }
 
