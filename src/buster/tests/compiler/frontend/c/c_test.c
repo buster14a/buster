@@ -1198,7 +1198,14 @@ BUSTER_GLOBAL_LOCAL String8 c_test_enum_bit_field_source(Arena* arena)
     "void write_PlainPackedU40(void) { plain_packed_u.field=9; }\n"
     "_Static_assert(sizeof(enum EU32)==4 && sizeof(enum EU40)==8 && sizeof(enum ES40)==8, \"enum representation\");\n"
     "_Static_assert(sizeof(enum EU64)==8 && sizeof(enum ES64)==8, \"full width representation\");\n"
+    // A packed union spans the 40 bits; the Microsoft rule allocates the
+    // declared type's whole unit (MinGW Clang and GCC: 8 bytes, alignment 1;
+    // MSVC rejects a 40-bit enum field outright). #1439.
+    "#ifdef _WIN32\n"
+    "_Static_assert(sizeof(union PackedU40)==8 && sizeof(union PackedS40)==8, \"storage is the declared unit\");\n"
+    "#else\n"
     "_Static_assert(sizeof(union PackedU40)==5 && sizeof(union PackedS40)==5, \"storage is not the enum type\");\n"
+    "#endif\n"
     ), S8(
     "int main(void)\n"
     "{\n"
@@ -1362,10 +1369,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arg
                                     BUSTER_TEST(arguments, field_type->kind == IR_TYPE_INTEGER && field_type->bit_width == expected.semantic_width);
                                     BUSTER_TEST(arguments, field_type->is_signed == expected.is_signed);
                                     BUSTER_TEST(arguments, field_type->layout.size == expected.semantic_width / 8);
+                                    // A packed 40-bit union spans five bytes and is
+                                    // read in two pieces under the Itanium rules;
+                                    // the Microsoft rule allocates the declared
+                                    // type's whole unit, one access (#1439).
+                                    bool microsoft = target.os == OPERATING_SYSTEM_WINDOWS;
+                                    bool split = expected.packed && !microsoft;
                                     if (expected.packed)
                                     {
-                                        BUSTER_TEST(arguments, ir_record->layout.size == 5 && ir_record->layout.alignment == 1);
-                                        BUSTER_TEST(arguments, ir_field_access_size(&program->types, field) == 5);
+                                        u64 packed_size = microsoft ? 8 : 5;
+                                        BUSTER_TEST(arguments, ir_record->layout.size == packed_size && ir_record->layout.alignment == 1);
+                                        BUSTER_TEST(arguments, ir_field_access_size(&program->types, field) == packed_size);
                                     }
                                     String8 read_name = string_format(temporary.arena, S8("read_{S8}"), expected.record);
                                     IrFunction* reader = c_test_find_ir_function(module, read_name);
@@ -1384,13 +1398,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arg
                                                 IrType* loaded = ir_type_from_id(&program->types, instruction->canonical_type);
                                                 if (BUSTER_REQUIRE(arguments, loaded != 0))
                                                 {
-                                                    BUSTER_TEST(arguments, loaded->bit_width <= (expected.packed ? 32u : expected.semantic_width));
+                                                    BUSTER_TEST(arguments, loaded->bit_width <= (split ? 32u : expected.semantic_width));
                                                     BUSTER_TEST(arguments, instruction->volatile_access == expected.is_volatile);
                                                 }
                                                 loads += 1;
                                             }
                                         }
-                                        BUSTER_TEST(arguments, loads == (expected.packed ? 2u : 1u));
+                                        BUSTER_TEST(arguments, loads == (split ? 2u : 1u));
                                         if (expected.packed)
                                         {
                                             IrFunction* writer = c_test_find_ir_function(module,
@@ -1407,7 +1421,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arg
                                                         stores += 1;
                                                     }
                                                 }
-                                                BUSTER_TEST(arguments, stores == 2);
+                                                BUSTER_TEST(arguments, stores == (split ? 2u : 1u));
                                             }
                                         }
                                     }

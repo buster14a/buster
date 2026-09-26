@@ -955,6 +955,41 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, target_cpu_features_are_valid(bpfel_target));
     BUSTER_TEST(arguments, target_parse_triple(S8("bpf-unknown-linux")).target.cpu_arch == CPU_ARCH_BPFEL);
     BUSTER_TEST(arguments, target_parse_triple(S8("ebpf-unknown-linux")).target.cpu_arch == CPU_ARCH_BPFEL);
+    // Bit-field allocation per target (#1439). Every Windows environment is
+    // Microsoft; AArch64 outside Darwin and Windows is AAPCS64; x86-64 UEFI
+    // keeps its architecture's rule, since PE/COFF does not imply the Windows
+    // C layout. record_layout_tests checks what each rule produces against
+    // Clang; this pins which rule each target selects.
+    typedef struct TargetRecordLayoutCase TargetRecordLayoutCase;
+    struct TargetRecordLayoutCase
+    {
+        String8 triple;
+        TargetRecordLayout record_layout;
+    };
+    TargetRecordLayoutCase record_layout_cases[] = {
+        {S8("x86_64-pc-windows-msvc"), TARGET_RECORD_LAYOUT_MICROSOFT},
+        {S8("aarch64-pc-windows-msvc"), TARGET_RECORD_LAYOUT_MICROSOFT},
+        {S8("x86_64-w64-mingw32"), TARGET_RECORD_LAYOUT_MICROSOFT},
+        {S8("aarch64-unknown-linux-gnu"), TARGET_RECORD_LAYOUT_AAPCS64},
+        {S8("aarch64-linux-android"), TARGET_RECORD_LAYOUT_AAPCS64},
+        {S8("aarch64-unknown-uefi"), TARGET_RECORD_LAYOUT_AAPCS64},
+        {S8("aarch64-unknown-freestanding"), TARGET_RECORD_LAYOUT_AAPCS64},
+        {S8("arm64-apple-macos"), TARGET_RECORD_LAYOUT_ITANIUM},
+        {S8("arm64-apple-ios"), TARGET_RECORD_LAYOUT_ITANIUM},
+        {S8("x86_64-unknown-linux-gnu"), TARGET_RECORD_LAYOUT_ITANIUM},
+        {S8("x86_64-apple-macos"), TARGET_RECORD_LAYOUT_ITANIUM},
+        {S8("x86_64-unknown-uefi"), TARGET_RECORD_LAYOUT_ITANIUM},
+        {S8("wasm64-unknown-freestanding"), TARGET_RECORD_LAYOUT_ITANIUM},
+        {S8("bpfel-unknown-linux"), TARGET_RECORD_LAYOUT_ITANIUM},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(record_layout_cases); index += 1)
+    {
+        TargetParseResult parsed = target_parse_triple(record_layout_cases[index].triple);
+        if (BUSTER_REQUIRE(arguments, parsed.error == TARGET_PARSE_ERROR_NONE))
+        {
+            BUSTER_TEST(arguments, target_data_layout(parsed.target).record_layout == record_layout_cases[index].record_layout);
+        }
+    }
     TargetCpuFeatures rocketlake_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_ROCKETLAKE);
     TargetCpuFeatures rocketlake_avx512 = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW, TARGET_CPU_FEATURE_X86_AVX512CD, TARGET_CPU_FEATURE_X86_AVX512DQ, TARGET_CPU_FEATURE_X86_AVX512IFMA, TARGET_CPU_FEATURE_X86_AVX512VBMI, TARGET_CPU_FEATURE_X86_AVX512VBMI2, TARGET_CPU_FEATURE_X86_AVX512VNNI, TARGET_CPU_FEATURE_X86_AVX512BITALG, TARGET_CPU_FEATURE_X86_AES, TARGET_CPU_FEATURE_X86_PCLMUL, TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ, TARGET_CPU_FEATURE_X86_GFNI, TARGET_CPU_FEATURE_X86_VAES, TARGET_CPU_FEATURE_X86_VPCLMULQDQ}, 16);
     BUSTER_TEST(arguments, target_cpu_features_subset(rocketlake_avx512, rocketlake_features));
