@@ -1,0 +1,97 @@
+name: Shared C failure reductions
+on:
+  push:
+    branches: [research/shared-c-capability-20260925]
+    paths: [.github/workflows/shared-c-reductions.yml]
+permissions:
+  contents: read
+jobs:
+  reductions:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          persist-credentials: false
+      - name: Build exact production baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence .ci-tools external
+          git rev-parse HEAD 'HEAD^{tree}' > evidence/revision.txt
+          clang --version > evidence/clang.txt
+          gcc --version > evidence/gcc.txt
+          clang -dumpmachine > evidence/target.txt
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o .ci-tools/build
+          .ci-tools/build generate --ci --cc clang --linker DEFAULT > evidence/generate.log 2>&1
+          .ci-tools/build build --config Release -t ide > evidence/build.log 2>&1
+          sha256sum build/Release/ide > evidence/compiler.sha256
+      - name: Preserve exact upstream source for reduction
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip -o external/sqlite.zip
+          printf '%s  %s\n' 1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d external/sqlite.zip | sha256sum --check
+          unzip -q external/sqlite.zip -d external
+          git clone --no-checkout https://git.musl-libc.org/git/musl external/musl
+          git -C external/musl checkout --detach 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          test -z "$(git -C external/musl status --porcelain --untracked-files=all)"
+          git -C external/musl archive HEAD > evidence/musl-source.tar
+          cp external/sqlite.zip evidence/sqlite.zip
+          sha256sum evidence/musl-source.tar evidence/sqlite.zip > evidence/upstream.sha256
+      - name: Run independent references and strict native reductions
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, itertools, json, pathlib, subprocess
+          root = pathlib.Path('evidence/probes'); root.mkdir(parents=True)
+          cases = {
+          'comma-void-condition': 'static int n; static int left(int x){return x;} static int right(void){return ++n<3;} int main(void){while((void)left(n),right()){} return n!=3;}\n',
+          'comma-condition': 'static int n; static int left(int x){return x;} static int right(void){return ++n<3;} int main(void){while(left(n),right()){} return n!=3;}\n',
+          'comma-void-return': 'static int n; static int left(int x){return x;} static int right(void){return ++n;} static int f(void){return ((void)left(n),right());} int main(void){return f()!=1 || n!=1;}\n',
+          'comma-nested-argument': 'static int n; static int left(int x){return x;} static int right(void){return ++n;} static int f(int a,int b){return a+b;} int main(void){int v=f(7,((void)left(n),right()));return v!=8||n!=1;}\n',
+          'pointer-prefix-assignment': "static char *itoa(char *p,unsigned x){do *--p='0'+x%10;while(x/=10);return p;} int main(void){char buf[16]={0};char *p=itoa(buf+15,123);return p!=buf+12||p[0]!='1'||p[1]!='2'||p[2]!='3';}\n",
+          'pointer-prefix-statement': "int main(void){char buf[3]={0};char *p=buf+2;*--p='x';return p!=buf+1||buf[1]!='x';}\n",
+          'static-callback-table': 'static int f(int x){return x+1;} struct F {int a; void *p; int (*call)(int);const char *name;}; static int test(void){static struct F a[]={ {3,0,f,"one"},{4,0,f,"two"} };return a[0].call(a[1].a)!=5;} int main(void){return test();}\n',
+          'static-unary-flags': 'struct F {int a;const char *s;};static int f(void){static struct F a[]={{(-1),"a"},{((unsigned)1<<7),"b"}};return a[0].a!=-1||a[1].a!=128;} int main(void){return f();}\n'
+          }
+          records=[]
+          for name, text in cases.items():
+              src=root/(name+'.c');src.write_text(text)
+              common=['-std=gnu17','-fwrapv','-fno-strict-aliasing','-funsigned-char','-g0']
+              profiles=[]
+              for compiler,opt in itertools.product(['clang','gcc'],['-O0','-O2']):
+                  profiles.append((compiler+opt,[compiler]+common+[opt]))
+              for allocator,ssa in itertools.product(['fast','none','mir-stack','quality'],['-ffrontend-ssa','-fno-frontend-ssa']):
+                  cmd=['build/Release/ide','cc','-target','x86_64-linux']+common+['-O0','-fverify-codegen','-fregister-allocator='+allocator,ssa]
+                  if allocator!='none':cmd+=['-fno-machine-fallback']
+                  profiles.append((allocator+ssa,cmd))
+              for profile,cmd in profiles:
+                  dest=root/(name+'-'+profile);dest.mkdir()
+                  argv=cmd+[str(src),'-o',str(dest/'program')]
+                  try:
+                      p=subprocess.run(argv,capture_output=True,timeout=45)
+                      (dest/'compile.stdout').write_bytes(p.stdout);(dest/'compile.stderr').write_bytes(p.stderr)
+                      row={'case':name,'profile':profile,'source_sha256':hashlib.sha256(text.encode()).hexdigest(),'argv':argv,'compile_exit':p.returncode,'run_exit':None}
+                      if p.returncode==0:
+                          r=subprocess.run([str(dest/'program')],capture_output=True,timeout=15)
+                          (dest/'run.stdout').write_bytes(r.stdout);(dest/'run.stderr').write_bytes(r.stderr);row['run_exit']=r.returncode
+                  except subprocess.TimeoutExpired as e:
+                      row={'case':name,'profile':profile,'argv':argv,'timeout':e.timeout}
+                  (dest/'result.json').write_text(json.dumps(row,indent=2));records.append(row)
+                  print(json.dumps(row),flush=True)
+          (root/'results.json').write_text(json.dumps(records,indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: shared-c-reductions-baseline
+          path: evidence
+          retention-days: 30
+          if-no-files-found: error
