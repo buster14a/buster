@@ -1664,17 +1664,21 @@ def _validate_external_population(
         require(diagnostic_key in diagnostics and diagnostic_key in diagnostic_profiles,
                 f"full process witness has no exact trusted stdout diagnostic for {key[1]}")
         diagnostic_profile = diagnostic_profiles[diagnostic_key]
-        full = next(item for item in process_verifications if item["complete"])
-        require(full["start_ticks"] == diagnostics[diagnostic_key]["sequence"]["start_ticks"] == identity[8] and
-                full["socket"] is not None and
-                full["socket"]["inode"] == diagnostic_profile["socket"]["ino"] and
-                full["socket"]["device"] == diagnostic_profile["socket"]["dev"] and
-                full["socket"]["mode"] == diagnostic_profile["socket"]["mode"] and
-                full["proc"] is not None and
-                _same_security_status(full["proc"]["status"], diagnostic_profile["status"]) and
-                full["proc"]["cgroup_path"] == diagnostic_profile["cgroup_path"] and
-                full["proc"]["ro_mounts"] == diagnostic_profile["ro_mounts"],
-                f"C diagnostic and external process captures disagree for {key[1]}")
+        full_captures = [item for item in process_verifications if item["complete"]]
+        # Every retained complete capture must agree. Selecting only the first
+        # witness would hide a later contradictory socket or security fact.
+        for full in full_captures:
+            require(full["start_ticks"] == diagnostics[diagnostic_key]["sequence"]["start_ticks"] == identity[8] and
+                    full["socket"] is not None and
+                    full["socket"]["inode"] == diagnostic_profile["socket"]["ino"] and
+                    full["socket"]["device"] == diagnostic_profile["socket"]["dev"] and
+                    full["socket"]["mode"] == diagnostic_profile["socket"]["mode"] and
+                    full["proc"] is not None and
+                    _same_security_status(full["proc"]["status"], diagnostic_profile["status"]) and
+                    full["proc"]["cgroup_path"] == diagnostic_profile["cgroup_path"] and
+                    full["proc"]["ro_mounts"] == diagnostic_profile["ro_mounts"],
+                    f"C diagnostic and external process captures disagree for {key[1]}")
+        full = full_captures[0]
         full_witnesses[key] = {"process_identity": identity, "socket": full["socket"],
                                "status": full["proc"]["status"], "proc": full["proc"]}
     return full_witnesses, {"process_generations": len(full_witnesses),
