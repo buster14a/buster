@@ -1,0 +1,65 @@
+name: CFI prefix-index research
+
+on:
+  push:
+    branches: [research/1309-cfi-prefix-index-ade6ac4]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cfi-prefix-index-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  correctness-and-counts:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pinned identities and source-extracted differential
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir cfi-evidence
+          git rev-parse HEAD > cfi-evidence/research-head.txt
+          git rev-parse ade6ac4b6ecb21f30b61b656439bac476c145e2f^{tree} > cfi-evidence/base-tree.txt
+          test "$(git hash-object src/buster/lib/compiler/object/object.c)" = b798889750f58b6605064ffebcc0b376625b978a
+          clang --version > cfi-evidence/clang.txt
+          uname -a > cfi-evidence/host.txt
+          clang -std=c11 -O1 -g -Wall -Wextra -Werror tools/research/cfi-prefix-index/probe.c -o "$RUNNER_TEMP/cfi-probe"
+          "$RUNNER_TEMP/cfi-probe" extract src/buster/lib/compiler/object/object.c tools/research/cfi-prefix-index/prototype.h cfi-evidence/generated-probe.h
+          clang -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -Icfi-evidence tools/research/cfi-prefix-index/differential.c -o "$RUNNER_TEMP/cfi-differential"
+          "$RUNNER_TEMP/cfi-differential" | tee cfi-evidence/helper-counts.log
+      - name: Isolated production-writer builds and held-out controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/cfi-probe" hosted 2>&1 | tee cfi-evidence/production.log
+      - name: Preserve actual source patches and binary identities
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p cfi-evidence
+          for mode in 0 1 2; do
+            if test -d "cfi-work-$mode"; then
+              git -C "cfi-work-$mode" diff -- src/buster/lib/compiler/object/object.c > "cfi-evidence/mode-$mode.patch"
+            fi
+            if test -f "cfi-work-$mode/build/Release/ide"; then
+              sha256sum "cfi-work-$mode/build/Release/ide" >> cfi-evidence/compiler-sha256.txt
+            fi
+          done
+      - name: Retain failures, counter rows, inputs and object comparisons
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cfi-prefix-index-${{ github.run_id }}-${{ github.run_attempt }}
+          path: cfi-evidence/
+          if-no-files-found: error
+          retention-days: 7
