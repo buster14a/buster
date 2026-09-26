@@ -380,6 +380,7 @@ class SdBus:
         self.slots: list[ctypes.c_void_p] = []
         self.armed = False
         self.manager_sender: str | None = None
+        self.connection_unique_name: str | None = None
 
     def _function(self, name: str, arguments: list[object], result: object) -> object:
         function = getattr(self.lib, name)
@@ -391,6 +392,8 @@ class SdBus:
         pvoid = ctypes.c_void_p
         ppvoid = ctypes.POINTER(pvoid)
         self.open_system = self._function("sd_bus_open_system", [ppvoid], ctypes.c_int)
+        self.get_unique_name = self._function("sd_bus_get_unique_name",
+                                              [pvoid, ctypes.POINTER(ctypes.c_char_p)], ctypes.c_int)
         self.add_match = self._function("sd_bus_add_match", [pvoid, ppvoid, ctypes.c_char_p,
                                   pvoid, pvoid], ctypes.c_int)
         self.new_method_call = self._function("sd_bus_message_new_method_call",
@@ -433,6 +436,12 @@ class SdBus:
     def arm(self) -> None:
         self._check(self.open_system(ctypes.byref(self.bus)), "sd_bus_open_system")
         require(bool(self.bus.value), "sd_bus_open_system returned a null connection")
+        unique_name = ctypes.c_char_p()
+        self._check(self.get_unique_name(self.bus, ctypes.byref(unique_name)),
+                    "sd_bus_get_unique_name")
+        self.connection_unique_name = _text(unique_name.value, "observer connection unique name", 64)
+        require(UNIQUE_BUS_NAME.fullmatch(self.connection_unique_name) is not None,
+                "observer connection has no unique bus name")
         for rule in MATCH_RULES:
             slot = ctypes.c_void_p()
             self._check(self.add_match(self.bus, ctypes.byref(slot), rule.encode("ascii"), None, None),
@@ -474,6 +483,19 @@ class SdBus:
     @staticmethod
     def _message_text(function: Callable, message: ctypes.c_void_p, label: str) -> str:
         return _text(function(message), label)
+
+    @staticmethod
+    def _signal_metadata(sender: str, interface: str, member: str,
+                         path: str, signature: str) -> str:
+        # Only bounded header fields, never a message body, enter rejection text.
+        def bounded(value: str) -> str:
+            encoded = json.dumps(value[:128], ensure_ascii=True)
+            return encoded if len(encoded) <= 256 else json.dumps(value[:16] + "...", ensure_ascii=True)
+
+        return " ".join(f"{key}={bounded(value)}"
+                        for key, value in (("sender", sender), ("interface", interface),
+                                           ("member", member), ("path", path),
+                                           ("signature", signature)))
 
     def _read_unit_path(self, message: ctypes.c_void_p) -> tuple[str, str]:
         unit = ctypes.c_char_p()
@@ -560,13 +582,23 @@ class SdBus:
             path = self._message_text(self.get_path, message, "signal object path")
             sender = self._message_text(self.get_sender, message, "signal sender")
             signature = self._message_text(lambda m: self.get_signature(m, 1), message, "signal signature")
+            metadata = self._signal_metadata(sender, interface, member, path, signature)
+            # The bus daemon may address NameAcquired directly to this connection
+            # without a match rule. It is not a system manager lifecycle signal.
+            if (sender == "org.freedesktop.DBus" and
+                    interface == "org.freedesktop.DBus" and member == "NameAcquired" and
+                    path == "/org/freedesktop/DBus" and signature == "s"):
+                acquired = self._read_string(message, "observer NameAcquired name")
+                require(acquired == self.connection_unique_name,
+                        f"unexpected observer NameAcquired name; {metadata}")
+                return result, None
             require(UNIQUE_BUS_NAME.fullmatch(sender) is not None and
                     sender == self.manager_sender,
-                    "system manager unique sender changed after Subscribe")
+                    f"system manager unique sender changed after Subscribe; {metadata}")
             if member == "Reloading":
                 require(interface == "org.freedesktop.systemd1.Manager" and
                         path == "/org/freedesktop/systemd1" and signature == "b",
-                        "unexpected Manager.Reloading signal metadata")
+                        f"unexpected Manager.Reloading signal metadata; {metadata}")
                 value = ctypes.c_int()
                 self._check(self.message_read(message, b"b", ctypes.byref(value)),
                             "read Manager.Reloading boolean")
@@ -576,20 +608,20 @@ class SdBus:
             if member in ("UnitNew", "UnitRemoved"):
                 require(interface == "org.freedesktop.systemd1.Manager" and
                         path == "/org/freedesktop/systemd1" and signature == "so",
-                        "unexpected Manager unit-signal metadata")
+                        f"unexpected Manager unit-signal metadata; {metadata}")
                 unit, unit_path = self._read_unit_path(message)
                 return result, {"member": member, "interface": interface, "path": path,
                                 "sender": sender, "unit": unit, "object_path": unit_path}
             if member == "PropertiesChanged":
                 require(interface == "org.freedesktop.DBus.Properties" and
                         path.startswith(BASE_UNIT_PATH + "/") and signature == "sa{sv}as",
-                        "unexpected unit PropertiesChanged metadata")
+                        f"unexpected unit PropertiesChanged metadata; {metadata}")
                 changed_interface, names, pids, invalidated = self._read_changed(message)
                 return result, {"member": member, "interface": interface, "path": path,
                                 "sender": sender, "unit_interface": changed_interface,
                                 "changed_properties": names, "main_pids": pids,
                                 "invalidated_properties": invalidated}
-            raise ObserverError(f"unexpected signal delivered by observer match: {member}")
+            raise ObserverError(f"unexpected signal delivered by observer match; {metadata}")
         finally:
             self.message_unref(message)
 
@@ -1486,6 +1518,8 @@ class BrokerObserver:
                 "observer readiness requires installed matches and Manager.Subscribe ack")
         require(UNIQUE_BUS_NAME.fullmatch(str(getattr(self.bus, "manager_sender", ""))) is not None,
                 "observer readiness requires a frozen unique manager sender")
+        require(UNIQUE_BUS_NAME.fullmatch(str(getattr(self.bus, "connection_unique_name", ""))) is not None,
+                "observer readiness requires its own frozen unique bus name")
         self.ready_ns = time.monotonic_ns()
         self.observer_pid = os.getpid()
         self.observer_start_ticks = _self_start_ticks()
@@ -1674,6 +1708,149 @@ def _self_test() -> None:
             checks += 1
         else:
             raise AssertionError("missing observer readiness acknowledgement was accepted")
+
+    # The connection name is read once from the completed handshake before
+    # match installation or Subscribe; malformed names cannot arm observation.
+    def arm_fixture(unique_name: bytes) -> tuple[SdBus, list[str]]:
+        fixture_bus = object.__new__(SdBus)
+        fixture_bus.bus = ctypes.c_void_p()
+        fixture_bus.slots = []
+        fixture_bus.armed = False
+        fixture_bus.manager_sender = None
+        fixture_bus.connection_unique_name = None
+        calls: list[str] = []
+        def open_bus(pointer: object) -> int:
+            calls.append("connect")
+            pointer._obj.value = 1
+            return 0
+
+        def get_unique_name(_bus: object, pointer: object) -> int:
+            calls.append("unique")
+            pointer._obj.value = unique_name
+            return 0
+
+        def add_match(_bus: object, pointer: object, _rule: bytes,
+                      _callback: object, _userdata: object) -> int:
+            calls.append("match")
+            pointer._obj.value = 2
+            return 0
+
+        def new_method(_bus: object, pointer: object, *_args: object) -> int:
+            calls.append("subscribe-method")
+            pointer._obj.value = 3
+            return 0
+
+        def call_method(_bus: object, _method: object, _timeout: int,
+                        _error: object, pointer: object) -> int:
+            calls.append("subscribe-call")
+            pointer._obj.value = 4
+            return 0
+
+        fixture_bus.open_system = open_bus
+        fixture_bus.get_unique_name = get_unique_name
+        fixture_bus.add_match = add_match
+        fixture_bus.new_method_call = new_method
+        fixture_bus.call = call_method
+        fixture_bus.get_sender = lambda _reply: b":1.0"
+        fixture_bus.message_unref = lambda _message: calls.append("unref")
+        return fixture_bus, calls
+
+    armed_bus, calls = arm_fixture(b":1.7")
+    armed_bus.arm()
+    assert armed_bus.armed and armed_bus.connection_unique_name == ":1.7"
+    assert armed_bus.manager_sender == ":1.0"
+    assert calls == ["connect", "unique", "match", "match", "match", "match",
+                     "subscribe-method", "subscribe-call", "unref", "unref"]
+    checks += 1
+    malformed_bus, calls = arm_fixture(b"org.freedesktop.DBus")
+    try:
+        malformed_bus.arm()
+    except ObserverError:
+        assert not malformed_bus.armed and calls == ["connect", "unique"]
+        checks += 1
+    else:
+        raise AssertionError("non-unique observer connection name was accepted")
+
+    # Exercise the actual pull-mode dispatch seam. A direct bus-daemon signal
+    # may bypass the manager match rules, while manager signals remain pinned
+    # to the unique Subscribe reply sender. No live bus is opened here.
+    def dispatch_fixture(member: str, interface: str, path: str, sender: str,
+                         signature: str, body: str = ":1.7") -> tuple[SdBus, list[bool], list[bytes]]:
+        fixture_bus = object.__new__(SdBus)
+        fixture_bus.bus = ctypes.c_void_p(1)
+        fixture_bus.manager_sender = ":1.0"
+        fixture_bus.connection_unique_name = ":1.7"
+        released: list[bool] = []
+        reads: list[bytes] = []
+        def read_name(_message: object, read_signature: bytes, pointer: object) -> int:
+            reads.append(read_signature)
+            pointer._obj.value = body.encode("ascii")
+            return 1
+
+        fixture_bus.process = lambda _bus, pointer: (setattr(pointer._obj, "value", 3) or 1)
+        fixture_bus.get_type = lambda _message, pointer: (setattr(pointer._obj, "value", 4) or 0)
+        fixture_bus.get_member = lambda _message: member.encode("ascii")
+        fixture_bus.get_interface = lambda _message: interface.encode("ascii")
+        fixture_bus.get_path = lambda _message: path.encode("ascii")
+        fixture_bus.get_sender = lambda _message: sender.encode("ascii")
+        fixture_bus.get_signature = lambda _message, _flag: signature.encode("ascii")
+        fixture_bus.message_read = read_name
+        fixture_bus._read_unit_path = lambda _message: (
+            "buster-bench-systemd-broker@0-741-65000.service",
+            "/org/freedesktop/systemd1/unit/fixture")
+        fixture_bus.message_unref = lambda _message: released.append(True)
+        return fixture_bus, released, reads
+
+    bus_header = ("NameAcquired", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                  "org.freedesktop.DBus", "s")
+    bus_fixture, released, reads = dispatch_fixture(*bus_header)
+    assert bus_fixture.process_one() == (1, None)
+    assert released == [True] and reads == [b"s"]
+    checks += 1
+    manager_header = ("UnitNew", "org.freedesktop.systemd1.Manager",
+                      "/org/freedesktop/systemd1", ":1.0", "so")
+    manager_fixture, released, reads = dispatch_fixture(*manager_header)
+    result, message = manager_fixture.process_one()
+    assert result == 1 and message is not None
+    assert message["sender"] == ":1.0" and message["member"] == "UnitNew"
+    assert released == [True] and reads == []
+    checks += 1
+    for header, body, was_read in (
+            (("NameAcquired", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+              ":1.9", "s"), ":1.7", False),
+            (("NameAcquired", "org.freedesktop.systemd1.Manager", "/org/freedesktop/DBus",
+              "org.freedesktop.DBus", "s"), ":1.7", False),
+            (("NameAcquired", "org.freedesktop.DBus", "/org/freedesktop/Other",
+              "org.freedesktop.DBus", "s"), ":1.7", False),
+            (("NameAcquired", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+              "org.freedesktop.DBus", "as"), ":1.7", False),
+            (bus_header, "secret-unexpected-name", True),
+            (("NameLost", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+              "org.freedesktop.DBus", "s"), ":1.7", False),
+            (("UnitNew", "org.freedesktop.systemd1.Manager",
+              "/org/freedesktop/systemd1", ":1.9", "so"), ":1.7", False),
+            (("UnitNew", "org.freedesktop.systemd1.Manager",
+              "/org/freedesktop/systemd1", ":1.0", "s"), ":1.7", False),
+            (("PropertiesChanged", "org.freedesktop.DBus.Properties",
+              BASE_UNIT_PATH + "/fixture", ":1.9", "sa{sv}as"), ":1.7", False)):
+        rejected, released, reads = dispatch_fixture(*header, body=body)
+        try:
+            rejected.process_one()
+        except ObserverError as exc:
+            reason = str(exc)
+            assert all(field + "=" in reason for field in
+                       ("sender", "interface", "member", "path", "signature"))
+            assert body not in reason and len(reason.encode("utf-8")) < 4096
+            assert released == [True] and reads == ([b"s"] if was_read else [])
+            checks += 1
+        else:
+            raise AssertionError("untrusted bus or manager signal was accepted")
+    long_metadata = SdBus._signal_metadata("\U0001f62e" * 1000, "org.freedesktop.DBus",
+                                           "NameAcquired", "/x" * 1000, "s" * 1000)
+    assert len(long_metadata.encode("utf-8")) < 1500
+    assert all(field + "=" in long_metadata for field in
+               ("sender", "interface", "member", "path", "signature"))
+    checks += 1
 
     # systemctl subprocess controls use an actual fake executable but never
     # open a manager bus or address the host systemd instance.
