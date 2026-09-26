@@ -9127,6 +9127,7 @@ BUSTER_C_INTERNAL u32 c_ir_float_suffix(String8 spelling, char8* code_out)
 
 BUSTER_C_SHARED bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out)
 {
+    C_CENSUS_FACT(FLOAT, spelling.pointer, spelling.length);
     spelling.length -= c_ir_float_suffix(spelling, suffix_out);
     bool hexadecimal = spelling.length >= 2 && spelling.pointer[0] == '0' && (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X');
     u32 base = hexadecimal ? 16 : 10;
@@ -9888,6 +9889,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_parse_exponent(String8 spelling, u64* index, s
 BUSTER_C_INTERNAL bool c_ir_ext80_parse_rational_literal(String8 spelling, CIrExt80Big* numerator_out, CIrExt80Big* denominator_out,
                                                            s32* binary_exponent_out)
 {
+    C_CENSUS_FACT(FLOAT, spelling.pointer, spelling.length);
     if (!numerator_out || !denominator_out || !binary_exponent_out || !spelling.length)
     {
         return false;
@@ -11621,6 +11623,14 @@ BUSTER_C_INTERNAL bool c_ir_decode_escape(String8 spelling, u64 end, u64* index_
 // one escape.
 BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out)
 {
+#if BUSTER_BENCH_ALLOCATIONS
+    // A character literal is counted once, by c_ir_decode_character_value.
+    if (delimiter == '"')
+    {
+        C_CENSUS_FACT(STRING_DECODE, spelling.pointer, spelling.length);
+        C_CENSUS_PHASE_RECORD(STRING_DECODE_OUTPUT_BYTES, spelling.length);
+    }
+#endif
     u64 opening = 0;
     while (opening < spelling.length && spelling.pointer[opening] != delimiter)
     {
@@ -11679,6 +11689,7 @@ BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 del
 // nothing.
 BUSTER_C_INTERNAL bool c_ir_count_quoted(String8 spelling, u8 delimiter, u64* count_out)
 {
+    C_CENSUS_FACT(STRING_COUNT, spelling.pointer, spelling.length);
     u64 opening = 0;
     while (opening < spelling.length && spelling.pointer[opening] != delimiter)
     {
@@ -12070,6 +12081,12 @@ BUSTER_C_INTERNAL bool c_ir_append_wide_unit(u8* bytes, u64 capacity, u64* byte_
 
 BUSTER_C_INTERNAL bool c_ir_decode_wide_quoted(Arena* arena, String8 spelling, u8 delimiter, u32 width, ByteSlice* bytes_out, u64* element_count_out)
 {
+#if BUSTER_BENCH_ALLOCATIONS
+    if (delimiter == '"')
+    {
+        C_CENSUS_FACT(STRING_DECODE, spelling.pointer, spelling.length);
+    }
+#endif
     u64 opening = 0;
     while (opening < spelling.length && spelling.pointer[opening] != delimiter)
     {
@@ -12277,6 +12294,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_string_literal_range_shape(CPreprocess
 BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target, u32 start, u32 end,
                                                                      CIrDecodedString* decoded_out)
 {
+    C_CENSUS_PHASE_RECORD(STRING_RANGE_DECODES, 1);
     CIrDecodedString decoded = {0};
     bool result = c_ir_string_literal_range_shape(&preprocess, target, &start, &end, &decoded);
     if (result)
@@ -12357,6 +12375,7 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
 BUSTER_C_SHARED bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target, u32 start, u32 end,
                                                                     CIrDecodedString* decoded_out)
 {
+    C_CENSUS_PHASE_RECORD(STRING_RANGE_COUNTS, 1);
     CIrDecodedString decoded = {0};
     bool result = c_ir_string_literal_range_shape(&preprocess, target, &start, &end, &decoded);
     u64 element_count = 0;
@@ -12381,6 +12400,7 @@ BUSTER_C_SHARED bool c_ir_count_string_literal_range_for_target(Arena* arena, CP
 BUSTER_C_SHARED bool c_ir_decode_character_value(Arena* arena, char8 const* spelling_base, CToken token, Target target, u64* value_out, CTypeKind* kind_out)
 {
     String8 token_spelling = c_token_spelling(spelling_base, token);
+    C_CENSUS_FACT(CHARACTER, token_spelling.pointer, token_spelling.length);
     u64 opening = 0;
     while (opening < token_spelling.length && token_spelling.pointer[opening] != '\'')
     {
@@ -48279,8 +48299,8 @@ BUSTER_C_INTERNAL bool c_ir_type_mapping_pending(CParseResult* parse, IrProgram*
     return false;
 }
 
-CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
-                                         CIRLowerOptions options)
+BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
+                                                    CIRLowerOptions options)
 {
     CIRLowerResult result = {0};
     if (!arena || parse.diagnostic_count)
@@ -51052,6 +51072,15 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     scratch_end(temporary);
     result.canonical_ir_certified = result.program && !result.diagnostic_count &&
                                     !program->rejected_function_count && !module->rejected_function_count;
+    return result;
+}
+
+CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
+                                         CIRLowerOptions options)
+{
+    C_CENSUS_PHASE_BEGIN(LOWER);
+    CIRLowerResult result = c_lower_to_ir_run(arena, source_path, preprocess, parse, target, options);
+    C_CENSUS_PHASE_END();
     return result;
 }
 

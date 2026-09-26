@@ -11,6 +11,7 @@
 #include <buster/lib/arena.h>
 #include <buster/lib/compiler/ir/model.h>
 #include <buster/lib/target.h>
+#include <buster/lib/compiler/frontend/c/c_census.h>
 
 typedef enum CTokenKind
 {
@@ -1431,10 +1432,14 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE u64 c_token_length(char8 co
 // The spelling of a token relative to its owning result's spelling base.
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE String8 c_token_spelling(char8 const* spelling_base, CToken token)
 {
-    return (String8){
+    String8 result = {
         .pointer = (char8*)spelling_base + token.offset,
         .length = c_token_length(spelling_base, token),
     };
+#if BUSTER_BENCH_ALLOCATIONS
+    c_census_spelling_read(result.pointer, result.length);
+#endif
+    return result;
 }
 // The #pragma pack alignment in effect at a final-stream token index: the
 // greatest pack_changes entry at or before it, 0 (natural alignment) before

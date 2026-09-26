@@ -6811,6 +6811,105 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_plain_production(UnitTestArgumen
     return result;
 }
 
+#if BUSTER_BENCH_ALLOCATIONS
+// Pinned conversion populations of c_test_source_fact_census's program.
+enum
+{
+    C_TEST_CENSUS_SEMANTIC_INTEGERS = 8,
+    C_TEST_CENSUS_LOWER_INTEGERS = 5,
+    C_TEST_CENSUS_SEMANTIC_STRING_COUNTS = 4,
+};
+
+// The phase counter delta between two census snapshots.
+BUSTER_GLOBAL_LOCAL u64 c_test_census_phase_delta(CCensusCounters const* before, CCensusCounters const* after, CCensusPhase phase,
+                                                  CCensusPhaseCounter counter)
+{
+    return after->phase_values[phase][counter] - before->phase_values[phase][counter];
+}
+
+// The source-fact census (c_census.h) is a diagnostic population, so its
+// contract is exactness: a fact at a registered spelling offset is distinct
+// once and a repeat afterwards, a pointer outside the space is untracked,
+// nested phases restore the outer phase, and one end-to-end compile reports
+// the conversion populations pinned below. A frontend change that removes a
+// redundant conversion is expected to lower a pinned count, and says so here.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_fact_census(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    {
+        char8 space[64] = "12345 0x10";
+        char8 outside[8] = "7";
+        CCensusCounters before = c_census_counters();
+        c_census_space_begin(space, sizeof(space));
+        CCensusPhase outer = c_census_phase_enter(C_CENSUS_PHASE_SEMANTIC);
+        c_census_fact(C_CENSUS_FACT_INTEGER, space, 5);
+        c_census_fact(C_CENSUS_FACT_INTEGER, space, 5);
+        c_census_fact(C_CENSUS_FACT_INTEGER, space + 6, 4);
+        c_census_fact(C_CENSUS_FACT_FLOAT, space, 5);
+        c_census_fact(C_CENSUS_FACT_INTEGER, outside, 1);
+        c_census_spelling_read(space, 5);
+        c_census_spelling_read(space, 5);
+        CCensusPhase inner = c_census_phase_enter(C_CENSUS_PHASE_LOWER);
+        BUSTER_TEST(arguments, inner == C_CENSUS_PHASE_SEMANTIC);
+        c_census_spelling_read(space, 5);
+        c_census_fact(C_CENSUS_FACT_INTEGER, space, 5);
+        c_census_phase_exit(inner);
+        c_census_fact(C_CENSUS_FACT_STRING_COUNT, space + 6, 4);
+        c_census_phase_exit(outer);
+        c_census_space_begin(0, 0);
+        CCensusCounters after = c_census_counters();
+        BUSTER_TEST(arguments, !after.overflowed);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_INTEGER_CONVERSIONS) == 4);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_INTEGER_CONVERSION_BYTES) == 15);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_INTEGER_CONVERSION_DISTINCT) == 2);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_INTEGER_CONVERSION_UNTRACKED) == 1);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_FLOAT_CONVERSION_DISTINCT) == 1);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_COUNT_DISTINCT) == 1);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_SPELLING_READS) == 2);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_SPELLING_READ_DISTINCT) == 1);
+        // The lower phase read the same offset: distinct per phase. Its
+        // integer conversion repeats the semantic phase's fact.
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_SPELLING_READ_DISTINCT) == 1);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_INTEGER_CONVERSIONS) == 1);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_INTEGER_CONVERSION_DISTINCT) == 0);
+    }
+    {
+        String8 source = S8("static const char text[] = \"ab\\n\";\n"
+                            "static int values[] = {1, 22, 333};\n"
+                            "int size(void) { return (int)sizeof text + values[2] + 4; }\n");
+        CCensusCounters before = c_census_counters();
+        CPreprocessResult preprocess = c_preprocess(arguments->arena, source, (CPreprocessOptions){0});
+        CParserResult syntax = c_parse_ast(arguments->arena, preprocess);
+        CIRLowerResult lowered = c_analyze(arguments->arena, S8("census.c"), preprocess, syntax, target_native);
+        CCensusCounters after = c_census_counters();
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, !after.overflowed);
+        BUSTER_TEST(arguments, after.values[C_CENSUS_OUTPUT_TOKEN_ROWS] - before.values[C_CENSUS_OUTPUT_TOKEN_ROWS] == preprocess.token_count);
+        BUSTER_TEST(arguments, after.values[C_CENSUS_TRANSLATE_CALLS] - before.values[C_CENSUS_TRANSLATE_CALLS] ==
+                                   after.values[C_CENSUS_LEX_CALLS] - before.values[C_CENSUS_LEX_CALLS]);
+        // Five integer literals reach the parser, which converts each once;
+        // the pinned semantic and lowering populations are the current
+        // redundant reconversions of the same five spellings.
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_PARSE, C_CENSUS_PHASE_INTEGER_CONVERSION_DISTINCT) == 5);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_PARSE, C_CENSUS_PHASE_INTEGER_CONVERSIONS) == 5);
+        u64 semantic_integers = c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_INTEGER_CONVERSIONS);
+        u64 lower_integers = c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_INTEGER_CONVERSIONS);
+        u64 semantic_counts = c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_COUNTS);
+        u64 lower_decodes = c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_STRING_DECODES);
+        if (os_get_environment_variable(S8("BUSTER_SOURCE_FACT_CENSUS")).length)
+        {
+            arguments->show(arguments, S8("SOURCE_FACT_CENSUS semantic_integers={u64} lower_integers={u64} semantic_string_counts={u64} lower_string_decodes={u64}\n"),
+                            semantic_integers, lower_integers, semantic_counts, lower_decodes);
+        }
+        BUSTER_TEST(arguments, semantic_integers == C_TEST_CENSUS_SEMANTIC_INTEGERS);
+        BUSTER_TEST(arguments, lower_integers == C_TEST_CENSUS_LOWER_INTEGERS);
+        BUSTER_TEST(arguments, semantic_counts == C_TEST_CENSUS_SEMANTIC_STRING_COUNTS);
+        BUSTER_TEST(arguments, lower_decodes == 1);
+    }
+    return result;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_source_metrics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23181,6 +23280,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_position_index_tiles);
     BUSTER_TEST_FIXTURE(arguments, c_test_oversized_token_spellings);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_source_metrics);
+#if BUSTER_BENCH_ALLOCATIONS
+    BUSTER_TEST_FIXTURE(arguments, c_test_source_fact_census);
+#endif
     BUSTER_TEST_FIXTURE(arguments, c_test_source_metrics_path_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_transparent_union_abi);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_semantic_basics);

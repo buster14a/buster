@@ -8,6 +8,10 @@
 // one thread before any parallel phase reads them (AGENTS.md).
 //
 // Layout, in file order; each anchor is a definition to search for:
+//   CCensusState, c_census_record ..           the source-fact census
+//   c_census_phase_name                        (c_census.h), compiled only
+//                                              into BUSTER_BENCH_ALLOCATIONS
+//                                              builds
 //   c_space_local .. c_space_retoken           spelling spaces: append-only
 //                                              storage token spellings point
 //                                              into
@@ -64,6 +68,295 @@
 #include "c_internal.h"
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
+
+#if BUSTER_BENCH_ALLOCATIONS
+// The source-fact census (c_census.h). The fact map holds one u16 per
+// spelling-space offset of the registered space: bits [0, C_CENSUS_PHASE_COUNT)
+// record which phases read the spelling at that offset, the bits above them
+// which conversion kinds already ran there. It is its own reservation,
+// committed in steps as offsets are touched, so it neither perturbs the arena
+// allocation counters nor commits memory for untouched offsets.
+typedef struct CCensusState CCensusState;
+struct CCensusState
+{
+    CCensusCounters counters;
+    u16* facts;
+    u64 fact_reserved;
+    u64 fact_committed;
+    u64 fact_touched;
+    char8 const* space_base;
+    u64 space_reserved;
+    CCensusPhase phase;
+    // Library traffic at the last phase boundary: the delta since then
+    // belongs to the phase active over that interval.
+    StringEqualCensus string_equal_mark;
+    BusterHashCensus hash_mark;
+    ArenaBenchmarkCounters arena_mark;
+};
+
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CCensusState c_census_state;
+
+enum
+{
+    C_CENSUS_FACT_SHIFT = C_CENSUS_PHASE_COUNT,
+    C_CENSUS_FACT_COMMIT_STEP = 1u << 24,
+};
+BUSTER_CT_CHECK(C_CENSUS_FACT_SHIFT + C_CENSUS_FACT_COUNT <= 16);
+
+BUSTER_GLOBAL_LOCAL void c_census_add(u64* value, u64 amount)
+{
+    if (amount > UINT64_MAX - *value)
+    {
+        *value = UINT64_MAX;
+        c_census_state.counters.overflowed = true;
+    }
+    else
+    {
+        *value += amount;
+    }
+}
+
+void c_census_record(CCensusCounter counter, u64 amount)
+{
+    if ((u32)counter < C_CENSUS_COUNT)
+    {
+        c_census_add(c_census_state.counters.values + counter, amount);
+    }
+    else
+    {
+        c_census_state.counters.overflowed = true;
+    }
+}
+
+void c_census_phase_record(CCensusPhaseCounter counter, u64 amount)
+{
+    if ((u32)counter < C_CENSUS_PHASE_COUNTER_COUNT)
+    {
+        c_census_add(c_census_state.counters.phase_values[c_census_state.phase] + counter, amount);
+    }
+    else
+    {
+        c_census_state.counters.overflowed = true;
+    }
+}
+
+// Charges the library traffic since the last boundary to the active phase.
+BUSTER_GLOBAL_LOCAL void c_census_flush(void)
+{
+    StringEqualCensus string_equal = string_equal_census();
+    BusterHashCensus hash = buster_hash_census();
+    ArenaBenchmarkCounters arena = arena_benchmark_counters();
+    u64* phase = c_census_state.counters.phase_values[c_census_state.phase];
+    c_census_add(phase + C_CENSUS_PHASE_STRING_EQUAL_CALLS, string_equal.calls - c_census_state.string_equal_mark.calls);
+    c_census_add(phase + C_CENSUS_PHASE_STRING_EQUAL_BYTES, string_equal.compared_bytes - c_census_state.string_equal_mark.compared_bytes);
+    c_census_add(phase + C_CENSUS_PHASE_HASH_CALLS, hash.calls - c_census_state.hash_mark.calls);
+    c_census_add(phase + C_CENSUS_PHASE_HASH_BYTES, hash.bytes - c_census_state.hash_mark.bytes);
+    c_census_add(phase + C_CENSUS_PHASE_ARENA_CALLS, arena.calls - c_census_state.arena_mark.calls);
+    c_census_add(phase + C_CENSUS_PHASE_ARENA_BYTES, arena.requested_bytes - c_census_state.arena_mark.requested_bytes);
+    c_census_state.string_equal_mark = string_equal;
+    c_census_state.hash_mark = hash;
+    c_census_state.arena_mark = arena;
+}
+
+CCensusPhase c_census_phase_enter(CCensusPhase phase)
+{
+    CCensusPhase previous = c_census_state.phase;
+    c_census_flush();
+    c_census_state.phase = (u32)phase < C_CENSUS_PHASE_COUNT ? phase : C_CENSUS_PHASE_OTHER;
+    return previous;
+}
+
+void c_census_phase_exit(CCensusPhase previous)
+{
+    c_census_flush();
+    c_census_state.phase = previous;
+}
+
+void c_census_space_begin(char8 const* base, u64 reserved_size)
+{
+    if (c_census_state.facts && reserved_size * sizeof(*c_census_state.facts) > c_census_state.fact_reserved)
+    {
+        // The map was reserved for a smaller space; the next fact reserves
+        // one that covers this space.
+        os_unreserve(c_census_state.facts, c_census_state.fact_reserved);
+        c_census_state.facts = 0;
+        c_census_state.fact_reserved = 0;
+        c_census_state.fact_committed = 0;
+    }
+    else if (c_census_state.facts && c_census_state.fact_touched)
+    {
+        memset(c_census_state.facts, 0, c_census_state.fact_touched * sizeof(*c_census_state.facts));
+    }
+    c_census_state.fact_touched = 0;
+    c_census_state.space_base = base;
+    c_census_state.space_reserved = reserved_size;
+}
+
+// The fact word of `pointer`, or null when it lies outside the registered
+// space or the map cannot grow to reach it.
+BUSTER_GLOBAL_LOCAL u16* c_census_fact_word(char8 const* pointer)
+{
+    u16* result = 0;
+    char8 const* base = c_census_state.space_base;
+    if (base && pointer >= base && (u64)(pointer - base) < c_census_state.space_reserved)
+    {
+        u64 key = (u64)(pointer - base);
+        if (!c_census_state.facts)
+        {
+            u64 reserved = c_census_state.space_reserved * sizeof(u16);
+            c_census_state.facts = (u16*)os_reserve(0, reserved, (ProtectionFlags){.read = 1, .write = 1},
+                                                    (MapFlags){.priv = 1, .anonymous = 1, .no_reserve = 1});
+            c_census_state.fact_reserved = c_census_state.facts ? reserved : 0;
+        }
+        u64 needed = (key + 1) * sizeof(u16);
+        while (c_census_state.facts && needed > c_census_state.fact_committed && c_census_state.fact_committed < c_census_state.fact_reserved)
+        {
+            u64 step = BUSTER_MIN((u64)C_CENSUS_FACT_COMMIT_STEP, c_census_state.fact_reserved - c_census_state.fact_committed);
+            if (!os_commit((u8*)c_census_state.facts + c_census_state.fact_committed, step, (ProtectionFlags){.read = 1, .write = 1}, false))
+            {
+                break;
+            }
+            c_census_state.fact_committed += step;
+        }
+        if (c_census_state.facts && needed <= c_census_state.fact_committed)
+        {
+            c_census_state.fact_touched = BUSTER_MAX(c_census_state.fact_touched, key + 1);
+            result = c_census_state.facts + key;
+        }
+    }
+    return result;
+}
+
+void c_census_spelling_read(char8 const* pointer, u64 length)
+{
+    u64* phase = c_census_state.counters.phase_values[c_census_state.phase];
+    c_census_add(phase + C_CENSUS_PHASE_SPELLING_READS, 1);
+    c_census_add(phase + C_CENSUS_PHASE_SPELLING_READ_BYTES, length);
+    u16* word = c_census_fact_word(pointer);
+    if (!word)
+    {
+        c_census_add(phase + C_CENSUS_PHASE_SPELLING_READ_UNTRACKED, 1);
+    }
+    else if (!(*word & (1u << c_census_state.phase)))
+    {
+        *word |= (u16)(1u << c_census_state.phase);
+        c_census_add(phase + C_CENSUS_PHASE_SPELLING_READ_DISTINCT, 1);
+    }
+}
+
+void c_census_fact(CCensusFact fact, char8 const* pointer, u64 length)
+{
+    // Each kind owns four consecutive phase counters: total, bytes, distinct,
+    // untracked (characters, which have no byte counter, own three).
+    CCensusPhaseCounter total = C_CENSUS_PHASE_COUNTER_COUNT;
+    CCensusPhaseCounter bytes = C_CENSUS_PHASE_COUNTER_COUNT;
+    CCensusPhaseCounter distinct = C_CENSUS_PHASE_COUNTER_COUNT;
+    CCensusPhaseCounter untracked = C_CENSUS_PHASE_COUNTER_COUNT;
+    switch (fact)
+    {
+    case C_CENSUS_FACT_INTEGER:
+        total = C_CENSUS_PHASE_INTEGER_CONVERSIONS;
+        bytes = C_CENSUS_PHASE_INTEGER_CONVERSION_BYTES;
+        distinct = C_CENSUS_PHASE_INTEGER_CONVERSION_DISTINCT;
+        untracked = C_CENSUS_PHASE_INTEGER_CONVERSION_UNTRACKED;
+        break;
+    case C_CENSUS_FACT_FLOAT:
+        total = C_CENSUS_PHASE_FLOAT_CONVERSIONS;
+        bytes = C_CENSUS_PHASE_FLOAT_CONVERSION_BYTES;
+        distinct = C_CENSUS_PHASE_FLOAT_CONVERSION_DISTINCT;
+        untracked = C_CENSUS_PHASE_FLOAT_CONVERSION_UNTRACKED;
+        break;
+    case C_CENSUS_FACT_CHARACTER:
+        total = C_CENSUS_PHASE_CHARACTER_DECODES;
+        distinct = C_CENSUS_PHASE_CHARACTER_DECODE_DISTINCT;
+        untracked = C_CENSUS_PHASE_CHARACTER_DECODE_UNTRACKED;
+        break;
+    case C_CENSUS_FACT_STRING_DECODE:
+        total = C_CENSUS_PHASE_STRING_DECODES;
+        bytes = C_CENSUS_PHASE_STRING_DECODE_BYTES;
+        distinct = C_CENSUS_PHASE_STRING_DECODE_DISTINCT;
+        untracked = C_CENSUS_PHASE_STRING_DECODE_UNTRACKED;
+        break;
+    case C_CENSUS_FACT_STRING_COUNT:
+        total = C_CENSUS_PHASE_STRING_COUNTS;
+        bytes = C_CENSUS_PHASE_STRING_COUNT_BYTES;
+        distinct = C_CENSUS_PHASE_STRING_COUNT_DISTINCT;
+        untracked = C_CENSUS_PHASE_STRING_COUNT_UNTRACKED;
+        break;
+    case C_CENSUS_FACT_COUNT:
+    default:
+        c_census_state.counters.overflowed = true;
+        break;
+    }
+    if (total != C_CENSUS_PHASE_COUNTER_COUNT)
+    {
+        u64* phase = c_census_state.counters.phase_values[c_census_state.phase];
+        c_census_add(phase + total, 1);
+        if (bytes != C_CENSUS_PHASE_COUNTER_COUNT)
+        {
+            c_census_add(phase + bytes, length);
+        }
+        u16* word = c_census_fact_word(pointer);
+        u16 bit = (u16)(1u << (C_CENSUS_FACT_SHIFT + fact));
+        if (!word)
+        {
+            c_census_add(phase + untracked, 1);
+        }
+        else if (!(*word & bit))
+        {
+            *word |= bit;
+            c_census_add(phase + distinct, 1);
+        }
+    }
+}
+
+CCensusCounters c_census_counters(void)
+{
+    c_census_flush();
+    return c_census_state.counters;
+}
+
+String8 c_census_counter_name(CCensusCounter counter)
+{
+    String8 result = {0};
+    switch (counter)
+    {
+#define C_CENSUS_NAME(id, name) case C_CENSUS_##id: result = S8(#name); break;
+        C_CENSUS_COUNTERS(C_CENSUS_NAME)
+#undef C_CENSUS_NAME
+        default: break;
+    }
+    return result;
+}
+
+String8 c_census_phase_counter_name(CCensusPhaseCounter counter)
+{
+    String8 result = {0};
+    switch (counter)
+    {
+#define C_CENSUS_PHASE_NAME(id, name) case C_CENSUS_PHASE_##id: result = S8(#name); break;
+        C_CENSUS_PHASE_COUNTERS(C_CENSUS_PHASE_NAME)
+#undef C_CENSUS_PHASE_NAME
+        default: break;
+    }
+    return result;
+}
+
+String8 c_census_phase_name(CCensusPhase phase)
+{
+    String8 result = {0};
+    switch (phase)
+    {
+    case C_CENSUS_PHASE_OTHER: result = S8("other"); break;
+    case C_CENSUS_PHASE_PREPROCESS: result = S8("preprocess"); break;
+    case C_CENSUS_PHASE_PARSE: result = S8("parse"); break;
+    case C_CENSUS_PHASE_SEMANTIC: result = S8("semantic"); break;
+    case C_CENSUS_PHASE_LOWER: result = S8("lower"); break;
+    case C_CENSUS_PHASE_COUNT: default: break;
+    }
+    return result;
+}
+#endif
 
 // Locations are recorded as checkpoints instead of one entry per translated
 // byte: within a run the original offset and the column both advance one per
@@ -195,6 +488,18 @@ BUSTER_C_SHARED CToken c_space_token(CSpellingSpace* space, String8 text, CToken
     // The sentinel is only valid on terminated literals; no other caller
     // synthesizes a spelling anywhere near it.
     BUSTER_CHECK(text.length < C_TOKEN_LENGTH_OVERSIZED || kind == C_TOKEN_STRING_LITERAL || kind == C_TOKEN_CHARACTER_LITERAL);
+#if BUSTER_BENCH_ALLOCATIONS
+    if (space->arena)
+    {
+        C_CENSUS_RECORD(SPACE_SYNTHESIZED_COPIES, 1);
+        C_CENSUS_RECORD(SPACE_SYNTHESIZED_BYTES, text.length);
+    }
+    else
+    {
+        C_CENSUS_PHASE_RECORD(TEMP_TOKENS, 1);
+        C_CENSUS_PHASE_RECORD(TEMP_SPELLING_BYTES, text.length);
+    }
+#endif
     char8* copy = c_space_allocate(space, text.length);
     if (text.length)
     {
@@ -214,6 +519,18 @@ BUSTER_C_SHARED CToken c_space_token(CSpellingSpace* space, String8 text, CToken
 BUSTER_C_SHARED CToken c_space_retoken(CSpellingSpace* space, char8 const* from_base, CToken token)
 {
     String8 spelling = c_token_spelling(from_base, token);
+#if BUSTER_BENCH_ALLOCATIONS
+    if (space->arena)
+    {
+        C_CENSUS_RECORD(SPACE_SYNTHESIZED_COPIES, 1);
+        C_CENSUS_RECORD(SPACE_SYNTHESIZED_BYTES, spelling.length);
+    }
+    else
+    {
+        C_CENSUS_PHASE_RECORD(TEMP_TOKENS, 1);
+        C_CENSUS_PHASE_RECORD(TEMP_SPELLING_BYTES, spelling.length);
+    }
+#endif
     char8* copy = c_space_allocate(space, spelling.length);
     if (spelling.length)
     {
@@ -230,6 +547,8 @@ BUSTER_C_SHARED CSpellingSpace c_space_local(Arena* arena, u64 capacity)
     CSpellingSpace space = {
         .capacity = capacity + C_SPELLING_PRELUDE_LENGTH,
     };
+    C_CENSUS_PHASE_RECORD(TEMP_SPACES, 1);
+    C_CENSUS_PHASE_RECORD(TEMP_SPACE_BYTES, space.capacity);
     space.base = arena_allocate(arena, char8, space.capacity);
     memcpy(c_space_allocate(&space, C_SPELLING_PRELUDE_LENGTH), C_SPELLING_PRELUDE_TEXT, C_SPELLING_PRELUDE_LENGTH);
     return space;
@@ -855,6 +1174,12 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             // unused tail back so the next spelling packs against it.
             c_space_shrink(space, source.length - output);
         }
+        C_CENSUS_RECORD(TRANSLATE_CALLS, 1);
+        C_CENSUS_RECORD(TRANSLATE_INPUT_BYTES, source.length);
+        C_CENSUS_RECORD(TRANSLATE_COPIED_BYTES, output);
+        C_CENSUS_RECORD(TRANSLATE_CHECKPOINTS, checkpoint_count);
+        // Capacity, not use: both arrays are sized by the source length.
+        C_CENSUS_RECORD(TRANSLATE_CHECKPOINT_BYTES, (source.length + 2) * (sizeof(*checkpoints) + sizeof(*checkpoint_offsets)));
         result.source = (String8){
             .pointer = translated,
             .length = output,
@@ -890,6 +1215,7 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
 // non-decreasing offsets advance instead of searching.
 BUSTER_C_INTERNAL CSourceLocation c_lex_local_location(CLexResult* result, u64 offset)
 {
+    C_CENSUS_PHASE_RECORD(LOCATION_RECOVERIES, 1);
     if (!result->checkpoint_count)
     {
         return (CSourceLocation){0};
@@ -945,6 +1271,7 @@ BUSTER_C_INTERNAL CSourceLocation c_source_location_from_position(u32 map_offset
 
 CSourceLocation c_preprocess_token_location(CPreprocessResult const* preprocess, CToken token)
 {
+    C_CENSUS_PHASE_RECORD(LOCATION_RECOVERIES, 1);
     CSourceMapRecovery const* recovery = preprocess->recovery;
     return c_source_location_from_position(token.offset, recovery ? ir_source_map_position(&recovery->map, token.offset, 0) : (IrSourcePosition){0});
 }
@@ -953,6 +1280,7 @@ CSourceLocation c_preprocess_token_location(CPreprocessResult const* preprocess,
 // walks tokens roughly in stream order).
 BUSTER_C_SHARED CSourceLocation c_preprocess_token_location_cursor(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
 {
+    C_CENSUS_PHASE_RECORD(LOCATION_RECOVERIES, 1);
     CSourceMapRecovery const* recovery = preprocess->recovery;
     return c_source_location_from_position(token.offset,
                                            recovery ? ir_source_map_position(&recovery->map, token.offset, cursor) : (IrSourcePosition){0});
@@ -2707,6 +3035,11 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
                     result.metrics.spliced_lines = result.metrics.lines - result.metrics.translated_lines;
                     result.metrics.tokens = result.token_count - state.newline_tokens;
                     c_token_push(&result, translated, translated.source.length, translated.source.length, C_TOKEN_END_OF_FILE, C_PUNCTUATOR_NONE);
+                    C_CENSUS_RECORD(LEX_CALLS, 1);
+                    C_CENSUS_RECORD(LEX_INPUT_BYTES, translated.source.length);
+                    C_CENSUS_RECORD(LEX_TOKEN_ROWS, result.token_count);
+                    C_CENSUS_RECORD(LEX_TOKEN_ROW_BYTES, result.token_count * (sizeof(CToken) + sizeof(CTokenShape)));
+                    C_CENSUS_RECORD(LEX_RESERVED_ROW_BYTES, token_capacity * (sizeof(CToken) + sizeof(CTokenShape)));
                     CDiagnostic* diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_count);
                     if (result.diagnostic_count)
                     {
@@ -2838,6 +3171,8 @@ struct CMacroPushMacro
 
 BUSTER_C_SHARED u64 c_macro_name_hash(String8 name)
 {
+    C_CENSUS_PHASE_RECORD(HASH_CALLS, 1);
+    C_CENSUS_PHASE_RECORD(HASH_BYTES, name.length);
     u64 hash = 1469598103934665603ull;
     for (u64 index = 0; index < name.length; index += 1)
     {
@@ -3183,10 +3518,13 @@ BUSTER_C_SHARED u32 c_symbol_intern(CSymbolTable* table, String8 name)
     u64 length_word = (u64)name.length << 32;
     u32 mask = table->slot_capacity - 1;
     u32 slot = c_symbol_slot_hash(key, name.length) & mask;
+    C_CENSUS_PHASE_RECORD(INTERN_CALLS, 1);
+    C_CENSUS_PHASE_RECORD(INTERN_KEY_BYTES, BUSTER_MIN(name.length, (u64)16));
     for (;;)
     {
         CSymbolSlot* entry = &table->slots[slot];
         u64 length_and_id = entry->length_and_id;
+        C_CENSUS_PHASE_RECORD(INTERN_PROBES, 1);
         if (!length_and_id)
         {
             break;
@@ -3194,6 +3532,13 @@ BUSTER_C_SHARED u32 c_symbol_intern(CSymbolTable* table, String8 name)
         if (entry->low == key.low && entry->high == key.high && (length_and_id & UINT64_C(0xFFFFFFFF00000000)) == length_word)
         {
             u32 id = (u32)length_and_id;
+#if BUSTER_BENCH_ALLOCATIONS
+            if (name.length > 16)
+            {
+                C_CENSUS_PHASE_RECORD(INTERN_MIDDLE_COMPARES, 1);
+                C_CENSUS_PHASE_RECORD(INTERN_MIDDLE_BYTES, name.length - 16);
+            }
+#endif
             if (name.length <= 16 || c_symbol_middle_equal(table->names[id], name))
             {
                 return id;
@@ -3201,6 +3546,7 @@ BUSTER_C_SHARED u32 c_symbol_intern(CSymbolTable* table, String8 name)
         }
         slot = (slot + 1) & mask;
     }
+    C_CENSUS_PHASE_RECORD(INTERN_INSERTS, 1);
     if (table->count + 1 == table->name_capacity)
     {
         u32 name_capacity = table->name_capacity * 2;
@@ -3215,6 +3561,7 @@ BUSTER_C_SHARED u32 c_symbol_intern(CSymbolTable* table, String8 name)
     if (table->count + 1 > table->slot_capacity / 2)
     {
         u32 slot_capacity = table->slot_capacity * 2;
+        C_CENSUS_PHASE_RECORD(INTERN_REHASH_SLOTS, table->slot_capacity);
         CSymbolSlot* slots = arena_allocate(table->arena, CSymbolSlot, slot_capacity);
         memset(slots, 0, sizeof(*slots) * slot_capacity);
         for (u32 old_slot = 0; old_slot < table->slot_capacity; old_slot += 1)
@@ -3436,6 +3783,7 @@ BUSTER_C_INTERNAL void c_symbols_intern_tokens(CSymbolTable* table, char8 const*
             while (identifiers)
             {
                 u64 index = window_base + mask64_first_set(identifiers);
+                C_CENSUS_RECORD(INTERN_PASS_TOKENS, 1);
                 tokens[index].symbol = c_symbol_intern(table, c_token_spelling(spelling_base, tokens[index]));
                 identifiers = mask64_and(identifiers, identifiers - 1);
             }
@@ -3447,6 +3795,7 @@ BUSTER_C_INTERNAL void c_symbols_intern_tokens(CSymbolTable* table, char8 const*
         {
             if (tokens[index].kind == C_TOKEN_IDENTIFIER)
             {
+                C_CENSUS_RECORD(INTERN_PASS_TOKENS, 1);
                 tokens[index].symbol = c_symbol_intern(table, c_token_spelling(spelling_base, tokens[index]));
             }
         }
@@ -3690,6 +4039,8 @@ struct CMacroReplacementToken
 
 BUSTER_C_EXTERN bool c_token_spelling_equal(char8 const* spelling_base, CToken token, String8 spelling)
 {
+    C_CENSUS_PHASE_RECORD(SPELLING_EQUAL_CALLS, 1);
+    C_CENSUS_PHASE_RECORD(SPELLING_EQUAL_BYTES, spelling.length);
     return string_equal(c_token_spelling(spelling_base, token), spelling);
 }
 
@@ -5052,6 +5403,7 @@ BUSTER_C_INTERNAL u32 c_integer_digit(u8 byte)
 
 BUSTER_C_SHARED bool c_conditional_number(String8 spelling, u64* value)
 {
+    C_CENSUS_FACT(INTEGER, spelling.pointer, spelling.length);
     u32 base = 10;
     u64 index = 0;
     if (spelling.length >= 2 && spelling.pointer[0] == '0')
@@ -5930,6 +6282,7 @@ BUSTER_C_INTERNAL void c_pp_class_masks_build(Arena* arena, CPpClassMasks* masks
 {
     u64 word_count = (token_count + (C_PP_CLASS_MASK_WINDOW - 1)) / C_PP_CLASS_MASK_WINDOW;
     *masks = (CPpClassMasks){0};
+    C_CENSUS_RECORD(CLASS_MASK_TOKENS, shapes ? token_count : 0);
     if (shapes && word_count)
     {
         masks->stop = arena_allocate(arena, Mask64, word_count);
@@ -6645,7 +6998,9 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
     for (CPreprocessTokenNode* node = first_line; node; node = node->next)
     {
         foreign_length += node->token.foreign ? c_token_length(space->base, node->token.token) : 0;
+        C_CENSUS_RECORD(SPACE_FOREIGN_COPIES, node->token.foreign);
     }
+    C_CENSUS_RECORD(SPACE_FOREIGN_BYTES, foreign_length);
     char8* copy = foreign_length ? c_space_allocate(space, foreign_length) : 0;
     bool run_open = false;
     // Every stamp of a line is pushed from a distinct token, so two tokens
@@ -8035,7 +8390,7 @@ BUSTER_C_INTERNAL CTargetFeatureMacro const c_target_feature_macros[] = {
     { S8_INITIALIZER("__ARM_NEON"), TARGET_CPU_FEATURE_AARCH64_NEON, CPU_ARCH_AARCH64 },
 };
 
-CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options)
+BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* arena, String8 source, CPreprocessOptions options)
 {
     if (options.dialect >= C_PREPROCESS_DIALECT_COUNT)
     {
@@ -8104,6 +8459,9 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .arena = spelling_arena,
     };
     CSpellingSpace* space = &space_storage;
+#if BUSTER_BENCH_ALLOCATIONS
+    c_census_space_begin(space->base, spelling_arena->reserved_size - arena_minimum_position);
+#endif
     CSourceMapRecovery* recovery = arena_allocate(arena, CSourceMapRecovery, 1);
     *recovery = (CSourceMapRecovery){
         .spelling_arena = spelling_arena,
@@ -9437,6 +9795,9 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         result.detail->preprocessed.bytes += spelled_bytes;
     }
     result.detail->preprocessed.spelling_bytes = space->used;
+    C_CENSUS_RECORD(OUTPUT_TOKEN_ROWS, result.token_count);
+    C_CENSUS_RECORD(OUTPUT_TOKEN_ROW_BYTES, result.token_count * (sizeof(CToken) + sizeof(CTokenShape)));
+    C_CENSUS_RECORD(SPACE_TOTAL_BYTES, space->used);
     result.detail->lexed_files = metrics_files.rows;
     result.detail->lexed_file_count = metrics_files.count;
 #if BUSTER_INCLUDE_TESTS
@@ -9476,6 +9837,14 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             diagnostic->location = c_source_location_from_position(diagnostic->location.map_offset, position);
         }
     }
+    return result;
+}
+
+CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options)
+{
+    C_CENSUS_PHASE_BEGIN(PREPROCESS);
+    CPreprocessResult result = c_preprocess_run(arena, source, options);
+    C_CENSUS_PHASE_END();
     return result;
 }
 
