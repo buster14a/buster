@@ -23161,263 +23161,264 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_choose_expr_evaluation(UnitTestArgumen
 // conditions test the final value. The comma is not short-circuiting, and
 // a comma in the middle operand of ?: is not a root comma. Keep argument
 // separators and unevaluated sizeof as controls, not ordering assertions.
-BUSTER_INTERNAL UnitTestResult c_test_comma_condition_evaluation(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_condition_evaluation(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 source_text = S8(
-        "static volatile unsigned trace; static int slot;\n"
-        "static int mark(int digit, int value) { trace = trace * 10u + (unsigned)digit; return value; }\n"
-        "static int (*indirect)(int, int) = mark;\n"
-        "static int pair(int a, int b) { return a + b; }\n"
-        "int probe_0(int flag) { int value = 0; if (mark(1, 0), mark(2, 1)) value = 1; return value; }\n"
-        "int probe_1(int flag) { int value = 0; while (mark(1, 0), mark(2, 1)) { value = 1; break; } return value; }\n"
-        "int probe_2(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 0), mark(2, 1)); return value - 1; }\n"
-        "int probe_3(int flag) { int value = 0; for (; mark(1, 0), mark(2, 1);) { value = 1; break; } return value; }\n"
-        "int probe_4(int flag) { return (mark(1, 0), mark(2, 1)) ? 1 : 0; }\n"
-        "int probe_5(int flag) { return !!(mark(1, 0), mark(2, 1)); }\n"
-        "int probe_6(int flag) { int value = 0; if ((void)mark(1, 1), mark(2, 0)) value = 1; return value; }\n"
-        "int probe_7(int flag) { int value = 0; while ((void)mark(1, 1), mark(2, 0)) { value = 1; break; } return value; }\n"
-        "int probe_8(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while ((void)mark(1, 1), mark(2, 0)); return value - 1; }\n"
-        "int probe_9(int flag) { int value = 0; for (; (void)mark(1, 1), mark(2, 0);) { value = 1; break; } return value; }\n"
-        "int probe_10(int flag) { return ((void)mark(1, 1), mark(2, 0)) ? 1 : 0; }\n"
-        "int probe_11(int flag) { return !!((void)mark(1, 1), mark(2, 0)); }\n"
-        "int probe_12(int flag) { int value = 0; if (mark(1, 1), mark(2, 0), mark(3, 1)) value = 1; return value; }\n"
-        "int probe_13(int flag) { int value = 0; while (mark(1, 1), mark(2, 0), mark(3, 1)) { value = 1; break; } return value; }\n"
-        "int probe_14(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 1), mark(2, 0), mark(3, 1)); return value - 1; }\n"
-        "int probe_15(int flag) { int value = 0; for (; mark(1, 1), mark(2, 0), mark(3, 1);) { value = 1; break; } return value; }\n"
-        "int probe_16(int flag) { return (mark(1, 1), mark(2, 0), mark(3, 1)) ? 1 : 0; }\n"
-        "int probe_17(int flag) { return !!(mark(1, 1), mark(2, 0), mark(3, 1)); }\n"
-        "int probe_18(int flag) { int value = 0; if (((mark(1, 1), mark(2, 0)))) value = 1; return value; }\n"
-        "int probe_19(int flag) { int value = 0; while (((mark(1, 1), mark(2, 0)))) { value = 1; break; } return value; }\n"
-        "int probe_20(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (((mark(1, 1), mark(2, 0)))); return value - 1; }\n"
-        "int probe_21(int flag) { int value = 0; for (; ((mark(1, 1), mark(2, 0)));) { value = 1; break; } return value; }\n"
-        "int probe_22(int flag) { return (((mark(1, 1), mark(2, 0)))) ? 1 : 0; }\n"
-        "int probe_23(int flag) { return !!(((mark(1, 1), mark(2, 0)))); }\n"
-        "int probe_24(int flag) { int value = 0; if (0 && mark(1, 1), mark(2, 1)) value = 1; return value; }\n"
-        "int probe_25(int flag) { int value = 0; while (0 && mark(1, 1), mark(2, 1)) { value = 1; break; } return value; }\n"
-        "int probe_26(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (0 && mark(1, 1), mark(2, 1)); return value - 1; }\n"
-        "int probe_27(int flag) { int value = 0; for (; 0 && mark(1, 1), mark(2, 1);) { value = 1; break; } return value; }\n"
-        "int probe_28(int flag) { return (0 && mark(1, 1), mark(2, 1)) ? 1 : 0; }\n"
-        "int probe_29(int flag) { return !!(0 && mark(1, 1), mark(2, 1)); }\n"
-        "int probe_30(int flag) { int value = 0; if (1 || mark(1, 1), mark(2, 0)) value = 1; return value; }\n"
-        "int probe_31(int flag) { int value = 0; while (1 || mark(1, 1), mark(2, 0)) { value = 1; break; } return value; }\n"
-        "int probe_32(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (1 || mark(1, 1), mark(2, 0)); return value - 1; }\n"
-        "int probe_33(int flag) { int value = 0; for (; 1 || mark(1, 1), mark(2, 0);) { value = 1; break; } return value; }\n"
-        "int probe_34(int flag) { return (1 || mark(1, 1), mark(2, 0)) ? 1 : 0; }\n"
-        "int probe_35(int flag) { return !!(1 || mark(1, 1), mark(2, 0)); }\n"
-        "int probe_36(int flag) { int value = 0; if (mark(1, 0) && mark(2, 1), mark(3, 1)) value = 1; return value; }\n"
-        "int probe_37(int flag) { int value = 0; while (mark(1, 0) && mark(2, 1), mark(3, 1)) { value = 1; break; } return value; }\n"
-        "int probe_38(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 0) && mark(2, 1), mark(3, 1)); return value - 1; }\n"
-        "int probe_39(int flag) { int value = 0; for (; mark(1, 0) && mark(2, 1), mark(3, 1);) { value = 1; break; } return value; }\n"
-        "int probe_40(int flag) { return (mark(1, 0) && mark(2, 1), mark(3, 1)) ? 1 : 0; }\n"
-        "int probe_41(int flag) { return !!(mark(1, 0) && mark(2, 1), mark(3, 1)); }\n"
-        "int probe_42(int flag) { int value = 0; if (mark(1, 1) || mark(2, 0), mark(3, 0)) value = 1; return value; }\n"
-        "int probe_43(int flag) { int value = 0; while (mark(1, 1) || mark(2, 0), mark(3, 0)) { value = 1; break; } return value; }\n"
-        "int probe_44(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 1) || mark(2, 0), mark(3, 0)); return value - 1; }\n"
-        "int probe_45(int flag) { int value = 0; for (; mark(1, 1) || mark(2, 0), mark(3, 0);) { value = 1; break; } return value; }\n"
-        "int probe_46(int flag) { return (mark(1, 1) || mark(2, 0), mark(3, 0)) ? 1 : 0; }\n"
-        "int probe_47(int flag) { return !!(mark(1, 1) || mark(2, 0), mark(3, 0)); }\n"
-        "int probe_48(int flag) { int value = 0; if (mark(1, 0), mark(2, 0) || mark(3, 1)) value = 1; return value; }\n"
-        "int probe_49(int flag) { int value = 0; while (mark(1, 0), mark(2, 0) || mark(3, 1)) { value = 1; break; } return value; }\n"
-        "int probe_50(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 0), mark(2, 0) || mark(3, 1)); return value - 1; }\n"
-        "int probe_51(int flag) { int value = 0; for (; mark(1, 0), mark(2, 0) || mark(3, 1);) { value = 1; break; } return value; }\n"
-        "int probe_52(int flag) { return (mark(1, 0), mark(2, 0) || mark(3, 1)) ? 1 : 0; }\n"
-        "int probe_53(int flag) { return !!(mark(1, 0), mark(2, 0) || mark(3, 1)); }\n"
-        "int probe_54(int flag) { int value = 0; if (mark(1, 1), mark(2, 1) && mark(3, 0)) value = 1; return value; }\n"
-        "int probe_55(int flag) { int value = 0; while (mark(1, 1), mark(2, 1) && mark(3, 0)) { value = 1; break; } return value; }\n"
-        "int probe_56(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 1), mark(2, 1) && mark(3, 0)); return value - 1; }\n"
-        "int probe_57(int flag) { int value = 0; for (; mark(1, 1), mark(2, 1) && mark(3, 0);) { value = 1; break; } return value; }\n"
-        "int probe_58(int flag) { return (mark(1, 1), mark(2, 1) && mark(3, 0)) ? 1 : 0; }\n"
-        "int probe_59(int flag) { return !!(mark(1, 1), mark(2, 1) && mark(3, 0)); }\n"
-        "int probe_60(int flag) { int value = 0; if (flag ? mark(1, 1), mark(2, 0) : mark(3, 1)) value = 1; return value; }\n"
-        "int probe_61(int flag) { int value = 0; while (flag ? mark(1, 1), mark(2, 0) : mark(3, 1)) { value = 1; break; } return value; }\n"
-        "int probe_62(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (flag ? mark(1, 1), mark(2, 0) : mark(3, 1)); return value - 1; }\n"
-        "int probe_63(int flag) { int value = 0; for (; flag ? mark(1, 1), mark(2, 0) : mark(3, 1);) { value = 1; break; } return value; }\n"
-        "int probe_64(int flag) { return (flag ? mark(1, 1), mark(2, 0) : mark(3, 1)) ? 1 : 0; }\n"
-        "int probe_65(int flag) { return !!(flag ? mark(1, 1), mark(2, 0) : mark(3, 1)); }\n"
-        "int probe_66(int flag) { int value = 0; if (flag ? mark(1, 1) : mark(2, 0), mark(3, 1)) value = 1; return value; }\n"
-        "int probe_67(int flag) { int value = 0; while (flag ? mark(1, 1) : mark(2, 0), mark(3, 1)) { value = 1; break; } return value; }\n"
-        "int probe_68(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (flag ? mark(1, 1) : mark(2, 0), mark(3, 1)); return value - 1; }\n"
-        "int probe_69(int flag) { int value = 0; for (; flag ? mark(1, 1) : mark(2, 0), mark(3, 1);) { value = 1; break; } return value; }\n"
-        "int probe_70(int flag) { return (flag ? mark(1, 1) : mark(2, 0), mark(3, 1)) ? 1 : 0; }\n"
-        "int probe_71(int flag) { return !!(flag ? mark(1, 1) : mark(2, 0), mark(3, 1)); }\n"
-        "int probe_72(int flag) { int value = 0; if (0 ? mark(1, 1) : mark(2, 0), mark(3, 1)) value = 1; return value; }\n"
-        "int probe_73(int flag) { int value = 0; while (0 ? mark(1, 1) : mark(2, 0), mark(3, 1)) { value = 1; break; } return value; }\n"
-        "int probe_74(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (0 ? mark(1, 1) : mark(2, 0), mark(3, 1)); return value - 1; }\n"
-        "int probe_75(int flag) { int value = 0; for (; 0 ? mark(1, 1) : mark(2, 0), mark(3, 1);) { value = 1; break; } return value; }\n"
-        "int probe_76(int flag) { return (0 ? mark(1, 1) : mark(2, 0), mark(3, 1)) ? 1 : 0; }\n"
-        "int probe_77(int flag) { return !!(0 ? mark(1, 1) : mark(2, 0), mark(3, 1)); }\n"
-        "int probe_78(int flag) { int value = 0; if (indirect(1, 1), indirect(2, 0)) value = 1; return value; }\n"
-        "int probe_79(int flag) { int value = 0; while (indirect(1, 1), indirect(2, 0)) { value = 1; break; } return value; }\n"
-        "int probe_80(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (indirect(1, 1), indirect(2, 0)); return value - 1; }\n"
-        "int probe_81(int flag) { int value = 0; for (; indirect(1, 1), indirect(2, 0);) { value = 1; break; } return value; }\n"
-        "int probe_82(int flag) { return (indirect(1, 1), indirect(2, 0)) ? 1 : 0; }\n"
-        "int probe_83(int flag) { return !!(indirect(1, 1), indirect(2, 0)); }\n"
-        "int probe_84(int flag) { int value = 0; if (sizeof(mark(1, 1)), mark(2, 1)) value = 1; return value; }\n"
-        "int probe_85(int flag) { int value = 0; while (sizeof(mark(1, 1)), mark(2, 1)) { value = 1; break; } return value; }\n"
-        "int probe_86(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (sizeof(mark(1, 1)), mark(2, 1)); return value - 1; }\n"
-        "int probe_87(int flag) { int value = 0; for (; sizeof(mark(1, 1)), mark(2, 1);) { value = 1; break; } return value; }\n"
-        "int probe_88(int flag) { return (sizeof(mark(1, 1)), mark(2, 1)) ? 1 : 0; }\n"
-        "int probe_89(int flag) { return !!(sizeof(mark(1, 1)), mark(2, 1)); }\n"
-        "int probe_90(int flag) { int value = 0; if (slot = mark(1, 0), mark(2, 1)) value = 1; return value; }\n"
-        "int probe_91(int flag) { int value = 0; while (slot = mark(1, 0), mark(2, 1)) { value = 1; break; } return value; }\n"
-        "int probe_92(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (slot = mark(1, 0), mark(2, 1)); return value - 1; }\n"
-        "int probe_93(int flag) { int value = 0; for (; slot = mark(1, 0), mark(2, 1);) { value = 1; break; } return value; }\n"
-        "int probe_94(int flag) { return (slot = mark(1, 0), mark(2, 1)) ? 1 : 0; }\n"
-        "int probe_95(int flag) { return !!(slot = mark(1, 0), mark(2, 1)); }\n"
-        "int probe_96(int flag) { int value = 0; if (mark(1, 0) && mark(2, 1)) value = 1; return value; }\n"
-        "int probe_97(int flag) { int value = 0; while (mark(1, 0) && mark(2, 1)) { value = 1; break; } return value; }\n"
-        "int probe_98(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 0) && mark(2, 1)); return value - 1; }\n"
-        "int probe_99(int flag) { int value = 0; for (; mark(1, 0) && mark(2, 1);) { value = 1; break; } return value; }\n"
-        "int probe_100(int flag) { return (mark(1, 0) && mark(2, 1)) ? 1 : 0; }\n"
-        "int probe_101(int flag) { return !!(mark(1, 0) && mark(2, 1)); }\n"
-        "int probe_102(int flag) { int value = 0; if (mark(1, 1) || mark(2, 0)) value = 1; return value; }\n"
-        "int probe_103(int flag) { int value = 0; while (mark(1, 1) || mark(2, 0)) { value = 1; break; } return value; }\n"
-        "int probe_104(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 1) || mark(2, 0)); return value - 1; }\n"
-        "int probe_105(int flag) { int value = 0; for (; mark(1, 1) || mark(2, 0);) { value = 1; break; } return value; }\n"
-        "int probe_106(int flag) { return (mark(1, 1) || mark(2, 0)) ? 1 : 0; }\n"
-        "int probe_107(int flag) { return !!(mark(1, 1) || mark(2, 0)); }\n"
-        "int probe_108(int flag) { int value = 0; if (pair(1, 2)) value = 1; return value; }\n"
-        "int probe_109(int flag) { int value = 0; while (pair(1, 2)) { value = 1; break; } return value; }\n"
-        "int probe_110(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (pair(1, 2)); return value - 1; }\n"
-        "int probe_111(int flag) { int value = 0; for (; pair(1, 2);) { value = 1; break; } return value; }\n"
-        "int probe_112(int flag) { return (pair(1, 2)) ? 1 : 0; }\n"
-        "int probe_113(int flag) { return !!(pair(1, 2)); }\n"
-        "int probe_114(int flag) { int value = 0; if (mark(1, 1), (flag ? mark(2, 0) : mark(3, 1))) value = 1; return value; }\n"
-        "int probe_115(int flag) { int value = 0; while (mark(1, 1), (flag ? mark(2, 0) : mark(3, 1))) { value = 1; break; } return value; }\n"
-        "int probe_116(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 1), (flag ? mark(2, 0) : mark(3, 1))); return value - 1; }\n"
-        "int probe_117(int flag) { int value = 0; for (; mark(1, 1), (flag ? mark(2, 0) : mark(3, 1));) { value = 1; break; } return value; }\n"
-        "int probe_118(int flag) { return (mark(1, 1), (flag ? mark(2, 0) : mark(3, 1))) ? 1 : 0; }\n"
-        "int probe_119(int flag) { return !!(mark(1, 1), (flag ? mark(2, 0) : mark(3, 1))); }\n"
-        "int main(void) { unsigned failed = 0; int value;\n"
-        "trace = 0; slot = 9; value = probe_0(1); failed |= value != 1; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_1(1); failed |= value != 1; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_2(1); failed |= value != 1; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_3(1); failed |= value != 1; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_4(1); failed |= value != 1; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_5(1); failed |= value != 1; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_6(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_7(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_8(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_9(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_10(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_11(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_12(1); failed |= value != 1; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_13(1); failed |= value != 1; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_14(1); failed |= value != 1; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_15(1); failed |= value != 1; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_16(1); failed |= value != 1; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_17(1); failed |= value != 1; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_18(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_19(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_20(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_21(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_22(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_23(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_24(1); failed |= value != 1; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_25(1); failed |= value != 1; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_26(1); failed |= value != 1; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_27(1); failed |= value != 1; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_28(1); failed |= value != 1; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_29(1); failed |= value != 1; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_30(1); failed |= value != 0; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_31(1); failed |= value != 0; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_32(1); failed |= value != 0; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_33(1); failed |= value != 0; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_34(1); failed |= value != 0; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_35(1); failed |= value != 0; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_36(1); failed |= value != 1; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_37(1); failed |= value != 1; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_38(1); failed |= value != 1; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_39(1); failed |= value != 1; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_40(1); failed |= value != 1; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_41(1); failed |= value != 1; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_42(1); failed |= value != 0; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_43(1); failed |= value != 0; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_44(1); failed |= value != 0; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_45(1); failed |= value != 0; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_46(1); failed |= value != 0; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_47(1); failed |= value != 0; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_48(1); failed |= value != 1; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_49(1); failed |= value != 1; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_50(1); failed |= value != 1; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_51(1); failed |= value != 1; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_52(1); failed |= value != 1; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_53(1); failed |= value != 1; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_54(1); failed |= value != 0; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_55(1); failed |= value != 0; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_56(1); failed |= value != 0; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_57(1); failed |= value != 0; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_58(1); failed |= value != 0; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_59(1); failed |= value != 0; failed |= trace != 123u;\n"
-        "trace = 0; slot = 9; value = probe_60(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_61(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_62(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_63(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_64(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_65(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_66(1); failed |= value != 1; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_67(1); failed |= value != 1; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_68(1); failed |= value != 1; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_69(1); failed |= value != 1; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_70(1); failed |= value != 1; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_71(1); failed |= value != 1; failed |= trace != 13u;\n"
-        "trace = 0; slot = 9; value = probe_72(1); failed |= value != 1; failed |= trace != 23u;\n"
-        "trace = 0; slot = 9; value = probe_73(1); failed |= value != 1; failed |= trace != 23u;\n"
-        "trace = 0; slot = 9; value = probe_74(1); failed |= value != 1; failed |= trace != 23u;\n"
-        "trace = 0; slot = 9; value = probe_75(1); failed |= value != 1; failed |= trace != 23u;\n"
-        "trace = 0; slot = 9; value = probe_76(1); failed |= value != 1; failed |= trace != 23u;\n"
-        "trace = 0; slot = 9; value = probe_77(1); failed |= value != 1; failed |= trace != 23u;\n"
-        "trace = 0; slot = 9; value = probe_78(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_79(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_80(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_81(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_82(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_83(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_84(1); failed |= value != 1; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_85(1); failed |= value != 1; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_86(1); failed |= value != 1; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_87(1); failed |= value != 1; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_88(1); failed |= value != 1; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_89(1); failed |= value != 1; failed |= trace != 2u;\n"
-        "trace = 0; slot = 9; value = probe_90(1); failed |= value != 1; failed |= trace != 12u;\n"
-        "failed |= slot != 0;\n"
-        "trace = 0; slot = 9; value = probe_91(1); failed |= value != 1; failed |= trace != 12u;\n"
-        "failed |= slot != 0;\n"
-        "trace = 0; slot = 9; value = probe_92(1); failed |= value != 1; failed |= trace != 12u;\n"
-        "failed |= slot != 0;\n"
-        "trace = 0; slot = 9; value = probe_93(1); failed |= value != 1; failed |= trace != 12u;\n"
-        "failed |= slot != 0;\n"
-        "trace = 0; slot = 9; value = probe_94(1); failed |= value != 1; failed |= trace != 12u;\n"
-        "failed |= slot != 0;\n"
-        "trace = 0; slot = 9; value = probe_95(1); failed |= value != 1; failed |= trace != 12u;\n"
-        "failed |= slot != 0;\n"
-        "trace = 0; slot = 9; value = probe_96(1); failed |= value != 0; failed |= trace != 1u;\n"
-        "trace = 0; slot = 9; value = probe_97(1); failed |= value != 0; failed |= trace != 1u;\n"
-        "trace = 0; slot = 9; value = probe_98(1); failed |= value != 0; failed |= trace != 1u;\n"
-        "trace = 0; slot = 9; value = probe_99(1); failed |= value != 0; failed |= trace != 1u;\n"
-        "trace = 0; slot = 9; value = probe_100(1); failed |= value != 0; failed |= trace != 1u;\n"
-        "trace = 0; slot = 9; value = probe_101(1); failed |= value != 0; failed |= trace != 1u;\n"
-        "trace = 0; slot = 9; value = probe_102(1); failed |= value != 1; failed |= trace != 1u;\n"
-        "trace = 0; slot = 9; value = probe_103(1); failed |= value != 1; failed |= trace != 1u;\n"
-        "trace = 0; slot = 9; value = probe_104(1); failed |= value != 1; failed |= trace != 1u;\n"
-        "trace = 0; slot = 9; value = probe_105(1); failed |= value != 1; failed |= trace != 1u;\n"
-        "trace = 0; slot = 9; value = probe_106(1); failed |= value != 1; failed |= trace != 1u;\n"
-        "trace = 0; slot = 9; value = probe_107(1); failed |= value != 1; failed |= trace != 1u;\n"
-        "trace = 0; slot = 9; value = probe_108(1); failed |= value != 1; failed |= trace != 0u;\n"
-        "trace = 0; slot = 9; value = probe_109(1); failed |= value != 1; failed |= trace != 0u;\n"
-        "trace = 0; slot = 9; value = probe_110(1); failed |= value != 1; failed |= trace != 0u;\n"
-        "trace = 0; slot = 9; value = probe_111(1); failed |= value != 1; failed |= trace != 0u;\n"
-        "trace = 0; slot = 9; value = probe_112(1); failed |= value != 1; failed |= trace != 0u;\n"
-        "trace = 0; slot = 9; value = probe_113(1); failed |= value != 1; failed |= trace != 0u;\n"
-        "trace = 0; slot = 9; value = probe_114(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_115(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_116(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_117(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_118(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "trace = 0; slot = 9; value = probe_119(1); failed |= value != 0; failed |= trace != 12u;\n"
-        "return failed != 0; }\n"
-    );
+    String8 source_parts[] = {
+        S8("static volatile unsigned trace; static int slot;\n"),
+        S8("static int mark(int digit, int value) { trace = trace * 10u + (unsigned)digit; return value; }\n"),
+        S8("static int (*indirect)(int, int) = mark;\n"),
+        S8("static int pair(int a, int b) { return a + b; }\n"),
+        S8("int probe_0(int flag) { int value = 0; if (mark(1, 0), mark(2, 1)) value = 1; return value; }\n"),
+        S8("int probe_1(int flag) { int value = 0; while (mark(1, 0), mark(2, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_2(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 0), mark(2, 1)); return value - 1; }\n"),
+        S8("int probe_3(int flag) { int value = 0; for (; mark(1, 0), mark(2, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_4(int flag) { return (mark(1, 0), mark(2, 1)) ? 1 : 0; }\n"),
+        S8("int probe_5(int flag) { return !!(mark(1, 0), mark(2, 1)); }\n"),
+        S8("int probe_6(int flag) { int value = 0; if ((void)mark(1, 1), mark(2, 0)) value = 1; return value; }\n"),
+        S8("int probe_7(int flag) { int value = 0; while ((void)mark(1, 1), mark(2, 0)) { value = 1; break; } return value; }\n"),
+        S8("int probe_8(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while ((void)mark(1, 1), mark(2, 0)); return value - 1; }\n"),
+        S8("int probe_9(int flag) { int value = 0; for (; (void)mark(1, 1), mark(2, 0);) { value = 1; break; } return value; }\n"),
+        S8("int probe_10(int flag) { return ((void)mark(1, 1), mark(2, 0)) ? 1 : 0; }\n"),
+        S8("int probe_11(int flag) { return !!((void)mark(1, 1), mark(2, 0)); }\n"),
+        S8("int probe_12(int flag) { int value = 0; if (mark(1, 1), mark(2, 0), mark(3, 1)) value = 1; return value; }\n"),
+        S8("int probe_13(int flag) { int value = 0; while (mark(1, 1), mark(2, 0), mark(3, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_14(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 1), mark(2, 0), mark(3, 1)); return value - 1; }\n"),
+        S8("int probe_15(int flag) { int value = 0; for (; mark(1, 1), mark(2, 0), mark(3, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_16(int flag) { return (mark(1, 1), mark(2, 0), mark(3, 1)) ? 1 : 0; }\n"),
+        S8("int probe_17(int flag) { return !!(mark(1, 1), mark(2, 0), mark(3, 1)); }\n"),
+        S8("int probe_18(int flag) { int value = 0; if (((mark(1, 1), mark(2, 0)))) value = 1; return value; }\n"),
+        S8("int probe_19(int flag) { int value = 0; while (((mark(1, 1), mark(2, 0)))) { value = 1; break; } return value; }\n"),
+        S8("int probe_20(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (((mark(1, 1), mark(2, 0)))); return value - 1; }\n"),
+        S8("int probe_21(int flag) { int value = 0; for (; ((mark(1, 1), mark(2, 0)));) { value = 1; break; } return value; }\n"),
+        S8("int probe_22(int flag) { return (((mark(1, 1), mark(2, 0)))) ? 1 : 0; }\n"),
+        S8("int probe_23(int flag) { return !!(((mark(1, 1), mark(2, 0)))); }\n"),
+        S8("int probe_24(int flag) { int value = 0; if (0 && mark(1, 1), mark(2, 1)) value = 1; return value; }\n"),
+        S8("int probe_25(int flag) { int value = 0; while (0 && mark(1, 1), mark(2, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_26(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (0 && mark(1, 1), mark(2, 1)); return value - 1; }\n"),
+        S8("int probe_27(int flag) { int value = 0; for (; 0 && mark(1, 1), mark(2, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_28(int flag) { return (0 && mark(1, 1), mark(2, 1)) ? 1 : 0; }\n"),
+        S8("int probe_29(int flag) { return !!(0 && mark(1, 1), mark(2, 1)); }\n"),
+        S8("int probe_30(int flag) { int value = 0; if (1 || mark(1, 1), mark(2, 0)) value = 1; return value; }\n"),
+        S8("int probe_31(int flag) { int value = 0; while (1 || mark(1, 1), mark(2, 0)) { value = 1; break; } return value; }\n"),
+        S8("int probe_32(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (1 || mark(1, 1), mark(2, 0)); return value - 1; }\n"),
+        S8("int probe_33(int flag) { int value = 0; for (; 1 || mark(1, 1), mark(2, 0);) { value = 1; break; } return value; }\n"),
+        S8("int probe_34(int flag) { return (1 || mark(1, 1), mark(2, 0)) ? 1 : 0; }\n"),
+        S8("int probe_35(int flag) { return !!(1 || mark(1, 1), mark(2, 0)); }\n"),
+        S8("int probe_36(int flag) { int value = 0; if (mark(1, 0) && mark(2, 1), mark(3, 1)) value = 1; return value; }\n"),
+        S8("int probe_37(int flag) { int value = 0; while (mark(1, 0) && mark(2, 1), mark(3, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_38(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 0) && mark(2, 1), mark(3, 1)); return value - 1; }\n"),
+        S8("int probe_39(int flag) { int value = 0; for (; mark(1, 0) && mark(2, 1), mark(3, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_40(int flag) { return (mark(1, 0) && mark(2, 1), mark(3, 1)) ? 1 : 0; }\n"),
+        S8("int probe_41(int flag) { return !!(mark(1, 0) && mark(2, 1), mark(3, 1)); }\n"),
+        S8("int probe_42(int flag) { int value = 0; if (mark(1, 1) || mark(2, 0), mark(3, 0)) value = 1; return value; }\n"),
+        S8("int probe_43(int flag) { int value = 0; while (mark(1, 1) || mark(2, 0), mark(3, 0)) { value = 1; break; } return value; }\n"),
+        S8("int probe_44(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 1) || mark(2, 0), mark(3, 0)); return value - 1; }\n"),
+        S8("int probe_45(int flag) { int value = 0; for (; mark(1, 1) || mark(2, 0), mark(3, 0);) { value = 1; break; } return value; }\n"),
+        S8("int probe_46(int flag) { return (mark(1, 1) || mark(2, 0), mark(3, 0)) ? 1 : 0; }\n"),
+        S8("int probe_47(int flag) { return !!(mark(1, 1) || mark(2, 0), mark(3, 0)); }\n"),
+        S8("int probe_48(int flag) { int value = 0; if (mark(1, 0), mark(2, 0) || mark(3, 1)) value = 1; return value; }\n"),
+        S8("int probe_49(int flag) { int value = 0; while (mark(1, 0), mark(2, 0) || mark(3, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_50(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 0), mark(2, 0) || mark(3, 1)); return value - 1; }\n"),
+        S8("int probe_51(int flag) { int value = 0; for (; mark(1, 0), mark(2, 0) || mark(3, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_52(int flag) { return (mark(1, 0), mark(2, 0) || mark(3, 1)) ? 1 : 0; }\n"),
+        S8("int probe_53(int flag) { return !!(mark(1, 0), mark(2, 0) || mark(3, 1)); }\n"),
+        S8("int probe_54(int flag) { int value = 0; if (mark(1, 1), mark(2, 1) && mark(3, 0)) value = 1; return value; }\n"),
+        S8("int probe_55(int flag) { int value = 0; while (mark(1, 1), mark(2, 1) && mark(3, 0)) { value = 1; break; } return value; }\n"),
+        S8("int probe_56(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 1), mark(2, 1) && mark(3, 0)); return value - 1; }\n"),
+        S8("int probe_57(int flag) { int value = 0; for (; mark(1, 1), mark(2, 1) && mark(3, 0);) { value = 1; break; } return value; }\n"),
+        S8("int probe_58(int flag) { return (mark(1, 1), mark(2, 1) && mark(3, 0)) ? 1 : 0; }\n"),
+        S8("int probe_59(int flag) { return !!(mark(1, 1), mark(2, 1) && mark(3, 0)); }\n"),
+        S8("int probe_60(int flag) { int value = 0; if (flag ? mark(1, 1), mark(2, 0) : mark(3, 1)) value = 1; return value; }\n"),
+        S8("int probe_61(int flag) { int value = 0; while (flag ? mark(1, 1), mark(2, 0) : mark(3, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_62(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (flag ? mark(1, 1), mark(2, 0) : mark(3, 1)); return value - 1; }\n"),
+        S8("int probe_63(int flag) { int value = 0; for (; flag ? mark(1, 1), mark(2, 0) : mark(3, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_64(int flag) { return (flag ? mark(1, 1), mark(2, 0) : mark(3, 1)) ? 1 : 0; }\n"),
+        S8("int probe_65(int flag) { return !!(flag ? mark(1, 1), mark(2, 0) : mark(3, 1)); }\n"),
+        S8("int probe_66(int flag) { int value = 0; if (flag ? mark(1, 1) : mark(2, 0), mark(3, 1)) value = 1; return value; }\n"),
+        S8("int probe_67(int flag) { int value = 0; while (flag ? mark(1, 1) : mark(2, 0), mark(3, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_68(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (flag ? mark(1, 1) : mark(2, 0), mark(3, 1)); return value - 1; }\n"),
+        S8("int probe_69(int flag) { int value = 0; for (; flag ? mark(1, 1) : mark(2, 0), mark(3, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_70(int flag) { return (flag ? mark(1, 1) : mark(2, 0), mark(3, 1)) ? 1 : 0; }\n"),
+        S8("int probe_71(int flag) { return !!(flag ? mark(1, 1) : mark(2, 0), mark(3, 1)); }\n"),
+        S8("int probe_72(int flag) { int value = 0; if (0 ? mark(1, 1) : mark(2, 0), mark(3, 1)) value = 1; return value; }\n"),
+        S8("int probe_73(int flag) { int value = 0; while (0 ? mark(1, 1) : mark(2, 0), mark(3, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_74(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (0 ? mark(1, 1) : mark(2, 0), mark(3, 1)); return value - 1; }\n"),
+        S8("int probe_75(int flag) { int value = 0; for (; 0 ? mark(1, 1) : mark(2, 0), mark(3, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_76(int flag) { return (0 ? mark(1, 1) : mark(2, 0), mark(3, 1)) ? 1 : 0; }\n"),
+        S8("int probe_77(int flag) { return !!(0 ? mark(1, 1) : mark(2, 0), mark(3, 1)); }\n"),
+        S8("int probe_78(int flag) { int value = 0; if (indirect(1, 1), indirect(2, 0)) value = 1; return value; }\n"),
+        S8("int probe_79(int flag) { int value = 0; while (indirect(1, 1), indirect(2, 0)) { value = 1; break; } return value; }\n"),
+        S8("int probe_80(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (indirect(1, 1), indirect(2, 0)); return value - 1; }\n"),
+        S8("int probe_81(int flag) { int value = 0; for (; indirect(1, 1), indirect(2, 0);) { value = 1; break; } return value; }\n"),
+        S8("int probe_82(int flag) { return (indirect(1, 1), indirect(2, 0)) ? 1 : 0; }\n"),
+        S8("int probe_83(int flag) { return !!(indirect(1, 1), indirect(2, 0)); }\n"),
+        S8("int probe_84(int flag) { int value = 0; if (sizeof(mark(1, 1)), mark(2, 1)) value = 1; return value; }\n"),
+        S8("int probe_85(int flag) { int value = 0; while (sizeof(mark(1, 1)), mark(2, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_86(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (sizeof(mark(1, 1)), mark(2, 1)); return value - 1; }\n"),
+        S8("int probe_87(int flag) { int value = 0; for (; sizeof(mark(1, 1)), mark(2, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_88(int flag) { return (sizeof(mark(1, 1)), mark(2, 1)) ? 1 : 0; }\n"),
+        S8("int probe_89(int flag) { return !!(sizeof(mark(1, 1)), mark(2, 1)); }\n"),
+        S8("int probe_90(int flag) { int value = 0; if (slot = mark(1, 0), mark(2, 1)) value = 1; return value; }\n"),
+        S8("int probe_91(int flag) { int value = 0; while (slot = mark(1, 0), mark(2, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_92(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (slot = mark(1, 0), mark(2, 1)); return value - 1; }\n"),
+        S8("int probe_93(int flag) { int value = 0; for (; slot = mark(1, 0), mark(2, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_94(int flag) { return (slot = mark(1, 0), mark(2, 1)) ? 1 : 0; }\n"),
+        S8("int probe_95(int flag) { return !!(slot = mark(1, 0), mark(2, 1)); }\n"),
+        S8("int probe_96(int flag) { int value = 0; if (mark(1, 0) && mark(2, 1)) value = 1; return value; }\n"),
+        S8("int probe_97(int flag) { int value = 0; while (mark(1, 0) && mark(2, 1)) { value = 1; break; } return value; }\n"),
+        S8("int probe_98(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 0) && mark(2, 1)); return value - 1; }\n"),
+        S8("int probe_99(int flag) { int value = 0; for (; mark(1, 0) && mark(2, 1);) { value = 1; break; } return value; }\n"),
+        S8("int probe_100(int flag) { return (mark(1, 0) && mark(2, 1)) ? 1 : 0; }\n"),
+        S8("int probe_101(int flag) { return !!(mark(1, 0) && mark(2, 1)); }\n"),
+        S8("int probe_102(int flag) { int value = 0; if (mark(1, 1) || mark(2, 0)) value = 1; return value; }\n"),
+        S8("int probe_103(int flag) { int value = 0; while (mark(1, 1) || mark(2, 0)) { value = 1; break; } return value; }\n"),
+        S8("int probe_104(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 1) || mark(2, 0)); return value - 1; }\n"),
+        S8("int probe_105(int flag) { int value = 0; for (; mark(1, 1) || mark(2, 0);) { value = 1; break; } return value; }\n"),
+        S8("int probe_106(int flag) { return (mark(1, 1) || mark(2, 0)) ? 1 : 0; }\n"),
+        S8("int probe_107(int flag) { return !!(mark(1, 1) || mark(2, 0)); }\n"),
+        S8("int probe_108(int flag) { int value = 0; if (pair(1, 2)) value = 1; return value; }\n"),
+        S8("int probe_109(int flag) { int value = 0; while (pair(1, 2)) { value = 1; break; } return value; }\n"),
+        S8("int probe_110(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (pair(1, 2)); return value - 1; }\n"),
+        S8("int probe_111(int flag) { int value = 0; for (; pair(1, 2);) { value = 1; break; } return value; }\n"),
+        S8("int probe_112(int flag) { return (pair(1, 2)) ? 1 : 0; }\n"),
+        S8("int probe_113(int flag) { return !!(pair(1, 2)); }\n"),
+        S8("int probe_114(int flag) { int value = 0; if (mark(1, 1), (flag ? mark(2, 0) : mark(3, 1))) value = 1; return value; }\n"),
+        S8("int probe_115(int flag) { int value = 0; while (mark(1, 1), (flag ? mark(2, 0) : mark(3, 1))) { value = 1; break; } return value; }\n"),
+        S8("int probe_116(int flag) { int value = 0; do { value += 1; if (value == 2) break; } while (mark(1, 1), (flag ? mark(2, 0) : mark(3, 1))); return value - 1; }\n"),
+        S8("int probe_117(int flag) { int value = 0; for (; mark(1, 1), (flag ? mark(2, 0) : mark(3, 1));) { value = 1; break; } return value; }\n"),
+        S8("int probe_118(int flag) { return (mark(1, 1), (flag ? mark(2, 0) : mark(3, 1))) ? 1 : 0; }\n"),
+        S8("int probe_119(int flag) { return !!(mark(1, 1), (flag ? mark(2, 0) : mark(3, 1))); }\n"),
+        S8("int main(void) { unsigned failed = 0; int value;\n"),
+        S8("trace = 0; slot = 9; value = probe_0(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_1(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_2(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_3(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_4(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_5(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_6(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_7(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_8(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_9(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_10(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_11(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_12(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_13(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_14(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_15(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_16(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_17(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_18(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_19(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_20(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_21(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_22(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_23(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_24(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_25(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_26(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_27(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_28(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_29(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_30(1); failed |= value != 0; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_31(1); failed |= value != 0; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_32(1); failed |= value != 0; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_33(1); failed |= value != 0; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_34(1); failed |= value != 0; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_35(1); failed |= value != 0; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_36(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_37(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_38(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_39(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_40(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_41(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_42(1); failed |= value != 0; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_43(1); failed |= value != 0; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_44(1); failed |= value != 0; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_45(1); failed |= value != 0; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_46(1); failed |= value != 0; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_47(1); failed |= value != 0; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_48(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_49(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_50(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_51(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_52(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_53(1); failed |= value != 1; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_54(1); failed |= value != 0; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_55(1); failed |= value != 0; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_56(1); failed |= value != 0; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_57(1); failed |= value != 0; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_58(1); failed |= value != 0; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_59(1); failed |= value != 0; failed |= trace != 123u;\n"),
+        S8("trace = 0; slot = 9; value = probe_60(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_61(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_62(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_63(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_64(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_65(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_66(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_67(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_68(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_69(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_70(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_71(1); failed |= value != 1; failed |= trace != 13u;\n"),
+        S8("trace = 0; slot = 9; value = probe_72(1); failed |= value != 1; failed |= trace != 23u;\n"),
+        S8("trace = 0; slot = 9; value = probe_73(1); failed |= value != 1; failed |= trace != 23u;\n"),
+        S8("trace = 0; slot = 9; value = probe_74(1); failed |= value != 1; failed |= trace != 23u;\n"),
+        S8("trace = 0; slot = 9; value = probe_75(1); failed |= value != 1; failed |= trace != 23u;\n"),
+        S8("trace = 0; slot = 9; value = probe_76(1); failed |= value != 1; failed |= trace != 23u;\n"),
+        S8("trace = 0; slot = 9; value = probe_77(1); failed |= value != 1; failed |= trace != 23u;\n"),
+        S8("trace = 0; slot = 9; value = probe_78(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_79(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_80(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_81(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_82(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_83(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_84(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_85(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_86(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_87(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_88(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_89(1); failed |= value != 1; failed |= trace != 2u;\n"),
+        S8("trace = 0; slot = 9; value = probe_90(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("failed |= slot != 0;\n"),
+        S8("trace = 0; slot = 9; value = probe_91(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("failed |= slot != 0;\n"),
+        S8("trace = 0; slot = 9; value = probe_92(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("failed |= slot != 0;\n"),
+        S8("trace = 0; slot = 9; value = probe_93(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("failed |= slot != 0;\n"),
+        S8("trace = 0; slot = 9; value = probe_94(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("failed |= slot != 0;\n"),
+        S8("trace = 0; slot = 9; value = probe_95(1); failed |= value != 1; failed |= trace != 12u;\n"),
+        S8("failed |= slot != 0;\n"),
+        S8("trace = 0; slot = 9; value = probe_96(1); failed |= value != 0; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_97(1); failed |= value != 0; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_98(1); failed |= value != 0; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_99(1); failed |= value != 0; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_100(1); failed |= value != 0; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_101(1); failed |= value != 0; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_102(1); failed |= value != 1; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_103(1); failed |= value != 1; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_104(1); failed |= value != 1; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_105(1); failed |= value != 1; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_106(1); failed |= value != 1; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_107(1); failed |= value != 1; failed |= trace != 1u;\n"),
+        S8("trace = 0; slot = 9; value = probe_108(1); failed |= value != 1; failed |= trace != 0u;\n"),
+        S8("trace = 0; slot = 9; value = probe_109(1); failed |= value != 1; failed |= trace != 0u;\n"),
+        S8("trace = 0; slot = 9; value = probe_110(1); failed |= value != 1; failed |= trace != 0u;\n"),
+        S8("trace = 0; slot = 9; value = probe_111(1); failed |= value != 1; failed |= trace != 0u;\n"),
+        S8("trace = 0; slot = 9; value = probe_112(1); failed |= value != 1; failed |= trace != 0u;\n"),
+        S8("trace = 0; slot = 9; value = probe_113(1); failed |= value != 1; failed |= trace != 0u;\n"),
+        S8("trace = 0; slot = 9; value = probe_114(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_115(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_116(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_117(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_118(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("trace = 0; slot = 9; value = probe_119(1); failed |= value != 0; failed |= trace != 12u;\n"),
+        S8("return failed != 0; }\n"),
+    };
+    String8 source_text = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
     Target targets[] = {target_native, target_native, target_native, target_native, target_native, target_native};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
     {
