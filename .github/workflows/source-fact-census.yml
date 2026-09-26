@@ -4,7 +4,9 @@
 #
 # Every binary is built for x86-64-v3 so callgrind runs on any hosted CPU, and
 # every stage-1 compile targets -march=znver3 so artifacts compare across
-# runners. Each census variant also builds the census baseline in the same job,
+# runners. Every job compiles the same stage-1 input (the main tree, configured
+# at the same path), so callgrind and census counts measure one workload.
+# Each census variant also builds the census baseline in the same job,
 # so its corpus comparison and census deltas are same-runner. Results are
 # printed to the job log (and uploaded) between REPORT markers.
 name: Source-fact census (disposable)
@@ -27,11 +29,12 @@ jobs:
           - {variant: main, sha: 'ade6ac4b6ecb21f30b61b656439bac476c145e2f', census: false}
           - {variant: census, sha: '398ad5788701531e36dc53671a5cba9c27a39592', census: true}
           - {variant: string-counts, sha: '42866ace3cf380ffaf5d5c1f1ef8dc1953d879bd', census: true}
-          - {variant: integer-facts, sha: 'bd5fcbd07bf1a460ae2d5f9e537c690956e10c77', census: true}
+          - {variant: integer-facts, sha: '02096ca3993ce5a5e0ba15f54d96dbc20cd58d37', census: true}
           - {variant: decode-once, sha: 'f1cac5523adc0d162622e4f4b76b6db6f86fd840', census: true}
-          - {variant: combined, sha: 'dadf8d2826ae8dbb360e47bc99fb158e43a8b1f0', census: true}
+          - {variant: combined, sha: 'db88d935dee8ae505e908067da58167d34bcad4d', census: true}
     env:
       BASELINE_SHA: '398ad5788701531e36dc53671a5cba9c27a39592'
+      INPUT_SHA: 'ade6ac4b6ecb21f30b61b656439bac476c145e2f'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -46,6 +49,7 @@ jobs:
           sudo apt-get install -y -qq valgrind ninja-build > /dev/null
           git checkout --quiet --detach '${{ matrix.sha }}'
           git worktree add --quiet --detach "$RUNNER_TEMP/baseline" "$BASELINE_SHA"
+          git worktree add --quiet --detach "$RUNNER_TEMP/input" "$INPUT_SHA"
           for tree in . "$RUNNER_TEMP/baseline"; do
             sed -i 's/^set(GNU_FAMILY_NATIVE_TARGET -march=native)$/set(GNU_FAMILY_NATIVE_TARGET -march=x86-64-v3)/' "$tree/CMakeLists.txt"
             grep -q '^set(GNU_FAMILY_NATIVE_TARGET -march=x86-64-v3)$' "$tree/CMakeLists.txt"
@@ -56,6 +60,7 @@ jobs:
             echo "commit=$(git rev-parse HEAD)"
             echo "tree=$(git rev-parse 'HEAD^{tree}')"
             echo "baseline=$(git -C "$RUNNER_TEMP/baseline" rev-parse HEAD)"
+            echo "input=$(git -C "$RUNNER_TEMP/input" rev-parse HEAD)"
             echo "cpu=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
             echo "avx512f=$(grep -m1 -c avx512f /proc/cpuinfo || true)"
             echo "nproc=$(nproc)"
@@ -70,6 +75,7 @@ jobs:
           set -euo pipefail
           driver="$RUNNER_TEMP/build-driver"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          (cd "$RUNNER_TEMP/input" && "$driver" generate --build-directory build/input --cc clang --config Release --linker DEFAULT -- -DBUSTER_INCLUDE_TESTS=OFF > /dev/null)
           "$driver" generate --build-directory build/plain --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=ON -DBUSTER_INCLUDE_TESTS=OFF
           "$driver" build --build-directory build/plain --config Release -t ide
           sha256sum build/plain/Release/ide | tee -a "$RUNNER_TEMP/out/identity.txt"
@@ -88,7 +94,8 @@ jobs:
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/out"
-          stage1=(-Isrc -Ibuild/plain/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -march=znver3 src/buster/apps/ide/ide.c)
+          in="$RUNNER_TEMP/input"
+          stage1=(-I"$in/src" -I"$in/build/input/generated" -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -march=znver3 "$in/src/buster/apps/ide/ide.c")
           build/plain/Release/ide cc "${stage1[@]}" -g0 -c -o "$out/stage1-plain.o"
           sha256sum "$out/stage1-plain.o" | tee "$out/stage1-hashes.txt"
           if [ '${{ matrix.census }}' = 'true' ]; then
@@ -105,9 +112,10 @@ jobs:
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/out"
+          in="$RUNNER_TEMP/input"
           valgrind --tool=callgrind --callgrind-out-file="$out/stage1.callgrind" \
-            build/plain/Release/ide cc -Isrc -Ibuild/plain/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -march=znver3 \
-            src/buster/apps/ide/ide.c -g0 -c -o "$out/stage1-callgrind.o" 2> "$out/callgrind.log" || { tail -40 "$out/callgrind.log"; exit 1; }
+            build/plain/Release/ide cc -I"$in/src" -I"$in/build/input/generated" -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -march=znver3 \
+            "$in/src/buster/apps/ide/ide.c" -g0 -c -o "$out/stage1-callgrind.o" 2> "$out/callgrind.log" || { tail -40 "$out/callgrind.log"; exit 1; }
           cmp "$out/stage1-plain.o" "$out/stage1-callgrind.o"
           callgrind_annotate --inclusive=no "$out/stage1.callgrind" > "$out/callgrind-annotate.txt"
           sed -n '1,60p' "$out/callgrind-annotate.txt" > "$out/callgrind-top.txt"
@@ -118,11 +126,12 @@ jobs:
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/out"
+          in="$RUNNER_TEMP/input"
           : > "$out/timing.txt"
           for run in 1 2 3 4 5 6 7; do
             /usr/bin/time -a -o "$out/timing.txt" -f "run=$run wall=%e user=%U sys=%S maxrss_kb=%M" \
-              build/plain/Release/ide cc -Isrc -Ibuild/plain/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -march=znver3 \
-              src/buster/apps/ide/ide.c -g0 -c -o "$out/stage1-timed.o"
+              build/plain/Release/ide cc -I"$in/src" -I"$in/build/input/generated" -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -march=znver3 \
+              "$in/src/buster/apps/ide/ide.c" -g0 -c -o "$out/stage1-timed.o"
           done
           cmp "$out/stage1-plain.o" "$out/stage1-timed.o"
           cat "$out/timing.txt"
@@ -131,6 +140,7 @@ jobs:
         if: ${{ always() }}
         shell: bash
         run: |
+          set +e
           out="$RUNNER_TEMP/out"
           echo "=====REPORT-BEGIN ${{ matrix.variant }}"
           for f in identity.txt stage1-hashes.txt callgrind-total.txt timing.txt; do
@@ -138,9 +148,21 @@ jobs:
           done
           if [ -f "$out/stage1.metrics" ]; then
             echo "---- stage1 census (baseline candidate)"
-            LC_ALL=C join -t= <(grep '^c_census\.' "$out/stage1-baseline.metrics" | LC_ALL=C sort -t= -k1,1) <(grep '^c_census\.' "$out/stage1.metrics" | LC_ALL=C sort -t= -k1,1)
+            python3 - "$out/stage1-baseline.metrics" "$out/stage1.metrics" <<'PYTHON'
+          import sys
+          def load(path):
+              facts = {}
+              for line in open(path):
+                  if line.startswith('c_census.'):
+                      key, _, value = line.strip().partition('=')
+                      facts[key] = value
+              return facts
+          baseline, candidate = load(sys.argv[1]), load(sys.argv[2])
+          for key in sorted(set(baseline) | set(candidate)):
+              print(f"{key}={baseline.get(key, 'absent')}={candidate.get(key, 'absent')}")
+          PYTHON
             echo "---- stage1 other metrics (candidate)"
-            grep -E '^(unique|lexed|preprocessed)\.' "$out/stage1.metrics" | head -40
+            grep -E '^(unique|lexed|preprocessed)\.' "$out/stage1.metrics" | sed -n '1,40p'
           fi
           if [ -f "$out/corpus/census.md" ]; then
             echo "---- corpus census.md"; cat "$out/corpus/census.md"
