@@ -9,6 +9,7 @@ repo_root="$(git rev-parse --show-toplevel)"
 live_probe_helper="$repo_root/.github/scripts/issue1162_live_probe.py"
 stage_observer_helper="$repo_root/.github/scripts/issue1162_stage_observer.py"
 workspace_observer_helper="$repo_root/.github/scripts/issue1162_workspace_observer.py"
+manager_denial_helper="$repo_root/.github/scripts/issue1162_manager_denial_probe.py"
 payload="$RUNNER_TEMP/issue1162-install"
 guest="issue1162-exact-${GITHUB_RUN_ID:?}"
 image="issue1162-exact:${GITHUB_RUN_ID}"
@@ -19,6 +20,7 @@ python3 "$live_probe_helper" --lease-self-test | tee "$evidence/lease-probe-self
 python3 "$live_probe_helper" --self-test | tee "$evidence/live-probe-self-test.txt"
 python3 "$stage_observer_helper" --self-test | tee "$evidence/stage-observer-self-test.txt"
 python3 "$workspace_observer_helper" --self-test | tee "$evidence/workspace-observer-self-test.txt"
+python3 "$manager_denial_helper" --self-test | tee "$evidence/manager-denial-self-test.txt"
 python3 "$repo_root/.github/scripts/issue1162_ancestor_preflight_test.py" | tee "$evidence/ancestor-preflight-self-test.txt"
 observer_pid=
 observer_collected=false
@@ -174,9 +176,11 @@ sha256sum "$payload"/binaries/* "$payload"/units/* "$payload"/recipes/* | tee "$
 cp "$live_probe_helper" "$payload/issue1162_live_probe.py"
 cp "$stage_observer_helper" "$payload/issue1162_stage_observer.py"
 cp "$workspace_observer_helper" "$payload/issue1162_workspace_observer.py"
+cp "$manager_denial_helper" "$payload/issue1162_manager_denial_probe.py"
 sha256sum "$live_probe_helper" "$payload/issue1162_live_probe.py" | tee "$evidence/live-probe-helper-sha256.txt"
 sha256sum "$stage_observer_helper" "$payload/issue1162_stage_observer.py" | tee "$evidence/stage-observer-helper-sha256.txt"
 sha256sum "$workspace_observer_helper" "$payload/issue1162_workspace_observer.py" | tee "$evidence/workspace-observer-helper-sha256.txt"
+sha256sum "$manager_denial_helper" "$payload/issue1162_manager_denial_probe.py" | tee "$evidence/manager-denial-helper-sha256.txt"
 clang --version | head -1 | tee "$evidence/toolchains.txt"
 cmake --version | head -1 | tee -a "$evidence/toolchains.txt"
 ninja --version | tee -a "$evidence/toolchains.txt"
@@ -361,8 +365,27 @@ sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_live_probe.p
 sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_live_probe.py --self-test | tee "$evidence/guest-live-probe-self-test.txt"
 sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_stage_observer.py --self-test | tee "$evidence/guest-stage-observer-self-test.txt"
 sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_workspace_observer.py --self-test | tee "$evidence/guest-workspace-observer-self-test.txt"
+sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_manager_denial_probe.py --self-test | tee "$evidence/guest-manager-denial-self-test.txt"
 sudo docker exec "$guest" timeout --signal=TERM --kill-after=5 120 /root/issue1162-install/cleanup-identity-tests --cleanup-identity-only | tee "$evidence/guest-cleanup-identity-tests.txt"
 sudo docker exec "$guest" systemctl start dbus.socket
+sudo docker exec "$guest" install -d -m 0700 -o 0 -g 0 /root/issue1162-install/manager-denial-output
+manager_denial_valid=false
+set +e
+sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_manager_denial_probe.py \
+  --run-id "$GITHUB_RUN_ID" --run-attempt "${GITHUB_RUN_ATTEMPT:?}" \
+  --output /root/issue1162-install/manager-denial-output \
+  >"$evidence/manager-denial-console.log" 2>&1
+manager_denial_status=$?
+set -e
+cat "$evidence/manager-denial-console.log"
+if ! sudo docker cp "$guest:/root/issue1162-install/manager-denial-output" "$evidence/manager-denial-artifacts" || \
+   ! sudo chown -R -- "$(id -u):$(id -g)" "$evidence/manager-denial-artifacts"; then
+  echo "MANAGER_DENIAL_ARTIFACT_COPY_FAILED"
+  manager_denial_status=1
+fi
+if (( manager_denial_status == 0 )); then manager_denial_valid=true; fi
+# Keep collecting the independent service slice when a bare-account probe is
+# inconclusive. Its missing evidence still prevents the overall validator PASS.
 sudo docker exec "$guest" systemctl start buster-bench-systemd-broker.socket
 sudo docker exec "$guest" systemctl start buster-bench.service
 sudo docker exec "$guest" systemctl show buster-bench.service -p ActiveState -p MainPID -p ControlGroup -p RestrictSUIDSGID -p NoNewPrivileges -p CapabilityBoundingSet | tee "$evidence/service-effective.txt"
@@ -499,8 +522,8 @@ if [[ -n "$observer_pid" ]]; then
   if ! collect_stage_observer; then observer_status=1; fi
   if (( observer_status == 0 )); then observer_valid=true; fi
 fi
-if [[ "$probe_valid" != true || "$terminal_valid" != true || "$observer_valid" != true ]]; then
-  echo "SERVICE_RESULT_SUCCEEDED source=$subject job=$job token=$token; live_probe_valid=$probe_valid terminal_proof_valid=$terminal_valid stage_observer_valid=$observer_valid; full acceptance pending"
+if [[ "$probe_valid" != true || "$terminal_valid" != true || "$observer_valid" != true || "$manager_denial_valid" != true ]]; then
+  echo "SERVICE_RESULT_SUCCEEDED source=$subject job=$job token=$token; live_probe_valid=$probe_valid terminal_proof_valid=$terminal_valid stage_observer_valid=$observer_valid manager_denial_valid=$manager_denial_valid; full acceptance pending"
   exit 1
 fi
-echo "NORMAL_PATH_EXECUTION_PASS source=$subject job=$job token=$token; live, terminal and stage observation probes passed; full acceptance pending"
+echo "NORMAL_PATH_EXECUTION_PASS source=$subject job=$job token=$token; live, terminal, stage and bare-account manager observation probes passed; full acceptance pending"
