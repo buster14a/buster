@@ -67,6 +67,8 @@
 //   c_ir_float_parse, c_ir_ieee_from_rational,    literals: exact rational ->
 //   c_ir_ext80_*, c_ir_decode_quoted,             IEEE/x87 conversion, string
 //   c_ir_count_quoted                             and character decoding
+//   c_string_count_memo_create,                   semantic analysis's once-per-
+//   c_ir_count_string_literal_range_for_target    token string-literal counts
 //   c_ir_complex_compose, c_ir_complex_split    immutable complex construction
 //                                                 and scalar projection
 //   c_ir_emit_initializer_capture                exact constructor types and
@@ -12364,6 +12366,60 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
     return result;
 }
 
+CStringCountMemo* c_string_count_memo_create(Arena* arena, CToken const* tokens)
+{
+    u32 capacity = 1024;
+    CStringCountMemo* memo = arena_allocate(arena, CStringCountMemo, 1);
+    *memo = (CStringCountMemo){
+        .arena = arena,
+        .tokens = tokens,
+        // Reused arena bytes can be dirty; empty slots must be zeroed.
+        .slots = arena_allocate_zeroed(arena, u64, capacity),
+        .capacity = capacity,
+    };
+    return memo;
+}
+
+// The slot holding `token_index`, or the empty slot where it belongs.
+BUSTER_C_INTERNAL u64* c_string_count_memo_slot(CStringCountMemo const* memo, u32 token_index)
+{
+    u64 key = (u64)token_index + 1;
+    u32 mask = memo->capacity - 1;
+    u32 slot = (u32)((key * UINT64_C(0x9E3779B97F4A7C15)) >> 32) & mask;
+    while (memo->slots[slot] && memo->slots[slot] >> 32 != key)
+    {
+        slot = (slot + 1) & mask;
+    }
+    return memo->slots + slot;
+}
+
+// Records a narrow fragment's count. The table stays at most half full, and
+// a rebuild re-places every entry at the doubled capacity in the same arena.
+BUSTER_C_INTERNAL void c_string_count_memo_insert(CStringCountMemo* memo, u32 token_index, u64 element_count)
+{
+    if (element_count <= UINT32_MAX)
+    {
+        if (memo->count + 1 > memo->capacity / 2)
+        {
+            CStringCountMemo grown = *memo;
+            grown.capacity = memo->capacity * 2;
+            grown.slots = arena_allocate_zeroed(memo->arena, u64, grown.capacity);
+            for (u32 index = 0; index < memo->capacity; index += 1)
+            {
+                u64 entry = memo->slots[index];
+                if (entry)
+                {
+                    *c_string_count_memo_slot(&grown, (u32)((entry >> 32) - 1)) = entry;
+                }
+            }
+            *memo = grown;
+        }
+        u64* slot = c_string_count_memo_slot(memo, token_index);
+        memo->count += *slot == 0;
+        *slot = ((u64)token_index + 1) << 32 | element_count;
+    }
+}
+
 // c_ir_decode_string_literal_range_for_target without the bytes: `bytes` is
 // left empty and every other field is what the full decode would report, so a
 // caller that only sizes or types the literal -- array-bound inference, the
@@ -12372,20 +12428,42 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
 // decoded, since its element count is a by-product of the same UTF-8 walk,
 // and `arena` is touched only for that. `decoded_out` is written on success
 // only.
+//
+// `memo`, when it answers for `preprocess.tokens`, supplies the count of every
+// narrow fragment it has seen and records the rest: the count of a narrow
+// fragment is a pure function of its spelling, whatever the target (wide
+// fragments, whose element width is the target's, are always decoded). On the
+// stage-1 unity build semantic analysis sized, typed and validated each
+// literal four times; with the memo each narrow fragment is walked once.
 BUSTER_C_SHARED bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target, u32 start, u32 end,
-                                                                    CIrDecodedString* decoded_out)
+                                                                    CStringCountMemo* memo, CIrDecodedString* decoded_out)
 {
     C_CENSUS_PHASE_RECORD(STRING_RANGE_COUNTS, 1);
     CIrDecodedString decoded = {0};
     bool result = c_ir_string_literal_range_shape(&preprocess, target, &start, &end, &decoded);
     u64 element_count = 0;
+    bool memoized = memo && memo->tokens == preprocess.tokens && decoded.element_width == 1;
     for (u32 fragment_index = 0; result && fragment_index < end - start; fragment_index += 1)
     {
-        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[start + fragment_index]);
-        ByteSlice fragment = {0};
+        u32 token_index = start + fragment_index;
+        u64* memo_slot = memoized ? c_string_count_memo_slot(memo, token_index) : 0;
         u64 fragment_elements = 0;
-        result = decoded.element_width == 1 ? c_ir_count_quoted(spelling, '"', &fragment_elements)
-                                            : c_ir_decode_wide_quoted(arena, spelling, '"', decoded.element_width, &fragment, &fragment_elements);
+        if (memo_slot && *memo_slot)
+        {
+            C_CENSUS_PHASE_RECORD(STRING_COUNT_MEMO_HITS, 1);
+            fragment_elements = (u32)*memo_slot;
+        }
+        else
+        {
+            String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]);
+            ByteSlice fragment = {0};
+            result = decoded.element_width == 1 ? c_ir_count_quoted(spelling, '"', &fragment_elements)
+                                                : c_ir_decode_wide_quoted(arena, spelling, '"', decoded.element_width, &fragment, &fragment_elements);
+            if (result && memo_slot)
+            {
+                c_string_count_memo_insert(memo, token_index, fragment_elements);
+            }
+        }
         result = result && fragment_elements <= UINT64_MAX - element_count;
         element_count += result ? fragment_elements : 0;
     }
@@ -40883,6 +40961,45 @@ bool c_test_decode_quoted_paths_agree(Arena* arena, String8 spelling, u8 delimit
 // The range-level half of the gate: over a token range, the count-only entry
 // point must accept exactly what the full decode accepts and report the same
 // count, width, kind and encoding, with `bytes` left empty.
+BUSTER_C_INTERNAL bool c_test_decoded_string_equal(CIrDecodedString left, CIrDecodedString right)
+{
+    return left.bytes.pointer == right.bytes.pointer && left.bytes.length == right.bytes.length && left.element_count == right.element_count &&
+           left.element_width == right.element_width && left.element_kind == right.element_kind && left.encoding == right.encoding;
+}
+
+// Every string-literal token counted twice through one memo, which must
+// grow past its initial capacity without losing a record, answer the second
+// pass entirely from records, and agree with the unmemoized walk each time.
+// A memo created for another token array must record nothing.
+bool c_test_string_count_memo_growth(Arena* arena, CPreprocessResult preprocess, u32* recorded_out)
+{
+    CStringCountMemo* memo = c_string_count_memo_create(arena, preprocess.tokens);
+    CStringCountMemo* foreign = c_string_count_memo_create(arena, preprocess.tokens + 1);
+    bool result = preprocess.token_count <= UINT32_MAX;
+    for (u32 pass = 0; result && pass < 2; pass += 1)
+    {
+        u32 recorded = memo->count;
+        for (u32 index = 0; result && index < preprocess.token_count; index += 1)
+        {
+            if (preprocess.tokens[index].kind == C_TOKEN_STRING_LITERAL)
+            {
+                CIrDecodedString walked = {0};
+                CIrDecodedString memoized = {0};
+                CIrDecodedString bypassed = {0};
+                bool walked_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, index, index + 1, 0, &walked);
+                bool memoized_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, index, index + 1, memo, &memoized);
+                bool bypassed_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, index, index + 1, foreign, &bypassed);
+                result = walked_accepts == memoized_accepts && walked_accepts == bypassed_accepts &&
+                         c_test_decoded_string_equal(walked, memoized) && c_test_decoded_string_equal(walked, bypassed);
+            }
+        }
+        result = result && (pass == 0 || memo->count == recorded) && memo->count <= memo->capacity / 2 && !foreign->count;
+    }
+    *recorded_out = memo->count;
+    return result;
+}
+
+
 bool c_test_string_literal_range_paths_agree(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end, bool* accepted_out)
 {
     CIrDecodedString sentinel = {
@@ -40897,8 +41014,19 @@ bool c_test_string_literal_range_paths_agree(Arena* arena, CPreprocessResult pre
     u64 position = arena->position;
     bool decoded_accepts = c_ir_decode_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, &decoded);
     u64 allocated = arena->position - position;
-    bool counted_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, &counted);
-    bool result = decoded_accepts == counted_accepts;
+    bool counted_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, 0, &counted);
+    // The memoized count must agree with the walk both when it records a
+    // fragment and when it answers from the record, and must record nothing
+    // for a range the walk rejects.
+    CStringCountMemo* memo = c_string_count_memo_create(arena, preprocess.tokens);
+    CIrDecodedString first_memoized = sentinel;
+    CIrDecodedString second_memoized = sentinel;
+    bool first_memoized_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, memo, &first_memoized);
+    u32 recorded = memo->count;
+    bool second_memoized_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, memo, &second_memoized);
+    bool result = decoded_accepts == counted_accepts && first_memoized_accepts == counted_accepts && second_memoized_accepts == counted_accepts &&
+                  memo->count == recorded && (counted_accepts || !recorded) &&
+                  c_test_decoded_string_equal(first_memoized, counted) && c_test_decoded_string_equal(second_memoized, counted);
     if (result && decoded_accepts)
     {
         result = counted.bytes.pointer == 0 && counted.bytes.length == 0 && counted.element_count == decoded.element_count &&
@@ -41595,7 +41723,7 @@ BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuilder
     {
         CIrDecodedString decoded = {0};
         IrType* element = ir_type_from_id(&builder->program->types, element_type);
-        if (!c_ir_count_string_literal_range_for_target(temporary_arena, builder->preprocess, builder->target, start, end, &decoded) ||
+        if (!c_ir_count_string_literal_range_for_target(temporary_arena, builder->preprocess, builder->target, start, end, 0, &decoded) ||
             decoded.element_count == UINT64_MAX || !element || !element->layout.resolved ||
             !c_ir_string_array_element_compatible(builder, element_type, decoded))
         {
@@ -41634,7 +41762,7 @@ BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuilder
         CIrDecodedString decoded = {0};
         IrType* element = ir_type_from_id(&builder->program->types, element_type);
         if (element && element->layout.resolved &&
-            c_ir_count_string_literal_range_for_target(temporary_arena, builder->preprocess, builder->target, string_start, string_end, &decoded) &&
+            c_ir_count_string_literal_range_for_target(temporary_arena, builder->preprocess, builder->target, string_start, string_end, 0, &decoded) &&
             decoded.element_count != UINT64_MAX && c_ir_string_array_element_compatible(builder, element_type, decoded))
         {
             *count_out = decoded.element_count + 1;
