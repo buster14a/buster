@@ -1008,21 +1008,33 @@ class BrokerObserver:
     def _stop_query(self, query: dict[str, object], reason: str) -> None:
         process = query["process"]
         assert isinstance(process, subprocess.Popen)
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=0.5)
-        except subprocess.TimeoutExpired:
+        # poll() may reap an already exited child. Never address its old PID as
+        # a process group after that point: the numeric PID may be reused.
+        if process.poll() is None:
             try:
-                process.kill()
+                os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             try:
                 process.wait(timeout=0.5)
             except subprocess.TimeoutExpired:
-                query["limit_reason"] = "systemctl_client_reap_timeout"
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    query["limit_reason"] = "systemctl_client_reap_timeout"
+        # A child that has already exited can leave inherited pipes open in a
+        # descendant. Bound the stopped query without signalling an unverified
+        # process group or waiting for that descendant.
+        for descriptor in list(query["open"]):
+            query["open"].pop(descriptor, None)
+            for stream in (process.stdout, process.stderr):
+                if stream is not None and not stream.closed and stream.fileno() == descriptor:
+                    stream.close()
+                    break
         query["cancel_reason"] = reason
 
     def _read_query_pipes(self, query: dict[str, object], ready: list[int]) -> None:
@@ -1714,6 +1726,24 @@ def _self_test() -> None:
     assert fixture_lifecycle.snapshots[2]["main_pid"] == 0
     assert fixture_lifecycle.snapshots[2]["incomplete_reasons"] == []
     assert fixture_lifecycle.as_json(boot, raw)["process_complete"]
+    checks += 1
+    reaped = subprocess.Popen(["/usr/bin/true"], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True, start_new_session=True)
+    reaped.wait(timeout=1.0)
+    assert reaped.stdout is not None and reaped.stderr is not None
+    stopped = {"process": reaped,
+               "open": {reaped.stdout.fileno(): "stdout", reaped.stderr.fileno(): "stderr"}}
+    def refuse_killpg(_pid: int, _signal: int) -> None:
+        raise AssertionError("attempted to signal a reaped client's numeric PID")
+
+    original_killpg = os.killpg
+    try:
+        os.killpg = refuse_killpg
+        fixture_observer._stop_query(stopped, "fixture_client_already_reaped")
+    finally:
+        os.killpg = original_killpg
+    assert stopped["open"] == {} and reaped.stdout.closed and reaped.stderr.closed
+    assert stopped["cancel_reason"] == "fixture_client_already_reaped"
     checks += 1
     print(f"BROKER_OBSERVER_SELF_TEST checks={checks} failures=0 fixtures-only-no-live-bus")
 
