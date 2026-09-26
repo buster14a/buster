@@ -222,7 +222,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_stable_region(UnitTestArgu
             CTypeLayoutTestAnswer passes = c_type_layout_test_query(temporary.arena, &unit, question, false, UINT32_MAX);
             BUSTER_TEST(arguments, c_type_layout_test_same(agenda, passes, false));
             BUSTER_TEST(arguments, agenda.resolved && agenda.size == 16 && agenda.alignment == 8);
-            BUSTER_TEST(arguments, c_type_layout_test_agenda_work(agenda.statistics, 3, 1, 0, 0, 1));
+            BUSTER_TEST(arguments, c_type_layout_test_agenda_work(agenda.statistics, 1, 1, 0, 0, 1));
             BUSTER_TEST(arguments, passes.statistics.pass_solves == 1 && passes.statistics.agenda_solves == 0);
             BUSTER_TEST(arguments, passes.statistics.pass_state_types == unit.parse.type_count);
             state_types[size_index] = passes.statistics.pass_state_types;
@@ -242,13 +242,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_stable_region(UnitTestArgu
     return result;
 }
 
-// A containment chain S0 <- S1 <- ... <- SD, asked at its top. Each link is
-// attempted once optimistically, blocked on the link below, and once more
-// after that link finishes; S0 resolves at its first attempt. Each blocked
-// link registers its blocker twice (as the blocker and again as a static
-// prerequisite), so each finish notifies two edges. Every declaration's
-// `int` is a type record of its own, seeded on first read, so the agenda
-// enters D + 1 links and D + 1 ints.
+// A containment chain S0 <- S1 <- ... <- SD, asked at its top. Popping a link
+// registers the link below as its one open prerequisite and pushes it; S0 has
+// none open and resolves at its first attempt, and each finish readies the
+// link above, which then resolves at its only attempt. Every declaration's
+// `int` is a type record of its own, which the seed rule answers without an
+// entry, so the agenda creates D + 1 entries; each link is pushed when first
+// waited on and again when its prerequisite finishes.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_chain(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -273,17 +273,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_chain(UnitTestArguments* a
             BUSTER_TEST(arguments, c_type_layout_test_same(agenda, passes, false));
             BUSTER_TEST(arguments, agenda.resolved && agenda.size == 4ull * (depth + 1) && agenda.alignment == 4);
             BUSTER_TEST(arguments,
-                        c_type_layout_test_agenda_work(agenda.statistics, 2ull * depth + 2, 2ull * depth + 1, 2ull * depth, 2ull * depth, 2ull * depth + 1));
+                        c_type_layout_test_agenda_work(agenda.statistics, depth + 1ull, depth + 1ull, depth, depth, 2ull * depth + 1));
         }
         scratch_end(temporary);
     }
     return result;
 }
 
-// One aggregate over W distinct leaf structs. The first attempt blocks on the
-// first leaf; the expansion registers every leaf, the first twice; every leaf
-// resolves at its first attempt and the aggregate at its second. The agenda
-// enters the aggregate, the W leaves and each leaf's own `int` record.
+// One aggregate over W distinct leaf structs. Popping the aggregate registers
+// the W leaves; every leaf resolves at its first attempt, and the aggregate at
+// its only attempt once the last leaf finishes. The agenda creates entries for
+// the aggregate and the W leaves; each leaf's own `int` record is seeded.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_fan_out(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -312,15 +312,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_fan_out(UnitTestArguments*
             CTypeLayoutTestAnswer passes = c_type_layout_test_query(temporary.arena, &unit, aggregate, false, UINT32_MAX);
             BUSTER_TEST(arguments, c_type_layout_test_same(agenda, passes, false));
             BUSTER_TEST(arguments, agenda.resolved && agenda.size == 4ull * width && agenda.alignment == 4);
-            BUSTER_TEST(arguments, c_type_layout_test_agenda_work(agenda.statistics, 2ull * width + 1, width + 2, width + 1, width + 1, width + 2));
+            BUSTER_TEST(arguments, c_type_layout_test_agenda_work(agenda.statistics, width + 1ull, width + 1ull, width, width, width + 2ull));
         }
         scratch_end(temporary);
     }
     return result;
 }
 
-// Two paths to one base: the base is attempted once, and each of the two
-// middle structs' finishes reaches the top through its own edges.
+// Two paths to one base. The top registers both middle structs; the first
+// popped registers the base, and the second finds it final already. Every
+// type is attempted once, and the top waits on its two middles only.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_diamond(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -337,7 +338,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_diamond(UnitTestArguments*
         CTypeLayoutTestAnswer passes = c_type_layout_test_query(temporary.arena, &unit, top, false, UINT32_MAX);
         BUSTER_TEST(arguments, c_type_layout_test_same(agenda, passes, false));
         BUSTER_TEST(arguments, agenda.resolved && agenda.size == 8 && agenda.alignment == 4);
-        BUSTER_TEST(arguments, c_type_layout_test_agenda_work(agenda.statistics, 5, 6, 5, 5, 6));
+        BUSTER_TEST(arguments, c_type_layout_test_agenda_work(agenda.statistics, 4, 4, 3, 3, 6));
     }
     scratch_end(temporary);
     return result;

@@ -333,6 +333,9 @@ per-type attempt, `c_parse_type_layout_attempts`. The attempt body is shared,
 so each type's layout rule has one implementation; the drivers differ only in
 which type they hand it next (`c_parse_layout_next`) and where its facts live
 (`c_parse_layout_resolved`/`_size`/`_alignment`/`_provisional`/`_publish`).
+The body takes the agenda as a parameter and is inlined into each driver with
+a constant, so the ordered passes' copy carries no agenda branch; keep new
+reads and writes of per-query facts on those accessors.
 
 - **Ordered passes** (`c_parse_type_layout_passes`, the only driver before this
   section existed). Per-query columns cover the whole type table, seeded from
@@ -345,14 +348,15 @@ which type they hand it next (`c_parse_layout_next`) and where its facts live
   for queries with no cache and no type-parse machine: enumerator `sizeof`
   folds and other machineless constant evaluation. It enters the requested
   type, applies the seed rule lazily on first read (`c_parse_layout_seed`,
-  shared with the passes), and attempts only what is reached. An attempt that
-  stops at an open type records it as the blocker; the attempt then waits on it
-  and, once, on its static prerequisites (`c_parse_layout_agenda_expand`: an
-  aligned alias's unqualified type and specifier types, an atomic copy's
-  unqualified type, an enum's/vector's/array's element, and a complete
-  aggregate's member layout types and specifier types). It is retried exactly
-  when the last of those edges completes. Array-bound `sizeof` operands are
-  discovered by the attempt itself.
+  shared with the passes), and attempts only what is reached. The first time
+  a type is popped it waits on each of its static prerequisites that is still
+  open (`c_parse_layout_agenda_expand`: an aligned alias's unqualified type and
+  specifier types, an atomic copy's unqualified type, an enum's/vector's/array's
+  element, and a complete aggregate's member layout types and specifier types),
+  and it is attempted only once all of them are final. Array-bound `sizeof`
+  operands are discovered by the attempt itself: an attempt that stops at an
+  open type records it as the blocker, waits on it, and is retried exactly when
+  it becomes final.
 
 **Why the agenda gives the passes' answer.** Within one query a type's fact
 only moves from unknown to resolved, and without a machine an attempt reads
@@ -389,15 +393,25 @@ re-tokenizer and its kind scan in Stage 3); after them the agenda can serve
 both paths.
 
 **Work and storage.** Agenda state is arena scratch for the one query: an
-entry per reached type (open-addressed index at most half full), one edge per
-registered prerequisite occurrence, and a LIFO ready stack; nothing outlives
-the query. An entry is pushed the first time something waits on it (the
-requested type is pushed at the start) and again each time its unfinished edge
-count returns to zero, so it is never on the stack twice; a type the seed
-resolves is never pushed. Its attempts are its first one, one after its static
-prerequisites finish, and one per array-bound operand that was still open. Edges are bounded by the
-closure's static prerequisites plus blocked attempts, and each edge completes
-exactly once. `ide cc -v` prints the counts accumulated over a compile:
+entry per reached type the seed rule does not answer (open-addressed index at
+most half full), one edge per distinct (waiting type, prerequisite) pair, and a
+LIFO ready stack; nothing outlives the query. A seeded type's fact is a function
+of its own record, so it is recomputed on a miss rather than stored; every
+declaration's scalar specifier is a record of its own, so this keeps the
+entries to the closure's aggregates, arrays, enums and aliases. The last type
+looked up is remembered, because an attempt reads a type's resolution and then
+its layout. An entry is pushed the first time
+something waits on it (the requested type is pushed at the start) and again
+each time its unfinished edge count returns to zero; it gains edges only while
+popped, so it is never on the stack twice. A type the seed resolves is never
+pushed. A type is attempted once, plus once per array-bound operand that was
+still open when an attempt read it, since its static prerequisites are all
+final before the first attempt. An expansion registers its edges back to back,
+so a prerequisite named twice (two members of one type) finds its own edge at
+the head of that prerequisite's waiters and is not registered again; a blocker
+is open and every earlier prerequisite is final, so it is never a repeat. Each
+edge completes exactly once. `ide cc -v` prints the counts accumulated over a
+compile:
 
 ```text
 C_TYPE_LAYOUT solves=N pass_solves=N pass_state_types=N pass_attempts=N agenda_solves=N agenda_types=N agenda_attempts=N agenda_edges=N agenda_notifications=N agenda_pushes=N agenda_fallbacks=N
@@ -414,8 +428,8 @@ checkpointed body so rollbacks and operand copies keep counting.
 `c_type_layout_tests` asks every question of both drivers
 (`c_test_type_layout`): exact agenda work on a stable region of 0 to 1024
 unrelated structs (constant) against linear pass work, containment chains
-(2D + 1 attempts for depth D), fan-out, a diamond whose base is attempted
-once, three invalid cycles (unresolved on both, no edge ever completes), the
+(D + 1 attempts and D edges for depth D), fan-out (W + 1 attempts, W edges),
+a diamond whose every type is attempted once, three invalid cycles (unresolved on both, no edge ever completes), the
 order-dependent operands with their fallbacks, production enumerator folds,
 and a 160-program seeded random corpus of valid and invalid aggregates whose
 every type and member offset must match.

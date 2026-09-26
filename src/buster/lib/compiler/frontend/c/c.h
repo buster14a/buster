@@ -1259,7 +1259,8 @@ struct CTypeLayoutStatistics
     u64 pass_solves;
     u64 pass_state_types;
     u64 pass_attempts;
-    // Demand-driven solves, the distinct types each reached, their attempts,
+    // Demand-driven solves, the entries each created (the distinct types it
+    // reached that the seed rule does not answer), their attempts,
     // prerequisite edges registered, edge completions delivered, agenda pushes
     // and solves abandoned to the ordered passes.
     u64 agenda_solves;
