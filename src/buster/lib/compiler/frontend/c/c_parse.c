@@ -7460,9 +7460,42 @@ BUSTER_C_INTERNAL CTypeId c_parse_aggregate_lookup(CParseResult* result, CTypeKi
     return found;
 }
 
+// The only row a (kind, tag) type name can mean, when the aggregate-tag index
+// vouches for it: every unqualified tagged row enters the index as it is
+// added, and a second live one marks its slot `multiple`, so a complete
+// index's unused slot means no row carries the tag and a single live slot
+// row means no other does. `*decided` stays false -- the caller must search
+// -- for duplicate or stale slots and for an incomplete index.
+BUSTER_C_SHARED CTypeId c_parse_aggregate_unique(CParseResult* result, CTypeKind kind, String8 tag, bool* decided)
+{
+    CTypeId found = C_TYPE_ID_INVALID;
+    CAggregateLookup* lookup = result->aggregate_lookup;
+    *decided = false;
+    if (lookup && !lookup->incomplete && tag.length)
+    {
+        CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, kind, tag);
+        if (!slot->used)
+        {
+            *decided = true;
+        }
+        else if (!slot->multiple && slot->type_index < result->type_count && result->types[slot->type_index].kind == kind &&
+                 !result->types[slot->type_index].has_unqualified_type && string_equal(result->types[slot->type_index].tag, tag))
+        {
+            found = (CTypeId){.value = slot->type_index};
+            *decided = true;
+        }
+    }
+    return found;
+}
+
 #undef C_AGGREGATE_LOOKUP_COUNT
 
 #if BUSTER_INCLUDE_TESTS
+CTypeId c_test_aggregate_unique(CParseResult* result, CTypeKind kind, String8 tag, bool* decided)
+{
+    return c_parse_aggregate_unique(result, kind, tag, decided);
+}
+
 CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType type)
 {
     return c_parse_add_type(result, type);

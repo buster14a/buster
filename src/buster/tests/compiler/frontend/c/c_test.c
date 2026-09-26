@@ -2976,6 +2976,90 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_identity(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_unique_search(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    // The index names a tag's only row, says no row carries an absent one,
+    // and leaves every other answer to the caller's search.
+    CAggregateLookup lookup = {.slot_count = 8};
+    lookup.slots = arena_allocate_zeroed(temporary.arena, CAggregateLookupSlot, lookup.slot_count);
+    CScope scopes[] = {{.parent = C_SCOPE_ID_INVALID}, {.parent = {0}}};
+    CParseResult parse = {.arena = temporary.arena, .aggregate_lookup = &lookup, .scopes = scopes, .scope_count = BUSTER_ARRAY_LENGTH(scopes),
+        .types = arena_allocate(temporary.arena, CType, 64), .type_capacity = 64};
+    bool decided = false;
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Only"), &decided).value == C_ID_UNDERLYING_INVALID && decided);
+    CTypeId only = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Only"), .tag_scope = {1}});
+    CTypeId other_kind = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_UNION, .tag = S8("Only"), .tag_scope = {0}});
+    CType qualified = parse.types[only.value];
+    qualified.has_unqualified_type = true;
+    qualified.unqualified_type = only;
+    qualified.is_const = true;
+    c_test_aggregate_lookup_add(&parse, qualified);
+    // Scope does not enter the answer: the one row is the one the search
+    // would return from any reference, visible or not.
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Only"), &decided).value == only.value && decided);
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_UNION, S8("Only"), &decided).value == other_kind.value && decided);
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_ENUM, S8("Only"), &decided).value == C_ID_UNDERLYING_INVALID && decided);
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, (String8){0}, &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Twice"), .tag_scope = {0}});
+    c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Twice"), .tag_scope = {1}});
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Twice"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    // A rolled-back row leaves its slot stale, which the caller searches; a
+    // row reusing the id under the tag answers again.
+    CParseResult checkpoint = parse;
+    CTypeId speculative = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Speculative"), .tag_scope = {0}});
+    c_test_aggregate_lookup_rollback(&parse, checkpoint);
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Speculative"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_ENUM, .tag = S8("Reuse"), .tag_scope = {0}});
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Speculative"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    c_test_aggregate_lookup_rollback(&parse, checkpoint);
+    CTypeId reused = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Speculative"), .tag_scope = {1}});
+    BUSTER_TEST(arguments, reused.value == speculative.value);
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Speculative"), &decided).value == reused.value && decided);
+    lookup.incomplete = true;
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Only"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    parse.aggregate_lookup = 0;
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Only"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+
+    // Lowering: 64 tags named by casts cost no search row; a shadowed tag
+    // still searches, and each search visits the whole table.
+    for (u32 shadow = 0; shadow < 2; shadow += 1)
+    {
+        String8 source = {0};
+        for (u32 row = 0; row < 64; row += 1)
+        {
+            source = string_format(temporary.arena, S8("{S8}struct U{u32} {{ int a; long b[{u32}]; }};\n"), source, row, row + 1);
+        }
+        source = string_format(temporary.arena, S8("{S8}int use(void* p) {{ int s = 0;\n"), source);
+        for (u32 row = 0; row < 64; row += 1)
+        {
+            source = string_format(temporary.arena, S8("{S8}s += ((struct U{u32}*)p)->a + (int)sizeof(struct U{u32});\n"), source, row, row);
+        }
+        if (shadow)
+        {
+            source = string_format(temporary.arena, S8("{S8}{{ struct U7 {{ char c; }}; s += ((struct U7*)p)->c; }}\n"), source);
+        }
+        source = string_format(temporary.arena, S8("{S8}return s; }\n"), source);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                                                                       .target = target_native,
+                                                                       .data_layout = target_data_layout(target_native),
+                                                                   });
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("aggregate-unique.c"), tokens, parsed, target_native);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parsed.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program != 0);
+#if BUSTER_BENCH_ALLOCATIONS
+        if (BUSTER_REQUIRE(arguments, parsed.aggregate_lookup != 0))
+        {
+            u64 rows = parsed.aggregate_lookup->lowering_search_type_count;
+            BUSTER_TEST(arguments, shadow ? rows != 0 && rows % parsed.type_count == 0 : rows == 0);
+        }
+#endif
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tag_scope_typedef_identity(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23365,6 +23449,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_definition_index);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_tag_scope_typedef_identity);
+    BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_unique_search);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
 
