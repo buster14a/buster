@@ -3,6 +3,9 @@ name: CFI prefix-index research
 on:
   push:
     branches: [research/1309-cfi-prefix-index-ade6ac4]
+    paths:
+      - tools/research/cfi-prefix-index/**
+      - .github/workflows/research-cfi-prefix-index.yml
   workflow_dispatch:
 
 permissions:
@@ -36,6 +39,13 @@ jobs:
           "$RUNNER_TEMP/cfi-probe" extract src/buster/lib/compiler/object/object.c tools/research/cfi-prefix-index/prototype.h cfi-evidence/generated-probe.h
           clang -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -Icfi-evidence tools/research/cfi-prefix-index/differential.c -o "$RUNNER_TEMP/cfi-differential"
           "$RUNNER_TEMP/cfi-differential" | tee cfi-evidence/helper-counts.log
+      - name: Install repository CI linker prerequisite
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y mold
+          mold --version | tee cfi-evidence/mold.txt
       - name: Isolated production-writer builds and held-out controls
         shell: bash
         run: |
