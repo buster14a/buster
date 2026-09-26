@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Temporary, isolated #1162 validation transport. Never install on a protected host.
 set -Eeuo pipefail
-subject=5eb501486f9b713c88d0b611cdc060079892d5b2
+subject=4245bf988aafa6f9fe8b203387b114eb1d7ca026
 baseline=ade6ac4b6ecb21f30b61b656439bac476c145e2f
 evidence="${RUNNER_TEMP:?}/issue1162-exact-slice-evidence"
 source_root="$RUNNER_TEMP/issue1162-source"
@@ -14,6 +14,7 @@ image="issue1162-exact:${GITHUB_RUN_ID}"
 mkdir -p "$evidence" "$payload/binaries" "$payload/sources" "$payload/units"
 chmod 0700 "$evidence"
 exec > >(tee "$evidence/run.log") 2>&1
+python3 "$live_probe_helper" --lease-self-test | tee "$evidence/lease-probe-self-test.txt"
 python3 "$live_probe_helper" --self-test | tee "$evidence/live-probe-self-test.txt"
 python3 "$stage_observer_helper" --self-test | tee "$evidence/stage-observer-self-test.txt"
 observer_pid=
@@ -71,7 +72,7 @@ retain() {
 trap retain EXIT
 printf 'SUBJECT_SHA=%s BASE_SHA=%s WORKFLOW_SHA=%s RUN=%s\n' "$subject" "$baseline" "$GITHUB_SHA" "$GITHUB_RUN_ID"
 git rev-parse "$subject" "$subject^{tree}" "$baseline" "$baseline^{tree}" | tee "$evidence/revisions.txt"
-test "$(git rev-parse "$subject^{tree}")" = 8b90d31bc37abfb7b0c2a93bbb719911c1e2a7dc
+test "$(git rev-parse "$subject^{tree}")" = ea4e65b809ebbe9592c2401e80c1414929529680
 test "$(git rev-parse "$baseline^{tree}")" = 4c5306221fdb22fccc929b55e333163742de17d0
 git worktree add --detach "$source_root" "$subject"
 test -z "$(git -C "$source_root" status --porcelain=v1)"
@@ -93,13 +94,17 @@ for path in files:
 manifest = ("\n".join(lines) + "\n").encode()
 expected = {
     "ade6ac4b6ecb21f30b61b656439bac476c145e2f": (375, 42585, "ebf4a4b4e5943dc60dd9fd9d175af643fbe0d0eee72e70e245c688aaabcb3007"),
-    "5eb501486f9b713c88d0b611cdc060079892d5b2": (372, 42199, "35031a4f9b8b05d9f84abc39043ace9fc7581ebbcfc3a5ac7d17e1fd48d3a9d1"),
+    "4245bf988aafa6f9fe8b203387b114eb1d7ca026": (372, 42199, "d7462636d6ed740bdc5433ef0e6cd24e0fc4b43706a812788b4ab8c6042c5d02"),
 }[rev]
 actual = (len(files), len(manifest), hashlib.sha256(manifest).hexdigest())
 print("SOURCE_CLOSURE", rev, "files", actual[0], "bytes", actual[1], "sha256", actual[2], flush=True)
 assert actual == expected, (actual, expected)
 (root / "source.manifest").write_bytes(manifest)
 PY
+  mkdir -p "$evidence/source-manifests"
+  cp "$payload/sources/$rev/source.manifest" "$evidence/source-manifests/$rev.manifest"
+  cmp "$payload/sources/$rev/source.manifest" "$evidence/source-manifests/$rev.manifest"
+  sha256sum "$evidence/source-manifests/$rev.manifest"
 done
 cd "$source_root"
 mkdir -p build
@@ -107,6 +112,7 @@ clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno
 readelf -W -l build/buster-bench-build | tee "$evidence/build-driver-elf.txt"
 grep -E 'GNU_STACK.*RW[[:space:]]' "$evidence/build-driver-elf.txt"
 build/buster-bench-build bench_service capabilities
+build/buster-bench-build bench_service self-test | tee "$evidence/service-self-test.txt"
 build/buster-bench-build bench_service_broker
 clang -Isrc -DBUSTER_SINGLE_THREADED=1 -std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/throughput/throughput.c tools/throughput/shared.c -lm -o build/throughput
 cat > "$payload/broker-state-probe.c" <<'PROBE'
@@ -154,6 +160,10 @@ install -m 0755 build/bench-service-tools/service "$payload/binaries/buster-benc
 install -m 0755 build/bench-service-tools/systemd-broker "$payload/binaries/buster-bench-systemd-broker"
 install -m 0755 build/bench-service-tools/systemd-broker-live-test "$payload/binaries/systemd-broker-live-test"
 install -m 0755 build/throughput "$payload/binaries/buster-bench-throughput"
+# The existing root-only cleanup regression owns fresh /tmp fixtures and is
+# kept outside the installed service's executable namespace.
+install -m 0755 build/bench-service-tools/service-tests "$payload/cleanup-identity-tests"
+sha256sum "$payload/cleanup-identity-tests" | tee "$evidence/cleanup-identity-binary-sha256.txt"
 cp tools/bench_service/deploy/{buster-bench.service,buster-bench.slice,buster-bench-systemd-broker.socket,buster-bench-systemd-broker@.service,buster-bench.tmpfiles.conf} "$payload/units/"
 mkdir -p "$payload/recipes"
 cp tools/bench_service/profiles/validate-buster-v1.recipe "$payload/recipes/"
@@ -165,6 +175,17 @@ sha256sum "$stage_observer_helper" "$payload/issue1162_stage_observer.py" | tee 
 clang --version | head -1 | tee "$evidence/toolchains.txt"
 cmake --version | head -1 | tee -a "$evidence/toolchains.txt"
 ninja --version | tee -a "$evidence/toolchains.txt"
+for tool in clang cmake ninja; do
+  tool_path="$(command -v "$tool")"
+  printf 'tool=%s path=%s resolved=%s\n' "$tool" "$tool_path" "$(readlink -f "$tool_path")"
+  sha256sum "$tool_path"
+  ldd "$tool_path"
+done >"$evidence/build-tool-dependencies.txt" 2>&1
+for binary in "$payload"/binaries/* "$payload/cleanup-identity-tests"; do
+  printf 'binary=%s\n' "$binary"
+  ldd "$binary"
+done >"$evidence/installed-binary-dependencies.txt" 2>&1
+printf 'PATH=%s\nLANG=%s\nLC_ALL=%s\n' "$PATH" "${LANG-}" "${LC_ALL-}" >"$evidence/build-environment.txt"
 cat > "$payload/Dockerfile" <<'DOCKERFILE'
 FROM ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv dbus util-linux python3 clang cmake ninja-build binutils build-essential git ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -222,6 +243,39 @@ stat -c 'LEASE_DEVICE=%d LEASE_INODE=%i MODE=%a OWNER=%u:%g LINKS=%h' /var/lib/b
 stat -c '%a %u:%g %n' /var/lib/buster-bench /var/lib/buster-bench/queue /var/lib/buster-bench/workspaces /var/lib/buster-bench/lease /var/lib/buster-bench/workspaces/results /etc/buster-bench /etc/buster-bench/systemd-broker-lease.identity
 systemctl daemon-reload
 systemd-analyze verify /etc/systemd/system/buster-bench.service /etc/systemd/system/buster-bench-systemd-broker.socket /etc/systemd/system/buster-bench-systemd-broker@.service /etc/systemd/system/buster-bench.slice
+for file in /root/issue1162-install/binaries/*; do
+  installed="/usr/local/libexec/$(basename "$file")"
+  cmp "$file" "$installed"
+  sha256sum "$installed"
+  stat -c '%a %u:%g %h %n' "$installed"
+done
+for file in /root/issue1162-install/units/*.service /root/issue1162-install/units/*.socket /root/issue1162-install/units/*.slice; do
+  installed="/etc/systemd/system/$(basename "$file")"
+  cmp "$file" "$installed"
+  sha256sum "$installed"
+  stat -c '%a %u:%g %h %n' "$installed"
+done
+cmp /root/issue1162-install/recipes/validate-buster-v1.recipe /opt/buster-bench/installed/recipes/validate-buster-v1.recipe
+sha256sum /opt/buster-bench/installed/recipes/validate-buster-v1.recipe
+for file in /root/issue1162-install/sources/*/source.manifest; do
+  revision="$(basename "$(dirname "$file")")"
+  cmp "$file" "/opt/buster-bench/installed/sources/$revision/source.manifest"
+  sha256sum "/opt/buster-bench/installed/sources/$revision/source.manifest"
+done
+printf 'GUEST_RUNTIME_TOOLCHAIN\n'
+clang --version
+cmake --version
+ninja --version
+dpkg-query -W -f='${Package} ${Version}\n'
+for executable in /usr/local/libexec/buster-bench-* /usr/local/libexec/systemd-broker-live-test /root/issue1162-install/cleanup-identity-tests /usr/bin/clang /usr/bin/cmake /usr/bin/ninja; do
+  printf 'runtime-executable=%s resolved=%s\n' "$executable" "$(readlink -f "$executable")"
+  sha256sum "$executable"
+  dependencies="$(ldd "$executable")"
+  printf '%s\n' "$dependencies"
+  printf '%s\n' "$dependencies" | awk '$2 == "=>" && $3 ~ /^\// {print $3} $1 ~ /^\// {print $1}' | while IFS= read -r library; do
+    sha256sum "$library"
+  done
+done
 GUEST
 sudo docker build --pull --no-cache -t "$image" "$payload"
 sudo docker run -d --name "$guest" --privileged --cgroup-parent=docker.slice --cgroupns=private --network none --env container=docker --tmpfs /tmp --tmpfs /run --tmpfs /run/lock "$image"
@@ -231,10 +285,60 @@ for attempt in $(seq 1 40); do
 done
 cat "$evidence/manager.txt"
 sudo docker exec "$guest" sh -ec 'test "$(cat /proc/1/comm)" = systemd; test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs; test -w /sys/fs/cgroup/cgroup.subtree_control; grep -qw cpu /sys/fs/cgroup/cgroup.controllers; grep -qw cpuset /sys/fs/cgroup/cgroup.controllers; grep -qw memory /sys/fs/cgroup/cgroup.controllers; grep -qw pids /sys/fs/cgroup/cgroup.controllers'
+sudo docker exec "$guest" sh -ec 'uname -a; systemd --version; cat /proc/sys/kernel/random/boot_id; cat /proc/self/cgroup; cat /proc/self/mountinfo; for name in cgroup.controllers cpuset.cpus.effective memory.max memory.swap.max pids.max; do printf "%s=" "$name"; cat "/sys/fs/cgroup/$name"; done' >"$evidence/guest-platform-and-ancestor.txt"
+# Inspect the real host-visible guest ancestry as well as its private cgroup
+# namespace, before copying or provisioning any service files.
+guest_pid="$(sudo docker inspect --format '{{.State.Pid}}' "$guest")"
+[[ "$guest_pid" =~ ^[1-9][0-9]*$ ]]
+test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
+sudo python3 - "$guest_pid" <<'ANCESTORS' | tee "$evidence/host-visible-guest-ancestors.txt"
+import json, os, re, sys
+from pathlib import Path
+pid = int(sys.argv[1])
+proc = Path(f"/proc/{pid}")
+before = (proc / "stat").read_text()
+start = before[before.rfind(")") + 2:].split()[19]
+cgroup = (proc / "cgroup").read_text()
+assert cgroup.startswith("0::/") and cgroup.count("\n") == 1, cgroup
+relative = cgroup[4:].strip()
+parts = relative.split("/") if relative else []
+assert len(parts) <= 64 and all(re.fullmatch(r"[A-Za-z0-9_.:@-]+", p) and p not in (".", "..") for p in parts)
+root = Path("/sys/fs/cgroup")
+current = root
+rows = []
+for part in [None, *parts]:
+    if part is not None:
+        current = current / part
+    assert not current.is_symlink() and current.is_dir(), current
+    cpus = (current / "cpuset.cpus.effective").read_text().strip()
+    assert len(cpus) <= 4096 and cpus, cpus
+    ranges = [piece.split("-") for piece in cpus.split(",")]
+    assert all(len(r) in (1, 2) and all(x.isdecimal() for x in r) and int(r[0]) <= int(r[-1]) for r in ranges)
+    assert any(int(r[0]) <= 2 <= int(r[-1]) for r in ranges), (current, cpus)
+    limits = {}
+    for name, minimum in (("memory.max", 8 * 1024**3), ("pids.max", 256)):
+        path = current / name
+        # The cgroup-v2 root has no controller limit files.
+        value = path.read_text().strip() if path.exists() else "root-unlimited"
+        assert value != "root-unlimited" or current == root, (current, name)
+        assert value in ("max", "root-unlimited") or (value.isdecimal() and int(value) >= minimum), (current, name, value)
+        limits[name] = value
+    swap = current / "memory.swap.max"
+    limits["memory.swap.max"] = swap.read_text().strip() if swap.exists() else "unavailable"
+    info = current.stat()
+    rows.append({"path": str(current), "device": info.st_dev, "inode": info.st_ino,
+                 "cpuset.cpus.effective": cpus, **limits})
+after = (proc / "stat").read_text()
+assert after[after.rfind(")") + 2:].split()[19] == start and (proc / "cgroup").read_text() == cgroup
+print(json.dumps({"guest_host_pid": pid, "start_ticks": start, "cgroup": cgroup, "ancestors": rows}, sort_keys=True))
+print("HOST_ANCESTOR_PREFLIGHT_PASS cpu=2 memory_min=8589934592 pids_min=256; service still uninstalled")
+ANCESTORS
 sudo docker cp "$payload" "$guest:/root/issue1162-install"
 sudo docker exec "$guest" sh /root/issue1162-install/provision.sh | tee "$evidence/provision.txt"
+sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_live_probe.py --lease-self-test | tee "$evidence/guest-lease-probe-self-test.txt"
 sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_live_probe.py --self-test | tee "$evidence/guest-live-probe-self-test.txt"
 sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_stage_observer.py --self-test | tee "$evidence/guest-stage-observer-self-test.txt"
+sudo docker exec "$guest" timeout --signal=TERM --kill-after=5 120 /root/issue1162-install/cleanup-identity-tests --cleanup-identity-only | tee "$evidence/guest-cleanup-identity-tests.txt"
 sudo docker exec "$guest" systemctl start dbus.socket
 sudo docker exec "$guest" systemctl start buster-bench-systemd-broker.socket
 sudo docker exec "$guest" systemctl start buster-bench.service
