@@ -1,0 +1,197 @@
+name: Promotion quotient research
+on:
+  push:
+    branches: [research/promotion-quotient-20260925-astra-c74e]
+permissions:
+  contents: read
+concurrency:
+  group: promotion-quotient-research-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  evidence:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      PIN: ade6ac4b6ecb21f30b61b656439bac476c145e2f
+      TREE: 4c5306221fdb22fccc929b55e333163742de17d0
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin source and establish isolated worktrees
+        shell: bash
+        run: |
+          set -euo pipefail
+          E="$GITHUB_WORKSPACE/evidence"
+          S="$RUNNER_TEMP/promotion-quotient-source"
+          I="$RUNNER_TEMP/promotion-quotient-input"
+          R="$GITHUB_WORKSPACE/tools/investigations/promotion-quotient-20260925"
+          mkdir -p "$E" "$I"
+          printf 'E=%s\nS=%s\nI=%s\nR=%s\n' "$E" "$S" "$I" "$R" >> "$GITHUB_ENV"
+          test "$(git rev-parse "$PIN^{tree}")" = "$TREE"
+          git worktree add --detach "$S" "$PIN"
+          git archive "$PIN" | tar -x -C "$I"
+          printf 'source=%s\ntree=%s\ntransport=%s\ntransport_tree=%s\n' "$PIN" "$TREE" "$GITHUB_SHA" "$(git rev-parse HEAD^{tree})" > "$E/identities.txt"
+          cp -r "$R" "$E/packet"
+          { uname -a; cat /etc/os-release; clang --version; gcc --version; cmake --version; ninja --version; } > "$E/environment.txt"
+          git -C "$S" ls-tree HEAD src/buster/lib/compiler/ir/ir_promote.c >> "$E/identities.txt"
+      - name: Independent finite model on hosted Clang and GCC
+        shell: bash
+        run: |
+          set -euo pipefail
+          for CC in clang gcc; do
+            "$CC" -std=c11 -O2 -fwrapv -fno-strict-aliasing -funsigned-char -Wall -Wextra -Wpedantic -Werror "$R/model.c" -o "$E/model-$CC"
+            "$E/model-$CC" | tee "$E/model-$CC.txt"
+          done
+          clang -std=c11 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fwrapv -fno-strict-aliasing -funsigned-char -Wall -Wextra -Wpedantic -Werror "$R/model.c" -o "$E/model-sanitized"
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$E/model-sanitized" | tee "$E/model-sanitized.txt"
+      - name: Trusted baseline build and pre-change self-host gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$S"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/pq-driver"
+          "$RUNNER_TEMP/pq-driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF > "$E/configure.log" 2>&1
+          "$RUNNER_TEMP/pq-driver" build --config Release -t ide > "$E/baseline-build.log" 2>&1
+          cp build/Release/ide "$E/baseline-ide"
+          cp build/compile_commands.json "$E/compile_commands.json"
+          cp build/CMakeCache.txt "$E/CMakeCache.txt"
+          sha256sum "$E/baseline-ide" > "$E/compiler-sha256.txt"
+          "$RUNNER_TEMP/pq-driver" test_self_host --config Release > "$E/baseline-self-host.log" 2>&1
+      - name: Baseline registered regression suite
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$E/baseline-ide"
+          cd "$S"
+          "$RUNNER_TEMP/pq-driver" build --config Release -t test_all > "$E/baseline-tests.log" 2>&1
+      - name: Build blob-anchored isolated research overlay
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$E/baseline-ide"
+          cd "$S"
+          test "$(git hash-object src/buster/lib/compiler/ir/ir_promote.c)" = 3a0bf7fd859afeb9c3d34d2db49368717740903a
+          git apply --check "$R/overlay.patch"
+          git apply "$R/overlay.patch"
+          cp "$R/observer.h" src/buster/lib/compiler/ir/promotion_quotient_research.h
+          git diff --check
+          git diff -- src/buster/lib/compiler/ir/ir_promote.c > "$E/applied.patch"
+          sha256sum src/buster/lib/compiler/ir/ir_promote.c src/buster/lib/compiler/ir/promotion_quotient_research.h >> "$E/identities.txt"
+          "$RUNNER_TEMP/pq-driver" build --config Release -t ide > "$E/probe-build.log" 2>&1
+          cp build/Release/ide "$E/probe-ide"
+          sha256sum "$E/probe-ide" >> "$E/compiler-sha256.txt"
+      - name: Whole-compiler and fixture state census with actual sharing
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$E/probe-ide"
+          test -x "$E/model-clang"
+          mkdir -p "$E/census"
+          cp "$R/family.c" "$I/family.c"
+          cd "$I"
+          inputs=(tests/basic_c_operations.c tests/basic_c_frontend_ssa.c tests/basic_c_local_promotion.c tests/basic_c_goto_into_loop.c tests/basic_c_nested_control_substatement.c tests/basic_c_volatile_aggregate.c family.c src/buster/apps/ide/ide.c)
+          failures=0
+          for form in default memory; do
+            form_flags=()
+            if test "$form" = memory; then form_flags=(-fno-frontend-ssa); fi
+            for input in "${inputs[@]}"; do
+              name="$(basename "$input" .c)-$form"
+              common=(cc -c -g0 -fregister-allocator=fast)
+              if test "$input" = src/buster/apps/ide/ide.c; then
+                common+=(-Isrc -I"$S/build/generated" -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0)
+              fi
+              common+=("${form_flags[@]}" "$input")
+              printf '%q ' "${common[@]}" > "$E/census/$name.command"
+              printf '\n' >> "$E/census/$name.command"
+              for mode in baseline observe share; do
+                compiler="$E/probe-ide"
+                if test "$mode" = baseline; then compiler="$E/baseline-ide"; fi
+                set +e
+                BUSTER_RESEARCH_PROMOTION_QUOTIENT="$mode" BUSTER_RESEARCH_PROMOTION_TRACE=1 "$compiler" "${common[@]}" -o "$E/census/$name-$mode.o" > "$E/census/$name-$mode.stdout" 2> "$E/census/$name-$mode.stderr"
+                status=$?
+                set -e
+                printf '%s\n' "$status" > "$E/census/$name-$mode.status"
+                sed '/^PQ /d' "$E/census/$name-$mode.stderr" > "$E/census/$name-$mode.diagnostics"
+                if test "$mode" != baseline; then
+                  "$E/model-clang" --census "$E/census/$name-$mode.stderr" | tee -a "$E/census-summary.txt"
+                fi
+              done
+              for mode in observe share; do
+                cmp "$E/census/$name-baseline.status" "$E/census/$name-$mode.status" || failures=$((failures+1))
+                cmp "$E/census/$name-baseline.diagnostics" "$E/census/$name-$mode.diagnostics" || failures=$((failures+1))
+                if test "$(cat "$E/census/$name-baseline.status")" = 0; then
+                  cmp "$E/census/$name-baseline.o" "$E/census/$name-$mode.o" || failures=$((failures+1))
+                fi
+              done
+            done
+          done
+          printf 'census_comparison_failures=%s\n' "$failures" | tee "$E/census-result.txt"
+          test "$failures" = 0
+      - name: Mixed identity control across targets, allocators and debug provenance
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$E/probe-ide"
+          mkdir -p "$E/matrix"
+          cd "$I"
+          failures=0
+          for target in x86_64-linux aarch64-linux; do
+            for allocator in none mir-stack fast quality; do
+              for form in default memory; do
+                form_flags=()
+                if test "$form" = memory; then form_flags=(-fno-frontend-ssa); fi
+                name="$target-$allocator-$form"
+                for mode in baseline share; do
+                  compiler="$E/probe-ide"
+                  if test "$mode" = baseline; then compiler="$E/baseline-ide"; fi
+                  BUSTER_RESEARCH_PROMOTION_QUOTIENT="$mode" "$compiler" cc -c -g -target "$target" -fregister-allocator="$allocator" "${form_flags[@]}" family.c -o "$E/matrix/$name-$mode.o" > "$E/matrix/$name-$mode.stdout" 2> "$E/matrix/$name-$mode.stderr"
+                done
+                cmp "$E/matrix/$name-baseline.o" "$E/matrix/$name-share.o" || failures=$((failures+1))
+                if test "$target" = x86_64-linux; then
+                  clang "$E/matrix/$name-share.o" -o "$E/matrix/$name"
+                  "$E/matrix/$name" || failures=$((failures+1))
+                fi
+              done
+            done
+          done
+          printf 'matrix_failures=%s\n' "$failures" | tee "$E/matrix-result.txt"
+          test "$failures" = 0
+      - name: Sharing-enabled registered suite and post-change self-host gate
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$E/probe-ide"
+          cd "$S"
+          export BUSTER_RESEARCH_PROMOTION_QUOTIENT=share
+          set +e
+          "$RUNNER_TEMP/pq-driver" build --config Release -t test_all > "$E/probe-tests.log" 2>&1
+          suite=$?
+          "$RUNNER_TEMP/pq-driver" test_self_host --config Release > "$E/probe-self-host.log" 2>&1
+          self_host=$?
+          set -e
+          printf 'suite=%s\nself_host=%s\n' "$suite" "$self_host" | tee "$E/probe-gates.txt"
+          test "$suite" = 0 && test "$self_host" = 0
+      - name: Retain exact evidence including failed attempts
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -d "$E"; then
+            find "$E" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$E/SHA256SUMS"
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: promotion-quotient-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30

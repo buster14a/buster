@@ -1,0 +1,165 @@
+--- a/src/buster/lib/compiler/ir/ir_promote.c
++++ b/src/buster/lib/compiler/ir/ir_promote.c
+@@ -290,9 +290,12 @@
+ 
+ // All arrays below are reused for the next local. Effects are 0=forward the
+ // incoming value, 1=store a new definition, 2=LOCAL lifetime reset.
++#include <buster/lib/compiler/ir/promotion_quotient_research.h>
++
+ BUSTER_GLOBAL_LOCAL bool ir_promote_global(Arena* arena, IrProgram* program, IrFunction* function, IrPromoteLocal* local,
+                                            IrPromoteEvent* events, IrPromoteCfg* cfg, u8* effects, u8* live, u8* bad_in, u8* bad_out,
+-                                           u32* entries, u32* exits, u32* replacements, u8* removed, IrLocalPromotionStatistics* statistics)
++                                           u32* entries, u32* exits, u32* replacements, u8* removed, IrLocalPromotionStatistics* statistics,
++                                           PromotionQuotient* quotient)
+ {
+     u32 count = function->block_count;
+     memset(effects, 0, count);
+@@ -319,60 +322,73 @@
+             exits[block] = row->opcode == IR_OPCODE_STORE ? row->operands[1].value : IR_PROMOTE_NONE;
+         }
+     }
++    PromotionQuotientProbe probe = promotion_quotient_begin(quotient, effects, live, &safe);
+     u32 read = 0;
+     u32 write = 0;
+-    for (u32 block = 0; block < count; block += 1)
+-    {
+-        bad_in[block] = block == function->entry.value || !cfg->reachable[block] || cfg->offsets[block] == cfg->offsets[block + 1];
+-        bad_out[block] = effects[block] == 2 || (effects[block] == 0 && bad_in[block]);
+-        if (bad_out[block])
+-        {
+-            cfg->queue[write++] = block;
+-        }
+-    }
+-    while (read < write)
+-    {
+-        u32 block = cfg->queue[read++];
+-        IrInstruction* terminator = function->instructions + function->blocks[block].last_instruction.value;
+-        for (u32 index = 0; index < terminator->target_count; index += 1)
+-        {
+-            u32 target = terminator->targets[index].value;
+-            bad_in[target] = 1;
+-            if (effects[target] == 0 && !bad_out[target])
+-            {
+-                bad_out[target] = 1;
+-                cfg->queue[write++] = target;
+-            }
+-        }
+-    }
+-    for (u32 block = 0; block < count; block += 1)
+-    {
+-        safe &= !(live[block] && bad_in[block]);
+-    }
++    if (!(probe.hit && quotient->share))
++    {
++        for (u32 block = 0; block < count; block += 1)
++        {
++            probe.block_visits += 1;
++            bad_in[block] = block == function->entry.value || !cfg->reachable[block] || cfg->offsets[block] == cfg->offsets[block + 1];
++            bad_out[block] = effects[block] == 2 || (effects[block] == 0 && bad_in[block]);
++            if (bad_out[block])
++            {
++                cfg->queue[write++] = block;
++            }
++        }
++        while (read < write)
++        {
++            u32 block = cfg->queue[read++];
++            IrInstruction* terminator = function->instructions + function->blocks[block].last_instruction.value;
++            for (u32 index = 0; index < terminator->target_count; index += 1)
++            {
++                probe.forward_edges += 1;
++                u32 target = terminator->targets[index].value;
++                bad_in[target] = 1;
++                if (effects[target] == 0 && !bad_out[target])
++                {
++                    bad_out[target] = 1;
++                    cfg->queue[write++] = target;
++                }
++            }
++        }
++        for (u32 block = 0; block < count; block += 1)
++        {
++            probe.block_visits += 1;
++            safe &= !(live[block] && bad_in[block]);
++        }
++        if (safe)
++        {
++            read = 0;
++            write = 0;
++            for (u32 block = 0; block < count; block += 1)
++            {
++                probe.block_visits += 1;
++                if (live[block])
++                {
++                    cfg->queue[write++] = block;
++                }
++            }
++            while (read < write)
++            {
++                u32 block = cfg->queue[read++];
++                for (u32 index = cfg->offsets[block]; index < cfg->offsets[block + 1]; index += 1)
++                {
++                    probe.backward_edges += 1;
++                    u32 pred = cfg->predecessors[index];
++                    if (!effects[pred] && !live[pred])
++                    {
++                        live[pred] = 1;
++                        cfg->queue[write++] = pred;
++                    }
++                }
++            }
++        }
++    }
++    promotion_quotient_finish(arena, quotient, &probe, function, local, safe, live);
+     if (safe)
+     {
+-        read = 0;
+-        write = 0;
+-        for (u32 block = 0; block < count; block += 1)
+-        {
+-            if (live[block])
+-            {
+-                cfg->queue[write++] = block;
+-            }
+-        }
+-        while (read < write)
+-        {
+-            u32 block = cfg->queue[read++];
+-            for (u32 index = cfg->offsets[block]; index < cfg->offsets[block + 1]; index += 1)
+-            {
+-                u32 pred = cfg->predecessors[index];
+-                if (!effects[pred] && !live[pred])
+-                {
+-                    live[pred] = 1;
+-                    cfg->queue[write++] = pred;
+-                }
+-            }
+-        }
+         u32 parameter_count = 0;
+         u32 first_parameter = function->value_count;
+         for (u32 block = 0; block < count; block += 1)
+@@ -813,6 +829,7 @@
+                 }
+             }
+         }
++        PromotionQuotient quotient = {0};
+         IrPromoteCfg cfg = {0};
+         bool cfg_built = false;
+         bool cfg_valid = false;
+@@ -861,6 +878,7 @@
+                     {
+                         cfg_built = true;
+                         cfg_valid = ir_promote_cfg(arena, program, function, &cfg);
++                        promotion_quotient_initialize(arena, &quotient, function->block_count);
+                         effects = arena_allocate(arena, u8, function->block_count);
+                         live = arena_allocate(arena, u8, function->block_count);
+                         bad_in = arena_allocate(arena, u8, function->block_count);
+@@ -871,7 +889,7 @@
+                     if (cfg_valid)
+                     {
+                         ir_promote_global(arena, program, function, local, events, &cfg, effects, live, bad_in, bad_out,
+-                                          entries, exits, replacements, removed, statistics);
++                                          entries, exits, replacements, removed, statistics, &quotient);
+                     }
+                 }
+             }
