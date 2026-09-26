@@ -1335,6 +1335,27 @@ class BrokerObserver:
         self.stop_seen = _safe_stop_file(self.writer)
         return self.stop_seen
 
+    def _drain_final_events(self) -> None:
+        # A stop marker bounds new work, but there may still be queued manager
+        # messages. Claim a complete stream only after observing an empty bus.
+        final_deadline = min(self.deadline, time.monotonic() + 0.25)
+        for _ in range(MAX_DISPATCHES_PER_DRAIN):
+            if time.monotonic() >= final_deadline:
+                self.mark_global("manager_final_drain_deadline_exceeded", event_loss=True)
+                break
+            result, message = self.bus.process_one()
+            if result == 0:
+                break
+            self.bus_dispatch_count += 1
+            if self.bus_dispatch_count > MAX_BUS_DISPATCHES:
+                self.bus_budget_exhausted = True
+                self.mark_global("manager_bus_dispatch_budget_exceeded", event_loss=True)
+                break
+            if message is not None:
+                self.handle_message(message)
+        else:
+            self.mark_global("manager_final_drain_slice_exceeded", event_loss=True)
+
     def run(self) -> dict[str, object]:
         require(bool(getattr(self.bus, "armed", False)),
                 "observer readiness requires installed matches and Manager.Subscribe ack")
@@ -1370,21 +1391,7 @@ class BrokerObserver:
             self._poll_once()
         # Give queued final manager messages one bounded drain after the root's
         # stop marker, then refuse new show subprocesses.
-        final_drain_deadline = min(self.deadline, time.monotonic() + 0.25)
-        for _ in range(MAX_DISPATCHES_PER_DRAIN):
-            if time.monotonic() >= final_drain_deadline:
-                break
-            result, message = self.bus.process_one()
-            if result == 0:
-                break
-            self.bus_dispatch_count += 1
-            if self.bus_dispatch_count > MAX_BUS_DISPATCHES:
-                self.bus_budget_exhausted = True
-                self.mark_global("manager_bus_dispatch_budget_exceeded", event_loss=True)
-                break
-            if message is None:
-                continue
-            self.handle_message(message)
+        self._drain_final_events()
         while self.queue:
             lifecycle, _trigger, seq = self.queue.popleft()
             reason = "observer_stopped_before_snapshot"
@@ -1745,6 +1752,29 @@ def _self_test() -> None:
     assert stopped["open"] == {} and reaped.stdout.closed and reaped.stderr.closed
     assert stopped["cancel_reason"] == "fixture_client_already_reaped"
     checks += 1
+    class FixtureFinalBus:
+        def __init__(self, messages: int):
+            self.remaining = messages
+
+        def process_one(self) -> tuple[int, None]:
+            if self.remaining:
+                self.remaining -= 1
+                return 1, None
+            return 0, None
+
+    for queued, expected_loss in ((0, False), (MAX_DISPATCHES_PER_DRAIN - 1, False),
+                                  (MAX_DISPATCHES_PER_DRAIN, True)):
+        final_observer = object.__new__(BrokerObserver)
+        final_observer.bus = FixtureFinalBus(queued)
+        final_observer.deadline = time.monotonic() + 5.0
+        final_observer.bus_dispatch_count = 0
+        final_observer.bus_budget_exhausted = False
+        final_observer.global_reasons = []
+        final_observer.event_loss_detected = False
+        final_observer._drain_final_events()
+        assert final_observer.event_loss_detected == expected_loss
+        assert final_observer.bus_dispatch_count == queued
+        checks += 1
     print(f"BROKER_OBSERVER_SELF_TEST checks={checks} failures=0 fixtures-only-no-live-bus")
 
 
