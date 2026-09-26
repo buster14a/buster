@@ -17,6 +17,7 @@ exec > >(tee "$evidence/run.log") 2>&1
 python3 "$live_probe_helper" --lease-self-test | tee "$evidence/lease-probe-self-test.txt"
 python3 "$live_probe_helper" --self-test | tee "$evidence/live-probe-self-test.txt"
 python3 "$stage_observer_helper" --self-test | tee "$evidence/stage-observer-self-test.txt"
+python3 "$repo_root/.github/scripts/issue1162_ancestor_preflight_test.py" | tee "$evidence/ancestor-preflight-self-test.txt"
 observer_pid=
 observer_collected=false
 collect_stage_observer() {
@@ -291,10 +292,14 @@ sudo docker exec "$guest" sh -ec 'uname -a; systemd --version; cat /proc/sys/ker
 guest_pid="$(sudo docker inspect --format '{{.State.Pid}}' "$guest")"
 [[ "$guest_pid" =~ ^[1-9][0-9]*$ ]]
 test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
-sudo python3 - "$guest_pid" <<'ANCESTORS' | tee "$evidence/host-visible-guest-ancestors.txt"
+sudo docker exec "$guest" stat -c '%d %i' /sys/fs/cgroup >"$evidence/guest-cgroup-root-before.txt"
+read -r guest_cgroup_device guest_cgroup_inode guest_cgroup_extra <"$evidence/guest-cgroup-root-before.txt"
+[[ "$guest_cgroup_device" =~ ^[1-9][0-9]*$ && "$guest_cgroup_inode" =~ ^[1-9][0-9]*$ && -z "$guest_cgroup_extra" ]]
+sudo python3 - "$guest_pid" "$guest_cgroup_device" "$guest_cgroup_inode" <<'ANCESTORS' | tee "$evidence/host-visible-guest-ancestors.txt"
 import json, os, re, sys
 from pathlib import Path
 pid = int(sys.argv[1])
+namespace_root = (int(sys.argv[2]), int(sys.argv[3]))
 proc = Path(f"/proc/{pid}")
 before = (proc / "stat").read_text()
 start = before[before.rfind(")") + 2:].split()[19]
@@ -304,8 +309,10 @@ relative = cgroup[4:].strip()
 parts = relative.split("/") if relative else []
 assert len(parts) <= 64 and all(re.fullmatch(r"[A-Za-z0-9_.:@-]+", p) and p not in (".", "..") for p in parts)
 root = Path("/sys/fs/cgroup")
+assert (root.stat().st_dev, root.stat().st_ino) != namespace_root, "guest cgroup root must be private"
 current = root
 rows = []
+namespace_found = False
 for part in [None, *parts]:
     if part is not None:
         current = current / part
@@ -328,11 +335,22 @@ for part in [None, *parts]:
     info = current.stat()
     rows.append({"path": str(current), "device": info.st_dev, "inode": info.st_ino,
                  "cpuset.cpus.effective": cpus, **limits})
+    # For the host-ancestry preflight, stop at the namespace root;
+    # init.scope is a sibling of the future service slice.
+    if (info.st_dev, info.st_ino) == namespace_root:
+        namespace_found = True
+        break
+assert namespace_found, ("guest cgroup namespace root is not on init PID ancestry", namespace_root)
 after = (proc / "stat").read_text()
 assert after[after.rfind(")") + 2:].split()[19] == start and (proc / "cgroup").read_text() == cgroup
-print(json.dumps({"guest_host_pid": pid, "start_ticks": start, "cgroup": cgroup, "ancestors": rows}, sort_keys=True))
+assert (current.stat().st_dev, current.stat().st_ino) == namespace_root
+print(json.dumps({"guest_host_pid": pid, "start_ticks": start, "cgroup": cgroup,
+                  "guest_cgroup_root": {"device": namespace_root[0], "inode": namespace_root[1]},
+                  "ancestors": rows}, sort_keys=True))
 print("HOST_ANCESTOR_PREFLIGHT_PASS cpu=2 memory_min=8589934592 pids_min=256; service still uninstalled")
 ANCESTORS
+sudo docker exec "$guest" stat -c '%d %i' /sys/fs/cgroup >"$evidence/guest-cgroup-root-after.txt"
+cmp "$evidence/guest-cgroup-root-before.txt" "$evidence/guest-cgroup-root-after.txt"
 sudo docker cp "$payload" "$guest:/root/issue1162-install"
 sudo docker exec "$guest" sh /root/issue1162-install/provision.sh | tee "$evidence/provision.txt"
 sudo docker exec "$guest" python3 /root/issue1162-install/issue1162_live_probe.py --lease-self-test | tee "$evidence/guest-lease-probe-self-test.txt"
