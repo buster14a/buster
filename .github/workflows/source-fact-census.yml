@@ -1,0 +1,117 @@
+# Disposable hosted measurement for the source-fact-flow redesign. It lives
+# only on an isolated measurement branch and is removed after its run; it is
+# not proposed for main. Every variant is checked out by exact commit.
+name: Source-fact census (disposable)
+
+on:
+  push:
+    branches: ['claude/fervent-cray-zlsgsj-census-run']
+
+permissions:
+  contents: read
+
+jobs:
+  census:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {variant: main, sha: 'ade6ac4b6ecb21f30b61b656439bac476c145e2f', census: false}
+          - {variant: census, sha: '398ad5788701531e36dc53671a5cba9c27a39592', census: true}
+          - {variant: string-counts, sha: '42866ace3cf380ffaf5d5c1f1ef8dc1953d879bd', census: true}
+          - {variant: integer-facts, sha: 'bd5fcbd07bf1a460ae2d5f9e537c690956e10c77', census: true}
+          - {variant: decode-once, sha: 'f1cac5523adc0d162622e4f4b76b6db6f86fd840', census: true}
+          - {variant: combined, sha: 'dadf8d2826ae8dbb360e47bc99fb158e43a8b1f0', census: true}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Toolchain and variant
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq valgrind ninja-build > /dev/null
+          git checkout --quiet --detach '${{ matrix.sha }}'
+          mkdir -p "$RUNNER_TEMP/out"
+          {
+            echo "variant=${{ matrix.variant }}"
+            echo "commit=$(git rev-parse HEAD)"
+            echo "tree=$(git rev-parse 'HEAD^{tree}')"
+            echo "cpu=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
+            echo "nproc=$(nproc)"
+            clang --version | head -1
+            cmake --version | head -1
+            valgrind --version
+          } | tee "$RUNNER_TEMP/out/identity.txt"
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/build-driver"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --build-directory build/plain --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=ON -DBUSTER_INCLUDE_TESTS=OFF
+          "$driver" build --build-directory build/plain --config Release -t ide
+          sha256sum build/plain/Release/ide | tee -a "$RUNNER_TEMP/out/identity.txt"
+          if [ '${{ matrix.census }}' = 'true' ]; then
+            "$driver" generate --build-directory build/census --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF -DBUSTER_BENCH_ALLOCATIONS=ON -DBUSTER_INCLUDE_TESTS=OFF
+            "$driver" build --build-directory build/census --config Release -t ide
+            sha256sum build/census/Release/ide | tee -a "$RUNNER_TEMP/out/identity.txt"
+          fi
+
+      - name: Stage-1 census and artifact identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/out"
+          stage1=(-Isrc -Ibuild/plain/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 src/buster/apps/ide/ide.c)
+          build/plain/Release/ide cc "${stage1[@]}" -g0 -c -o "$out/stage1-plain.o"
+          sha256sum "$out/stage1-plain.o" | tee "$out/stage1-hashes.txt"
+          if [ '${{ matrix.census }}' = 'true' ]; then
+            build/census/Release/ide cc "${stage1[@]}" -g0 -c -fsource-metrics="$out/stage1.metrics" -o "$out/stage1-census.o"
+            sha256sum "$out/stage1-census.o" | tee -a "$out/stage1-hashes.txt"
+            cmp "$out/stage1-plain.o" "$out/stage1-census.o"
+            python3 tools/source_fact_census.py run --baseline build/census/Release/ide --out "$out/corpus"
+          fi
+
+      - name: Callgrind instruction count (stage-1, -g0 -c)
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/out"
+          valgrind --tool=callgrind --callgrind-out-file="$out/stage1.callgrind" \
+            build/plain/Release/ide cc -Isrc -Ibuild/plain/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 \
+            src/buster/apps/ide/ide.c -g0 -c -o "$out/stage1-callgrind.o" 2> "$out/callgrind.log"
+          cmp "$out/stage1-plain.o" "$out/stage1-callgrind.o"
+          callgrind_annotate --inclusive=no "$out/stage1.callgrind" | head -80 > "$out/callgrind-top.txt"
+          grep "PROGRAM TOTALS" "$out/callgrind-top.txt" | tee "$out/callgrind-total.txt"
+
+      - name: Hosted timing (supporting only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/out"
+          for run in 1 2 3 4 5 6 7; do
+            /usr/bin/time -f "run=$run wall=%e user=%U sys=%S maxrss_kb=%M" \
+              build/plain/Release/ide cc -Isrc -Ibuild/plain/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 \
+              src/buster/apps/ide/ide.c -g0 -c -o "$out/stage1-timed.o" 2>> "$out/timing.txt"
+          done
+          cat "$out/timing.txt"
+          {
+            echo "### ${{ matrix.variant }}"
+            echo '```'
+            cat "$out/identity.txt" "$out/stage1-hashes.txt" "$out/callgrind-total.txt" "$out/timing.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: source-fact-census-${{ matrix.variant }}
+          path: ${{ runner.temp }}/out
+          retention-days: 30
