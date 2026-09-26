@@ -149,6 +149,33 @@ duplicate-target suppression. `ir_function_cfg_edge` replaces incoming-list
 searches. Mutation must invalidate `IrFunction.published_cfg`; it is not a
 semantic certificate. See [publication and lifetime details](../../canonical-cfg-publication.md).
 
+## Number facts
+
+`c_parse_ast` converts every preprocessing number of the final stream once
+(`c_number_facts_build`) and publishes `CParserResult.number_facts`, which
+semantic analysis borrows into `CParseResult.number_facts` and lowering reads
+through its parse result. A rank index maps a final-stream token index to its
+number ordinal: one bit per token in 64-token windows plus each window's prefix
+count. Each number keeps the `c_conditional_number` value, whether it
+converted, `c_number_is_float`'s class, and the literal's
+`c_semantic_integer_literal_kind` for the stream's data model.
+
+- The facts are immutable after the syntax pass and live in its arena.
+- They answer only for the token array they were built from. Synthesized
+  evaluation tokens and hand-built results convert their spellings as before.
+- A cached kind is reused only when the consumer's `cpu_arch` and `os` match,
+  because literal typing reads the target only through `target_data_layout`.
+  If that dependency ever widens, widen the key in `c_number_fact_kind` too.
+- A failed conversion writes no value. The syntax diagnostic is issued at the
+  same point and in the same order as before.
+- Do not store literal facts in `CToken.symbol`. Several readers treat a nonzero
+  symbol as an identifier without testing the kind.
+
+`c_test_number_facts` covers every fact of an adversarial spelling set slid
+across the rank windows on five data models, and checks lowering with and
+without facts for identical bitcode and diagnostics.
+`c_test_parser_body_frame_storage` counts the facts as published syntax storage.
+
 ## C frontend and canonical IR rules
 
 - [Vector semantics](../../ir-vector-semantics.md) classifies every dedicated

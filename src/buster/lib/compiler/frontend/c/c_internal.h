@@ -291,6 +291,94 @@ BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_token(CParseResult* result, char
 BUSTER_C_EXTERN CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index);
 BUSTER_C_EXTERN u32 c_parse_scope_distance(CParseResult* result, CScopeId candidate, CScopeId scope);
 BUSTER_C_EXTERN bool c_token_spelling_equal(char8 const* spelling_base, CToken token, String8 spelling);
+
+// The syntax pass converts every preprocessing number of the final stream once
+// (c_number_facts_build) and publishes the answers beside the token rows, so
+// the semantic typing, constant folding and lowering sites that used to call
+// c_conditional_number and c_semantic_integer_literal_kind on the same
+// spelling again read a byte and a word instead. The index is a rank over the
+// stream: one bit per token in 64-token windows marks the numbers, and the
+// window's prefix count plus a popcount below the lane gives the number's
+// ordinal into `values` and `flags`. Everything is immutable after the syntax
+// pass and lives in its arena for the translation unit. A fact answers only for
+// `tokens`, the stream it was built from; any other token array (synthesized
+// evaluation tokens, hand-built results) takes the conversion itself.
+enum
+{
+    // CTypeKind of c_semantic_integer_literal_kind(target, 0, spelling, value)
+    // for `target`, or C_TYPE_INVALID when there is none.
+    C_NUMBER_FACT_KIND_MASK = 0x3f,
+    // c_conditional_number accepted the spelling; `values` holds its value.
+    C_NUMBER_FACT_CONVERTED = 0x40,
+    // c_number_is_float classified the spelling as floating.
+    C_NUMBER_FACT_FLOATING = 0x80,
+};
+BUSTER_CT_CHECK((u32)C_TYPE_COUNT <= (u32)C_NUMBER_FACT_KIND_MASK + 1);
+
+struct CNumberFacts
+{
+    CToken const* tokens;
+    u64* number_masks;
+    u32* number_ranks;
+    u64* values;
+    u8* flags;
+    // The data model the cached kinds were typed for. Integer literal typing
+    // reads the target only through target_data_layout, which depends on the
+    // architecture and operating system alone (c_number_fact_kind).
+    CpuArch cpu_arch;
+    OperatingSystem os;
+    u32 token_count;
+    u32 number_count;
+};
+
+typedef struct CNumberFact CNumberFact;
+struct CNumberFact
+{
+    u64 value;
+    u8 flags;
+    bool present;
+};
+
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE CNumberFact c_number_fact(CNumberFacts const* facts, CToken const* tokens, u64 token_index)
+{
+    CNumberFact result = {0};
+    if (facts && facts->tokens == tokens && token_index < facts->token_count)
+    {
+        u64 lane = token_index & 63;
+        Mask64 window = facts->number_masks[token_index >> 6];
+        if ((window >> lane) & 1)
+        {
+            Mask64 below = window & mask64_prefix(lane);
+            u32 ordinal = facts->number_ranks[token_index >> 6] + mask64_count(below);
+            result = (CNumberFact){
+                .value = facts->values[ordinal],
+                .flags = facts->flags[ordinal],
+                .present = true,
+            };
+        }
+    }
+    return result;
+}
+
+// The literal's type kind for `target` from a present fact: true, with the
+// cached kind (C_TYPE_INVALID when the spelling did not convert or fits no
+// candidate), when the facts were typed for the same data model.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_number_fact_kind(CNumberFacts const* facts, CNumberFact fact, Target target, CTypeKind* kind_out)
+{
+    bool result = fact.present && facts->cpu_arch == target.cpu_arch && facts->os == target.os;
+    if (result)
+    {
+        *kind_out = (fact.flags & C_NUMBER_FACT_CONVERTED) ? (CTypeKind)(fact.flags & C_NUMBER_FACT_KIND_MASK) : C_TYPE_INVALID;
+    }
+    return result;
+}
+
+BUSTER_C_EXTERN CNumberFacts const* c_number_facts_build(Arena* arena, CPreprocessResult const* preprocess);
+// c_conditional_number of the token at `token_index`: its fact when `facts`
+// answer for `tokens`, the conversion itself otherwise. `value_out` is written
+// only on success, as c_conditional_number writes it.
+BUSTER_C_EXTERN bool c_number_convert_at(CNumberFacts const* facts, char8 const* spelling_base, CToken const* tokens, u32 token_index,
+                                         u64* value_out);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
 

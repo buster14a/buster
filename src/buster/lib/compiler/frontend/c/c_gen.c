@@ -9009,28 +9009,62 @@ BUSTER_C_SHARED CTypeKind c_semantic_integer_literal_kind(Target target, u64 con
     return result;
 }
 
-BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder, String8 spelling, u64 value)
+// The value and type of the integer literal at `token_index`: the syntax
+// pass's number fact when it covers the token and the builder's data model,
+// otherwise the conversion and typing of the spelling. The fact's kind was
+// typed with the target's computed limits; builder->literal_limits are the
+// same limits cached (both come from c_ir_scalar_type_properties), so the two
+// answers agree. False when the spelling does not convert; `value_out` is
+// then untouched and `type_out` invalid.
+BUSTER_C_INTERNAL bool c_ir_integer_literal_at(CIntegerIrBuilder* builder, u32 token_index, u64* value_out, IrTypeId* type_out)
 {
-    CTypeKind kind = c_semantic_integer_literal_kind(builder->target, builder->literal_limits, spelling, value);
-    return kind != C_TYPE_INVALID ? builder->scalar_types[kind] : IR_TYPE_ID_INVALID;
+    CNumberFacts const* facts = builder->parse.number_facts;
+    CNumberFact fact = c_number_fact(facts, builder->preprocess.tokens, token_index);
+    CTypeKind kind = C_TYPE_INVALID;
+    bool result;
+    if (c_number_fact_kind(facts, fact, builder->target, &kind))
+    {
+        result = (fact.flags & C_NUMBER_FACT_CONVERTED) != 0;
+        if (result)
+        {
+            *value_out = fact.value;
+        }
+    }
+    else
+    {
+        String8 spelling = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[token_index]);
+        u64 value = 0;
+        result = c_conditional_number(spelling, &value);
+        if (result)
+        {
+            *value_out = value;
+            kind = c_semantic_integer_literal_kind(builder->target, builder->literal_limits, spelling, value);
+        }
+    }
+    *type_out = result && kind != C_TYPE_INVALID ? builder->scalar_types[kind] : IR_TYPE_ID_INVALID;
+    return result;
 }
 
-BUSTER_C_INTERNAL IrValueId c_ir_emit_integer(CIntegerIrBuilder* builder, CToken token)
+// c_number_is_float of the token at `token_index`, from its fact when present.
+BUSTER_C_INTERNAL bool c_ir_number_is_float_at(CIntegerIrBuilder* builder, u32 token_index)
+{
+    CNumberFact fact = c_number_fact(builder->parse.number_facts, builder->preprocess.tokens, token_index);
+    return fact.present ? (fact.flags & C_NUMBER_FACT_FLOATING) != 0
+                        : c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[token_index]));
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_integer(CIntegerIrBuilder* builder, u32 token_index)
 {
     u64 value = 0;
-    if (!c_conditional_number(c_token_spelling(builder->preprocess.spelling_base, token), &value))
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    IrTypeId type = c_ir_integer_literal_type(builder, c_token_spelling(builder->preprocess.spelling_base, token), value);
+    IrTypeId type = IR_TYPE_ID_INVALID;
     IrValueId result;
-    if (type.value == IR_TYPE_ID_INVALID.value)
+    if (!c_ir_integer_literal_at(builder, token_index, &value, &type) || type.value == IR_TYPE_ID_INVALID.value)
     {
         result = IR_VALUE_ID_INVALID;
     }
     else
     {
-        result = c_ir_emit_integer_value_typed(builder, value, false, token, type);
+        result = c_ir_emit_integer_value_typed(builder, value, false, builder->preprocess.tokens[token_index], type);
     }
 
     return result;
@@ -26759,17 +26793,17 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     if (first.kind == C_TOKEN_PREPROCESSING_NUMBER &&
         (start + 1 == end || c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACKET)))
     {
-        if (c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, first)))
+        if (c_ir_number_is_float_at(builder, start))
         {
             *type_out = c_ir_float_literal_type(builder, c_token_spelling(builder->preprocess.spelling_base, first));
             return start + 1 == end;
         }
         u64 integer_value = 0;
-        if (!c_conditional_number(c_token_spelling(builder->preprocess.spelling_base, first), &integer_value))
+        IrTypeId literal_type = IR_TYPE_ID_INVALID;
+        if (!c_ir_integer_literal_at(builder, start, &integer_value, &literal_type))
         {
             return false;
         }
-        IrTypeId literal_type = c_ir_integer_literal_type(builder, c_token_spelling(builder->preprocess.spelling_base, first), integer_value);
         if (literal_type.value == IR_ID_UNDERLYING_INVALID)
         {
             return false;
@@ -28417,7 +28451,7 @@ c_ir_expression_core_loop:
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
-            IrValueId value = c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, token)) ? c_ir_emit_float(builder, token) : c_ir_emit_integer(builder, token);
+            IrValueId value = c_ir_number_is_float_at(builder, index) ? c_ir_emit_float(builder, token) : c_ir_emit_integer(builder, index);
             if (value.value == IR_ID_UNDERLYING_INVALID)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -31372,21 +31406,17 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
         if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
         {
             IrTypeId candidate = builder->s32_type;
-            String8 number_spelling = c_token_spelling(builder->preprocess.spelling_base, token);
-            if (c_number_is_float(number_spelling))
+            if (c_ir_number_is_float_at(builder, index))
             {
-                candidate = c_ir_float_literal_type(builder, number_spelling);
+                candidate = c_ir_float_literal_type(builder, c_token_spelling(builder->preprocess.spelling_base, token));
             }
             else
             {
                 u64 integer_value = 0;
-                if (c_conditional_number(c_token_spelling(builder->preprocess.spelling_base, token), &integer_value))
+                IrTypeId integer_type = IR_TYPE_ID_INVALID;
+                if (c_ir_integer_literal_at(builder, index, &integer_value, &integer_type) && integer_type.value != IR_ID_UNDERLYING_INVALID)
                 {
-                    IrTypeId integer_type = c_ir_integer_literal_type(builder, c_token_spelling(builder->preprocess.spelling_base, token), integer_value);
-                    if (integer_type.value != IR_ID_UNDERLYING_INVALID)
-                    {
-                        candidate = integer_type;
-                    }
+                    candidate = integer_type;
                 }
             }
             IrType* current = ir_type_from_id(&builder->program->types, result);
@@ -42507,7 +42537,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builde
 // integer constant, landing in an integer, boolean, enum or float member
 // that is not a bit-field, is folded here
 // instead: the same literal routines and typing rules the evaluator uses
-// (c_ir_integer_literal_type, c_ir_float_literal_value,
+// (c_ir_integer_literal_at, c_ir_float_literal_value,
 // c_ir_decode_character_value), the evaluator's unary `+`/`-`
 // (c_ir_constant_apply_unary) and its cast (c_ir_constant_cast), then one
 // little-endian store of the member's size.  The class is one byte decided
@@ -42666,17 +42696,17 @@ BUSTER_C_INTERNAL void c_ir_constant_initializer_store_float_leaf(IrType* child,
 }
 
 // The INTEGER_TO_INTEGER and INTEGER_TO_FLOAT arms: an integer literal,
-// typed by c_ir_integer_literal_type exactly as the evaluator types it.
+// typed by c_ir_integer_literal_at exactly as the evaluator types it.
 BUSTER_C_INTERNAL bool c_ir_constant_initializer_fold_integer_leaf(CIntegerIrBuilder* builder, u8 leaf_class, IrType* child, u32 start, u32 end,
                                                                     u8* bytes)
 {
     CToken* tokens = builder->preprocess.tokens;
     bool signed_prefix = end - start == 2;
     bool negative = signed_prefix && c_token_is_punctuator(&tokens[start], C_PUNCTUATOR_MINUS);
-    String8 spelling = c_token_spelling(builder->preprocess.spelling_base, tokens[end - 1]);
     u64 integer = 0;
-    bool folded = c_conditional_number(spelling, &integer);
-    IrType* literal_type = folded ? ir_type_from_id(&builder->program->types, c_ir_integer_literal_type(builder, spelling, integer)) : 0;
+    IrTypeId literal_type_id = IR_TYPE_ID_INVALID;
+    bool folded = c_ir_integer_literal_at(builder, end - 1, &integer, &literal_type_id);
+    IrType* literal_type = folded ? ir_type_from_id(&builder->program->types, literal_type_id) : 0;
     folded = literal_type != 0;
     if (folded && signed_prefix)
     {
@@ -46461,8 +46491,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 else
                 {
                     u64 integer = 0;
-                    if (!c_conditional_number(c_token_spelling(builder->preprocess.spelling_base, token), &integer)) return false;
-                    value = c_ir_constant_integer(c_ir_integer_literal_type(builder, c_token_spelling(builder->preprocess.spelling_base, token), integer), integer);
+                    IrTypeId integer_type = IR_TYPE_ID_INVALID;
+                    if (!c_ir_integer_literal_at(builder, index, &integer, &integer_type)) return false;
+                    value = c_ir_constant_integer(integer_type, integer);
                     if (value.type.value == IR_ID_UNDERLYING_INVALID) return false;
                 }
                 if (value_count >= capacity) return false;
