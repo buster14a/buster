@@ -116,9 +116,11 @@ the region was a `#pragma clang attribute` that also marked declarations. The
 audit replays the database row for `ide.c` through the Clang frontend only
 (LLVM IR, no optimization or code generation; about ten seconds) and fails
 when a function defined outside `src/buster/tests/` carries `optnone`. The
-combination matrix runs it on the same canonical tree as `clang_analyze`. A
-production header that defines functions must be included before the test
-region, as `simd.h` is.
+`optnone_audit` CMake target runs it on the same canonical unsanitized
+optimized Clang tree as `clang_analyze`, in the same superbuild step (the
+direct matrix schedules the command beside `clang_analyze` too). A production
+header that defines functions must be included before the test region, as
+`simd.h` is.
 
 Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `bench_throughput`, `bench_throughput_ci`, `generate`, `build` (default), `clang_analyze`, `optnone_audit`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`, `test_cpython`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,

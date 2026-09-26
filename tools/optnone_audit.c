@@ -80,6 +80,14 @@ BUSTER_GLOBAL_LOCAL u64 optnone_audit_find(String8 line, u64 from, String8 needl
     return result;
 }
 
+// Whether a DIFile names a test source. LLVM IR escapes a backslash in a
+// Windows path as \5C, so both separators are accepted.
+BUSTER_GLOBAL_LOCAL bool optnone_audit_is_test_file(String8 filename)
+{
+    return string_contains(filename, S8("buster/tests/")) || string_contains(filename, S8("buster\\5Ctests\\5C")) ||
+           string_contains(filename, S8("buster\\tests\\"));
+}
+
 // Metadata ids appear in ascending order in textual IR, so both tables are
 // already sorted and a binary search resolves a definition's debug file.
 BUSTER_GLOBAL_LOCAL String8 optnone_audit_filename(OptnoneAuditSubprogram const* subprograms, u64 subprogram_count, OptnoneAuditFile const* files,
@@ -258,7 +266,7 @@ BUSTER_GLOBAL_LOCAL OptnoneAuditResult optnone_audit_scan(Arena* arena, String8 
                 String8 filename = debug < line.length ? optnone_audit_filename(subprograms, subprogram_count, files, file_count,
                                                                                 optnone_audit_number(line, &debug_index))
                                                        : S8("?");
-                if (string_contains(filename, S8("buster/tests/")))
+                if (optnone_audit_is_test_file(filename))
                 {
                     result.optnone_tests += 1;
                 }
@@ -339,6 +347,12 @@ BUSTER_GLOBAL_LOCAL bool optnone_audit_self_test(Arena* arena)
     OptnoneAuditResult audit = optnone_audit_scan(arena, ir);
     bool pass = audit.valid && audit.defined == 3 && audit.optnone_tests == 1 && audit.optnone_outside == 1 && audit.violations.first &&
                 string_equal(audit.violations.first->string, S8("inherited (src/buster/lib/x.h)"));
+    String8 windows_ir = S8("define internal i32 @test_body(i32 %0) #0 !dbg !10 {\n"
+                            "attributes #0 = { noinline nounwind optnone uwtable }\n"
+                            "!3 = !DIFile(filename: \"src\\5Cbuster\\5Ctests\\5Cx_test.c\", directory: \"C:\\5Cr\")\n"
+                            "!10 = distinct !DISubprogram(name: \"test_body\", scope: !3, file: !3, line: 1, unit: !1)\n");
+    OptnoneAuditResult windows_audit = optnone_audit_scan(arena, windows_ir);
+    pass = pass && windows_audit.valid && windows_audit.optnone_tests == 1 && windows_audit.optnone_outside == 0;
     SliceString8 command = optnone_audit_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(((String8[]){
         S8("clang"), S8("-O3"), S8("-MD"), S8("-MT"), S8("t.o"), S8("-MF"), S8("t.d"), S8("-o"), S8("t.o"), S8("-c"), S8("ide.c"),
     })), S8("/out/ide.ll"));
@@ -449,6 +463,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult optnone_audit_main(Arena* arena, SliceString8 
                     string_print(S8("error: optnone_audit: could not map {S8}\n"), output);
                 }
                 file_map_unmap(map);
+                os_file_delete(output);
             }
         }
     }
