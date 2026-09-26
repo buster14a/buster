@@ -290,6 +290,15 @@ BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_token(CParseResult* result, char
                                                        CScopeId scope, CToken const* token);
 BUSTER_C_EXTERN CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index);
 BUSTER_C_EXTERN u32 c_parse_scope_distance(CParseResult* result, CScopeId candidate, CScopeId scope);
+BUSTER_C_EXTERN u32 c_parse_definition_scan_start(CParseResult const* result, u32 definition_start);
+// CDefinitionIndex diagnostic counts, kept out of ordinary compilers and timing
+// builds and out of the canonical-construction census: parse-only runs
+// construct no IR, and tests pin that their construction counters stay still.
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+#define C_DEFINITION_INDEX_COUNT(index, field, amount) do { if (index) { (index)->field += (amount); } } while (0)
+#else
+#define C_DEFINITION_INDEX_COUNT(index, field, amount) ((void)0)
+#endif
 BUSTER_C_EXTERN bool c_token_spelling_equal(char8 const* spelling_base, CToken token, String8 spelling);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
