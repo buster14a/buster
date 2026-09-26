@@ -1,0 +1,8 @@
+variant=base commit=ade6ac4b6ecb21f30b61b656439bac476c145e2f status=0
+SELF_HOST variant=base stage1_rc=0 stage2_rc=0 fixed_point=identical bytes=46675696 stage1=84df3291ee7d64e5 stage2=84df3291ee7d64e5 preprocessed.tokens=3601167 stage2_preprocessed.tokens=3601167 bench_rc=0
+variant=a commit=343ed8df4ff37065e22e1b8317a2d63ef372440e status=0
+SELF_HOST variant=a stage1_rc=0 stage2_rc=0 fixed_point=identical bytes=46677680 stage1=93ee2be3804a86ee stage2=93ee2be3804a86ee preprocessed.tokens=3601193 stage2_preprocessed.tokens=3601193 bench_rc=0
+variant=b commit=d3a8d872cb1016d6d554b18fbdd5e6bab655046b status=0
+SELF_HOST variant=b stage1_rc=0 stage2_rc=0 fixed_point=identical bytes=46676072 stage1=5ae35d676affd562 stage2=5ae35d676affd562 preprocessed.tokens=3601261 stage2_preprocessed.tokens=3601261 bench_rc=0
+variant=ab commit=207ea447810d89b1b71e24263a1787bda2e8c670 status=0
+SELF_HOST variant=ab stage1_rc=0 stage2_rc=0 fixed_point=identical bytes=46687112 stage1=16791c9353b8698f stage2=16791c9353b8698f preprocessed.tokens=3601407 stage2_preprocessed.tokens=3601407 bench_rc=0

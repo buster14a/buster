@@ -1,0 +1,1 @@
+config=checked invocations=7056 rows=3528 objects_compared=3207 mismatches=0 nonzero_exit_rows=321
