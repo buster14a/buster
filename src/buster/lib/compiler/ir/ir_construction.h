@@ -121,7 +121,19 @@
     X(PREPARATION_FAST_OUTPUT_VALIDATIONS, preparation_fast_output_validations) \
     X(PREPARATION_PROMOTION_FUNCTIONS, preparation_promotion_functions) \
     X(PREPARATION_FAST_FUNCTIONS, preparation_fast_functions) \
-    X(PREPARATION_PUBLICATION_FUNCTIONS, preparation_publication_functions)
+    X(PREPARATION_PUBLICATION_FUNCTIONS, preparation_publication_functions) \
+    X(COMMIT_CHECKS, commit_checks) \
+    X(COMMIT_REFUSALS, commit_refusals) \
+    X(COMMIT_OPERAND_CHECKS, commit_operand_checks) \
+    X(COMMIT_TARGET_CHECKS, commit_target_checks) \
+    X(COMMIT_RESULT_BINDS, commit_result_binds) \
+    X(COMMIT_CLOSES, commit_closes) \
+    X(COMMIT_INSERTIONS, commit_insertions) \
+    X(COMMIT_RETRACTIONS, commit_retractions) \
+    X(COMMIT_TRUNCATED_ROWS, commit_truncated_rows) \
+    X(COMMIT_REOPENED_MARKERS, commit_reopened_markers) \
+    X(COMMIT_FINALIZED_BLOCKS, commit_finalized_blocks) \
+    X(CFG_TERMINATOR_CHECKS, cfg_terminator_checks)
 
 typedef enum IrConstructionCounter
 {

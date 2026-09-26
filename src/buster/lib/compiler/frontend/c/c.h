@@ -1396,9 +1396,12 @@ struct CIRLowerResult
     CDiagnostic* diagnostics;
     u32 diagnostic_count;
     // Published only after the C lowerer finishes every function and global
-    // through its typed builders without a rejected row. The driver may trust
-    // this private producer boundary; public/manual IR still uses the full
-    // canonical validator.
+    // through its typed builders without a rejected row. Every row passed the
+    // block-row commit protocol and every function its finalization
+    // (docs/canonical-ir-construction.md), so ownership, termination and
+    // result binding hold by construction; the other canonical rules rest on
+    // the producer's contract. The driver may trust this private producer
+    // boundary; public/manual IR still uses the full canonical validator.
     bool canonical_ir_certified;
 };
 

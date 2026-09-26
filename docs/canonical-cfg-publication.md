@@ -7,7 +7,11 @@ explicit trusted producer/pass contract; the const publication pointer does not
 extend an input semantic certificate to arbitrary later mutations.
 
 Publication checks exact construction-list extents, tails, incoming order/types,
-topology agreement and bounded IDs/counts. It proves instruction ownership while
+topology agreement and bounded IDs/counts. Every block must end in exactly one
+terminator (`ir_instruction_is_terminator`): an empty block or a non-terminator
+tail is `UNTERMINATED_BLOCK`, a terminator with a successor in its chain is
+`INSTRUCTION_AFTER_TERMINATOR`. These are the only checks every producer passes,
+certified input included; see [construction](canonical-ir-construction.md). It proves instruction ownership while
 building one instruction permutation, then publishes these immutable slices:
 
 - Instructions occupy one contiguous span per block, in block ID order.

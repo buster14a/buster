@@ -130,6 +130,14 @@ late escape, scalar temporaries, bitfields and dynamic-stack fallback. Native
 machine tests exercise vector block parameters as well as preserving the
 independent legacy mutable-register and pressure-census contracts.
 
+Every lowered row enters its block through `c_ir_append_instruction`, which
+commits it with ir.h's block-row protocol: the commit links the row, binds its
+result's definition and closes the block on a terminator, and a refused row
+rejects the function at `c_ir_finish_construction`. Do not write
+`next`/`first_instruction`/`last_instruction`, `IrBlock.terminated` or
+`IrValue.definition` directly; use the `ir_block_*` primitives. See
+[canonical IR construction](../../canonical-ir-construction.md).
+
 `ir_prepare_canonical_module` consumes an input-only producer certificate.
 Changed output is checked with the existing canonical verifier in debug,
 test and sanitizer builds; optimized production retains the pass-contract

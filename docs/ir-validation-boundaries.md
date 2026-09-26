@@ -1,5 +1,10 @@
 # Canonical and machine validation boundaries
 
+The block-row family (instruction ownership, termination, result binding
+and reference range) is established at construction by the protocol in
+[canonical IR construction](canonical-ir-construction.md); the boundaries
+below remain its independent checks.
+
 This contract complements the [frontend guide](agents/frontend/foundations.md),
 [machine ownership inventory](machine-metadata-ownership.md), and
 [differential testing](differential-testing.md). The focused implementation is
@@ -59,8 +64,8 @@ instruction/value rows and machine rows do not change size.
 
 | Boundary / owner | Existing checks reused | What a successful check does not establish |
 | --- | --- | --- |
-| Canonical input and promotion output / `ir_validate_canonical_module` | Required storage; instruction-chain ownership; block sealing and termination; value and operation types; call/return signatures; parameter/incoming types, counts and predecessor order; branch-target validity; global alignment, initializer and relocation ownership | This change does not add a whole-function canonical dominance proof or prove full CFG predecessor/successor symmetry. Those properties must not be inferred merely from valid IDs and parameter counts. |
-| Dense CFG publication / `ir_function_publish_cfg` and published-shape validation | Bounded instruction ownership; terminator-derived unique edges, including parameter-free edges; exact optional builder predecessor lists and incoming extents; dense parameter/argument slices; remapped instruction sources, value definitions and sparse extras | These structural checks do not replace canonical type/operation/provenance validation or grant a semantic certificate. They do not prove whole-function canonical dominance. |
+| Canonical input and promotion output / `ir_validate_canonical_module` | Required storage; instruction-chain ownership; block sealing and termination; one definition per value (a row or one block parameter, never both); value and operation types; call/return signatures; parameter/incoming types, counts and predecessor order; branch-target validity; global alignment, initializer and relocation ownership | This change does not add a whole-function canonical dominance proof or prove full CFG predecessor/successor symmetry. Those properties must not be inferred merely from valid IDs and parameter counts. |
+| Dense CFG publication / `ir_function_publish_cfg` and published-shape validation | Bounded instruction ownership; every tail a terminator and no terminator followed by a row (`ir_instruction_is_terminator`), for every producer including certified input; terminator-derived unique edges, including parameter-free edges; exact optional builder predecessor lists and incoming extents; dense parameter/argument slices; remapped instruction sources, value definitions and sparse extras | These structural checks do not replace canonical type/operation/provenance validation or grant a semantic certificate. They do not prove whole-function canonical dominance. |
 | Selected MIR / `machine_verify_function` | Side-table bounds; opcode and operand kinds; register classes and physical limits; fixed/tied constraints; block instruction coverage and terminators; parameter/edge-copy classes; definition counts/points and immutable-register dominance, including edge uses | Opcode-specific payload validation is not an independent proof of every emitted instruction's width/encoding. Legacy explicitly mutable registers retain their separate definition contract. Bounded edge spans alone are not a proof of complete CFG symmetry. |
 | Scheduled MIR / native code-generation verification path | With `verify_invariants`, reruns the same machine verifier on the reordered candidate, before replacing the accepted function or using its rebuilt placement | The selector's original certificate cannot certify reordered rows, remapped definition points or the new placement. This slice leaves the existing opt-in scheduled-MIR hook and its counters unchanged. |
 | Placement / native code generation | Existing valid-placement checks and strict `verify_invariants` failure handling | Structural IR verification does not prove ABI behavior or generated-program semantics. Use the existing independent compiler/runtime matrix. |

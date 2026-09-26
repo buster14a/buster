@@ -10,6 +10,13 @@
 // separate from the declared qualification of parameter objects.
 // c_ir_record_local_place publishes canonical owner/place identities for
 // named and temporary locals; final SSA compaction remaps those identities.
+// Every row reaches its block through ir.h's block-row protocol: the funnel
+// c_ir_append_instruction commits it (linking, result binding and closing
+// happen there and nowhere else in this file), c_ir_reopen_unreachable_marker
+// is the one way back into a closed block, retraction and SSA memory
+// restoration use the checked ir_block_* primitives, and
+// c_ir_finish_construction rejects a function with a refused row or an open
+// block.
 //
 // Source-dependent recursion is forbidden (AGENTS.md), so anything that
 // would recurse runs on an explicit machine owned by CIntegerIrBuilder:
@@ -2643,6 +2650,8 @@ struct CIntegerIrBuilder
     IrInstructionId previous_instruction;
     bool previous_instruction_known;
     String8 failure_message;
+    // Set by c_ir_construction_refused; see there.
+    bool construction_refused;
     // The CDiagnosticKind `failure_message` deserves, biased by one so a
     // zero-initialized builder still means the funnel's own
     // C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS. A rejected alignment specifier is
@@ -4278,13 +4287,63 @@ BUSTER_C_INTERNAL bool c_ir_label_metadata_store_for_place(CIntegerIrBuilder* bu
     return true;
 }
 
+// A refused commit (ir.h's block-row protocol) is a lowering defect, never a
+// property of the source. The flag is sticky, so a caller that treats the
+// INVALID row as a soft failure still cannot publish the function: finishing
+// it rejects the whole function with this message.
+BUSTER_C_INTERNAL void c_ir_construction_refused(CIntegerIrBuilder* builder, IrCommitRefusal refusal)
+{
+    builder->construction_refused = true;
+    if (!builder->failure_message.length)
+    {
+        builder->failure_message = string_format(builder->arena, S8("canonical IR construction refused a row ({S8})"), ir_commit_refusal_name(refusal));
+    }
+}
+
+BUSTER_C_INTERNAL void c_ir_ssa_follow_retracted_row(CIntegerIrBuilder* builder, IrInstructionId row, IrInstructionId previous);
+
+// A noreturn call or __builtin_unreachable inside a larger expression closes
+// its block with UNREACHABLE (c_ir_end_control_flow_after_call), yet the rest
+// of the expression still emits rows: `v((die(), x))`, `switch (die())`,
+// `int y = (die(), x + 1);`. Those rows never run, and the marker is the one
+// row that would make them invalid -- behind a terminator. UNREACHABLE has no
+// edge, so retracting it while it is still the newest row reopens the block
+// with the call as its tail; the tail rows then follow the call, where the
+// values they use still dominate them (a disconnected block would not). Only
+// such tails reopen a block: statements after a closed block are skipped as
+// dead code before they emit anything, so a function without them lowers
+// exactly as before. SSA events and reads recorded after the marker move to
+// the position the marker vacated.
+BUSTER_C_INTERNAL bool c_ir_reopen_unreachable_marker(CIntegerIrBuilder* builder)
+{
+    IrFunction* function = builder->function;
+    IrInstructionId marker = function->blocks[builder->current_block.value].last_instruction;
+    IrInstructionId previous = builder->previous_instruction;
+    bool result = builder->previous_instruction_known && builder->last_instruction.value == marker.value &&
+                  ir_block_retract_tail(function, builder->current_block, previous);
+    if (result)
+    {
+        c_ir_ssa_follow_retracted_row(builder, marker, previous);
+        builder->last_instruction = previous;
+        builder->previous_instruction_known = false;
+    }
+    IR_CONSTRUCTION_RECORD(COMMIT_REOPENED_MARKERS, result);
+    return result;
+}
+
 BUSTER_C_INTERNAL IrInstructionId c_ir_append_instruction(CIntegerIrBuilder* builder, IrInstruction instruction, IrSourceRange canonical_source)
 {
     if (builder->current_block.value >= builder->function->block_count)
     {
         return IR_INSTRUCTION_ID_INVALID;
     }
-    IrBlock* block = &builder->function->blocks[builder->current_block.value];
+    if (builder->function->blocks[builder->current_block.value].terminated)
+    {
+        // Either the block reopens here, or the commit below refuses it as
+        // closed and the function is rejected: never a row behind a
+        // terminator.
+        c_ir_reopen_unreachable_marker(builder);
+    }
     if (builder->label_metadata_enabled && instruction.result.value < builder->function->value_count)
     {
         IrValueId result = instruction.result;
@@ -4343,19 +4402,21 @@ BUSTER_C_INTERNAL IrInstructionId c_ir_append_instruction(CIntegerIrBuilder* bui
             c_ir_label_metadata_rebuild_summary(builder, result);
         }
     }
-    IrInstructionId id = ir_function_add_instruction(builder->arena, builder->function, instruction, canonical_source);
-    if (builder->last_instruction.value != IR_ID_UNDERLYING_INVALID)
+    // The commit links the row as the block's tail, binds its result's
+    // definition and closes the block on a terminator; nothing else in the
+    // frontend writes those fields.
+    IrCommitRefusal refusal = IR_COMMIT_ACCEPTED;
+    IrInstructionId id = ir_block_commit_trusted(builder->arena, builder->function, builder->current_block, instruction, canonical_source, &refusal);
+    if (refusal != IR_COMMIT_ACCEPTED)
     {
-        builder->function->instructions[builder->last_instruction.value].next = id;
+        c_ir_construction_refused(builder, refusal);
     }
     else
     {
-        block->first_instruction = id;
+        builder->previous_instruction = builder->last_instruction;
+        builder->previous_instruction_known = true;
+        builder->last_instruction = id;
     }
-    builder->previous_instruction = builder->last_instruction;
-    builder->previous_instruction_known = true;
-    builder->last_instruction = id;
-    block->last_instruction = id;
     return id;
 }
 
@@ -5494,12 +5555,10 @@ BUSTER_C_INTERNAL bool c_ir_ssa_restore_memory(CIntegerIrBuilder* builder, u8* m
         valid = event->block.value < function->block_count && (!has_after || event->after.value < old_count);
         if (valid)
         {
-            IrBlock* block = function->blocks + event->block.value;
             u64 key = has_after ? (u64)event->after.value : (u64)old_count + event->block.value;
             u32 after = tails[key] != UINT32_MAX ? tails[key] : event->after.value;
             IrInstruction instruction = c_ir_instruction_initialize((IrOpcode)event->opcode,
                 event->opcode == IR_OPCODE_STORE ? builder->void_type : local->type);
-            instruction.next = after != UINT32_MAX ? function->instructions[after].next : block->first_instruction;
             if (event->opcode == IR_OPCODE_LOCAL)
             {
                 instruction.result = local->place;
@@ -5520,31 +5579,59 @@ BUSTER_C_INTERNAL bool c_ir_ssa_restore_memory(CIntegerIrBuilder* builder, u8* m
                     instruction.canonical_local = event->named_load ? local->id : IR_LOCAL_ID_INVALID;
                 }
             }
-            IrInstructionId added = ir_function_add_instruction(builder->arena, function, instruction, event->source);
-            valid = added.value != IR_ID_UNDERLYING_INVALID;
+            // The event recorded `after` while its block was current, which is
+            // the insertion's membership obligation; the insertion checks the
+            // rest and binds the restored row's result.
+            IrCommitRefusal refusal = IR_COMMIT_ACCEPTED;
+            IrInstructionId added = ir_block_insert_instruction_after(builder->arena, function, event->block, (IrInstructionId){.value = after},
+                                                                      instruction, event->source, &refusal);
+            valid = refusal == IR_COMMIT_ACCEPTED;
             if (valid)
             {
-                if (after == UINT32_MAX)
-                {
-                    block->first_instruction = added;
-                }
-                else
-                {
-                    function->instructions[after].next = added;
-                }
-                if (block->last_instruction.value == after)
-                {
-                    block->last_instruction = added;
-                }
-                if (instruction.result.value != IR_ID_UNDERLYING_INVALID)
-                {
-                    function->values[instruction.result.value].definition = added;
-                }
                 tails[key] = added.value;
+            }
+            else
+            {
+                c_ir_construction_refused(builder, refusal);
             }
         }
     }
     return valid;
+}
+
+// SSA events and reads recorded after `row`, the newest row, were placed
+// relative to it; once it is retracted they belong where it was, after
+// `previous`. Only trailing entries can name it, since it was the newest row.
+BUSTER_C_INTERNAL void c_ir_ssa_follow_retracted_row(CIntegerIrBuilder* builder, IrInstructionId row, IrInstructionId previous)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    for (u32 index = ssa ? ssa->event_count : 0; index && ssa->events[index - 1].after.value == row.value; index -= 1)
+    {
+        ssa->events[index - 1].after = previous;
+    }
+    for (u32 index = ssa ? ssa->read_count : 0; index && ssa->reads[index - 1].instruction_count == row.value + 1; index -= 1)
+    {
+        ssa->reads[index - 1].instruction_count = row.value;
+    }
+}
+
+// Explicit finalization of the block-row protocol, after SSA finish has made
+// its last insertions: a refused commit, or a block the lowering left open,
+// rejects the function here with its own diagnostic rather than reaching CFG
+// publication as an unterminated block. O(blocks).
+BUSTER_C_INTERNAL bool c_ir_finish_construction(CIntegerIrBuilder* builder)
+{
+    bool result = !builder->construction_refused;
+    if (result)
+    {
+        IrBlockId open = ir_function_first_open_block(builder->function);
+        result = open.value == IR_ID_UNDERLYING_INVALID;
+        if (!result && !builder->failure_message.length)
+        {
+            builder->failure_message = string_format(builder->arena, S8("canonical IR construction left block {u32} without a terminator"), open.value);
+        }
+    }
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaStatistics* statistics)
@@ -6150,8 +6237,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_local(CIntegerIrBuilder* builder, CToken n
         IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_LOCAL, type);
         instruction.canonical_local = local_id;
         instruction.result = place;
-        IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-        builder->function->values[place.value].definition = id;
+        c_ir_append_instruction(builder, instruction, instruction_source);
     }
     builder->local_entities[builder->local_count] = entity.value;
     builder->local_symbols[builder->local_count] = name.symbol;
@@ -6180,8 +6266,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_stack_save(CIntegerIrBuilder* builder, IrS
     IrSourceRange instruction_source = source;
     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_STACK_SAVE, checkpoint_type);
     instruction.result = checkpoint;
-    IrInstructionId instruction_id = c_ir_append_instruction(builder, instruction, instruction_source);
-    builder->function->values[checkpoint.value].definition = instruction_id;
+    c_ir_append_instruction(builder, instruction, instruction_source);
     return checkpoint;
 }
 
@@ -6276,8 +6361,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_global_place(CIntegerIrBuilder* builder, C
     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_GLOBAL, symbol_value->type);
     instruction.symbol = symbol;
     instruction.result = place;
-    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-    builder->function->values[place.value].definition = id;
+    c_ir_append_instruction(builder, instruction, instruction_source);
     // Label provenance only exists when some global's initializer took the
     // address of a block label, and the module counts those as they are added.
     // Without the count this walks every global in the module per emitted
@@ -6330,8 +6414,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_temporary(CIntegerIrBuilder* builder, IrTy
         IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_LOCAL, type);
         instruction.canonical_local = local_id;
         instruction.result = place;
-        IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
-        builder->function->values[place.value].definition = id;
+        c_ir_append_instruction(builder, instruction, source);
     }
     return place;
 }
@@ -6592,8 +6675,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_memory_load(CIntegerIrBuilder* builder, CI
         instruction.result = result;
         instruction.memory_order = atomic ? IR_MEMORY_ORDER_SEQUENTIAL : IR_MEMORY_ORDER_COUNT;
         instruction.volatile_access = local->place.value < builder->function->value_count && builder->function->values[local->place.value].is_volatile;
-        IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-        builder->function->values[result.value].definition = id;
+        c_ir_append_instruction(builder, instruction, instruction_source);
     }
     return result;
 }
@@ -6630,8 +6712,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_binary_value_raw(CIntegerIrBuilder* builde
     instruction.operand_count = 2;
     instruction.binary_operation = (u8)operation;
     instruction.result = result;
-    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-    builder->function->values[result.value].definition = id;
+    c_ir_append_instruction(builder, instruction, instruction_source);
     return result;
 }
 
@@ -6766,8 +6847,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_memory_load_place_raw(CIntegerIrBuilder* b
         instruction.result = result;
         instruction.memory_order = atomic ? IR_MEMORY_ORDER_SEQUENTIAL : IR_MEMORY_ORDER_COUNT;
         instruction.volatile_access = place.value < builder->function->value_count && builder->function->values[place.value].is_volatile;
-        IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-        builder->function->values[result.value].definition = id;
+        c_ir_append_instruction(builder, instruction, instruction_source);
     }
     return result;
 }
@@ -6818,8 +6898,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_bit_field_storage_address(CIntegerIrBuilde
     instruction.operands[0] = place;
     instruction.operand_count = 1;
     instruction.result = address;
-    IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
-    builder->function->values[address.value].definition = id;
+    c_ir_append_instruction(builder, instruction, source);
     return c_ir_emit_cast(builder, address, byte_pointer_type, source);
 }
 
@@ -7218,8 +7297,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast_instruction(CIntegerIrBuilder* builde
     cast.operand_count = 1;
     cast.conversion_operation = (u8)operation;
     cast.result = result;
-    IrInstructionId id = c_ir_append_instruction(builder, cast, cast_source);
-    builder->function->values[result.value].definition = id;
+    c_ir_append_instruction(builder, cast, cast_source);
     return result;
 }
 
@@ -7334,8 +7412,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_atomic_aggregate_conversion(CIntegerIrBuil
         load.operands = load_operands;
         load.operand_count = 1;
         load.result = result;
-        IrInstructionId load_id = c_ir_append_instruction(builder, load, source);
-        builder->function->values[result.value].definition = load_id;
+        c_ir_append_instruction(builder, load, source);
         return result;
     }
     IrValueId* store_operands = arena_allocate(builder->arena, IrValueId, 2);
@@ -8113,8 +8190,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* 
         dereference.operands[0] = operand;
         dereference.operand_count = 1;
         dereference.result = base;
-        IrInstructionId dereference_id = c_ir_append_instruction(builder, dereference, dereference_source);
-        builder->function->values[base.value].definition = dereference_id;
+        c_ir_append_instruction(builder, dereference, dereference_source);
     }
     else if (!c_token_is_punctuator(&access, C_PUNCTUATOR_DOT))
     {
@@ -8317,8 +8393,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* 
         field.immediates[0] = field_index;
         field.immediate_count = 1;
         field.result = next;
-        IrInstructionId field_id = c_ir_append_instruction(builder, field, field_source);
-        builder->function->values[next.value].definition = field_id;
+        c_ir_append_instruction(builder, field, field_source);
         place = next;
         place_type = field_type;
     }
@@ -8421,8 +8496,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_index_place_raw(CIntegerIrBuilder* builder
     instruction.operands[1] = index;
     instruction.operand_count = 2;
     instruction.result = place;
-    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-    builder->function->values[place.value].definition = id;
+    c_ir_append_instruction(builder, instruction, instruction_source);
     c_ir_label_metadata_copy_for_place(builder, place);
     return place;
 }
@@ -8474,8 +8548,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_address_of_place(CIntegerIrBuilder* builde
     instruction.operands[0] = place;
     instruction.operand_count = 1;
     instruction.result = result;
-    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-    builder->function->values[result.value].definition = id;
+    c_ir_append_instruction(builder, instruction, instruction_source);
     return result;
 }
 
@@ -8613,8 +8686,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_label_address(CIntegerIrBuilder* builder, 
         instruction.targets[0] = label;
         instruction.target_count = 1;
         instruction.result = result;
-        IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-        builder->function->values[result.value].definition = id;
+        c_ir_append_instruction(builder, instruction, instruction_source);
     }
 
     return result;
@@ -8651,8 +8723,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_dereference_place(CIntegerIrBuilder* build
     instruction.operands[0] = pointer;
     instruction.operand_count = 1;
     instruction.result = place;
-    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-    builder->function->values[place.value].definition = id;
+    c_ir_append_instruction(builder, instruction, instruction_source);
     return place;
 }
 
@@ -8741,8 +8812,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_parameter(CIntegerIrBuilder* builder, CToken na
     argument.immediates = immediate;
     argument.immediate_count = 1;
     argument.result = value;
-    IrInstructionId id = c_ir_append_instruction(builder, argument, argument_source);
-    builder->function->values[value.value].definition = id;
+    c_ir_append_instruction(builder, argument, argument_source);
     bool stored = c_ir_emit_store(builder, local, value, argument_source);
     if (stored)
     {
@@ -8765,8 +8835,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_at(CIntegerIrBuilder* builde
     instruction.immediate_count = 1;
     instruction.immediate_is_negative = is_negative;
     instruction.result = result;
-    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-    builder->function->values[result.value].definition = id;
+    c_ir_append_instruction(builder, instruction, instruction_source);
     return result;
 }
 
@@ -11189,7 +11258,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_f80_constant_bits(CIntegerIrBuilder* build
     instruction.result = result;
     IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
     ir_instruction_extra_ensure(builder->arena, builder->function, id)->literal = literal;
-    builder->function->values[result.value].definition = id;
     return result;
 }
 
@@ -11210,7 +11278,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_f128_constant_bits(CIntegerIrBuilder* buil
         instruction.result = result;
         IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
         ir_instruction_extra_ensure(builder->arena, builder->function, id)->literal = literal;
-        builder->function->values[result.value].definition = id;
     }
     return result;
 }
@@ -11335,7 +11402,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_spelling(CIntegerIrBuilder* builder,
     instruction.result = result;
     IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
     ir_instruction_extra_ensure(builder->arena, builder->function, id)->literal = spelling;
-    builder->function->values[result.value].definition = id;
     return result;
 }
 
@@ -12565,8 +12631,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_string_contents_typed(CIntegerIrBuilder* b
     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_GLOBAL, array_type);
     instruction.symbol = symbol;
     instruction.result = place;
-    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-    builder->function->values[place.value].definition = id;
+    c_ir_append_instruction(builder, instruction, instruction_source);
     if (requested && requested->kind == IR_TYPE_ARRAY)
     {
         return c_ir_emit_load_place_raw(builder, place, array_type, source);
@@ -12964,8 +13029,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_function_pointer(CIntegerIrBuilder* builde
     IrInstruction reference = c_ir_instruction_initialize(IR_OPCODE_FUNCTION, pointer_type);
     reference.symbol = target->symbol;
     reference.result = result;
-    IrInstructionId reference_id = c_ir_append_instruction(builder, reference, reference_source);
-    builder->function->values[result.value].definition = reference_id;
+    c_ir_append_instruction(builder, reference, reference_source);
     return result;
 }
 
@@ -14896,10 +14960,6 @@ BUSTER_C_INTERNAL void c_ir_end_control_flow_after_call(CIntegerIrBuilder* build
     {
         IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type);
         c_ir_append_instruction(builder, unreachable, source);
-        if (builder->current_block.value < builder->function->block_count)
-        {
-            builder->function->blocks[builder->current_block.value].terminated = true;
-        }
     }
 }
 
@@ -15008,8 +15068,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CT
     IrInstruction reference = c_ir_instruction_initialize(IR_OPCODE_FUNCTION, callee_type);
     reference.symbol = target->symbol;
     reference.result = reference_result;
-    IrInstructionId reference_id = c_ir_append_instruction(builder, reference, reference_source);
-    builder->function->values[reference_result.value].definition = reference_id;
+    c_ir_append_instruction(builder, reference, reference_source);
 
     // The declaration's attribute is the general answer -- glibc marks exit,
     // abort and longjmp with it -- and the three names remain because a
@@ -15034,12 +15093,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CT
     call.operand_count = argument_count + 1;
     call.symbol = target->symbol;
     call.result = signature.returns_void ? IR_VALUE_ID_INVALID : result;
-    IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
-    if (!signature.returns_void)
-    {
-        builder->function->values[result.value].definition = call_id;
-    }
-    else if (!terminates)
+    c_ir_append_instruction(builder, call, call_source);
+    if (signature.returns_void && !terminates)
     {
         result = c_ir_emit_integer_value(builder, 0, false, token);
     }
@@ -15157,7 +15212,6 @@ BUSTER_C_INTERNAL bool c_ir_emit_runtime_call_source(CIntegerIrBuilder* builder,
     IrInstructionId call_id = IR_INSTRUCTION_ID_INVALID;
     if (emitted)
     {
-        builder->function->values[reference_result.value].definition = reference_id;
         IrValueId* operands = arena_allocate(builder->arena, IrValueId, argument_count + 1);
         operands[0] = reference_result;
         for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
@@ -15174,10 +15228,6 @@ BUSTER_C_INTERNAL bool c_ir_emit_runtime_call_source(CIntegerIrBuilder* builder,
         call.result = result;
         call_id = c_ir_append_instruction(builder, call, source);
         emitted = call_id.value != IR_ID_UNDERLYING_INVALID && (returns_void || result.value != IR_ID_UNDERLYING_INVALID);
-    }
-    if (emitted && !returns_void)
-    {
-        builder->function->values[result.value].definition = call_id;
     }
     if (emitted && result_out)
     {
@@ -15218,7 +15268,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_builtin_float_bits(CIntegerIrBuilder* buil
     instruction.result = result;
     IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
     ir_instruction_extra_ensure(builder->arena, builder->function, id)->literal = literal;
-    builder->function->values[result.value].definition = id;
     return result;
 }
 
@@ -15290,7 +15339,6 @@ BUSTER_C_INTERNAL bool c_ir_emit_clear_cache_runtime_call(CIntegerIrBuilder* bui
         emitted = reference_result.value != IR_ID_UNDERLYING_INVALID && reference_id.value != IR_ID_UNDERLYING_INVALID;
         if (emitted)
         {
-            builder->function->values[reference_result.value].definition = reference_id;
             IrValueId* operands = arena_allocate(builder->arena, IrValueId, BUSTER_ARRAY_LENGTH(arguments) + 1);
             operands[0] = reference_result;
             operands[1] = arguments[0];
@@ -15412,8 +15460,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_runtime_call(CIntegerIrBuilder* bu
             IrInstruction reference = c_ir_instruction_initialize(IR_OPCODE_FUNCTION, function_type);
             reference.symbol = symbol;
             reference.result = reference_result;
-            IrInstructionId reference_id = c_ir_append_instruction(builder, reference, source);
-            builder->function->values[reference_result.value].definition = reference_id;
+            c_ir_append_instruction(builder, reference, source);
 
             IrValueId* operands = arena_allocate(builder->arena, IrValueId, 2);
             operands[0] = reference_result;
@@ -15424,8 +15471,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_runtime_call(CIntegerIrBuilder* bu
             call.operand_count = 2;
             call.symbol = symbol;
             call.result = call_result;
-            IrInstructionId call_id = c_ir_append_instruction(builder, call, source);
-            builder->function->values[call_result.value].definition = call_id;
+            c_ir_append_instruction(builder, call, source);
             result = darwin_x64_integer_half_abi && return_is_half
                          ? c_ir_emit_representation_alias_conversion(builder, call_result, return_type, source)
                          : call_result;
@@ -15528,8 +15574,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_memory_builtin_call(CIntegerIrBuilder* bui
                 reference.symbol = symbol;
                 reference.result = reference_result;
                 IrSourceRange reference_source = source;
-                IrInstructionId reference_id = c_ir_append_instruction(builder, reference, reference_source);
-                builder->function->values[reference_result.value].definition = reference_id;
+                c_ir_append_instruction(builder, reference, reference_source);
                 IrValueId call_result = c_ir_add_result(builder, return_type);
                 IrValueId* operands = arena_allocate(builder->arena, IrValueId, argument_count + 1);
                 operands[0] = reference_result;
@@ -15543,8 +15588,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_memory_builtin_call(CIntegerIrBuilder* bui
                 call.symbol = symbol;
                 call.result = call_result;
                 IrSourceRange call_source = source;
-                IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
-                builder->function->values[call_result.value].definition = call_id;
+                c_ir_append_instruction(builder, call, call_source);
                 result = call_result;
             }
         }
@@ -15812,8 +15856,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
     IrInstruction reference = c_ir_instruction_initialize(IR_OPCODE_FUNCTION, function_type);
     reference.symbol = symbol;
     reference.result = reference_result;
-    IrInstructionId reference_id = c_ir_append_instruction(builder, reference, reference_source);
-    builder->function->values[reference_result.value].definition = reference_id;
+    c_ir_append_instruction(builder, reference, reference_source);
     IrValueId result = c_ir_add_result(builder, value_type);
     IrValueId* operands = arena_allocate(builder->arena, IrValueId, argument_count + 1);
     operands[0] = reference_result;
@@ -15827,8 +15870,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
     call.operand_count = argument_count + 1;
     call.symbol = symbol;
     call.result = result;
-    IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
-    builder->function->values[result.value].definition = call_id;
+    c_ir_append_instruction(builder, call, call_source);
     return result;
 }
 
@@ -15917,8 +15959,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_unary_value(CIntegerIrBuilder* builder, Ir
         instruction.operand_count = 1;
         instruction.unary_operation = (u8)operation;
         instruction.result = result;
-        IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
-        builder->function->values[result.value].definition = id;
+        c_ir_append_instruction(builder, instruction, source);
     }
     return result;
 }
@@ -16007,8 +16048,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_index_place(CIntegerIrBuilder* build
             field.immediates[0] = field_index;
             field.immediate_count = 1;
             field.result = next;
-            IrInstructionId field_id = c_ir_append_instruction(builder, field, source);
-            builder->function->values[next.value].definition = field_id;
+            c_ir_append_instruction(builder, field, source);
         }
     }
     return next;
@@ -16148,8 +16188,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_complex_compose(CIntegerIrBuilder* builder, IrT
             instruction.immediates[1] = 1;
             instruction.immediate_count = 2;
             instruction.result = result;
-            IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
-            builder->function->values[result.value].definition = id;
+            c_ir_append_instruction(builder, instruction, source);
         }
     }
     return result;
@@ -18451,7 +18490,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_population_count(CIntegerIrBuilder* builde
         instruction.operand_count = 1;
         instruction.unary_operation = IR_UNARY_INTEGER_POPULATION_COUNT;
         instruction.result = result;
-        builder->function->values[result.value].definition = c_ir_append_instruction(builder, instruction, source);
+        c_ir_append_instruction(builder, instruction, source);
         return result;
     }
     // The classic SWAR sequence: subtract the odd bits to make two-bit sums,
@@ -18817,10 +18856,9 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
             instruction.operand_count = 1;
         }
         instruction.result = result;
-        IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
+        c_ir_append_instruction(builder, instruction, source);
         if (!selected->builtin_va_end)
         {
-            builder->function->values[result.value].definition = id;
             IrValueId place = frame->as.prepared_call.state->place;
             valid = c_ir_emit_store_place(builder, place, builder->function->values[place.value].canonical_type, result, source);
         }
@@ -19426,8 +19464,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     instruction.memory_order = (u8)order;
                     instruction.failure_memory_order = (u8)failure_order;
                     instruction.result = observed;
-                    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-                    builder->function->values[observed.value].definition = id;
+                    c_ir_append_instruction(builder, instruction, instruction_source);
                     IrValueId observed_value = representation_value
                                                    ? c_ir_atomic_aggregate_bits_value(builder, observed, value_type_id, comparison_type, false, source)
                                                    : observed;
@@ -19446,8 +19483,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     comparison.binary_operation =
                         pointer_value && !representation_value ? IR_BINARY_POINTER_EQUAL : IR_BINARY_INTEGER_EQUAL;
                     comparison.result = selected->result;
-                    id = c_ir_append_instruction(builder, comparison, comparison_source);
-                    builder->function->values[selected->result.value].definition = id;
+                    c_ir_append_instruction(builder, comparison, comparison_source);
                 }
             }
             else if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_TEST_AND_SET || selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_CLEAR)
@@ -19485,8 +19521,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     IrValueId previous = c_ir_add_result(builder, value_type_id);
                     instruction.atomic_operation = (u8)IR_ATOMIC_EXCHANGE;
                     instruction.result = previous;
-                    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-                    builder->function->values[previous.value].definition = id;
+                    c_ir_append_instruction(builder, instruction, instruction_source);
                     IrValueId zero = c_ir_emit_integer_value_typed(builder, 0, false, token, value_type_id);
                     selected->result = zero.value == IR_ID_UNDERLYING_INVALID
                                            ? IR_VALUE_ID_INVALID
@@ -19520,8 +19555,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     instruction.operand_count = 1;
                     instruction.memory_order = (u8)order;
                     instruction.result = loaded;
-                    IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
-                    builder->function->values[loaded.value].definition = id;
+                    c_ir_append_instruction(builder, instruction, source);
                     IrValueId loaded_value =
                         c_ir_atomic_aggregate_bits_value(builder, loaded, value_type_id, generic_bits_type, false, source);
                     if (loaded_value.value == IR_ID_UNDERLYING_INVALID ||
@@ -19549,8 +19583,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     instruction.operand_count = 1;
                     instruction.memory_order = (u8)order;
                     instruction.result = selected->result;
-                    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-                    builder->function->values[selected->result.value].definition = id;
+                    c_ir_append_instruction(builder, instruction, instruction_source);
                 }
             }
             else
@@ -19777,8 +19810,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                         instruction.memory_order = (u8)order;
                         instruction.atomic_operation = (u8)operation;
                         instruction.result = previous;
-                        IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-                        builder->function->values[previous.value].definition = id;
+                        c_ir_append_instruction(builder, instruction, instruction_source);
                     }
                     selected->result = representation_value
                                            ? c_ir_atomic_aggregate_bits_value(builder, previous, value_type_id, operation_type, false, source)
@@ -19831,8 +19863,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                             instruction.operand_count = 1;
                             instruction.unary_operation = IR_UNARY_INTEGER_BITWISE_NOT;
                             instruction.result = inverted;
-                            IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
-                            builder->function->values[inverted.value].definition = id;
+                            c_ir_append_instruction(builder, instruction, source);
                             recompute_values[0] = inverted;
                         }
                         else
@@ -19948,8 +19979,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     instruction.operand_count = 2;
                     instruction.binary_operation = (u8)entry.operation;
                     instruction.result = result;
-                    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-                    builder->function->values[result.value].definition = id;
+                    c_ir_append_instruction(builder, instruction, instruction_source);
                 }
             }
             if (result.value == IR_ID_UNDERLYING_INVALID)
@@ -20039,10 +20069,9 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             {
                 instruction.result = c_ir_add_result(builder, result_type);
             }
-            IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+            c_ir_append_instruction(builder, instruction, instruction_source);
             if (shape.has_result)
             {
-                builder->function->values[instruction.result.value].definition = id;
                 selected->result = instruction.result;
             }
             else
@@ -20125,8 +20154,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 instruction.operand_count = 1;
                 instruction.unary_operation = (u8)selected->builtin_unary;
                 instruction.result = result;
-                IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-                builder->function->values[result.value].definition = id;
+                c_ir_append_instruction(builder, instruction, instruction_source);
             }
             if (parameter_kind != C_TYPE_INVALID && result.value != IR_ID_UNDERLYING_INVALID)
             {
@@ -20249,7 +20277,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             allocation.immediates[0] = 16;
             allocation.immediate_count = 1;
             allocation.result = storage;
-            builder->function->values[storage.value].definition = c_ir_append_instruction(builder, allocation, allocation_source);
+            c_ir_append_instruction(builder, allocation, allocation_source);
             selected->result = storage;
             selected->argument_count = 1;
             selected->emitted = true;
@@ -20533,7 +20561,6 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             IrSourceRange unreachable_source = c_ir_token_source_range(builder, token);
             IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type);
             c_ir_append_instruction(builder, unreachable, unreachable_source);
-            builder->function->blocks[builder->current_block.value].terminated = true;
             selected->emitted = true;
             remaining -= 1;
             continue;
@@ -20607,8 +20634,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             instruction.operands[0] = list;
             instruction.operand_count = 1;
             instruction.result = selected->result;
-            IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-            builder->function->values[selected->result.value].definition = id;
+            c_ir_append_instruction(builder, instruction, instruction_source);
             selected->argument_count = 2;
             selected->emitted = true;
             remaining -= 1;
@@ -21263,10 +21289,9 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             call.operands = operands;
             call.operand_count = argument_count + 1;
             call.result = signature.returns_void ? IR_VALUE_ID_INVALID : result;
-            IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
+            c_ir_append_instruction(builder, call, call_source);
             if (!signature.returns_void)
             {
-                builder->function->values[result.value].definition = call_id;
                 selected->result = result;
             }
             else
@@ -21514,8 +21539,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_vector_splat(CIntegerIrBuilder* builder, IrValu
     instruction.operands = operands;
     instruction.operand_count = count;
     instruction.result = result;
-    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-    builder->function->values[result.value].definition = id;
+    c_ir_append_instruction(builder, instruction, instruction_source);
     return result;
 }
 
@@ -21604,8 +21628,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_scalarize_binary16_vector_operation(CIntegerIrB
         instruction.operands = lanes;
         instruction.operand_count = lane_count;
         instruction.result = result;
-        IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
-        builder->function->values[result.value].definition = id;
+        c_ir_append_instruction(builder, instruction, source);
     }
     return result;
 }
@@ -21775,8 +21798,7 @@ BUSTER_C_INTERNAL bool c_ir_apply_vector_operation(CIntegerIrBuilder* builder, I
     instruction.unary_operation = (u8)unary;
     instruction.binary_operation = (u8)binary;
     instruction.result = result;
-    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-    builder->function->values[result.value].definition = id;
+    c_ir_append_instruction(builder, instruction, instruction_source);
     *value_count = first;
     values[(*value_count)++] = result;
     return true;
@@ -22275,8 +22297,7 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
         instruction.operand_count = 1;
         instruction.unary_operation = IR_UNARY_BOOLEAN_NOT;
         instruction.result = result;
-        IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-        builder->function->values[result.value].definition = id;
+        c_ir_append_instruction(builder, instruction, instruction_source);
         result = c_ir_emit_cast(builder, result, builder->s32_type, source);
         if (result.value == IR_ID_UNDERLYING_INVALID)
         {
@@ -22605,8 +22626,7 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
             instruction.operand_count = 2;
             instruction.binary_operation = operation == C_CONDITIONAL_EQUAL ? IR_BINARY_POINTER_EQUAL : IR_BINARY_POINTER_NOT_EQUAL;
             instruction.result = result;
-            IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-            builder->function->values[result.value].definition = id;
+            c_ir_append_instruction(builder, instruction, instruction_source);
             result = c_ir_emit_cast(builder, result, builder->s32_type, source);
             if (result.value == IR_ID_UNDERLYING_INVALID)
             {
@@ -22656,8 +22676,7 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
             subtract.operand_count = 2;
             subtract.binary_operation = IR_BINARY_INTEGER_SUBTRACT;
             subtract.result = result;
-            IrInstructionId subtract_id = c_ir_append_instruction(builder, subtract, subtract_source);
-            builder->function->values[result.value].definition = subtract_id;
+            c_ir_append_instruction(builder, subtract, subtract_source);
             CIrVlaValue shape = c_ir_vla_value(builder, values[first]);
             if (shape.counts || element->layout.size > 1)
             {
@@ -22673,8 +22692,7 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
                 divide.operand_count = 2;
                 divide.binary_operation = IR_BINARY_SIGNED_DIVIDE;
                 divide.result = quotient;
-                IrInstructionId divide_id = c_ir_append_instruction(builder, divide, divide_source);
-                builder->function->values[quotient.value].definition = divide_id;
+                c_ir_append_instruction(builder, divide, divide_source);
                 result = quotient;
             }
             *value_count = first;
@@ -22725,8 +22743,7 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
                 negate.operand_count = 1;
                 negate.unary_operation = IR_UNARY_INTEGER_NEGATE;
                 negate.result = negated;
-                IrInstructionId negate_id = c_ir_append_instruction(builder, negate, negate_source);
-                builder->function->values[negated.value].definition = negate_id;
+                c_ir_append_instruction(builder, negate, negate_source);
                 index = negated;
             }
             IrType* pointer = ir_type_from_id(&builder->program->types, pointer_type);
@@ -23004,8 +23021,7 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
         cast.operand_count = 1;
         cast.conversion_operation = IR_CONVERSION_INTEGER_ZERO_EXTEND;
         cast.result = converted;
-        IrInstructionId cast_id = c_ir_append_instruction(builder, cast, cast_source);
-        builder->function->values[converted.value].definition = cast_id;
+        c_ir_append_instruction(builder, cast, cast_source);
         result = converted;
     }
     values[(*value_count)++] = result;
@@ -23112,7 +23128,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_atomic_float_update(CIntegerIrBuilder* builder,
         load.operand_count = 1;
         load.memory_order = (u8)IR_MEMORY_ORDER_RELAXED;
         load.result = seed;
-        builder->function->values[seed.value].definition = c_ir_append_instruction(builder, load, source);
+        c_ir_append_instruction(builder, load, source);
         result = c_ir_emit_store_place(builder, expected_slot, bits_type, seed, source) &&
                  c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &retry_block, 1, source) && c_ir_switch_block(builder, retry_block);
     }
@@ -23142,7 +23158,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_atomic_float_update(CIntegerIrBuilder* builder,
         exchange.memory_order = (u8)IR_MEMORY_ORDER_SEQUENTIAL;
         exchange.failure_memory_order = (u8)IR_MEMORY_ORDER_SEQUENTIAL;
         exchange.result = observed;
-        builder->function->values[observed.value].definition = c_ir_append_instruction(builder, exchange, source);
+        c_ir_append_instruction(builder, exchange, source);
         IrValueId settled = c_ir_emit_binary_value(builder, observed, expected, builder->bool_type, IR_BINARY_INTEGER_EQUAL, source);
         IrBlockId targets[2] = {done_block, retry_block};
         result = settled.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, expected_slot, bits_type, observed, source) &&
@@ -23234,8 +23250,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
         instruction.memory_order = IR_MEMORY_ORDER_SEQUENTIAL;
         instruction.atomic_operation = (u8)atomic_operation;
         instruction.result = previous;
-        IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-        builder->function->values[previous.value].definition = id;
+        c_ir_append_instruction(builder, instruction, instruction_source);
     }
     else
     {
@@ -24283,8 +24298,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_initializer_capture(CIntegerIrBuilder* bui
             instruction.immediates = fields;
             instruction.immediate_count = array ? 0 : (u16)count;
             instruction.result = result;
-            IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
-            builder->function->values[result.value].definition = id;
+            c_ir_append_instruction(builder, instruction, source);
         }
     }
     return result;
@@ -29055,13 +29069,8 @@ BUSTER_C_INTERNAL bool c_ir_terminate(CIntegerIrBuilder* builder, IrOpcode opcod
         memcpy(instruction.targets, targets, sizeof(IrBlockId) * target_count);
         instruction.target_count = (u16)target_count;
     }
-    if (c_ir_append_instruction(builder, instruction, instruction_source).value == IR_ID_UNDERLYING_INVALID)
-    {
-        return false;
-    }
-    block = &builder->function->blocks[builder->current_block.value];
-    block->terminated = true;
-    return true;
+    // The committed terminator closes the block.
+    return c_ir_append_instruction(builder, instruction, instruction_source).value != IR_ID_UNDERLYING_INVALID;
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
@@ -29180,8 +29189,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValue
     comparison.operand_count = 2;
     comparison.binary_operation = (u8)operation;
     comparison.result = result;
-    IrInstructionId id = c_ir_append_instruction(builder, comparison, comparison_source);
-    builder->function->values[result.value].definition = id;
+    c_ir_append_instruction(builder, comparison, comparison_source);
     return result;
 }
 
@@ -30085,17 +30093,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_recover_memory_place_from_value(CIntegerIrBuild
                     recover = cursor.value == definition_id.value;
                 }
             }
+            // The retraction re-proves the tail shape above against the chain
+            // itself and unbinds the load's result before its value is dropped.
+            recover = recover && ir_block_retract_tail(builder->function, builder->current_block, previous);
             if (recover)
             {
-                if (previous.value == IR_ID_UNDERLYING_INVALID)
-                {
-                    builder->function->blocks[builder->current_block.value].first_instruction = IR_INSTRUCTION_ID_INVALID;
-                }
-                else
-                {
-                    builder->function->instructions[previous.value].next = IR_INSTRUCTION_ID_INVALID;
-                }
-                builder->function->blocks[builder->current_block.value].last_instruction = previous;
                 builder->last_instruction = previous;
                 builder->previous_instruction_known = false;
                 result = definition->operands[0];
@@ -30109,7 +30111,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_recover_memory_place_from_value(CIntegerIrBuild
                 }
                 IR_CONSTRUCTION_RECORD(PLACE_LOAD_RETRACTIONS, definition->opcode == IR_OPCODE_LOAD);
                 IR_CONSTRUCTION_RECORD(PLACE_ATOMIC_LOAD_RETRACTIONS, definition->opcode == IR_OPCODE_ATOMIC_LOAD);
-                builder->function->instruction_count -= 1;
                 c_ir_vla_value_forget(builder, (IrValueId){.value = builder->function->value_count - 1});
                 builder->function->value_count -= 1;
             }
@@ -30175,15 +30176,15 @@ BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_advance(CIntegerIrBuilder
                     {
                         cursor = builder->function->instructions[cursor.value].next;
                     }
-                    if (cursor.value != definition_id.value)
+                    // Dropping every row after the place is sound only when they are
+                    // exactly this block's newest rows; the truncation proves it
+                    // (and that none closed the block) or changes nothing.
+                    if (cursor.value != definition_id.value || !ir_block_truncate_after(builder->function, builder->current_block, definition_id))
                     {
                         continue;
                     }
-                    builder->function->instructions[definition_id.value].next = IR_INSTRUCTION_ID_INVALID;
-                    current_block->last_instruction = definition_id;
                     builder->last_instruction = definition_id;
                     builder->previous_instruction_known = false;
-                    builder->function->instruction_count = definition_id.value + 1;
                     builder->function->value_count = candidate.value + 1;
                     for (u32 shape_index = 0; shape_index < builder->vla_value_capacity; shape_index += 1)
                     {
@@ -33514,7 +33515,6 @@ BUSTER_C_INTERNAL bool c_ir_emit_computed_goto_cleanup_dispatch(CIntegerIrBuilde
             {
                 return false;
             }
-            builder->function->blocks[invalid.value].terminated = true;
         }
     }
     for (u32 target_index = 0; target_index < target_count; target_index += 1)
@@ -34356,12 +34356,7 @@ BUSTER_C_INTERNAL bool c_ir_terminate_switch(CIntegerIrBuilder* builder, IrValue
     instruction.targets[value_count] = default_block;
     instruction.target_count = (u16)(value_count + 1);
     instruction.immediate_count = (u16)value_count;
-    if (c_ir_append_instruction(builder, instruction, instruction_source).value == IR_ID_UNDERLYING_INVALID)
-    {
-        return false;
-    }
-    builder->function->blocks[builder->current_block.value].terminated = true;
-    return true;
+    return c_ir_append_instruction(builder, instruction, instruction_source).value != IR_ID_UNDERLYING_INVALID;
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_switch_promoted_type(CIntegerIrBuilder* builder, IrTypeId type_id)
@@ -34507,7 +34502,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_vla_storage(CIntegerIrBuilder* builder, CIrVlaL
         allocation.immediates[0] = alignment;
         allocation.immediate_count = 1;
         allocation.result = storage;
-        builder->function->values[storage.value].definition = c_ir_append_instruction(builder, allocation, source);
+        c_ir_append_instruction(builder, allocation, source);
         IrType* pointer_type = ir_type_from_id(&builder->program->types, pointer_type_id);
         IrValueId place = c_ir_emit_local(builder, name, pointer_type_id, entity, pointer_type ? pointer_type->layout.alignment : alignment);
         CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
@@ -36320,7 +36315,6 @@ BUSTER_C_INTERNAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder, C
         goto_extra->clobber_count = state->clobber_count;
         goto_extra->label_names = state->label_names;
         goto_extra->label_name_count = state->label_count;
-        builder->function->blocks[builder->current_block.value].terminated = true;
         if (!c_ir_switch_block(builder, fallthrough))
         {
             return false;
@@ -39204,7 +39198,6 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             IrSourceRange unreachable_source = declaration_source;
             IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type);
             c_ir_append_instruction(builder, unreachable, unreachable_source);
-            block->terminated = true;
         }
     }
     return true;
@@ -50888,7 +50881,8 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             builder.failure_message = S8("could not initialize cleanup state");
         }
         if (!parameters_lowered || !delimiters_valid || !cleanup_flags_initialized || !c_ir_lower_body(&builder, declaration, false, 0) ||
-            !c_ir_atomic_aggregate_accesses_lowerable(&builder) || !c_ir_ssa_finish(&builder, &result.direct_ssa))
+            !c_ir_atomic_aggregate_accesses_lowerable(&builder) || !c_ir_ssa_finish(&builder, &result.direct_ssa) ||
+            !c_ir_finish_construction(&builder))
         {
             CSourceLocation failure_location = declaration.location;
             String8 failure_token = {0};

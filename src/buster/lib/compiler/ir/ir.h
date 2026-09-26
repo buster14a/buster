@@ -982,6 +982,78 @@ struct IrInstructionOwnership
     IrInstructionId instruction;
 };
 
+// Block-row construction protocol (docs/canonical-ir-construction.md). One
+// family of canonical invariants -- every row sits in exactly one block chain,
+// no row follows a terminator, every block ends in one, and a result value is
+// defined by the one row that names it -- is established by the operations
+// below instead of being discovered afterwards by a whole-module scan. A block
+// is OPEN until a terminator row is committed to it and CLOSED from then on;
+// IrBlock.terminated records that state and producers never write it. A
+// refused operation changes nothing, so a producer turns the refusal into a
+// structured diagnostic instead of committing an invalid row.
+// ir_validate_canonical_module remains the independent oracle for this family,
+// and ir_function_publish_cfg rechecks termination for every producer.
+
+// The rows that close a block. The protocol, CFG publication and the canonical
+// validator share this one predicate.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool ir_instruction_is_terminator(IrInstruction const* instruction)
+{
+    u8 opcode = instruction->opcode;
+    return opcode == IR_OPCODE_BRANCH || opcode == IR_OPCODE_BRANCH_IF || opcode == IR_OPCODE_SWITCH || opcode == IR_OPCODE_INDIRECT_BRANCH ||
+           opcode == IR_OPCODE_RETURN || opcode == IR_OPCODE_UNREACHABLE || (opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->target_count != 0);
+}
+
+typedef enum IrCommitRefusal
+{
+    IR_COMMIT_ACCEPTED,
+    // The block id names no block of the function, or there is no arena.
+    IR_COMMIT_REFUSED_BLOCK,
+    // The block already ends in a terminator.
+    IR_COMMIT_REFUSED_CLOSED,
+    // A nonzero operand, target or immediate count without its storage.
+    IR_COMMIT_REFUSED_STORAGE,
+    // An operand names a value the function does not hold yet.
+    IR_COMMIT_REFUSED_OPERAND,
+    // A target names a block the function does not hold yet.
+    IR_COMMIT_REFUSED_TARGET,
+    // The result names no value, a value a row already defines, or a value of
+    // another type than the row.
+    IR_COMMIT_REFUSED_RESULT,
+    // Insertion only: a terminator row, or a position after a terminator.
+    IR_COMMIT_REFUSED_POSITION,
+    IR_COMMIT_REFUSAL_COUNT,
+} IrCommitRefusal;
+
+BUSTER_F_DECL String8 ir_commit_refusal_name(IrCommitRefusal refusal);
+// Appends `instruction` as the tail of the open `block`, binds its result's
+// definition to the new row, and closes the block when the row is a
+// terminator. An accepted row reopens a published CFG first, like every
+// builder append; a refused one leaves it published. The capacity fast path
+// for a fresh, unpublished function is ir_block_commit_trusted in ir_append.h.
+BUSTER_F_DECL IrInstructionId ir_block_append_instruction(Arena* arena, IrFunction* function, IrBlockId block, IrInstruction instruction,
+                                                          IrSourceRange canonical_source, IrCommitRefusal* refusal_out);
+// Links a new non-terminator row after `after` in `block`, or first when
+// `after` is INVALID; a closed block accepts it ahead of its terminator. The
+// caller owns the obligation that `after` belongs to `block` -- it is the
+// position the builder recorded while `block` was current.
+BUSTER_F_DECL IrInstructionId ir_block_insert_instruction_after(Arena* arena, IrFunction* function, IrBlockId block, IrInstructionId after,
+                                                                IrInstruction instruction, IrSourceRange canonical_source,
+                                                                IrCommitRefusal* refusal_out);
+// Removes the function's newest row when it is the tail of `block` and
+// `previous` is its predecessor in the chain (INVALID when it is the only
+// row), unbinding its result. The block must be open, or closed by exactly
+// that row as an UNREACHABLE: it has no edge, so retracting it reopens the
+// block and no other terminator can be retracted. False, with nothing
+// changed, otherwise.
+BUSTER_F_DECL bool ir_block_retract_tail(IrFunction* function, IrBlockId block, IrInstructionId previous);
+// Removes every row after `keep` in the open `block` when those rows are
+// exactly the function's newest rows and none is a terminator, unbinding their
+// results. False, with nothing changed, otherwise.
+BUSTER_F_DECL bool ir_block_truncate_after(IrFunction* function, IrBlockId block, IrInstructionId keep);
+// Explicit finalization: the first block that is still open, or INVALID when
+// every block is closed. O(blocks); reads only IrBlock.terminated.
+BUSTER_F_DECL IrBlockId ir_function_first_open_block(IrFunction const* function);
+
 BUSTER_F_DECL IrProgram ir_program_initialize(Arena* arena, u32 module_count, u32 type_capacity, u32 symbol_capacity, u32 source_capacity);
 BUSTER_F_DECL IrTypeId ir_program_add_type(IrProgram* program, IrType type);
 BUSTER_F_DECL void ir_prepare_program_abi(IrProgram* program, IrAbiConvention convention);
@@ -1061,9 +1133,8 @@ BUSTER_F_DECL bool ir_inline_assembly_jump_target(IrFunction* function, IrInstru
 // Writes the owning block of every instruction into `owners`, which the
 // caller sizes to function->instruction_count, and returns the first
 // ownership violation. One O(instructions + blocks) pass: the array doubles
-// as the visited set that bounds every chain walk, so consumers past
-// validation - register allocation and the emitters - reuse it instead of
-// re-deriving block membership or guarding their walks with a counter.
+// as the visited set that bounds every chain walk. The canonical validator is
+// its consumer; backends read published spans instead of owner arrays.
 BUSTER_F_DECL IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBlockId* owners);
 BUSTER_F_DECL IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module);
 // Requires canonical validation (or a producer/pass contract) for instruction
