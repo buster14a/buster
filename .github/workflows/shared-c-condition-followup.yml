@@ -1,0 +1,164 @@
+name: Shared C condition follow-up
+on:
+  push:
+    branches: [research/shared-c-capability-20260925]
+    paths: [.github/workflows/shared-c-condition-followup.yml]
+permissions:
+  contents: write
+jobs:
+  evidence:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - phase: before
+            branch: research/c-comma-condition-tests-only
+            expected: d50ee736821a74bf6e10fca8543a413603e89f86
+          - phase: after
+            branch: fix/c-comma-condition-capability
+            expected: 9581ad04ffae6b8b101c913ee8855b891dc9c58a
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ matrix.branch }}
+          persist-credentials: true
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: transport
+          persist-credentials: false
+      - name: Publish fixture-only portability correction
+        id: publish
+        shell: bash
+        env:
+          EXPECTED: ${{ matrix.expected }}
+          DESTINATION: ${{ matrix.branch }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          python3 transport/tools/investigations/shared-c-capability-20260925/repair-fixture.py .
+          git diff --check
+          test "$(git diff --name-only)" = src/buster/tests/compiler/frontend/c/c_test.c
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/buster/tests/compiler/frontend/c/c_test.c
+          git commit -m 'test(c): use portable storage and split source literals'
+          git push origin "HEAD:refs/heads/$DESTINATION"
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          mkdir -p evidence .ci-tools external
+          git rev-parse HEAD 'HEAD^{tree}' > evidence/revision.txt
+          git diff ade6ac4b6ecb21f30b61b656439bac476c145e2f HEAD > evidence/source.patch
+          git archive HEAD > evidence/source.tar
+          sha256sum evidence/source.tar > evidence/source.tar.sha256
+      - name: Build exact source and existing host dependency
+        id: compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang --version > evidence/clang.txt
+          gcc --version > evidence/gcc.txt
+          clang -dumpmachine > evidence/target.txt
+          uname -a > evidence/host.txt
+          python3 tools/ci_apt.py readline --out evidence/apt-readline
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o .ci-tools/build
+          .ci-tools/build generate --ci --cc clang --linker DEFAULT > evidence/generate.log 2>&1
+          .ci-tools/build build --config Release -t ide > evidence/build.log 2>&1
+          sha256sum build/Release/ide > evidence/compiler.sha256
+      - name: Independent references and strict native semantic family
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: python3 transport/tools/investigations/shared-c-capability-20260925/observe.py build/Release/ide evidence/family --references > evidence/family-observer.log 2>&1
+      - name: Full registered suite without denominator changes
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set +e
+          .ci-tools/build build --config Release -t test_all > evidence/test-all.log 2>&1
+          result=$?
+          printf '%s\n' "$result" > evidence/test-all.exit
+          tail -80 evidence/test-all.log
+          exit "$result"
+      - name: Ordinary self-host fixed point
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          .ci-tools/build test_self_host --config Release 2>&1 | tee evidence/selfhost.log
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        with:
+          repository: lua/lua
+          ref: 6e22fedb74cf0c9b6656e9fce8b7331db847c605
+          path: external/lua-git
+          persist-credentials: false
+      - name: Pristine approved Lua release
+        id: lua_input
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location https://www.lua.org/ftp/lua-5.4.8.tar.gz -o external/lua.tar.gz
+          printf '%s  %s\n' 4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae external/lua.tar.gz | sha256sum --check
+          tar -xzf external/lua.tar.gz -C external
+          sha256sum external/lua.tar.gz > evidence/lua.sha256
+      - name: Existing complete Lua harness
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && steps.lua_input.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          .ci-tools/build test_lua --config Release "$PWD/external/lua-5.4.8/src" "$PWD/external/lua-git" 2>&1 | tee evidence/lua.log
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        id: quickjs_input
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        with:
+          repository: bellard/quickjs
+          ref: 3d5e064e9dd67c70f7962836505a7fa067bf0a4e
+          path: external/quickjs
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        id: test262_input
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        with:
+          repository: tc39/test262
+          ref: 5c8206929d81b2d3d727ca6aac56c18358c8d790
+          path: external/test262
+          persist-credentials: false
+      - name: Existing complete QuickJS harness with approved Test262 subset
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && steps.quickjs_input.outcome == 'success' && steps.test262_input.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C external/quickjs rev-parse HEAD 'HEAD^{tree}' > evidence/quickjs-source.txt
+          git -C external/test262 rev-parse HEAD 'HEAD^{tree}' > evidence/test262-source.txt
+          test -z "$(git -C external/quickjs status --porcelain --untracked-files=all)"
+          test -z "$(git -C external/test262 status --porcelain --untracked-files=all)"
+          git -C external/quickjs archive HEAD > evidence/quickjs-source.tar
+          .ci-tools/build test_quickjs --config Release "$PWD/external/quickjs" "$PWD/external/test262" 2>&1 | tee evidence/quickjs.log
+      - name: Confirm unchanged upstream source
+        if: ${{ !cancelled() && steps.quickjs_input.outcome == 'success' && steps.test262_input.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git -C external/quickjs status --porcelain --untracked-files=all)"
+          test -z "$(git -C external/test262 status --porcelain --untracked-files=all)"
+          git -C external/lua-git diff --exit-code
+          mkdir -p verify-lua
+          tar -xzf external/lua.tar.gz -C verify-lua
+          diff -r verify-lua/lua-5.4.8 external/lua-5.4.8
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: shared-c-condition-final-${{ matrix.phase }}
+          path: |
+            evidence
+            build/lua-v5.4.8-*/
+            build/quickjs-2026-06-04-*/
+          retention-days: 30
+          if-no-files-found: error
