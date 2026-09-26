@@ -63,8 +63,9 @@ shutil.copy2('/etc/os-release',out/'environment/os-release')
 driver = out/'build-driver'
 run(['clang','-Isrc','-Wall','-Werror','-Wno-unused-function','-Wno-unused-variable',
      '-fwrapv','-fno-strict-aliasing','-funsigned-char','build.c','-o',str(driver)],'bootstrap')
-build_env = dict(os.environ, BUSTER_CC='clang')
-run([str(driver),'generate','-DBUSTER_CI=ON','-DBUSTER_INCLUDE_TESTS=OFF',
+build_env = dict(os.environ)
+run([str(driver),'generate','--cc','clang','--linker','DEFAULT',
+     '-DBUSTER_CI=ON','-DBUSTER_INCLUDE_TESTS=OFF',
      '-DBUSTER_BENCH_ALLOCATIONS=ON','-DBUSTER_LTO=OFF'], 'generate',env=build_env)
 run([str(driver),'build','--config','Release','-t','ide'],'build-base',env=build_env)
 base = out/'base-ide'; probe = out/'probe-ide'
