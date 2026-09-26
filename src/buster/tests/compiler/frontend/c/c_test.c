@@ -21386,6 +21386,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
         {S8("0b1111111111111111111111111111111111111111111111111111111111111111ULL"), UINT64_MAX},
         {S8("18'446'744'073'709'551'615ULL"), UINT64_MAX},
         {S8("0xFF'FFu"), 65535}, {S8("0'77"), 63}, {S8("0b10'10"), 10},
+        // Overflow depends on significant digits, not digit count, and runs
+        // cross every eight-byte boundary; a blocked conversion must agree.
+        {S8("000000000000000000000000000001"), 1},
+        {S8("0x0000000000000000FFFFFFFFFFFFFFFF"), UINT64_MAX},
+        {S8("18446744073709551614"), UINT64_MAX - 1},
+        {S8("12345678"), 12345678}, {S8("123456789"), 123456789},
+        {S8("0x12345678"), UINT64_C(0x12345678)}, {S8("0x123456789abcdef0"), UINT64_C(0x123456789abcdef0)},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(valid); index += 1)
     {
@@ -21419,6 +21426,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
         S8("0b10000000000000000000000000000000000000000000000000000000000000000ULL"),
         S8("99999999999999999999999999999999999999"),
         S8("'1"), S8("0x'1"), S8("1''0"), S8("1'"), S8("1'u"), S8("0b1'2"),
+        S8("99999999999999999999"), S8("0001844674407370955161"), S8("0x1'g"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
     {
