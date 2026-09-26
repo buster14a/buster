@@ -644,6 +644,28 @@ without facts for identical bitcode and diagnostics.
   `c_test_type_specifier_diagnostics` and `compiler_driver_test_type_specifiers`,
   which also verify a refused compilation preserves or never creates the output.
 
+## String literal counts
+
+Semantic analysis sizes, types and validates a string literal through
+several independent consumers: expression typing, array-bound inference,
+braced string initializers, member initializers and initializer validation.
+Each of them asks `c_ir_count_string_literal_range_for_target`.
+`CParseResult.string_counts` (a `CStringCountMemo`) records a narrow
+fragment's element count, keyed by final-stream token index, the first time
+it is counted. Later queries read the record instead of walking the spelling.
+
+- Only narrow fragments (plain and `u8`) are recorded, because their count
+  does not depend on the target. Wide fragments are decoded every time.
+- Rejected fragments are never recorded.
+- The memo answers only for the token array it was created for.
+- It is allocated once at the start of semantic analysis. Its slots grow in
+  the never-rewound parse arena, so rollback's wholesale `CParseResult`
+  restore keeps a valid pointer.
+- Semantic analysis clears the pointer before returning.
+
+The decode/count differential checks memoized counts on a miss and on a hit,
+and `c_test_string_count_memo` crosses several rebuilds.
+
 ## Immutable aggregate and complex construction
 
 `IR_OPCODE_AGGREGATE` captures already-evaluated `IR_VALUE_VALUE` operands

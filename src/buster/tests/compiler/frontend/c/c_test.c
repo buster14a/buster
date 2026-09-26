@@ -6818,7 +6818,7 @@ enum
 {
     C_TEST_CENSUS_SEMANTIC_INTEGERS = 0,
     C_TEST_CENSUS_LOWER_INTEGERS = 0,
-    C_TEST_CENSUS_SEMANTIC_STRING_COUNTS = 4,
+    C_TEST_CENSUS_SEMANTIC_STRING_COUNTS = 1,
 };
 
 // The phase counter delta between two census snapshots.
@@ -6905,6 +6905,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_fact_census(UnitTestArguments* 
         BUSTER_TEST(arguments, semantic_integers == C_TEST_CENSUS_SEMANTIC_INTEGERS);
         BUSTER_TEST(arguments, lower_integers == C_TEST_CENSUS_LOWER_INTEGERS);
         BUSTER_TEST(arguments, semantic_counts == C_TEST_CENSUS_SEMANTIC_STRING_COUNTS);
+        // The semantic consumers that used to walk the literal again read the
+        // memoized count instead.
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_COUNT_MEMO_HITS) == 3);
         BUSTER_TEST(arguments, lower_decodes == 1);
     }
     return result;
@@ -7010,6 +7013,35 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_number_facts(UnitTestArguments* argume
         BUSTER_TEST(arguments, artifacts[0].binary.length == artifacts[1].binary.length &&
                                    !memcmp(artifacts[0].binary.pointer, artifacts[1].binary.pointer, artifacts[0].binary.length));
     }
+    return result;
+}
+
+// The semantic string-count memo across its growth boundary: 1,500
+// distinct literal tokens (narrow, u8, wide, escaped, invalid and empty)
+// force several rebuilds, and every memoized answer must equal the walk.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_count_memo(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const shapes[] = {
+        S8("\"plain {u32}\""), S8("u8\"utf {u32}\""), S8("L\"wide {u32}\""), S8("\"esc\\x41\\101\\n{u32}\""),
+        S8("\"bad\\q{u32}\""), S8("\"\""), S8("U\"\\u00e9{u32}\""), S8("\"\\777{u32}\""),
+    };
+    u64 capacity = BUSTER_KB(128);
+    char8* bytes = arena_allocate(arguments->arena, char8, capacity);
+    u64 length = 0;
+    for (u32 index = 0; index < 1500; index += 1)
+    {
+        String8 literal = string_format(arguments->arena, shapes[index % BUSTER_ARRAY_LENGTH(shapes)], index);
+        c_test_append_source(bytes, capacity, &length, string_format(arguments->arena, S8("{S8}\n"), literal));
+    }
+    CPreprocessResult preprocess = c_preprocess(arguments->arena, (String8){.pointer = bytes, .length = length},
+                                                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    u32 recorded = 0;
+    BUSTER_TEST(arguments, preprocess.tokens != 0);
+    BUSTER_TEST(arguments, c_test_string_count_memo_growth(arguments->arena, preprocess, &recorded));
+    // Narrow valid fragments only: the plain, u8, escaped and empty shapes,
+    // four of every eight, plus three of the final partial cycle's four.
+    BUSTER_TEST(arguments, recorded == 1500 / 8 * 4 + 3);
     return result;
 }
 
@@ -23382,6 +23414,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_pp_class_masks);
     BUSTER_TEST_FIXTURE(arguments, c_test_string_literal_decode_differential);
     BUSTER_TEST_FIXTURE(arguments, c_test_number_facts);
+    BUSTER_TEST_FIXTURE(arguments, c_test_string_count_memo);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
     BUSTER_TEST_FIXTURE(arguments, c_test_position_index_tiles);
     BUSTER_TEST_FIXTURE(arguments, c_test_oversized_token_spellings);
