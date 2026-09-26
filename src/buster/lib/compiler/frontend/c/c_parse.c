@@ -52,6 +52,7 @@
 //   c_parse_infer_initializer_array_count_core    array-bound inference
 //   c_parse_add_type, c_parse_aggregate_lookup,   type interning and
 //   c_parse_primitive_type                        construction, attributes
+//   c_parse_definition_scan_start                 definition-token index
 //   c_parse_enum_complete, c_parse_enum_successor enum types and full-width values
 //   c_parse_word_bits_compute,                    specifier words answered
 //   c_parse_word_bits_token                       from the interned symbol
@@ -6557,6 +6558,97 @@ BUSTER_C_INTERNAL void c_parse_aggregate_lookup_insert(CParseResult* result, CTy
     }
 }
 
+// Definition-index slot holding `start`, or the empty slot where it belongs.
+BUSTER_C_INTERNAL CDefinitionIndexSlot* c_parse_definition_index_slot(CDefinitionIndex* index, u32 start)
+{
+    u32 mask = index->slot_count - 1;
+    u32 slot_index = (u32)(((u64)start * UINT64_C(0x9E3779B97F4A7C15)) >> 32) & mask;
+    C_DEFINITION_INDEX_COUNT(index, probe_count, 1);
+    while (index->slots[slot_index].start_plus_one && index->slots[slot_index].start_plus_one != start + 1)
+    {
+        C_DEFINITION_INDEX_COUNT(index, probe_count, 1);
+        slot_index = (slot_index + 1) & mask;
+    }
+    return index->slots + slot_index;
+}
+
+BUSTER_C_INTERNAL bool c_parse_definition_index_grow(CParseResult* result)
+{
+    CDefinitionIndex* index = result->definition_index;
+    bool grown = false;
+    if (index->slot_count <= UINT32_MAX / 2)
+    {
+        u32 slot_count = index->slot_count * 2;
+        u64 size = (u64)slot_count * sizeof(CDefinitionIndexSlot);
+        if (c_parse_arena_can_allocate(result->arena, size, BUSTER_ALIGN_OF(CDefinitionIndexSlot)))
+        {
+            CDefinitionIndexSlot* old_slots = index->slots;
+            u32 old_count = index->slot_count;
+            index->slots = arena_allocate_zeroed(result->arena, CDefinitionIndexSlot, slot_count);
+            index->slot_count = slot_count;
+            for (u32 slot_index = 0; slot_index < old_count; slot_index += 1)
+            {
+                CDefinitionIndexSlot slot = old_slots[slot_index];
+                if (slot.start_plus_one)
+                {
+                    *c_parse_definition_index_slot(index, slot.start_plus_one - 1) = slot;
+                }
+            }
+            grown = true;
+        }
+    }
+    return grown;
+}
+
+// `type` now starts its definition at token `start`: keep the lowest such id.
+BUSTER_C_INTERNAL void c_parse_definition_index_record(CParseResult* result, u32 start, CTypeId type)
+{
+    CDefinitionIndex* index = result->definition_index;
+    if (index && !index->incomplete)
+    {
+        CDefinitionIndexSlot* slot = start < UINT32_MAX ? c_parse_definition_index_slot(index, start) : 0;
+        if (!slot)
+        {
+            index->incomplete = true;
+        }
+        else if (slot->start_plus_one)
+        {
+            slot->lowest_type = BUSTER_MIN(slot->lowest_type, type.value);
+        }
+        else
+        {
+            if (index->fill >= index->slot_count / 2)
+            {
+                index->incomplete = !c_parse_definition_index_grow(result);
+                // Growth invalidates the slot pointer, including its empty slot.
+                slot = c_parse_definition_index_slot(index, start);
+            }
+            if (!index->incomplete)
+            {
+                index->fill += 1;
+                *slot = (CDefinitionIndexSlot){.start_plus_one = start + 1, .lowest_type = type.value};
+            }
+        }
+    }
+}
+
+// The first type id a search for rows whose definition starts at token
+// `definition_start` must visit (see CDefinitionIndex): the lowest id ever
+// recorded for it, the type count when it was never recorded, or 0 when the
+// index cannot vouch for an absence.
+BUSTER_C_SHARED u32 c_parse_definition_scan_start(CParseResult const* result, u32 definition_start)
+{
+    CDefinitionIndex* index = result->definition_index;
+    u32 first = 0;
+    C_DEFINITION_INDEX_COUNT(index, search_count, 1);
+    if (index && !index->incomplete && definition_start < UINT32_MAX)
+    {
+        CDefinitionIndexSlot* slot = c_parse_definition_index_slot(index, definition_start);
+        first = slot->start_plus_one ? slot->lowest_type : result->type_count;
+    }
+    return first;
+}
+
 // Builtin identity belongs to the type, so every typedef spelling shares it.
 BUSTER_C_INTERNAL CTypeId c_parse_variable_argument_list_type(CParseResult* result)
 {
@@ -7385,6 +7477,16 @@ void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpo
 {
     CTypeParseMachine machine = {0};
     c_type_parse_rollback(&machine, result, checkpoint, 0);
+}
+
+void c_test_definition_index_record(CParseResult* result, u32 definition_start, CTypeId type)
+{
+    c_parse_definition_index_record(result, definition_start, type);
+}
+
+u32 c_test_definition_scan_start(CParseResult const* result, u32 definition_start)
+{
+    return c_parse_definition_scan_start(result, definition_start);
 }
 #endif
 
@@ -9726,8 +9828,10 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
             {
                 open += 1;
             }
-            for (u32 index = 0; index < result->type_count && type.value == C_ID_UNDERLYING_INVALID; index += 1)
+            for (u32 index = c_parse_definition_scan_start(result, open + 1); index < result->type_count && type.value == C_ID_UNDERLYING_INVALID;
+                 index += 1)
             {
+                C_DEFINITION_INDEX_COUNT(result->definition_index, scan_row_count, 1);
                 if (result->types[index].definition_start == open + 1 &&
                     (result->types[index].is_complete || result->types[index].kind == C_TYPE_ENUM))
                 {
@@ -11392,6 +11496,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
     aggregate->member_start = result->member_count;
     aggregate->definition_start = open + 1;
     aggregate->definition_token_count = close - (open + 1);
+    c_parse_definition_index_record(result, open + 1, type);
     if (kind == C_TYPE_ENUM)
     {
         aggregate->enum_member_start = result->enum_member_count;
@@ -16404,8 +16509,9 @@ BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* mac
             open += 1;
         }
         bool defined = false;
-        for (u32 type_index = 0; type_index < result->type_count && !defined; type_index += 1)
+        for (u32 type_index = c_parse_definition_scan_start(result, open + 1); type_index < result->type_count && !defined; type_index += 1)
         {
+            C_DEFINITION_INDEX_COUNT(result->definition_index, scan_row_count, 1);
             defined = result->types[type_index].definition_start == open + 1;
         }
         if (defined)
@@ -22671,6 +22777,14 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             // Reused arena bytes can be dirty; empty slots must be zeroed.
             .slots = arena_allocate_zeroed(arena, CAggregateLookupSlot, aggregate_slot_count),
             .slot_count = aggregate_slot_count,
+        };
+    }
+    {
+        u32 definition_slot_count = 1024;
+        result.definition_index = arena_allocate(arena, CDefinitionIndex, 1);
+        *result.definition_index = (CDefinitionIndex){
+            .slots = arena_allocate_zeroed(arena, CDefinitionIndexSlot, definition_slot_count),
+            .slot_count = definition_slot_count,
         };
     }
     result.position_index = arena_allocate(arena, CTokenPositionIndex, 1);
