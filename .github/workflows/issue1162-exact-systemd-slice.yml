@@ -9,6 +9,9 @@ on:
       - .github/scripts/issue1162_exact_systemd_slice.sh
       - .github/scripts/issue1162_live_probe.py
       - .github/scripts/issue1162_stage_observer.py
+      - .github/scripts/issue1162_workspace_observer.py
+      - .github/scripts/issue1162_manager_denial_probe.py
+      - .github/scripts/issue1162_ancestor_preflight_test.py
 
 concurrency:
   group: issue1162-exact-systemd-slice-${{ github.workflow }}-${{ github.ref }}
