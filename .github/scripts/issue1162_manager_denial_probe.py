@@ -601,6 +601,8 @@ def self_test() -> None:
                     if owner_uid == 0:
                         run_orchestration_checks(command_mock, commands, fake_command)
                     else:
+                        reject(lambda: observe(123, 2),
+                               "fixed systemctl executable identity is unsafe")
                         # Adapt the runner-owned fixture to the root-owned
                         # executable view expected inside the disposable guest.
                         # The adapter stays active for every positive and
