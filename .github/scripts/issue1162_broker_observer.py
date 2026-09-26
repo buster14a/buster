@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -53,6 +54,12 @@ HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 UNIQUE_BUS_NAME = re.compile(r":[0-9]+\.[0-9]+\Z")
 DECIMAL = re.compile(r"(?:0|[1-9][0-9]{0,19})\Z")
 FDINFO_INODE = re.compile(rb"^ino:\s*([0-9]+)\s*$", re.MULTILINE)
+PREEXEC_EXECUTABLES = frozenset(("/lib/systemd/systemd-executor",
+                                  "/usr/lib/systemd/systemd-executor"))
+SUPERSEDABLE_CAPTURE_STATES = frozenset(("transient_proc_disappeared",
+                                         "transient_proc_interrupted",
+                                         "transient_capture_deadline",
+                                         "known_preexec_executable_transition"))
 
 MAX_RUN_SECONDS = 4000.0
 MAX_EVENTS = 512
@@ -91,6 +98,9 @@ MATCH_RULES = (
     "type='signal',sender='org.freedesktop.systemd1',"
     "path='/org/freedesktop/systemd1',"
     "interface='org.freedesktop.systemd1.Manager',member='UnitRemoved'",
+    "type='signal',sender='org.freedesktop.systemd1',"
+    "path='/org/freedesktop/systemd1',"
+    "interface='org.freedesktop.systemd1.Manager',member='Reloading'",
     "type='signal',sender='org.freedesktop.systemd1',"
     "path_namespace='/org/freedesktop/systemd1/unit',"
     "interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'",
@@ -552,6 +562,16 @@ class SdBus:
             require(UNIQUE_BUS_NAME.fullmatch(sender) is not None and
                     sender == self.manager_sender,
                     "system manager unique sender changed after Subscribe")
+            if member == "Reloading":
+                require(interface == "org.freedesktop.systemd1.Manager" and
+                        path == "/org/freedesktop/systemd1" and signature == "b",
+                        "unexpected Manager.Reloading signal metadata")
+                value = ctypes.c_int()
+                self._check(self.message_read(message, b"b", ctypes.byref(value)),
+                            "read Manager.Reloading boolean")
+                require(value.value in (0, 1), "invalid Manager.Reloading boolean")
+                return result, {"member": member, "interface": interface, "path": path,
+                                "sender": sender, "reloading": bool(value.value)}
             if member in ("UnitNew", "UnitRemoved"):
                 require(interface == "org.freedesktop.systemd1.Manager" and
                         path == "/org/freedesktop/systemd1" and signature == "so",
@@ -678,8 +698,17 @@ class Lifecycle:
         # A missing start-ticks read is deliberately not supersedable.
         positive_identities_match = (len(witness_identities) == 1 and
             all(self.positive_pid_identity(s) in witness_identities
+                for s in positive_snapshots) and
+            all(bool(s.get("complete")) or
+                (s.get("process_capture_state") in SUPERSEDABLE_CAPTURE_STATES and
+                 bool(s.get("manager_properties_complete")) and
+                 not bool(s.get("process_capture_complete")))
                 for s in positive_snapshots))
         process_reasons = list(self.process_incomplete_reasons)
+        if len(witness_identities) == 1:
+            witness_pid = next(iter(witness_identities))[5]
+            if any(pid > 0 and pid != witness_pid for pid in self.main_pid_values):
+                process_reasons.append("mainpid_signal_conflicts_with_process_witness")
         if not positive_identities_match:
             process_reasons.append("positive_mainpid_without_exact_full_process_witness")
         process_complete = (manager_complete and positive_identities_match and
@@ -800,7 +829,7 @@ class BrokerObserver:
             self.global_reasons.append(reason[:512])
         self.event_loss_detected = self.event_loss_detected or event_loss
 
-    def _emit(self, body: dict[str, object], unit: str | None = None) -> int:
+    def _emit(self, body: dict[str, object], unit: str | None = None) -> tuple[int, int]:
         self.event_seq += 1
         if unit is not None:
             count = self.event_count_by_unit.get(unit, 0) + 1
@@ -813,11 +842,12 @@ class BrokerObserver:
             if isinstance(current, Lifecycle):
                 query_context = {"unit": current.unit, "generation": current.generation,
                                  "started_monotonic_ns": query.get("started_monotonic_ns")}
+        event_ns = time.monotonic_ns()
         event = {"schema": SCHEMA, "boot_id": self.boot_id, "boot_id_raw": self.boot_id_raw,
-                 "seq": self.event_seq, "monotonic_ns": time.monotonic_ns(),
+                 "seq": self.event_seq, "monotonic_ns": event_ns,
                  "observer_show_query_inflight": query_context, **body}
         self.writer.event(event)
-        return self.event_seq
+        return self.event_seq, event_ns
 
     def _schedule(self, lifecycle: Lifecycle, trigger: str, seq: int) -> None:
         if lifecycle.removed:
@@ -850,11 +880,11 @@ class BrokerObserver:
                     "broker lifecycle generation population exceeds bound")
             generation = self.generation_by_unit.get(unit, 0) + 1
             self.generation_by_unit[unit] = generation
-            seq = self._emit({"event": "UnitNew", "member": member,
+            seq, event_ns = self._emit({"event": "UnitNew", "member": member,
                               "interface": message["interface"], "sender": message["sender"],
                               "unit": unit, "object_path": path,
                               "generation": generation}, unit)
-            lifecycle = Lifecycle(unit, path, generation, seq, time.monotonic_ns())
+            lifecycle = Lifecycle(unit, path, generation, seq, event_ns)
             self.units.append(lifecycle)
             self.current_by_path[path] = lifecycle
             self.last_by_path[path] = lifecycle
@@ -863,26 +893,26 @@ class BrokerObserver:
         lifecycle = self.current_by_path.get(path)
         if lifecycle is None:
             previous = self.last_by_path.get(path)
-            seq = self._emit({"event": "UnitRemoved", "member": member,
+            seq, event_ns = self._emit({"event": "UnitRemoved", "member": member,
                               "interface": message["interface"], "sender": message["sender"],
                               "unit": unit, "object_path": path,
                               "generation": previous.generation if previous else None,
                               "orphan": True}, unit)
             if previous is not None:
                 previous.last_event_seq = seq
-                previous.last_monotonic_ns = time.monotonic_ns()
+                previous.last_monotonic_ns = event_ns
                 previous.mark_manager_incomplete("orphan_unit_removed")
             else:
                 self.mark_global("orphan_unit_removed", event_loss=True)
             return
-        seq = self._emit({"event": "UnitRemoved", "member": member,
+        seq, event_ns = self._emit({"event": "UnitRemoved", "member": member,
                           "interface": message["interface"], "sender": message["sender"],
                           "unit": unit, "object_path": path,
                           "generation": lifecycle.generation}, unit)
         lifecycle.removed = True
         lifecycle.removed_event_seq = seq
         lifecycle.last_event_seq = seq
-        lifecycle.last_monotonic_ns = time.monotonic_ns()
+        lifecycle.last_monotonic_ns = event_ns
         lifecycle.removed_monotonic_ns = lifecycle.last_monotonic_ns
         self.current_by_path.pop(path, None)
         query = self.current_query
@@ -902,7 +932,7 @@ class BrokerObserver:
         changed = list(message["changed_properties"])
         invalidated = list(message["invalidated_properties"])
         main_pids = list(message["main_pids"])
-        seq = self._emit({"event": "PropertiesChanged", "member": "PropertiesChanged",
+        seq, event_ns = self._emit({"event": "PropertiesChanged", "member": "PropertiesChanged",
                           "interface": "org.freedesktop.DBus.Properties",
                           "unit_interface": message["unit_interface"],
                           "sender": message["sender"], "unit": lifecycle.unit,
@@ -911,7 +941,7 @@ class BrokerObserver:
                           "invalidated_properties": invalidated,
                           "main_pids": main_pids}, lifecycle.unit)
         lifecycle.last_event_seq = seq
-        lifecycle.last_monotonic_ns = time.monotonic_ns()
+        lifecycle.last_monotonic_ns = event_ns
         self._schedule(lifecycle, "properties-first", seq)
         if "MainPID" in changed or "MainPID" in invalidated:
             for pid in main_pids or [None]:
@@ -926,6 +956,12 @@ class BrokerObserver:
             self._unit_signal(message)
         elif member == "PropertiesChanged":
             self._property_signal(message)
+        elif member == "Reloading":
+            self._emit({"event": "Reloading", "member": member,
+                        "interface": message["interface"], "path": message["path"],
+                        "sender": message["sender"],
+                        "reloading": message["reloading"]})
+            self.mark_global("manager_reloading_during_observation", event_loss=True)
         else:
             raise ObserverError("unrecognized systemd observer message")
 
@@ -959,7 +995,8 @@ class BrokerObserver:
                 "incomplete_reasons": [], "main_pid": 0, "process_started": False,
                 "invocation_id": None, "invocation_id_observed": None,
                 "start_ticks": None, "cgroup": None, "exe": None, "exe_sha256": None,
-                "result": None, "substate": None, "exec_main_status": None,
+                "result": None, "active_state": None, "substate": None,
+                "exec_main_status": None,
                 "raw_show": None, "raw_stderr": None, "proc_capture": {},
                 "socket_fd0": None, "systemctl_exit": None,
                 "systemctl_timed_out": False, "systemctl_timeout_reason": None,
@@ -1069,6 +1106,35 @@ class BrokerObserver:
             else:
                 buffer.extend(block)
 
+    @staticmethod
+    def _capture_failure_state(exc: Exception, snapshot: dict[str, object],
+                               pid: int, capture_number: int) -> str:
+        # The known systemd executor may occupy Type=exec's MainPID before it
+        # enters the fixed broker image. It is preliminary only when the full
+        # show still reports the start phase and the independently read ticks
+        # later bind to a full broker witness. A different executable, cgroup,
+        # hash, socket FD, or process identity is a hard contradiction.
+        expected_preexec = f"process executable path mismatch for broker-{capture_number:06d}: "
+        if (type(exc).__name__ == "ProbeError" and
+                snapshot.get("active_state") == "activating" and
+                snapshot.get("substate") == "start" and
+                isinstance(snapshot.get("start_ticks"), int) and
+                str(exc).startswith(expected_preexec) and
+                str(exc)[len(expected_preexec):] in PREEXEC_EXECUTABLES):
+            return "known_preexec_executable_transition"
+        if type(exc).__name__ == "ProbeError" and str(exc) == \
+                "submit-relative live-probe deadline exhausted":
+            return "transient_capture_deadline"
+        proc_prefix = f"/proc/{pid}/"
+        if (isinstance(exc, OSError) and exc.errno in (errno.ENOENT, errno.ESRCH,
+                errno.ENOTDIR, errno.EINTR) and isinstance(exc.filename, str) and
+                exc.filename.startswith(proc_prefix)):
+            if exc.errno == errno.EINTR:
+                return "transient_proc_interrupted"
+            if not Path(f"/proc/{pid}/stat").exists():
+                return "transient_proc_disappeared"
+        return "identity_contradiction_or_capture_error"
+
     def _finish_query(self, query: dict[str, object]) -> None:
         lifecycle = query["lifecycle"]
         snapshot = query["snapshot"]
@@ -1130,6 +1196,7 @@ class BrokerObserver:
                 lifecycle.cgroup = stdout_property["ControlGroup"]
             lifecycle.process_started = lifecycle.process_started or started
             lifecycle.result = stdout_property["Result"]
+            snapshot["active_state"] = stdout_property["ActiveState"]
             lifecycle.substate = stdout_property["SubState"]
             lifecycle.exec_main_status = stdout_property["ExecMainStatus"]
             snapshot.update({"invocation_id_observed": invocation,
@@ -1145,6 +1212,8 @@ class BrokerObserver:
                     self._capture_process(lifecycle, snapshot, pid, capture_number)
                     snapshot["process_capture_complete"] = bool(invocation_ok and exec_start > 0)
                 except (OSError, ObserverError, ValueError, RuntimeError) as exc:
+                    snapshot["process_capture_state"] = self._capture_failure_state(
+                        exc, snapshot, pid, capture_number)
                     process_failure = process_failure or (
                         f"process_capture_failed:{type(exc).__name__}:{str(exc)[:300]}")
             elif lifecycle.process_started:
@@ -1190,6 +1259,7 @@ class BrokerObserver:
             # independently read start ticks and manager identity. Other
             # failures (invocation, start time, or unverified PID-zero) are hard.
             if not (snapshot["main_pid"] > 0 and
+                    snapshot.get("process_capture_state") in SUPERSEDABLE_CAPTURE_STATES and
                     process_failure.startswith("process_capture_failed:")):
                 lifecycle.mark_process_incomplete(process_failure)
         snapshot["complete"] = bool(snapshot["process_capture_complete"] and
@@ -1537,9 +1607,10 @@ def _self_test() -> None:
 
     good = FixtureArm()
     good.arm()
-    assert good.calls == ["connect", "match-0", "match-1", "match-2", "subscribe"]
+    assert good.calls == ["connect", "match-0", "match-1", "match-2", "match-3",
+                          "subscribe"]
     checks += 1
-    for fail_at in ("match-0", "match-1", "match-2", "subscribe"):
+    for fail_at in ("match-0", "match-1", "match-2", "match-3", "subscribe"):
         failed = FixtureArm(fail_at)
         try:
             failed.arm()
@@ -1551,7 +1622,10 @@ def _self_test() -> None:
 
     # systemctl subprocess controls use an actual fake executable but never
     # open a manager bus or address the host systemd instance.
-    with tempfile.TemporaryDirectory(prefix="issue1162-broker-observer-selftest-") as temp:
+    # The disposable systemd guest mounts /tmp noexec; executable fixtures
+    # therefore live in /var/tmp without relaxing a guest mount policy.
+    with tempfile.TemporaryDirectory(prefix="issue1162-broker-observer-selftest-",
+                                     dir="/var/tmp") as temp:
         root = Path(temp)
         fake = root / "systemctl-fixture.py"
         fake.write_text("#!/usr/bin/env python3\n"
@@ -1566,6 +1640,17 @@ def _self_test() -> None:
             encoding="ascii")
         fake.chmod(0o700)
         unit = "buster-bench-systemd-broker@0-622-65000.service"
+        fake.chmod(0o600)
+        try:
+            _run_fake_command([str(fake), "show", "--", unit],
+                              {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, 1.0, 4096)
+        except PermissionError as exc:
+            assert exc.errno == errno.EACCES
+            checks += 1
+        else:
+            raise AssertionError("non-executable/noexec-style fixture unexpectedly ran")
+        finally:
+            fake.chmod(0o700)
         for mode, timeout, output_bound, expected, marker in (
                 ("ok", 1.0, 4096, 0, "Id="),
                 ("timeout", 0.05, 4096, None, "timeout"),
@@ -1631,7 +1716,9 @@ def _self_test() -> None:
         "manager_properties_complete": True, "process_capture_complete": True,
         "complete": True}
     partial = {**witness, "process_capture_complete": False, "complete": False,
-               "incomplete_reasons": ["process_capture_failed:FileNotFoundError:raced"]}
+               "process_capture_state": "known_preexec_executable_transition",
+               "active_state": "activating", "substate": "start",
+               "incomplete_reasons": ["process_capture_failed:ProbeError:known preexec image"]}
     ended = {"boot_id": boot, "unit": lifecycle.unit,
              "object_path": lifecycle.object_path, "generation": 3,
              "main_pid": 0, "process_started": False,
@@ -1644,6 +1731,24 @@ def _self_test() -> None:
     assert row["process_complete"] and row["snapshots"][0] is partial
     assert not partial["complete"] and not ended["complete"]
     checks += 1
+    completed.main_pid_values = {741, 742}
+    conflicting_signal = completed.as_json(boot, raw)
+    assert not conflicting_signal["process_complete"]
+    assert "mainpid_signal_conflicts_with_process_witness" in conflicting_signal["process_incomplete_reasons"]
+    checks += 1
+    completed.main_pid_values = {0, 741}
+    assert completed.as_json(boot, raw)["process_complete"]
+    checks += 1
+    for contradiction in ("process cgroup mismatch", "process executable path mismatch",
+                          "running and installed executable hashes differ",
+                          "accepted socket FD 0 readback is inconsistent",
+                          "positive MainPID start ticks changed during capture"):
+        bad_partial = {**partial, "process_capture_state": "identity_contradiction_or_capture_error",
+                       "incomplete_reasons": [f"process_capture_failed:ProbeError:{contradiction}"]}
+        completed.snapshots = [bad_partial, witness, ended]
+        assert not completed.as_json(boot, raw)["process_complete"], contradiction
+        checks += 1
+    completed.snapshots = [partial, witness, ended]
     for key, changed in (("boot_id", "f" * 32), ("unit", "other.service"),
                          ("object_path", path_mismatch), ("generation", 4),
                          ("invocation_id", "c" * 32), ("main_pid", 742),
@@ -1734,6 +1839,54 @@ def _self_test() -> None:
     assert fixture_lifecycle.snapshots[2]["incomplete_reasons"] == []
     assert fixture_lifecycle.as_json(boot, raw)["process_complete"]
     checks += 1
+    class ProbeError(RuntimeError):
+        pass
+
+    for failure, active_state, substate, supersedable in (
+            (ProbeError("process executable path mismatch for broker-000004: "
+                        "/usr/lib/systemd/systemd-executor"), "activating", "start", True),
+            (ProbeError("process executable path mismatch for broker-000004: "
+                        "/usr/local/bin/other"), "activating", "start", False),
+            (ProbeError("process executable path mismatch for broker-000004: "
+                        "/usr/lib/systemd/systemd-executor"), "active", "running", False),
+            (ProbeError("process cgroup mismatch for broker-000004"), "activating", "start", False),
+            (ProbeError("running and installed executable hashes differ for broker-000004"),
+             "active", "running", False),
+            (ObserverError("accepted socket FD 0 readback is inconsistent"),
+             "active", "running", False),
+            (ObserverError("positive MainPID start ticks changed during capture"),
+             "active", "running", False)):
+        case_lifecycle = Lifecycle(lifecycle.unit, lifecycle.object_path, 4, 10, 50)
+        snap = {"boot_id": boot, "unit": lifecycle.unit,
+                "object_path": lifecycle.object_path, "generation": 4,
+                "raw_show": None, "raw_stderr": None,
+                "process_capture_complete": False, "manager_properties_complete": False,
+                "incomplete_reasons": [], "main_pid": 0,
+                "process_start_observed_before_query": False,
+                "trigger": "mainpid:741", "trigger_event_seq": 10,
+                "started_monotonic_ns": time.monotonic_ns()}
+        case_lifecycle.snapshots.append(snap)
+        client = subprocess.Popen(["/usr/bin/true"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+        client.wait(timeout=1.0)
+        case_show = positive_show.replace("ActiveState=activating", f"ActiveState={active_state}")
+        case_show = case_show.replace("SubState=start", f"SubState={substate}")
+        query = {"lifecycle": case_lifecycle, "snapshot": snap, "process": client,
+                 "stdout": bytearray(case_show.encode()), "stderr": bytearray(),
+                 "capture_number": 4, "limit_reason": None, "cancel_reason": None}
+        def failed_capture(_row: Lifecycle, row_snapshot: dict[str, object],
+                           _pid: int, _number: int) -> None:
+            row_snapshot["start_ticks"] = 5812
+            raise failure
+
+        fixture_observer._capture_process = failed_capture
+        fixture_observer.current_query = query
+        fixture_observer._finish_query(query)
+        case_lifecycle.snapshots.append({**witness, "generation": 4})
+        case_lifecycle.removed = True
+        assert case_lifecycle.as_json(boot, raw)["process_complete"] == supersedable
+        assert (snap["process_capture_state"] in SUPERSEDABLE_CAPTURE_STATES) == supersedable
+        checks += 1
     reaped = subprocess.Popen(["/usr/bin/true"], stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True, start_new_session=True)
     reaped.wait(timeout=1.0)
@@ -1752,6 +1905,58 @@ def _self_test() -> None:
     assert stopped["open"] == {} and reaped.stdout.closed and reaped.stderr.closed
     assert stopped["cancel_reason"] == "fixture_client_already_reaped"
     checks += 1
+    class FixtureEventWriter:
+        def __init__(self):
+            self.rows: list[dict[str, object]] = []
+
+        def event(self, record: dict[str, object]) -> int:
+            self.rows.append(record)
+            return 1
+
+    class FixturePathBus:
+        def object_path(self, _unit: str) -> str:
+            return lifecycle.object_path
+
+    event_observer = object.__new__(BrokerObserver)
+    event_observer.bus = FixturePathBus()
+    event_observer.writer = FixtureEventWriter()
+    event_observer.boot_id = boot
+    event_observer.boot_id_raw = raw
+    event_observer.event_seq = 0
+    event_observer.event_count_by_unit = {}
+    event_observer.current_query = None
+    event_observer.units = []
+    event_observer.current_by_path = {}
+    event_observer.last_by_path = {}
+    event_observer.generation_by_unit = {}
+    event_observer.queue = deque()
+    event_observer.global_reasons = []
+    event_observer.event_loss_detected = False
+    event_observer.handle_message({"member": "UnitNew", "interface": "org.freedesktop.systemd1.Manager",
+        "sender": ":1.4", "unit": lifecycle.unit, "object_path": lifecycle.object_path})
+    event_observer.handle_message({"member": "PropertiesChanged",
+        "unit_interface": "org.freedesktop.systemd1.Service", "sender": ":1.4",
+        "path": lifecycle.object_path, "changed_properties": ["MainPID"],
+        "invalidated_properties": [], "main_pids": [741]})
+    event_observer.handle_message({"member": "UnitRemoved",
+        "interface": "org.freedesktop.systemd1.Manager", "sender": ":1.4",
+        "unit": lifecycle.unit, "object_path": lifecycle.object_path})
+    event_lifecycle = event_observer.units[0]
+    rows = event_observer.writer.rows
+    assert event_lifecycle.first_monotonic_ns == rows[0]["monotonic_ns"]
+    assert event_lifecycle.last_monotonic_ns == rows[2]["monotonic_ns"]
+    assert event_lifecycle.removed_monotonic_ns == rows[2]["monotonic_ns"]
+    assert event_lifecycle.main_pid_values == {741}
+    checks += 1
+    for reloading in (True, False):
+        event_observer.handle_message({"member": "Reloading",
+            "interface": "org.freedesktop.systemd1.Manager",
+            "path": "/org/freedesktop/systemd1", "sender": ":1.4",
+            "reloading": reloading})
+        assert rows[-1]["event"] == "Reloading" and rows[-1]["reloading"] is reloading
+        assert event_observer.event_loss_detected
+        assert "manager_reloading_during_observation" in event_observer.global_reasons
+        checks += 1
     class FixtureFinalBus:
         def __init__(self, messages: int):
             self.remaining = messages
