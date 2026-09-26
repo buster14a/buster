@@ -125,6 +125,28 @@ DIRECTED = [
 ]
 
 
+# Shapes that c_test.c's packed-layout fixtures pin for the Itanium rule on
+# x86-64 Linux, where Clang agrees with those numbers. Every other target meets
+# them here instead, against Clang. They come after the random records so that
+# adding them renamed no existing record.
+PINNED = [
+    ("union", " __attribute__((packed))", None, ["char lead;", "int value : 5;"]),
+    ("union", " __attribute__((packed))", None, ["char lead;", "unsigned int value : 12;"]),
+    ("union", "", None, ["char lead;", "int value : 5;"]),
+    ("struct", " __attribute__((packed))", None, ["unsigned char low : 3;", "unsigned char high : 5;", "char tail;"]),
+    ("struct", " __attribute__((packed))", None, ["char lead;", "int value : 24;"]),
+    ("struct", "", None, ["char lead;", "__attribute__((packed)) int value : 5;", "char tail;"]),
+    ("struct", "", None, ["char lead;", "int value : 5 __attribute__((packed));", "char tail;"]),
+    ("struct", "", None, ["char byte;", "int a : 8;", "int b : 24 __attribute__((packed));", "char tail;"]),
+    ("struct", "", None, ["char byte;", "int a : 8 __attribute__((packed));", "int b : 24;", "char tail;"]),
+    ("struct", " __attribute__((packed))", None, ["int low : 3;", "int high : 30;"]),
+    ("struct", " __attribute__((packed))", None, ["long long lead : 1;", "long long value : 55;"]),
+    ("struct", " __attribute__((packed))", None, ["long long lead : 1;", "long long value : 64;"]),
+    ("struct", " __attribute__((packed, aligned(8)))", None, ["char byte;", "int value;"]),
+    ("struct", "", None, ["char byte;", "int value __attribute__((packed));"]),
+]
+
+
 def directed_records():
     records = []
     for kind, attribute, pack, members in DIRECTED:
@@ -157,7 +179,7 @@ def random_record(rng: random.Random, attributes: bool):
     return {"kind": kind, "attribute": attribute, "pack": pack, "members": members}
 
 
-MEMBER = re.compile(r"^(?P<type>.*?)\s*(?P<name>\b[a-z]\w*)?\s*(?P<array>\[\d+\])?\s*(?::\s*(?P<width>\d+))?\s*(?:__attribute__.*)?;$")
+MEMBER = re.compile(r"^(?:__attribute__\(\([^()]*(?:\([^()]*\))?\)\)\s+)?(?P<type>.*?)\s*(?P<name>\b[a-z]\w*)?\s*(?P<array>\[\d+\])?\s*(?::\s*(?P<width>\d+))?\s*(?:__attribute__.*)?;$")
 
 
 def member_facts(declaration: str):
@@ -307,6 +329,8 @@ def corpus_records():
     for seed in range(1, 4):
         rng = random.Random(seed)
         records += [random_record(rng, seed != 1) for _ in range(20)]
+    for kind, attribute, pack, members in PINNED:
+        records.append({"kind": kind, "attribute": attribute, "pack": pack, "members": members})
     return records
 
 
