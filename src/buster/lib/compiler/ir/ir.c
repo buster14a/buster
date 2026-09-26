@@ -73,8 +73,56 @@ String8 ir_construction_counter_name(IrConstructionCounter counter)
 }
 #endif
 
+#if BUSTER_INCREMENTAL_AUDIT
+// The audit open on this thread, or null. Research builds only.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL IrAccessAudit* ir_access_audit_current;
+
+void ir_access_audit_open(IrAccessAudit* audit)
+{
+    ir_access_audit_current = audit;
+}
+
+void ir_access_audit_close(void)
+{
+    ir_access_audit_current = 0;
+}
+
+void ir_access_audit_type(u32 id)
+{
+    IrAccessAudit* audit = ir_access_audit_current;
+    if (audit)
+    {
+        if (audit->type_count < audit->type_capacity)
+        {
+            audit->types[audit->type_count++] = id;
+        }
+        else
+        {
+            audit->overflow = true;
+        }
+    }
+}
+
+void ir_access_audit_symbol(u32 id)
+{
+    IrAccessAudit* audit = ir_access_audit_current;
+    if (audit)
+    {
+        if (audit->symbol_count < audit->symbol_capacity)
+        {
+            audit->symbols[audit->symbol_count++] = id;
+        }
+        else
+        {
+            audit->overflow = true;
+        }
+    }
+}
+#endif
+
 IrType* ir_type_from_id(IrTypeTable* table, IrTypeId id)
 {
+    IR_ACCESS_AUDIT_TYPE(id.value);
     IrType* result;
     if (!table || id.value >= table->count)
     {
@@ -136,6 +184,7 @@ bool ir_symbol_is_interposable(IrSymbol const* symbol)
 
 IrSymbol* ir_symbol_from_id(IrSymbolTable* table, IrSymbolId id)
 {
+    IR_ACCESS_AUDIT_SYMBOL(id.value);
     IrSymbol* result;
     if (!table || id.value >= table->count)
     {

@@ -1,0 +1,79 @@
+name: Incremental code-generation research
+
+# Hosted correctness and deterministic-workload evidence for the opt-in
+# function-granular code-generation cache (docs/incremental-compilation.md).
+# Every step of the edit matrix, the randomized edit sequences, the real-code
+# workload and the self-host run compares incremental output byte-for-byte
+# with a clean rebuild; the dependency audit checks every program-level read
+# of code generation against the function's key. Wall times in the report are
+# supplementary; the counts are the result.
+on:
+  pull_request:
+    paths:
+      - src/buster/lib/compiler/incremental/**
+      - src/buster/lib/compiler/codegen/codegen.c
+      - src/buster/lib/compiler/codegen/codegen.h
+      - src/buster/lib/compiler/codegen/machine_select.c
+      - src/buster/lib/compiler/codegen/machine_x86_64.c
+      - src/buster/lib/compiler/ir/ir.c
+      - src/buster/lib/compiler/ir/model.h
+      - src/buster/lib/compiler/driver/driver.c
+      - src/buster/lib/compiler/driver/driver.h
+      - src/buster/lib/os.c
+      - src/buster/tests/compiler/incremental/**
+      - tools/incremental_edit_matrix.py
+      - .github/workflows/incremental-codegen-research.yml
+  workflow_dispatch:
+
+concurrency:
+  group: incremental-codegen-research-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  research:
+    if: ${{ vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Incremental evidence (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-26.04-arm, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Build the Release compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+      - name: Edit matrix, randomized sequences, real code, self-host and audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/incremental-report"
+          mkdir -p "$report"
+          python3 -B tools/incremental_edit_matrix.py \
+            --compiler build/Release/ide --work "$RUNNER_TEMP/incremental-work" \
+            --matrix --random 8:40 --real-code --self-host --audit \
+            --targets host,aarch64-unknown-linux,x86_64-unknown-linux,x86_64-pc-windows,aarch64-pc-windows,aarch64-apple-macos,x86_64-apple-macos \
+            --audit-targets host,aarch64-unknown-linux,x86_64-pc-windows \
+            --json "$report/report.json" --markdown "$report/report.md" \
+            || status=$?
+          cat "$report/report.md" >> "$GITHUB_STEP_SUMMARY"
+          exit "${status:-0}"
+      - name: Retain the report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: incremental-report-${{ matrix.runner }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/incremental-report
+          if-no-files-found: warn
+          retention-days: 14

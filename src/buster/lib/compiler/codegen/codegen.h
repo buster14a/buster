@@ -523,6 +523,7 @@ typedef enum CodegenThreadLocalModel
 } CodegenThreadLocalModel;
 
 typedef struct BootstrapTrace BootstrapTrace;
+typedef struct IncrementalCodegenSession IncrementalCodegenSession;
 typedef struct CodegenModuleOptions CodegenModuleOptions;
 struct CodegenModuleOptions
 {
@@ -586,5 +587,10 @@ BUSTER_F_DECL CodegenAbi codegen_abi_for_target(Target target);
 BUSTER_F_DECL CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options);
 // Tracing is a separate entrypoint: keep the ordinary compact options ABI.
 BUSTER_F_DECL CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options, BootstrapTrace* bootstrap_trace);
+// Opt-in function-granular reuse (incremental.h). A null or inactive session
+// is exactly codegen_generate_canonical_module_with_trace.
+BUSTER_F_DECL CodegenModule codegen_generate_canonical_module_incremental(Arena* arena, IrProgram* program, IrModule* module, Target target,
+                                                                         CodegenModuleOptions options, BootstrapTrace* bootstrap_trace,
+                                                                         IncrementalCodegenSession* incremental);
 BUSTER_F_DECL CodegenExecutable codegen_make_executable(CodegenFunction function);
 BUSTER_F_DECL void codegen_release_executable(CodegenExecutable executable);

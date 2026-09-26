@@ -312,6 +312,11 @@ BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnR
 BUSTER_F_DECL ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spawn, u64 timeout_microseconds);
 BUSTER_F_DECL String8 os_get_environment_variable(String8 variable);
 
+// The file the running process was loaded from, as the platform reports it:
+// /proc/self/exe on Linux and Android, _NSGetExecutablePath on Apple targets,
+// GetModuleFileNameW on Windows. Empty where the platform cannot say or the
+// query fails, so a caller that needs the image must treat it as unknown.
+BUSTER_F_DECL String8 os_executable_path(Arena* arena);
 BUSTER_F_DECL void os_make_directory(String8 path);
 // Creates one owner-only directory. An existing path counts as success, like
 // mkdir/EEXIST; callers opening a result tree still validate its contents.

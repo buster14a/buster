@@ -76,6 +76,7 @@ Compiler (`src/buster/lib/compiler/`):
 | `ebpf/ebpf.{c,h}` | Linux eBPF direct backend with its own instruction, ELF, relocation, and BTF encoders. |
 | `gpu/gpu.{c,h}` | Target parsing, deterministic command planning/execution, tool discovery, temporary ownership, and artifact validation for external SPIR-V, NVPTX/PTX, AMDGCN/HSA, Metal AIR/metallib, and DXIL pipelines. |
 | `llvm/bitcode.{c,h}` | Dependency-free canonical typed-IR to binary LLVM bitcode emitter. It writes the bitstream directly, preserves deterministic value numbering, records target metadata, and diagnoses unsupported IR instead of routing through textual LLVM IR. |
+| `incremental/incremental.{c,h}` | Opt-in research prototype of function-granular code-generation reuse: canonical dependency records, the reusable artifact, the per-unit pack and its session. Off unless `-fincremental-cache=DIR` is given; see `docs/incremental-compilation.md`. |
 | `driver/driver.{c,h}` | Clang-like C command-line parsing and end-to-end preprocess/compile/assemble/object/link dispatch, including hosted and freestanding UEFI links, plus direct LLVM bitcode output and isolated external GPU-pipeline orchestration. |
 
 Applications:

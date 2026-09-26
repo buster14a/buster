@@ -97,6 +97,7 @@
 #include <buster/tests/compiler/codegen/aarch64_stride_test.h>
 #include <buster/tests/compiler/debug/debug_test.h>
 #include <buster/tests/compiler/dwarf/dwarf_test.h>
+#include <buster/tests/compiler/incremental/incremental_test.h>
 #include <buster/tests/compiler/codeview/codeview_test.h>
 #include <buster/tests/compiler/pdb/pdb_test.h>
 #include <buster/tests/compiler/object/object_test.h>
@@ -161,6 +162,7 @@
 #include <buster/tests/compiler/jit/jit_test.c>
 #include <buster/tests/compiler/link/link_test.c>
 #include <buster/tests/compiler/gpu/gpu_test.c>
+#include <buster/tests/compiler/incremental/incremental_test.c>
 #include <buster/tests/compiler/driver/driver_test.c>
 #include <buster/tests/compiler/driver/object_path_test.c>
 #if BUSTER_CPU_ARCH_X86_64
@@ -527,6 +529,7 @@ typedef enum TestId
     TEST_ID_COMPILER_DIAGNOSTIC,
     TEST_ID_COMPILER_DRIVER,
     TEST_ID_COMPILER_DRIVER_OBJECT_PATH,
+    TEST_ID_INCREMENTAL,
 #if BUSTER_CPU_ARCH_X86_64
     TEST_ID_X86_64,
 #endif
@@ -589,6 +592,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_COMPILER_DIAGNOSTIC] = {S8_INITIALIZER("compiler_diagnostic_tests"), &compiler_diagnostic_tests, true},
     [TEST_ID_COMPILER_DRIVER] = {S8_INITIALIZER("compiler_driver_tests"), &compiler_driver_tests, true},
     [TEST_ID_COMPILER_DRIVER_OBJECT_PATH] = {S8_INITIALIZER("compiler_driver_object_path_tests"), &compiler_driver_object_path_tests, !BUSTER_ANDROID && !BUSTER_IOS},
+    [TEST_ID_INCREMENTAL] = {S8_INITIALIZER("incremental_tests"), &incremental_tests, true},
 #if BUSTER_CPU_ARCH_X86_64
     [TEST_ID_X86_64] = {S8_INITIALIZER("x86_64_tests"), &x86_64_tests},
 #endif

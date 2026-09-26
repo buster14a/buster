@@ -55,6 +55,27 @@ link as before. Function compilation remains serial within each TU, preserving
 signature/source-cursor and inline-assembly ordering. Existing SIMD kernels
 inside each lane are unchanged.
 
+## Opt-in incremental code generation (research prototype)
+
+`-fincremental-cache=DIR` opts native x86-64/AArch64 C compilation into
+function-granular reuse of machine code generation; `-fno-incremental-cache`
+(last one wins) and the default disable it completely. The frontend, IR
+preparation and object writing always run. A machine-emitted function is
+replayed only when its canonical dependency record -- prepared IR with
+program ids relabeled, referenced type closure, referenced symbol attributes
+-- equals the stored one byte for byte under an identical context record
+(compiler image, target, data layout, ABI and codegen options). One pack per
+input path lives in `DIR`; it is replaced atomically after a successful
+object and ignored when corrupt, foreign or from another context.
+`-fincremental-stats` prints `INCREMENTAL*` records on stdout,
+`-fincremental-trace` one `INCREMENTAL_FUNCTION` row per function, and
+`-fincremental-verify` compiles every hit again and counts artifact
+mismatches while emitting the fresh result. The cache stays inactive under
+`-fverify-codegen`, `-fcodegen-fallback-census`, bootstrap tracing and
+`-fno-register-allocator`. The contract, dependency model, formats and
+evidence are in [incremental compilation](../incremental-compilation.md);
+`tools/incremental_edit_matrix.py` is its oracle harness.
+
 The Clang-like `ide cc` driver accepts `-march=<model>` and
 `-mcpu=<model>` (or their separated forms), ordered target-feature overrides
 through `-mattr=+feature,-feature`, and x86 assembly dialect selection through

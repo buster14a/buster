@@ -1164,6 +1164,77 @@ String8 os_path_absolute_lexical(Arena* arena, String8 path, bool null_terminate
     return result;
 }
 
+#if defined(__APPLE__)
+// libSystem's own query, declared here rather than through <mach-o/dyld.h> so
+// that self-hosting on Apple targets parses no additional SDK header.
+extern int _NSGetExecutablePath(char* buffer, uint32_t* buffer_size);
+#endif
+
+String8 os_executable_path(Arena* arena)
+{
+    String8 result = {0};
+#if defined(__linux__)
+    // readlink reports truncation only by filling the buffer, so a result that
+    // fills it is retried with twice the room.
+    bool done = false;
+    for (u64 capacity = 1024; !done && capacity <= BUSTER_MB(1); capacity *= 2)
+    {
+        TemporalArena scratch = scratch_begin(&arena, 1);
+        char8* buffer = arena_allocate(scratch.arena, char8, capacity);
+        ssize_t length = readlink("/proc/self/exe", (char*)buffer, capacity);
+        if (length <= 0)
+        {
+            done = true;
+        }
+        else if ((u64)length < capacity)
+        {
+            result = string_duplicate_arena(arena, (String8){.pointer = buffer, .length = (u64)length}, false);
+            done = true;
+        }
+        scratch_end(scratch);
+    }
+#elif defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(0, &size);
+    if (size)
+    {
+        TemporalArena scratch = scratch_begin(&arena, 1);
+        char8* buffer = arena_allocate(scratch.arena, char8, (u64)size + 1);
+        if (_NSGetExecutablePath((char*)buffer, &size) == 0)
+        {
+            u64 length = 0;
+            while (length < size && buffer[length])
+            {
+                length += 1;
+            }
+            result = string_duplicate_arena(arena, (String8){.pointer = buffer, .length = length}, false);
+        }
+        scratch_end(scratch);
+    }
+#elif defined(_WIN32)
+    bool done = false;
+    for (DWORD capacity = 512; !done && capacity <= 32768; capacity *= 2)
+    {
+        TemporalArena scratch = scratch_begin(&arena, 1);
+        char16* buffer = arena_allocate(scratch.arena, char16, capacity);
+        DWORD length = GetModuleFileNameW(0, (LPWSTR)buffer, capacity);
+        if (length == 0)
+        {
+            done = true;
+        }
+        else if (length < capacity)
+        {
+            result = string8_from_string16(arena, (String16){.pointer = buffer, .length = length}, false);
+            done = true;
+        }
+        scratch_end(scratch);
+    }
+#else
+    BUSTER_UNUSED(arena);
+#endif
+    return result;
+}
+
 bool os_make_directory_attempt(String8 path)
 {
     bool result = path.pointer != 0 && path.length != 0;
