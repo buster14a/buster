@@ -4,7 +4,8 @@
 Subcommands (all outputs are JSON under --output; nothing is timed as proof):
 
   generate  deterministic scaling family: N functions with loops, a switch,
-            a global table read and a call chain (s<N>.c)
+            a global table read and a call chain (s<N>.c), plus the s1000 body
+            with K unused static functions (h<K>.c)
   ab        alternate BASE and CANDIDATE on one command; record exit status,
             output SHA-256, exact minor page faults and peak RSS per run
   corpus    compile every tests/*.c for eight target/debug configurations with
@@ -53,6 +54,13 @@ def generate(arguments):
         lines.append(f"u64 entry(u64 a, u64 b) {{ u64 r = 0; {calls} return r; }}")
         with open(os.path.join(arguments.output, f"s{count}.c"), "w") as handle:
             handle.write("\n".join(lines) + "\n")
+    # Amalgamation-style family: the s1000 body plus K unused static functions,
+    # the shape of a translation unit whose configuration leaves helpers dead.
+    base = open(os.path.join(arguments.output, "s1000.c")).read() if 1000 in arguments.sizes else None
+    for helpers in arguments.helpers if base else []:
+        extra = "".join(f"static u64 helper{index}(u64 a) {{ return a * {index + 3}u + (a >> 3); }}\n" for index in range(helpers))
+        with open(os.path.join(arguments.output, f"h{helpers}.c"), "w") as handle:
+            handle.write(base.replace("static u64 table[256];", "static u64 table[256];\n" + extra, 1))
 
 
 def sha256(path):
@@ -204,6 +212,7 @@ def main():
     generate_parser = commands.add_parser("generate")
     generate_parser.add_argument("--output", required=True)
     generate_parser.add_argument("--sizes", type=int, nargs="+", default=[250, 1000, 4000, 16000])
+    generate_parser.add_argument("--helpers", type=int, nargs="+", default=[250, 1000, 4000])
     ab_parser = commands.add_parser("ab")
     for parser_with_pair in (ab_parser,):
         parser_with_pair.add_argument("--base", required=True)
