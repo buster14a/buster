@@ -62,26 +62,29 @@ BUSTER_GLOBAL_LOCAL IntegerAlignmentSummary integer_alignment_summary_item(Integ
 BUSTER_GLOBAL_LOCAL IntegerAlignmentSummary integer_alignment_summary_then(IntegerAlignmentSummary left, IntegerAlignmentSummary right)
 {
     IntegerAlignmentSummary result = {.alignment = 1};
-    u64 shift;
-    u64 rounded;
-    bool valid = left.valid && right.valid && u64_add_checked(left.tail, right.bias, &shift);
-    if (valid)
+    if (left.valid && right.valid)
     {
-        if (left.alignment >= right.alignment)
+        u64 shift;
+        bool valid = u64_add_checked(left.tail, right.bias, &shift);
+        if (valid)
         {
-            result.bias = left.bias;
-            result.alignment = left.alignment;
-            valid = align_forward_checked(shift, right.alignment, &rounded) && u64_add_checked(rounded, right.tail, &result.tail);
+            u64 rounded;
+            if (left.alignment >= right.alignment)
+            {
+                result.bias = left.bias;
+                result.alignment = left.alignment;
+                valid = align_forward_checked(shift, right.alignment, &rounded) && u64_add_checked(rounded, right.tail, &result.tail);
+            }
+            else
+            {
+                result.alignment = right.alignment;
+                result.tail = right.tail;
+                valid = align_forward_checked(shift, left.alignment, &rounded) && u64_add_checked(left.bias, rounded, &result.bias);
+            }
+            result.valid = valid;
+            u64 at_zero;
+            result.valid = integer_alignment_summary_apply(result, 0, &at_zero);
         }
-        else
-        {
-            result.alignment = right.alignment;
-            result.tail = right.tail;
-            valid = align_forward_checked(shift, left.alignment, &rounded) && u64_add_checked(left.bias, rounded, &result.bias);
-        }
-        result.valid = valid;
-        u64 at_zero;
-        result.valid = integer_alignment_summary_apply(result, 0, &at_zero);
     }
     return result;
 }
@@ -95,12 +98,16 @@ BUSTER_GLOBAL_LOCAL IntegerAlignmentScan integer_alignment_scalar(IntegerAlignme
     {
         IntegerAlignmentItem item = items[result.completed];
         u64 aligned;
-        u64 next;
-        result.valid = align_forward_checked(result.end, item.alignment, &aligned) && u64_add_checked(aligned, item.size, &next);
+        result.valid = align_forward_checked(result.end, item.alignment, &aligned);
         if (result.valid)
         {
-            offsets[result.completed++] = aligned;
-            result.end = next;
+            u64 next;
+            result.valid = u64_add_checked(aligned, item.size, &next);
+            if (result.valid)
+            {
+                offsets[result.completed++] = aligned;
+                result.end = next;
+            }
         }
     }
     return result;
