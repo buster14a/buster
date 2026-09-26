@@ -23619,10 +23619,19 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
             // consulted -- including the forward-declared tag whose pointer
             // typedef was lowered against the opaque made before the
             // definition.
-            CScopeId reference_scope = c_parse_scope_for_token(&builder->parse, (CScopeId){0}, index + 1);
-            u32 best_distance = UINT32_MAX;
-            for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
+            // A tag only one row carries needs no search; the parse-side
+            // index says so for every unique tag, the common case.
+            bool decided = false;
+            CTypeId unique = c_parse_aggregate_unique(&builder->parse, kind, tag, &decided);
+            if (unique.value != C_ID_UNDERLYING_INVALID)
             {
+                type = builder->c_type_ir_map[unique.value];
+            }
+            CScopeId reference_scope = decided ? (CScopeId){0} : c_parse_scope_for_token(&builder->parse, (CScopeId){0}, index + 1);
+            u32 best_distance = UINT32_MAX;
+            for (u32 type_index = 0; !decided && type_index < builder->parse.type_count; type_index += 1)
+            {
+                C_AGGREGATE_TAG_SEARCH_COUNT(builder->parse.aggregate_lookup);
                 CType* candidate = &builder->parse.types[type_index];
                 if (candidate->kind == kind && !candidate->has_unqualified_type && string_equal(candidate->tag, tag))
                 {
