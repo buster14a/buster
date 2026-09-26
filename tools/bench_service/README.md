@@ -80,26 +80,29 @@ coordinator observes the same properties on the outer unit before continuing.
 
 For a fresh real job the server acquires the cooperative host lease before FIFO
 reservation and materialization. It transfers the descriptor over a private,
-peer-credential-checked result-root `SOCK_SEQPACKET` handoff and closes its own
-copy only after the worker acknowledges receipt. The `.lease-handoff` socket is
+peer-credential-checked result-root `SOCK_SEQPACKET` handoff and retains its own
+copy after the worker acknowledges receipt. The `.lease-handoff` socket is
 unlinked by device/inode identity and the result directory is fsynced before
 the helper is continued; a handoff cleanup failure fails the launch rather
-than signalling CONT over a stale socket. The worker then owns that
-descriptor while result or failure evidence becomes durable, while TERM/KILL
-escalation runs, until `cgroup.events` is unpopulated and workspace
-reconciliation durably releases the queue job. No later queue job can reserve
-while any of those steps is uncertain.
+than signalling CONT over a stale socket. The worker receives a reference to
+the same locked open-file description; closing that reference does not release
+the coordinator's reference. The coordinator retains the lease while result or
+failure evidence becomes durable, while TERM/KILL escalation runs, until
+`cgroup.events` is unpopulated and workspace reconciliation durably releases
+the queue job. Uncertain cleanup transfers its reference to quarantine. No
+later queue job can reserve while any of those steps is uncertain.
 
 Cleanup sends TERM, polls descriptor-validated recursive population every
 100 ms for the configured 10-second grace, then sends KILL and polls for at
 most another 10 seconds. Once the outer unit can no longer launch work, the
-coordinator reacquires and retains the host lease, enumerates every deterministic
-stage name, validates any surviving stage's boot, invocation, relationship and
+coordinator retains the host lease (or reacquires it when recovering without
+an existing descriptor), enumerates every deterministic stage name, validates
+any surviving stage's boot, invocation, relationship and
 cgroup identity, directly applies the same TERM/KILL escalation, and proves all
 five stage units and cgroups absent. It reaps the service helper only after
-those absence proofs. A start/observation failure that cannot prove physical ownership
-retains the active queue admission and the live helper's inherited host lock;
-it does not guess that a transient service disappeared.
+those absence proofs. A start/observation failure that cannot prove physical
+ownership retains active queue admission and the coordinator's lease reference
+in quarantine; it does not guess that a transient service disappeared.
 
 All manager subprocess pipe reads and child waits use monotonic deadlines;
 signal interruption cannot restart an unbounded relative wait. Fixed manager
