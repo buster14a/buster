@@ -8,6 +8,10 @@ on:
       - .github/workflows/issue1162-exact-systemd-slice.yml
       - .github/scripts/issue1162_exact_systemd_slice.sh
 
+concurrency:
+  group: issue1162-exact-systemd-slice-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
