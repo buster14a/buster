@@ -140,7 +140,7 @@ cmake --version | head -1 | tee -a "$evidence/toolchains.txt"
 ninja --version | tee -a "$evidence/toolchains.txt"
 cat > "$payload/Dockerfile" <<'DOCKERFILE'
 FROM ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv dbus util-linux python3-minimal clang cmake ninja-build binutils build-essential git ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv dbus util-linux python3 clang cmake ninja-build binutils build-essential git ca-certificates && rm -rf /var/lib/apt/lists/*
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]
 DOCKERFILE
@@ -206,6 +206,7 @@ cat "$evidence/manager.txt"
 sudo docker exec "$guest" sh -ec 'test "$(cat /proc/1/comm)" = systemd; test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs; test -w /sys/fs/cgroup/cgroup.subtree_control; grep -qw cpu /sys/fs/cgroup/cgroup.controllers; grep -qw cpuset /sys/fs/cgroup/cgroup.controllers; grep -qw memory /sys/fs/cgroup/cgroup.controllers; grep -qw pids /sys/fs/cgroup/cgroup.controllers'
 sudo docker cp "$payload" "$guest:/root/issue1162-install"
 sudo docker exec "$guest" sh /root/issue1162-install/provision.sh | tee "$evidence/provision.txt"
+sudo docker exec "$guest" python3 /root/issue1162-install/live-probe.py --self-test | tee "$evidence/guest-live-probe-self-test.txt"
 sudo docker exec "$guest" systemctl start dbus.socket
 sudo docker exec "$guest" systemctl start buster-bench-systemd-broker.socket
 sudo docker exec "$guest" systemctl start buster-bench.service
