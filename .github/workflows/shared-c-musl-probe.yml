@@ -1,0 +1,108 @@
+name: Shared C musl capability probe
+
+# Temporary correctness investigation. No acceptance or performance-policy change.
+on:
+  push:
+    branches: [research/shared-c-capability-20260925]
+    paths: [.github/workflows/shared-c-musl-probe.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  musl-baseline:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          persist-credentials: false
+      - name: Record exact baseline and tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          test "$(git rev-parse 'HEAD^{tree}')" = 4c5306221fdb22fccc929b55e333163742de17d0
+          mkdir -p evidence .ci-tools external
+          git rev-parse HEAD > evidence/revision.txt
+          git rev-parse 'HEAD^{tree}' > evidence/tree.txt
+          clang --version > evidence/clang.txt
+          clang -dumpmachine > evidence/target.txt
+          clang -print-resource-dir > evidence/resource-dir.txt
+          gcc --version > evidence/gcc.txt
+          ld --version > evidence/ld.txt
+          uname -a > evidence/host.txt
+      - name: Fetch pristine approved musl pin
+        id: musl_source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --no-checkout https://git.musl-libc.org/git/musl external/musl
+          git -C external/musl checkout --detach 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          test "$(git -C external/musl rev-parse HEAD)" = 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          test -z "$(git -C external/musl status --porcelain --untracked-files=all)"
+          git -C external/musl rev-parse HEAD 'HEAD^{tree}' > evidence/musl-source.txt
+      - name: Fetch pristine approved libc-test pin
+        id: libc_source
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --no-checkout https://repo.or.cz/libc-test.git external/libc-test
+          git -C external/libc-test checkout --detach 68edb8bd73dab8147ee54c8bec638f4d2b3cff37
+          test "$(git -C external/libc-test rev-parse HEAD)" = 68edb8bd73dab8147ee54c8bec638f4d2b3cff37
+          test -z "$(git -C external/libc-test status --porcelain --untracked-files=all)"
+          git -C external/libc-test rev-parse HEAD 'HEAD^{tree}' > evidence/libc-test-source.txt
+      - name: Build compiler through existing hosted bootstrap
+        id: compiler
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o .ci-tools/build
+          .ci-tools/build generate --ci --cc clang --linker DEFAULT 2>&1 | tee evidence/generate.log
+          .ci-tools/build build --config Release -t ide 2>&1 | tee evidence/build.log
+          sha256sum build/Release/ide > evidence/compiler.sha256
+      - name: Existing musl and libc-test harness
+        id: harness
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && steps.musl_source.outcome == 'success' && steps.libc_source.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/build test_musl --config Release "$PWD/external/musl" "$PWD/external/libc-test" 2>&1 | tee evidence/musl-libc-test.log
+      - name: Verify pristine inputs after the harness
+        if: ${{ !cancelled() && steps.musl_source.outcome == 'success' && steps.libc_source.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git -C external/musl status --porcelain --untracked-files=all)"
+          test -z "$(git -C external/libc-test status --porcelain --untracked-files=all)"
+      - name: Record distinct outcomes
+        if: always()
+        shell: bash
+        env:
+          MUSL_SOURCE: ${{ steps.musl_source.outcome }}
+          LIBC_SOURCE: ${{ steps.libc_source.outcome }}
+          COMPILER: ${{ steps.compiler.outcome }}
+          HARNESS: ${{ steps.harness.outcome }}
+        run: |
+          mkdir -p evidence
+          printf 'musl-source=%s\nlibc-test-source=%s\ncompiler=%s\nharness=%s\n' "$MUSL_SOURCE" "$LIBC_SOURCE" "$COMPILER" "$HARNESS" | tee evidence/outcomes.txt
+          printf 'Functional investigation only; keep all unexecuted and excluded rows in the denominator. No performance acceptance.\n' >> "$GITHUB_STEP_SUMMARY"
+          cat evidence/outcomes.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain raw workload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: shared-c-musl-baseline-results
+          path: |
+            evidence
+            build/musl-*/
+          retention-days: 14
+          if-no-files-found: error
