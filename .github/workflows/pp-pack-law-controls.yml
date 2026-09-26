@@ -1,0 +1,94 @@
+name: Preprocessing packing transport controls (research only)
+
+on:
+  push:
+    branches: [research/20260925-pp-pack-law-ade6ac4-astra]
+    paths:
+      - tools/investigations/pp-pack-controls-20260925.c
+      - .github/workflows/pp-pack-law-controls.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-pp-pack-controls-ade6ac4
+  cancel-in-progress: false
+
+jobs:
+  controls:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          path: pinned-source
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: research-definition
+          persist-credentials: false
+      - name: Isolate unchanged compiler and identify control sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/pp-pack-controls-evidence"
+          mkdir -p "$OUT"
+          exec > >(tee "$OUT/provenance.txt") 2>&1
+          cd pinned-source
+          test "$(git rev-parse HEAD)" = ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          test "$(git rev-parse 'HEAD^{tree}')" = 4c5306221fdb22fccc929b55e333163742de17d0
+          test "$(uname -m)" = x86_64
+          git worktree add --detach "$RUNNER_TEMP/pp-pack-controls-source" HEAD
+          git rev-parse HEAD 'HEAD^{tree}'
+          printf 'workflow_commit=%s run_id=%s attempt=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          clang --version
+          gcc --version
+          gcc -dumpmachine
+          printf '\n' | gcc -dM -E - > "$OUT/gcc-identity.macros"
+          ! grep -q '__clang__' "$OUT/gcc-identity.macros"
+          mkdir -p "$OUT/pp-pack-law-20260925"
+          cp "$GITHUB_WORKSPACE/research-definition/tools/investigations/pp-pack-law-20260925/probe.c" "$OUT/pp-pack-law-20260925/probe.c"
+          cp "$GITHUB_WORKSPACE/research-definition/tools/investigations/pp-pack-controls-20260925.c" "$OUT/controls.c"
+          cp "$GITHUB_WORKSPACE/research-definition/.github/workflows/pp-pack-law-controls.yml" "$OUT/workflow.yml"
+      - name: Build pinned compiler through native build driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/pp-pack-controls-evidence"
+          cd "$RUNNER_TEMP/pp-pack-controls-source"
+          exec > >(tee "$OUT/build.log") 2>&1
+          mkdir -p .cache/pp-pack-controls
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o .cache/pp-pack-controls/build
+          .cache/pp-pack-controls/build generate --ci --linker DEFAULT --build-directory build-pp-pack-controls -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF
+          .cache/pp-pack-controls/build build --config Release --build-directory build-pp-pack-controls -t ide
+          sha256sum .cache/pp-pack-controls/build build-pp-pack-controls/Release/ide > "$OUT/compiler.sha256"
+          git diff --exit-code
+      - name: Execute supplemental controls without normalizing generated text
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/pp-pack-controls-evidence"
+          exec > >(tee "$OUT/transcript.log") 2>&1
+          clang -std=c17 -Wall -Wextra -Werror -Wpedantic -fwrapv -fno-strict-aliasing -funsigned-char "$OUT/controls.c" -o "$RUNNER_TEMP/pp-pack-controls"
+          sha256sum "$OUT/controls.c" "$OUT/pp-pack-law-20260925/probe.c" "$RUNNER_TEMP/pp-pack-controls" > "$OUT/controls.sha256"
+          "$RUNNER_TEMP/pp-pack-controls" "$RUNNER_TEMP/pp-pack-controls-source/build-pp-pack-controls/Release/ide" "$OUT/results"
+      - name: Retain complete observations including expected marker rejections
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/pp-pack-controls-evidence"
+          if [ -d "$OUT" ]; then
+            cd "$OUT"
+            find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pp-pack-controls-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pp-pack-controls-evidence
+          if-no-files-found: error
+          retention-days: 14
