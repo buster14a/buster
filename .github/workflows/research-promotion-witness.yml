@@ -1,0 +1,106 @@
+name: Promotion witness research (temporary)
+on:
+  push:
+    branches: [research/20260926-promotion-witness]
+    paths:
+      - tools/research/promotion-witness/**
+      - .github/workflows/research-promotion-witness.yml
+permissions:
+  contents: read
+jobs:
+  model:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Source-derived model, independent classifier, negative controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/witness-evidence"
+          mkdir -p "$evidence"
+          exec > >(tee "$evidence/model.log") 2>&1
+          set -x
+          base=ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          test "$(git rev-parse "$base^{tree}")" = 4c5306221fdb22fccc929b55e333163742de17d0
+          git worktree add --detach "$RUNNER_TEMP/witness-base" "$base"
+          git worktree add --detach "$RUNNER_TEMP/witness-candidate" "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree}
+          uname -a
+          clang --version
+          gcc --version
+          src="$RUNNER_TEMP/witness-candidate/tools/research/promotion-witness"
+          python3 "$src/prepare.py" "$RUNNER_TEMP/witness-base" "$evidence/generated"
+          cp "$src/probe.c" "$src/prepare.py" "$evidence/"
+          flags=(-std=c17 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror -fwrapv -fno-strict-aliasing -funsigned-char -I"$evidence/generated")
+          clang "${flags[@]}" -O2 "$src/probe.c" -o "$evidence/clang-probe"
+          "$evidence/clang-probe" | tee "$evidence/clang.stdout"
+          clang "${flags[@]}" -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all "$src/probe.c" -o "$evidence/sanitized-probe"
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 "$evidence/sanitized-probe" | tee "$evidence/sanitized.stdout"
+          gcc "${flags[@]}" -O2 "$src/probe.c" -o "$evidence/gcc-probe"
+          "$evidence/gcc-probe" | tee "$evidence/gcc.stdout"
+          cmp "$evidence/clang.stdout" "$evidence/sanitized.stdout"
+          cmp "$evidence/clang.stdout" "$evidence/gcc.stdout"
+          sha256sum "$evidence"/*.stdout "$evidence"/*.c "$evidence"/*.py "$evidence/generated"/*.inc | tee "$evidence/hashes.txt"
+          printf 'No timing, PMU, RSS, or compiler speedup measurement. Reduced-state correctness only.\n'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ always() }}
+        with:
+          name: promotion-witness-model-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/witness-evidence
+          retention-days: 14
+  baseline-census:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pinned unmodified Buster, existing shared-promotion counters
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/witness-census"
+          mkdir -p "$evidence"
+          exec > >(tee "$evidence/census.log") 2>&1
+          set -x
+          base=ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          git worktree add --detach "$RUNNER_TEMP/census-base" "$base"
+          cd "$RUNNER_TEMP/census-base"
+          git rev-parse HEAD HEAD^{tree}
+          clang --version
+          cmake --version
+          ninja --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/witness-build"
+          "$RUNNER_TEMP/witness-build" generate --cc clang
+          "$RUNNER_TEMP/witness-build" build --config Release -t ide
+          sha256sum build/Release/ide src/buster/lib/compiler/ir/ir_promote.c
+          printf 'int test(int n,int x){int v=x;while(n--){if(n&1)v=x;}return v;}\n' > "$evidence/cascade.c"
+          for form in direct memory; do
+            frontend=()
+            if [[ "$form" == memory ]]; then frontend=(-fno-frontend-ssa); fi
+            for subject in operations frontend-ssa cascade unity; do
+              extra=()
+              case "$subject" in
+                operations) source=tests/basic_c_operations.c ;;
+                frontend-ssa) source=tests/basic_c_frontend_ssa.c ;;
+                cascade) source="$evidence/cascade.c" ;;
+                unity) source=src/buster/apps/ide/ide.c; extra=(-Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0) ;;
+              esac
+              build/Release/ide cc -c -g0 -v "${frontend[@]}" "${extra[@]}" "$source" -o "$evidence/$subject-$form.o" > "$evidence/$subject-$form.stdout" 2> "$evidence/$subject-$form.stderr"
+              sha256sum "$source" "$evidence/$subject-$form.o"
+              grep -E 'IR_LOCAL_PROMOTION|IR_FRONTEND_SSA' "$evidence/$subject-$form.stdout" "$evidence/$subject-$form.stderr" || true
+            done
+          done
+          git diff --exit-code
+          printf 'Baseline work census only: no candidate compiler, timing verdict, self-host fixed point, or speedup claim.\n'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ always() }}
+        with:
+          name: promotion-witness-census-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/witness-census
+          retention-days: 14
