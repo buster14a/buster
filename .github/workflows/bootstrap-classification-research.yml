@@ -1,0 +1,140 @@
+name: Bootstrap classification research
+on:
+  push:
+    branches: [research/bootstrap-classification-20260925-astra]
+    paths:
+      - tools/investigations/bootstrap-classification-20260925/classify.c
+      - tools/investigations/bootstrap-classification-20260925/observe.c
+      - .github/workflows/bootstrap-classification-research.yml
+permissions:
+  contents: read
+concurrency:
+  group: bootstrap-classification-research-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  research:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      BUSTER_TEST_JOBS: 2
+      SOURCE_SHA: ade6ac4b6ecb21f30b61b656439bac476c145e2f
+      SOURCE_TREE: 4c5306221fdb22fccc929b55e333163742de17d0
+      LC_ALL: C
+      TZ: UTC
+    steps:
+      - name: Require enabled hosted correctness
+        env:
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: test "$CI_ENABLED" = true
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Pin separate immutable compiler worktrees and record environment
+        id: setup
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/bootstrap-evidence"
+          git fetch --no-tags origin "$SOURCE_SHA"
+          git worktree add --detach "$RUNNER_TEMP/bootstrap-clang" "$SOURCE_SHA"
+          git worktree add --detach "$RUNNER_TEMP/bootstrap-gcc" "$SOURCE_SHA"
+          test "$(git -C "$RUNNER_TEMP/bootstrap-clang" rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          test "$(git -C "$RUNNER_TEMP/bootstrap-gcc" rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          git -C "$RUNNER_TEMP/bootstrap-clang" diff --exit-code
+          git -C "$RUNNER_TEMP/bootstrap-gcc" diff --exit-code
+          { git rev-parse HEAD HEAD^{tree}; printf 'source=%s\ntree=%s\nrun=%s\nattempt=%s\n' "$SOURCE_SHA" "$SOURCE_TREE" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"; } > "$RUNNER_TEMP/bootstrap-evidence/identities.txt"
+          { date -u; uname -a; cat /etc/os-release; lscpu; clang --version; gcc --version; cmake --version; ninja --version; ld --version; objdump --version; timeout --version; } > "$RUNNER_TEMP/bootstrap-evidence/environment.txt" 2>&1
+          cp -a tools/investigations/bootstrap-classification-20260925 "$RUNNER_TEMP/bootstrap-evidence/packet"
+          cp .github/workflows/bootstrap-classification-research.yml "$RUNNER_TEMP/bootstrap-evidence/workflow.yml"
+      - name: Bootstrap existing build driver and C-only research executor
+        id: tools
+        run: |
+          set -euxo pipefail
+          cd "$RUNNER_TEMP/bootstrap-clang"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          clang -std=c11 -Wall -Wextra -Werror -Wpedantic -fwrapv -fno-strict-aliasing -funsigned-char -O2 "$GITHUB_WORKSPACE/tools/investigations/bootstrap-classification-20260925/observe.c" -o "$RUNNER_TEMP/bootstrap-observe"
+          sha256sum "$RUNNER_TEMP/buster-build" "$RUNNER_TEMP/bootstrap-observe" > "$RUNNER_TEMP/bootstrap-evidence/tool-hashes.txt"
+      - name: Configure Clang Debug split producer
+        id: clang_configure
+        run: |
+          cd "$RUNNER_TEMP/bootstrap-clang"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON > "$RUNNER_TEMP/bootstrap-evidence/clang-configure.stdout" 2> "$RUNNER_TEMP/bootstrap-evidence/clang-configure.stderr"
+      - name: Preserve Clang producer ordinary fixed point and alternate gates
+        id: clang_bootstrap
+        if: ${{ !cancelled() && steps.clang_configure.outcome == 'success' }}
+        run: |
+          cd "$RUNNER_TEMP/bootstrap-clang"
+          set +e
+          "$RUNNER_TEMP/buster-build" test_self_host --config Debug > "$RUNNER_TEMP/bootstrap-evidence/clang-bootstrap.stdout" 2> "$RUNNER_TEMP/bootstrap-evidence/clang-bootstrap.stderr"
+          status=$?
+          printf '%s\n' "$status" > "$RUNNER_TEMP/bootstrap-evidence/clang-bootstrap.status"
+          tail -n 100 "$RUNNER_TEMP/bootstrap-evidence/clang-bootstrap.stdout"
+          cat "$RUNNER_TEMP/bootstrap-evidence/clang-bootstrap.stderr"
+          exit "$status"
+      - name: Observe Clang-produced C0 and available descendants without hiding failures
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' && steps.clang_configure.outcome == 'success' }}
+        run: |
+          cd "$RUNNER_TEMP/bootstrap-clang"
+          "$RUNNER_TEMP/bootstrap-observe" "$GITHUB_WORKSPACE/tools/investigations/bootstrap-classification-20260925/classify.c" "$RUNNER_TEMP/bootstrap-evidence/clang-probes" "$RUNNER_TEMP/bootstrap-clang/build/Debug/ide" "$RUNNER_TEMP/bootstrap-clang/build/self-host/Debug/ide-stage1" "$RUNNER_TEMP/bootstrap-clang/build/self-host/Debug/ide-stage2" > "$RUNNER_TEMP/bootstrap-evidence/clang-probes.stdout" 2> "$RUNNER_TEMP/bootstrap-evidence/clang-probes.stderr"
+      - name: Configure independent GCC Debug split producer on the same CPU
+        id: gcc_configure
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        run: |
+          cd "$RUNNER_TEMP/bootstrap-gcc"
+          "$RUNNER_TEMP/buster-build" generate --cc gcc --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON > "$RUNNER_TEMP/bootstrap-evidence/gcc-configure.stdout" 2> "$RUNNER_TEMP/bootstrap-evidence/gcc-configure.stderr"
+      - name: Preserve GCC producer ordinary fixed point and alternate gates
+        id: gcc_bootstrap
+        if: ${{ !cancelled() && steps.gcc_configure.outcome == 'success' }}
+        run: |
+          cd "$RUNNER_TEMP/bootstrap-gcc"
+          set +e
+          "$RUNNER_TEMP/buster-build" test_self_host --config Debug > "$RUNNER_TEMP/bootstrap-evidence/gcc-bootstrap.stdout" 2> "$RUNNER_TEMP/bootstrap-evidence/gcc-bootstrap.stderr"
+          status=$?
+          printf '%s\n' "$status" > "$RUNNER_TEMP/bootstrap-evidence/gcc-bootstrap.status"
+          tail -n 100 "$RUNNER_TEMP/bootstrap-evidence/gcc-bootstrap.stdout"
+          cat "$RUNNER_TEMP/bootstrap-evidence/gcc-bootstrap.stderr"
+          exit "$status"
+      - name: Observe GCC-produced C0 and available descendants without hiding failures
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' && steps.gcc_configure.outcome == 'success' }}
+        run: |
+          cd "$RUNNER_TEMP/bootstrap-gcc"
+          "$RUNNER_TEMP/bootstrap-observe" "$GITHUB_WORKSPACE/tools/investigations/bootstrap-classification-20260925/classify.c" "$RUNNER_TEMP/bootstrap-evidence/gcc-probes" "$RUNNER_TEMP/bootstrap-gcc/build/Debug/ide" "$RUNNER_TEMP/bootstrap-gcc/build/self-host/Debug/ide-stage1" "$RUNNER_TEMP/bootstrap-gcc/build/self-host/Debug/ide-stage2" > "$RUNNER_TEMP/bootstrap-evidence/gcc-probes.stdout" 2> "$RUNNER_TEMP/bootstrap-evidence/gcc-probes.stderr"
+      - name: Preserve exact compiler artifacts flags and source cleanliness
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          set -euxo pipefail
+          for producer in clang gcc; do
+            root="$RUNNER_TEMP/bootstrap-$producer"
+            destination="$RUNNER_TEMP/bootstrap-evidence/$producer-build"
+            mkdir -p "$destination"
+            git -C "$root" rev-parse HEAD HEAD^{tree} > "$destination/source.txt"
+            git -C "$root" diff --exit-code > "$destination/tracked-diff.txt"
+            for item in CMakeCache.txt compile_commands.json build.ninja; do
+              if test -f "$root/build/$item"; then cp "$root/build/$item" "$destination/$item"; else printf 'missing %s\n' "$item" >> "$destination/missing.txt"; fi
+            done
+            if test -f "$root/build/Debug/ide"; then cp "$root/build/Debug/ide" "$destination/C0"; fi
+            for generation in 1 2; do
+              if test -f "$root/build/self-host/Debug/ide-stage$generation"; then cp "$root/build/self-host/Debug/ide-stage$generation" "$destination/C$generation"; fi
+              if test -f "$root/build/self-host/Debug/ide-stage$generation.metrics"; then cp "$root/build/self-host/Debug/ide-stage$generation.metrics" "$destination/C$generation.metrics"; fi
+            done
+            if test -f "$destination/C1" && test -f "$destination/C2"; then
+              set +e
+              cmp "$destination/C1" "$destination/C2" > "$destination/fixed-point.stdout" 2> "$destination/fixed-point.stderr"
+              status=$?
+              set -e
+              printf '%s\n' "$status" > "$destination/fixed-point.status"
+            fi
+            if test -d "$root/build/generated"; then (cd "$root"; find build/generated -type f -print0 | sort -z | xargs -0 -r sha256sum) > "$destination/generated-hashes.txt"; fi
+            if test -f "$RUNNER_TEMP/bootstrap-evidence/$producer-probes/C0-fast-r0.o"; then objdump -drw "$RUNNER_TEMP/bootstrap-evidence/$producer-probes/C0-fast-r0.o" > "$destination/first-object.disassembly"; fi
+          done
+          cd "$RUNNER_TEMP/bootstrap-evidence"
+          find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+      - name: Always retain complete research evidence
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: bootstrap-classification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bootstrap-evidence/
+          retention-days: 30
+          compression-level: 6
+          if-no-files-found: error
