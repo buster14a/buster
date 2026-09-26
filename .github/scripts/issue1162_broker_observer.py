@@ -1057,6 +1057,7 @@ class BrokerObserver:
         # exact full witness for every positive-PID snapshot identity.
         if (pid <= 0 or lifecycle.removed or
                 self.stop_seen or time.monotonic() >= self.deadline or
+                any(trigger.startswith("preexec-retry:") for trigger in lifecycle.triggers) or
                 len(lifecycle.triggers) >= MAX_PRESTOP_SNAPSHOTS_PER_GENERATION or
                 not lifecycle.snapshots or lifecycle.manager_incomplete_reasons or
                 lifecycle.process_incomplete_reasons or
@@ -2853,9 +2854,9 @@ def _self_test() -> None:
                                 "trigger_event_seq": retry_observer.event_seq,
                                 "finished_monotonic_ns": time.monotonic_ns() - 1_000_000})
     retry_observer.handle_message(later_service)
-    assert len(retry_observer.queue) == 1 and retry_observer.queue[0][1] == \
-           "preexec-retry:4"
+    assert not retry_observer.queue and len(retry_row.triggers) == 4
     checks += 1
+    retry_row.triggers.remove("preexec-retry:3")
     retry_observer.queue.clear()
     retry_row.snapshots[0]["start_ticks"] += 1
     retry_observer.handle_message(later_service)
@@ -2900,10 +2901,16 @@ def _self_test() -> None:
         retry_row.last_mainpid_zero_event_seq = saved_zero_seq
         retry_row.removed = False
         checks += 1
+    retry_row.triggers.add("preexec-retry:3")
+    retry_row.main_pid_values = {760}
+    retry_row.last_mainpid_zero_event_seq = None
     retry_observer.handle_message({**later_service, "main_pids": [0]})
     assert retry_row.last_mainpid_zero_event_seq == retry_observer.event_seq
+    assert len(retry_observer.queue) == 1 and retry_observer.queue[0][1] == "mainpid:0"
+    assert len(retry_row.triggers) == MAX_PRESTOP_SNAPSHOTS_PER_GENERATION
+    retry_observer.queue.clear()
     retry_observer.handle_message(later_service)
-    assert not retry_observer.queue  # A later terminal zero precedes this positive retry signal.
+    assert not retry_observer.queue  # Terminal zero precedes this positive signal.
     checks += 1
     retry_observer.bus.last_dispatch_kind = "positive_null"
     retry_observer.bus_dispatch_count = 0
