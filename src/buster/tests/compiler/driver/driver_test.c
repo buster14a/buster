@@ -16490,7 +16490,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
                 String8 fixture_path = buster_test_temporary_path(fixture_temporary.arena, S8("buster-c-flat-aggregate-initializers"), S8(""));
-                String8 source_path = string_format(fixture_temporary.arena, S8("{S8}.c"), fixture_path);
+                String8 source_path = string_format_z(fixture_temporary.arena, S8("{S8}.c"), fixture_path);
                 BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(c_flat_initializer_source)));
                 String8 fixture_command_line[] = {
                     c_flat_initializer_frontends[frontend_index], c_flat_initializer_optimizations[optimization_index],
