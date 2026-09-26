@@ -1,0 +1,10 @@
+target=native total=392 identical_objects=364 both_failed=28 differences=0
+target=aarch64-unknown-linux-gnu total=392 identical_objects=350 both_failed=42 differences=0
+target=x86_64-pc-windows-msvc total=392 identical_objects=349 both_failed=43 differences=0
+target=aarch64-apple-darwin total=392 identical_objects=350 both_failed=42 differences=0
+mode=llvm-bitcode total=392 identical=271 both_failed=121 differences=0
+mode=wasm64 total=392 identical=194 both_failed=198 differences=0
+mode=quality total=392 identical=364 both_failed=28 differences=0
+mode=mir-stack total=392 identical=364 both_failed=28 differences=0
+mode=none total=392 identical=361 both_failed=31 differences=0
+mode=pic-fast total=392 identical=364 both_failed=28 differences=0

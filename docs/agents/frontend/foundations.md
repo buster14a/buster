@@ -95,13 +95,23 @@ uninitialized owner; disconnected reads keep the ordinary predecessor path.
 The dependency walk is unnecessary when every retained owner already has entry
 initialization; restored loads still become independent definitions first.
 
-After predecessor propagation finishes, parameter simplification reuses its
-block cursor for a stable list of blocks that still own parameters. Empty
-blocks leave the list after each sweep. Simplification never adds parameters,
-so they cannot become active again. Retain ascending block order and each
-block's parameter order: changing elimination order can change replacement
-representatives and canonical value IDs. The allocation diagnostic census
-counts initial list construction as well as subsequent block visits.
+After predecessor propagation finishes, `c_ir_ssa_simplify_parameters` removes
+trivial parameters with the historical decision order: ascending blocks, each
+block's list order, repeated until nothing changes. Changing elimination order
+can change replacement representatives and canonical value IDs, so that
+schedule remains the definition. Only the first sweep visits every parameter;
+it records, for each kept parameter, the two distinct non-self roots that
+decided it. A removal is the only event that changes a root, and a kept
+parameter's decision cannot change until one of those witnesses is removed.
+Later sweeps therefore evaluate only parameters notified through doubly linked
+witness watches, scheduled in the current sweep when they follow the removed
+parameter and in the next sweep otherwise, and unlink removed parameters in
+constant time. Watches are built only when a first-sweep survivor's witness
+was removed after it was decided. The full-sweep algorithm survives only as
+the test oracle behind `c_test_ssa_simplify_parameters`; keep it and the
+production path in agreement. The allocation diagnostic census counts the
+initial block census, evaluations, and the agenda's survivor, classification,
+watch, notification and dirty-set work.
 
 Temporary places and read aliases preserve C lvalue/qualifier checks without
 emitting `LOCAL`, `LOAD` or `STORE` rows for promoted owners. Finalization

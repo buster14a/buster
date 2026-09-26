@@ -54,6 +54,12 @@
     X(SSA_SIMPLIFY_EMPTY_BLOCK_VISITS, ssa_simplify_empty_block_visits) \
     X(SSA_SIMPLIFY_PARAMETER_VISITS, ssa_simplify_parameter_visits) \
     X(SSA_SIMPLIFY_INCOMING_VISITS, ssa_simplify_incoming_visits) \
+    X(SSA_SIMPLIFY_TRIVIAL_REMOVALS, ssa_simplify_trivial_removals) \
+    X(SSA_SIMPLIFY_SURVIVORS, ssa_simplify_survivors) \
+    X(SSA_SIMPLIFY_CLASSIFIED, ssa_simplify_classified) \
+    X(SSA_SIMPLIFY_WATCH_LINKS, ssa_simplify_watch_links) \
+    X(SSA_SIMPLIFY_NOTIFICATIONS, ssa_simplify_notifications) \
+    X(SSA_SIMPLIFY_AGENDA_WORDS, ssa_simplify_agenda_words) \
     X(SSA_LIVE_WORK_VISITS, ssa_live_work_visits) \
     X(SSA_REMAP_VALUE_ROWS, ssa_remap_value_rows) \
     X(SSA_REMAP_INSTRUCTION_ROWS, ssa_remap_instruction_rows) \

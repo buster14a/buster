@@ -20808,6 +20808,381 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_sparse_finish(UnitTestArgum
     return result;
 }
 
+// Loop nests are the ordinary source of backward trivial-parameter chains: a
+// variable only read inside the nest gets a header parameter at every depth,
+// and the innermost one becomes trivial first. The full sweeps then removed one
+// depth per sweep, so their evaluations grew with depth squared.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_loop_nest_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 depths[] = {8, 32, 96};
+    for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        u32 depth = depths[depth_index];
+        u64 capacity = (u64)depth * 96 + 512;
+        char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+        u64 length = 0;
+        // Two writes per owner disable the entry-definition shortcut.
+        c_test_append_source(bytes, capacity, &length,
+            S8("int test(int n,int c){int a=n,b=n+1,d=n+2,e=n+3;if(c){a=c;b=c+1;d=c+2;e=c+3;}int s=0;"));
+        for (u32 level = 0; level < depth; level += 1)
+        {
+            c_test_append_source(bytes, capacity, &length,
+                string_format(temporary.arena, S8("for(int i{u32}=0;i{u32}<n;++i{u32})"), level, level, level));
+        }
+        c_test_append_source(bytes, capacity, &length, S8("s+=a^b^d^e;return s;}"));
+        CPreprocessResult tokens = c_preprocess(temporary.arena, (String8){bytes, length}, (CPreprocessOptions){0});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
+#if BUSTER_BENCH_ALLOCATIONS
+        IrConstructionCounters before = ir_construction_counters();
+#endif
+        CIRLowerResult direct = c_lower_to_ir(temporary.arena, S8("loop-nest.c"), tokens, parse, target_native);
+#if BUSTER_BENCH_ALLOCATIONS
+        IrConstructionCounters after = ir_construction_counters();
+        u64 sweeps = after.values[IR_CONSTRUCTION_SSA_SIMPLIFY_PASSES] - before.values[IR_CONSTRUCTION_SSA_SIMPLIFY_PASSES];
+        u64 visits = after.values[IR_CONSTRUCTION_SSA_SIMPLIFY_PARAMETER_VISITS] - before.values[IR_CONSTRUCTION_SSA_SIMPLIFY_PARAMETER_VISITS];
+        BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+        // The chain is present: at least one sweep per nesting level.
+        BUSTER_TEST(arguments, sweeps >= depth);
+        // Every created parameter is evaluated in the first sweep and each
+        // chain parameter at most once more.
+        BUSTER_TEST(arguments, visits <= 2 * direct.direct_ssa.parameters_created);
+#endif
+        CIRLowerResult reference = c_lower_to_ir_with_options(temporary.arena, S8("loop-nest.c"), tokens, parse, target_native,
+            (CIRLowerOptions){.disable_direct_ssa = true});
+        BUSTER_TEST(arguments, direct.program && !direct.diagnostic_count && reference.program && !reference.diagnostic_count);
+        BUSTER_TEST(arguments, direct.direct_ssa.parameters_created > 4 * depth);
+        if (direct.program && reference.program && !direct.diagnostic_count && !reference.diagnostic_count)
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(direct.program, direct.program->modules).error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(reference.program, reference.program->modules).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// Synthetic parameter graphs for the trivial-parameter simplification oracle.
+// Parameters join their block's list in creation order and blocks are swept in
+// ascending order, so (block, creation index) is the historical decision order.
+typedef struct CTestSsaGraph CTestSsaGraph;
+struct CTestSsaGraph
+{
+    u32* parameter_blocks;
+    u32* parameter_values;
+    u32* degrees;
+    u32* edges;
+    u32* replacements;
+    u8* memory;
+    u32 value_count;
+    u32 value_capacity;
+    u32 parameter_count;
+    u32 parameter_capacity;
+    u32 degree_capacity;
+    u32 block_count;
+};
+
+BUSTER_GLOBAL_LOCAL CTestSsaGraph c_test_ssa_graph(Arena* arena, u32 value_capacity, u32 parameter_capacity, u32 degree_capacity, u32 block_count)
+{
+    CTestSsaGraph graph = {
+        .parameter_blocks = arena_allocate(arena, u32, parameter_capacity + 1),
+        .parameter_values = arena_allocate(arena, u32, parameter_capacity + 1),
+        .degrees = arena_allocate(arena, u32, parameter_capacity + 1),
+        .edges = arena_allocate(arena, u32, (u64)(parameter_capacity + 1) * degree_capacity),
+        .replacements = arena_allocate(arena, u32, value_capacity + 1),
+        .memory = arena_allocate(arena, u8, parameter_capacity + 1),
+        .value_capacity = value_capacity,
+        .parameter_capacity = parameter_capacity,
+        .degree_capacity = degree_capacity,
+        .block_count = block_count,
+    };
+    return graph;
+}
+
+BUSTER_GLOBAL_LOCAL u32 c_test_ssa_value(CTestSsaGraph* graph)
+{
+    u32 value = graph->value_count;
+    BUSTER_CHECK(value < graph->value_capacity);
+    graph->replacements[value] = value;
+    graph->value_count += 1;
+    return value;
+}
+
+// Returns the new parameter's creation index; its value is parameter_values[index].
+BUSTER_GLOBAL_LOCAL u32 c_test_ssa_parameter(CTestSsaGraph* graph, u32 block)
+{
+    u32 index = graph->parameter_count;
+    BUSTER_CHECK(index < graph->parameter_capacity && block < graph->block_count);
+    graph->parameter_blocks[index] = block;
+    graph->parameter_values[index] = c_test_ssa_value(graph);
+    graph->degrees[index] = 0;
+    graph->memory[index] = 0;
+    graph->parameter_count += 1;
+    return index;
+}
+
+BUSTER_GLOBAL_LOCAL void c_test_ssa_incoming(CTestSsaGraph* graph, u32 parameter, u32 value)
+{
+    BUSTER_CHECK(parameter < graph->parameter_count && graph->degrees[parameter] < graph->degree_capacity);
+    graph->edges[(u64)parameter * graph->degree_capacity + graph->degrees[parameter]] = value;
+    graph->degrees[parameter] += 1;
+}
+
+BUSTER_GLOBAL_LOCAL CTestSsaSimplifyResult c_test_ssa_run(Arena* arena, CTestSsaGraph const* graph)
+{
+    u32* offsets = arena_allocate(arena, u32, graph->parameter_count + 1);
+    u32* values = arena_allocate(arena, u32, (u64)graph->parameter_count * graph->degree_capacity + 1);
+    u32 count = 0;
+    for (u32 parameter = 0; parameter < graph->parameter_count; parameter += 1)
+    {
+        offsets[parameter] = count;
+        for (u32 edge = 0; edge < graph->degrees[parameter]; edge += 1)
+        {
+            values[count] = graph->edges[(u64)parameter * graph->degree_capacity + edge];
+            count += 1;
+        }
+    }
+    offsets[graph->parameter_count] = count;
+    CTestSsaSimplifyCase input = {
+        .parameter_blocks = graph->parameter_blocks,
+        .parameter_values = graph->parameter_values,
+        .incoming_offsets = offsets,
+        .incoming_values = values,
+        .replacements = graph->replacements,
+        .memory_parameters = graph->memory,
+        .value_count = graph->value_count,
+        .block_count = graph->block_count,
+        .parameter_count = graph->parameter_count,
+    };
+    return c_test_ssa_simplify_parameters(arena, &input);
+}
+
+// p_i = (p_{i+1}, x) in block `first_block + i`, and the last one is (x, x).
+// Each full sweep removes only the chain's tail, so the reference needs
+// length + 1 sweeps; the agenda evaluates each chain parameter at most twice.
+BUSTER_GLOBAL_LOCAL void c_test_ssa_backward_chain(CTestSsaGraph* graph, u32 first_block, u32 length, u32 x)
+{
+    u32 first = graph->parameter_count;
+    for (u32 index = 0; index < length; index += 1)
+    {
+        (void)c_test_ssa_parameter(graph, first_block + index);
+    }
+    for (u32 index = 0; index < length; index += 1)
+    {
+        u32 parameter = first + index;
+        c_test_ssa_incoming(graph, parameter, index + 1 < length ? graph->parameter_values[parameter + 1] : x);
+        c_test_ssa_incoming(graph, parameter, x);
+    }
+}
+
+// The notification agenda must reproduce every decision of the historical
+// full sweeps (roots of all values, list order, first/last links and counts)
+// while evaluating a subset of their parameter and incoming visits.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_simplify_agenda(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    Arena* arena = temporary.arena;
+    // Order sensitivity: of two mutually trivial parameters, the one visited
+    // second keeps the only self-referencing root. Both orders must match.
+    for (u32 order = 0; order < 2; order += 1)
+    {
+        CTestSsaGraph graph = c_test_ssa_graph(arena, 4, 2, 2, 2);
+        u32 p = c_test_ssa_parameter(&graph, order);
+        u32 q = c_test_ssa_parameter(&graph, 1 - order);
+        c_test_ssa_incoming(&graph, p, graph.parameter_values[q]);
+        c_test_ssa_incoming(&graph, p, graph.parameter_values[q]);
+        c_test_ssa_incoming(&graph, q, graph.parameter_values[p]);
+        c_test_ssa_incoming(&graph, q, graph.parameter_values[p]);
+        CTestSsaSimplifyResult run = c_test_ssa_run(arena, &graph);
+        BUSTER_TEST(arguments, run.valid && run.identical && run.retained == 1);
+    }
+    // Backward chains are the historical worst case: one removal per sweep.
+    u32 chain_lengths[] = {4, 64, 256, 1024};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(chain_lengths); index += 1)
+    {
+        u64 n = chain_lengths[index];
+        CTestSsaGraph graph = c_test_ssa_graph(arena, (u32)n + 1, (u32)n, 2, (u32)n);
+        u32 x = c_test_ssa_value(&graph);
+        c_test_ssa_backward_chain(&graph, 0, (u32)n, x);
+        CTestSsaSimplifyResult run = c_test_ssa_run(arena, &graph);
+        BUSTER_TEST(arguments, run.valid && run.identical && run.retained == 0);
+        BUSTER_TEST(arguments, run.reference.sweeps == n + 1 && run.reference.parameter_visits == n * (n + 1) / 2);
+        BUSTER_TEST(arguments, run.reference.incoming_visits == n * (n + 1));
+        BUSTER_TEST(arguments, run.agenda.sweeps == n && run.agenda.parameter_visits == 2 * n - 1);
+        BUSTER_TEST(arguments, run.agenda.incoming_visits == 2 * (2 * n - 1));
+        BUSTER_TEST(arguments, run.agenda.survivors == n - 1 && run.agenda.watch_links == n - 2);
+        BUSTER_TEST(arguments, run.agenda.notifications == n - 2 && run.agenda.agenda_words == n - 1);
+        BUSTER_TEST(arguments, run.agenda.classified == n - 1 && run.agenda.removed == n);
+    }
+    // Forward chains converge in the first sweep: no survivor, no index.
+    {
+        u32 n = 512;
+        CTestSsaGraph graph = c_test_ssa_graph(arena, n + 1, n, 2, n);
+        u32 x = c_test_ssa_value(&graph);
+        for (u32 block = 0; block < n; block += 1)
+        {
+            u32 parameter = c_test_ssa_parameter(&graph, block);
+            c_test_ssa_incoming(&graph, parameter, block ? graph.parameter_values[parameter - 1] : x);
+            c_test_ssa_incoming(&graph, parameter, x);
+        }
+        CTestSsaSimplifyResult run = c_test_ssa_run(arena, &graph);
+        BUSTER_TEST(arguments, run.valid && run.identical && run.retained == 0);
+        BUSTER_TEST(arguments, run.reference.sweeps == 2 && run.reference.parameter_visits == n);
+        BUSTER_TEST(arguments, run.agenda.sweeps == 1 && run.agenda.parameter_visits == n && run.agenda.survivors == 0);
+        BUSTER_TEST(arguments, run.agenda.watch_links == 0 && run.agenda.notifications == 0 && run.agenda.classified == 0);
+    }
+    // Population N and changed frontier D vary independently. N stable
+    // parameters decided by two instruction values never need a watch; a
+    // backward chain of D parameters supplies the only later changes. The full
+    // sweeps revisit N every sweep; the agenda classifies N once after the
+    // first sweep and afterwards touches only the chain.
+    u32 populations[] = {0, 64, 4096};
+    u32 frontiers[] = {2, 8, 64};
+    for (u32 population_index = 0; population_index < BUSTER_ARRAY_LENGTH(populations); population_index += 1)
+    {
+        for (u32 frontier_index = 0; frontier_index < BUSTER_ARRAY_LENGTH(frontiers); frontier_index += 1)
+        {
+            u64 population = populations[population_index];
+            u64 frontier = frontiers[frontier_index];
+            CTestSsaGraph graph = c_test_ssa_graph(arena, (u32)(population + frontier) + 3, (u32)(population + frontier), 2,
+                                                   (u32)frontier + 1);
+            u32 x = c_test_ssa_value(&graph);
+            u32 a = c_test_ssa_value(&graph);
+            u32 b = c_test_ssa_value(&graph);
+            for (u64 stable = 0; stable < population; stable += 1)
+            {
+                u32 parameter = c_test_ssa_parameter(&graph, 0);
+                c_test_ssa_incoming(&graph, parameter, a);
+                c_test_ssa_incoming(&graph, parameter, b);
+            }
+            c_test_ssa_backward_chain(&graph, 1, (u32)frontier, x);
+            CTestSsaSimplifyResult run = c_test_ssa_run(arena, &graph);
+            BUSTER_TEST(arguments, run.valid && run.identical && run.retained == population);
+            BUSTER_TEST(arguments, run.reference.sweeps == frontier + 1);
+            BUSTER_TEST(arguments, run.reference.parameter_visits == population * (frontier + 1) + frontier * (frontier + 1) / 2);
+            BUSTER_TEST(arguments, run.agenda.parameter_visits == population + 2 * frontier - 1);
+            BUSTER_TEST(arguments, run.agenda.survivors == population + frontier - 1);
+            BUSTER_TEST(arguments, run.agenda.watch_links == frontier - 2 && run.agenda.notifications == frontier - 2);
+            BUSTER_TEST(arguments, run.agenda.classified == population + frontier - 1);
+        }
+    }
+    // Dense adversarial control. A backward hub chain removes one hub per
+    // sweep and M watchers read every hub before a private value, so each hub
+    // removal changes every watcher's witness. The agenda then re-evaluates
+    // every watcher exactly as often as the full sweeps (saving only the hub
+    // re-sweeps and, when watchers follow the hubs, the confirmation sweep)
+    // while paying a notification and a watch link per watcher evaluation.
+    u32 watcher_counts[] = {1, 64, 1024};
+    for (u32 watcher_index = 0; watcher_index < BUSTER_ARRAY_LENGTH(watcher_counts); watcher_index += 1)
+    {
+        for (u32 watchers_first = 0; watchers_first < 2; watchers_first += 1)
+        {
+            u64 hubs = 7;
+            u64 watchers = watcher_counts[watcher_index];
+            CTestSsaGraph graph = c_test_ssa_graph(arena, (u32)(hubs + 2 * watchers) + 1, (u32)(hubs + watchers), (u32)hubs + 1,
+                                                   (u32)hubs + 1);
+            u32 x = c_test_ssa_value(&graph);
+            u32 watcher_block = watchers_first ? 0 : (u32)hubs;
+            u32 first_watcher = UINT32_MAX;
+            if (watchers_first)
+            {
+                first_watcher = graph.parameter_count;
+                for (u64 watcher = 0; watcher < watchers; watcher += 1)
+                {
+                    (void)c_test_ssa_parameter(&graph, watcher_block);
+                }
+            }
+            u32 first_hub = graph.parameter_count;
+            c_test_ssa_backward_chain(&graph, watchers_first ? 1 : 0, (u32)hubs, x);
+            if (!watchers_first)
+            {
+                first_watcher = graph.parameter_count;
+                for (u64 watcher = 0; watcher < watchers; watcher += 1)
+                {
+                    (void)c_test_ssa_parameter(&graph, watcher_block);
+                }
+            }
+            for (u64 watcher = 0; watcher < watchers; watcher += 1)
+            {
+                for (u64 hub = hubs; hub; hub -= 1)
+                {
+                    c_test_ssa_incoming(&graph, first_watcher + (u32)watcher, graph.parameter_values[first_hub + hub - 1]);
+                }
+                c_test_ssa_incoming(&graph, first_watcher + (u32)watcher, c_test_ssa_value(&graph));
+            }
+            CTestSsaSimplifyResult run = c_test_ssa_run(arena, &graph);
+            u64 hub_reference = hubs * (hubs + 1) / 2;
+            BUSTER_TEST(arguments, run.valid && run.identical && run.retained == watchers);
+            BUSTER_TEST(arguments, run.reference.parameter_visits == hub_reference + watchers * (hubs + 1));
+            BUSTER_TEST(arguments, run.agenda.parameter_visits == 2 * hubs - 1 + watchers * (hubs + watchers_first));
+            BUSTER_TEST(arguments, run.agenda.notifications == hubs - 2 + watchers * (hubs - 1));
+            BUSTER_TEST(arguments, run.agenda.incoming_visits <= run.reference.incoming_visits);
+        }
+    }
+    // Deterministic random graphs: cycles, self and duplicate incoming values,
+    // empty and self-only parameters, forwarded parameters, aliased values,
+    // memory-form owners and witnesses that are never removed.
+    u64 seed = UINT64_C(0x5eed5a9e7a11ce55);
+    u32 mismatches = 0;
+    u32 invalid = 0;
+    u32 extra_work = 0;
+    u32 later_sweeps = 0;
+    for (u32 round = 0; round < 20000; round += 1)
+    {
+        TemporalArena scope = scratch_begin(&arena, 1);
+        seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+        u32 block_count = 1 + (u32)((seed >> 33) % 12);
+        seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+        u32 parameter_target = 1 + (u32)((seed >> 33) % 48);
+        CTestSsaGraph graph = c_test_ssa_graph(scope.arena, parameter_target + 24, parameter_target, 6, block_count);
+        while (graph.parameter_count < parameter_target || graph.value_count < 2)
+        {
+            seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+            u32 remaining = parameter_target - graph.parameter_count;
+            bool room = graph.value_count + remaining + 1 < graph.value_capacity;
+            bool parameter = remaining && (!room || (seed >> 33) % 3 != 0);
+            u32 value = parameter ? graph.parameter_values[c_test_ssa_parameter(&graph, (u32)((seed >> 40) % block_count))]
+                                  : c_test_ssa_value(&graph);
+            // Forward some values to an earlier ID: read aliases and
+            // parameters forwarded through single-predecessor chains.
+            if (value && (seed >> 20) % 7 == 0)
+            {
+                graph.replacements[value] = (u32)((seed >> 45) % value);
+            }
+        }
+        for (u32 parameter = 0; parameter < graph.parameter_count; parameter += 1)
+        {
+            seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+            u32 degree = (u32)((seed >> 33) % 7);
+            graph.memory[parameter] = (seed >> 50) % 23 == 0;
+            for (u32 edge = 0; edge < degree; edge += 1)
+            {
+                seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+                u32 pick = (u32)((seed >> 33) % 20);
+                u32 value = pick < 9   ? graph.parameter_values[(seed >> 40) % graph.parameter_count]
+                            : pick < 12 ? graph.parameter_values[parameter]
+                                        : (u32)((seed >> 40) % graph.value_count);
+                c_test_ssa_incoming(&graph, parameter, value);
+            }
+        }
+        CTestSsaSimplifyResult run = c_test_ssa_run(scope.arena, &graph);
+        mismatches += !run.identical;
+        invalid += !run.valid;
+        extra_work += run.agenda.parameter_visits > run.reference.parameter_visits ||
+                      run.agenda.incoming_visits > run.reference.incoming_visits || run.agenda.sweeps > run.reference.sweeps;
+        later_sweeps += run.agenda.sweeps > 1;
+        scratch_end(scope);
+    }
+    BUSTER_TEST(arguments, mismatches == 0 && invalid == 0 && extra_work == 0);
+    // The corpus must actually exercise notification-driven sweeps.
+    BUSTER_TEST(arguments, later_sweeps > 1000);
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23223,6 +23598,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_control_flow);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
+    BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_simplify_agenda);
+    BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_loop_nest_work);
     BUSTER_TEST_FIXTURE(arguments, c_test_for_declaration_scopes);
     BUSTER_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);

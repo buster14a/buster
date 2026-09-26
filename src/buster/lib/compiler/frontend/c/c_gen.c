@@ -4892,6 +4892,9 @@ struct CIrSsaParameter
     u32 block;
     u32 local;
     IrValueId forwarded;
+    // Position among the parameters kept by the first simplification sweep;
+    // meaningful only while c_ir_ssa_simplify_parameters runs.
+    u32 order;
 };
 
 typedef struct CIrSsaLocal CIrSsaLocal;
@@ -5547,6 +5550,558 @@ BUSTER_C_INTERNAL bool c_ir_ssa_restore_memory(CIntegerIrBuilder* builder, u8* m
     return valid;
 }
 
+// One live parameter's decision against the current replacement roots,
+// reading incoming values in list order until a second distinct non-self
+// root. `root` is the only non-self root of a trivial parameter, otherwise
+// UINT32_MAX. A kept parameter reports the two roots that decided it; when
+// every incoming root is the parameter itself both witnesses are UINT32_MAX.
+// `visits` is the number of incoming values read, which the caller adds to
+// its evaluation work.
+typedef struct CIrSsaDecision CIrSsaDecision;
+struct CIrSsaDecision
+{
+    u32 root;
+    u32 witnesses[2];
+    u32 visits;
+};
+
+BUSTER_C_INTERNAL CIrSsaDecision c_ir_ssa_decide(u32* replacements, IrBlockParameter* parameter)
+{
+    u32 self = parameter->value.value;
+    u32 same = UINT32_MAX;
+    u32 other = UINT32_MAX;
+    u32 visits = 0;
+    for (IrIncoming* incoming = parameter->first_incoming; incoming && other == UINT32_MAX; incoming = incoming->next)
+    {
+        visits += 1;
+        u32 value = c_ir_ssa_root(replacements, incoming->value.value);
+        if (value != self && value != same)
+        {
+            if (same == UINT32_MAX)
+            {
+                same = value;
+            }
+            else
+            {
+                other = value;
+            }
+        }
+    }
+    CIrSsaDecision result = {
+        .root = other == UINT32_MAX ? same : UINT32_MAX,
+        .witnesses = {other == UINT32_MAX ? UINT32_MAX : same, other},
+        .visits = visits,
+    };
+    return result;
+}
+
+// Watch lists are doubly linked through two slots per first-sweep survivor:
+// slot 2q+j is survivor q's j-th witness. `watched` names the survivor a slot
+// is linked under, or UINT32_MAX when it is not linked anywhere.
+BUSTER_C_INTERNAL void c_ir_ssa_watch_unlink(u32* heads, u32* watched, u32* next, u32* previous, u32 slot)
+{
+    u32 witness = watched[slot];
+    if (witness != UINT32_MAX)
+    {
+        if (previous[slot] == UINT32_MAX)
+        {
+            heads[witness] = next[slot];
+        }
+        else
+        {
+            next[previous[slot]] = next[slot];
+        }
+        if (next[slot] != UINT32_MAX)
+        {
+            previous[next[slot]] = previous[slot];
+        }
+        watched[slot] = UINT32_MAX;
+    }
+}
+
+// Link survivor `watcher`'s slots under those of its two witnesses that are
+// themselves live first-sweep survivors, returning the number linked. Other
+// roots (instruction results, arguments, restored loads, memory-form
+// parameters) are never removed by simplification and need no notification.
+BUSTER_C_INTERNAL u32 c_ir_ssa_watch(IrBlockParameter** survivors, u32 survivor_count, CIrSsaParameter** pending_by_value, u32* heads,
+                                     u32* watched, u32* next, u32* previous, u32 watcher, u32 const* witnesses)
+{
+    u32 links = 0;
+    for (u32 index = 0; index < 2; index += 1)
+    {
+        u32 witness = witnesses[index];
+        CIrSsaParameter* pending = witness != UINT32_MAX ? pending_by_value[witness] : 0;
+        u32 order = pending ? pending->order : UINT32_MAX;
+        if (order < survivor_count && survivors[order]->value.value == witness)
+        {
+            u32 slot = watcher * 2 + index;
+            watched[slot] = order;
+            previous[slot] = UINT32_MAX;
+            next[slot] = heads[order];
+            if (heads[order] != UINT32_MAX)
+            {
+                previous[heads[order]] = slot;
+            }
+            heads[order] = slot;
+            links += 1;
+        }
+    }
+    return links;
+}
+
+// Remove trivial block parameters to a fixed point.
+//
+// State: `replacements` is a forest over old value IDs. A live parameter p is
+// trivial when the roots of its incoming values, ignoring p, are exactly one
+// value s; removing it unlinks p and sets replacements[p] = s. That removal is
+// the only transition that changes any root: path compression rewrites only
+// non-root links. Removals are irreversible, so a removed parameter never
+// becomes live again.
+//
+// Decisions are order-sensitive (of two mutually trivial parameters, the one
+// visited second keeps the only self-referencing root), so the definition is
+// the historical schedule: sweep blocks in ascending order and each block's
+// parameters in list order, repeating until a sweep removes nothing. The
+// chosen representatives and canonical value IDs depend on that schedule.
+//
+// A kept parameter either sees no non-self root, and then stays forever (its
+// incoming roots change only if it is itself removed), or has two distinct
+// non-self witnesses a and b found by the scan. Until a or b is removed, both
+// remain roots, every earlier incoming still resolves to a or to p, and a
+// repeated scan stops at the same incoming with the same decision. The first
+// sweep therefore runs exactly as before while recording each survivor's
+// witnesses. Later sweeps evaluate only survivors whose witness was removed:
+// a removal at survivor r notifies its watchers, scheduling a watcher q in the
+// same sweep when q follows r and in the next sweep otherwise -- precisely
+// where the full sweep would next evaluate q. Every skipped evaluation is one
+// the full sweep performs without effect, so each removal, its replacement
+// root and every retained parameter are unchanged, and the sweeps executed are
+// a subset of the full sweeps.
+//
+// Cost: the first sweep; then, only when it removed a trivial parameter, one
+// O(S) pass classifying the S survivors, and only when one of them is due, an
+// O(S) pass linking watches, plus the later evaluations (each one a full-sweep
+// evaluation), at most two watch links per evaluation, one notification per
+// clean-to-dirty transition, the dirty-set words between the lowest and
+// highest due survivor of each executed sweep, and a constant-time unlink per
+// later removal. `capacity` is the number of linked parameters; every linked
+// parameter needs its pending record, otherwise the function reports failure
+// instead of guessing.
+BUSTER_C_INTERNAL bool c_ir_ssa_simplify_parameters(Arena* arena, IrFunction* function, u8 const* memory, u32* replacements,
+                                                    CIrSsaParameter** pending_by_value, u32* cursor, u32 capacity,
+                                                    CIrSsaSimplifyWork* work)
+{
+    bool valid = true;
+    // Work is counted in locals and published once, at the end.
+    u64 sweeps = 1;
+    u64 block_visits = 0;
+    u64 empty_block_visits = 0;
+    u64 parameter_visits = 0;
+    u64 incoming_visits = 0;
+    u64 removed = 0;
+    u64 trivial = 0;
+    u64 classified = 0;
+    u64 watch_links = 0;
+    u64 notifications = 0;
+    u64 agenda_words = 0;
+    u32 block_count = function->block_count;
+    u32 active_block_count = 0;
+    for (u32 block = 0; block < block_count; block += 1)
+    {
+        block_visits += 1;
+        empty_block_visits += function->blocks[block].first_parameter == 0;
+        if (function->blocks[block].first_parameter)
+        {
+            cursor[active_block_count++] = block;
+        }
+    }
+    // Nothing allocated here outlives the call; releasing it lets the finish
+    // pass's later value-sized scratch reuse the same pages.
+    TemporalArena scratch = arena_begin_temporal(arena);
+    IrBlockParameter** survivors = arena_allocate(scratch.arena, IrBlockParameter*, capacity ? capacity : 1);
+    u32* witnesses = arena_allocate(scratch.arena, u32, (u64)(capacity ? capacity : 1) * 2);
+    u32* group_offsets = arena_allocate(scratch.arena, u32, (u64)active_block_count + 1);
+    u32 survivor_count = 0;
+    u32 group_count = 0;
+    bool changed = false;
+    for (u32 active = 0; active < active_block_count; active += 1)
+    {
+        u32 block = cursor[active];
+        block_visits += 1;
+        IrBlock* destination = function->blocks + block;
+        IrBlockParameter** link = &destination->first_parameter;
+        destination->last_parameter = 0;
+        group_offsets[group_count] = survivor_count;
+        while (*link)
+        {
+            IrBlockParameter* parameter = *link;
+            parameter_visits += 1;
+            CIrSsaParameter* pending = pending_by_value[parameter->value.value];
+            CIrSsaDecision decision = {.root = UINT32_MAX, .witnesses = {UINT32_MAX, UINT32_MAX}};
+            bool excluded = (pending && memory[pending->local]) || replacements[parameter->value.value] != parameter->value.value;
+            if (!excluded)
+            {
+                decision = c_ir_ssa_decide(replacements, parameter);
+                incoming_visits += decision.visits;
+            }
+            if (excluded || decision.root != UINT32_MAX)
+            {
+                if (!excluded)
+                {
+                    replacements[parameter->value.value] = decision.root;
+                    trivial += 1;
+                    changed = true;
+                }
+                *link = parameter->next;
+                destination->parameter_count -= 1;
+                removed += 1;
+            }
+            else
+            {
+                destination->last_parameter = parameter;
+                link = &parameter->next;
+                valid &= pending != 0 && survivor_count < capacity;
+                if (valid)
+                {
+                    pending->order = survivor_count;
+                    survivors[survivor_count] = parameter;
+                    witnesses[survivor_count * 2] = decision.witnesses[0];
+                    witnesses[survivor_count * 2 + 1] = decision.witnesses[1];
+                    survivor_count += 1;
+                }
+            }
+        }
+        if (destination->first_parameter)
+        {
+            cursor[group_count++] = block;
+        }
+    }
+    group_offsets[group_count] = survivor_count;
+    if (changed && valid && survivor_count)
+    {
+        // A survivor whose witness was removed later in the first sweep is
+        // due in the second. When none is, the fixed point is already reached
+        // and no watch is ever built.
+        u32 word_count = (survivor_count + 63) / 64;
+        u64* current = arena_allocate(scratch.arena, u64, word_count);
+        u64* following = arena_allocate(scratch.arena, u64, word_count);
+        memset(current, 0, sizeof(*current) * word_count);
+        memset(following, 0, sizeof(*following) * word_count);
+        u32 following_low = word_count;
+        u32 following_high = 0;
+        for (u32 survivor = 0; survivor < survivor_count; survivor += 1)
+        {
+            u32 const* decided = witnesses + survivor * 2;
+            if (decided[0] != UINT32_MAX && (replacements[decided[0]] != decided[0] || replacements[decided[1]] != decided[1]))
+            {
+                following[survivor / 64] |= (u64)1 << (survivor % 64);
+                following_low = BUSTER_MIN(following_low, survivor / 64);
+                following_high = BUSTER_MAX(following_high, survivor / 64 + 1);
+            }
+        }
+        classified = survivor_count;
+        if (following_low < following_high)
+        {
+            u32 slot_count = survivor_count * 2;
+            u32* heads = arena_allocate(scratch.arena, u32, survivor_count);
+            u32* watched = arena_allocate(scratch.arena, u32, slot_count);
+            u32* next = arena_allocate(scratch.arena, u32, slot_count);
+            u32* previous = arena_allocate(scratch.arena, u32, slot_count);
+            // The live survivor preceding each survivor in its block's list,
+            // so a later removal unlinks in constant time.
+            u32* before = arena_allocate(scratch.arena, u32, survivor_count);
+            memset(heads, 0xff, sizeof(*heads) * survivor_count);
+            memset(watched, 0xff, sizeof(*watched) * slot_count);
+            for (u32 group = 0; group < group_count; group += 1)
+            {
+                for (u32 survivor = group_offsets[group]; survivor < group_offsets[group + 1]; survivor += 1)
+                {
+                    before[survivor] = survivor == group_offsets[group] ? UINT32_MAX : survivor - 1;
+                    u32 bit = (u32)(following[survivor / 64] >> (survivor % 64)) & 1;
+                    if (!bit)
+                    {
+                        watch_links += c_ir_ssa_watch(survivors, survivor_count, pending_by_value, heads, watched, next, previous, survivor,
+                                                      witnesses + survivor * 2);
+                    }
+                }
+            }
+            while (following_low < following_high)
+            {
+                u64* swap = current;
+                current = following;
+                following = swap;
+                u32 current_low = following_low;
+                u32 current_high = following_high;
+                following_low = word_count;
+                following_high = 0;
+                sweeps += 1;
+                for (u32 word = current_low; word < current_high; word += 1)
+                {
+                    agenda_words += 1;
+                    while (current[word])
+                    {
+                        u32 survivor = word * 64 + trailing_zeroes_u64(current[word]);
+                        current[word] &= current[word] - 1;
+                        IrBlockParameter* parameter = survivors[survivor];
+                        parameter_visits += 1;
+                        CIrSsaDecision decision = c_ir_ssa_decide(replacements, parameter);
+                        incoming_visits += decision.visits;
+                        if (decision.root != UINT32_MAX)
+                        {
+                            replacements[parameter->value.value] = decision.root;
+                            removed += 1;
+                            trivial += 1;
+                            IrBlock* destination = function->blocks + pending_by_value[parameter->value.value]->block;
+                            IrBlockParameter* after = parameter->next;
+                            if (before[survivor] != UINT32_MAX)
+                            {
+                                survivors[before[survivor]]->next = after;
+                            }
+                            else
+                            {
+                                destination->first_parameter = after;
+                            }
+                            if (after)
+                            {
+                                before[pending_by_value[after->value.value]->order] = before[survivor];
+                            }
+                            else
+                            {
+                                destination->last_parameter = before[survivor] != UINT32_MAX ? survivors[before[survivor]] : 0;
+                            }
+                            destination->parameter_count -= 1;
+                            u32 slot = heads[survivor];
+                            while (slot != UINT32_MAX)
+                            {
+                                u32 following_slot = next[slot];
+                                u32 watcher = slot / 2;
+                                watched[slot] = UINT32_MAX;
+                                // The watcher's other witness no longer decides
+                                // it; it is re-evaluated before it may watch again.
+                                c_ir_ssa_watch_unlink(heads, watched, next, previous, slot ^ 1);
+                                notifications += 1;
+                                u64 bit = (u64)1 << (watcher % 64);
+                                if (watcher > survivor)
+                                {
+                                    current[watcher / 64] |= bit;
+                                    current_high = BUSTER_MAX(current_high, watcher / 64 + 1);
+                                }
+                                else
+                                {
+                                    following[watcher / 64] |= bit;
+                                    following_low = BUSTER_MIN(following_low, watcher / 64);
+                                    following_high = BUSTER_MAX(following_high, watcher / 64 + 1);
+                                }
+                                slot = following_slot;
+                            }
+                            heads[survivor] = UINT32_MAX;
+                        }
+                        else if (decision.witnesses[0] != UINT32_MAX)
+                        {
+                            watch_links += c_ir_ssa_watch(survivors, survivor_count, pending_by_value, heads, watched, next, previous, survivor,
+                                                          decision.witnesses);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    scratch_end(scratch);
+    work->sweeps += sweeps;
+    work->block_visits += block_visits;
+    work->empty_block_visits += empty_block_visits;
+    work->parameter_visits += parameter_visits;
+    work->incoming_visits += incoming_visits;
+    work->removed += removed;
+    work->trivial += trivial;
+    work->survivors += survivor_count;
+    work->classified += classified;
+    work->watch_links += watch_links;
+    work->notifications += notifications;
+    work->agenda_words += agenda_words;
+    return valid;
+}
+
+#if BUSTER_INCLUDE_TESTS
+// The removed full-sweep simplifier, retained only as the independent oracle
+// for c_test_ssa_simplify_parameters. It performs the historical schedule on
+// the same inputs and reports the same work vocabulary.
+BUSTER_C_INTERNAL void c_ir_ssa_simplify_parameters_sweep_reference(IrFunction* function, u8 const* memory, u32* replacements,
+                                                                    CIrSsaParameter** pending_by_value, u32* cursor,
+                                                                    CIrSsaSimplifyWork* work)
+{
+    u32 block_count = function->block_count;
+    u32 active_block_count = 0;
+    for (u32 block = 0; block < block_count; block += 1)
+    {
+        work->block_visits += 1;
+        work->empty_block_visits += function->blocks[block].first_parameter == 0;
+        if (function->blocks[block].first_parameter)
+        {
+            cursor[active_block_count++] = block;
+        }
+    }
+    bool changed = true;
+    while (changed)
+    {
+        work->sweeps += 1;
+        changed = false;
+        u32 remaining_block_count = 0;
+        for (u32 active = 0; active < active_block_count; active += 1)
+        {
+            u32 block = cursor[active];
+            work->block_visits += 1;
+            IrBlock* destination = function->blocks + block;
+            work->empty_block_visits += destination->first_parameter == 0;
+            IrBlockParameter** link = &destination->first_parameter;
+            destination->last_parameter = 0;
+            while (*link)
+            {
+                IrBlockParameter* parameter = *link;
+                work->parameter_visits += 1;
+                CIrSsaParameter* pending = pending_by_value[parameter->value.value];
+                if ((pending && memory[pending->local]) || replacements[parameter->value.value] != parameter->value.value)
+                {
+                    *link = parameter->next;
+                    destination->parameter_count -= 1;
+                    work->removed += 1;
+                    continue;
+                }
+                u32 same = UINT32_MAX;
+                bool trivial = true;
+                for (IrIncoming* incoming = parameter->first_incoming; incoming && trivial; incoming = incoming->next)
+                {
+                    work->incoming_visits += 1;
+                    u32 value = c_ir_ssa_root(replacements, incoming->value.value);
+                    if (value != parameter->value.value)
+                    {
+                        trivial = same == UINT32_MAX || value == same;
+                        same = value;
+                    }
+                }
+                if (trivial && same != UINT32_MAX)
+                {
+                    replacements[parameter->value.value] = same;
+                    *link = parameter->next;
+                    destination->parameter_count -= 1;
+                    work->removed += 1;
+                    work->trivial += 1;
+                    changed = true;
+                }
+                else
+                {
+                    destination->last_parameter = parameter;
+                    link = &parameter->next;
+                }
+            }
+            if (destination->first_parameter)
+            {
+                cursor[remaining_block_count++] = block;
+            }
+        }
+        active_block_count = remaining_block_count;
+    }
+}
+
+CTestSsaSimplifyResult c_test_ssa_simplify_parameters(Arena* arena, CTestSsaSimplifyCase const* input)
+{
+    CTestSsaSimplifyResult result = {0};
+    u32 incoming_count = input->incoming_offsets[input->parameter_count];
+    u32 local_count = input->parameter_count ? input->parameter_count : 1;
+    IrFunction functions[2] = {0};
+    IrBlockParameter* parameters[2] = {0};
+    u32* replacements[2] = {0};
+    for (u32 copy = 0; copy < 2; copy += 1)
+    {
+        IrFunction* function = functions + copy;
+        function->block_count = input->block_count;
+        function->blocks = arena_allocate(arena, IrBlock, input->block_count ? input->block_count : 1);
+        memset(function->blocks, 0, sizeof(IrBlock) * (input->block_count ? input->block_count : 1));
+        parameters[copy] = arena_allocate(arena, IrBlockParameter, local_count);
+        replacements[copy] = arena_allocate(arena, u32, input->value_count ? input->value_count : 1);
+        memcpy(replacements[copy], input->replacements, sizeof(u32) * input->value_count);
+        IrIncoming* incoming = arena_allocate(arena, IrIncoming, incoming_count ? incoming_count : 1);
+        CIrSsaParameter* pending = arena_allocate(arena, CIrSsaParameter, local_count);
+        CIrSsaParameter** pending_by_value = arena_allocate(arena, CIrSsaParameter*, input->value_count ? input->value_count : 1);
+        memset(pending_by_value, 0, sizeof(*pending_by_value) * input->value_count);
+        u8* memory = arena_allocate(arena, u8, local_count);
+        u32* cursor = arena_allocate(arena, u32, input->block_count ? input->block_count : 1);
+        for (u32 index = 0; index < input->parameter_count; index += 1)
+        {
+            IrBlockParameter* parameter = parameters[copy] + index;
+            IrBlock* block = function->blocks + input->parameter_blocks[index];
+            *parameter = (IrBlockParameter){.value = {.value = input->parameter_values[index]}};
+            for (u32 edge = input->incoming_offsets[index]; edge < input->incoming_offsets[index + 1]; edge += 1)
+            {
+                incoming[edge] = (IrIncoming){.value = {.value = input->incoming_values[edge]}};
+                if (parameter->last_incoming)
+                {
+                    parameter->last_incoming->next = incoming + edge;
+                }
+                else
+                {
+                    parameter->first_incoming = incoming + edge;
+                }
+                parameter->last_incoming = incoming + edge;
+                parameter->incoming_count += 1;
+            }
+            if (block->last_parameter)
+            {
+                block->last_parameter->next = parameter;
+            }
+            else
+            {
+                block->first_parameter = parameter;
+            }
+            block->last_parameter = parameter;
+            block->parameter_count += 1;
+            pending[index] = (CIrSsaParameter){.parameter = parameter, .block = input->parameter_blocks[index], .local = index};
+            pending_by_value[parameter->value.value] = pending + index;
+            memory[index] = input->memory_parameters ? input->memory_parameters[index] : 0;
+        }
+        if (copy == 0)
+        {
+            c_ir_ssa_simplify_parameters_sweep_reference(function, memory, replacements[copy], pending_by_value, cursor, &result.reference);
+        }
+        else
+        {
+            result.valid = c_ir_ssa_simplify_parameters(arena, function, memory, replacements[copy], pending_by_value, cursor,
+                                                        input->parameter_count, &result.agenda);
+        }
+    }
+    bool identical = result.agenda.removed == result.reference.removed && result.agenda.trivial == result.reference.trivial;
+    for (u32 value = 0; value < input->value_count && identical; value += 1)
+    {
+        identical = c_ir_ssa_root(replacements[0], value) == c_ir_ssa_root(replacements[1], value);
+    }
+    for (u32 block = 0; block < input->block_count && identical; block += 1)
+    {
+        IrBlock* reference = functions[0].blocks + block;
+        IrBlock* agenda = functions[1].blocks + block;
+        identical = reference->parameter_count == agenda->parameter_count &&
+                    (reference->last_parameter ? reference->last_parameter - parameters[0] : -1) ==
+                        (agenda->last_parameter ? agenda->last_parameter - parameters[1] : -1);
+        IrBlockParameter* left = reference->first_parameter;
+        IrBlockParameter* right = agenda->first_parameter;
+        u32 length = 0;
+        while (identical && (left || right))
+        {
+            identical = left && right && left - parameters[0] == right - parameters[1] && length < input->parameter_count;
+            if (identical)
+            {
+                left = left->next;
+                right = right->next;
+                length += 1;
+            }
+        }
+        identical &= length == reference->parameter_count;
+        result.retained += length;
+    }
+    result.identical = identical;
+    return result;
+}
+#endif
+
 BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaStatistics* statistics)
 {
     IR_CONSTRUCTION_RECORD(SSA_FINISH_CALLS, 1);
@@ -5744,79 +6299,24 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
             }
         }
         // Predecessor propagation is complete; its read-path cursor is now
-        // scratch. Keep parameter-bearing blocks in their original order and
-        // retire empty ones between sweeps. Simplification only removes rows,
-        // so a retired block can never become active again. Stable order keeps
-        // the same replacement representatives and canonical value IDs.
-        u32 active_block_count = 0;
-        for (u32 block = 0; block < block_count; block += 1)
-        {
-            IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_BLOCK_VISITS, 1);
-            IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_EMPTY_BLOCK_VISITS, function->blocks[block].first_parameter == 0);
-            if (function->blocks[block].first_parameter)
-            {
-                cursor[active_block_count++] = block;
-            }
-        }
-        bool changed = true;
-        while (changed)
-        {
-            IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_PASSES, 1);
-            changed = false;
-            u32 remaining_block_count = 0;
-            for (u32 active = 0; active < active_block_count; active += 1)
-            {
-                u32 block = cursor[active];
-                IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_BLOCK_VISITS, 1);
-                IrBlock* destination = function->blocks + block;
-                IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_EMPTY_BLOCK_VISITS, destination->first_parameter == 0);
-                IrBlockParameter** link = &destination->first_parameter;
-                destination->last_parameter = 0;
-                while (*link)
-                {
-                    IrBlockParameter* parameter = *link;
-                    IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_PARAMETER_VISITS, 1);
-                    CIrSsaParameter* pending = pending_by_value[parameter->value.value];
-                    if ((pending && memory[pending->local]) || replacements[parameter->value.value] != parameter->value.value)
-                    {
-                        *link = parameter->next;
-                        destination->parameter_count -= 1;
-                        ssa->statistics.parameters_removed += 1;
-                        continue;
-                    }
-                    u32 same = UINT32_MAX;
-                    bool trivial = true;
-                    for (IrIncoming* incoming = parameter->first_incoming; incoming && trivial; incoming = incoming->next)
-                    {
-                        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_INCOMING_VISITS, 1);
-                        u32 value = c_ir_ssa_root(replacements, incoming->value.value);
-                        if (value != parameter->value.value)
-                        {
-                            trivial = same == UINT32_MAX || value == same;
-                            same = value;
-                        }
-                    }
-                    if (trivial && same != UINT32_MAX)
-                    {
-                        replacements[parameter->value.value] = same;
-                        *link = parameter->next;
-                        destination->parameter_count -= 1;
-                        ssa->statistics.parameters_removed += 1;
-                        changed = true;
-                    }
-                    else
-                    {
-                        destination->last_parameter = parameter;
-                        link = &parameter->next;
-                    }
-                }
-                if (destination->first_parameter)
-                {
-                    cursor[remaining_block_count++] = block;
-                }
-            }
-            active_block_count = remaining_block_count;
-        }
+        // scratch for the parameter-bearing blocks. Simplification only
+        // removes rows and keeps the historical block/list decision order, so
+        // replacement representatives and canonical value IDs are unchanged.
+        CIrSsaSimplifyWork simplify = {0};
+        valid &= c_ir_ssa_simplify_parameters(builder->scratch_arena, function, memory, replacements, pending_by_value, cursor,
+                                              (u32)ssa->statistics.parameters_created, &simplify);
+        ssa->statistics.parameters_removed += simplify.removed;
+        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_PASSES, simplify.sweeps);
+        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_BLOCK_VISITS, simplify.block_visits);
+        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_EMPTY_BLOCK_VISITS, simplify.empty_block_visits);
+        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_PARAMETER_VISITS, simplify.parameter_visits);
+        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_INCOMING_VISITS, simplify.incoming_visits);
+        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_TRIVIAL_REMOVALS, simplify.trivial);
+        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_SURVIVORS, simplify.survivors);
+        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_CLASSIFIED, simplify.classified);
+        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_WATCH_LINKS, simplify.watch_links);
+        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_NOTIFICATIONS, simplify.notifications);
+        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_AGENDA_WORDS, simplify.agenda_words);
         // A parenthesized assignment can recover a read's place without ever
         // consuming its provisional value. Prune such parameters (including
         // unused cyclic groups), starting only at actual instruction operands.
