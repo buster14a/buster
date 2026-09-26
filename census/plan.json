@@ -4,9 +4,14 @@
   "reloc": "32f4ea808de447900508382d76242a00cd0c6fdf",
   "dbgseed": "12c4d577f700211fae20a95ef70d2fc49a4435a5",
   "dbgval": "78c3d48815623b52825fe5a443a474c4fbbc76f4",
-  "defidx": "d7239eb1298f542c4133722cc6222c0672fbd304"
+  "defidx": "ea04c03859c503c6dbd5adcc4f6a70ceead1ca99",
+  "tag": "43090d04b7df19745ab8f42a972c29a2df06abec"
  },
  "census_ref": "base",
+ "census_refs": [
+  "defidx",
+  "tag"
+ ],
  "variants": [
   "count",
   "plain"
@@ -369,7 +374,8 @@
    "refs": [
     "base",
     "census",
-    "defidx"
+    "defidx",
+    "defidx@census"
    ],
    "grid": [
     [
@@ -421,10 +427,155 @@
    "show": [
     "census_core_step_def_visits",
     "census_bind_agg_visits",
-    "census_tnp_anon_visits",
-    "c_definition_scans",
-    "c_definition_index_probes",
-    "c_definition_scan_rows"
+    "census_tnp_anon_visits"
+   ]
+  },
+  {
+   "name": "tag",
+   "generator": "gen_tags.py",
+   "refs": [
+    "base",
+    "census",
+    "tag",
+    "tag@census"
+   ],
+   "grid": [
+    [
+     "unique",
+     250,
+     1000
+    ],
+    [
+     "unique",
+     1000,
+     1000
+    ],
+    [
+     "unique",
+     4000,
+     1000
+    ],
+    [
+     "unique",
+     16000,
+     1000
+    ],
+    [
+     "unique",
+     4000,
+     250
+    ],
+    [
+     "unique",
+     4000,
+     4000
+    ],
+    [
+     "shadow",
+     1000,
+     1000
+    ],
+    [
+     "shadow",
+     4000,
+     1000
+    ]
+   ],
+   "show": [
+    "census_tnp_tag_calls",
+    "census_tnp_tag_searches",
+    "census_tnp_tag_visits"
+   ]
+  },
+  {
+   "name": "designated",
+   "generator": "gen_designated.py",
+   "refs": [
+    "base",
+    "census"
+   ],
+   "grid": [
+    [
+     "ordered",
+     1000
+    ],
+    [
+     "ordered",
+     2000
+    ],
+    [
+     "ordered",
+     4000
+    ],
+    [
+     "ordered",
+     8000
+    ],
+    [
+     "reverse",
+     1000
+    ],
+    [
+     "reverse",
+     2000
+    ],
+    [
+     "reverse",
+     4000
+    ],
+    [
+     "reverse",
+     8000
+    ],
+    [
+     "shuffle",
+     1000
+    ],
+    [
+     "shuffle",
+     2000
+    ],
+    [
+     "shuffle",
+     4000
+    ],
+    [
+     "shuffle",
+     8000
+    ],
+    [
+     "override",
+     1000
+    ],
+    [
+     "override",
+     2000
+    ],
+    [
+     "override",
+     4000
+    ],
+    [
+     "override",
+     8000
+    ],
+    [
+     "range",
+     1000
+    ],
+    [
+     "range",
+     4000
+    ],
+    [
+     "range",
+     16000
+    ]
+   ],
+   "show": [
+    "census_clear_calls",
+    "census_clear_compactions",
+    "census_clear_compaction_rows"
    ]
   }
  ],
@@ -446,7 +597,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ]
   },
   {
@@ -466,7 +620,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ]
   },
   {
@@ -487,7 +644,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ]
   },
   {
@@ -508,7 +668,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ]
   },
   {
@@ -529,7 +692,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ]
   },
   {
@@ -547,7 +713,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ]
   },
   {
@@ -565,7 +734,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ]
   },
   {
@@ -584,7 +756,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -604,7 +779,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -624,7 +802,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -644,7 +825,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -664,7 +848,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -684,7 +871,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -704,7 +894,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -724,7 +917,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -744,7 +940,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -764,7 +963,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -784,7 +986,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -804,7 +1009,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -824,7 +1032,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -844,7 +1055,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -864,7 +1078,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -884,7 +1101,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -904,7 +1124,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -924,7 +1147,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -944,7 +1170,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -964,7 +1193,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -984,7 +1216,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -1004,7 +1239,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -1024,7 +1262,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -1044,7 +1285,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -1064,7 +1308,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -1084,7 +1331,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -1104,7 +1354,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -1124,7 +1377,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -1144,7 +1400,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -1164,7 +1423,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -1184,7 +1446,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -1204,7 +1469,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -1224,7 +1492,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   },
@@ -1244,7 +1515,10 @@
     "dbgseed",
     "dbgval",
     "defidx",
-    "census"
+    "tag",
+    "census",
+    "defidx@census",
+    "tag@census"
    ],
    "timing_repeats": 1
   }

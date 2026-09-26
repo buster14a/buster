@@ -11,6 +11,9 @@ object SHA-256; the uninstrumented binary supplies repeated wall times and,
 where perf_event_open is available, user-space instruction counts. Real
 workloads (self-host unity source, SQLite, Lua, cJSON) run the same way.
 
+plan["census_refs"] names further refs to build with census_patch.py
+--lenient; experiments and workloads address them as "NAME@census".
+
 usage: run.py PLAN.json OUTDIR
 """
 import concurrent.futures
@@ -45,7 +48,7 @@ def run(argv, cwd=None, log=None, check=True):
     return process
 
 
-def build(repo, out, name, commit, variant, census_patch):
+def build(repo, out, name, commit, variant, lenient):
     source = os.path.join(out, "src", f"{name}-{variant}")
     log = os.path.join(out, "logs", f"build-{name}-{variant}.log")
     if os.path.exists(source):
@@ -53,7 +56,7 @@ def build(repo, out, name, commit, variant, census_patch):
     run(["git", "-C", repo, "worktree", "add", "--detach", source, commit], log=log)
     tree = run(["git", "-C", source, "rev-parse", "HEAD^{tree}"]).stdout.strip()
     if variant == "census":
-        run([sys.executable, os.path.join(HERE, "census_patch.py"), source], log=log)
+        run([sys.executable, os.path.join(HERE, "census_patch.py"), source] + (["--lenient"] if lenient else []), log=log)
     driver = os.path.join(out, "tmp", f"driver-{name}-{variant}")
     run(["clang", "-Isrc", "-Wall", "-Werror", "-Wno-unused-function", "-Wno-unused-variable", "-fwrapv",
          "-fno-strict-aliasing", "-funsigned-char", "build.c", "-o", driver], cwd=source, log=log)
@@ -149,6 +152,8 @@ def main():
             jobs.append((name, commit, variant))
     if plan.get("census_ref"):
         jobs.append(("census", refs[plan["census_ref"]], "census"))
+    for name in plan.get("census_refs", []):
+        jobs.append((name, refs[name], "census"))
     builds = {}
     prebuilt = os.environ.get("CENSUS_PREBUILT")
     if prebuilt:
@@ -160,7 +165,7 @@ def main():
                            "source": value["source"]}
         jobs = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=plan.get("build_jobs", 3)) as pool:
-        futures = {pool.submit(build, repo, out, name, commit, variant, plan.get("census_ref")): (name, variant)
+        futures = {pool.submit(build, repo, out, name, commit, variant, variant == "census" and name != "census"): (name, variant)
                    for name, commit, variant in jobs}
         for future in concurrent.futures.as_completed(futures):
             name, variant = futures[future]
@@ -196,11 +201,12 @@ def main():
                     tag = f"{experiment['name']}-{'-'.join(str(p) for p in row)}-{ref}-{'_'.join(f.strip('-') for f in flags)}"
                     record = {"kind": "experiment", "experiment": experiment["name"], "row": row, "flags": flags,
                               "ref": ref, "source_sha256": source_hash}
-                    count_key = "census-census" if ref == "census" else f"{ref}-count"
-                    counted = compile_once(builds[count_key]["binary"], flags + [source], out, tag + "-count", True, False)
+                    census = ref == "census" or ref.endswith("@census")
+                    count_key = "census-census" if ref == "census" else f"{ref[:-len('@census')]}-census" if census else f"{ref}-count"
+                    counted = compile_once(builds[count_key]["binary"], flags + [source], out, tag.replace("@", "_") + "-count", True, False)
                     record["count"] = counted
                     timings = []
-                    timed_refs = repeats if ref != "census" and "plain" in plan.get("variants", ["count", "plain"]) else 0
+                    timed_refs = repeats if not census and "plain" in plan.get("variants", ["count", "plain"]) else 0
                     for repeat in range(timed_refs):
                         timed = compile_once(builds[f"{ref}-plain"]["binary"], flags + [source], out, tag + "-plain", False, True)
                         timings.append({k: timed[k] for k in ("status", "seconds", "instructions", "object_sha256")})
@@ -213,15 +219,17 @@ def main():
         argv_tail = [arg.replace("$BASE_SRC", builds[f"{plan['workload_source']}-count"]["source"]).replace("$INPUTS", os.environ.get("CENSUS_INPUTS", ""))
                      for arg in workload["argv"]]
         for ref in workload["refs"]:
-            variants = ["census"] if ref == "census" else ["count"]
+            census = ref == "census" or ref.endswith("@census")
+            variants = ["census"] if census else ["count"]
             for variant in variants:
-                binary = builds[f"{ref}-{variant}"]["binary"]
-                tag = f"workload-{workload['name']}-{ref}-{variant}"
+                key = "census-census" if ref == "census" else f"{ref[:-len('@census')]}-census" if census else f"{ref}-{variant}"
+                binary = builds[key]["binary"]
+                tag = f"workload-{workload['name']}-{ref.replace('@', '_')}-{variant}"
                 counted = compile_once(binary, argv_tail, out, tag, True, False)
                 record = {"kind": "workload", "workload": workload["name"], "ref": ref, "variant": variant,
                           "argv": argv_tail, "count": counted}
                 timings = []
-                if ref != "census" and "plain" in plan.get("variants", ["count", "plain"]):
+                if not census and "plain" in plan.get("variants", ["count", "plain"]):
                     for repeat in range(workload.get("timing_repeats", repeats)):
                         timed = compile_once(builds[f"{ref}-plain"]["binary"], argv_tail, out, tag + "-plain", False, True)
                         timings.append({k: timed[k] for k in ("status", "seconds", "instructions", "object_sha256")})

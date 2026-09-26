@@ -8,7 +8,11 @@ counters, so a counting build reports them as ir_construction.census_* in
 apply otherwise. It never changes control flow: each insertion is a single
 IR_CONSTRUCTION_RECORD statement, which normal builds preprocess away.
 
-usage: census_patch.py REPO_ROOT
+--lenient patches a candidate commit instead: an anchor its change removed
+is skipped and reported, and CANDIDATE_EDITS place the same counters on the
+replacement code, so base and candidate counts share one meaning.
+
+usage: census_patch.py REPO_ROOT [--lenient]
 """
 import sys
 from pathlib import Path
@@ -21,7 +25,7 @@ COUNTERS = [
     "ENUM_PENDING_CALLS", "ENUM_PENDING_VISITS",
     "TYPE_ALIGN_VISITS",
     "INIT_SLOT_STEPS", "INIT_AT_CALLS", "INIT_AT_STEPS",
-    "TNP_ANON_VISITS", "TNP_TAG_CALLS", "TNP_TAG_VISITS",
+    "TNP_ANON_VISITS", "TNP_TAG_CALLS", "TNP_TAG_SEARCHES", "TNP_TAG_VISITS",
     "CLEAR_CALLS", "CLEAR_COMPACTIONS", "CLEAR_COMPACTION_ROWS",
     "AGG_FIELD_PAIRS",
     "AGG_LOOKUP_SCANS", "AGG_LOOKUP_VISITS",
@@ -85,7 +89,8 @@ EDITS = [
      f"                {R}(CENSUS_TNP_ANON_VISITS, 1);\n"),
     ("src/buster/lib/compiler/frontend/c/c_gen.c",
      "            CScopeId reference_scope = c_parse_scope_for_token(&builder->parse, (CScopeId){0}, index + 1);\n", "after",
-     f"            {R}(CENSUS_TNP_TAG_CALLS, 1);\n            {R}(CENSUS_TNP_TAG_VISITS, builder->parse.type_count);\n"),
+     f"            {R}(CENSUS_TNP_TAG_CALLS, 1);\n            {R}(CENSUS_TNP_TAG_SEARCHES, 1);\n"
+     f"            {R}(CENSUS_TNP_TAG_VISITS, builder->parse.type_count);\n"),
     ("src/buster/lib/compiler/frontend/c/c_gen.c",
      "            u64 relocation_start = relocation_base + offset;\n", "before",
      f"            {R}(CENSUS_CLEAR_CALLS, 1);\n"),
@@ -175,23 +180,56 @@ EDITS = [
 ]
 
 
+# Candidate replacements of anchored loops. Absent on main; each applies only
+# where its anchor occurs exactly once.
+CANDIDATE_EDITS = [
+    # Tag type-name index (#1297): every call, the calls that still search,
+    # and each row the search visits.
+    ("src/buster/lib/compiler/frontend/c/c_gen.c",
+     "            CTypeId unique = c_parse_aggregate_unique(&builder->parse, kind, tag, &decided);\n", "after",
+     f"            {R}(CENSUS_TNP_TAG_CALLS, 1);\n            {R}(CENSUS_TNP_TAG_SEARCHES, !decided);\n"),
+    ("src/buster/lib/compiler/frontend/c/c_gen.c",
+     "                C_AGGREGATE_TAG_SEARCH_COUNT(builder->parse.aggregate_lookup);\n", "after",
+     f"                {R}(CENSUS_TNP_TAG_VISITS, 1);\n"),
+]
+
+
+def insert(root, path, anchor, where, text, required):
+    file = root / path
+    body = file.read_text()
+    count = body.count(anchor)
+    if count != 1:
+        if required or count > 1:
+            raise SystemExit(f"{path}: anchor occurs {count} times: {anchor[:80]!r}")
+        return False
+    replacement = text + anchor if where == "before" else anchor + text
+    file.write_text(body.replace(anchor, replacement))
+    return True
+
+
 def main():
     root = Path(sys.argv[1])
+    lenient = "--lenient" in sys.argv[2:]
     header = root / "src/buster/lib/compiler/ir/ir_construction.h"
-    text = header.read_text()
-    last = "    X(PREPARATION_PUBLICATION_FUNCTIONS, preparation_publication_functions)\n"
-    assert text.count(last) == 1, "construction list anchor"
-    extra = "".join(f" \\\n    X(CENSUS_{name}, census_{name.lower()})" for name in COUNTERS)
-    header.write_text(text.replace(last, last.rstrip("\n") + extra + "\n"))
-    for path, anchor, where, insert in EDITS:
-        file = root / path
-        body = file.read_text()
-        count = body.count(anchor)
-        if count != 1:
-            raise SystemExit(f"{path}: anchor occurs {count} times: {anchor[:80]!r}")
-        replacement = insert + anchor if where == "before" else anchor + insert
-        file.write_text(body.replace(anchor, replacement))
-    print(f"applied {len(EDITS)} insertions and {len(COUNTERS)} counters")
+    lines = header.read_text().split("\n")
+    # The construction X-list's final entry: a candidate may have appended
+    # its own counters after main's last one.
+    ends = [index for index, line in enumerate(lines)
+            if line.startswith("    X(") and line.endswith(")") and lines[index - 1].endswith("\\")]
+    assert len(ends) == 1, f"construction list end: {ends}"
+    lines[ends[0]] += "".join(f" \\\n    X(CENSUS_{name}, census_{name.lower()})" for name in COUNTERS)
+    header.write_text("\n".join(lines))
+    applied = 0
+    for path, anchor, where, text in EDITS:
+        if insert(root, path, anchor, where, text, not lenient):
+            applied += 1
+        else:
+            print(f"skipped (anchor removed by candidate): {path}: {text.strip()[:70]}")
+    for path, anchor, where, text in CANDIDATE_EDITS:
+        if insert(root, path, anchor, where, text, False):
+            applied += 1
+            print(f"candidate insertion: {path}: {text.strip()[:70]}")
+    print(f"applied {applied} insertions and {len(COUNTERS)} counters")
 
 
 if __name__ == "__main__":

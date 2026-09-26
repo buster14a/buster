@@ -19,7 +19,8 @@ def main():
     for item in sys.argv[1:]:
         name, _, commit = item.partition("=")
         refs[name] = commit
-    workload_refs = list(refs) + ["census"]
+    census_refs = [name for name in ("defidx", "tag") if name in refs]
+    workload_refs = list(refs) + ["census"] + [f"{name}@census" for name in census_refs]
     workloads = [
         {"name": "selfhost-g", "argv": ["-g"] + SELF, "refs": workload_refs},
         {"name": "selfhost-g0", "argv": ["-g0"] + SELF, "refs": workload_refs},
@@ -52,10 +53,19 @@ def main():
     if "defidx" in refs:
         grid = ([["defs", t, 1000] for t in (0, 1000, 4000, 16000)] + [["defs", 4000, q] for q in (250, 4000)] +
                 [["defs_multi", 4000, 1000], ["local", 4000, 1000], ["local", 4000, 4000]])
-        experiments.append({"name": "defidx", "generator": "gen_defs.py", "refs": ["base", "census", "defidx"], "grid": grid,
-                            "show": ["census_core_step_def_visits", "census_bind_agg_visits", "census_tnp_anon_visits",
-                                     "c_definition_scans", "c_definition_index_probes", "c_definition_scan_rows"]})
-    plan = {"refs": refs, "census_ref": "base", "variants": ["count", "plain"], "build_jobs": 3, "timing_repeats": 3,
+        experiments.append({"name": "defidx", "generator": "gen_defs.py", "refs": ["base", "census", "defidx", "defidx@census"], "grid": grid,
+                            "show": ["census_core_step_def_visits", "census_bind_agg_visits", "census_tnp_anon_visits"]})
+    if "tag" in refs:
+        grid = ([["unique", t, 1000] for t in (250, 1000, 4000, 16000)] + [["unique", 4000, q] for q in (250, 4000)] +
+                [["shadow", t, 1000] for t in (1000, 4000)])
+        experiments.append({"name": "tag", "generator": "gen_tags.py", "refs": ["base", "census", "tag", "tag@census"], "grid": grid,
+                            "show": ["census_tnp_tag_calls", "census_tnp_tag_searches", "census_tnp_tag_visits"]})
+    # Initializer relocation compaction (#1450): main only, no candidate yet.
+    grid = [[family, n] for family in ("ordered", "reverse", "shuffle", "override") for n in (1000, 2000, 4000, 8000)] + \
+           [["range", n] for n in (1000, 4000, 16000)]
+    experiments.append({"name": "designated", "generator": "gen_designated.py", "refs": ["base", "census"], "grid": grid,
+                        "show": ["census_clear_calls", "census_clear_compactions", "census_clear_compaction_rows"]})
+    plan = {"refs": refs, "census_ref": "base", "census_refs": census_refs, "variants": ["count", "plain"], "build_jobs": 3, "timing_repeats": 3,
             "workload_source": "base", "experiments": experiments, "workloads": workloads}
     json.dump(plan, open("plan.json", "w"), indent=1)
 
