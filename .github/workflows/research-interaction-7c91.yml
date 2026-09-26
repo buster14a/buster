@@ -1,6 +1,6 @@
 name: Interaction research 7c91 (non-timing)
 
-# Isolated research branch only. Never selects a dedicated performance runner.
+# Isolated research branch only. No dedicated runner, lease or timing campaign.
 on:
   push:
     branches: [research/interaction-cost-20260925-astra-7c91]
@@ -13,37 +13,21 @@ permissions:
   contents: read
 
 jobs:
-  source-snapshot:
+  controlled-counts:
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Freeze main source and instructions (no compiler execution)
+      - name: Frozen grid, C prototype and independent LLVM consumers
         shell: bash
-        run: |
-          set -euo pipefail
-          BASE=ade6ac4b6ecb21f30b61b656439bac476c145e2f
-          TREE=4c5306221fdb22fccc929b55e333163742de17d0
-          E="$RUNNER_TEMP/interaction-7c91-source"
-          B="$RUNNER_TEMP/interaction-7c91-base"
-          mkdir -p "$E"
-          test "$(git rev-parse "$BASE^{tree}")" = "$TREE"
-          git worktree add --detach "$B" "$BASE"
-          git -C "$B" diff --exit-code
-          printf 'base_commit=%s\nbase_tree=%s\nresearch_commit=%s\nresearch_tree=%s\n' "$BASE" "$TREE" "$GITHUB_SHA" "$(git rev-parse HEAD^{tree})" > "$E/identity.txt"
-          git -C "$B" archive --format=tar.gz "$BASE" > "$E/source.tar.gz"
-          git -C "$B" ls-files '*AGENTS.md' > "$E/instruction-paths.txt"
-          (cd "$B" && python3 tools/new_audit.py --newest) > "$E/newest-audit.txt"
-          (cd "$B" && python3 tools/new_audit.py --list) > "$E/audit-index.txt"
-          (cd "$E" && sha256sum source.tar.gz) > "$E/SHA256SUMS"
-          cat "$E/identity.txt" "$E/newest-audit.txt" "$E/instruction-paths.txt"
+        run: python3 -B tools/investigations/interaction-7c91/runner.py
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: interaction-7c91-source-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/interaction-7c91-source
+          name: interaction-7c91-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/interaction-7c91-result
           if-no-files-found: error
           retention-days: 30
