@@ -3146,7 +3146,10 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
         {
             return;
         }
-        ObjectArtifact artifact = object_write(arena, &object, object_format_for_target(invocation.target));
+        // The file is the only consumer of these bytes, and the object's
+        // section payloads stay live in this arena until it is written, so
+        // the image borrows them instead of copying every payload byte.
+        ObjectArtifact artifact = object_write_borrowing(arena, &object, object_format_for_target(invocation.target));
         if (artifact.error != OBJECT_ERROR_NONE)
         {
             result->error = COMPILER_DRIVER_ERROR_OBJECT;
@@ -3157,7 +3160,9 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
             return;
         }
         String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
-        if (!file_publish(output, artifact.bytes))
+        u32 slice_count = 0;
+        ByteSlice* slices = object_artifact_slices(arena, artifact, &slice_count);
+        if (!file_publish_slices(output, slices, slice_count))
         {
             result->error = COMPILER_DRIVER_ERROR_FILE_WRITE;
             result->diagnostic = string_format(arena, S8("could not write {S8}"), output);
@@ -3697,15 +3702,25 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         compiler_driver_write_llvm_bitcode(arena, invocation, artifact, &result);
         goto end;
     }
+    // The preparation above is the module's validation boundary: it already
+    // scanned or certified these exact rows and they have not changed since.
+    // Hand that fact to the direct emitters, as native code generation and
+    // LLVM bitcode receive it, instead of letting each one re-prepare
+    // uncertified and walk the whole module again. (-fverify-codegen, which
+    // forces uncertified preparation, is refused for these targets.)
     if (compiler_driver_target_is_wasm(invocation.target))
     {
-        WasmArtifact artifact = wasm_emit(arena, lowered.program, module, 1, compiler_driver_wasm_options(invocation.target));
+        WasmOptions options = compiler_driver_wasm_options(invocation.target);
+        options.assume_validated = true;
+        WasmArtifact artifact = wasm_emit(arena, lowered.program, module, 1, options);
         compiler_driver_write_wasm(arena, invocation, artifact, &result);
         goto end;
     }
     if (invocation.target.cpu_arch == CPU_ARCH_BPFEL)
     {
-        EbpfArtifact artifact = ebpf_emit(arena, lowered.program, module, 1);
+        EbpfOptions options = EBPF_OPTIONS_DEFAULT;
+        options.assume_validated = true;
+        EbpfArtifact artifact = ebpf_emit_with_options(arena, lowered.program, module, 1, options);
         compiler_driver_write_ebpf(arena, invocation, artifact, &result);
         goto end;
     }

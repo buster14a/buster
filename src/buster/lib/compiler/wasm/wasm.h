@@ -66,6 +66,10 @@ struct Wasm64Stats
     u64 stack_upper_bound;
     u64 code_bytes;
     u64 binary_bytes;
+    // Instruction rows read to learn which function symbols some call names:
+    // one pass over every function when any undefined internal function symbol
+    // asks, however many do, and none when no symbol asks.
+    u64 call_fact_instruction_visits;
 };
 
 typedef struct Wasm64Artifact Wasm64Artifact;
@@ -108,7 +112,12 @@ struct Wasm64Options
     // For WASI Preview 1, synthesize the command `_start` adapter around a C
     // `main` when the program does not define `_start` itself.
     bool synthesize_start;
-    u8 reserved[3];
+    // The caller already ran ir_prepare_canonical_module on these modules and
+    // has not mutated them since, as the driver does; like
+    // CodegenModuleOptions.assume_validated it skips the emitter's own
+    // uncertified re-preparation. Zero keeps the validating default.
+    bool assume_validated;
+    u8 reserved[2];
 };
 
 #define WASM64_OPTIONS_DEFAULT                                                                                                             \

@@ -3324,7 +3324,7 @@ EbpfArtifact ebpf_emit_with_options(Arena* arena, IrProgram* program, IrModule* 
 
     for (u32 module_index = 0; module_index < module_count; module_index += 1)
     {
-        IrValidationResult validation = ir_prepare_canonical_module(program, modules + module_index, false);
+        IrValidationResult validation = ir_prepare_canonical_module(program, modules + module_index, options.assume_validated);
         if (validation.error != IR_VALIDATION_NONE)
         {
             context.error.code = EBPF_ERROR_IR_VALIDATION;

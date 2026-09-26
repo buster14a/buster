@@ -43,6 +43,19 @@ editing, reacquire any builder-node pointers, discard its certificate and supply
 when the pass-completion marker is already set. A failed result must not be
 consumed by code generation or retried with the stale input certificate.
 
+Every canonical consumer also calls preparation itself, so a direct caller that
+never prepared its module still gets a validated one. When the driver has just
+prepared the same unchanged module, that call would be a second whole-module
+scan, not a new boundary. The driver therefore hands its preparation to every
+consumer it selects: native code generation through
+`CodegenModuleOptions.assume_validated`, LLVM bitcode through
+`LlvmBitcodeOptions.validate_ir = false`, and the Wasm and eBPF emitters
+through `WasmOptions.assume_validated` and `EbpfOptions.assume_validated`.
+Each of these makes the consumer's own preparation certified, which is a no-op
+on a prepared module. A zero-initialized Wasm or eBPF options structure keeps
+the validating default for direct callers; `-fverify-codegen`, which makes the
+driver prepare uncertified, is refused for these non-native targets.
+
 `IrValidationResult.boundary` identifies the last preparation scan, on both
 success and failure: `CANONICAL_INPUT` or `LOCAL_PROMOTION_OUTPUT`. Raw verifier
 calls and certified preparation that performs no scan return `UNSPECIFIED`.
