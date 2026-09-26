@@ -417,7 +417,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult incremental_test_driver(UnitTestArguments* ar
         flipped[original.length - 1] ^= 1;
         BUSTER_TEST(arguments, file_write(pack, (ByteSlice){.pointer = flipped, .length = original.length}));
         CompilerDriverResult recovered = incremental_test_compile(arena, target, input, cached, cache, (String8){0});
+        // The -g0 oracle above replaced the clean object; rebuild the
+        // default-flag one this comparison needs.
         oracle = incremental_test_compile(arena, target, input, clean, (String8){0}, (String8){0});
+        BUSTER_TEST_RAW(arguments, oracle.error == COMPILER_DRIVER_ERROR_NONE, oracle.diagnostic);
         BUSTER_TEST(arguments, recovered.error == COMPILER_DRIVER_ERROR_NONE && incremental_test_same_file(arena, clean, cached));
         BUSTER_TEST(arguments, recovered.incremental.pack_statuses[INCREMENTAL_PACK_CORRUPT] == 1);
     }
