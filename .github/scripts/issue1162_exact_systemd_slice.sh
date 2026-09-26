@@ -65,7 +65,8 @@ JOURNAL_CAPTURE
 collect_broker_observer() {
   if [[ -n "$broker_observer_pid" && "$broker_observer_collected" != true ]]; then
     printf 'snapshot=%s\n' "${1:-completed}" >"$evidence/broker-observer-retention.txt"
-    sudo docker exec "$guest" python3 -c '
+    local stop_requested=true
+    timeout --signal=TERM --kill-after=2 10 sudo docker exec "$guest" python3 -c '
 import os
 p="/root/issue1162-install/broker-observer-output/stop"
 try:
@@ -73,11 +74,11 @@ try:
     os.close(fd)
 except FileExistsError:
     pass
-' || return 1
+' || stop_requested=false
     local stop_deadline=$((SECONDS + 35))
-    while kill -0 "$broker_observer_pid" 2>/dev/null && (( SECONDS < stop_deadline )); do sleep 1; done
+    while [[ "$stop_requested" == true ]] && kill -0 "$broker_observer_pid" 2>/dev/null && (( SECONDS < stop_deadline )); do sleep 1; done
     if kill -0 "$broker_observer_pid" 2>/dev/null; then
-      echo "BROKER_OBSERVER_STOP_TIMEOUT"
+      echo "BROKER_OBSERVER_STOP_INCOMPLETE requested=$stop_requested"
       kill -TERM "$broker_observer_pid" 2>/dev/null || true
       broker_observer_status=124
     else
@@ -85,8 +86,8 @@ except FileExistsError:
     fi
     printf 'exit_status=%s\n' "$broker_observer_status" >"$evidence/broker-observer-exit.txt"
     mkdir -p "$evidence/broker-observer-artifacts"
-    if sudo docker cp "$guest:/root/issue1162-install/broker-observer-output/." "$evidence/broker-observer-artifacts" &&
-       sudo chown -R -- "$(id -u):$(id -g)" "$evidence/broker-observer-artifacts"; then
+    if timeout --signal=TERM --kill-after=2 25 sudo docker cp "$guest:/root/issue1162-install/broker-observer-output/." "$evidence/broker-observer-artifacts" &&
+       timeout --signal=TERM --kill-after=2 10 sudo chown -R -- "$(id -u):$(id -g)" "$evidence/broker-observer-artifacts"; then
       broker_observer_collected=true
     else
       echo "BROKER_OBSERVER_ARTIFACT_COPY_FAILED"
@@ -176,7 +177,7 @@ for path in files:
 manifest = ("\n".join(lines) + "\n").encode()
 expected = {
     "ade6ac4b6ecb21f30b61b656439bac476c145e2f": (375, 42585, "ebf4a4b4e5943dc60dd9fd9d175af643fbe0d0eee72e70e245c688aaabcb3007"),
-    "4245bf988aafa6f9fe8b203387b114eb1d7ca026": (372, 42199, "d7462636d6ed740bdc5433ef0e6cd24e0fc4b43706a812788b4ab8c6042c5d02"),
+    "fd1e80c36fb7fa4cecf7912f0ff8ad4722742ad6": (372, 42199, "23ec0e7f879b5d636bbddaa67a2d9f39f21e106f6dc94dc8ff4610479c728973"),
 }[rev]
 actual = (len(files), len(manifest), hashlib.sha256(manifest).hexdigest())
 print("SOURCE_CLOSURE", rev, "files", actual[0], "bytes", actual[1], "sha256", actual[2], flush=True)
@@ -666,7 +667,7 @@ expected = {"schema": "issue1162-broker-evidence-expectation-v1", "run_id": run_
     "broker_binary_sha256": hashlib.sha256((payload / "binaries/buster-bench-systemd-broker").read_bytes()).hexdigest(),
     "broker_executable_path": "/usr/local/libexec/buster-bench-systemd-broker",
     "profile": {"broker_uid": 0, "broker_gid": 65000, "candidate_gid": 65001,
-        "client_uids": [0, 65000], "groups": [65000, 65001],
+        "client_uids": [65000], "groups": [65000, 65001],
         "capabilities": {key: "0000000000000000" for key in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")},
         "no_new_privs": 1, "seccomp": 2, "seccomp_filters_min": 1,
         "read_only_mount_targets": ["/", "/etc/buster-bench", "/opt/buster-bench/installed", "/var/lib/buster-bench"],
@@ -699,10 +700,12 @@ BROKER_INPUTS
     --observer-dir "$evidence/broker-observer-artifacts" --expected-json "$evidence/broker-expected.json" \
     --overlap-jsonl "$evidence/broker-overlap.jsonl" >"$evidence/broker-reconciliation.json" \
     2>"$evidence/broker-reconciliation-stderr.txt"; then
-    if python3 - "$evidence/broker-reconciliation.json" <<'BROKER_VERDICT'
+    if python3 - "$evidence/broker-reconciliation.json" "$evidence/broker-overlap.jsonl" "$broker_observer_status" <<'BROKER_VERDICT'
 import json, pathlib, sys
 value = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert all(value[key] is True for key in ("diagnostic_complete", "manager_capture_complete", "external_proc_complete"))
+assert int(sys.argv[3]) == 0
+assert not pathlib.Path(sys.argv[2]).read_bytes() or value["overlap_complete"] is True
 BROKER_VERDICT
     then broker_valid=true; fi
   fi
