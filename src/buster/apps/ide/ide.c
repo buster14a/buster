@@ -1014,6 +1014,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                         "parameters_created={u64} parameters_removed={u64} temporaries={u64} fallback_locals={u64}\n"),
                      direct.functions, direct.locals, direct.reads, direct.writes, direct.parameters_created, direct.parameters_removed,
                      direct.temporaries, direct.fallback_locals);
+        CTypeLayoutStatistics layout = compile.type_layout;
+        string_print(S8("C_TYPE_LAYOUT solves={u64} pass_solves={u64} pass_state_types={u64} pass_attempts={u64} agenda_solves={u64} agenda_types={u64} "
+                        "agenda_attempts={u64} agenda_edges={u64} agenda_notifications={u64} agenda_pushes={u64} agenda_fallbacks={u64}\n"),
+                     layout.solves, layout.pass_solves, layout.pass_state_types, layout.pass_attempts, layout.agenda_solves, layout.agenda_types,
+                     layout.agenda_attempts, layout.agenda_edges, layout.agenda_notifications, layout.agenda_pushes, layout.agenda_fallbacks);
         if (invocation.fast_passes)
         {
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)

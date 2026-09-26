@@ -24,6 +24,10 @@ CIRLowerResult c_analyze_with_options(Arena* arena, String8 source_path, CPrepro
     {
         result = c_lower_to_ir_with_options(arena, source_path, preprocess, analysis, target, options);
     }
+    if (analysis.type_layout_statistics)
+    {
+        result.type_layout = *analysis.type_layout_statistics;
+    }
     return result;
 }
 

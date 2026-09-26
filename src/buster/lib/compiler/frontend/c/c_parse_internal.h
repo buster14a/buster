@@ -1,6 +1,6 @@
 #pragma once
 
-// Private test seams for production constexpr, call arity, expression typing, binding, aggregate-tag and label-provenance gate queries.
+// Private test seams for production constexpr, call arity, expression typing, binding, aggregate-tag, label-provenance gate and layout-solve queries.
 // Tests own their storage and observe production behavior, not a duplicate
 // implementation. No declarations enter production builds.
 #include <buster/lib/compiler/frontend/c/c.h>
@@ -20,4 +20,12 @@ BUSTER_F_DECL bool c_test_parse_direct_expression_type(Arena* scratch, CPreproce
 // Whether c_parse_validate_label_values would walk this function body's
 // values; the analysis must already have built the scope index.
 BUSTER_F_DECL bool c_test_parse_label_values_needed(CParseResult* result, CPreprocessResult preprocess, CDeclaration const* declaration);
+// One layout query that reaches the solve, as a machineless caller without a
+// cache asks it: through the demand-driven agenda when `agenda_allowed` (which
+// still falls back to the ordered passes exactly as production does), through
+// the ordered passes otherwise. `statistics` receives this query's counts in
+// place of the result's own record. `offset_member` is UINT32_MAX and
+// `offset_out` null except for an offsetof query.
+BUSTER_F_DECL bool c_test_type_layout(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CTypeId type, bool agenda_allowed,
+                                      u32 offset_member, CTypeLayoutStatistics* statistics, u64* size_out, u32* alignment_out, u64* offset_out);
 #endif
