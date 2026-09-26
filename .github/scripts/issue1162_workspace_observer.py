@@ -328,6 +328,14 @@ def fixed_metadata(parent: int, name: str, path: str, uid: int, gid: int,
     return {**metadata(path, before), "presence": "present"}, fd
 
 
+def fixed_absent(parent: int, name: str, path: str) -> dict:
+    try:
+        os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return {"path": path, "presence": "absent"}
+    raise probe.ProbeError(f"fixed workspace path must be absent: {path}")
+
+
 def fixed_file(parent: int, name: str, path: str, uid: int, gid: int,
                mode: int | None, required: bool) -> dict:
     try:
@@ -464,10 +472,17 @@ def stage_handoff(identity_record: dict, stage: str, deadline: float) -> dict:
         staging, staging_fd = fixed_metadata(candidate_fd, "staging", "candidate/staging",
                                              service_uid, candidate_gid, 0o2770, True)
         stack.callback(os.close, staging_fd)
-        output, output_fd = fixed_metadata(staging_fd, "throughput-results",
-                                           "candidate/staging/throughput-results",
-                                           service_uid, candidate_gid, 0o2770, True)
-        stack.callback(os.close, output_fd)
+        if stage == "candidate-build":
+            # candidate-generate removes and recreates the staging tree. The
+            # service recreates this handoff directory after candidate-build.
+            output = fixed_absent(staging_fd, "throughput-results",
+                                  "candidate/staging/throughput-results")
+            output_fd = -1
+        else:
+            output, output_fd = fixed_metadata(staging_fd, "throughput-results",
+                                               "candidate/staging/throughput-results",
+                                               service_uid, candidate_gid, 0o2770, True)
+            stack.callback(os.close, output_fd)
         result["paths"].extend([build, staging, output])
         # A candidate build output can appear at any point during its unit; it
         # is never opened/read while active. The final trusted copy must exist
@@ -492,10 +507,13 @@ def stage_handoff(identity_record: dict, stage: str, deadline: float) -> dict:
                 recheck_absent(directory, "Release", release)
             result["paths"].append(release)
         for child_parent, leaf, fd, record in (
-                (staging_fd, "throughput-results", output_fd, output),
                 (candidate_fd, "staging", staging_fd, staging),
                 (candidate_fd, "build", build_fd, build)):
             recheck_fixed(child_parent, leaf, fd, record)
+        if output_fd >= 0:
+            recheck_fixed(staging_fd, "throughput-results", output_fd, output)
+        else:
+            recheck_absent(staging_fd, "throughput-results", output)
         recheck(attempt_fd, "candidate", candidate_fd, candidate_info, "candidate")
         _workspace_stable(parent, attempt_fd, parent_info, attempt_info, before)
         probe._remaining(deadline, 0)
@@ -589,11 +607,38 @@ def self_test() -> None:
                 assert positive["sources"]["candidate"]["directories"] == 2
                 assert {p["path"] for p in positive["paths"]} >= {
                     "candidate/staging", "candidate/staging/throughput-results", "candidate/build"}
+                prepared_output = next(p for p in positive["paths"] if p["path"] ==
+                                       "candidate/staging/throughput-results")
+                assert prepared_output["presence"] == "present"
                 checks += 1
+                # candidate-generate calls generate_add(), which removes and
+                # recreates candidate/staging before candidate-build starts.
+                output.rmdir()
+                staging.rmdir()
+                staging.mkdir()
+                os.chmod(staging, 0o2770)
                 candidate_build = stage("candidate-build")
+                assert next(p for p in candidate_build["paths"] if p["path"] ==
+                            "candidate/staging/throughput-results")["presence"] == "absent"
                 assert next(p for p in candidate_build["paths"] if p["path"] ==
                             "candidate/build/Release/ide")["presence"] == "absent"
                 checks += 1
+                output.mkdir()
+                os.chmod(output, 0o700)
+                reject(lambda: stage("candidate-build"), "fixed workspace path must be absent")
+                output.rmdir()
+                output.symlink_to(attempt / "candidate" / "build", target_is_directory=True)
+                reject(lambda: stage("candidate-build"), "fixed workspace path must be absent")
+                output.unlink()
+                real_recheck_absent = recheck_absent
+                def appear_during_capture(parent: int, name: str, record: dict) -> None:
+                    if record["path"] == "candidate/staging/throughput-results":
+                        output.mkdir()
+                        os.chmod(output, 0o2770)
+                    real_recheck_absent(parent, name, record)
+                with patch(__name__ + ".recheck_absent", side_effect=appear_during_capture):
+                    reject(lambda: stage("candidate-build"), "fixed workspace path appeared during capture")
+                output.rmdir()
                 stage_release = staging / "Release"
                 stage_release.mkdir()
                 (stage_release / "ide").write_bytes(b"candidate-output")
@@ -606,7 +651,11 @@ def self_test() -> None:
                 os.chmod(final_release / "ide", 0o550)
                 os.chmod(final_release, 0o550)
                 os.chmod(final, 0o550)
+                output.mkdir()
+                os.chmod(output, 0o2770)
                 throughput = stage("throughput")
+                assert next(p for p in throughput["paths"] if p["path"] ==
+                            "candidate/staging/throughput-results")["presence"] == "present"
                 assert next(p for p in throughput["paths"] if p["path"] ==
                             "candidate/build/Release/ide")["presence"] == "present"
                 checks += 1
@@ -616,8 +665,10 @@ def self_test() -> None:
                 os.chmod(output, 0o2700)
                 reject(lambda: stage("throughput"), "fixed workspace metadata mismatch")
                 os.chmod(output, 0o2770)
-                os.chmod(final, 0o2700)
+                os.chmod(final, 0o550)
                 output.rmdir()
+                reject(lambda: stage("throughput"), "required workspace entry absent")
+                os.chmod(final, 0o2700)
                 reject(lambda: observe(), "required workspace entry absent")
                 output.mkdir()
                 os.chmod(output, 0o2770)
