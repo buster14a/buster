@@ -150,6 +150,7 @@ bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
 #include <buster/lib/integer.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
+#include <buster/lib/time.h>
 
 #define X64_VALUE_SLOT_SIZE 32
 #define X64_VALUE_SLOT_COMPONENT_COUNT 4

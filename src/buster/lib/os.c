@@ -1166,8 +1166,16 @@ String8 os_path_absolute_lexical(Arena* arena, String8 path, bool null_terminate
 
 #if defined(__APPLE__)
 // libSystem's own query, declared here rather than through <mach-o/dyld.h> so
-// that self-hosting on Apple targets parses no additional SDK header.
+// that self-hosting on Apple targets parses no additional SDK header. The name
+// is the system's, hence reserved.
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wreserved-identifier"
+#endif
 extern int _NSGetExecutablePath(char* buffer, uint32_t* buffer_size);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 #endif
 
 String8 os_executable_path(Arena* arena)
