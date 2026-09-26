@@ -5,12 +5,15 @@ subject=5eb501486f9b713c88d0b611cdc060079892d5b2
 baseline=ade6ac4b6ecb21f30b61b656439bac476c145e2f
 evidence="${RUNNER_TEMP:?}/issue1162-exact-slice-evidence"
 source_root="$RUNNER_TEMP/issue1162-source"
+repo_root="$(git rev-parse --show-toplevel)"
+live_probe_helper="$repo_root/.github/scripts/issue1162_live_probe.py"
 payload="$RUNNER_TEMP/issue1162-install"
 guest="issue1162-exact-${GITHUB_RUN_ID:?}"
 image="issue1162-exact:${GITHUB_RUN_ID}"
 mkdir -p "$evidence" "$payload/binaries" "$payload/sources" "$payload/units"
 chmod 0700 "$evidence"
 exec > >(tee "$evidence/run.log") 2>&1
+python3 "$live_probe_helper" --self-test | tee "$evidence/live-probe-self-test.txt"
 retain() {
   result=$?
   trap - EXIT
@@ -130,6 +133,8 @@ cp tools/bench_service/deploy/{buster-bench.service,buster-bench.slice,buster-be
 mkdir -p "$payload/recipes"
 cp tools/bench_service/profiles/validate-buster-v1.recipe "$payload/recipes/"
 sha256sum "$payload"/binaries/* "$payload"/units/* "$payload"/recipes/* | tee "$evidence/installed-sha256.txt"
+cp "$live_probe_helper" "$payload/live-probe.py"
+sha256sum "$live_probe_helper" "$payload/live-probe.py" | tee "$evidence/live-probe-helper-sha256.txt"
 clang --version | head -1 | tee "$evidence/toolchains.txt"
 cmake --version | head -1 | tee -a "$evidence/toolchains.txt"
 ninja --version | tee -a "$evidence/toolchains.txt"
@@ -208,13 +213,38 @@ sudo docker exec "$guest" systemctl show buster-bench.service -p ActiveState -p 
 sudo docker exec "$guest" systemctl is-active --quiet buster-bench.service
 key="issue1162-${GITHUB_RUN_ID}"
 sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway capabilities | tee "$evidence/gateway-capabilities.txt"
-sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway submit "$key" "$baseline" "$subject" | tee "$evidence/submit.txt"
-job="$(sed -nE 's/^job=([0-9]+) .*/\1/p' "$evidence/submit.txt" | head -1)"
-test -n "$job"
-echo "JOB=$job"
 wait_limit_seconds=3900
 wait_started=$SECONDS
 wait_deadline=$((wait_started + wait_limit_seconds))
+sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway submit "$key" "$baseline" "$subject" | tee "$evidence/submit.txt"
+job="$(sed -nE 's/^job=([0-9]+) .*/\1/p' "$evidence/submit.txt" | head -1)"
+request_sha="$(sed -nE 's/.*request-sha256=([a-f0-9]{64}).*/\1/p' "$evidence/submit.txt" | head -1)"
+test -n "$job"
+test -n "$request_sha"
+echo "JOB=$job"
+probe_valid=false
+probe_budget=$((wait_deadline - SECONDS - 35))
+if (( probe_budget > 0 )); then
+  set +e
+  sudo docker exec "$guest" python3 /root/issue1162-install/live-probe.py --run \
+    --job "$job" --request-sha256 "$request_sha" --baseline "$baseline" --subject "$subject" \
+    --budget-seconds "$probe_budget" --output /root/issue1162-install/live-probe-output \
+    >"$evidence/live-probe-console.log" 2>&1
+  probe_status=$?
+  set -e
+  cat "$evidence/live-probe-console.log"
+  if ! sudo docker cp "$guest:/root/issue1162-install/live-probe-output" "$evidence/live-probe-artifacts" || \
+     ! sudo chown -R -- "$(id -u):$(id -g)" "$evidence/live-probe-artifacts"; then
+    echo "LIVE_PROBE_ARTIFACT_COPY_FAILED"
+    probe_status=1
+  fi
+  if (( probe_status == 0 )); then probe_valid=true; fi
+else
+  echo "LIVE_PROBE_INCONCLUSIVE insufficient submit-relative deadline budget" | tee "$evidence/live-probe-console.log"
+fi
+if [[ "$probe_valid" != true ]]; then
+  echo "LIVE_PROBE_VALIDATION=INCONCLUSIVE; continue bounded RESULT wait to retain actual service outcome"
+fi
 finished=false
 # Client-side ceiling only: 60m maximum job plus 5m result/transport slack.
 # It does not change the service runtime policy or the 90m outer CI limit.
@@ -261,4 +291,8 @@ sha256sum "$evidence/result.bqexport" | tee "$evidence/archive-sha256.txt"
 mkdir -m 0700 "$evidence/replay"
 build/bench-service-tools/service unpack-export "$evidence/result.bqexport" "$evidence/replay/result" "$receipt" | tee "$evidence/replay.txt"
 sudo docker exec "$guest" sh -ec 'test ! -e /var/lib/buster-bench/workspaces/.lease-handoff; test "$(stat -c %h /var/lib/buster-bench/lease/host.lock)" = 1'
-echo "FULL_SLICE_EXECUTION_PASS source=$subject job=$job token=$token; no protected host involved"
+if [[ "$probe_valid" != true ]]; then
+  echo "SERVICE_RESULT_SUCCEEDED source=$subject job=$job token=$token; live systemd probe inconclusive; full acceptance pending"
+  exit 1
+fi
+echo "NORMAL_PATH_EXECUTION_PASS source=$subject job=$job token=$token; live systemd probe passed; full acceptance pending"
