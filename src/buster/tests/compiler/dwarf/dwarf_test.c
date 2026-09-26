@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/dwarf/dwarf_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/codegen/codegen.h>
+#include <buster/lib/string.h>
 
 
 BUSTER_GLOBAL_LOCAL bool dwarf_test_read_uleb128(ByteSlice bytes, u64* offset, u64* value)
