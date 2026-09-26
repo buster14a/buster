@@ -214,6 +214,11 @@ sudo docker exec "$guest" systemctl show buster-bench.service -p ActiveState -p 
 sudo docker exec "$guest" systemctl is-active --quiet buster-bench.service
 key="issue1162-${GITHUB_RUN_ID}"
 sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway capabilities | tee "$evidence/gateway-capabilities.txt"
+sudo docker exec "$guest" sh -ec 'test -f /var/lib/buster-bench/lease/host.lock; test ! -L /var/lib/buster-bench/lease/host.lock; stat -c "%d %i %h %a %u %g" /var/lib/buster-bench/lease/host.lock' >"$evidence/lease-before-submit.txt"
+read -r lease_device lease_inode lease_links lease_mode lease_uid lease_gid lease_extra <"$evidence/lease-before-submit.txt"
+[[ "$lease_device" =~ ^[0-9]+$ && "$lease_inode" =~ ^[1-9][0-9]*$ &&
+   "$lease_links" == 1 && "$lease_mode" == 640 && "$lease_uid" == 65000 &&
+   "$lease_gid" == 65000 && -z "$lease_extra" ]]
 wait_limit_seconds=3900
 wait_started=$SECONDS
 wait_deadline=$((wait_started + wait_limit_seconds))
@@ -279,11 +284,35 @@ if [[ "$finished" != true ]]; then
   printf 'RESULT_WAIT_TIMEOUT limit=%ss elapsed=%ss\n' "$wait_limit_seconds" "$((SECONDS - wait_started))" | tee "$evidence/result-wait-timeout.txt"
   exit 1
 fi
-grep -q 'outcome=succeeded' "$evidence/result.txt"
-grep -q 'result-bound=1' "$evidence/result.txt"
-token="$(sed -nE 's/^job=[0-9]+ token=([0-9]+) .*/\1/p' "$evidence/result.txt" | head -1)"
-digest="$(sed -nE 's/^full-result-sha256=([a-f0-9]{64})$/\1/p' "$evidence/result.txt" | head -1)"
-test -n "$token" && test -n "$digest"
+python3 "$live_probe_helper" --check-result "$evidence/result.txt" \
+  --job "$job" --request-sha256 "$request_sha" >"$evidence/result-validated.txt"
+read -r token digest result_extra <"$evidence/result-validated.txt"
+[[ "$token" =~ ^[1-9][0-9]*$ && "$digest" =~ ^[a-f0-9]{64}$ && -z "$result_extra" ]]
+terminal_valid=false
+terminal_budget=$((wait_deadline - SECONDS - 35))
+if (( terminal_budget > 60 )); then terminal_budget=60; fi
+if (( terminal_budget > 0 )); then
+  set +e
+  sudo docker exec "$guest" python3 /root/issue1162-install/live-probe.py --terminal \
+    --job "$job" --attempt "$token" --request-sha256 "$request_sha" \
+    --baseline "$baseline" --subject "$subject" --lease-device "$lease_device" --lease-inode "$lease_inode" \
+    --budget-seconds "$terminal_budget" --output /root/issue1162-install/terminal-proof-output \
+    >"$evidence/terminal-proof-console.log" 2>&1
+  terminal_status=$?
+  set -e
+  cat "$evidence/terminal-proof-console.log"
+  if ! sudo docker cp "$guest:/root/issue1162-install/terminal-proof-output" "$evidence/terminal-proof-artifacts" || \
+     ! sudo chown -R -- "$(id -u):$(id -g)" "$evidence/terminal-proof-artifacts"; then
+    echo "TERMINAL_PROOF_ARTIFACT_COPY_FAILED"
+    terminal_status=1
+  fi
+  if (( terminal_status == 0 )); then terminal_valid=true; fi
+else
+  echo "TERMINAL_PROOF_INCONCLUSIVE insufficient submit-relative deadline budget" | tee "$evidence/terminal-proof-console.log"
+fi
+if [[ "$terminal_valid" != true ]]; then
+  echo "TERMINAL_PROOF_VALIDATION=INCONCLUSIVE; retain authenticated export and replay of actual service outcome"
+fi
 sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway export "$job" "$token" "$digest" >"$evidence/result.bqexport" 2>"$evidence/export-stderr.txt"
 cat "$evidence/export-stderr.txt"
 receipt="$(sed -nE 's/^export-receipt-sha256=([a-f0-9]{64})$/\1/p' "$evidence/export-stderr.txt" | head -1)"
@@ -291,9 +320,8 @@ test -n "$receipt"
 sha256sum "$evidence/result.bqexport" | tee "$evidence/archive-sha256.txt"
 mkdir -m 0700 "$evidence/replay"
 build/bench-service-tools/service unpack-export "$evidence/result.bqexport" "$evidence/replay/result" "$receipt" | tee "$evidence/replay.txt"
-sudo docker exec "$guest" sh -ec 'test ! -e /var/lib/buster-bench/workspaces/.lease-handoff; test "$(stat -c %h /var/lib/buster-bench/lease/host.lock)" = 1'
-if [[ "$probe_valid" != true ]]; then
-  echo "SERVICE_RESULT_SUCCEEDED source=$subject job=$job token=$token; live systemd probe inconclusive; full acceptance pending"
+if [[ "$probe_valid" != true || "$terminal_valid" != true ]]; then
+  echo "SERVICE_RESULT_SUCCEEDED source=$subject job=$job token=$token; live_probe_valid=$probe_valid terminal_proof_valid=$terminal_valid; full acceptance pending"
   exit 1
 fi
-echo "NORMAL_PATH_EXECUTION_PASS source=$subject job=$job token=$token; live systemd probe passed; full acceptance pending"
+echo "NORMAL_PATH_EXECUTION_PASS source=$subject job=$job token=$token; live and terminal checkpoint probes passed; full acceptance pending"
