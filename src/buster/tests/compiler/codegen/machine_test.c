@@ -273,9 +273,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_movabs(UnitTestArgument
 // Independent goldens: GNU as and LLVM MC agree on every row. Each row is the
 // instruction before its disp32 for -0x1000(%rbp): loads (MOVZX r64 for one
 // and two bytes, MOV otherwise) then stores, widths 1/2/4/8, registers 0-15.
-// The reference is the metadata exact form the prepared records are copied
-// from; bytes past the instruction but inside capacity are the emitter's
-// spare record bytes and are not compared.
+// A final displacement that is a nonzero signed byte takes the same row with
+// ModRM mod=01 and a disp8 field instead (three bytes shorter; GNU as picks
+// the same form for such a displacement). The reference is the metadata
+// exact form the prepared records are copied from; bytes past the
+// instruction but inside capacity are the emitter's spare record bytes and
+// are not compared.
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_frame_chunk(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -322,13 +325,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_frame_chunk(UnitTestArg
                         u32 offset = offsets[offset_index];
                         u32 frame_base = frame_bases[base_index];
                         u32 value = (0u - offset) + frame_base;
+                        bool short_form = (s32)value != 0 && (s32)value >= INT8_MIN && (s32)value <= INT8_MAX;
+                        u32 row_length = golden[0] + (short_form ? 1u : (u32)sizeof(u32));
+                        u8 prefix[4];
+                        memcpy(prefix, golden + 1, golden[0]);
+                        // mod=10 (disp32) becomes mod=01 (disp8) in the trailing ModRM byte.
+                        prefix[golden[0] - 1u] = short_form ? (u8)(prefix[golden[0] - 1u] - 0x40u) : prefix[golden[0] - 1u];
                         for (u32 start_index = 0; start_index < BUSTER_ARRAY_LENGTH(starts); start_index += 1)
                         {
                             u32 start = starts[start_index];
                             for (u32 available = 0; available <= 17; available += 1)
                             {
                                 u32 capacity = start + available;
-                                bool valid = available >= length;
+                                bool valid = available >= row_length;
                                 u8 reference[64];
                                 memset(bytes, 0xa5, sizeof(bytes));
                                 memset(reference, 0xa5, sizeof(reference));
@@ -337,17 +346,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_frame_chunk(UnitTestArg
                                 MachineEncodeResult oracle =
                                     machine_x64_test_emit_frame_chunk(reference, capacity, start, frame_base, load, reg, offset, chunks[width_slot], true);
                                 row_matches &= prepared.valid == valid && oracle.valid == valid;
-                                row_matches &= prepared.byte_count == start + (valid ? length : 0u) && prepared.byte_count == oracle.byte_count;
+                                row_matches &= prepared.byte_count == start + (valid ? row_length : 0u) && prepared.byte_count == oracle.byte_count;
                                 row_matches &= prepared.exact_attempts == 1 && prepared.exact_successes == (u32)valid &&
                                                prepared.exact_failures == (u32)!valid;
                                 if (valid)
                                 {
                                     row_matches &= oracle.exact_attempts == 1 && oracle.exact_successes == 1 && oracle.exact_failures == 0;
-                                    row_matches &= memcmp(bytes, reference, start + length) == 0;
-                                    row_matches &= memcmp(bytes + start, golden + 1, golden[0]) == 0;
-                                    u32 patched;
-                                    memcpy(&patched, bytes + start + golden[0], sizeof(patched));
-                                    row_matches &= patched == value;
+                                    row_matches &= memcmp(bytes, reference, start + row_length) == 0;
+                                    row_matches &= memcmp(bytes + start, prefix, golden[0]) == 0;
+                                    if (short_form)
+                                    {
+                                        row_matches &= bytes[start + golden[0]] == (u8)value;
+                                    }
+                                    else
+                                    {
+                                        u32 patched;
+                                        memcpy(&patched, bytes + start + golden[0], sizeof(patched));
+                                        row_matches &= patched == value;
+                                    }
                                 }
                                 for (u32 index = 0; index < sizeof(bytes); index += 1)
                                 {
@@ -5872,6 +5888,132 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_source(UnitTestArgumen
     return result;
 }
 
+// Whether an x86-64 byte stream contains XOR r32, r32 (31 /r with mod=11
+// and equal fields; a REX.RB prefix names the same register in r8-r15).
+BUSTER_GLOBAL_LOCAL bool machine_test_contains_self_xor(u8 const* bytes, u32 byte_count)
+{
+    bool found = false;
+    for (u32 byte = 0; byte + 1 < byte_count; byte += 1)
+    {
+        u8 modrm = bytes[byte + 1];
+        found |= bytes[byte] == 0x31 && (modrm >> 6) == 3 && ((modrm >> 3) & 7) == (modrm & 7);
+    }
+    return found;
+}
+
+// Whether it contains MOV r32, 0 (B8+r followed by a zero imm32).
+BUSTER_GLOBAL_LOCAL bool machine_test_contains_mov_zero(u8 const* bytes, u32 byte_count)
+{
+    bool found = false;
+    for (u32 byte = 0; byte + 5 <= byte_count; byte += 1)
+    {
+        found |= bytes[byte] >= 0xb8 && bytes[byte] <= 0xbf && bytes[byte + 1] == 0 && bytes[byte + 2] == 0 && bytes[byte + 3] == 0 &&
+                 bytes[byte + 4] == 0;
+    }
+    return found;
+}
+
+// The verified zero idiom (docs/machine-rewrite-campaign.md) turns MOV r32, 0
+// into XOR r32, r32 only where no reader can observe the flags. Shapes 0 and
+// 1 return (5 < 7) + 0 through a SETCC that reads the flags a CMP set, with
+// the zero materialized between them: in the same block, and across a JMP
+// into a block whose first flag-relevant row reads them. The zero must keep
+// MOV there, and the result must be 1. Shape 2 returns a zero whose flags are
+// dead, which takes XOR. Every MIR placement is checked, and the code runs
+// where the host can execute it.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_zero_idiom_flags(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 immediates[] = {5, 7, 0};
+    MachineRef refs[5];
+    for (u32 value = 0; value < 5; value += 1) refs[value] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value);
+    MachineRef rax = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX);
+    for (u32 shape = 0; shape < 3; shape += 1)
+    {
+        bool split = shape == 1;
+        bool dead = shape == 2;
+        u32 setcc_row = split ? 5u : 4u;
+        MachineInstruction live_rows[] = {
+            {.opcode = MACHINE_X64_MOV_RI, .operands = {refs[0], machine_ref_make(MACHINE_REF_IMMEDIATE, 0)}},
+            {.opcode = MACHINE_X64_MOV_RI, .operands = {refs[1], machine_ref_make(MACHINE_REF_IMMEDIATE, 1)}},
+            {.opcode = MACHINE_X64_CMP64, .operands = {refs[0], refs[1]}},
+            {.opcode = MACHINE_X64_MOV_RI, .operands = {refs[2], machine_ref_make(MACHINE_REF_IMMEDIATE, 2)}},
+            {.opcode = MACHINE_X64_JMP, .operands = {machine_ref_make(MACHINE_REF_BLOCK, 1)}},
+            {.opcode = MACHINE_X64_SETCC, .payload = MACHINE_X64_CONDITION_LESS, .operands = {refs[3]}},
+            {.opcode = MACHINE_X64_ADD64, .operands = {refs[4], refs[3], refs[2]}},
+            {.opcode = MACHINE_X64_MOV_RR, .operands = {rax, refs[4]}},
+            {.opcode = MACHINE_X64_RET},
+        };
+        MachineInstruction dead_rows[] = {
+            {.opcode = MACHINE_X64_MOV_RI, .operands = {refs[0], machine_ref_make(MACHINE_REF_IMMEDIATE, 2)}},
+            {.opcode = MACHINE_X64_MOV_RR, .operands = {rax, refs[0]}},
+            {.opcode = MACHINE_X64_RET},
+        };
+        MachineInstruction rows[BUSTER_ARRAY_LENGTH(live_rows)];
+        u32 row_count = 0;
+        if (dead)
+        {
+            memcpy(rows, dead_rows, sizeof(dead_rows));
+            row_count = BUSTER_ARRAY_LENGTH(dead_rows);
+        }
+        else
+        {
+            for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(live_rows); row += 1)
+            {
+                if (split || live_rows[row].opcode != MACHINE_X64_JMP) rows[row_count++] = live_rows[row];
+            }
+        }
+        MachineVirtualRegister values[5];
+        u32 definitions[5] = {0, 1, 3, setcc_row, setcc_row + 1u};
+        for (u32 value = 0; value < 5; value += 1)
+        {
+            values[value] = (MachineVirtualRegister){.register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                     .definition_point = machine_point_make(definitions[value], MACHINE_POINT_AFTER)};
+        }
+        MachineBlock blocks[2] = {
+            {.first_instruction = 0, .instruction_count = split ? setcc_row : row_count},
+            {.first_instruction = setcc_row, .instruction_count = row_count - setcc_row},
+        };
+        MachineEdge edge = {.source_block = 0, .destination_block = 1};
+        MachineFunction function = {.instructions = rows, .instruction_count = row_count, .virtual_registers = values,
+            .virtual_register_count = dead ? 1u : 5u, .blocks = blocks, .block_count = split ? 2u : 1u,
+            .edges = split ? &edge : 0, .edge_count = split ? 1u : 0u, .immediates = immediates,
+            .immediate_count = BUSTER_ARRAY_LENGTH(immediates), .target = machine_target_x86_64()};
+        BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE);
+        for (u32 mode = 0; mode < 3; mode += 1)
+        {
+            MachineStackPlacement placement = mode == 0 ? machine_stack_placement_build(arguments->arena, &function) :
+                mode == 1 ? machine_fast_placement_build(arguments->arena, &function) : machine_quality_placement_build(arguments->arena, &function);
+            MachineEncodeResult encoded = placement.valid ? machine_encode_x86_64(arguments->arena, &function, &placement)
+                                                          : (MachineEncodeResult){0};
+            BUSTER_TEST(arguments, placement.valid && encoded.valid);
+            if (encoded.valid)
+            {
+                // Rematerializations elsewhere may legitimately use the
+                // idiom; the zero between CMP and SETCC must stay a MOV.
+                bool mov_zero = machine_test_contains_mov_zero(encoded.bytes, encoded.byte_count);
+                BUSTER_TEST(arguments, dead ? !mov_zero && machine_test_contains_self_xor(encoded.bytes, encoded.byte_count) : mov_zero);
+            }
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+            if (encoded.valid)
+            {
+                CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = {.pointer = encoded.bytes, .length = encoded.byte_count}});
+                BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+                if (executable.address)
+                {
+                    typedef u64 ZeroCall(void);
+                    ZeroCall* call = 0;
+                    memcpy(&call, &executable.address, sizeof(call));
+                    BUSTER_TEST(arguments, call() == (dead ? 0u : 1u));
+                    codegen_release_executable(executable);
+                }
+            }
+#endif
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_widths(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7057,6 +7199,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_traffic);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_widths);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_zero_idiom_flags);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_edges);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_source);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_bank);
@@ -7545,9 +7688,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         [MACHINE_X64_CALL_DIRECT] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_TLS_GENERAL_DYNAMIC] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_SWITCH] = MACHINE_SCHEDULE_UNIT_BARRIER,
-        [MACHINE_X64_COPY_FRAME_FROM_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY,
-        [MACHINE_X64_COPY_FRAME_FROM_PTR] = MACHINE_SCHEDULE_UNIT_MEMORY,
-        [MACHINE_X64_COPY_PTR_FROM_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        // x86 aggregate copies move sixteen-byte chunks through XMM0.
+        [MACHINE_X64_COPY_FRAME_FROM_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY | MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_COPY_FRAME_FROM_PTR] = MACHINE_SCHEDULE_UNIT_MEMORY | MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_COPY_PTR_FROM_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY | MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_X64_FARITH] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_X64_FCMP_SET] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_X64_CVT_F32_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
@@ -7932,8 +8076,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         {
             saw_cmpxchg16 = true;
         }
+        // mov [rbp + disp], rax: ModRM 0x85 carries a disp32, 0x45 a disp8.
         if (saw_cmpxchg16 && byte + 3 <= cmpxchg16_encoded.byte_count && cmpxchg16_encoded.bytes[byte] == 0x48 &&
-            cmpxchg16_encoded.bytes[byte + 1] == 0x89 && cmpxchg16_encoded.bytes[byte + 2] == 0x85)
+            cmpxchg16_encoded.bytes[byte + 1] == 0x89 &&
+            (cmpxchg16_encoded.bytes[byte + 2] == 0x85 || cmpxchg16_encoded.bytes[byte + 2] == 0x45))
         {
             saw_result_store = true;
         }
@@ -8208,8 +8354,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // Every fixed-shape template row prewarm allots must be one the
     // metadata authority accepted; a refused row would silently keep the
     // slower metadata lane for its shape.
-    BUSTER_TEST_RAW(arguments, exact_map.fixed_template_rows == 1466,
-                    string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1466 (rows: {u32})"), exact_map.fixed_template_rows));
+    BUSTER_TEST_RAW(arguments, exact_map.fixed_template_rows == 1486,
+                    string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1486 (rows: {u32})"), exact_map.fixed_template_rows));
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
     BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_movabs);
@@ -8217,7 +8363,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
     // Atomic NAND adds the 8-, 16-, 32- and 64-bit NOT register shapes.
-    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 267);
+    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 274);
     BUSTER_TEST(arguments, metadata_shape_cache.invalid_rows == 0);
 
     // Canonical metadata authorities and neutral patch helpers are separate
