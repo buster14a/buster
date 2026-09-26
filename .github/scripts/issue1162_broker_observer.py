@@ -674,6 +674,7 @@ class Lifecycle:
         self.removed = False
         self.triggers: set[str] = set()
         self.main_pid_values: set[int] = set()
+        self.last_mainpid_zero_event_seq: int | None = None
         self.snapshots: list[dict[str, object]] = []
         self.incomplete_reasons: list[str] = []
         self.manager_incomplete_reasons: list[str] = []
@@ -965,7 +966,7 @@ class BrokerObserver:
         # transition after the first three immediate snapshots saw executor.
         # A retry does not turn a partial into proof; as_json still requires an
         # exact full witness for every positive-PID snapshot identity.
-        if (pid <= 0 or lifecycle.removed or 0 in lifecycle.main_pid_values or
+        if (pid <= 0 or lifecycle.removed or
                 self.stop_seen or time.monotonic() >= self.deadline or
                 len(lifecycle.triggers) >= MAX_SNAPSHOTS_PER_GENERATION or
                 not lifecycle.snapshots or lifecycle.manager_incomplete_reasons or
@@ -982,6 +983,8 @@ class BrokerObserver:
                 latest.get("main_pid") != pid or identity is None or
                 latest.get("finished_monotonic_ns", event_ns) >= event_ns or
                 latest.get("trigger_event_seq", seq) >= seq or
+                (lifecycle.last_mainpid_zero_event_seq is not None and
+                 lifecycle.last_mainpid_zero_event_seq >= latest.get("trigger_event_seq", seq)) or
                 lifecycle.invocation_id != latest.get("invocation_id") or
                 lifecycle.main_pid != pid or lifecycle.cgroup != latest.get("cgroup")):
             return
@@ -1084,6 +1087,8 @@ class BrokerObserver:
         if "MainPID" in changed or "MainPID" in invalidated:
             for pid in main_pids or [None]:
                 key = -1 if pid is None else int(pid)
+                if key == 0:
+                    lifecycle.last_mainpid_zero_event_seq = seq
                 if key not in lifecycle.main_pid_values:
                     lifecycle.main_pid_values.add(key)
                     self._schedule(lifecycle, "mainpid:" + str(key), seq)
@@ -2509,7 +2514,10 @@ def _self_test() -> None:
                   "3_2d758_2d65000_2eservice")
     retry_row = Lifecycle(retry_unit, retry_path, 1, 40, time.monotonic_ns() - 80_000_000)
     retry_row.triggers = {"unit-new", "properties-first", "mainpid:760"}
-    retry_row.main_pid_values = {760}
+    # An initial MainPID=0 preceded the positive PID and cannot prohibit a
+    # later positive pre-exec capture merely through unordered set membership.
+    retry_row.main_pid_values = {0, 760}
+    retry_row.last_mainpid_zero_event_seq = 39
     retry_row.invocation_id = "a" * 32
     retry_row.main_pid = 760
     retry_row.cgroup = "/system.slice/broker.instance"
@@ -2578,12 +2586,13 @@ def _self_test() -> None:
     for blocked in ("hard", "zero", "removed", "deadline", "stop", "full", "cap"):
         saved_deadline = retry_observer.deadline
         saved_stop = retry_observer.stop_seen
+        saved_zero_seq = retry_row.last_mainpid_zero_event_seq
         saved_snapshot = retry_row.snapshots[-1]
         saved_triggers = retry_row.triggers.copy()
         if blocked == "hard":
             retry_row.process_incomplete_reasons.append("identity_contradiction")
         elif blocked == "zero":
-            retry_row.main_pid_values.add(0)
+            retry_row.last_mainpid_zero_event_seq = retry_observer.event_seq + 1
         elif blocked == "removed":
             retry_row.removed = True
         elif blocked == "deadline":
@@ -2604,9 +2613,14 @@ def _self_test() -> None:
         retry_row.snapshots[-1] = saved_snapshot
         retry_row.triggers = saved_triggers
         retry_row.process_incomplete_reasons.clear()
-        retry_row.main_pid_values.discard(0)
+        retry_row.last_mainpid_zero_event_seq = saved_zero_seq
         retry_row.removed = False
         checks += 1
+    retry_observer.handle_message({**later_service, "main_pids": [0]})
+    assert retry_row.last_mainpid_zero_event_seq == retry_observer.event_seq
+    retry_observer.handle_message(later_service)
+    assert not retry_observer.queue  # A later terminal zero precedes this positive retry signal.
+    checks += 1
     retry_observer.bus.last_dispatch_kind = "positive_null"
     retry_observer.bus_dispatch_count = 0
     retry_observer._record_dispatch(None)
