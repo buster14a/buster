@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -53,6 +54,13 @@ HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 UNIQUE_BUS_NAME = re.compile(r":[0-9]+\.[0-9]+\Z")
 DECIMAL = re.compile(r"(?:0|[1-9][0-9]{0,19})\Z")
 FDINFO_INODE = re.compile(rb"^ino:\s*([0-9]+)\s*$", re.MULTILINE)
+PREEXEC_EXECUTABLES = frozenset(("/lib/systemd/systemd-executor",
+                                  "/usr/lib/systemd/systemd-executor"))
+BROKER_EXECUTABLE = "/usr/local/libexec/buster-bench-systemd-broker"
+SUPERSEDABLE_CAPTURE_STATES = frozenset(("transient_proc_disappeared",
+                                         "transient_proc_interrupted",
+                                         "transient_capture_deadline",
+                                         "known_preexec_executable_transition"))
 
 MAX_RUN_SECONDS = 4000.0
 MAX_EVENTS = 512
@@ -91,6 +99,9 @@ MATCH_RULES = (
     "type='signal',sender='org.freedesktop.systemd1',"
     "path='/org/freedesktop/systemd1',"
     "interface='org.freedesktop.systemd1.Manager',member='UnitRemoved'",
+    "type='signal',sender='org.freedesktop.systemd1',"
+    "path='/org/freedesktop/systemd1',"
+    "interface='org.freedesktop.systemd1.Manager',member='Reloading'",
     "type='signal',sender='org.freedesktop.systemd1',"
     "path_namespace='/org/freedesktop/systemd1/unit',"
     "interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'",
@@ -552,6 +563,16 @@ class SdBus:
             require(UNIQUE_BUS_NAME.fullmatch(sender) is not None and
                     sender == self.manager_sender,
                     "system manager unique sender changed after Subscribe")
+            if member == "Reloading":
+                require(interface == "org.freedesktop.systemd1.Manager" and
+                        path == "/org/freedesktop/systemd1" and signature == "b",
+                        "unexpected Manager.Reloading signal metadata")
+                value = ctypes.c_int()
+                self._check(self.message_read(message, b"b", ctypes.byref(value)),
+                            "read Manager.Reloading boolean")
+                require(value.value in (0, 1), "invalid Manager.Reloading boolean")
+                return result, {"member": member, "interface": interface, "path": path,
+                                "sender": sender, "reloading": bool(value.value)}
             if member in ("UnitNew", "UnitRemoved"):
                 require(interface == "org.freedesktop.systemd1.Manager" and
                         path == "/org/freedesktop/systemd1" and signature == "so",
@@ -643,18 +664,60 @@ class Lifecycle:
         self.invocation_id = invocation_id
         return True
 
+    @staticmethod
+    def positive_pid_identity(snapshot: dict[str, object]) -> tuple[object, ...] | None:
+        invocation = snapshot.get("invocation_id")
+        pid = snapshot.get("main_pid")
+        started = snapshot.get("exec_main_start_timestamp_monotonic")
+        cgroup = snapshot.get("cgroup")
+        ticks = snapshot.get("start_ticks")
+        if (not isinstance(invocation, str) or HEX32.fullmatch(invocation) is None or
+                invocation == "0" * 32 or not isinstance(pid, int) or pid <= 0 or
+                not isinstance(started, int) or started <= 0 or
+                not isinstance(cgroup, str) or not cgroup.startswith("/") or
+                not isinstance(ticks, int) or ticks <= 0):
+            return None
+        return (snapshot.get("boot_id"), snapshot.get("unit"),
+                snapshot.get("object_path"), snapshot.get("generation"),
+                invocation, pid, started, cgroup, ticks)
+
     def as_json(self, boot_id: str, boot_id_raw: str, event_loss: bool = False) -> dict[str, object]:
         manager_complete = (self.removed and bool(self.snapshots) and
                             not self.manager_incomplete_reasons and not event_loss and
                             any(bool(s.get("manager_properties_complete")) for s in self.snapshots) and
                             all(bool(s.get("manager_properties_complete")) or
                                 bool(s.get("preliminary_property_miss")) for s in self.snapshots))
-        started_snapshots = [s for s in self.snapshots
-                             if bool(s.get("process_started")) or
-                             bool(s.get("process_start_observed_before_query"))]
-        process_complete = (manager_complete and bool(started_snapshots) and
-                            not self.process_incomplete_reasons and
-                            all(bool(s.get("process_capture_complete")) for s in started_snapshots))
+        positive_snapshots = [s for s in self.snapshots if isinstance(s.get("main_pid"), int) and
+                              int(s["main_pid"]) > 0]
+        witness_identities = {identity for s in positive_snapshots
+                              if bool(s.get("complete")) and
+                              bool(s.get("manager_properties_complete")) and
+                              bool(s.get("process_capture_complete")) and
+                              (identity := self.positive_pid_identity(s)) is not None}
+        # An incomplete positive-PID proc read can be superseded only by a
+        # complete independent witness of precisely the same process start.
+        # A missing start-ticks read is deliberately not supersedable.
+        positive_identities_match = (len(witness_identities) == 1 and
+            all(self.positive_pid_identity(s) in witness_identities
+                for s in positive_snapshots) and
+            all(bool(s.get("complete")) or
+                (s.get("process_capture_state") in SUPERSEDABLE_CAPTURE_STATES and
+                 bool(s.get("manager_properties_complete")) and
+                 not bool(s.get("process_capture_complete")))
+                for s in positive_snapshots))
+        process_reasons = list(self.process_incomplete_reasons)
+        if len(witness_identities) == 1:
+            witness_pid = next(iter(witness_identities))[5]
+            if any(pid > 0 and pid != witness_pid for pid in self.main_pid_values):
+                process_reasons.append("mainpid_signal_conflicts_with_process_witness")
+        if not positive_identities_match:
+            process_reasons.append("positive_mainpid_without_exact_full_process_witness")
+        process_complete = (manager_complete and positive_identities_match and
+                            not process_reasons)
+        incomplete_reasons = list(self.incomplete_reasons)
+        for reason in process_reasons:
+            if reason not in incomplete_reasons:
+                incomplete_reasons.append(reason)
         return {"boot_id": boot_id, "boot_id_raw": boot_id_raw, "unit": self.unit,
                 "object_path": self.object_path, "generation": self.generation,
                 "invocation_id": self.invocation_id, "main_pid": self.main_pid,
@@ -670,12 +733,13 @@ class Lifecycle:
                 "last_snapshot_finished_monotonic_ns": self.last_snapshot_finished_monotonic_ns,
                 "manager_lifecycle_complete": manager_complete,
                 "process_complete": process_complete,
-                "process_start_seen": bool(started_snapshots),
+                "process_start_seen": self.process_started or
+                                      any(value > 0 for value in self.main_pid_values),
                 "complete": process_complete,
                 "manager_incomplete_reasons": list(self.manager_incomplete_reasons),
-                "process_incomplete_reasons": list(self.process_incomplete_reasons),
+                "process_incomplete_reasons": process_reasons,
                 "preliminary_property_misses": self.preliminary_property_misses,
-                "incomplete_reasons": list(self.incomplete_reasons),
+                "incomplete_reasons": incomplete_reasons,
                 "snapshots": self.snapshots}
 
 
@@ -766,7 +830,7 @@ class BrokerObserver:
             self.global_reasons.append(reason[:512])
         self.event_loss_detected = self.event_loss_detected or event_loss
 
-    def _emit(self, body: dict[str, object], unit: str | None = None) -> int:
+    def _emit(self, body: dict[str, object], unit: str | None = None) -> tuple[int, int]:
         self.event_seq += 1
         if unit is not None:
             count = self.event_count_by_unit.get(unit, 0) + 1
@@ -779,11 +843,12 @@ class BrokerObserver:
             if isinstance(current, Lifecycle):
                 query_context = {"unit": current.unit, "generation": current.generation,
                                  "started_monotonic_ns": query.get("started_monotonic_ns")}
+        event_ns = time.monotonic_ns()
         event = {"schema": SCHEMA, "boot_id": self.boot_id, "boot_id_raw": self.boot_id_raw,
-                 "seq": self.event_seq, "monotonic_ns": time.monotonic_ns(),
+                 "seq": self.event_seq, "monotonic_ns": event_ns,
                  "observer_show_query_inflight": query_context, **body}
         self.writer.event(event)
-        return self.event_seq
+        return self.event_seq, event_ns
 
     def _schedule(self, lifecycle: Lifecycle, trigger: str, seq: int) -> None:
         if lifecycle.removed:
@@ -816,11 +881,11 @@ class BrokerObserver:
                     "broker lifecycle generation population exceeds bound")
             generation = self.generation_by_unit.get(unit, 0) + 1
             self.generation_by_unit[unit] = generation
-            seq = self._emit({"event": "UnitNew", "member": member,
+            seq, event_ns = self._emit({"event": "UnitNew", "member": member,
                               "interface": message["interface"], "sender": message["sender"],
                               "unit": unit, "object_path": path,
                               "generation": generation}, unit)
-            lifecycle = Lifecycle(unit, path, generation, seq, time.monotonic_ns())
+            lifecycle = Lifecycle(unit, path, generation, seq, event_ns)
             self.units.append(lifecycle)
             self.current_by_path[path] = lifecycle
             self.last_by_path[path] = lifecycle
@@ -829,26 +894,26 @@ class BrokerObserver:
         lifecycle = self.current_by_path.get(path)
         if lifecycle is None:
             previous = self.last_by_path.get(path)
-            seq = self._emit({"event": "UnitRemoved", "member": member,
+            seq, event_ns = self._emit({"event": "UnitRemoved", "member": member,
                               "interface": message["interface"], "sender": message["sender"],
                               "unit": unit, "object_path": path,
                               "generation": previous.generation if previous else None,
                               "orphan": True}, unit)
             if previous is not None:
                 previous.last_event_seq = seq
-                previous.last_monotonic_ns = time.monotonic_ns()
+                previous.last_monotonic_ns = event_ns
                 previous.mark_manager_incomplete("orphan_unit_removed")
             else:
                 self.mark_global("orphan_unit_removed", event_loss=True)
             return
-        seq = self._emit({"event": "UnitRemoved", "member": member,
+        seq, event_ns = self._emit({"event": "UnitRemoved", "member": member,
                           "interface": message["interface"], "sender": message["sender"],
                           "unit": unit, "object_path": path,
                           "generation": lifecycle.generation}, unit)
         lifecycle.removed = True
         lifecycle.removed_event_seq = seq
         lifecycle.last_event_seq = seq
-        lifecycle.last_monotonic_ns = time.monotonic_ns()
+        lifecycle.last_monotonic_ns = event_ns
         lifecycle.removed_monotonic_ns = lifecycle.last_monotonic_ns
         self.current_by_path.pop(path, None)
         query = self.current_query
@@ -868,7 +933,7 @@ class BrokerObserver:
         changed = list(message["changed_properties"])
         invalidated = list(message["invalidated_properties"])
         main_pids = list(message["main_pids"])
-        seq = self._emit({"event": "PropertiesChanged", "member": "PropertiesChanged",
+        seq, event_ns = self._emit({"event": "PropertiesChanged", "member": "PropertiesChanged",
                           "interface": "org.freedesktop.DBus.Properties",
                           "unit_interface": message["unit_interface"],
                           "sender": message["sender"], "unit": lifecycle.unit,
@@ -877,7 +942,7 @@ class BrokerObserver:
                           "invalidated_properties": invalidated,
                           "main_pids": main_pids}, lifecycle.unit)
         lifecycle.last_event_seq = seq
-        lifecycle.last_monotonic_ns = time.monotonic_ns()
+        lifecycle.last_monotonic_ns = event_ns
         self._schedule(lifecycle, "properties-first", seq)
         if "MainPID" in changed or "MainPID" in invalidated:
             for pid in main_pids or [None]:
@@ -892,6 +957,12 @@ class BrokerObserver:
             self._unit_signal(message)
         elif member == "PropertiesChanged":
             self._property_signal(message)
+        elif member == "Reloading":
+            self._emit({"event": "Reloading", "member": member,
+                        "interface": message["interface"], "path": message["path"],
+                        "sender": message["sender"],
+                        "reloading": message["reloading"]})
+            self.mark_global("manager_reloading_during_observation", event_loss=True)
         else:
             raise ObserverError("unrecognized systemd observer message")
 
@@ -925,7 +996,8 @@ class BrokerObserver:
                 "incomplete_reasons": [], "main_pid": 0, "process_started": False,
                 "invocation_id": None, "invocation_id_observed": None,
                 "start_ticks": None, "cgroup": None, "exe": None, "exe_sha256": None,
-                "result": None, "substate": None, "exec_main_status": None,
+                "result": None, "active_state": None, "substate": None,
+                "exec_main_status": None,
                 "raw_show": None, "raw_stderr": None, "proc_capture": {},
                 "socket_fd0": None, "systemctl_exit": None,
                 "systemctl_timed_out": False, "systemctl_timeout_reason": None,
@@ -974,21 +1046,33 @@ class BrokerObserver:
     def _stop_query(self, query: dict[str, object], reason: str) -> None:
         process = query["process"]
         assert isinstance(process, subprocess.Popen)
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=0.5)
-        except subprocess.TimeoutExpired:
+        # poll() may reap an already exited child. Never address its old PID as
+        # a process group after that point: the numeric PID may be reused.
+        if process.poll() is None:
             try:
-                process.kill()
+                os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             try:
                 process.wait(timeout=0.5)
             except subprocess.TimeoutExpired:
-                query["limit_reason"] = "systemctl_client_reap_timeout"
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    query["limit_reason"] = "systemctl_client_reap_timeout"
+        # A child that has already exited can leave inherited pipes open in a
+        # descendant. Bound the stopped query without signalling an unverified
+        # process group or waiting for that descendant.
+        for descriptor in list(query["open"]):
+            query["open"].pop(descriptor, None)
+            for stream in (process.stdout, process.stderr):
+                if stream is not None and not stream.closed and stream.fileno() == descriptor:
+                    stream.close()
+                    break
         query["cancel_reason"] = reason
 
     def _read_query_pipes(self, query: dict[str, object], ready: list[int]) -> None:
@@ -1022,6 +1106,87 @@ class BrokerObserver:
                 buffer.extend(block[:remain])
             else:
                 buffer.extend(block)
+
+    @staticmethod
+    def _stable_exe_identity(before: tuple[str, int, int], first_exe: str,
+                             after: tuple[str, int, int], second_exe: str,
+                             expected_ticks: int) -> bool:
+        return (before[1:] == after[1:] and before[2] == expected_ticks and
+                expected_ticks > 0 and first_exe == second_exe and
+                0 < len(first_exe) <= 4096)
+
+    def _read_stable_process_exe(self, pid: int, expected_ticks: int, label: str) -> str:
+        import issue1162_live_probe as live_probe
+        proc = Path(f"/proc/{pid}")
+        before = live_probe._proc_stat_identity(
+            live_probe._bounded_file(proc / "stat", MAX_PROC_STAT_BYTES, self.deadline, reserve=0.0),
+            label)
+        first_exe = os.readlink(proc / "exe")
+        after = live_probe._proc_stat_identity(
+            live_probe._bounded_file(proc / "stat", MAX_PROC_STAT_BYTES, self.deadline, reserve=0.0),
+            label)
+        second_exe = os.readlink(proc / "exe")
+        if self._stable_exe_identity(before, first_exe, after, second_exe, expected_ticks):
+            return first_exe
+        # Type=exec can transition from systemd-executor to the pinned broker
+        # between the two readlinks without changing PID/start ticks. Retry
+        # exactly once and accept only a now-stable broker image.
+        require(before[1:] == after[1:] and before[2] == expected_ticks and
+                first_exe in PREEXEC_EXECUTABLES and second_exe == BROKER_EXECUTABLE,
+                "process executable or start ticks changed around read")
+        retry_before = live_probe._proc_stat_identity(
+            live_probe._bounded_file(proc / "stat", MAX_PROC_STAT_BYTES, self.deadline, reserve=0.0),
+            label)
+        retry_first_exe = os.readlink(proc / "exe")
+        retry_after = live_probe._proc_stat_identity(
+            live_probe._bounded_file(proc / "stat", MAX_PROC_STAT_BYTES, self.deadline, reserve=0.0),
+            label)
+        retry_second_exe = os.readlink(proc / "exe")
+        require(retry_first_exe == BROKER_EXECUTABLE and
+                self._stable_exe_identity(retry_before, retry_first_exe,
+                                          retry_after, retry_second_exe, expected_ticks),
+                "executor-to-broker executable transition did not stabilize")
+        return BROKER_EXECUTABLE
+
+    def _recheck_known_preexec(self, pid: int, snapshot: dict[str, object],
+                               label: str) -> bool:
+        try:
+            current_exe = self._read_stable_process_exe(pid, int(snapshot["start_ticks"]), label)
+        except (OSError, ObserverError, ValueError, RuntimeError):
+            return False
+        return current_exe == snapshot.get("initial_exe_observed") and \
+               current_exe in PREEXEC_EXECUTABLES
+
+    def _capture_failure_state(self, exc: Exception, snapshot: dict[str, object],
+                               pid: int, capture_number: int) -> str:
+        # The known systemd executor may occupy Type=exec's MainPID before it
+        # enters the fixed broker image. It is preliminary only when the full
+        # show still reports the start phase and the independently read ticks
+        # later bind to a full broker witness. A different executable, cgroup,
+        # hash, socket FD, or process identity is a hard contradiction.
+        label = f"broker-{capture_number:06d}"
+        expected_preexec = f"process executable path mismatch for {label}: "
+        preexec_error = (str(exc) == expected_preexec + str(snapshot.get("initial_exe_observed")) or
+                         str(exc) == f"process cgroup mismatch for {label}")
+        if (type(exc).__name__ == "ProbeError" and
+                snapshot.get("active_state") == "activating" and
+                snapshot.get("substate") == "start" and
+                isinstance(snapshot.get("start_ticks"), int) and
+                snapshot.get("initial_exe_observed") in PREEXEC_EXECUTABLES and
+                preexec_error and self._recheck_known_preexec(pid, snapshot, label)):
+            return "known_preexec_executable_transition"
+        if type(exc).__name__ == "ProbeError" and str(exc) == \
+                "submit-relative live-probe deadline exhausted":
+            return "transient_capture_deadline"
+        proc_prefix = f"/proc/{pid}/"
+        if (isinstance(exc, OSError) and exc.errno in (errno.ENOENT, errno.ESRCH,
+                errno.ENOTDIR, errno.EINTR) and isinstance(exc.filename, str) and
+                exc.filename.startswith(proc_prefix)):
+            if exc.errno == errno.EINTR:
+                return "transient_proc_interrupted"
+            if not Path(f"/proc/{pid}/stat").exists():
+                return "transient_proc_disappeared"
+        return "identity_contradiction_or_capture_error"
 
     def _finish_query(self, query: dict[str, object]) -> None:
         lifecycle = query["lifecycle"]
@@ -1068,47 +1233,52 @@ class BrokerObserver:
         if stdout_property is not None:
             invocation = stdout_property["InvocationID"]
             pid = int(stdout_property["MainPID"])
-            started = (pid > 0 or int(stdout_property["ExecMainStartTimestampMonotonic"]) > 0)
+            exec_start = int(stdout_property["ExecMainStartTimestampMonotonic"])
+            # The unit object may expose an old InvocationID or start timestamp
+            # before this Accept=yes process obtains a nonzero MainPID.
+            started = pid > 0
             invocation_ok = True
             if started:
                 invocation_ok = lifecycle.accept_invocation(invocation)
                 if not invocation_ok:
                     process_failure = "invocation_id_changed_or_invalid_within_manager_generation"
-            lifecycle.main_pid = pid
+                if exec_start == 0:
+                    process_failure = process_failure or "positive_mainpid_without_exec_start"
+            if lifecycle.start_ticks is None:
+                lifecycle.main_pid = pid
+                lifecycle.cgroup = stdout_property["ControlGroup"]
             lifecycle.process_started = lifecycle.process_started or started
-            lifecycle.start_ticks = None
-            lifecycle.exe = None
-            lifecycle.exe_sha256 = None
-            lifecycle.cgroup = stdout_property["ControlGroup"]
             lifecycle.result = stdout_property["Result"]
+            snapshot["active_state"] = stdout_property["ActiveState"]
             lifecycle.substate = stdout_property["SubState"]
             lifecycle.exec_main_status = stdout_property["ExecMainStatus"]
             snapshot.update({"invocation_id_observed": invocation,
                 "invocation_id": invocation if started and invocation_ok else None,
                 "main_pid": pid, "process_started": started,
                 "manager_properties_complete": True,
-                "cgroup": lifecycle.cgroup,
+                "cgroup": stdout_property["ControlGroup"],
                 "result": lifecycle.result, "substate": lifecycle.substate,
                 "exec_main_status": lifecycle.exec_main_status,
-                "exec_main_start_timestamp_monotonic": int(stdout_property["ExecMainStartTimestampMonotonic"])})
+                "exec_main_start_timestamp_monotonic": exec_start})
             if pid > 0:
                 try:
                     self._capture_process(lifecycle, snapshot, pid, capture_number)
-                    snapshot["process_capture_complete"] = True
+                    snapshot["process_capture_complete"] = bool(invocation_ok and exec_start > 0)
                 except (OSError, ObserverError, ValueError, RuntimeError) as exc:
+                    snapshot["process_capture_state"] = self._capture_failure_state(
+                        exc, snapshot, pid, capture_number)
                     process_failure = process_failure or (
                         f"process_capture_failed:{type(exc).__name__}:{str(exc)[:300]}")
             elif lifecycle.process_started:
-                if started:
-                    process_failure = process_failure or "process_exited_before_verified_proc_capture"
-                elif snapshot["process_start_observed_before_query"]:
+                if lifecycle.start_ticks is None:
                     process_failure = process_failure or "mainpid_event_not_live_at_property_snapshot"
                 snapshot["process_capture_state"] = "process_started_but_mainpid_zero"
             else:
                 if snapshot["process_start_observed_before_query"]:
-                    process_failure = process_failure or "mainpid_event_not_live_at_property_snapshot"
+                    if lifecycle.start_ticks is None:
+                        process_failure = process_failure or "mainpid_event_not_live_at_property_snapshot"
                     snapshot["process_capture_state"] = "mainpid_event_not_live_at_property_snapshot"
-                elif trigger_is_unit_new(snapshot) and not started:
+                elif snapshot.get("trigger") == "unit-new" and not started:
                     snapshot["preliminary_property_miss"] = True
                     snapshot["preliminary_property_miss_reason"] = "unit_new_before_process_start"
                     snapshot["process_capture_state"] = "no_process_started_at_snapshot"
@@ -1137,7 +1307,14 @@ class BrokerObserver:
                 lifecycle.mark_manager_incomplete(manager_failure)
         if process_failure:
             snapshot["incomplete_reasons"].append(process_failure)
-            lifecycle.mark_process_incomplete(process_failure)
+            # A raced positive-PID proc capture remains in evidence. It is
+            # resolved only if as_json finds a complete witness with the exact
+            # independently read start ticks and manager identity. Other
+            # failures (invocation, start time, or unverified PID-zero) are hard.
+            if not (snapshot["main_pid"] > 0 and
+                    snapshot.get("process_capture_state") in SUPERSEDABLE_CAPTURE_STATES and
+                    process_failure.startswith("process_capture_failed:")):
+                lifecycle.mark_process_incomplete(process_failure)
         snapshot["complete"] = bool(snapshot["process_capture_complete"] and
                                       snapshot["manager_properties_complete"] and
                                       not process_failure and not manager_failure)
@@ -1151,18 +1328,34 @@ class BrokerObserver:
             import issue1162_live_probe as live_probe
         except ImportError as exc:
             raise ObserverError("required issue1162_live_probe sibling helper is unavailable") from exc
-        require(pid > 0 and lifecycle.cgroup is not None and lifecycle.cgroup.startswith("/"),
+        require(pid > 0 and isinstance(snapshot.get("cgroup"), str) and
+                snapshot["cgroup"].startswith("/"),
                 "live MainPID has no valid systemd ControlGroup")
-        expected_exe = "/usr/local/libexec/buster-bench-systemd-broker"
+        expected_exe = BROKER_EXECUTABLE
         label = f"broker-{capture_number:06d}"
         references = {}
+        proc_path = Path(f"/proc/{pid}")
+        initial_stat = live_probe._proc_stat_identity(
+            live_probe._bounded_file(proc_path / "stat", MAX_PROC_STAT_BYTES, self.deadline, reserve=0.0),
+            label)
+        require(initial_stat[2] > 0, "positive MainPID has invalid proc start ticks")
+        snapshot["start_ticks"] = initial_stat[2]
+        snapshot["initial_exe_observed"] = self._read_stable_process_exe(
+            pid, initial_stat[2], label)
         with tempfile.TemporaryDirectory(prefix="issue1162-broker-proc-") as temp_dir:
             old_umask = os.umask(0o077)
             try:
                 proc = live_probe._capture_process(pid, label, Path(temp_dir),
-                    self.deadline, lifecycle.cgroup, expected_exe, reserve=0.0)
+                    self.deadline, str(snapshot["cgroup"]), expected_exe, reserve=0.0)
             finally:
                 os.umask(old_umask)
+            require(int(proc["starttime_ticks"]) == initial_stat[2],
+                    "positive MainPID start ticks changed during capture")
+            require(proc["cgroup"] == f"0::{snapshot['cgroup']}",
+                    "proc cgroup raw identity differs from manager ControlGroup")
+            snapshot["proc_cgroup_raw"] = str(proc["cgroup"])
+            snapshot["exe"] = str(proc["exe"])
+            snapshot["exe_sha256"] = str(proc["exe_sha256"])
             # The sibling helper writes three individually bounded files into
             # this private, short-lived directory. Copy only verified captures
             # into the aggregate-limited evidence directory.
@@ -1172,19 +1365,19 @@ class BrokerObserver:
                 filename = f"{label}.{suffix}"
                 references[suffix] = self.writer.capture_path(
                     filename, Path(temp_dir) / filename, maximum)
+                snapshot["proc_capture"] = dict(references)
         fd0 = self._capture_fd0(pid, int(proc["starttime_ticks"]), label, capture_number)
-        snapshot["proc_capture"] = {**references, "fd0_link": fd0["link_ref"],
-                                    "fd0_info": fd0["fdinfo_ref"]}
+        snapshot["proc_capture"].update({"fd0_link": fd0["link_ref"],
+                                         "fd0_info": fd0["fdinfo_ref"]})
         snapshot["socket_fd0"] = fd0["identity"]
         snapshot["start_ticks"] = int(proc["starttime_ticks"])
         snapshot["main_pid"] = int(proc["pid"])
-        snapshot["cgroup"] = str(proc["cgroup"])
-        snapshot["exe"] = str(proc["exe"])
-        snapshot["exe_sha256"] = str(proc["exe_sha256"])
-        lifecycle.start_ticks = int(proc["starttime_ticks"])
-        lifecycle.main_pid = int(proc["pid"])
-        lifecycle.exe = str(proc["exe"])
-        lifecycle.exe_sha256 = str(proc["exe_sha256"])
+        if lifecycle.start_ticks is None:
+            lifecycle.start_ticks = int(proc["starttime_ticks"])
+            lifecycle.main_pid = int(proc["pid"])
+            lifecycle.cgroup = str(snapshot["cgroup"])
+            lifecycle.exe = str(proc["exe"])
+            lifecycle.exe_sha256 = str(proc["exe_sha256"])
 
     def _capture_fd0(self, pid: int, expected_ticks: int, label: str,
                      capture_number: int) -> dict[str, object]:
@@ -1267,6 +1460,27 @@ class BrokerObserver:
         self.stop_seen = _safe_stop_file(self.writer)
         return self.stop_seen
 
+    def _drain_final_events(self) -> None:
+        # A stop marker bounds new work, but there may still be queued manager
+        # messages. Claim a complete stream only after observing an empty bus.
+        final_deadline = min(self.deadline, time.monotonic() + 0.25)
+        for _ in range(MAX_DISPATCHES_PER_DRAIN):
+            if time.monotonic() >= final_deadline:
+                self.mark_global("manager_final_drain_deadline_exceeded", event_loss=True)
+                break
+            result, message = self.bus.process_one()
+            if result == 0:
+                break
+            self.bus_dispatch_count += 1
+            if self.bus_dispatch_count > MAX_BUS_DISPATCHES:
+                self.bus_budget_exhausted = True
+                self.mark_global("manager_bus_dispatch_budget_exceeded", event_loss=True)
+                break
+            if message is not None:
+                self.handle_message(message)
+        else:
+            self.mark_global("manager_final_drain_slice_exceeded", event_loss=True)
+
     def run(self) -> dict[str, object]:
         require(bool(getattr(self.bus, "armed", False)),
                 "observer readiness requires installed matches and Manager.Subscribe ack")
@@ -1302,21 +1516,7 @@ class BrokerObserver:
             self._poll_once()
         # Give queued final manager messages one bounded drain after the root's
         # stop marker, then refuse new show subprocesses.
-        final_drain_deadline = min(self.deadline, time.monotonic() + 0.25)
-        for _ in range(MAX_DISPATCHES_PER_DRAIN):
-            if time.monotonic() >= final_drain_deadline:
-                break
-            result, message = self.bus.process_one()
-            if result == 0:
-                break
-            self.bus_dispatch_count += 1
-            if self.bus_dispatch_count > MAX_BUS_DISPATCHES:
-                self.bus_budget_exhausted = True
-                self.mark_global("manager_bus_dispatch_budget_exceeded", event_loss=True)
-                break
-            if message is None:
-                continue
-            self.handle_message(message)
+        self._drain_final_events()
         while self.queue:
             lifecycle, _trigger, seq = self.queue.popleft()
             reason = "observer_stopped_before_snapshot"
@@ -1462,9 +1662,10 @@ def _self_test() -> None:
 
     good = FixtureArm()
     good.arm()
-    assert good.calls == ["connect", "match-0", "match-1", "match-2", "subscribe"]
+    assert good.calls == ["connect", "match-0", "match-1", "match-2", "match-3",
+                          "subscribe"]
     checks += 1
-    for fail_at in ("match-0", "match-1", "match-2", "subscribe"):
+    for fail_at in ("match-0", "match-1", "match-2", "match-3", "subscribe"):
         failed = FixtureArm(fail_at)
         try:
             failed.arm()
@@ -1476,7 +1677,10 @@ def _self_test() -> None:
 
     # systemctl subprocess controls use an actual fake executable but never
     # open a manager bus or address the host systemd instance.
-    with tempfile.TemporaryDirectory(prefix="issue1162-broker-observer-selftest-") as temp:
+    # The disposable systemd guest mounts /tmp noexec; executable fixtures
+    # therefore live in /var/tmp without relaxing a guest mount policy.
+    with tempfile.TemporaryDirectory(prefix="issue1162-broker-observer-selftest-",
+                                     dir="/var/tmp") as temp:
         root = Path(temp)
         fake = root / "systemctl-fixture.py"
         fake.write_text("#!/usr/bin/env python3\n"
@@ -1491,6 +1695,17 @@ def _self_test() -> None:
             encoding="ascii")
         fake.chmod(0o700)
         unit = "buster-bench-systemd-broker@0-622-65000.service"
+        fake.chmod(0o600)
+        try:
+            _run_fake_command([str(fake), "show", "--", unit],
+                              {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, 1.0, 4096)
+        except PermissionError as exc:
+            assert exc.errno == errno.EACCES
+            checks += 1
+        else:
+            raise AssertionError("non-executable/noexec-style fixture unexpectedly ran")
+        finally:
+            fake.chmod(0o700)
         for mode, timeout, output_bound, expected, marker in (
                 ("ok", 1.0, 4096, 0, "Id="),
                 ("timeout", 0.05, 4096, None, "timeout"),
@@ -1544,6 +1759,328 @@ def _self_test() -> None:
     path_mismatch = "/org/freedesktop/systemd1/unit/not-a-broker"
     assert path_mismatch != lifecycle.object_path
     checks += 1
+
+    # A full witness may account for an earlier positive-PID proc race only
+    # when that partial retained the same independent start ticks and every
+    # manager identity component. A later PID-zero property read is harmless.
+    witness = {"boot_id": boot, "unit": lifecycle.unit,
+        "object_path": lifecycle.object_path, "generation": 3,
+        "invocation_id": "b" * 32, "main_pid": 741, "process_started": True,
+        "exec_main_start_timestamp_monotonic": 912345,
+        "cgroup": "/system.slice/broker.instance", "start_ticks": 5812,
+        "manager_properties_complete": True, "process_capture_complete": True,
+        "complete": True}
+    partial = {**witness, "process_capture_complete": False, "complete": False,
+               "process_capture_state": "known_preexec_executable_transition",
+               "active_state": "activating", "substate": "start",
+               "incomplete_reasons": ["process_capture_failed:ProbeError:known preexec image"]}
+    ended = {"boot_id": boot, "unit": lifecycle.unit,
+             "object_path": lifecycle.object_path, "generation": 3,
+             "main_pid": 0, "process_started": False,
+             "manager_properties_complete": True, "complete": False}
+    completed = Lifecycle(lifecycle.unit, lifecycle.object_path, 3, 5, 30)
+    completed.removed = True
+    completed.process_started = True
+    completed.snapshots = [partial, witness, ended]
+    row = completed.as_json(boot, raw)
+    assert row["process_complete"] and row["snapshots"][0] is partial
+    assert not partial["complete"] and not ended["complete"]
+    checks += 1
+    completed.main_pid_values = {741, 742}
+    conflicting_signal = completed.as_json(boot, raw)
+    assert not conflicting_signal["process_complete"]
+    assert "mainpid_signal_conflicts_with_process_witness" in conflicting_signal["process_incomplete_reasons"]
+    checks += 1
+    completed.main_pid_values = {0, 741}
+    assert completed.as_json(boot, raw)["process_complete"]
+    checks += 1
+    for contradiction in ("process cgroup mismatch", "process executable path mismatch",
+                          "running and installed executable hashes differ",
+                          "accepted socket FD 0 readback is inconsistent",
+                          "positive MainPID start ticks changed during capture"):
+        bad_partial = {**partial, "process_capture_state": "identity_contradiction_or_capture_error",
+                       "incomplete_reasons": [f"process_capture_failed:ProbeError:{contradiction}"]}
+        completed.snapshots = [bad_partial, witness, ended]
+        assert not completed.as_json(boot, raw)["process_complete"], contradiction
+        checks += 1
+    completed.snapshots = [partial, witness, ended]
+    for key, changed in (("boot_id", "f" * 32), ("unit", "other.service"),
+                         ("object_path", path_mismatch), ("generation", 4),
+                         ("invocation_id", "c" * 32), ("main_pid", 742),
+                         ("exec_main_start_timestamp_monotonic", 912346),
+                         ("cgroup", "/system.slice/other"),
+                         ("start_ticks", 5813), ("start_ticks", None),
+                         ("exec_main_start_timestamp_monotonic", 0)):
+        completed.snapshots = [{**partial, key: changed}, witness, ended]
+        assert not completed.as_json(boot, raw)["process_complete"], key
+        checks += 1
+    completed.snapshots = [partial, witness, ended]
+    completed.mark_process_incomplete("invocation_id_changed_or_invalid_within_manager_generation")
+    assert not completed.as_json(boot, raw)["process_complete"]
+    checks += 1
+
+    # A stale inactive object may advertise an old invocation and execution
+    # timestamp. It cannot bind the generation until a positive MainPID show.
+    class FixtureWriter:
+        def capture(self, name: str, content: bytes, maximum: int) -> dict[str, object]:
+            assert len(content) <= maximum
+            return {"path": f"captures/{name}", "bytes": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest()}
+
+    fixture_observer = object.__new__(BrokerObserver)
+    fixture_observer.writer = FixtureWriter()
+    fixture_observer.boot_id = boot
+    fixture_observer.boot_id_raw = raw
+    fixture_observer.current_query = None
+    fixture_lifecycle = Lifecycle(lifecycle.unit, lifecycle.object_path, 4, 7, 40)
+    show = (f"Id={lifecycle.unit}\nLoadState=loaded\nActiveState=activating\n"
+            "SubState=start\nMainPID=0\nInvocationID=" + "a" * 32 + "\n"
+            "ControlGroup=/system.slice/broker.instance\n"
+            "ExecMainStartTimestampMonotonic=912345\nExecMainStatus=0\nResult=success\n")
+    client = subprocess.Popen(["/usr/bin/true"], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+    client.wait(timeout=1.0)
+    initial = {"raw_show": None, "raw_stderr": None, "process_capture_complete": False,
+               "manager_properties_complete": False, "incomplete_reasons": [],
+               "main_pid": 0, "process_start_observed_before_query": False,
+               "trigger": "unit-new", "trigger_event_seq": 7,
+               "started_monotonic_ns": time.monotonic_ns()}
+    fixture_lifecycle.snapshots.append(initial)
+    query = {"lifecycle": fixture_lifecycle, "snapshot": initial, "process": client,
+             "stdout": bytearray(show.encode()), "stderr": bytearray(),
+             "capture_number": 1, "limit_reason": None, "cancel_reason": None}
+    fixture_observer.current_query = query
+    fixture_observer._finish_query(query)
+    assert initial["manager_properties_complete"] and initial["preliminary_property_miss"]
+    assert fixture_lifecycle.invocation_id is None and not fixture_lifecycle.process_started
+    checks += 1
+    def fixture_capture(row: Lifecycle, snap: dict[str, object], pid: int, number: int) -> None:
+        assert pid == 741 and number == 2
+        snap.update({"start_ticks": 5812, "exe": "/usr/local/libexec/buster-bench-systemd-broker",
+                     "exe_sha256": "f" * 64, "socket_fd0": {"stable": True},
+                     "proc_capture": {"proc-status": {"bytes": 1}}})
+        row.start_ticks = 5812
+        row.main_pid = pid
+        row.cgroup = str(snap["cgroup"])
+        row.exe = str(snap["exe"])
+        row.exe_sha256 = str(snap["exe_sha256"])
+
+    fixture_observer._capture_process = fixture_capture
+    positive_show = show.replace("MainPID=0", "MainPID=741").replace(
+        "InvocationID=" + "a" * 32, "InvocationID=" + "b" * 32)
+    for number, source in ((2, positive_show), (3, show)):
+        client = subprocess.Popen(["/usr/bin/true"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+        client.wait(timeout=1.0)
+        snap = {"boot_id": boot, "unit": lifecycle.unit,
+                "object_path": lifecycle.object_path, "generation": 4,
+                "raw_show": None, "raw_stderr": None,
+                "process_capture_complete": False, "manager_properties_complete": False,
+                "incomplete_reasons": [], "main_pid": 0,
+                "process_start_observed_before_query": number == 3,
+                "trigger": "mainpid:741", "trigger_event_seq": number + 7,
+                "started_monotonic_ns": time.monotonic_ns()}
+        fixture_lifecycle.snapshots.append(snap)
+        query = {"lifecycle": fixture_lifecycle, "snapshot": snap, "process": client,
+                 "stdout": bytearray(source.encode()), "stderr": bytearray(),
+                 "capture_number": number, "limit_reason": None, "cancel_reason": None}
+        fixture_observer.current_query = query
+        fixture_observer._finish_query(query)
+    fixture_lifecycle.removed = True
+    assert fixture_lifecycle.invocation_id == "b" * 32
+    assert fixture_lifecycle.main_pid == 741 and fixture_lifecycle.start_ticks == 5812
+    assert fixture_lifecycle.snapshots[1]["complete"]
+    assert fixture_lifecycle.snapshots[2]["main_pid"] == 0
+    assert fixture_lifecycle.snapshots[2]["incomplete_reasons"] == []
+    assert fixture_lifecycle.as_json(boot, raw)["process_complete"]
+    checks += 1
+    class ProbeError(RuntimeError):
+        pass
+
+    executor = "/usr/lib/systemd/systemd-executor"
+    for failure, active_state, substate, initial_exe, reread_exe, supersedable in (
+            (ProbeError("process executable path mismatch for broker-000004: "
+                        "/usr/lib/systemd/systemd-executor"),
+             "activating", "start", executor, executor, True),
+            (ProbeError("process cgroup mismatch for broker-000004"),
+             "activating", "start", executor, executor, True),
+            (ProbeError("process cgroup mismatch for broker-000004"),
+             "activating", "start", executor, BROKER_EXECUTABLE, False),
+            (ProbeError("process cgroup mismatch for broker-000004"),
+             "activating", "start", BROKER_EXECUTABLE, executor, False),
+            (ProbeError("process executable path mismatch for broker-000004: "
+                        "/usr/local/bin/other"),
+             "activating", "start", "/usr/local/bin/other", "/usr/local/bin/other", False),
+            (ProbeError("process executable path mismatch for broker-000004: "
+                        "/usr/lib/systemd/systemd-executor"),
+             "active", "running", executor, executor, False),
+            (ProbeError("running and installed executable hashes differ for broker-000004"),
+             "active", "running", BROKER_EXECUTABLE, BROKER_EXECUTABLE, False),
+            (ObserverError("accepted socket FD 0 readback is inconsistent"),
+             "active", "running", BROKER_EXECUTABLE, BROKER_EXECUTABLE, False),
+            (ObserverError("positive MainPID start ticks changed during capture"),
+             "active", "running", BROKER_EXECUTABLE, BROKER_EXECUTABLE, False)):
+        case_lifecycle = Lifecycle(lifecycle.unit, lifecycle.object_path, 4, 10, 50)
+        snap = {"boot_id": boot, "unit": lifecycle.unit,
+                "object_path": lifecycle.object_path, "generation": 4,
+                "raw_show": None, "raw_stderr": None,
+                "process_capture_complete": False, "manager_properties_complete": False,
+                "incomplete_reasons": [], "main_pid": 0,
+                "process_start_observed_before_query": False,
+                "trigger": "mainpid:741", "trigger_event_seq": 10,
+                "started_monotonic_ns": time.monotonic_ns()}
+        case_lifecycle.snapshots.append(snap)
+        client = subprocess.Popen(["/usr/bin/true"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+        client.wait(timeout=1.0)
+        case_show = positive_show.replace("ActiveState=activating", f"ActiveState={active_state}")
+        case_show = case_show.replace("SubState=start", f"SubState={substate}")
+        query = {"lifecycle": case_lifecycle, "snapshot": snap, "process": client,
+                 "stdout": bytearray(case_show.encode()), "stderr": bytearray(),
+                 "capture_number": 4, "limit_reason": None, "cancel_reason": None}
+        def failed_capture(_row: Lifecycle, row_snapshot: dict[str, object],
+                           _pid: int, _number: int) -> None:
+            row_snapshot["start_ticks"] = 5812
+            row_snapshot["initial_exe_observed"] = initial_exe
+            raise failure
+
+        fixture_observer._capture_process = failed_capture
+        fixture_observer._read_stable_process_exe = lambda _pid, _ticks, _label: reread_exe
+        fixture_observer.current_query = query
+        fixture_observer._finish_query(query)
+        case_lifecycle.snapshots.append({**witness, "generation": 4})
+        case_lifecycle.removed = True
+        assert case_lifecycle.as_json(boot, raw)["process_complete"] == supersedable
+        assert (snap["process_capture_state"] in SUPERSEDABLE_CAPTURE_STATES) == supersedable
+        checks += 1
+    class FixtureProcReader:
+        @staticmethod
+        def _bounded_file(path: Path, maximum: int, deadline: float,
+                          reserve: float = 0.0) -> bytes:
+            assert str(path) == "/proc/741/stat" and maximum == MAX_PROC_STAT_BYTES
+            return b"fixture-stat"
+
+        @staticmethod
+        def _proc_stat_identity(_raw: bytes, _label: str) -> tuple[str, int, int]:
+            return "S", 1, 5812
+
+    original_probe_module = sys.modules.get("issue1162_live_probe")
+    original_readlink = os.readlink
+    fixture_observer.deadline = time.monotonic() + 5.0
+    try:
+        sys.modules["issue1162_live_probe"] = FixtureProcReader()
+        links = iter((executor, BROKER_EXECUTABLE, BROKER_EXECUTABLE, BROKER_EXECUTABLE))
+        os.readlink = lambda _path: next(links)
+        assert BrokerObserver._read_stable_process_exe(
+            fixture_observer, 741, 5812, "broker-fixture") == BROKER_EXECUTABLE
+        checks += 1
+        links = iter((executor, "/usr/local/bin/other"))
+        try:
+            BrokerObserver._read_stable_process_exe(fixture_observer, 741, 5812,
+                                                     "broker-fixture")
+        except ObserverError:
+            checks += 1
+        else:
+            raise AssertionError("unknown executable transition was accepted")
+    finally:
+        os.readlink = original_readlink
+        if original_probe_module is None:
+            sys.modules.pop("issue1162_live_probe", None)
+        else:
+            sys.modules["issue1162_live_probe"] = original_probe_module
+    reaped = subprocess.Popen(["/usr/bin/true"], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True, start_new_session=True)
+    reaped.wait(timeout=1.0)
+    assert reaped.stdout is not None and reaped.stderr is not None
+    stopped = {"process": reaped,
+               "open": {reaped.stdout.fileno(): "stdout", reaped.stderr.fileno(): "stderr"}}
+    def refuse_killpg(_pid: int, _signal: int) -> None:
+        raise AssertionError("attempted to signal a reaped client's numeric PID")
+
+    original_killpg = os.killpg
+    try:
+        os.killpg = refuse_killpg
+        fixture_observer._stop_query(stopped, "fixture_client_already_reaped")
+    finally:
+        os.killpg = original_killpg
+    assert stopped["open"] == {} and reaped.stdout.closed and reaped.stderr.closed
+    assert stopped["cancel_reason"] == "fixture_client_already_reaped"
+    checks += 1
+    class FixtureEventWriter:
+        def __init__(self):
+            self.rows: list[dict[str, object]] = []
+
+        def event(self, record: dict[str, object]) -> int:
+            self.rows.append(record)
+            return 1
+
+    class FixturePathBus:
+        def object_path(self, _unit: str) -> str:
+            return lifecycle.object_path
+
+    event_observer = object.__new__(BrokerObserver)
+    event_observer.bus = FixturePathBus()
+    event_observer.writer = FixtureEventWriter()
+    event_observer.boot_id = boot
+    event_observer.boot_id_raw = raw
+    event_observer.event_seq = 0
+    event_observer.event_count_by_unit = {}
+    event_observer.current_query = None
+    event_observer.units = []
+    event_observer.current_by_path = {}
+    event_observer.last_by_path = {}
+    event_observer.generation_by_unit = {}
+    event_observer.queue = deque()
+    event_observer.global_reasons = []
+    event_observer.event_loss_detected = False
+    event_observer.handle_message({"member": "UnitNew", "interface": "org.freedesktop.systemd1.Manager",
+        "sender": ":1.4", "unit": lifecycle.unit, "object_path": lifecycle.object_path})
+    event_observer.handle_message({"member": "PropertiesChanged",
+        "unit_interface": "org.freedesktop.systemd1.Service", "sender": ":1.4",
+        "path": lifecycle.object_path, "changed_properties": ["MainPID"],
+        "invalidated_properties": [], "main_pids": [741]})
+    event_observer.handle_message({"member": "UnitRemoved",
+        "interface": "org.freedesktop.systemd1.Manager", "sender": ":1.4",
+        "unit": lifecycle.unit, "object_path": lifecycle.object_path})
+    event_lifecycle = event_observer.units[0]
+    rows = event_observer.writer.rows
+    assert event_lifecycle.first_monotonic_ns == rows[0]["monotonic_ns"]
+    assert event_lifecycle.last_monotonic_ns == rows[2]["monotonic_ns"]
+    assert event_lifecycle.removed_monotonic_ns == rows[2]["monotonic_ns"]
+    assert event_lifecycle.main_pid_values == {741}
+    checks += 1
+    for reloading in (True, False):
+        event_observer.handle_message({"member": "Reloading",
+            "interface": "org.freedesktop.systemd1.Manager",
+            "path": "/org/freedesktop/systemd1", "sender": ":1.4",
+            "reloading": reloading})
+        assert rows[-1]["event"] == "Reloading" and rows[-1]["reloading"] is reloading
+        assert event_observer.event_loss_detected
+        assert "manager_reloading_during_observation" in event_observer.global_reasons
+        checks += 1
+    class FixtureFinalBus:
+        def __init__(self, messages: int):
+            self.remaining = messages
+
+        def process_one(self) -> tuple[int, None]:
+            if self.remaining:
+                self.remaining -= 1
+                return 1, None
+            return 0, None
+
+    for queued, expected_loss in ((0, False), (MAX_DISPATCHES_PER_DRAIN - 1, False),
+                                  (MAX_DISPATCHES_PER_DRAIN, True)):
+        final_observer = object.__new__(BrokerObserver)
+        final_observer.bus = FixtureFinalBus(queued)
+        final_observer.deadline = time.monotonic() + 5.0
+        final_observer.bus_dispatch_count = 0
+        final_observer.bus_budget_exhausted = False
+        final_observer.global_reasons = []
+        final_observer.event_loss_detected = False
+        final_observer._drain_final_events()
+        assert final_observer.event_loss_detected == expected_loss
+        assert final_observer.bus_dispatch_count == queued
+        checks += 1
     print(f"BROKER_OBSERVER_SELF_TEST checks={checks} failures=0 fixtures-only-no-live-bus")
 
 
@@ -1589,11 +2126,7 @@ def _run_fake_command(argv: list[str], env: dict[str, str], timeout: float,
             streams[descriptor].extend(chunk)
         if timed_out or limit_hit:
             for descriptor in tuple(open_fds):
-                try:
-                    open_fds.remove(descriptor)
-                    os.close(descriptor)
-                except OSError:
-                    pass
+                open_fds.remove(descriptor)
             break
     result = {"exit": process.wait(), "stdout": bytes(streams[stdout_fd]),
             "stderr": bytes(streams[stderr_fd]), "timed_out": timed_out,
@@ -1634,6 +2167,10 @@ def main() -> int:
         failure = {"schema": SCHEMA, "kind": "SUMMARY", "boot_id": boot_id,
                    "boot_id_raw": boot_id_raw, "run_id": args.run_id,
                    "run_attempt": int(args.run_attempt) if args.run_attempt else None,
+                   "observer_pid": observer.observer_pid,
+                   "observer_start_ticks": observer.observer_start_ticks,
+                   "manager_sender": bus.manager_sender,
+                   "ready_monotonic_ns": observer.ready_ns,
                    "ended_monotonic_ns": time.monotonic_ns(), "stop_seen": False,
                    "observer_complete": False, "manager_observation_complete": False,
                    "process_complete": False, "event_loss_detected": True,
