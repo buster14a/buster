@@ -23,8 +23,21 @@ def main():
             shown = {k: v for k, v in counters.items() if v and k.startswith(SHOWN)}
             seconds = ", ".join(f"{t['seconds']:.3f}" for t in row["plain"])
             print(f"| {row['experiment']} | {row['row']} | {' '.join(row['flags'])} | {row['ref']} | {row['count']['status']} | `{(row['count']['object_sha256'] or '-')[:12]}` | {shown} | {seconds} |")
+    workloads = [row for row in rows if row["kind"] == "workload"]
+    if len(workloads) > 1000:
+        # A fixture sweep: one line per input whose refs disagree.
+        groups = {}
+        for row in workloads:
+            groups.setdefault(row["workload"], set()).add((row["count"]["status"], row["count"]["object_sha256"]))
+        split = sorted(name for name, outcomes in groups.items() if len(outcomes) > 1)
+        failing = sum(1 for outcomes in groups.values() if any(status for status, _ in outcomes))
+        print(f"\n{len(groups)} inputs x {len(workloads) // max(len(groups), 1)} refs: {len(split)} with differing outcomes, "
+              f"{failing} failing on some ref.\n")
+        for name in split:
+            print(f"- {name}: {sorted(groups[name], key=str)}")
+        workloads = []
     print("\n| workload | ref | variant | status | object | nonzero census/validation/debug counters | plain seconds |\n|---|---|---|---|---|---|---|")
-    for row in rows:
+    for row in workloads:
         if row["kind"] == "workload":
             counters = row["count"]["counters"] or {}
             shown = {k: v for k, v in counters.items() if v and k.startswith(SHOWN)}
