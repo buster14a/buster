@@ -354,7 +354,9 @@ def observe(job: int, request_sha: str, baseline: str, subject: str,
     deadline = time.monotonic() + budget
     outcome: dict = {"verdict": "OBSERVATION_INCONCLUSIVE", "job": job,
                      "request_sha256": request_sha, "baseline": baseline, "subject": subject,
-                     "stages": {}, "inventories": {}, "causes": []}
+                     "stages": {}, "inventories": {}, "causes": [],
+                     "structural_capture_complete": False,
+                     "inventory_before_throughput": False, "timing_causes": []}
     identity = None
     failed_stages: set[str] = set()
     failed_inventories: set[str] = set()
@@ -430,10 +432,19 @@ def observe(job: int, request_sha: str, baseline: str, subject: str,
         if len(outcome["inventories"]) != len(BUILD_STAGES):
             add_cause(outcome, "missing frozen inventory: " + ",".join(s for s in BUILD_STAGES if s not in outcome["inventories"]))
         if not outcome["causes"]:
-            validate_inventory_timing(outcome)
-        if not outcome["causes"]:
+            # Complete the independent identity check even when an inventory
+            # finishes after throughput starts. Timing remains a separate,
+            # failing observation; it is never repaired by changing its stamp.
             record_identity(job, request_sha, identity, output, "final-")
-            outcome["verdict"] = "OBSERVATION_PASS"
+            outcome["structural_capture_complete"] = True
+            try:
+                validate_inventory_timing(outcome)
+                outcome["inventory_before_throughput"] = True
+            except (ValueError, probe.ProbeError) as exc:
+                outcome["timing_causes"].append(str(exc)[:500])
+                add_cause(outcome, str(exc))
+            if not outcome["causes"]:
+                outcome["verdict"] = "OBSERVATION_PASS"
     except (OSError, ValueError, probe.ProbeError) as exc:
         add_cause(outcome, str(exc))
     finally:
@@ -644,6 +655,33 @@ def self_test() -> None:
             assert outcome["verdict"] == "OBSERVATION_PASS" and len(outcome["stages"]) == 5
             assert len(outcome["inventories"]) == 2 and not outcome["inventories"]["base-build"].get("nodes")
             assert json.loads((tmp / "positive-observe-output" / "base-build-inventory.json").read_text())["nodes"]
+            assert outcome["structural_capture_complete"] and outcome["inventory_before_throughput"]
+            checks += 1
+        def late_inventory(ident, stage, manifest, deadline, output):
+            result = invented(ident, stage, manifest, deadline, output)
+            result["complete_monotonic_us"] = 1001
+            return result
+        with patch(__name__ + ".record_identity", return_value=identity) as records, \
+             patch.object(probe, "_systemd", side_effect=active), \
+             patch(__name__ + ".capture_stage", side_effect=captured), \
+             patch(__name__ + ".read_stage_manifest", return_value={"manifest_sha256": digest}), \
+             patch(__name__ + ".inventory_stage", side_effect=late_inventory):
+            (tmp / "late-inventory-output").mkdir(mode=0o700)
+            outcome = observe(7, request, "1" * 40, "2" * 40, 1, tmp / "late-inventory-output")
+            assert outcome["verdict"] == "OBSERVATION_INCONCLUSIVE"
+            assert outcome["structural_capture_complete"] and not outcome["inventory_before_throughput"]
+            assert outcome["timing_causes"] == outcome["causes"] and records.call_count == 2
+            assert outcome["inventories"]["candidate-build"]["complete_monotonic_us"] == 1001
+            checks += 1
+        with patch(__name__ + ".record_identity", side_effect=[identity, probe.ProbeError("final identity changed")]), \
+             patch.object(probe, "_systemd", side_effect=active), \
+             patch(__name__ + ".capture_stage", side_effect=captured), \
+             patch(__name__ + ".read_stage_manifest", return_value={"manifest_sha256": digest}), \
+             patch(__name__ + ".inventory_stage", side_effect=late_inventory):
+            (tmp / "late-changed-record-output").mkdir(mode=0o700)
+            outcome = observe(7, request, "1" * 40, "2" * 40, 1, tmp / "late-changed-record-output")
+            assert not outcome["structural_capture_complete"] and not outcome["inventory_before_throughput"]
+            assert "final identity changed" in outcome["causes"] and not outcome["timing_causes"]
             checks += 1
     print(f"STAGE_OBSERVER_SELF_TEST checks={checks} failures=0 fixtures-only-not-live-proof")
 
