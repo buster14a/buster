@@ -1245,6 +1245,8 @@ struct CTokenPositionIndex
     bool built;
 };
 
+typedef struct CStringCountMemo CStringCountMemo;
+
 typedef struct CParseResult CParseResult;
 struct CParseResult
 {
@@ -1275,6 +1277,10 @@ struct CParseResult
     CEntityId* name_lookup_buckets;
     CAggregateLookup* aggregate_lookup;
     CTokenPositionIndex* position_index;
+    // Semantic analysis only: element counts of narrow string-literal
+    // fragments, counted once per final-stream token (c_string_count_memo in
+    // c_gen.c). Null outside semantic analysis and for hand-built results.
+    CStringCountMemo* string_counts;
     CIdentifierUse* identifier_uses;
     // First recorded use of each token, plus one, so an unused token is the
     // zero the operating system already supplied; c_parse_identifier_use_index
