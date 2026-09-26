@@ -1,6 +1,6 @@
 name: Host bootstrap research 9f7a
 
-# Temporary mechanism-only experiment; not a production or benchmark gate.
+# Isolated correctness research. No benchmark, deployment or admission gate.
 on:
   push:
     branches: [codex/host-bootstrap-audit-ade6ac4b-9f7a]
@@ -10,10 +10,10 @@ permissions:
   contents: read
 
 jobs:
-  mechanism:
+  full-compiler:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -25,48 +25,32 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
           path: pinned
-      - name: Identify and extract the pinned mechanism
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git -C pinned rev-parse HEAD)" = ade6ac4b6ecb21f30b61b656439bac476c145e2f
-          test "$(git -C pinned rev-parse HEAD^{tree})" = 4c5306221fdb22fccc929b55e333163742de17d0
-          git -C pinned worktree add --detach "$RUNNER_TEMP/host-audit-source" HEAD
-          python3 research/tools/investigations/host-bootstrap-9f7a/prepare.py "$RUNNER_TEMP/host-audit-source" "$RUNNER_TEMP/host-audit-evidence"
-          {
-            printf 'experiment_commit=%s\nrun_id=%s\nrun_attempt=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
-            uname -a
-            clang --version
-            clang -dumpmachine
-            lscpu
-            printf '\nHOST FEATURE MACROS (not emitted-program options):\n'
-            clang -march=native -dM -E -x c /dev/null | grep -E '__FMA__|__AVX|__SSE|__FLT_EVAL_METHOD__|__SIZEOF_DOUBLE__'
-          } > "$RUNNER_TEMP/host-audit-evidence/identity.txt"
-      - name: Run bounded host controls
+      - name: Compare supported host build, contraction diagnostic and bootstrap generations
         shell: bash
         env:
-          ASAN_OPTIONS: halt_on_error=1:abort_on_error=1:detect_leaks=1
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-          LSAN_OPTIONS: exitcode=86
+          LC_ALL: C
+          TZ: UTC
         run: |
           set -euo pipefail
-          cd "$RUNNER_TEMP/host-audit-evidence"
-          set -x
-          clang -std=c11 -O0 -g -march=native -fwrapv -fno-strict-aliasing -funsigned-char -Wall -Wextra -Werror -Wpedantic -fsanitize=address,undefined -fno-sanitize-recover=all probe.c -lm -o clang-debug-sanitized
-          ./clang-debug-sanitized > clang-debug-sanitized.csv
-          clang -std=c11 -O2 -g -march=native -fwrapv -fno-strict-aliasing -funsigned-char -Wall -Wextra -Werror -Wpedantic probe.c -lm -o clang-release
-          ./clang-release > clang-release.csv
-          clang -std=c11 -O2 -g -march=native -fwrapv -fno-strict-aliasing -funsigned-char -Wall -Wextra -Werror -Wpedantic -ffp-contract=off probe.c -lm -o clang-release-contract-off
-          ./clang-release-contract-off > clang-release-contract-off.csv
-          objdump -d clang-release > clang-release.disassembly.txt
-          objdump -d clang-release-contract-off > clang-release-contract-off.disassembly.txt
-          sha256sum probe.c clang-* > hashes.txt
-          git -C "$RUNNER_TEMP/host-audit-source" diff --exit-code
-      - name: Retain all mechanism evidence
+          mkdir -p "$RUNNER_TEMP/host-audit-full"
+          python3 research/tools/investigations/host-bootstrap-9f7a/full_probe.py "$GITHUB_WORKSPACE/pinned" "$RUNNER_TEMP/host-audit-full" 2>&1 | tee "$RUNNER_TEMP/host-audit-full/driver.log"
+      - name: Retain named parser code and identities
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for variant in default contract-off; do
+            compiler="$RUNNER_TEMP/host-bootstrap-work-$variant/build/Release/ide"
+            if test -f "$compiler"; then
+              sha256sum "$compiler" >> "$RUNNER_TEMP/host-audit-full/built-compiler-hashes.txt"
+              objdump -d --disassemble=c_ir_float_parse "$compiler" > "$RUNNER_TEMP/host-audit-full/$variant-parser-disassembly.txt"
+            fi
+          done
+      - name: Retain all results including failed or unavailable legs
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: host-bootstrap-mechanism-9f7a-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/host-audit-evidence
+          name: host-bootstrap-full-9f7a-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/host-audit-full
           if-no-files-found: error
           retention-days: 14
