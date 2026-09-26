@@ -1,0 +1,54 @@
+name: Scratch watermark controls
+
+on:
+  push:
+    branches: [research/scratch-watermark-20260925-astra]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  controls:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Pin the original source in a separate worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/scratch-controls-evidence"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/scratch-controls-evidence/transport.txt"
+          git fetch --no-tags --depth=1 origin ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          git worktree add --detach "$RUNNER_TEMP/scratch-watermark-source" ade6ac4b6ecb21f30b61b656439bac476c145e2f
+      - name: Use frozen compilers for causal controls
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/investigations/scratch-watermark-20260925/controls.py \
+            "$RUNNER_TEMP/scratch-watermark-source" "$RUNNER_TEMP/scratch-controls-evidence" \
+            2>&1 | tee "$RUNNER_TEMP/scratch-controls-evidence/controls.log"
+      - name: Seal all outcomes
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/scratch-controls-evidence"
+          git -C "$RUNNER_TEMP/scratch-watermark-source" diff --exit-code > "$evidence/source-restored.txt"
+          (cd "$evidence"; find . -type f ! -path './SHA256SUMS' -print0 | sort -z | xargs -0 sha256sum) > "$RUNNER_TEMP/scratch-controls-manifest"
+          cp "$RUNNER_TEMP/scratch-controls-manifest" "$evidence/SHA256SUMS"
+      - name: Retain every control outcome
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scratch-controls-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/scratch-controls-evidence
+          retention-days: 30
+          if-no-files-found: error
