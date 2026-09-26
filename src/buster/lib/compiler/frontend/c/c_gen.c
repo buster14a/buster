@@ -39390,11 +39390,246 @@ struct CIrInitializerRelocationExtent
     u64 begin;
     u64 end;
     u32 indexed_count;
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+    // Rows the whole-array compaction below read.
+    u64 compaction_rows;
+#endif
 };
+
+// The relocations of one designator-machine context, indexed so a clear
+// inside the occupied extent touches only the records it can overlap
+// (#1450). A record overlaps [start, end) exactly when its offset lies in
+// (start - pointer size, end), so bucketing offsets by pointer size puts
+// every candidate in the buckets that range spans; records with one offset
+// share a group, and a bucket holds at most pointer-size groups. A clear
+// therefore visits O(size / pointer size + pointer size) groups plus the
+// records it removes, instead of every record.
+//
+// Removal must keep the survivors' order, which is the order the object
+// writer emits. Removed records stay in `records` marked dead until they
+// outnumber the live ones; then one stable pass drops them, so each removal
+// costs O(1) amortized. The context works in `records` -- scratch that holds
+// twice the caller's capacity, allocated at the first clear that needs the
+// index -- and copies the live records to the caller's array when it
+// finishes. Appenders see a capacity of the caller's plus the dead count, so
+// an append fails exactly when the caller's array would have been full.
+typedef struct CIrInitializerRelocationIndex CIrInitializerRelocationIndex;
+struct CIrInitializerRelocationIndex
+{
+    Arena* arena;
+    IrGlobalRelocation* published;
+    u32* published_count;
+    u32 published_capacity;
+    // Zero until the first indexed clear; then the context's array.
+    IrGlobalRelocation* records;
+    u32 record_count;
+    u32 record_capacity;
+    // Bucket -> its first group's head record + 1.
+    u32* bucket_heads;
+    // Group head -> the next group head in its bucket + 1.
+    u32* group_next;
+    // Record -> the next record at the same offset + 1.
+    u32* same_next;
+    u8* dead;
+    u64 pointer_size;
+    u32 bucket_count;
+    u32 indexed_count;
+    u32 dead_count;
+    // The index could not be built; clears keep the whole-array compaction.
+    bool unavailable;
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+    u64 bucket_visits;
+    u64 group_visits;
+    u64 removed_rows;
+    u64 compaction_rows;
+#endif
+};
+
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+#define C_IR_INITIALIZER_RELOCATION_COUNT(counters, field, amount) do { (counters)->field += (amount); } while (0)
+#else
+#define C_IR_INITIALIZER_RELOCATION_COUNT(counters, field, amount) ((void)0)
+#endif
+
+BUSTER_C_INTERNAL u32 c_ir_initializer_relocation_bucket(CIrInitializerRelocationIndex* index, u64 offset)
+{
+    // Offsets past the object cannot overlap a clear inside it; the last
+    // bucket takes them so every record stays reachable.
+    u64 bucket = offset / index->pointer_size;
+    return bucket < index->bucket_count ? (u32)bucket : index->bucket_count - 1;
+}
+
+BUSTER_C_INTERNAL void c_ir_initializer_relocation_index_insert(CIrInitializerRelocationIndex* index, u32 record)
+{
+    u64 offset = index->records[record].offset;
+    u32 bucket = c_ir_initializer_relocation_bucket(index, offset);
+    u32 group = index->bucket_heads[bucket];
+    while (group && index->records[group - 1].offset != offset)
+    {
+        group = index->group_next[group - 1];
+    }
+    if (group)
+    {
+        index->same_next[record] = index->same_next[group - 1];
+        index->same_next[group - 1] = record + 1;
+    }
+    else
+    {
+        index->same_next[record] = 0;
+        index->group_next[record] = index->bucket_heads[bucket];
+        index->bucket_heads[bucket] = record + 1;
+    }
+}
+
+// Moves the context into scratch the index can grow tombstones in; false
+// leaves it on the caller's array and the whole-array compaction.
+BUSTER_C_INTERNAL bool c_ir_initializer_relocation_index_begin(CIrInitializerRelocationIndex* index, u64 byte_count, u64 pointer_size)
+{
+    if (!index->records && !index->unavailable)
+    {
+        u64 bucket_count = pointer_size ? byte_count / pointer_size + 1 : 0;
+        u32 published_count = *index->published_count;
+        index->unavailable = !index->arena || !pointer_size || bucket_count > UINT32_MAX || index->published_capacity > UINT32_MAX / 2 ||
+                             published_count > index->published_capacity;
+        if (!index->unavailable)
+        {
+            u32 record_capacity = index->published_capacity * 2;
+            IrGlobalRelocation* records = arena_allocate(index->arena, IrGlobalRelocation, record_capacity ? record_capacity : 1);
+            u32* group_next = arena_allocate(index->arena, u32, record_capacity ? record_capacity : 1);
+            u32* same_next = arena_allocate(index->arena, u32, record_capacity ? record_capacity : 1);
+            u8* dead = arena_allocate_zeroed(index->arena, u8, record_capacity ? record_capacity : 1);
+            u32* bucket_heads = arena_allocate_zeroed(index->arena, u32, bucket_count);
+            index->unavailable = !records || !group_next || !same_next || !dead || !bucket_heads;
+            if (!index->unavailable)
+            {
+                if (published_count)
+                {
+                    memcpy(records, index->published, sizeof(*records) * published_count);
+                }
+                index->records = records;
+                index->record_count = published_count;
+                index->record_capacity = record_capacity;
+                index->group_next = group_next;
+                index->same_next = same_next;
+                index->dead = dead;
+                index->bucket_heads = bucket_heads;
+                index->bucket_count = (u32)bucket_count;
+                index->pointer_size = pointer_size;
+            }
+        }
+    }
+    return index->records != 0;
+}
+
+// Marks dead every record overlapping [relocation_start, end), the set the
+// whole-array compaction drops, and compacts once the dead outnumber the live.
+BUSTER_C_INTERNAL void c_ir_initializer_relocation_index_remove(CIrInitializerRelocationIndex* index, u64 relocation_start, u64 end,
+                                                                  CIrInitializerRelocationExtent* extent)
+{
+    u64 relocation_size = index->pointer_size;
+    for (; index->indexed_count < index->record_count; index->indexed_count += 1)
+    {
+        c_ir_initializer_relocation_index_insert(index, index->indexed_count);
+    }
+    if (end)
+    {
+        u64 low = relocation_start >= relocation_size - 1 ? (relocation_start - (relocation_size - 1)) / relocation_size : 0;
+        u64 high = (end - 1) / relocation_size;
+        low = BUSTER_MIN(low, (u64)index->bucket_count - 1);
+        high = BUSTER_MIN(high, (u64)index->bucket_count - 1);
+        for (u64 bucket = low; bucket <= high; bucket += 1)
+        {
+            C_IR_INITIALIZER_RELOCATION_COUNT(index, bucket_visits, 1);
+            u32* link = index->bucket_heads + bucket;
+            while (*link)
+            {
+                C_IR_INITIALIZER_RELOCATION_COUNT(index, group_visits, 1);
+                u32 group = *link - 1;
+                u64 offset = index->records[group].offset;
+                u64 relocation_end = offset > UINT64_MAX - relocation_size ? UINT64_MAX : offset + relocation_size;
+                if (offset < end && relocation_start < relocation_end)
+                {
+                    *link = index->group_next[group];
+                    for (u32 member = group + 1; member; member = index->same_next[member - 1])
+                    {
+                        C_IR_INITIALIZER_RELOCATION_COUNT(index, removed_rows, 1);
+                        index->dead[member - 1] = 1;
+                        index->dead_count += 1;
+                    }
+                }
+                else
+                {
+                    link = index->group_next + group;
+                }
+            }
+        }
+    }
+    if (index->dead_count > index->record_count - index->dead_count)
+    {
+        // Every record is indexed, so the buckets they name are the only
+        // nonempty ones.
+        for (u32 record = 0; record < index->record_count; record += 1)
+        {
+            index->bucket_heads[c_ir_initializer_relocation_bucket(index, index->records[record].offset)] = 0;
+        }
+        CIrInitializerRelocationExtent kept = {.begin = UINT64_MAX};
+        u32 write_index = 0;
+        for (u32 read_index = 0; read_index < index->record_count; read_index += 1)
+        {
+            C_IR_INITIALIZER_RELOCATION_COUNT(index, compaction_rows, 1);
+            if (!index->dead[read_index])
+            {
+                IrGlobalRelocation relocation = index->records[read_index];
+                u64 relocation_end = relocation.offset > UINT64_MAX - relocation_size ? UINT64_MAX : relocation.offset + relocation_size;
+                index->records[write_index++] = relocation;
+                kept.begin = BUSTER_MIN(kept.begin, relocation.offset);
+                kept.end = BUSTER_MAX(kept.end, relocation_end);
+            }
+            index->dead[read_index] = 0;
+        }
+        index->record_count = write_index;
+        index->dead_count = 0;
+        for (index->indexed_count = 0; index->indexed_count < index->record_count; index->indexed_count += 1)
+        {
+            c_ir_initializer_relocation_index_insert(index, index->indexed_count);
+        }
+        kept.indexed_count = write_index;
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+        kept.compaction_rows = extent->compaction_rows;
+#endif
+        *extent = kept;
+    }
+}
+
+// The context's live records, in order, in the caller's array.
+BUSTER_C_INTERNAL bool c_ir_initializer_relocation_index_publish(CIrInitializerRelocationIndex* index)
+{
+    bool published = true;
+    if (index->records)
+    {
+        u32 live = 0;
+        for (u32 record = 0; record < index->record_count && published; record += 1)
+        {
+            if (!index->dead[record])
+            {
+                published = live < index->published_capacity;
+                if (published)
+                {
+                    index->published[live++] = index->records[record];
+                }
+            }
+        }
+        if (published)
+        {
+            *index->published_count = live;
+        }
+    }
+    return published;
+}
 
 BUSTER_C_INTERNAL bool c_ir_constant_initializer_clear_subobject(CIntegerIrBuilder* builder, u8* bytes, u64 byte_count, u64 offset, u64 size,
                                                                     u64 relocation_base, IrGlobalRelocation* relocations, u32* relocation_count,
-                                                                    CIrInitializerRelocationExtent* extent)
+                                                                    CIrInitializerRelocationExtent* extent, CIrInitializerRelocationIndex* relocation_index)
 {
     bool valid = offset <= byte_count && size <= byte_count - offset && (u64)(size_t)size == size &&
                  offset <= UINT64_MAX - size && relocation_base <= UINT64_MAX - offset;
@@ -39426,12 +39661,21 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_clear_subobject(CIntegerIrBuild
                 extent->indexed_count = *relocation_count;
                 may_overlap = relocation_size && extent->indexed_count && extent->begin < end && relocation_start < extent->end;
             }
-            if (may_overlap)
+            if (may_overlap && extent && relocation_index && c_ir_initializer_relocation_index_begin(relocation_index, byte_count, relocation_size))
+            {
+                // A context's clears pass relocation_base 0: the offsets
+                // are the object's own.
+                c_ir_initializer_relocation_index_remove(relocation_index, relocation_start, end, extent);
+            }
+            else if (may_overlap)
             {
                 CIrInitializerRelocationExtent kept = {.begin = UINT64_MAX};
                 u32 write_index = 0;
                 for (u32 read_index = 0; read_index < *relocation_count; read_index += 1)
                 {
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+                    if (extent) extent->compaction_rows += 1;
+#endif
                     IrGlobalRelocation relocation = relocations[read_index];
                     u64 relocation_end = relocation.offset > UINT64_MAX - relocation_size ? UINT64_MAX : relocation.offset + relocation_size;
                     bool overlaps = relocation_size != 0 && relocation.offset < end && relocation_start < relocation_end;
@@ -39446,6 +39690,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_clear_subobject(CIntegerIrBuild
                 if (extent)
                 {
                     kept.indexed_count = write_index;
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+                    kept.compaction_rows = extent->compaction_rows;
+#endif
                     *extent = kept;
                 }
             }
@@ -39750,7 +39997,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
         }
         if (task.clear_subobject && !task.is_bit_field &&
             !c_ir_constant_initializer_clear_subobject(builder, bytes, byte_count, task.offset, type->layout.size, relocation_base, relocations,
-                                                       relocation_count, 0))
+                                                       relocation_count, 0, 0))
         {
             return false;
         }
@@ -42069,6 +42316,7 @@ struct CIrConstantInitializerContext
     u32* relocation_count;
     u32 relocation_capacity;
     CIrInitializerRelocationExtent relocation_extent;
+    CIrInitializerRelocationIndex relocation_index;
     CIrConstantInitializerFrame* frames;
     CIrConstantInitializerContinuation* continuation_work;
     CIrConstantInitializerRange* range_work;
@@ -42126,13 +42374,30 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_range_offset(CIrConstantInitial
     return true;
 }
 
+// A designated clear in a context. Its relocations may move to the index's
+// scratch, so callers read the context's array, count and capacity afresh.
+BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_clear(CIntegerIrBuilder* builder, CIrConstantInitializerContext* context, u64 offset,
+                                                                  u64 size)
+{
+    CIrInitializerRelocationIndex* index = &context->relocation_index;
+    bool valid = c_ir_constant_initializer_clear_subobject(builder, context->bytes, context->byte_count, offset, size, 0, context->relocations,
+                                                          context->relocation_count, &context->relocation_extent, index);
+    if (index->records)
+    {
+        context->relocations = index->records;
+        context->relocation_count = &index->record_count;
+        context->relocation_capacity = index->published_capacity + index->dead_count;
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_initializer_apply_materialized_range(CIntegerIrBuilder* builder, Arena* task_arena,
                                                                               CIrConstantInitializerDesignator* designator,
                                                                               u8* value_bytes, IrGlobalRelocation* value_relocations,
-                                                                              u32 value_relocation_count, u8* bytes, u64 byte_count,
-                                                                              IrGlobalRelocation* relocations, u32* relocation_count,
-                                                                              u32 relocation_capacity, CIrInitializerRelocationExtent* extent)
+                                                                              u32 value_relocation_count, CIrConstantInitializerContext* context)
 {
+    u8* bytes = context->bytes;
+    u64 byte_count = context->byte_count;
     IrType* child = ir_type_from_id(&builder->program->types, designator->value_type);
     if (!child || !child->layout.resolved || !value_bytes)
     {
@@ -42174,8 +42439,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_apply_materialized_range(CInteg
             }
             clear_size = designator->clear_size;
         }
-        if (clear_value &&
-            !c_ir_constant_initializer_clear_subobject(builder, bytes, byte_count, clear_offset, clear_size, 0, relocations, relocation_count, extent))
+        if (clear_value && !c_ir_constant_initializer_context_clear(builder, context, clear_offset, clear_size))
         {
             return false;
         }
@@ -42199,10 +42463,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_apply_materialized_range(CInteg
         else
         {
             memcpy(bytes + target_offset, value_bytes, child->layout.size);
+            IrGlobalRelocation* relocations = context->relocations;
+            u32* relocation_count = context->relocation_count;
             for (u32 relocation_index = 0; relocation_index < value_relocation_count; relocation_index += 1)
             {
                 IrGlobalRelocation relocation = value_relocations[relocation_index];
-                if (relocation.offset > UINT64_MAX - target_offset || !relocations || !relocation_count || *relocation_count >= relocation_capacity)
+                if (relocation.offset > UINT64_MAX - target_offset || !relocations || !relocation_count ||
+                    *relocation_count >= context->relocation_capacity)
                 {
                     return false;
                 }
@@ -42886,11 +43153,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
         u64 clear_offset = clear_whole_union ? designator.clear_offset : child_offset;
         u64 clear_size = clear_whole_union ? designator.clear_size : child->layout.size;
         bool clear_value = designator.has_designator && (clear_whole_union || !designator.value_field || !designator.value_field->is_bit_field);
-        if (clear_value &&
-            !c_ir_constant_initializer_clear_subobject(builder, bytes, byte_count, clear_offset, clear_size, 0, relocations, relocation_count, &context->relocation_extent))
+        if (clear_value && !c_ir_constant_initializer_context_clear(builder, context, clear_offset, clear_size))
         {
             return c_ir_constant_initializer_fail(builder, S8("designated initializer exceeds the target object"), value_start);
         }
+        relocations = context->relocations;
+        relocation_count = context->relocation_count;
+        relocation_capacity = context->relocation_capacity;
         if (designator.clear_union)
         {
             frame->has_last_union = true;
@@ -43170,6 +43439,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_begin(CIntegerIrBuilder
         .relocations = relocations,
         .relocation_count = relocation_count,
         .relocation_capacity = relocation_capacity,
+        .relocation_index =
+            {
+                .arena = task_arena,
+                .published = relocations,
+                .published_count = relocation_count,
+                .published_capacity = relocation_capacity,
+            },
         .step = C_IR_CONSTANT_INITIALIZER_CONTEXT_FAILED,
     };
     IrType* root = ir_type_from_id(&builder->program->types, root_type);
@@ -43268,9 +43544,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* b
             CIrConstantInitializerContext* parent = contexts + context_count - 2;
             CIrConstantInitializerPendingRange* pending = &parent->pending_range;
             if (!c_ir_constant_initializer_apply_materialized_range(builder, task_arena, &pending->designator, pending->value_bytes,
-                                                                      pending->value_relocations, pending->value_relocation_count, parent->bytes,
-                                                                      parent->byte_count, parent->relocations, parent->relocation_count,
-                                                                      parent->relocation_capacity, &parent->relocation_extent))
+                                                                      pending->value_relocations, pending->value_relocation_count, parent))
             {
                 return c_ir_constant_initializer_fail(builder, S8("range initializer exceeds the target object"), pending->value_start);
             }
@@ -43304,6 +43578,12 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* b
         }
         if (context->step == C_IR_CONSTANT_INITIALIZER_CONTEXT_DONE)
         {
+            // A range value's parent reads its relocations next, and the
+            // root's caller reads them on return.
+            if (!c_ir_initializer_relocation_index_publish(&context->relocation_index))
+            {
+                return false;
+            }
             context->finished = true;
             continue;
         }
@@ -43356,6 +43636,82 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builde
     scratch_end(temporary);
     return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+void c_test_initializer_relocation_replay(Arena* arena, u32 pointer_size, u64 byte_count, u32 capacity,
+                                          CTestInitializerRelocationOperation const* operations, u32 operation_count,
+                                          CTestInitializerRelocationReplay* replay)
+{
+    IrProgram program = {0};
+    program.data_layout.pointer.size = pointer_size;
+    CIntegerIrBuilder builder = {.program = &program};
+    u8* indexed_bytes = arena_allocate_zeroed(arena, u8, byte_count ? byte_count : 1);
+    u8* reference_bytes = arena_allocate_zeroed(arena, u8, byte_count ? byte_count : 1);
+    *replay = (CTestInitializerRelocationReplay){
+        .indexed = arena_allocate(arena, IrGlobalRelocation, capacity ? capacity : 1),
+        .reference = arena_allocate(arena, IrGlobalRelocation, capacity ? capacity : 1),
+        .indexed_stop = operation_count,
+        .reference_stop = operation_count,
+    };
+    CIrConstantInitializerContext context = {
+        .bytes = indexed_bytes,
+        .byte_count = byte_count,
+        .relocations = replay->indexed,
+        .relocation_count = &replay->indexed_count,
+        .relocation_capacity = capacity,
+        .relocation_index =
+            {
+                .arena = arena,
+                .published = replay->indexed,
+                .published_count = &replay->indexed_count,
+                .published_capacity = capacity,
+            },
+    };
+    CIrInitializerRelocationExtent reference_extent = {0};
+    for (u32 operation_index = 0; operation_index < operation_count; operation_index += 1)
+    {
+        CTestInitializerRelocationOperation operation = operations[operation_index];
+        IrGlobalRelocation relocation = {
+            .symbol = {.value = operation.symbol},
+            .offset = operation.offset,
+        };
+        if (replay->indexed_stop == operation_count)
+        {
+            bool done = operation.clear ? c_ir_constant_initializer_context_clear(&builder, &context, operation.offset, operation.size)
+                                        : *context.relocation_count < context.relocation_capacity;
+            if (done && !operation.clear)
+            {
+                context.relocations[(*context.relocation_count)++] = relocation;
+                replay->indexed_appends += 1;
+            }
+            replay->indexed_stop = done ? operation_count : operation_index;
+        }
+        if (replay->reference_stop == operation_count)
+        {
+            bool done = operation.clear ? c_ir_constant_initializer_clear_subobject(&builder, reference_bytes, byte_count, operation.offset, operation.size, 0,
+                                                                                  replay->reference, &replay->reference_count, &reference_extent, 0)
+                                        : replay->reference_count < capacity;
+            if (done && !operation.clear)
+            {
+                replay->reference[replay->reference_count++] = relocation;
+            }
+            replay->reference_stop = done ? operation_count : operation_index;
+        }
+    }
+    if (replay->indexed_stop == operation_count && !c_ir_initializer_relocation_index_publish(&context.relocation_index))
+    {
+        replay->indexed_stop = operation_count + 1;
+    }
+    replay->index_built = context.relocation_index.records != 0;
+#if BUSTER_BENCH_ALLOCATIONS
+    replay->index_bucket_visits = context.relocation_index.bucket_visits;
+    replay->index_group_visits = context.relocation_index.group_visits;
+    replay->index_removed_rows = context.relocation_index.removed_rows;
+    replay->index_compaction_rows = context.relocation_index.compaction_rows + context.relocation_extent.compaction_rows;
+    replay->reference_compaction_rows = reference_extent.compaction_rows;
+#endif
+}
+#endif
 
 // C11 6.5.2.5p5: a compound literal written outside a function body has static
 // storage duration, so `&(int){0}` names an object that outlives the
