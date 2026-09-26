@@ -212,21 +212,42 @@ sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-b
 job="$(sed -nE 's/^job=([0-9]+) .*/\1/p' "$evidence/submit.txt" | head -1)"
 test -n "$job"
 echo "JOB=$job"
+wait_limit_seconds=3900
+wait_started=$SECONDS
+wait_deadline=$((wait_started + wait_limit_seconds))
 finished=false
-for attempt in $(seq 1 360); do
-  sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway status "$job" >"$evidence/status-latest.txt"
-  cat "$evidence/status-latest.txt"
-  sudo docker exec "$guest" systemctl list-units --all --plain 'buster-bench*' >>"$evidence/units-observed.txt" 2>&1
-  if grep -q 'phase=finished' "$evidence/status-latest.txt"; then finished=true; break; fi
-  failure="$(sed -nE 's/^job=.* failure=([^ ]+).*/\1/p' "$evidence/status-latest.txt" | head -1)"
-  if grep -q 'phase=preparing' "$evidence/status-latest.txt" && [[ -n "$failure" && "$failure" != ok ]]; then
-    echo 'EARLY_FAILURE: preparing job has a recorded non-ok failure; retain the guest evidence.'
-    exit 1
+# Client-side ceiling only: 60m maximum job plus 5m result/transport slack.
+# It does not change the service runtime policy or the 90m outer CI limit.
+# The client call can wait 30s; stop starting calls with less than 35s remaining.
+while (( SECONDS + 35 < wait_deadline )); do
+  set +e
+  result="$(sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway result "$job" 2>&1)"
+  status=$?
+  set -e
+  printf 'elapsed_seconds=%s exit_status=%s\n%s\n' "$((SECONDS - wait_started))" "$status" "$result" >>"$evidence/result-wait.log"
+  if [[ $status -eq 0 ]]; then
+    if [[ "$result" != "job=$job "* ]]; then
+      printf 'unexpected gateway result receipt for job %s: %s\n' "$job" "$result" >&2
+      exit 1
+    fi
+    printf '%s\n' "$result" >"$evidence/status-latest.txt"
+    if [[ "$result" == *"phase=finished"* ]]; then
+      printf '%s\n' "$result" | tee "$evidence/result.txt"
+      finished=true
+      break
+    fi
+  elif [[ "$result" == "bench_service: io-uncertain" || "$result" == "bench_service: busy" ]]; then
+    :
+  else
+    printf '%s\n' "$result" >&2
+    exit "$status"
   fi
-  sleep 5
+  sleep 10
 done
-test "$finished" = true
-sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway result "$job" | tee "$evidence/result.txt"
+if [[ "$finished" != true ]]; then
+  printf 'RESULT_WAIT_TIMEOUT limit=%ss elapsed=%ss\n' "$wait_limit_seconds" "$((SECONDS - wait_started))" | tee "$evidence/result-wait-timeout.txt"
+  exit 1
+fi
 grep -q 'outcome=succeeded' "$evidence/result.txt"
 grep -q 'result-bound=1' "$evidence/result.txt"
 token="$(sed -nE 's/^job=[0-9]+ token=([0-9]+) .*/\1/p' "$evidence/result.txt" | head -1)"
