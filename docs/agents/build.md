@@ -106,6 +106,20 @@ general scripting in the CMake language when `build.c` can do the work
 directly. Prefer one persistent native build-driver process over chains of
 shell, CMake, and utility subprocesses.
 
+The Linux fixed `bench_service_recipe` publishes private frozen-tree receipts
+after each successful base-build and candidate-build cleanup. The files
+`validate-buster-v1.base-build.inventory` and
+`validate-buster-v1.candidate-build.inventory` contain complete bounded node
+identities, modes and owners, executable SHA-256 digests, exact recipe
+job/token/revisions, boot ID and scan-completion monotonic time. The source
+publishes each receipt without replacement and syncs its file and result
+directory before reporting that stage successful; a scan, identity, capacity
+or publication failure prevents the next stage from launching. These private
+result files are conserved by the existing BQ bundle index. A separate 64 MiB
+serialized-file limit applies in addition to node, depth, path and hashing
+limits; overflow fails the recipe. These are source-owned statements, while
+the external stage observer records its own inventory and timing independently.
+
 ```sh
 ./build.sh generate                 # configure a fresh tree (Debug, clang)
 ./build.sh                          # build the configured tree (Debug by default)
