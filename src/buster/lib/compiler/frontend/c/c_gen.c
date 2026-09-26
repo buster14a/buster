@@ -9009,12 +9009,6 @@ BUSTER_C_SHARED CTypeKind c_semantic_integer_literal_kind(Target target, u64 con
     return result;
 }
 
-BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder, String8 spelling, u64 value)
-{
-    CTypeKind kind = c_semantic_integer_literal_kind(builder->target, builder->literal_limits, spelling, value);
-    return kind != C_TYPE_INVALID ? builder->scalar_types[kind] : IR_TYPE_ID_INVALID;
-}
-
 // The value and type of the integer literal at `token_index`: the syntax
 // pass's number fact when it covers the token and the builder's data model,
 // otherwise the conversion and typing of the spelling. The fact's kind was
@@ -42543,7 +42537,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builde
 // integer constant, landing in an integer, boolean, enum or float member
 // that is not a bit-field, is folded here
 // instead: the same literal routines and typing rules the evaluator uses
-// (c_ir_integer_literal_type, c_ir_float_literal_value,
+// (c_ir_integer_literal_at, c_ir_float_literal_value,
 // c_ir_decode_character_value), the evaluator's unary `+`/`-`
 // (c_ir_constant_apply_unary) and its cast (c_ir_constant_cast), then one
 // little-endian store of the member's size.  The class is one byte decided
@@ -42702,7 +42696,7 @@ BUSTER_C_INTERNAL void c_ir_constant_initializer_store_float_leaf(IrType* child,
 }
 
 // The INTEGER_TO_INTEGER and INTEGER_TO_FLOAT arms: an integer literal,
-// typed by c_ir_integer_literal_type exactly as the evaluator types it.
+// typed by c_ir_integer_literal_at exactly as the evaluator types it.
 BUSTER_C_INTERNAL bool c_ir_constant_initializer_fold_integer_leaf(CIntegerIrBuilder* builder, u8 leaf_class, IrType* child, u32 start, u32 end,
                                                                     u8* bytes)
 {
