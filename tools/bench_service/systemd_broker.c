@@ -50,6 +50,10 @@
 #define BQ_BROKER_MAGIC 0x42515344u
 #define BQ_BROKER_MAX_ARGS 96u
 #define BQ_BROKER_TEXT 2048u
+#define BQ_BROKER_DIAG_LINE 1200u
+#define BQ_BROKER_DIAG_CHUNK 512u
+#define BQ_BROKER_DIAG_OUTPUT (512u * 1024u)
+#define BQ_BROKER_DIAG_MILLISECONDS 500u
 
 enum { BQ_BROKER_START = 1, BQ_BROKER_SIGNAL = 2 };
 enum { BQ_BROKER_OUTER = 0, BQ_BROKER_BASE_GENERATE = 1, BQ_BROKER_BASE_BUILD = 2,
@@ -84,6 +88,17 @@ typedef struct BqBrokerFrame
     uint32_t length;
     unsigned char bytes[4096];
 } BqBrokerFrame;
+
+typedef struct BqBrokerDiagnostic
+{
+    int stream;
+    pid_t pid;
+    uint64_t start_ticks;
+    uint64_t spent_milliseconds;
+    size_t output_bytes;
+    bool stream_ok;
+    bool snapshot_complete;
+} BqBrokerDiagnostic;
 
 enum { BQ_BROKER_STDOUT = 1, BQ_BROKER_STDERR = 2, BQ_BROKER_STATUS = 3 };
 
@@ -721,6 +736,260 @@ static uint64_t bq_broker_now_milliseconds(void)
     return result;
 }
 
+/* Private evidence only. The socket protocol and broker decision never depend
+ * on these records. Journal loss, partial output, or a read bound leaves an
+ * incomplete sequence for the external collector to reject. */
+static bool bq_broker_diag_charge(BqBrokerDiagnostic* diagnostic, uint64_t before)
+{
+    uint64_t after = bq_broker_now_milliseconds();
+    bool ok = diagnostic->spent_milliseconds <= BQ_BROKER_DIAG_MILLISECONDS &&
+              before != UINT64_MAX && after != UINT64_MAX && after >= before &&
+              after - before <= BQ_BROKER_DIAG_MILLISECONDS - diagnostic->spent_milliseconds;
+    if (ok) diagnostic->spent_milliseconds += after - before;
+    return ok;
+}
+
+static bool bq_broker_diag_phase_end(BqBrokerDiagnostic* diagnostic, uint64_t before,
+                                     uint64_t prior_spent)
+{
+    uint64_t after = bq_broker_now_milliseconds();
+    bool ok = before != UINT64_MAX && after != UINT64_MAX && after >= before &&
+              prior_spent <= BQ_BROKER_DIAG_MILLISECONDS &&
+              after - before <= BQ_BROKER_DIAG_MILLISECONDS - prior_spent;
+    if (ok) diagnostic->spent_milliseconds = prior_spent + after - before;
+    else diagnostic->stream_ok = false;
+    return ok;
+}
+
+static bool bq_broker_diag_line(BqBrokerDiagnostic* diagnostic, char const* line, size_t length)
+{
+    uint64_t before = bq_broker_now_milliseconds();
+    bool ok = diagnostic->stream_ok && diagnostic->start_ticks && before != UINT64_MAX &&
+              diagnostic->spent_milliseconds <= BQ_BROKER_DIAG_MILLISECONDS &&
+              length > 0 && length < BQ_BROKER_DIAG_LINE &&
+              diagnostic->output_bytes <= BQ_BROKER_DIAG_OUTPUT - length;
+    if (ok)
+    {
+        ssize_t written = send(diagnostic->stream, line, length, MSG_DONTWAIT | MSG_NOSIGNAL);
+        ok = written == (ssize_t)length;
+        if (ok) diagnostic->output_bytes += length;
+    }
+    if (ok) ok = bq_broker_diag_charge(diagnostic, before);
+    diagnostic->stream_ok = ok;
+    return ok;
+}
+
+static bool bq_broker_diag_format(BqBrokerDiagnostic* diagnostic, char const* format, ...)
+{
+    char line[BQ_BROKER_DIAG_LINE];
+    va_list args;
+    va_start(args, format);
+    int length = vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    bool ok = length > 0 && (size_t)length < sizeof(line) &&
+              bq_broker_diag_line(diagnostic, line, (size_t)length);
+    return ok;
+}
+
+static bool bq_broker_diag_read(BqBrokerDiagnostic* diagnostic, char const* path,
+                                unsigned char* bytes, size_t capacity, size_t* length)
+{
+    uint64_t before = bq_broker_now_milliseconds();
+    int descriptor = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    bool ok = descriptor >= 0 && capacity > 0;
+    size_t size = 0;
+    while (ok && size <= capacity)
+    {
+        ssize_t count = read(descriptor, bytes + size, capacity + 1 - size);
+        if (count < 0 && errno == EINTR)
+        {
+            ok = bq_broker_diag_charge(diagnostic, before);
+            if (ok) before = bq_broker_now_milliseconds();
+            continue;
+        }
+        ok = count >= 0;
+        if (!ok || count == 0) break;
+        size += (size_t)count;
+        ok = size <= capacity && diagnostic->spent_milliseconds <= BQ_BROKER_DIAG_MILLISECONDS;
+        if (ok) ok = bq_broker_diag_charge(diagnostic, before);
+        if (ok) before = bq_broker_now_milliseconds();
+    }
+    if (descriptor >= 0) close(descriptor);
+    ok = ok && size > 0 && size <= capacity && bq_broker_diag_charge(diagnostic, before);
+    if (ok) *length = size;
+    return ok;
+}
+
+static bool bq_broker_diag_ticks(unsigned char const* bytes, size_t length, uint64_t* ticks)
+{
+    char const* start = (char const*)bytes;
+    char const* end = start + length;
+    char const* close = NULL;
+    for (char const* at = start; at < end; at += 1)
+        if (*at == ')') close = at;
+    bool ok = close && close + 2 < end && close[1] == ' ';
+    char const* field = ok ? close + 2 : end;
+    for (unsigned index = 3; ok && index < 22; index += 1)
+    {
+        while (field < end && *field != ' ') field += 1;
+        ok = field < end;
+        while (field < end && *field == ' ') field += 1;
+    }
+    uint64_t value = 0;
+    size_t digits = 0;
+    while (ok && field < end && *field >= '0' && *field <= '9')
+    {
+        unsigned digit = (unsigned)(*field - '0');
+        ok = value <= (UINT64_MAX - digit) / 10;
+        if (ok) value = value * 10 + digit;
+        field += 1;
+        digits += 1;
+    }
+    ok = ok && digits > 0 && (field == end || *field == ' ' || *field == '\n') && value > 0;
+    if (ok) *ticks = value;
+    return ok;
+}
+
+static bool bq_broker_diag_data(BqBrokerDiagnostic* diagnostic, char const* field,
+                                unsigned char const* bytes, size_t length)
+{
+    static char const hex[] = "0123456789abcdef";
+    bool ok = length > 0;
+    for (size_t offset = 0; ok && offset < length; offset += BQ_BROKER_DIAG_CHUNK)
+    {
+        size_t count = length - offset;
+        if (count > BQ_BROKER_DIAG_CHUNK) count = BQ_BROKER_DIAG_CHUNK;
+        char line[BQ_BROKER_DIAG_LINE];
+        int prefix = snprintf(line, sizeof(line),
+                              "BQ-BROKER-DIAG-V1 DATA pid=%ld ticks=%" PRIu64 " field=%s offset=%zu total=%zu hex=",
+                              (long)diagnostic->pid, diagnostic->start_ticks, field, offset, length);
+        ok = prefix > 0 && (size_t)prefix + count * 2 + 1 < sizeof(line);
+        if (ok)
+        {
+            for (size_t index = 0; index < count; index += 1)
+            {
+                line[prefix + index * 2] = hex[bytes[offset + index] >> 4];
+                line[prefix + index * 2 + 1] = hex[bytes[offset + index] & 15];
+            }
+            line[prefix + count * 2] = '\n';
+            ok = bq_broker_diag_line(diagnostic, line, (size_t)prefix + count * 2 + 1);
+        }
+    }
+    return ok;
+}
+
+static bool bq_broker_diag_field(BqBrokerDiagnostic* diagnostic, char const* field,
+                                 char const* path, unsigned char* buffer, size_t maximum,
+                                 size_t* length)
+{
+    bool ok = bq_broker_diag_read(diagnostic, path, buffer, maximum, length) &&
+              bq_broker_diag_data(diagnostic, field, buffer, *length);
+    return ok;
+}
+
+static void bq_broker_diag_snapshot(BqBrokerDiagnostic* diagnostic, int stream)
+{
+    *diagnostic = (BqBrokerDiagnostic){.stream = stream, .pid = getpid(), .stream_ok = true};
+    uint64_t phase_before = bq_broker_now_milliseconds();
+    unsigned char stat_bytes[4097], buffer[131073];
+    size_t stat_size = 0, status_size = 0, mount_size = 0, cgroup_size = 0;
+    size_t exe_size = 0, socket_size = 0;
+    uint64_t start_ticks = 0;
+    bool ok = bq_broker_diag_read(diagnostic, "/proc/self/stat", stat_bytes, 4096, &stat_size) &&
+              bq_broker_diag_ticks(stat_bytes, stat_size, &start_ticks);
+    if (ok) diagnostic->start_ticks = start_ticks;
+    if (ok) ok = bq_broker_diag_format(diagnostic, "BQ-BROKER-DIAG-V1 BEGIN pid=%ld ticks=%" PRIu64 "\n",
+                                     (long)diagnostic->pid, diagnostic->start_ticks) &&
+                 bq_broker_diag_data(diagnostic, "stat", stat_bytes, stat_size);
+    if (ok) ok = bq_broker_diag_field(diagnostic, "status", "/proc/self/status", buffer, 16384, &status_size);
+    if (ok) ok = bq_broker_diag_field(diagnostic, "mountinfo", "/proc/self/mountinfo", buffer, 131072, &mount_size);
+    if (ok) ok = bq_broker_diag_field(diagnostic, "cgroup", "/proc/self/cgroup", buffer, 4096, &cgroup_size);
+    char exe[512];
+    ssize_t link_size = ok ? readlink("/proc/self/exe", exe, sizeof(exe) - 1) : -1;
+    struct stat executable = {0};
+    ok = ok && link_size > 0 && (size_t)link_size < sizeof(exe) - 1 &&
+         stat("/proc/self/exe", &executable) == 0 && S_ISREG(executable.st_mode);
+    if (ok)
+    {
+        exe[link_size] = 0;
+        char value[768];
+        int count = snprintf(value, sizeof(value), "path=%s dev=%ju ino=%ju mode=%jo size=%ju",
+                             exe, (uintmax_t)executable.st_dev, (uintmax_t)executable.st_ino,
+                             (uintmax_t)executable.st_mode, (uintmax_t)executable.st_size);
+        ok = count > 0 && (size_t)count < sizeof(value);
+        if (ok) exe_size = (size_t)count;
+        if (ok) ok = bq_broker_diag_data(diagnostic, "exe", (unsigned char const*)value, exe_size);
+    }
+    struct stat socket_info = {0};
+    if (ok) ok = fstat(STDIN_FILENO, &socket_info) == 0 && S_ISSOCK(socket_info.st_mode);
+    if (ok)
+    {
+        char value[256];
+        int count = snprintf(value, sizeof(value), "dev=%ju ino=%ju mode=%jo",
+                             (uintmax_t)socket_info.st_dev, (uintmax_t)socket_info.st_ino,
+                             (uintmax_t)socket_info.st_mode);
+        ok = count > 0 && (size_t)count < sizeof(value);
+        if (ok) socket_size = (size_t)count;
+        if (ok) ok = bq_broker_diag_data(diagnostic, "socket", (unsigned char const*)value, socket_size);
+    }
+    size_t final_stat_size = 0;
+    uint64_t final_ticks = 0;
+    if (ok) ok = bq_broker_diag_read(diagnostic, "/proc/self/stat", stat_bytes, 4096, &final_stat_size) &&
+                 bq_broker_diag_ticks(stat_bytes, final_stat_size, &final_ticks) &&
+                 final_ticks == diagnostic->start_ticks;
+    bool within_budget = bq_broker_diag_phase_end(diagnostic, phase_before, 0);
+    /* Leave time for the final nonblocking journal line; later REQUEST and
+     * OUTCOME are required as well, so a late END cannot complete a sequence. */
+    if (ok && within_budget && diagnostic->spent_milliseconds <= BQ_BROKER_DIAG_MILLISECONDS - 25u)
+        ok = bq_broker_diag_format(diagnostic,
+        "BQ-BROKER-DIAG-V1 SNAPSHOT_END pid=%ld ticks=%" PRIu64
+        " stat=%zu status=%zu mountinfo=%zu cgroup=%zu exe=%zu socket=%zu elapsed_ms=%" PRIu64 "\n",
+        (long)diagnostic->pid, diagnostic->start_ticks, stat_size, status_size,
+        mount_size, cgroup_size, exe_size, socket_size, diagnostic->spent_milliseconds);
+    else ok = false;
+    diagnostic->snapshot_complete = ok && diagnostic->stream_ok;
+}
+
+static void bq_broker_diag_request(BqBrokerDiagnostic* diagnostic, bool peer_known,
+                                   struct ucred peer, bool poll_called, bool recv_called,
+                                   ssize_t received, unsigned flags, bool request_valid,
+                                   bool state_checked, bool state_valid, bool signal_checked,
+                                   bool signal_valid, bool command_checked, bool command_valid,
+                                   BqBrokerRequest const* request)
+{
+    int saved_errno = errno;
+    uint64_t phase_before = bq_broker_now_milliseconds();
+    uint64_t prior_spent = diagnostic->spent_milliseconds;
+    bool known = request_valid;
+    (void)bq_broker_diag_format(diagnostic,
+        "BQ-BROKER-DIAG-V1 REQUEST pid=%ld ticks=%" PRIu64
+        " peer_known=%u peer_pid=%ld peer_uid=%lu poll_called=%u recv_called=%u recv=%zd flags=%u"
+        " parsed=%u state_checked=%u state_valid=%u signal_checked=%u signal_valid=%u"
+        " command_checked=%u command_valid=%u request_known=%u operation=%u stage=%u job=%" PRIu64
+        " attempt=%" PRIu64 "\n",
+        (long)diagnostic->pid, diagnostic->start_ticks, peer_known, peer_known ? (long)peer.pid : 0L,
+        peer_known ? (unsigned long)peer.uid : 0UL, poll_called, recv_called, received, flags,
+        request_valid, state_checked, state_valid, signal_checked, signal_valid,
+        command_checked, command_valid, known, known ? request->operation : 0u,
+        known ? request->stage : 0u, known ? request->job : 0u, known ? request->attempt : 0u);
+    (void)bq_broker_diag_phase_end(diagnostic, phase_before, prior_spent);
+    errno = saved_errno;
+}
+
+static void bq_broker_diag_outcome(BqBrokerDiagnostic* diagnostic, int result,
+                                   int32_t frame_status, bool frame_sent)
+{
+    int saved_errno = errno;
+    uint64_t phase_before = bq_broker_now_milliseconds();
+    uint64_t prior_spent = diagnostic->spent_milliseconds;
+    (void)bq_broker_diag_format(diagnostic,
+        "BQ-BROKER-DIAG-V1 OUTCOME pid=%ld ticks=%" PRIu64
+        " broker_exit=%d frame_status=%" PRId32 " frame_sent=%u\n",
+        (long)diagnostic->pid, diagnostic->start_ticks, result, frame_status, frame_sent);
+    (void)bq_broker_diag_phase_end(diagnostic, phase_before, prior_spent);
+    errno = saved_errno;
+}
+
 static bool bq_broker_show(char const* unit, char output[8192])
 {
     static char const* const properties[] = {"Id", "LoadState", "Slice", "InvocationID", "ControlGroup",
@@ -890,7 +1159,8 @@ static bool bq_broker_write_all(int descriptor, unsigned char const* bytes, size
     return ok;
 }
 
-static int bq_broker_execute(BqBrokerCommand const* command, int connection, bool signal_operation)
+static int bq_broker_execute(BqBrokerCommand const* command, int connection, bool signal_operation,
+                             int32_t* framed_status, bool* frame_delivered)
 {
     int output[2] = {-1, -1}, error_pipe[2] = {-1, -1};
     bool ok = pipe2(output, O_CLOEXEC) == 0;
@@ -974,7 +1244,10 @@ static int bq_broker_execute(BqBrokerCommand const* command, int connection, boo
     }
     int32_t result = ok && reaped && WIFEXITED(status) ? WEXITSTATUS(status) :
                      ok && reaped && WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 126;
-    if (!bq_broker_send_frame(connection, BQ_BROKER_STATUS, &result, sizeof(result))) result = 126;
+    bool sent = bq_broker_send_frame(connection, BQ_BROKER_STATUS, &result, sizeof(result));
+    if (!sent) result = 126;
+    if (framed_status) *framed_status = result;
+    if (frame_delivered) *frame_delivered = sent;
     return result == 126 ? 1 : 0;
 }
 
@@ -994,6 +1267,10 @@ static bool bq_broker_groups_valid(gid_t service_gid, gid_t candidate_gid)
 
 static int bq_broker_server(void)
 {
+    BqBrokerDiagnostic diagnostic;
+    int diagnostic_errno = errno;
+    bq_broker_diag_snapshot(&diagnostic, STDERR_FILENO);
+    errno = diagnostic_errno;
     struct ucred peer = {0};
     socklen_t peer_size = sizeof(peer);
     struct passwd* account = getpwnam("buster-bench");
@@ -1004,14 +1281,17 @@ static int bq_broker_server(void)
     gid_t candidate_gid = account ? account->pw_gid : (gid_t)-1;
     account = getpwnam("buster-github-runner");
     uid_t runner_uid = account ? account->pw_uid : (uid_t)-1;
-    bool ok = geteuid() == 0 && service_uid != (uid_t)-1 && service_uid != 0 &&
+    bool credentials = geteuid() == 0 && service_uid != (uid_t)-1 && service_uid != 0 &&
               service_gid != (gid_t)-1 && candidate_gid != (gid_t)-1 && service_gid != candidate_gid &&
               getegid() == service_gid && bq_broker_groups_valid(service_gid, candidate_gid) &&
               candidate_uid != (uid_t)-1 && candidate_uid != service_uid &&
-              runner_uid != (uid_t)-1 && runner_uid != service_uid && runner_uid != candidate_uid &&
-              getsockopt(STDIN_FILENO, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) == 0 &&
-              peer_size == sizeof(peer) && peer.uid == service_uid;
+              runner_uid != (uid_t)-1 && runner_uid != service_uid && runner_uid != candidate_uid;
+    bool peer_known = credentials &&
+                      getsockopt(STDIN_FILENO, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) == 0 &&
+                      peer_size == sizeof(peer);
+    bool ok = peer_known && peer.uid == service_uid;
     BqBrokerRequest request = {0};
+    bool poll_called = ok;
     if (ok)
     {
         struct pollfd ready = {.fd = STDIN_FILENO, .events = POLLIN};
@@ -1019,23 +1299,38 @@ static int bq_broker_server(void)
     }
     struct iovec data = {.iov_base = &request, .iov_len = sizeof(request)};
     struct msghdr message = {.msg_iov = &data, .msg_iovlen = 1};
-    ssize_t received = ok ? recvmsg(STDIN_FILENO, &message, 0) : -1;
-    ok = ok && received == sizeof(request) && !(message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) &&
-         bq_broker_request_valid(&request);
+    bool recv_called = ok;
+    ssize_t received = recv_called ? recvmsg(STDIN_FILENO, &message, 0) : -1;
+    bool parsed = ok && received == sizeof(request) && !(message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) &&
+                  bq_broker_request_valid(&request);
+    ok = parsed;
+    bool state_checked = ok;
     if (ok) ok = bq_broker_state(&request, service_uid, service_gid, candidate_gid);
-    if (ok && request.operation == BQ_BROKER_SIGNAL) ok = bq_broker_signal_identity(&request);
+    bool state_valid = state_checked && ok;
+    bool signal_checked = ok && request.operation == BQ_BROKER_SIGNAL;
+    if (signal_checked) ok = bq_broker_signal_identity(&request);
+    bool signal_valid = signal_checked && ok;
     BqBrokerCommand command;
+    bool command_checked = ok;
     if (ok) ok = bq_broker_command(&request, &command);
+    bool command_valid = command_checked && ok;
+    bq_broker_diag_request(&diagnostic, peer_known, peer, poll_called, recv_called,
+                           received, message.msg_flags, parsed, state_checked, state_valid,
+                           signal_checked, signal_valid, command_checked, command_valid, &request);
     struct timeval timeout = {.tv_sec = 5};
     if (ok) ok = setsockopt(STDIN_FILENO, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0;
     int result = 1;
+    int32_t framed_status = 126;
+    bool frame_sent = false;
     if (ok)
-        result = bq_broker_execute(&command, STDIN_FILENO, request.operation == BQ_BROKER_SIGNAL);
+        result = bq_broker_execute(&command, STDIN_FILENO, request.operation == BQ_BROKER_SIGNAL,
+                                   &framed_status, &frame_sent);
     else
     {
         int32_t status = 126;
-        bq_broker_send_frame(STDIN_FILENO, BQ_BROKER_STATUS, &status, sizeof(status));
+        frame_sent = bq_broker_send_frame(STDIN_FILENO, BQ_BROKER_STATUS, &status, sizeof(status));
     }
+    bq_broker_diag_outcome(&diagnostic, result, framed_status, frame_sent);
     return result;
 }
 
@@ -1284,7 +1579,7 @@ static int bq_broker_self_test(void)
     if (io_ready)
     {
         BqBrokerCommand test_command = {.argv = {"/usr/bin/printf", "broker-output"}, .count = 2, .valid = true};
-        int executed = bq_broker_execute(&test_command, connection[0], false);
+        int executed = bq_broker_execute(&test_command, connection[0], false, NULL, NULL);
         BqBrokerFrame frame;
         ssize_t received = recv(connection[1], &frame, sizeof(frame), 0);
         BQ_BROKER_CHECK(executed == 0 && received == (ssize_t)(offsetof(BqBrokerFrame, bytes) + 13) &&
@@ -1298,7 +1593,7 @@ static int bq_broker_self_test(void)
         test_command.argv[0] = "/usr/bin/false";
         test_command.argv[1] = NULL;
         test_command.count = 1;
-        BQ_BROKER_CHECK(bq_broker_execute(&test_command, connection[0], true) == 0);
+        BQ_BROKER_CHECK(bq_broker_execute(&test_command, connection[0], true, NULL, NULL) == 0);
         received = recv(connection[1], &frame, sizeof(frame), 0);
         status = -1;
         if (received == (ssize_t)(offsetof(BqBrokerFrame, bytes) + sizeof(status)))
@@ -1337,6 +1632,89 @@ static int bq_broker_self_test(void)
             rmdir(source);
         }
         rmdir(root);
+    }
+    int journal[2] = {-1, -1}, accepted[2] = {-1, -1};
+    bool diagnostic_ready = socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, journal) == 0 &&
+                            socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, accepted) == 0;
+    BQ_BROKER_CHECK(diagnostic_ready);
+    if (diagnostic_ready)
+    {
+        int saved_input = dup(STDIN_FILENO);
+        BQ_BROKER_CHECK(dup2(accepted[0], STDIN_FILENO) == STDIN_FILENO);
+        BqBrokerDiagnostic diagnostic;
+        bq_broker_diag_snapshot(&diagnostic, journal[0]);
+        BQ_BROKER_CHECK(diagnostic.snapshot_complete && diagnostic.stream_ok &&
+                        diagnostic.pid == getpid() && diagnostic.start_ticks > 0 &&
+                        diagnostic.output_bytes < BQ_BROKER_DIAG_OUTPUT);
+        struct ucred test_peer = {.pid = getpid(), .uid = getuid(), .gid = getgid()};
+        bq_broker_diag_request(&diagnostic, true, test_peer, false, false, -1, 0,
+                               false, false, false, false, false, false, false, &request);
+        bq_broker_diag_outcome(&diagnostic, 1, 126, true);
+        char journal_bytes[BQ_BROKER_DIAG_OUTPUT + 1];
+        size_t journal_size = 0;
+        ssize_t count = 0;
+        do
+        {
+            count = recv(journal[1], journal_bytes + journal_size,
+                         sizeof(journal_bytes) - 1 - journal_size, MSG_DONTWAIT);
+            if (count > 0) journal_size += (size_t)count;
+        } while (count > 0 && journal_size < sizeof(journal_bytes) - 1);
+        journal_bytes[journal_size] = 0;
+        BQ_BROKER_CHECK(diagnostic.stream_ok && strstr(journal_bytes, "BQ-BROKER-DIAG-V1 BEGIN") &&
+                        strstr(journal_bytes, "field=status") && strstr(journal_bytes, "field=mountinfo") &&
+                        strstr(journal_bytes, "field=cgroup") && strstr(journal_bytes, "field=stat") &&
+                        strstr(journal_bytes, "field=socket") && strstr(journal_bytes, "field=exe") &&
+                        strstr(journal_bytes, "SNAPSHOT_END") && strstr(journal_bytes, "elapsed_ms=") &&
+                        strstr(journal_bytes, "REQUEST") &&
+                        strstr(journal_bytes, "recv_called=0 recv=-1") &&
+                        strstr(journal_bytes, "OUTCOME") &&
+                        journal_size == diagnostic.output_bytes);
+        unsigned char actual[16385];
+        size_t actual_size = 0;
+        BQ_BROKER_CHECK(bq_broker_diag_read(&diagnostic, "/proc/self/status", actual, 16384,
+                                            &actual_size) && actual_size > 0 &&
+                        memmem(actual, actual_size, "CapEff:", 7) != NULL &&
+                        memmem(actual, actual_size, "NoNewPrivs:", 11) != NULL);
+        BQ_BROKER_CHECK(!bq_broker_diag_read(&diagnostic, "/proc/self/mountinfo",
+                                              actual, 1, &actual_size));
+        if (saved_input >= 0) { dup2(saved_input, STDIN_FILENO); close(saved_input); }
+        else close(STDIN_FILENO);
+        BqBrokerDiagnostic full = {.stream = journal[0], .pid = getpid(), .start_ticks = 1,
+                                   .stream_ok = true, .output_bytes = BQ_BROKER_DIAG_OUTPUT};
+        BQ_BROKER_CHECK(!bq_broker_diag_format(&full, "BQ-BROKER-DIAG-V1 test\n"));
+        BqBrokerDiagnostic expired = {.stream = journal[0], .pid = getpid(), .start_ticks = 1,
+                                      .stream_ok = true,
+                                      .spent_milliseconds = BQ_BROKER_DIAG_MILLISECONDS + 1};
+        BQ_BROKER_CHECK(!bq_broker_diag_format(&expired, "BQ-BROKER-DIAG-V1 test\n") &&
+                        !expired.stream_ok);
+        int send_buffer = 4096;
+        BQ_BROKER_CHECK(setsockopt(journal[0], SOL_SOCKET, SO_SNDBUF,
+                                   &send_buffer, sizeof(send_buffer)) == 0);
+        char filler[4096] = {0};
+        size_t fill_attempts = 0;
+        while (fill_attempts < 256 && send(journal[0], filler, sizeof(filler),
+                                           MSG_DONTWAIT | MSG_NOSIGNAL) > 0)
+            fill_attempts += 1;
+        BqBrokerDiagnostic blocked = {.stream = journal[0], .pid = getpid(), .start_ticks = 1,
+                                      .stream_ok = true};
+        uint64_t blocked_before = bq_broker_now_milliseconds();
+        bool blocked_result = bq_broker_diag_format(&blocked, "BQ-BROKER-DIAG-V1 test\n");
+        BQ_BROKER_CHECK(fill_attempts < 256 && !blocked_result && !blocked.stream_ok &&
+                        bq_broker_now_milliseconds() - blocked_before < 100);
+        BqBrokerDiagnostic blocked_snapshot;
+        bq_broker_diag_snapshot(&blocked_snapshot, journal[0]);
+        BQ_BROKER_CHECK(!blocked_snapshot.snapshot_complete && !blocked_snapshot.stream_ok);
+        close(journal[1]);
+        journal[1] = -1;
+        BqBrokerDiagnostic closed = {.stream = journal[0], .pid = getpid(), .start_ticks = 1,
+                                     .stream_ok = true};
+        BQ_BROKER_CHECK(!bq_broker_diag_format(&closed, "BQ-BROKER-DIAG-V1 test\n") &&
+                        !closed.stream_ok);
+    }
+    for (unsigned index = 0; index < 2; index += 1)
+    {
+        if (journal[index] >= 0) close(journal[index]);
+        if (accepted[index] >= 0) close(accepted[index]);
     }
 #undef BQ_BROKER_CHECK
     printf("BUSTER_SYSTEMD_BROKER_SELF_TEST checks=%u result=%s\n", checks, ok ? "pass" : "fail");
