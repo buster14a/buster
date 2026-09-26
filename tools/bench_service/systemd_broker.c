@@ -224,6 +224,7 @@ static void bq_broker_common_sandbox(BqBrokerCommand* command)
         "--property=ProtectHostname=yes", "--property=ProtectProc=invisible", "--property=LockPersonality=yes",
         "--property=MemoryDenyWriteExecute=yes", "--property=RemoveIPC=yes", "--property=KeyringMode=private",
         "--property=RestrictNamespaces=yes", "--property=RestrictRealtime=yes",
+        "--property=CapabilityBoundingSet=", "--property=AmbientCapabilities=",
         "--property=RestrictAddressFamilies=AF_UNIX", "--property=SystemCallArchitectures=native",
         "--property=SystemCallFilter=@system-service", "--property=SystemCallErrorNumber=EPERM"
     };
@@ -803,6 +804,8 @@ static bool bq_broker_show(char const* unit, char output[8192])
 
 static bool bq_broker_signal_identity(BqBrokerRequest const* request)
 {
+    /* Signal only an exact unit identity, including older units whose
+     * capability policy predates the current fixed transient command. */
     BqBrokerPaths paths;
     char cgroup[256];
     char output[8192];
@@ -1149,6 +1152,15 @@ static unsigned bq_broker_argument_count(BqBrokerCommand const* command, char co
     return count;
 }
 
+static unsigned bq_broker_property_count(BqBrokerCommand const* command, char const* prefix)
+{
+    unsigned count = 0;
+    size_t length = strlen(prefix);
+    for (unsigned index = 0; index < command->count; index += 1)
+        if (!strncmp(command->argv[index], prefix, length)) count += 1;
+    return count;
+}
+
 static int bq_broker_self_test(void)
 {
     BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = 1, .operation = BQ_BROKER_START,
@@ -1176,6 +1188,10 @@ static int bq_broker_self_test(void)
         BQ_BROKER_CHECK(bq_broker_has_argument(&command, unit_option) &&
                         bq_broker_argument_count(&command, unit_option) == 1 &&
                         bq_broker_argument_count(&command, "--property=NoNewPrivileges=yes") == 1);
+        BQ_BROKER_CHECK(bq_broker_property_count(&command, "--property=CapabilityBoundingSet=") == 1 &&
+                        bq_broker_argument_count(&command, "--property=CapabilityBoundingSet=") == 1 &&
+                        bq_broker_property_count(&command, "--property=AmbientCapabilities=") == 1 &&
+                        bq_broker_argument_count(&command, "--property=AmbientCapabilities=") == 1);
         BQ_BROKER_CHECK(bq_broker_has_argument(&command, "--slice=buster-bench.slice") &&
                         bq_broker_has_argument(&command, "--setenv=PATH=/usr/bin:/bin") &&
                         bq_broker_has_argument(&command, "--setenv=LC_ALL=C") &&
