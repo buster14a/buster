@@ -1,0 +1,39 @@
+name: C falloff - preserve the return edge
+on:
+  push:
+    branches: [research/return-edge-20260925-astra]
+    paths:
+      - .github/workflows/return-edge-20260925-astra.yml
+      - tools/investigations/return-edge-20260925-astra/**
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  causal-probe:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    env:
+      CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      BUSTER_TEST_JOBS: 2
+    steps:
+      - name: Require explicitly enabled hosted correctness
+        run: test "$CI_ENABLED" = true
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compare pinned source with normal-return experimental control
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/investigations/return-edge-20260925-astra/probe.py
+      - name: Preserve successful, failed, and incomplete evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: return-edge-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 30
+          if-no-files-found: error
