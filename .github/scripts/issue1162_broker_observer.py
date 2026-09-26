@@ -1132,7 +1132,7 @@ class BrokerObserver:
             if not block:
                 streams.pop(descriptor, None)
                 for stream in (process.stdout, process.stderr):
-                    if stream is not None and stream.fileno() == descriptor:
+                    if stream is not None and not stream.closed and stream.fileno() == descriptor:
                         stream.close()
                         break
                 continue
@@ -2036,6 +2036,129 @@ def _self_test() -> None:
             assert len(content) <= maximum
             return {"path": f"captures/{name}", "bytes": len(content),
                     "sha256": hashlib.sha256(content).hexdigest()}
+
+    # Exercise the production poll/drain/finish path with real local pipes.
+    # An EOF on one stream closes it; a later EOF on the other must never call
+    # fileno() on the first closed Python file object. The stdin barrier makes
+    # the two ordered EOF cases span separate poll cycles deterministically.
+    class PipeWriter(FixtureWriter):
+        def __init__(self):
+            self.contents: dict[str, bytes] = {}
+
+        def capture(self, name: str, content: bytes, maximum: int) -> dict[str, object]:
+            self.contents[name] = content
+            return super().capture(name, content, maximum)
+
+    pipe_show = (f"Id={lifecycle.unit}\nLoadState=loaded\nActiveState=activating\n"
+                 "SubState=start\nMainPID=0\nInvocationID=" + "a" * 32 + "\n"
+                 "ControlGroup=/system.slice/broker.instance\n"
+                 "ExecMainStartTimestampMonotonic=0\nExecMainStatus=0\nResult=success\n").encode()
+    pipe_error = b"fixture-stderr\n"
+    def pipe_case(mode: str) -> None:
+        if mode in ("stdout-first", "stderr-first"):
+            first = 1 if mode == "stdout-first" else 2
+            second = 2 if first == 1 else 1
+            bodies = {1: pipe_show, 2: pipe_error}
+            code = (f"import os\nos.write({first}, {bodies[first]!r})\nos.close({first})\n"
+                    f"os.read(0, 1)\nos.write({second}, {bodies[second]!r})\nos.close({second})\n")
+        elif mode == "simultaneous":
+            code = f"import os\nos.write(1, {pipe_show!r})\nos.write(2, {pipe_error!r})\n"
+        else:
+            code = "import os\nos.write(1, b'partial-show\\n')\nos.read(0, 1)\n"
+        client = subprocess.Popen([sys.executable, "-c", code],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            close_fds=True, start_new_session=True, bufsize=0)
+        assert client.stdout is not None and client.stderr is not None and client.stdin is not None
+        stdout_fd, stderr_fd = client.stdout.fileno(), client.stderr.fileno()
+        os.set_blocking(stdout_fd, False)
+        os.set_blocking(stderr_fd, False)
+        bus_read, bus_write = os.pipe()
+        class QuietBus:
+            bus = ctypes.c_void_p(1)
+            bus_fd = lambda self, _bus: bus_read
+            bus_events = lambda self, _bus: select.POLLIN
+            bus_timeout = lambda self, _bus, pointer: (
+                setattr(pointer._obj, "value", (1 << 64) - 1) or 0)
+
+        reader = object.__new__(BrokerObserver)
+        reader.bus = QuietBus()
+        reader.deadline = time.monotonic() + 2.0
+        reader.writer = PipeWriter()
+        row = Lifecycle(lifecycle.unit, lifecycle.object_path, 5, 1, 1)
+        snap = {"raw_show": None, "raw_stderr": None, "process_capture_complete": False,
+                "manager_properties_complete": False, "incomplete_reasons": [], "main_pid": 0,
+                "process_start_observed_before_query": False, "trigger": "unit-new",
+                "trigger_event_seq": 1, "started_monotonic_ns": time.monotonic_ns()}
+        row.snapshots.append(snap)
+        query = {"lifecycle": row, "snapshot": snap, "process": client,
+                 "stdout": bytearray(), "stderr": bytearray(),
+                 "open": {stdout_fd: "stdout", stderr_fd: "stderr"},
+                 "deadline": time.monotonic() + 1.5, "capture_number": 1,
+                 "cancel_reason": None, "limit_reason": None}
+        reader.current_query = query
+        stop_started: float | None = None
+        try:
+            if mode == "simultaneous":
+                client.wait(timeout=1.0)
+            else:
+                first_stream = client.stderr if mode == "stderr-first" else client.stdout
+                for _ in range(20):
+                    reader._poll_once()
+                    if first_stream.closed or (mode in ("cancel", "deadline") and query["stdout"]):
+                        break
+                else:
+                    raise AssertionError("first local pipe did not become readable")
+                if mode in ("stdout-first", "stderr-first"):
+                    assert first_stream.closed and reader.current_query is query
+                    client.stdin.write(b"x")
+                    client.stdin.close()
+                elif mode == "cancel":
+                    stop_started = time.monotonic()
+                    query["cancel_reason"] = "unit_removed_during_snapshot"
+                else:
+                    stop_started = time.monotonic()
+                    query["deadline"] = time.monotonic() - 1.0
+            for _ in range(30):
+                if reader.current_query is None:
+                    break
+                reader._poll_once()
+            assert reader.current_query is None and not query["open"]
+            assert client.stdout.closed and client.stderr.closed
+            assert client.poll() is not None
+            assert reader.writer.contents["show-000001.txt"] == (
+                b"partial-show\n" if mode in ("cancel", "deadline") else pipe_show)
+            assert reader.writer.contents["show-000001.stderr"] == (
+                b"" if mode in ("cancel", "deadline") else pipe_error)
+            if mode in ("cancel", "deadline"):
+                assert stop_started is not None and time.monotonic() - stop_started < \
+                       SHOW_TIMEOUT_SECONDS + 1.0
+                assert not snap["manager_properties_complete"]
+                if mode == "cancel":
+                    assert snap["systemctl_cancelled"] == "unit_removed_during_snapshot"
+                    assert not snap["systemctl_timed_out"]
+                else:
+                    assert snap["systemctl_timed_out"] and snap["systemctl_timeout_reason"] == \
+                           "systemctl_timeout"
+            else:
+                assert snap["systemctl_exit"] == 0 and snap["manager_properties_complete"]
+                assert not snap["systemctl_timed_out"] and snap["systemctl_cancelled"] is None
+        finally:
+            if reader.current_query is not None:
+                reader._stop_query(query, "fixture_cleanup")
+            if not client.stdin.closed:
+                client.stdin.close()
+            if client.poll() is None:
+                client.kill()
+                client.wait(timeout=1.0)
+            for stream in (client.stdout, client.stderr):
+                if not stream.closed:
+                    stream.close()
+            os.close(bus_read)
+            os.close(bus_write)
+
+    for pipe_mode in ("stdout-first", "stderr-first", "simultaneous", "cancel", "deadline"):
+        pipe_case(pipe_mode)
+        checks += 1
 
     fixture_observer = object.__new__(BrokerObserver)
     fixture_observer.writer = FixtureWriter()
