@@ -438,8 +438,13 @@ Explicit clear bytes exclude ordinary map writes and allocator-internal clears.
 The `validation_*` and `preparation_*` fields attribute the canonical boundary.
 `validation_calls` counts complete module-verifier entries. The ownership fields
 count the preliminary function scan, published-CFG checks, lowered functions,
-blocks, instruction-chain steps and owner-map clear bytes. The remaining fields
-count globals/relocations and their overlap pairs, aliases, initializers, value
+blocks, instruction-chain steps and owner-map clear bytes.
+`validation_global_relocation_pairs` counts relocation overlap comparisons:
+one per relocation against its predecessor while a global's offsets ascend,
+then one per neighbour of a sorted copy for a global whose offsets do not.
+`validation_global_relocation_sorts` counts those unordered globals and
+`validation_global_relocation_sort_rows` the rows their radix passes moved.
+The remaining fields count globals, relocations, aliases, initializers, value
 and provenance visits, block parameters and incoming values, instruction,
 operand, target and result checks, opcode-operation checks, conversions,
 calls/fixed arguments, provenance-bearing opcodes and terminator checks.
