@@ -29453,6 +29453,49 @@ BUSTER_C_INTERNAL bool c_ir_lower_condition_branch_on_leaf(CIntegerIrBuilder* bu
     return branched;
 }
 
+// A controlling expression still obeys comma precedence. Only commas outside
+// delimiter groups and the middle operand of ?: belong to its root. The full
+// expression machine already owns their ordered evaluation and result type.
+BUSTER_C_INTERNAL bool c_ir_condition_has_root_comma(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool found = false;
+    while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           !c_ir_group_is_statement_expression(builder, start, end) &&
+           c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
+    {
+        start += 1;
+        end -= 1;
+    }
+    u32 conditional_depth = 0;
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+        if (scan == C_IR_GROUP_SCAN_UNCLOSED)
+        {
+            break;
+        }
+        if (scan == C_IR_GROUP_SCAN_SKIPPED)
+        {
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+        {
+            conditional_depth += 1;
+        }
+        else if (conditional_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+        {
+            conditional_depth -= 1;
+        }
+        else if (!conditional_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            found = true;
+            break;
+        }
+    }
+    return found;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -29631,6 +29674,23 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
                 }
                 continue;
             }
+        }
+        if (c_ir_condition_has_root_comma(builder, task.start, task.end))
+        {
+            // Split the sequence before ?: or &&/||. In particular, a false
+            // left operand cannot suppress the final comma operand, and a
+            // deferred right-hand call must not enter the arithmetic core.
+            frame->as.condition.leaf_true_block = task.true_block;
+            frame->as.condition.leaf_false_block = task.false_block;
+            frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_CHILD;
+            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                    .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                    .as.expression = {.start = task.start, .end = task.end},
+                                                }))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+            return;
         }
         u32 conditional_start = 0;
         u32 conditional_question = 0;
