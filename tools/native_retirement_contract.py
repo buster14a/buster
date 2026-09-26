@@ -291,7 +291,7 @@ def validate_dependencies(directory, manifest):
 def validate_dependency_binding(directory, manifest, profile, inputs):
     required = profile == FULL_CENSUS_PROFILE or bool(manifest.get("project_include_sha256", ""))
     if not required:
-        return
+        return frozenset()
     assert manifest.get("dependency_manifest") == dependency_authority.POLICY_PATH
     assert manifest.get("dependency_receipt") == "dependency-receipt.json"
     receipt_path = directory / "dependency-receipt.json"
@@ -396,6 +396,23 @@ def validate_dependency_binding(directory, manifest, profile, inputs):
     for row in rows:
         expected_headers = fixture_map[row["fixture"]]["project_headers"] if row["disposition"] == "repo-owned-project-header" else []
         assert row["project_headers"] == expected_headers
+    # Select compatibility argv only after the descriptor, source snapshot,
+    # receipt, ledger and project closure have all matched trusted bindings.
+    # Old live and immutable legacy declarations do not contain this record.
+    adapter_source = "tools/native-retirement-darwin/Availability.h"
+    adapter_destination = "dependencies/project-include/sdk/darwin-adapter/Availability.h"
+    adapters = [item for item in descriptor_value.get("projects", [])
+                if item.get("source") == adapter_source or item.get("destination") == adapter_destination]
+    selected_adapters = frozenset()
+    if adapters:
+        assert len(adapters) == 1, "ambiguous Darwin availability adapter"
+        adapter = adapters[0]
+        assert adapter.get("source") == adapter_source
+        assert adapter.get("provenance") == "repo:" + adapter_source
+        assert adapter.get("destination") == adapter_destination
+        assert "sdk/darwin-adapter/Availability.h" in project_destinations
+        selected_adapters = frozenset((adapter_destination,))
+    return selected_adapters
 
 
 def validate_inputs(directory, manifest):
@@ -591,7 +608,7 @@ def read_argv(path):
     return [item.decode("utf-8") for item in raw[:-1].split(b"\0")]
 
 
-def validate_argv(directory, manifest, row, recipes):
+def validate_argv(directory, manifest, row, recipes, dependency_adapters):
     argv_path = directory / relative_path(row["argv_evidence"])
     argv = read_argv(argv_path)
     baseline = row["allocator"] == "none"
@@ -621,6 +638,9 @@ def validate_argv(directory, manifest, row, recipes):
                 expected.extend(["-isystem", str(sdk_root / "mingw-adapter"),
                                  "-isystem", str(sdk_root / "windows")])
             elif "apple" in target:
+                if (target.endswith("-ios") and
+                        "dependencies/project-include/sdk/darwin-adapter/Availability.h" in dependency_adapters):
+                    expected.extend(["-isystem", str(sdk_root / "darwin-adapter")])
                 expected.extend(["-isystem", str(sdk_root / "darwin")])
             elif "android" in target:
                 arch = target.split("-", 1)[0]
@@ -1073,7 +1093,7 @@ def validate(directory):
     assert row_fields == ROW_FIELDS
     assert result_fields == RESULT_FIELDS
     profile, subject_count = validate_profile(manifest, inputs, len(rows))
-    validate_dependency_binding(directory, manifest, profile, inputs)
+    dependency_adapters = validate_dependency_binding(directory, manifest, profile, inputs)
     gap_ledger_identities, declared_gap_rows, gap_ledger_sha256 = validate_supported_gap_ledger(
         directory, manifest, rows, profile)
     applicability_ledger, applicability_ledger_sha256 = validate_applicability_ledger(
@@ -1150,7 +1170,7 @@ def validate(directory):
     for key, result in by_result.items():
         row = by_row[key]
         assert int(row["group"]) % int(manifest["shard_count"]) == int(manifest["shard_index"])
-        validate_argv(directory, manifest, row, recipes)
+        validate_argv(directory, manifest, row, recipes, dependency_adapters)
         assert result["group"] == row["group"]
         assert result["cpu"] in {"", row["cpu"]}
         assert result["cpu_features"] in {"", row["cpu_features"]}
