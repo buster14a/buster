@@ -16476,7 +16476,7 @@ BUSTER_C_INTERNAL void c_parser_diagnostic(Arena* arena, CParserResult* result, 
 // converted and typed for the stream's target exactly once. The syntax pass
 // already converted every number it validated; building the facts first is
 // that same work, done where every later consumer can read it.
-CNumberFacts const* c_number_facts_build(Arena* arena, CPreprocessResult const* preprocess)
+BUSTER_C_SHARED CNumberFacts const* c_number_facts_build(Arena* arena, CPreprocessResult const* preprocess)
 {
     CNumberFacts* facts = 0;
     CTokenShape const* shapes = c_preprocess_token_shapes(preprocess);
@@ -16548,7 +16548,7 @@ CNumberFacts const* c_number_facts_build(Arena* arena, CPreprocessResult const* 
     return facts;
 }
 
-bool c_number_convert_at(CNumberFacts const* facts, char8 const* spelling_base, CToken const* tokens, u32 token_index, u64* value_out)
+BUSTER_C_SHARED bool c_number_convert_at(CNumberFacts const* facts, char8 const* spelling_base, CToken const* tokens, u32 token_index, u64* value_out)
 {
     CNumberFact fact = c_number_fact(facts, tokens, token_index);
     bool result;
