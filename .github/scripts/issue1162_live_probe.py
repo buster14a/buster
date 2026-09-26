@@ -1310,6 +1310,7 @@ def _record_discovery_failure(output: Path, failures: dict[str, object], reason:
 
 def _run_probe(job: int, request_sha: str, baseline: str, subject: str,
                budget: float, output: Path) -> dict[str, object]:
+    import issue1162_workspace_observer as workspace_observer
     coverage = {
         "disposition": "normal-path checkpoint probe only",
         "checkpoint_discovery_window_seconds": 300,
@@ -1319,6 +1320,7 @@ def _run_probe(job: int, request_sha: str, baseline: str, subject: str,
             "exact active outer full systemctl show, invocation, MainPID, proc and cgroup identity",
             "one exact active base-build full systemctl show, invocation, MainPID, proc and cgroup identity before and after payload cleanup",
             "immutable worker and instance record bytes bound to submit request SHA-256",
+            "complete settled sealed-source metadata and exact fixed workspace path modes at a live base-build checkpoint",
             "temporary result payload metadata, inode-bound cleanup, and cleanup absence",
             "broker instance unit/process details only if still listed after the live probe",
         ],
@@ -1328,6 +1330,7 @@ def _run_probe(job: int, request_sha: str, baseline: str, subject: str,
             "short-lived broker processes that exited before post-probe capture",
             "physical host readiness, host installation, or service/security acceptance",
             "continuous coordinator FD retention or shared open-file-description identity from inode matching",
+            "instantaneous materializer mkdir/chmod calls or rehashing every sealed source byte",
         ],
         "full_acceptance": "pending",
     }
@@ -1388,6 +1391,18 @@ def _run_probe(job: int, request_sha: str, baseline: str, subject: str,
     initial_build_identity = {key: value for key, value in build_identity.items() if key != "unit"}
     _fail(same_build(initial_build_identity, live_build_identity),
           "base-build checkpoint changed before payload creation")
+    workspace_snapshot = workspace_observer.base_build_workspace(outer_identity, baseline, subject,
+                                                                  job_deadline)
+    _write_json_private(output, "base-build-workspace.json", workspace_snapshot)
+    workspace_outer = capture_unit(str(outer_identity["outer_unit"]), output,
+                                   "outer-after-workspace", 8.0, job_deadline, reserve=75.0)
+    validate_outer(workspace_outer, outer_identity)
+    _fail(outer_capture_identity(outer_live_start) == outer_capture_identity(workspace_outer),
+          "outer invocation or cgroup advanced during workspace capture")
+    workspace_build = capture_unit(build_unit, output, "base-build-after-workspace", 8.0,
+                                   job_deadline, reserve=75.0)
+    _fail(same_build(live_build_identity, validate_build(workspace_build, build_unit)),
+          "base-build invocation or cgroup advanced during workspace capture")
     attempt = int(outer_identity["attempt"])
     results_fd = _safe_dir(RESULTS, service.pw_uid, service.pw_gid, 0o710)
     result_fd = -1
@@ -1542,6 +1557,7 @@ def _run_probe(job: int, request_sha: str, baseline: str, subject: str,
             "worker_sha256": outer_identity["worker_sha256"],
             "instance_sha256": outer_identity["instance_sha256"],
             "request_sha256": request_sha, "base_build": after_build_identity,
+            "base_build_workspace_artifact": "base-build-workspace.json",
             "payload_device": payload_identity[0] if payload_identity else None,
             "payload_inode": payload_identity[1] if payload_identity else None,
             "payload_absent_after_cleanup": True, "live_test_exit": probe_exit,
@@ -1808,6 +1824,8 @@ def self_test() -> None:
                  patch(__name__ + ".RESULTS", str(results_root)), \
                  patch(__name__ + "._open_records", return_value=(fixture_worker, fixture_instance, identity)), \
                  patch(__name__ + ".capture_unit", side_effect=fake_capture), \
+                 patch("issue1162_workspace_observer.base_build_workspace",
+                       return_value={"fixture": "source walk exercised by workspace observer self-test"}), \
                  patch(__name__ + ".capture_active_lease", return_value={"fixture": "passive-only"}), \
                  patch(__name__ + ".run_probe_process", side_effect=fake_process), \
                  patch(__name__ + ".subprocess.run", side_effect=fake_subprocess_run), \
@@ -2363,6 +2381,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    sys.modules.setdefault("issue1162_live_probe", sys.modules[__name__])
     try:
         raise SystemExit(main())
     except ProbeError as exc:
