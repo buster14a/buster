@@ -1152,6 +1152,8 @@ struct CParserDeclaration
     u8 reserved[2];
 };
 
+typedef struct CNumberFacts CNumberFacts;
+
 typedef struct CParserResult CParserResult;
 struct CParserResult
 {
@@ -1160,6 +1162,10 @@ struct CParserResult
     // Null until the first syntax diagnostic; capacity is the logical limit,
     // not allocated storage. Nonempty rows retain the parse arena's lifetime.
     CDiagnostic* diagnostics;
+    // The conversion of every preprocessing number of the final stream, made
+    // once here and read by semantic analysis and lowering (c_number_fact).
+    // Null for hand-built inputs, whose consumers convert the spelling.
+    CNumberFacts const* number_facts;
     u32 declaration_count;
     u32 diagnostic_count;
     u32 declaration_capacity;
@@ -1275,6 +1281,9 @@ struct CParseResult
     CEntityId* name_lookup_buckets;
     CAggregateLookup* aggregate_lookup;
     CTokenPositionIndex* position_index;
+    // Borrowed from the syntax result: immutable number conversions keyed by
+    // final-stream token index (see CParserResult.number_facts).
+    CNumberFacts const* number_facts;
     CIdentifierUse* identifier_uses;
     // First recorded use of each token, plus one, so an unused token is the
     // zero the operating system already supplied; c_parse_identifier_use_index
