@@ -96,6 +96,8 @@ BASE_UNIT_PATH_ENCODED_BROKER_PREFIX = (
     "/org/freedesktop/systemd1/unit/"
     "buster_2dbench_2dsystemd_2dbroker_40"
 )
+TEMPLATE_METADATA_UNIT = "buster-bench-systemd-broker@internal.service"
+TEMPLATE_METADATA_PATH = BASE_UNIT_PATH_ENCODED_BROKER_PREFIX + "internal_2eservice"
 MATCH_RULES = (
     "type='signal',sender='org.freedesktop.systemd1',"
     "path='/org/freedesktop/systemd1',"
@@ -931,6 +933,7 @@ class BrokerObserver:
         self.event_seq = 0
         self.bus_dispatch_count = 0
         self.dispatch_diagnostics = self._new_dispatch_diagnostics()
+        self.template_metadata_events: list[dict[str, object]] = []
         self.bus_budget_exhausted = False
         self.units: list[Lifecycle] = []
         self.current_by_path: dict[str, Lifecycle] = {}
@@ -1091,10 +1094,40 @@ class BrokerObserver:
         member = str(message["member"])
         unit = str(message["unit"])
         path = str(message["object_path"])
+        if unit == TEMPLATE_METADATA_UNIT:
+            # An Accept=yes socket loads this fixed, non-peer template while
+            # opening its listener for SELinux-label metadata. It is never a
+            # broker process witness. Preserve the one pre-peer manager pair
+            # for independent PID1/journal reconciliation.
+            previous = self.template_metadata_events
+            event_ns = time.monotonic_ns()
+            ordinal = self.bus_dispatch_count
+            valid_header = (path == TEMPLATE_METADATA_PATH and
+                message.get("sender") == self.bus.manager_sender and
+                message.get("interface") == "org.freedesktop.systemd1.Manager" and
+                message.get("path") == "/org/freedesktop/systemd1" and
+                message.get("signature") == "so")
+            valid_order = (not self.units and not self.stop_seen and
+                self.ready_ns < event_ns and 0 < ordinal <= MAX_BUS_DISPATCHES and
+                ((not previous and member == "UnitNew") or
+                 (len(previous) == 1 and member == "UnitRemoved" and
+                  previous[0]["bus_dispatch_ordinal"] < ordinal and
+                  previous[0]["monotonic_ns"] < event_ns)))
+            if not valid_header or not valid_order:
+                self._record_noncanonical_unit(message)
+                self.mark_global("invalid_template_metadata_signal", event_loss=True)
+                return
+            previous.append({"boot_id": self.boot_id, "boot_id_raw": self.boot_id_raw,
+                "unit": unit, "object_path": path, "sender": message["sender"],
+                "member": member, "interface": message["interface"],
+                "path": message["path"], "signature": message["signature"],
+                "bus_dispatch_ordinal": ordinal, "monotonic_ns": event_ns})
+            return
         try:
             parse_broker_unit(unit)
         except ObserverError:
-            if path.startswith(BASE_UNIT_PATH_ENCODED_BROKER_PREFIX):
+            if (unit.startswith("buster-bench-systemd-broker@") or
+                    path.startswith(BASE_UNIT_PATH_ENCODED_BROKER_PREFIX)):
                 self._record_noncanonical_unit(message)
                 self.mark_global("noncanonical_broker_unit_signal", event_loss=True)
             else:
@@ -1115,6 +1148,9 @@ class BrokerObserver:
                               "interface": message["interface"], "sender": message["sender"],
                               "unit": unit, "object_path": path,
                               "generation": generation}, unit)
+            if self.template_metadata_events and \
+                    self.template_metadata_events[-1]["monotonic_ns"] >= event_ns:
+                self.mark_global("template_metadata_not_before_broker", event_loss=True)
             lifecycle = Lifecycle(unit, path, generation, seq, event_ns)
             self.units.append(lifecycle)
             self.current_by_path[path] = lifecycle
@@ -1152,6 +1188,9 @@ class BrokerObserver:
 
     def _property_signal(self, message: dict[str, object]) -> None:
         path = str(message["path"])
+        if path == TEMPLATE_METADATA_PATH:
+            self.mark_global("template_metadata_properties_changed", event_loss=True)
+            return
         lifecycle = self.current_by_path.get(path)
         if lifecycle is None:
             if path.startswith(BASE_UNIT_PATH_ENCODED_BROKER_PREFIX):
@@ -1916,6 +1955,10 @@ class BrokerObserver:
         else:
             self.mark_global("manager_final_drain_slice_exceeded", event_loss=True)
 
+    def _check_template_metadata_completion(self) -> None:
+        if len(self.template_metadata_events) == 1:
+            self.mark_global("template_metadata_unpaired", event_loss=True)
+
     def run(self) -> dict[str, object]:
         require(bool(getattr(self.bus, "armed", False)),
                 "observer readiness requires installed matches and Manager.Subscribe ack")
@@ -1964,6 +2007,7 @@ class BrokerObserver:
         # final bounded empty drain is the horizon for every terminal claim.
         self._drain_final_events()
         self._settle_unstarted_queue()
+        self._check_template_metadata_completion()
         units = [row.as_json(self.boot_id, self.boot_id_raw, self.event_loss_detected)
                  for row in self.units]
         event_stream_complete = not self.event_loss_detected
@@ -1988,6 +2032,7 @@ class BrokerObserver:
                 "event_count": self.writer.event_count, "event_bytes": self.writer.event_bytes,
                 "bus_dispatch_count": self.bus_dispatch_count,
                 "dispatch_diagnostics": self.dispatch_diagnostics,
+                "template_metadata_events": self.template_metadata_events,
                 "capture_bytes": self.writer.capture_bytes,
                 "event_loss_detected": self.event_loss_detected,
                 "event_stream_complete": event_stream_complete,
@@ -2747,6 +2792,91 @@ def _self_test() -> None:
         def object_path(self, _unit: str) -> str:
             return lifecycle.object_path
 
+    # Run authenticated-shaped manager records through the production pull
+    # dispatcher. These are fixtures, never a claim about a live manager.
+    class FixtureMetadataBus:
+        manager_sender = ":1.4"
+
+        def __init__(self, messages: list[dict[str, object]]):
+            self.messages = deque(messages)
+
+        def process_one(self) -> tuple[int, dict[str, object] | None]:
+            if self.messages:
+                return 1, self.messages.popleft()
+            return 0, None
+
+        def object_path(self, _unit: str) -> str:
+            return lifecycle.object_path
+
+    manager_record = {"interface": "org.freedesktop.systemd1.Manager",
+                      "path": "/org/freedesktop/systemd1", "signature": "so",
+                      "sender": ":1.4"}
+    template_new = {**manager_record, "member": "UnitNew",
+                    "unit": TEMPLATE_METADATA_UNIT,
+                    "object_path": TEMPLATE_METADATA_PATH}
+    template_removed = {**template_new, "member": "UnitRemoved"}
+    canonical_new = {**manager_record, "member": "UnitNew",
+                     "unit": lifecycle.unit, "object_path": lifecycle.object_path}
+
+    def template_fixture(messages: list[dict[str, object]]) -> BrokerObserver:
+        fixture = BrokerObserver(FixtureMetadataBus(messages), FixtureEventWriter(),
+                                 boot, raw, time.monotonic() + 5.0, "1", 1)
+        fixture.ready_ns = time.monotonic_ns() - 1_000_000
+        fixture._current_process_events()
+        return fixture
+
+    paired = template_fixture([template_new, template_removed, canonical_new])
+    retained = paired.template_metadata_events
+    expected_template_keys = {"boot_id", "boot_id_raw", "unit", "object_path",
+                              "sender", "member", "interface", "path", "signature",
+                              "bus_dispatch_ordinal", "monotonic_ns"}
+    assert len(retained) == 2 and all(set(item) == expected_template_keys for item in retained)
+    assert [item["member"] for item in retained] == ["UnitNew", "UnitRemoved"]
+    assert [item["bus_dispatch_ordinal"] for item in retained] == [1, 2]
+    assert paired.ready_ns < retained[0]["monotonic_ns"] < \
+           retained[1]["monotonic_ns"] < paired.units[0].first_monotonic_ns
+    assert paired.bus_dispatch_count == 3 and paired.event_seq == 1
+    assert len(paired.units) == 1 and not paired.global_reasons
+    checks += 1
+    empty = template_fixture([canonical_new])
+    assert not empty.template_metadata_events and not empty.global_reasons
+    checks += 1
+    partial = template_fixture([template_new])
+    partial._check_template_metadata_completion()
+    assert len(partial.template_metadata_events) == 1 and \
+           partial.global_reasons == ["template_metadata_unpaired"]
+    checks += 1
+    rejected_templates = (
+        ("reversed", [template_removed]),
+        ("repeated", [template_new, template_removed, template_new]),
+        ("late", [canonical_new, template_new, template_removed]),
+        ("wrong-path", [{**template_new, "object_path": BASE_UNIT_PATH + "/other"}]),
+        ("wrong-name", [{**template_new, "unit": TEMPLATE_METADATA_UNIT + "x"}]),
+        ("wrong-sender", [{**template_new, "sender": ":1.9"}]),
+        ("wrong-interface", [{**template_new, "interface": "org.freedesktop.DBus.Properties"}]),
+        ("wrong-signature", [{**template_new, "signature": "s"}]),
+        ("malformed-prefix-wrong-path", [{**template_new,
+            "unit": "buster-bench-systemd-broker@bad.service",
+            "object_path": BASE_UNIT_PATH + "/other"}]),
+        ("template-properties", [template_new, template_removed,
+            {"member": "PropertiesChanged", "path": TEMPLATE_METADATA_PATH,
+             "sender": ":1.4", "unit_interface": "org.freedesktop.systemd1.Service",
+             "changed_properties": [], "invalidated_properties": [], "main_pids": []}]),
+    )
+    for label, messages in rejected_templates:
+        rejected_template = template_fixture(messages)
+        assert rejected_template.event_loss_detected and rejected_template.global_reasons, label
+        assert len(rejected_template.template_metadata_events) <= 2, label
+        checks += 1
+    over_budget = BrokerObserver(FixtureMetadataBus([template_new]), FixtureEventWriter(),
+                                 boot, raw, time.monotonic() + 5.0, "1", 1)
+    over_budget.ready_ns = time.monotonic_ns() - 1_000_000
+    over_budget.bus_dispatch_count = MAX_BUS_DISPATCHES
+    over_budget._current_process_events()
+    assert over_budget.bus_budget_exhausted and not over_budget.template_metadata_events
+    assert over_budget.global_reasons == ["manager_bus_dispatch_budget_exceeded"]
+    checks += 1
+
     event_observer = object.__new__(BrokerObserver)
     event_observer.bus = FixturePathBus()
     event_observer.writer = FixtureEventWriter()
@@ -2763,6 +2893,7 @@ def _self_test() -> None:
     event_observer.global_reasons = []
     event_observer.event_loss_detected = False
     event_observer.dispatch_diagnostics = BrokerObserver._new_dispatch_diagnostics()
+    event_observer.template_metadata_events = []
     event_observer.deadline = time.monotonic() + 5.0
     event_observer.stop_seen = False
     event_observer.handle_message({"member": "UnitNew", "interface": "org.freedesktop.systemd1.Manager",
