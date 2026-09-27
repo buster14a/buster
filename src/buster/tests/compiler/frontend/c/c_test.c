@@ -4548,6 +4548,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_block_tls(UnitTestArguments* a
 // starts from: that state means lowering failed, and the LLVM bitcode,
 // WebAssembly and eBPF emitters refuse the whole unit on it. The cycle's
 // unprototyped half is the no-prototype path, which leaves no function at all.
+// A definition kept for its section is a root, so both of its callees are
+// needed. Before it was, the call to the unprototyped one failed to lower and
+// the prototyped one was left bodiless, referenced as an undefined global.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unneeded_prototyped_definitions(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4565,7 +4568,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unneeded_prototyped_definitions(UnitTe
                                                "static int unneeded_cycle_a(void) { return unneeded_cycle_b(); }\n"
                                                "static int needed_static(void);\n"
                                                "int keep(void) { return needed_static(); }\n"
-                                               "static int needed_static(void) { return 4; }\n"),
+                                               "static int needed_static(void) { return 4; }\n"
+                                               "static int section_callee(void) { return 5; }\n"
+                                               "static int section_callee_prototyped(void);\n"
+                                               "__attribute__((section(\".text.kept\"))) static int section_root(void)"
+                                               " { return section_callee() + section_callee_prototyped(); }\n"
+                                               "static int section_callee_prototyped(void) { return 6; }\n"),
                                             (CPreprocessOptions){
                                                 .target = target_native,
                                                 .data_layout = target_data_layout(target_native),
@@ -4594,6 +4602,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unneeded_prototyped_definitions(UnitTe
         IrFunction* keep = c_test_find_ir_function(module, S8("keep"));
         BUSTER_TEST(arguments, needed && needed->state == IR_FUNCTION_LOWERED);
         BUSTER_TEST(arguments, keep && keep->state == IR_FUNCTION_LOWERED);
+        String8 section_reached[] = {S8("section_root"), S8("section_callee"), S8("section_callee_prototyped")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(section_reached); index += 1)
+        {
+            IrFunction* function = c_test_find_ir_function(module, section_reached[index]);
+            BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_LOWERED);
+        }
     }
     scratch_end(temporary);
     return result;

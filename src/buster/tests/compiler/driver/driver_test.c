@@ -8588,9 +8588,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_has_builtin_targets(Unit
 
 // Issue 1603: a prototype followed by a definition nothing reaches left that
 // definition's REJECTED placeholder in the IR. Native code generation skipped
-// it, but the LLVM bitcode, WebAssembly and eBPF emitters refused the unit,
-// so every shape below failed on all three. A refusal that does concern a
-// function must name it and point at it, as a native refusal does.
+// it, but the LLVM bitcode, WebAssembly and eBPF emitters refused the unit.
+// The last shape is a definition kept for its section, whose callees were
+// never marked needed: the call to the unprototyped one failed to lower on
+// every target, and the prototyped one was left bodiless -- refused by the
+// LLVM and eBPF emitters, turned into a host import by the WebAssembly one. A
+// refusal that does concern a function must name it and point at it, as a
+// native refusal does.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unneeded_prototyped_definitions(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8605,7 +8609,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unneeded_prototyped_defi
                         "static int unneeded_cycle_a(void) { return unneeded_cycle_b(); }\n"
                         "static int needed_static(void);\n"
                         "int main(void) { return needed_static(); }\n"
-                        "static int needed_static(void) { return 4; }\n");
+                        "static int needed_static(void) { return 4; }\n"
+                        "static int section_callee(void) { return 5; }\n"
+                        "static int section_callee_prototyped(void);\n"
+                        "__attribute__((section(\".text.kept\"))) static int section_root(void)"
+                        " { return section_callee() + section_callee_prototyped(); }\n"
+                        "static int section_callee_prototyped(void) { return 6; }\n");
     // The first target is compiled with -emit-llvm; the others select their
     // direct emitter by target alone.
     String8 target_names[] = {S8("x86_64-unknown-linux-gnu"), S8("wasm32-unknown-wasi"), S8("bpfel-unknown-linux")};
@@ -8636,10 +8645,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unneeded_prototyped_defi
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         Arena* arena = temporary.arena;
         String8 output = buster_test_temporary_path(arena, S8("buster-emitter-refusal"), S8(".out"));
-        String8 command[] = {S8("-c"), S8("-target"), refusal_targets[target_index], S8("-DABI_TEST_MODE=0"), S8("-o"), output,
-                             S8("tests/basic_c_llvm_abi_unsupported.c")};
-        CompilerDriverResult refused = compiler_driver_execute_invocation(
-            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        String8 command[] = {
+            S8("-c"), S8("-target"), refusal_targets[target_index], S8("-DABI_TEST_MODE=0"), S8("-o"), output, S8("tests/basic_c_llvm_abi_unsupported.c")};
+        CompilerDriverResult refused =
+            compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
         BUSTER_TEST(arguments, refused.error == (target_index == 0 ? COMPILER_DRIVER_ERROR_WASM : COMPILER_DRIVER_ERROR_EBPF));
         BUSTER_TEST_RAW(arguments, string_starts_with_sequence(refused.diagnostic, S8("tests/basic_c_llvm_abi_unsupported.c:3:")), refused.diagnostic);
         BUSTER_TEST_RAW(arguments, string_ends_with_sequence(refused.diagnostic, S8(" (in function 'return_pair')")), refused.diagnostic);

@@ -3007,7 +3007,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_llvm_bitcode_path(Arena* are
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_write_llvm_bitcode(Arena* arena, CompilerDriverInvocation invocation, IrProgram* program, IrModule* module,
-                                                              LlvmBitcodeArtifact artifact, CompilerDriverResult* result)
+                                                            LlvmBitcodeArtifact artifact, CompilerDriverResult* result)
 {
     if (!result)
     {
@@ -3019,7 +3019,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_llvm_bitcode(Arena* arena, Compil
         result->error = COMPILER_DRIVER_ERROR_LLVM_BITCODE;
         String8 message = artifact.error.diagnostic.length ? artifact.error.diagnostic
                           : artifact.error.message.length  ? artifact.error.message
-                                                            : S8("LLVM bitcode emission failed");
+                                                           : S8("LLVM bitcode emission failed");
         result->diagnostic = compiler_driver_emitter_diagnostic(arena, program, module, artifact.error.function, artifact.error.instruction, message);
         return false;
     }
@@ -3057,7 +3057,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_wasm_path(Arena* arena, Stri
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriverInvocation invocation, IrProgram* program, IrModule* module,
-                                                     WasmArtifact artifact, CompilerDriverResult* result)
+                                                    WasmArtifact artifact, CompilerDriverResult* result)
 {
     if (!result)
     {
@@ -3070,7 +3070,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriver
         result->error = COMPILER_DRIVER_ERROR_WASM;
         String8 message = artifact.error.diagnostic.length ? artifact.error.diagnostic
                           : artifact.error.message.length  ? artifact.error.message
-                                                            : S8("WebAssembly code generation failed");
+                                                           : S8("WebAssembly code generation failed");
         result->diagnostic = compiler_driver_emitter_diagnostic(arena, program, module, artifact.error.function, artifact.error.instruction, message);
         return false;
     }
@@ -3090,7 +3090,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriver
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriverInvocation invocation, IrProgram* program, IrModule* module,
-                                                     EbpfArtifact artifact, CompilerDriverResult* result)
+                                                    EbpfArtifact artifact, CompilerDriverResult* result)
 {
     if (!result)
     {
@@ -3102,7 +3102,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
         result->error = COMPILER_DRIVER_ERROR_EBPF;
         String8 message = artifact.error.diagnostic.length ? artifact.error.diagnostic
                           : artifact.error.message.length  ? artifact.error.message
-                                                            : S8("eBPF code generation failed");
+                                                           : S8("eBPF code generation failed");
         result->diagnostic = compiler_driver_emitter_diagnostic(arena, program, module, artifact.error.function, artifact.error.instruction, message);
         return false;
     }

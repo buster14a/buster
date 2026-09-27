@@ -50343,7 +50343,11 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         // image's startup calls it and no expression in the unit names it.
         bool registered = declaration.entity.value < parse.entity_count &&
                           (entity_constructor[declaration.entity.value] || entity_destructor[declaration.entity.value]);
-        if ((!internal && !inline_definition) || referenced_outside_body || registered)
+        // A definition placed in a named section is kept without a reference
+        // too, so it is a root as well: seeding it here is what keeps the
+        // functions it calls. The section is only looked up for a definition
+        // nothing else roots.
+        if ((!internal && !inline_definition) || referenced_outside_body || registered || c_declaration_section_name(arena, preprocess, declaration).length)
         {
             function_needed[declaration_index] = true;
             function_worklist[function_worklist_count++] = declaration_index;
@@ -50429,8 +50433,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         }
         bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
         bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
-        bool unneeded_definition = (internal || inline_definition) && declaration.is_definition && !function_needed[declaration_index] &&
-                                   !c_declaration_section_name(arena, preprocess, declaration).length;
+        bool unneeded_definition = (internal || inline_definition) && declaration.is_definition && !function_needed[declaration_index];
         IrFunction* existing_function = 0;
         CIntegerIrBuilder lookup_builder = {
             .function_names = &function_names,
@@ -50565,8 +50568,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         }
         bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
         bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
-        if ((internal || inline_definition) && !function_needed[declaration_index] &&
-            !c_declaration_section_name(arena, preprocess, declaration).length)
+        if ((internal || inline_definition) && !function_needed[declaration_index])
         {
             continue;
         }
