@@ -351,10 +351,11 @@ static bool bqeg_unit(BqEgMutation kind)
             "RestrictSUIDSGID=yes\nRestrictAddressFamilies=AF_UNIX\n"
             "SystemCallArchitectures=native\nSystemCallFilter=@system-service\n"
             "SystemCallErrorNumber=EPERM\n";
-        /* PrivateDevices may add a syscall filter even without an explicit
-         * SystemCallFilter. Keep the root/mount/identity/socket prerequisites,
-         * and let the prestart probe prove actual mode zero. */
-        char const* private_options = kind == BQEG_SECCOMP_OFF ? "" :
+        /* PrivateDevices installs an implicit @raw-io seccomp filter even
+         * without SystemCallFilter. Omit only that implicit source here;
+         * retain the other private namespaces and require measured mode 0. */
+        char const* private_options = kind == BQEG_SECCOMP_OFF ?
+            "PrivateTmp=yes\nPrivateNetwork=yes\nProtectHome=yes\n" :
             "PrivateTmp=yes\nPrivateDevices=yes\nPrivateNetwork=yes\nProtectHome=yes\n";
         fprintf(file, "[Unit]\nDescription=Disposable synthetic broker entry component\n"
             "[Service]\nType=exec\nRemainAfterExit=yes\nUser=root\nGroup=%s\n"
