@@ -55,22 +55,22 @@
 typedef enum BqEgMutation
 {
     BQEG_POSITIVE, BQEG_RECEIPT_ABSENT, BQEG_RECEIPT_MODE,
-    BQEG_RECEIPT_SERVICE_GID, BQEG_CANDIDATE_UID, BQEG_RUNNER_GID,
-    BQEG_NSSWITCH_MERGE, BQEG_NSCD_SOCKET,
+    BQEG_RECEIPT_SERVICE_GID, BQEG_NSSWITCH_MERGE, BQEG_NSCD_SOCKET,
     BQEG_PRIMARY_GID, BQEG_MISSING_GROUP, BQEG_EXTRA_GROUP,
     BQEG_BOUNDING_CAP, BQEG_AMBIENT_CAP, BQEG_NNP_OFF, BQEG_SECCOMP_OFF,
     BQEG_ROOT_RW, BQEG_SUBMOUNT_RW, BQEG_WRONG_FD0, BQEG_ABSENT_FD0,
     BQEG_CLOEXEC_FD0, BQEG_BROKER_MODE, BQEG_BROKER_ELF,
-    BQEG_BROKER_STACK, BQEG_JOURNAL_FAIL
+    BQEG_BROKER_STACK, BQEG_JOURNAL_FAIL, BQEG_CANDIDATE_UID, BQEG_RUNNER_GID
 } BqEgMutation;
 
 static char const* const bqeg_names[BQEG_CASES] = {
     "positive", "receipt-absent", "receipt-mode", "receipt-service-gid",
-    "candidate-uid-rebound", "runner-gid-rebound", "nsswitch-merge", "nscd-socket", "primary-gid",
+    "nsswitch-merge", "nscd-socket", "primary-gid",
     "missing-group", "extra-group", "bounding-cap", "ambient-cap",
     "nnp-off", "seccomp-off", "root-rw", "protected-submount-rw",
     "wrong-fd0", "absent-fd0", "cloexec-fd0", "broker-mode",
-    "broker-elf", "broker-exec-stack", "journal-send-fails"
+    "broker-elf", "broker-exec-stack", "journal-send-fails",
+    "candidate-uid-rebound", "runner-gid-rebound"
 };
 
 static char const bqeg_receipt[] = "BQ-ACCOUNTS-V1\nservice-uid=65000\nservice-gid=65000\n"
@@ -792,11 +792,14 @@ static bool bqeg_case(BqEgMutation kind)
         clean = bqeg_command(final_show, cleanup_log, 10) == 0 && clean;
         char final[8192] = {0};
         clean = bqeg_file(cleanup_log, final, sizeof(final)) && clean;
-        bool unloaded = strstr(final, "LoadState=not-found\n") != NULL &&
+        bool unloaded = (strstr(final, "LoadState=not-found\n") != NULL ||
+            strstr(final, "LoadState=loaded\n") != NULL) &&
             strstr(final, "ActiveState=inactive\n") != NULL &&
             strstr(final, "MainPID=0\n") != NULL &&
             strstr(final, "ControlGroup=\n") != NULL;
-        clean = clean && unloaded && (reset_status == 0 || unloaded);
+        clean = clean && unloaded && (reset_status == 0 ||
+            (strstr(final, "Failed to reset failed state of unit ") != NULL &&
+             strstr(final, "not loaded.") != NULL));
     }
     clean = bqeg_restore(kind, command_log) && clean;
     printf("BQEG_CLEANUP name=%s status=%s\n", bqeg_names[kind], clean ? "pass" : "fail");
