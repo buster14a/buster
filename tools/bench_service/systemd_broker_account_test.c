@@ -34,12 +34,20 @@
 
 enum { BQ_ACCOUNT_ROOT_FD = 100, BQ_ACCOUNT_ETC_FD = 101,
        BQ_ACCOUNT_CONFIG_FD = 102, BQ_ACCOUNT_RECEIPT_FD = 103 };
-static uid_t account_candidate_uid;
-static gid_t account_candidate_gid;
+enum AccountMutation { ACCOUNT_UNCHANGED, ACCOUNT_SERVICE_UID, ACCOUNT_SERVICE_GID,
+                       ACCOUNT_CANDIDATE_UID, ACCOUNT_CANDIDATE_GID,
+                       ACCOUNT_RUNNER_UID, ACCOUNT_RUNNER_GID };
+enum AccountFault { ACCOUNT_RECEIPT_OK, ACCOUNT_RECEIPT_MISSING,
+                    ACCOUNT_FILE_OWNER, ACCOUNT_FILE_MODE, ACCOUNT_FILE_LINK,
+                    ACCOUNT_FILE_TYPE, ACCOUNT_FILE_OVERSIZE,
+                    ACCOUNT_DIRECTORY_OWNER, ACCOUNT_DIRECTORY_MODE,
+                    ACCOUNT_AFTER_INODE, ACCOUNT_AFTER_MTIME, ACCOUNT_AFTER_CTIME };
+static BqBrokerAccounts account_ids;
 static unsigned account_state_walks;
 static unsigned account_receipt_reads;
+static unsigned account_receipt_stats;
 static unsigned account_manager_execs;
-static bool account_missing_receipt;
+static enum AccountFault account_fault;
 static char const* account_receipt_bytes;
 static size_t account_receipt_offset;
 
@@ -49,32 +57,32 @@ struct passwd* bq_account_getpwnam(char const* name)
     result = (struct passwd){0};
     if (!strcmp(name, "buster-bench"))
     {
-        result.pw_uid = 65000;
-        result.pw_gid = 65000;
+        result.pw_uid = account_ids.service_uid;
+        result.pw_gid = account_ids.service_gid;
     }
     else if (!strcmp(name, "buster-bench-candidate"))
     {
-        result.pw_uid = account_candidate_uid;
-        result.pw_gid = account_candidate_gid;
+        result.pw_uid = account_ids.candidate_uid;
+        result.pw_gid = account_ids.candidate_gid;
     }
     else if (!strcmp(name, "buster-github-runner"))
     {
-        result.pw_uid = 65002;
-        result.pw_gid = 65002;
+        result.pw_uid = account_ids.runner_uid;
+        result.pw_gid = account_ids.runner_gid;
     }
     else return NULL;
     return &result;
 }
 
 uid_t bq_account_geteuid(void) { return 0; }
-gid_t bq_account_getegid(void) { return 65000; }
+gid_t bq_account_getegid(void) { return account_ids.service_gid; }
 int bq_account_getgroups(int size, gid_t* groups)
 {
     int result = -1;
     if (size >= 2)
     {
-        groups[0] = 65000;
-        groups[1] = account_candidate_gid;
+        groups[0] = account_ids.service_gid;
+        groups[1] = account_ids.candidate_gid;
         result = 2;
     }
     return result;
@@ -87,7 +95,7 @@ int bq_account_getgrouplist(char const* user, gid_t primary, gid_t* groups, int*
     if (*count >= needed)
     {
         groups[0] = primary;
-        if (service) groups[1] = account_candidate_gid;
+        if (service) groups[1] = account_ids.candidate_gid;
         result = needed;
     }
     *count = needed;
@@ -99,7 +107,8 @@ int bq_account_getsockopt(int descriptor, int level, int name, void* output, soc
     int result = -1;
     if (level == SOL_SOCKET && name == SO_PEERCRED && *size >= sizeof(struct ucred))
     {
-        *(struct ucred*)output = (struct ucred){.pid = getpid(), .uid = 65000, .gid = 65000};
+        *(struct ucred*)output = (struct ucred){.pid = getpid(),
+            .uid = account_ids.service_uid, .gid = account_ids.service_gid};
         *size = sizeof(struct ucred);
         result = 0;
     }
@@ -121,7 +130,7 @@ int bq_account_openat(int directory, char const* path, int flags, ...)
     if (directory == BQ_ACCOUNT_ROOT_FD && !strcmp(path, "etc")) result = BQ_ACCOUNT_ETC_FD;
     else if (directory == BQ_ACCOUNT_ETC_FD && !strcmp(path, "buster-bench")) result = BQ_ACCOUNT_CONFIG_FD;
     else if (directory == BQ_ACCOUNT_CONFIG_FD && !strcmp(path, "systemd-broker-accounts.identity") &&
-             !account_missing_receipt) result = BQ_ACCOUNT_RECEIPT_FD;
+             account_fault != ACCOUNT_RECEIPT_MISSING) result = BQ_ACCOUNT_RECEIPT_FD;
     else if (directory == BQ_ACCOUNT_ROOT_FD && !strcmp(path, "var")) account_state_walks += 1;
     if (result < 0) errno = ENOENT;
     return result;
@@ -135,7 +144,27 @@ int bq_account_fstat(int descriptor, struct stat* info)
         info->st_uid = 0; info->st_gid = 0;
         info->st_nlink = 1; info->st_dev = 41; info->st_ino = (ino_t)descriptor;
         info->st_mode = descriptor == BQ_ACCOUNT_RECEIPT_FD ? S_IFREG | 0444 : S_IFDIR | 0555;
-        if (descriptor == BQ_ACCOUNT_RECEIPT_FD) info->st_size = (off_t)strlen(account_receipt_bytes);
+        if (descriptor == BQ_ACCOUNT_RECEIPT_FD)
+        {
+            account_receipt_stats += 1;
+            info->st_size = (off_t)strlen(account_receipt_bytes);
+            if (account_fault == ACCOUNT_FILE_OWNER) info->st_uid = 65010;
+            if (account_fault == ACCOUNT_FILE_MODE) info->st_mode = S_IFREG | 0644;
+            if (account_fault == ACCOUNT_FILE_LINK) info->st_nlink = 2;
+            if (account_fault == ACCOUNT_FILE_TYPE) info->st_mode = S_IFIFO | 0444;
+            if (account_fault == ACCOUNT_FILE_OVERSIZE) info->st_size = 256;
+            if (account_receipt_stats == 2)
+            {
+                if (account_fault == ACCOUNT_AFTER_INODE) info->st_ino += 1;
+                if (account_fault == ACCOUNT_AFTER_MTIME) info->st_mtim.tv_nsec += 1;
+                if (account_fault == ACCOUNT_AFTER_CTIME) info->st_ctim.tv_nsec += 1;
+            }
+        }
+        if (descriptor == BQ_ACCOUNT_CONFIG_FD)
+        {
+            if (account_fault == ACCOUNT_DIRECTORY_OWNER) info->st_uid = 65010;
+            if (account_fault == ACCOUNT_DIRECTORY_MODE) info->st_mode = S_IFDIR | 0777;
+        }
         result = 0;
     }
     else result = (int)syscall(SYS_fstat, descriptor, info);
@@ -173,9 +202,9 @@ int bq_account_execv(char const* path, char* const arguments[])
     return -1;
 }
 
-static bool account_case(char const* label, uint32_t operation, uid_t candidate_uid,
-                         gid_t candidate_gid, char const* receipt, bool missing,
-                         bool expected_state)
+static bool account_case(char const* label, uint32_t operation, uint32_t signal_number,
+                         enum AccountMutation mutation, char const* receipt,
+                         enum AccountFault fault, bool expected_state, unsigned expected_reads)
 {
     static char const canonical[] = "BQ-ACCOUNTS-V1\nservice-uid=65000\nservice-gid=65000\n"
                                     "candidate-uid=65001\ncandidate-gid=65001\n"
@@ -183,19 +212,31 @@ static bool account_case(char const* label, uint32_t operation, uid_t candidate_
     int pair[2] = {-1, -1};
     int saved_stdin = dup(STDIN_FILENO);
     bool ok = saved_stdin >= 0 && socketpair(AF_UNIX, SOCK_SEQPACKET, 0, pair) == 0;
-    account_candidate_uid = candidate_uid;
-    account_candidate_gid = candidate_gid;
+    account_ids = (BqBrokerAccounts){.service_uid = 65000, .service_gid = 65000,
+        .candidate_uid = 65001, .candidate_gid = 65001,
+        .runner_uid = 65002, .runner_gid = 65002};
+    switch (mutation)
+    {
+        case ACCOUNT_UNCHANGED: break;
+        case ACCOUNT_SERVICE_UID: account_ids.service_uid = 65003; break;
+        case ACCOUNT_SERVICE_GID: account_ids.service_gid = 65003; break;
+        case ACCOUNT_CANDIDATE_UID: account_ids.candidate_uid = 65003; break;
+        case ACCOUNT_CANDIDATE_GID: account_ids.candidate_gid = 65003; break;
+        case ACCOUNT_RUNNER_UID: account_ids.runner_uid = 65003; break;
+        case ACCOUNT_RUNNER_GID: account_ids.runner_gid = 65003; break;
+    }
     account_receipt_bytes = receipt ? receipt : canonical;
     account_receipt_offset = 0;
     account_receipt_reads = 0;
+    account_receipt_stats = 0;
     account_state_walks = 0;
     account_manager_execs = 0;
-    account_missing_receipt = missing;
+    account_fault = fault;
     if (ok)
     {
         BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = 1,
                                    .operation = operation, .stage = BQ_BROKER_OUTER,
-                                   .signal_number = operation == BQ_BROKER_SIGNAL ? BQ_BROKER_CONT : 0,
+                                   .signal_number = signal_number,
                                    .job = 1, .attempt = 2};
         if (operation == BQ_BROKER_START)
         {
@@ -210,28 +251,82 @@ static bool account_case(char const* label, uint32_t operation, uid_t candidate_
     if (pair[0] >= 0) syscall(SYS_close, pair[0]);
     if (pair[1] >= 0) syscall(SYS_close, pair[1]);
     bool state = account_state_walks > 0;
-    printf("%s op=%u candidate=%u:%u receipt_reads=%u state=%d manager_execs=%u\n",
-           label, operation, candidate_uid, candidate_gid, account_receipt_reads, state,
-           account_manager_execs);
+    printf("%s op=%u signal=%u ids=%u:%u,%u:%u,%u:%u receipt_reads=%u state=%d manager_execs=%u\n",
+           label, operation, signal_number, account_ids.service_uid, account_ids.service_gid,
+           account_ids.candidate_uid, account_ids.candidate_gid, account_ids.runner_uid,
+           account_ids.runner_gid, account_receipt_reads, state, account_manager_execs);
     return ok && state == expected_state && account_manager_execs == 0 &&
-           (missing ? account_receipt_reads == 0 : account_receipt_reads >= 1);
+           account_receipt_reads == expected_reads;
 }
 
 int main(void)
 {
-    static char const malformed[] = "BQ-ACCOUNTS-V1\nservice-uid=65000\nservice-gid=65000\n"
+    static char const crlf[] = "BQ-ACCOUNTS-V1\nservice-uid=65000\nservice-gid=65000\n"
+                               "candidate-uid=65001\ncandidate-gid=65001\n"
+                               "runner-uid=65002\nrunner-gid=65002\r\n";
+    static char const leading_zero[] = "BQ-ACCOUNTS-V1\nservice-uid=065000\nservice-gid=65000\n"
+                                       "candidate-uid=65001\ncandidate-gid=65001\n"
+                                       "runner-uid=65002\nrunner-gid=65002\n";
+    static char const truncated[] = "BQ-ACCOUNTS-V1\nservice-uid=65000\nservice-gid=65000\n"
+                                    "candidate-uid=65001\ncandidate-gid=65001\nrunner-uid=65002\n";
+    static char const duplicate[] = "BQ-ACCOUNTS-V1\nservice-uid=65000\nservice-gid=65000\n"
                                     "candidate-uid=65001\ncandidate-gid=65001\n"
-                                    "runner-uid=65002\nrunner-gid=65002\r\n";
+                                    "runner-uid=65002\nrunner-gid=65002\nrunner-gid=65002\n";
+    static char const extra[] = "BQ-ACCOUNTS-V1\nservice-uid=65000\nservice-gid=65000\n"
+                                "candidate-uid=65001\ncandidate-gid=65001\n"
+                                "runner-uid=65002\nrunner-gid=65002\nextra=1\n";
+    static char const mismatch[] = "BQ-ACCOUNTS-V1\nservice-uid=65000\nservice-gid=65000\n"
+                                   "candidate-uid=65003\ncandidate-gid=65001\n"
+                                   "runner-uid=65002\nrunner-gid=65002\n";
     bool ok = true;
-    ok &= account_case("clean_start", BQ_BROKER_START, 65001, 65001, NULL, false, true);
-    ok &= account_case("changed_candidate_uid_start", BQ_BROKER_START, 65003, 65001, NULL, false, false);
-    ok &= account_case("changed_candidate_gid_start", BQ_BROKER_START, 65001, 65003, NULL, false, false);
-    ok &= account_case("missing_start", BQ_BROKER_START, 65001, 65001, NULL, true, false);
-    ok &= account_case("malformed_start", BQ_BROKER_START, 65001, 65001, malformed, false, false);
-    ok &= account_case("clean_cont", BQ_BROKER_SIGNAL, 65001, 65001, NULL, false, true);
-    ok &= account_case("changed_candidate_uid_cont", BQ_BROKER_SIGNAL, 65003, 65001, NULL, false, false);
-    ok &= account_case("changed_candidate_gid_cont", BQ_BROKER_SIGNAL, 65001, 65003, NULL, false, false);
-    ok &= account_case("missing_cont", BQ_BROKER_SIGNAL, 65001, 65001, NULL, true, false);
-    ok &= account_case("malformed_cont", BQ_BROKER_SIGNAL, 65001, 65001, malformed, false, false);
+    static enum AccountMutation const changes[] = {ACCOUNT_SERVICE_UID, ACCOUNT_SERVICE_GID,
+        ACCOUNT_CANDIDATE_UID, ACCOUNT_CANDIDATE_GID, ACCOUNT_RUNNER_UID, ACCOUNT_RUNNER_GID};
+    static char const* const roles[] = {"service_uid", "service_gid", "candidate_uid",
+        "candidate_gid", "runner_uid", "runner_gid"};
+    ok &= account_case("clean_start", BQ_BROKER_START, 0, ACCOUNT_UNCHANGED,
+                       NULL, ACCOUNT_RECEIPT_OK, true, 2);
+    ok &= account_case("clean_cont", BQ_BROKER_SIGNAL, BQ_BROKER_CONT, ACCOUNT_UNCHANGED,
+                       NULL, ACCOUNT_RECEIPT_OK, true, 2);
+    for (size_t index = 0; index < sizeof(changes) / sizeof(changes[0]); index += 1)
+    {
+        char label[64];
+        snprintf(label, sizeof(label), "changed_%s_start", roles[index]);
+        ok &= account_case(label, BQ_BROKER_START, 0, changes[index],
+                           NULL, ACCOUNT_RECEIPT_OK, false, 2);
+        snprintf(label, sizeof(label), "changed_%s_cont", roles[index]);
+        ok &= account_case(label, BQ_BROKER_SIGNAL, BQ_BROKER_CONT, changes[index],
+                           NULL, ACCOUNT_RECEIPT_OK, false, 2);
+    }
+#define ACCOUNT_REJECT(label, bytes, fault, reads) \
+    ok &= account_case(label "_start", BQ_BROKER_START, 0, ACCOUNT_UNCHANGED, \
+                       bytes, fault, false, reads); \
+    ok &= account_case(label "_cont", BQ_BROKER_SIGNAL, BQ_BROKER_CONT, ACCOUNT_UNCHANGED, \
+                       bytes, fault, false, reads)
+    ACCOUNT_REJECT("missing", NULL, ACCOUNT_RECEIPT_MISSING, 0);
+    ACCOUNT_REJECT("mismatched", mismatch, ACCOUNT_RECEIPT_OK, 2);
+    ACCOUNT_REJECT("crlf", crlf, ACCOUNT_RECEIPT_OK, 2);
+    ACCOUNT_REJECT("leading_zero", leading_zero, ACCOUNT_RECEIPT_OK, 2);
+    ACCOUNT_REJECT("truncated", truncated, ACCOUNT_RECEIPT_OK, 2);
+    ACCOUNT_REJECT("duplicate", duplicate, ACCOUNT_RECEIPT_OK, 2);
+    ACCOUNT_REJECT("extra", extra, ACCOUNT_RECEIPT_OK, 2);
+    ACCOUNT_REJECT("file_owner", NULL, ACCOUNT_FILE_OWNER, 0);
+    ACCOUNT_REJECT("file_mode", NULL, ACCOUNT_FILE_MODE, 0);
+    ACCOUNT_REJECT("file_link", NULL, ACCOUNT_FILE_LINK, 0);
+    ACCOUNT_REJECT("file_type", NULL, ACCOUNT_FILE_TYPE, 0);
+    ACCOUNT_REJECT("file_oversize", NULL, ACCOUNT_FILE_OVERSIZE, 0);
+    ACCOUNT_REJECT("directory_owner", NULL, ACCOUNT_DIRECTORY_OWNER, 0);
+    ACCOUNT_REJECT("directory_mode", NULL, ACCOUNT_DIRECTORY_MODE, 0);
+    ACCOUNT_REJECT("after_inode", NULL, ACCOUNT_AFTER_INODE, 2);
+    ACCOUNT_REJECT("after_mtime", NULL, ACCOUNT_AFTER_MTIME, 2);
+    ACCOUNT_REJECT("after_ctime", NULL, ACCOUNT_AFTER_CTIME, 2);
+#undef ACCOUNT_REJECT
+    ok &= account_case("missing_term_cleanup", BQ_BROKER_SIGNAL, BQ_BROKER_TERM,
+                       ACCOUNT_UNCHANGED, NULL, ACCOUNT_RECEIPT_MISSING, true, 0);
+    ok &= account_case("missing_kill_cleanup", BQ_BROKER_SIGNAL, BQ_BROKER_KILL,
+                       ACCOUNT_UNCHANGED, NULL, ACCOUNT_RECEIPT_MISSING, true, 0);
+    ok &= account_case("mismatched_term_cleanup", BQ_BROKER_SIGNAL, BQ_BROKER_TERM,
+                       ACCOUNT_UNCHANGED, mismatch, ACCOUNT_RECEIPT_OK, true, 0);
+    ok &= account_case("mismatched_kill_cleanup", BQ_BROKER_SIGNAL, BQ_BROKER_KILL,
+                       ACCOUNT_UNCHANGED, mismatch, ACCOUNT_RECEIPT_OK, true, 0);
     return ok ? 0 : 1;
 }
