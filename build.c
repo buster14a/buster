@@ -24193,9 +24193,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
     MatrixTestTree linux_trees[5] = {
         {.build_directory = S8("linux-debug")},
         {.build_directory = S8("linux-canonical"), .unity_only = 1},
-        {0},
-        {0},
-        {0},
+        {.build_directory = {0}},
+        {.build_directory = {0}},
+        {.build_directory = {0}},
     };
     matrix_superbuild_allocate_jobs(linux_trees, BUSTER_ARRAY_LENGTH(linux_trees), 16);
     u32 expected_linux_unity[] = {0, 1, 0, 0, 0};
@@ -24212,12 +24212,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
     }
 
     MatrixTestTree windows_trees[6] = {
-        {0},
-        {0},
+        {.build_directory = {0}},
+        {.build_directory = {0}},
         {.build_directory = S8("windows-canonical"), .unity_only = 1},
-        {0},
-        {0},
-        {0},
+        {.build_directory = {0}},
+        {.build_directory = {0}},
+        {.build_directory = {0}},
     };
     matrix_superbuild_allocate_jobs(windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4);
     u32 expected_windows_unity[] = {0, 0, 1, 0, 0, 0};
