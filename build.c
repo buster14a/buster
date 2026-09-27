@@ -29,7 +29,7 @@
 //   aarch64_import_*, aarch64_generated_*        Arm A64 XML importer
 //   bench_throughput_add                        reproducible compiler benchmarks
 //   bench_service_recipe                        fixed validate-buster service recipe
-//   bench_service_broker_add                    Linux broker, static credential gate and regression probes
+//   bench_service_broker_add                    Linux broker, static entry/payload gates and regression probes
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance
 //   uefi_boot_*                                 pinned firmware boot gate
@@ -39784,24 +39784,31 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_broker_add(Arena* arena, SliceSt
         // The effective-credential gate must run before any dynamic loader or
         // candidate-controlled payload. The installed broker also verifies its
         // ELF program headers; a dynamic substitute is not an installable gate.
-        ProcessRun* gate_compile = run_add(arena, step_add(arena));
-        builder = os_argument_builder_start(arena);
-        os_argument_builder_append(&builder, compiler);
-        os_argument_builder_append(&builder, S8("-std=c11"));
-        os_argument_builder_append(&builder, S8("-O2"));
-        os_argument_builder_append(&builder, S8("-Wall"));
-        os_argument_builder_append(&builder, S8("-Wextra"));
-        os_argument_builder_append(&builder, S8("-Werror"));
-        os_argument_builder_append(&builder, S8("-fwrapv"));
-        os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
-        os_argument_builder_append(&builder, S8("-funsigned-char"));
-        os_argument_builder_append(&builder, S8("-static"));
-        os_argument_builder_append(&builder, S8("-Wl,-z,noexecstack"));
-        os_argument_builder_append(&builder, S8("tools/bench_service/credential_gate.c"));
-        os_argument_builder_append(&builder, S8("-o"));
-        os_argument_builder_append(&builder, S8("build/bench-service-tools/credential-gate"));
-        *gate_compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder), .working_directory = S8("."),
-                                     .spawn_options = {.use_process_environment = 1}};
+        String8 gate_sources[] = {S8("tools/bench_service/credential_gate.c"),
+                                  S8("tools/bench_service/broker_entry_gate.c")};
+        String8 gate_outputs[] = {S8("build/bench-service-tools/credential-gate"),
+                                  S8("build/bench-service-tools/broker-entry-gate")};
+        for (u32 gate = 0; gate < BUSTER_ARRAY_LENGTH(gate_sources); gate += 1)
+        {
+            ProcessRun* gate_compile = run_add(arena, step_add(arena));
+            builder = os_argument_builder_start(arena);
+            os_argument_builder_append(&builder, compiler);
+            os_argument_builder_append(&builder, S8("-std=c11"));
+            os_argument_builder_append(&builder, S8("-O2"));
+            os_argument_builder_append(&builder, S8("-Wall"));
+            os_argument_builder_append(&builder, S8("-Wextra"));
+            os_argument_builder_append(&builder, S8("-Werror"));
+            os_argument_builder_append(&builder, S8("-fwrapv"));
+            os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
+            os_argument_builder_append(&builder, S8("-funsigned-char"));
+            os_argument_builder_append(&builder, S8("-static"));
+            os_argument_builder_append(&builder, S8("-Wl,-z,noexecstack"));
+            os_argument_builder_append(&builder, gate_sources[gate]);
+            os_argument_builder_append(&builder, S8("-o"));
+            os_argument_builder_append(&builder, gate_outputs[gate]);
+            *gate_compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder), .working_directory = S8("."),
+                                         .spawn_options = {.use_process_environment = 1}};
+        }
         ProcessRun* live_compile = run_add(arena, step_add(arena));
         builder = os_argument_builder_start(arena);
         os_argument_builder_append(&builder, compiler);
@@ -39823,11 +39830,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_broker_add(Arena* arena, SliceSt
             String8 fixture_sources[] = {S8("tools/bench_service/credential_gate_test.c"),
                                          S8("tools/bench_service/credential_gate_elf_test.c"),
                                          S8("tools/bench_service/credential_gate.c"),
-                                         S8("tools/bench_service/systemd_broker_account_test.c")};
+                                         S8("tools/bench_service/systemd_broker_account_test.c"),
+                                         S8("tools/bench_service/broker_entry_gate_test.c")};
             String8 fixture_outputs[] = {S8("build/bench-service-tools/credential-gate-test"),
                                          S8("build/bench-service-tools/credential-gate-elf-test"),
                                          S8("build/bench-service-tools/credential-gate-dynamic-negative"),
-                                         S8("build/bench-service-tools/systemd-broker-account-test")};
+                                         S8("build/bench-service-tools/systemd-broker-account-test"),
+                                         S8("build/bench-service-tools/broker-entry-gate-test")};
             for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixture_sources); fixture += 1)
             {
                 ProcessRun* fixture_compile = run_add(arena, step_add(arena));
@@ -39886,6 +39895,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_broker_add(Arena* arena, SliceSt
                                          S8("build/bench-service-tools/credential-gate-dynamic-negative")};
             *gate_elf_test = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(gate_elf_command),
                                           .working_directory = S8("."), .spawn_options = {.use_process_environment = 1}};
+            ProcessRun* entry_test = run_add(arena, step_add(arena));
+            String8 entry_command[] = {S8("build/bench-service-tools/broker-entry-gate-test"),
+                                       S8("build/bench-service-tools/broker-entry-gate"), executable};
+            *entry_test = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(entry_command),
+                                       .working_directory = S8("."), .spawn_options = {.use_process_environment = 1}};
             ProcessRun* account_test = run_add(arena, step_add(arena));
             String8 account_command[] = {S8("build/bench-service-tools/systemd-broker-account-test")};
             *account_test = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(account_command),

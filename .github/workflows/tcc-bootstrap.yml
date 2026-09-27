@@ -87,6 +87,11 @@ jobs:
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: ./build.sh bench_service self-test --sanitize
 
+      - name: Broker and static gate component tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: ./build.sh bench_service_broker self-test
+
       - name: Fixed smoke recipe self-test
         if: ${{ !cancelled() }}
         shell: bash

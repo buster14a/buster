@@ -41,6 +41,72 @@ directory components with `O_PATH`, checks the exact owner/group/mode, and
 reads only the named records and manifests. Candidate and runner accounts
 have neither service-group membership nor access to the socket.
 
+### Prospective broker entry enforcement (#1162)
+
+`broker_entry_gate.c` is the source component for the prospective same-PID
+entry criterion recorded in #1162. `bench_service_broker` builds the separate
+static `build/bench-service-tools/broker-entry-gate`; `self-test` also runs its
+component regressions. The deployed unit template still directly starts the
+broker. This component is not an installation release or service-readiness
+verdict. The payload credential gate below remains unchanged.
+
+The new entry executable accepts no arguments. It reads the canonical numeric
+account receipt through root-owned nonsymlink ancestry, rejects changes during
+the read, and checks all four root UIDs and service GIDs. Its complete expected
+supplementary set is **exactly** group 0, the receipt's service GID and its
+candidate GID, once each, in any kernel order. Future unit integration must
+explicitly pin `SupplementaryGroups=root buster-bench buster-bench-candidate`;
+it must not silently inherit whichever subset an NSS configuration produces.
+The receipt remains installation authority. This static gate performs no NSS
+lookup; the broker's existing request-time NSS/receipt and role-membership
+checks still apply. Changing any account requires the disabled/drained
+installation procedure and a new authenticated inventory.
+
+Before executing the broker, the gate requires empty effective, permitted,
+inheritable, bounding and ambient capabilities, NNP=1 and seccomp mode 2.
+It checks read-only mounts at `/usr`, `/etc/buster-bench`,
+`/opt/buster-bench/installed` and `/var/lib/buster-bench`, including every
+descendant mount listed in the bounded kernel mount inventory. It requires
+FD0 to be a connected, non-listening AF_UNIX SOCK_SEQPACKET socket at the
+fixed control pathname with CLOEXEC clear. Peer and request authorization
+remain in the broker; a root peer is still expected to pass the gate and
+then be denied before request polling or receipt.
+
+The gate opens the fixed installed broker through root-owned nonsymlink
+ancestry. Both its own static executable and the held broker must be regular,
+single-link, root-owned, non-suid, capless files on read-only mounts, with no
+group/world write permission. Bounded native ELF64 inspection rejects an
+executable stack, writable executable load segment, invalid program bounds
+or foreign machine. A successful gate emits one bounded
+`BQ-BROKER-ENTRY-V1 PASS` line to the inherited journal socket; a short or
+failed nonblocking send prevents exec. It then calls `fexecve` on the held
+broker descriptor with only `serve-connection` and a fixed PATH, locale and
+validated invocation ID. PID, start ticks and FD0 are preserved. An exec
+failure exits 126; a PASS without the matching broker records cannot pass
+the eventual evidence consumer.
+
+The receipt binds boot ID, PID/start ticks, invocation ID, broker-unit cgroup,
+FD0 device/inode, gate/broker/account-file device/inode/size/mtime/ctime and
+the six canonical numeric account values. File tuples are not binary hashes;
+independent installation readback must bind them to exact reviewed binaries,
+receipt bytes and unit/filter hashes. Seccomp mode 2 does not identify a
+filter. Trusted installation and the verified immutable systemd filter are
+mandatory parts of the claim, as are the existing namespace and mount policy.
+
+Before enabling this component, finish the installation manifest and unit
+integration, strict per-instance manager/gate/broker/outcome reconciliation,
+and independent exact-source review (including absence of later broker
+credential, namespace, mount and parent-FD0 changes). Missing, duplicate or
+inconsistent evidence must reject the whole attempt. The fresh disposable
+real-systemd full-service proof must cover every required positive operation
+and negative mutation, including account rebinding, groups, capability sets,
+NNP/seccomp/mount weakening, FD0, ELF tampering and missing evidence, with
+zero broker BEGIN/manager effects for rejected entry. Component fixtures
+use synthetic capability queries and a real socketpair with a synthetic
+local pathname; they do not prove PID1's descriptor inheritance or a live
+systemd sandbox. Retain external process captures wherever available and
+independently replay the full raw attempt. Attempt23 remains failed.
+
 ### Effective credentials before each transient payload
 
 An independent installation receipt fixes the six numeric service, candidate

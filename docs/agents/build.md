@@ -87,7 +87,9 @@ the local bootstrap cache, and runs `./build.sh time_trace_summary_self_test`
 twice to prove both cold publication and warm reuse. This check does not select
 the dedicated benchmark runner or require privileged installation.
 The same hosted check runs native service tests, their ASan/UBSan variant, and
-the fixed smoke recipe self-test through this TCC-built driver. These use
+the fixed smoke recipe self-test through this TCC-built driver. It also builds
+the broker and both static gates and runs their component regressions with
+`bench_service_broker self-test`. These use
 temporary fixtures and do not provision or qualify the benchmark host.
 
 On Linux, distribution TCC 0.9.27 can reject inferred-size arrays containing
