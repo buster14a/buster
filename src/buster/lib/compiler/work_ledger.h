@@ -31,7 +31,13 @@
 // pages) and arena request traffic to the pipeline stage that caused them.
 #include <buster/lib/base.h>
 
-#if BUSTER_BENCH_ALLOCATIONS
+// On in the allocation build of anything that links ir.c. build.c includes
+// x86_64_metadata.c without ir.c, so it sets this to 0 and records nothing.
+#ifndef BUSTER_WORK_LEDGER
+#define BUSTER_WORK_LEDGER BUSTER_BENCH_ALLOCATIONS
+#endif
+
+#if BUSTER_WORK_LEDGER
 #define WORK_LEDGER_COUNTERS(X) \
     X(REDERIVE_TYPE_QUERY_ROOTS, rederive, type_query_roots) \
     X(REDERIVE_TYPE_QUERY_CACHE_HITS, rederive, type_query_cache_hits) \

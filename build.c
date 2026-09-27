@@ -36,6 +36,10 @@
 //   process_arguments, main                      command dispatch
 
 #define BUSTER_UNITY_BUILD 1
+// The allocation-census harness builds this driver with
+// BUSTER_BENCH_ALLOCATIONS=1, but the work ledger's storage lives in the
+// compiler's ir.c, which the driver does not include (work_ledger.h).
+#define BUSTER_WORK_LEDGER 0
 // TCC's bootstrap headers/atomics retain the serial fallback. Hosted Clang
 // drivers can opt into the existing lane gang with test_differential --jobs.
 #if defined(__TINYC__) && !defined(BUSTER_SINGLE_THREADED)
