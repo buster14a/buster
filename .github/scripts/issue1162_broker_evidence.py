@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import sys
+import tempfile
 import zlib
 from typing import Any
 
@@ -48,6 +49,17 @@ UUID36 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 STARTING_MESSAGE_ID = "7d4958e842da4a758f6c1cdc7b36dcc5"
 STARTED_MESSAGE_ID = "39f53479d3a045ac8e11786248231fbf"
 FAILED_MESSAGE_ID = "be02cf6855d2428ba40df7e9d022f03d"
+PROCESS_EXIT_MESSAGE_ID = "98e322203f7a4ed290d09fe03c09fe15"
+UNIT_FAILED_MESSAGE_ID = "d9b373ed55a64feb8242e02dbe79a49c"
+TERMINAL_PROPERTIES = frozenset((
+    "Id", "LoadState", "CollectMode", "ActiveState", "SubState", "MainPID",
+    "InvocationID", "ExecMainPID", "ExecMainCode", "ExecMainStatus",
+    "ExecMainStartTimestampMonotonic", "ExecMainExitTimestampMonotonic", "Result"))
+TERMINAL_FIELDS = frozenset((
+    "boot_id", "boot_id_raw", "unit", "object_path", "generation", "manager_sender",
+    "event_seq", "started_monotonic_ns", "finished_monotonic_ns", "raw_show", "raw_stderr",
+    "systemctl_exit", "systemctl_timed_out", "systemctl_timeout_reason", "systemctl_cancelled",
+    "manager_properties_complete", "incomplete_reasons", "properties"))
 
 # Captured from the frozen #1472 C emitter through an AF_UNIX socketpair.
 # The producer's REQUEST/OUTCOME values are simulated, and the stream has no
@@ -605,6 +617,59 @@ def collect_manager_start_rows(records: list[dict[str, Any]], expected_boot: str
     return rows
 
 
+def collect_manager_failed_exit_rows(
+        records: list[dict[str, Any]], expected_boot: str
+        ) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Index observed PID1 failures; this does not classify them as success."""
+    rows: dict[tuple[str, str, str], dict[str, Any]] = {}
+    starts: dict[tuple[str, str, str], tuple[int, Any]] = {}
+    for number, record in enumerate(records, 1):
+        unit = record.get("UNIT")
+        message_id = record.get("MESSAGE_ID")
+        if (not isinstance(unit, str) or not unit.startswith("buster-bench-systemd-broker@") or
+                message_id not in (STARTED_MESSAGE_ID, PROCESS_EXIT_MESSAGE_ID, UNIT_FAILED_MESSAGE_ID)):
+            continue
+        parse_broker_unit(unit, "PID1 failure unit")
+        require(record.get("_PID") == "1" and record.get("_TRANSPORT") == "journal" and
+                record.get("_BOOT_ID") == expected_boot,
+                "broker failure is not from the exact PID1/boot journal")
+        invocation = _field_text(record, "INVOCATION_ID", "PID1 failure invocation")
+        require(HEX32.fullmatch(invocation) is not None and invocation != "0" * 32,
+                "PID1 failure invocation is malformed")
+        key = (expected_boot, unit, invocation)
+        if message_id == STARTED_MESSAGE_ID:
+            require(key not in starts and record.get("JOB_TYPE") == "start" and record.get("JOB_RESULT") == "done",
+                    "duplicate or malformed PID1 successful start before failure")
+            starts[key] = (number, record.get("__MONOTONIC_TIMESTAMP"))
+            continue
+        timestamp = canonical_uint(_field_text(record, "__MONOTONIC_TIMESTAMP", "PID1 failure time"),
+                                   "PID1 failure time", (1 << 64) - 1, False)
+        row = rows.setdefault(key, {})
+        require(len(rows) <= MAX_INSTANCES, "PID1 failure population exceeds bound")
+        if message_id == PROCESS_EXIT_MESSAGE_ID:
+            require("exit" not in row and "failure" not in row and
+                    record.get("COMMAND") == "ExecStart",
+                    "duplicate, reordered or non-main broker process exit")
+            row["exit"] = {"record_number": number, "monotonic_us": timestamp,
+                           "code": _field_text(record, "EXIT_CODE", "PID1 exit code"),
+                           "status": _field_text(record, "EXIT_STATUS", "PID1 exit status")}
+        else:
+            require("exit" in row and "failure" not in row and
+                    timestamp >= row["exit"]["monotonic_us"],
+                    "PID1 unit failure lacks a unique preceding process exit")
+            row["failure"] = {"record_number": number, "monotonic_us": timestamp,
+                              "result": _field_text(record, "UNIT_RESULT", "PID1 unit result")}
+    for key, row in rows.items():
+        require(set(row) == {"exit", "failure"}, f"incomplete PID1 failure pair for {key[1]}")
+        require(key in starts and starts[key][0] < row["exit"]["record_number"],
+                "PID1 failure lacks its preceding exact successful start")
+        row["start_record_number"] = starts[key][0]
+        row["start_monotonic_us"] = canonical_uint(starts[key][1], "PID1 successful start time", (1 << 64) - 1, False)
+        require(row["start_monotonic_us"] <= row["exit"]["monotonic_us"],
+                "PID1 exit timestamp precedes successful start")
+    return rows
+
+
 def _request_tuple(request: dict[str, Any]) -> tuple[int, int, int, int]:
     return (request["operation"], request["stage"], request["job"], request["attempt"])
 
@@ -1110,6 +1175,107 @@ def _snapshot_process_identity(snapshot: dict[str, Any]) -> tuple[Any, ...] | No
     return (*_generation_key(snapshot), invocation, pid, exec_start, cgroup, ticks)
 
 
+def _post_removal_unstarted(snapshot: dict[str, Any], row: dict[str, Any],
+                           removed: dict[str, Any] | None) -> bool:
+    if snapshot.get("post_removal_unstarted") is not True:
+        return False
+    require(removed is not None and
+            all(type(snapshot.get(key)) is int for key in
+                ("trigger_event_seq", "started_monotonic_ns", "finished_monotonic_ns")) and
+            snapshot["trigger_event_seq"] < removed["seq"] and
+            snapshot.get("started_monotonic_ns", 0) >= removed["monotonic_ns"] and
+            snapshot.get("finished_monotonic_ns", 0) >= snapshot["started_monotonic_ns"] and
+            snapshot.get("incomplete_reasons") == ["unit_removed_before_snapshot"] and
+            snapshot.get("complete") is False and snapshot.get("manager_properties_complete") is False and
+            snapshot.get("process_capture_complete") is False and
+            type(snapshot.get("main_pid")) is int and snapshot.get("main_pid") == 0 and
+            snapshot.get("process_started") is False and snapshot.get("proc_capture") == {} and
+            snapshot.get("systemctl_timed_out") is False and
+            all(snapshot.get(key) is None for key in ("raw_show", "raw_stderr", "systemctl_exit",
+                "systemctl_timeout_reason", "systemctl_cancelled", "socket_fd0", "invocation_id",
+                "start_ticks", "exe", "exe_sha256", "cgroup", "result", "active_state", "substate",
+                "exec_main_status", "invocation_id_observed", "exec_main_start_timestamp_monotonic",
+                "process_capture_state", "initial_exe_observed", "proc_cgroup_raw",
+                "preliminary_property_miss", "preliminary_property_miss_reason")),
+            "post-removal query was started, has payload, or disagrees with event order")
+    return any(old.get("complete") is True and old.get("manager_properties_complete") is True and
+               old.get("process_capture_complete") is True and
+               _snapshot_process_identity(old) is not None and
+               type(old.get("finished_monotonic_ns")) is int and
+               old.get("finished_monotonic_ns", removed["monotonic_ns"] + 1) <= removed["monotonic_ns"] and
+               _generation_key(old) == _generation_key(snapshot)
+               for old in row["snapshots"])
+
+
+def _retained_terminal_shape(row: dict[str, Any], summary: dict[str, Any],
+                             life_events: list[dict[str, Any]],
+                             removed: dict[str, Any] | None) -> bool:
+    terminal = row.get("retained_failed_terminal")
+    if terminal is None:
+        return False
+    require(isinstance(terminal, dict) and set(terminal) == TERMINAL_FIELDS and
+            _generation_key(terminal) == _generation_key(row) and
+            terminal.get("boot_id_raw") == row["boot_id_raw"] and
+            terminal.get("manager_sender") == summary["manager_sender"] and
+            terminal.get("manager_properties_complete") is True and
+            terminal.get("incomplete_reasons") == [] and terminal.get("systemctl_exit") == 0 and
+            type(terminal.get("systemctl_exit")) is int and
+            terminal.get("systemctl_timed_out") is False and
+            terminal.get("systemctl_timeout_reason") is None and
+            terminal.get("systemctl_cancelled") is None,
+            "retained-failed terminal identity or completed query is invalid")
+    phase_keys = ("stop_monotonic_ns", "terminal_phase_started_monotonic_ns",
+                  "terminal_phase_finished_monotonic_ns", "ready_monotonic_ns", "ended_monotonic_ns")
+    require(all(type(summary.get(key)) is int and summary[key] > 0 for key in phase_keys) and
+            summary["ready_monotonic_ns"] <= summary["stop_monotonic_ns"] <=
+            summary["terminal_phase_started_monotonic_ns"] <= summary["terminal_phase_finished_monotonic_ns"] <=
+            summary["ended_monotonic_ns"] and
+            summary["terminal_phase_finished_monotonic_ns"] -
+            summary["terminal_phase_started_monotonic_ns"] <= 30_000_000_000 and
+            summary["terminal_phase_finished_monotonic_ns"] - summary["stop_monotonic_ns"] <= 30_000_000_000 and
+            summary["terminal_phase_finished_monotonic_ns"] - summary["ready_monotonic_ns"] <= 4_000_000_000_000,
+            "retained-failed terminal phase is missing, reordered or exceeds deadline")
+    require(type(terminal.get("started_monotonic_ns")) is int and
+            type(terminal.get("finished_monotonic_ns")) is int and
+            summary["terminal_phase_started_monotonic_ns"] <= terminal["started_monotonic_ns"] <=
+            terminal["finished_monotonic_ns"] <= summary["terminal_phase_finished_monotonic_ns"] and
+            terminal["finished_monotonic_ns"] - terminal["started_monotonic_ns"] <= 2_000_000_000,
+            "retained-failed query is pre-stop, reordered or exceeds query deadline")
+    event_seq = terminal.get("event_seq")
+    referenced = [event for event in life_events if event["seq"] == event_seq]
+    require(type(event_seq) is int and len(referenced) == 1 and
+            referenced[0]["monotonic_ns"] <= terminal["started_monotonic_ns"] and
+            (removed is None and event_seq == row["last_event_seq"] or
+             removed is not None and event_seq < removed["seq"] and
+             terminal["finished_monotonic_ns"] <= removed["monotonic_ns"]),
+            "retained terminal does not bind the final event horizon or predates removal incorrectly")
+    properties = terminal.get("properties")
+    require(isinstance(properties, dict) and set(properties) == TERMINAL_PROPERTIES and
+            all(isinstance(value, str) and len(value) <= 4096 and "\x00" not in value
+                for value in properties.values()), "retained terminal property map is malformed")
+    fixed = {"Id": row["unit"], "LoadState": "loaded", "CollectMode": "inactive",
+             "ActiveState": "failed", "SubState": "failed", "MainPID": "0", "Result": "exit-code",
+             "ExecMainCode": "1", "ExecMainStatus": "1"}
+    require(all(properties[key] == value for key, value in fixed.items()),
+            "retained terminal does not describe the exact retained failed state")
+    witnesses = {_snapshot_process_identity(snapshot) for snapshot in row["snapshots"]
+                 if snapshot.get("complete") is True and snapshot.get("manager_properties_complete") is True and
+                 snapshot.get("process_capture_complete") is True and
+                 type(snapshot.get("finished_monotonic_ns")) is int and
+                 snapshot.get("finished_monotonic_ns", terminal["started_monotonic_ns"] + 1) <=
+                 terminal["started_monotonic_ns"]}
+    require(len(witnesses) == 1 and None not in witnesses,
+            "retained failure lacks one consistent earlier full live process identity")
+    witness = next(iter(witnesses))
+    exit_us = canonical_uint(properties["ExecMainExitTimestampMonotonic"], "retained exit time", (1 << 64) - 1, False)
+    require(properties["InvocationID"] == witness[4] == row["invocation_id"] and
+            properties["ExecMainPID"] == str(witness[5]) == str(row["main_pid"]) and
+            properties["ExecMainStartTimestampMonotonic"] == str(witness[6]) and
+            witness[6] < exit_us and exit_us * 1000 <= terminal["started_monotonic_ns"],
+            "retained terminal process/start/exit differs from earlier full witness")
+    return True
+
+
 def _validate_event_rows(ready: dict[str, Any], events: list[dict[str, Any]],
                          summary: dict[str, Any]) -> tuple[dict[tuple[str, str, str, int], dict[str, Any]],
                                                           list[dict[str, Any]]]:
@@ -1259,6 +1425,9 @@ def _validate_event_rows(ready: dict[str, Any], events: list[dict[str, Any]],
         row_snaps = unit_row.get("snapshots")
         require(isinstance(row_snaps, list) and 1 <= len(row_snaps) <= 6,
                 f"observer unit snapshot list missing or out of bounds for {key[1]}")
+        has_terminal = unit_row.get("retained_failed_terminal") is not None
+        require(len(row_snaps) + int(has_terminal) <= 6,
+                f"observer terminal query exceeds the shared six-query bound for {key[1]}")
         for snapshot in row_snaps:
             require(isinstance(snapshot, dict) and _generation_key(snapshot) == key,
                     f"nested observer snapshot identity mismatch for {key[1]}")
@@ -1271,11 +1440,14 @@ def _validate_event_rows(ready: dict[str, Any], events: list[dict[str, Any]],
         manager_reasons = unit_row["manager_incomplete_reasons"]
         process_reasons = unit_row["process_incomplete_reasons"]
         event_loss = summary.get("event_loss_detected") is True
+        terminal_complete = _retained_terminal_shape(unit_row, summary, all_events, removed)
         expected_unit_manager_complete = (
-            life["removed"] is not None and bool(row_snaps) and not manager_reasons and not event_loss and
+            (life["removed"] is not None or terminal_complete) and bool(row_snaps) and
+            not manager_reasons and not event_loss and
             any(snapshot.get("manager_properties_complete") is True for snapshot in row_snaps) and
             all(snapshot.get("manager_properties_complete", False) is True or
-                snapshot.get("preliminary_property_miss", False) is True for snapshot in row_snaps))
+                snapshot.get("preliminary_property_miss", False) is True or
+                _post_removal_unstarted(snapshot, unit_row, removed) for snapshot in row_snaps))
         require(unit_row["manager_lifecycle_complete"] == expected_unit_manager_complete,
                 f"observer manager lifecycle completeness is inconsistent for {key[1]}")
         positive_snapshots = [snapshot for snapshot in row_snaps
@@ -1306,7 +1478,9 @@ def _validate_event_rows(ready: dict[str, Any], events: list[dict[str, Any]],
         unit_rows[key] = unit_row
     require(set(unit_rows) == set(lifecycles),
             "observer summary omitted or invented a manager lifecycle generation")
-    require(len(nested_snapshots) <= 100_000, "observer snapshot count exceeds bound")
+    require(len(nested_snapshots) + sum(row.get("retained_failed_terminal") is not None
+                                      for row in unit_rows.values()) <= 768,
+            "observer ordinary and terminal query count exceeds bound")
     for snapshot in nested_snapshots:
         require(isinstance(snapshot, dict), "observer snapshot is not an object")
         key = _generation_key(snapshot)
@@ -1554,11 +1728,54 @@ def _observer_unit_index(
     return result
 
 
+def _validate_retained_terminal_join(
+        row: dict[str, Any], manager: dict[str, Any], diagnostic: dict[str, Any],
+        failed_rows: dict[tuple[str, str, str], dict[str, Any]],
+        expected: dict[str, Any], observer_fd: int) -> None:
+    terminal = row["retained_failed_terminal"]
+    unit = row["unit"]
+    declared = terminal["properties"]
+    raw = _safe_ref(observer_fd, terminal["raw_show"], "retained failed all-show", 256 * 1024)
+    stderr = _safe_ref(observer_fd, terminal["raw_stderr"], "retained failed stderr", 32 * 1024)
+    require(not stderr and terminal["raw_show"]["exit"] == terminal["raw_stderr"]["exit"] == 0 and
+            terminal["raw_show"]["timed_out"] is False and terminal["raw_stderr"]["timed_out"] is False,
+            "retained failed raw query did not complete cleanly")
+    observation = {"process_started": False, "main_pid": 0, "result": "exit-code",
+                   "substate": "failed", "exec_main_status": "1", "active_state": "failed",
+                   "exec_main_start_timestamp_monotonic": int(declared["ExecMainStartTimestampMonotonic"])}
+    properties = _parse_systemctl_show(raw, unit, row["invocation_id"], observation, expected)
+    require(TERMINAL_PROPERTIES <= properties.keys() and
+            {key: properties[key] for key in TERMINAL_PROPERTIES} == declared,
+            "retained failed summary differs from complete raw manager readback")
+    failure_key = (row["boot_id"], unit, row["invocation_id"])
+    require(failure_key in failed_rows, "retained failed unit lacks trusted PID1 exit/failure pair")
+    failure = failed_rows[failure_key]
+    exit_row, result_row = failure["exit"], failure["failure"]
+    start_us = int(properties["ExecMainStartTimestampMonotonic"])
+    exit_us = int(properties["ExecMainExitTimestampMonotonic"])
+    require(manager["result"] == "done" and
+            manager["record_number"] == failure["start_record_number"] and
+            start_us <= failure["start_monotonic_us"] <= exit_row["monotonic_us"] and
+            start_us < exit_us <= exit_row["monotonic_us"] <= result_row["monotonic_us"] and
+            result_row["monotonic_us"] * 1000 <= terminal["started_monotonic_ns"] and
+            exit_row["code"] == "exited" and exit_row["status"] == properties["ExecMainStatus"] == "1" and
+            result_row["result"] == properties["Result"] == "exit-code",
+            "retained failed raw result/timing disagrees with trusted PID1 outcome")
+    sequence = diagnostic["sequence"]
+    outcome = sequence["outcome"]
+    require(sequence["pid"] == int(properties["ExecMainPID"]) == row["main_pid"] and
+            sequence["start_ticks"] == row["start_ticks"] and
+            outcome["broker_exit"] == 1 and outcome["frame_status"] == 126 and outcome["frame_sent"] == 1,
+            "retained failure differs from the same process's complete broker diagnostic")
+
+
 def _validate_manager_population(
         manager_rows: dict[tuple[str, str], dict[str, Any]],
         unit_rows: dict[tuple[str, str, str, int], dict[str, Any]],
         diagnostics: dict[tuple[str, str, str, int], dict[str, Any]],
-        summary: dict[str, Any]) -> dict[str, int]:
+        summary: dict[str, Any],
+        failed_rows: dict[tuple[str, str, str], dict[str, Any]] | None = None,
+        expected: dict[str, Any] | None = None, observer_fd: int | None = None) -> dict[str, int]:
     observer_index = _observer_unit_index(unit_rows)
     require(bool(manager_rows) and set(manager_rows) == set(observer_index),
             "trusted PID 1 starts and observed manager lifecycles have different populations")
@@ -1595,6 +1812,10 @@ def _validate_manager_population(
                     entry["sequence"]["start_ticks"] == unit_row["start_ticks"] and
                     (manager_invocation is None or manager_invocation == unit_invocation),
                     f"PID 1, observer and diagnostic process identities differ for {pair[1]}")
+            if unit_row.get("retained_failed_terminal") is not None:
+                require(failed_rows is not None and expected is not None and observer_fd is not None,
+                        "retained terminal lacks raw/journal verification inputs")
+                _validate_retained_terminal_join(unit_row, manager, entry, failed_rows, expected, observer_fd)
             started_count += 1
         else:
             require(not unit_row["process_started"] and diagnostic_key is None,
@@ -1843,6 +2064,7 @@ def main() -> int:
     diagnostics: dict[tuple[str, str, str, int], dict[str, Any]] = {}
     diagnostic_profiles: dict[tuple[str, str, str, int], dict[str, Any]] = {}
     manager_rows: dict[tuple[str, str], dict[str, Any]] = {}
+    failed_rows: dict[tuple[str, str, str], dict[str, Any]] = {}
     if expected is not None:
         try:
             journal_raw = read_absolute_file(args.journal_jsonl, MAX_FILE)
@@ -1861,7 +2083,9 @@ def main() -> int:
                 failed("diagnostic", exc)
             try:
                 manager_rows = collect_manager_start_rows(records, expected["boot_id"])
+                failed_rows = collect_manager_failed_exit_rows(records, expected["boot_id"])
             except (EvidenceError, OSError, ValueError) as exc:
+                manager_rows = {}
                 failed("manager_journal", exc)
 
     observer_fd: int | None = None
@@ -1880,7 +2104,7 @@ def main() -> int:
     if expected is not None and summary is not None and result["journal_capture_complete"]:
         try:
             result["manager_counts"] = _validate_manager_population(
-                manager_rows, unit_rows, diagnostics, summary)
+                manager_rows, unit_rows, diagnostics, summary, failed_rows, expected, observer_fd)
             result["manager_capture_complete"] = True
         except (EvidenceError, OSError, ValueError) as exc:
             failed("manager_capture", exc)
@@ -2030,6 +2254,145 @@ def self_test() -> int:
     second["proc"]["status"]["Seccomp"] = "0"
     rejects(_check_complete_capture_conservation, [capture, second], diagnostic_profile, 5812, "fixture")
     rejects(_check_complete_capture_conservation, [], diagnostic_profile, 5812, "fixture")
+
+    # Retained failure is a manager observation, never a successful request.
+    # Synthetic fields exercise the real raw-ref and PID1/C join adapters.
+    unit = "buster-bench-systemd-broker@5-789-0.service"
+    invocation = "a" * 32
+    unit_path = _unit_object_path(unit)
+    positive = {"boot_id": expected["boot_id"], "boot_id_raw": boot_raw,
+        "unit": unit, "object_path": unit_path, "generation": 1,
+        "invocation_id": invocation, "main_pid": 123, "start_ticks": 99,
+        "exec_main_start_timestamp_monotonic": 1000,
+        "cgroup": expected["profile"]["cgroup_prefix"] + unit,
+        "complete": True, "manager_properties_complete": True,
+        "process_capture_complete": True, "finished_monotonic_ns": 1_500_000}
+    unit_row = {key: positive[key] for key in ("boot_id", "boot_id_raw", "unit", "object_path",
+        "generation", "invocation_id", "main_pid", "start_ticks")}
+    unit_row.update(snapshots=[positive], last_event_seq=3, process_started=True,
+                    process_start_seen=True, manager_lifecycle_complete=True)
+    phase = {"manager_sender": ":1.0", "ready_monotonic_ns": 100_000,
+        "stop_monotonic_ns": 4_000_000, "terminal_phase_started_monotonic_ns": 4_000_000,
+        "terminal_phase_finished_monotonic_ns": 6_000_000, "ended_monotonic_ns": 7_000_000,
+        "manager_observation_complete": True}
+    values = {"Id": unit, "LoadState": "loaded", "CollectMode": "inactive", "ActiveState": "failed",
+        "SubState": "failed", "MainPID": "0", "InvocationID": invocation, "ExecMainPID": "123",
+        "ExecMainCode": "1", "ExecMainStatus": "1", "ExecMainStartTimestampMonotonic": "1000",
+        "ExecMainExitTimestampMonotonic": "2000", "Result": "exit-code"}
+    terminal = {key: positive[key] for key in ("boot_id", "boot_id_raw", "unit", "object_path", "generation")}
+    terminal.update(manager_sender=":1.0", event_seq=3, started_monotonic_ns=5_000_000,
+        finished_monotonic_ns=5_100_000, raw_show=None, raw_stderr=None,
+        systemctl_exit=0, systemctl_timed_out=False, systemctl_timeout_reason=None,
+        systemctl_cancelled=None, manager_properties_complete=True, incomplete_reasons=[], properties=values)
+    unit_row["retained_failed_terminal"] = terminal
+    life_events = [{"seq": 3, "monotonic_ns": 3_000_000}]
+    require(_retained_terminal_shape(unit_row, phase, life_events, None), "terminal shape positive failed")
+    checks += 1
+    for key, value in (("Id", unit + "x"), ("LoadState", "not-found"), ("CollectMode", "inactive-or-failed"),
+                       ("ActiveState", "active"), ("SubState", "running"), ("MainPID", "123"),
+                       ("InvocationID", "b" * 32), ("ExecMainPID", "124"), ("ExecMainCode", "2"),
+                       ("ExecMainStatus", "2"), ("ExecMainStartTimestampMonotonic", "999"),
+                       ("ExecMainExitTimestampMonotonic", "1000"), ("Result", "success")):
+        changed = json.loads(json.dumps(unit_row))
+        changed["retained_failed_terminal"]["properties"][key] = value
+        rejects(_retained_terminal_shape, changed, phase, life_events, None)
+    changed = json.loads(json.dumps(unit_row))
+    changed["snapshots"][0]["complete"] = False
+    rejects(_retained_terminal_shape, changed, phase, life_events, None)
+    changed = json.loads(json.dumps(unit_row))
+    changed["last_event_seq"] = 4
+    rejects(_retained_terminal_shape, changed, phase, life_events + [{"seq": 4, "monotonic_ns": 5_200_000}], None)
+    removed = {"seq": 4, "monotonic_ns": 5_200_000}
+    require(_retained_terminal_shape(changed, phase, life_events + [removed], removed),
+            "completed terminal before later removal did not preserve removal path")
+    checks += 1
+    rejects(_retained_terminal_shape, changed, phase, life_events + [removed],
+            {"seq": 4, "monotonic_ns": 5_050_000})
+    for key, value in (("stop_monotonic_ns", 5_500_000),
+                       ("terminal_phase_finished_monotonic_ns", 31_000_000_000)):
+        rejects(_retained_terminal_shape, unit_row, {**phase, key: value}, life_events, None)
+    changed = json.loads(json.dumps(unit_row))
+    changed["retained_failed_terminal"]["systemctl_timed_out"] = True
+    rejects(_retained_terminal_shape, changed, phase, life_events, None)
+
+    journal_identity = {"_PID": "1", "_TRANSPORT": "journal", "_BOOT_ID": expected["boot_id"],
+                        "UNIT": unit, "INVOCATION_ID": invocation}
+    records = [
+        {**journal_identity, "MESSAGE_ID": STARTED_MESSAGE_ID, "JOB_TYPE": "start",
+         "JOB_RESULT": "done", "__MONOTONIC_TIMESTAMP": "1100"},
+        {**journal_identity, "MESSAGE_ID": PROCESS_EXIT_MESSAGE_ID, "COMMAND": "ExecStart",
+         "EXIT_CODE": "exited", "EXIT_STATUS": "1", "__MONOTONIC_TIMESTAMP": "2050"},
+        {**journal_identity, "MESSAGE_ID": UNIT_FAILED_MESSAGE_ID, "UNIT_RESULT": "exit-code",
+         "__MONOTONIC_TIMESTAMP": "2060"}]
+    failed_rows = collect_manager_failed_exit_rows(records, expected["boot_id"])
+    require(len(failed_rows) == 1, "PID1 failure index positive failed")
+    checks += 1
+    rejects(collect_manager_failed_exit_rows, records[:2], expected["boot_id"])
+    rejects(collect_manager_failed_exit_rows, records + [records[-1]], expected["boot_id"])
+    rejects(collect_manager_failed_exit_rows, [records[0], records[2], records[1]], expected["boot_id"])
+    for key, value in (("_PID", "2"), ("_TRANSPORT", "stdout"), ("_BOOT_ID", "b" * 32),
+                       ("INVOCATION_ID", "b" * 32), ("__MONOTONIC_TIMESTAMP", "1000")):
+        changed_records = json.loads(json.dumps(records))
+        changed_records[1][key] = value
+        rejects(collect_manager_failed_exit_rows, changed_records, expected["boot_id"])
+    manager = {"result": "done", "record_number": 1, "invocation_id": invocation}
+    diagnostic = {"sequence": {"pid": 123, "start_ticks": 99,
+                   "outcome": {"broker_exit": 1, "frame_status": 126, "frame_sent": 1}}}
+    with tempfile.TemporaryDirectory(prefix="issue1507-consumer-") as directory:
+        raw_values = {**values, "ControlGroup": "", "ProtectSystem": "strict",
+                      "ReadOnlyPaths": " ".join(expected["profile"]["read_only_mount_targets"][1:])}
+        stdout = "".join(f"{key}={value}\n" for key, value in raw_values.items()).encode()
+        def fixture_ref(name: str, data: bytes) -> dict[str, Any]:
+            (Path(directory) / name).write_bytes(data)
+            return {"path": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                    "exit": 0, "timed_out": False}
+        terminal["raw_show"] = fixture_ref("terminal.txt", stdout)
+        terminal["raw_stderr"] = fixture_ref("terminal.stderr", b"")
+        descriptor = open_absolute_directory(directory)
+        try:
+            _validate_retained_terminal_join(unit_row, manager, diagnostic, failed_rows, expected, descriptor)
+            checks += 1
+            rejects(_validate_retained_terminal_join, unit_row, manager, diagnostic, {}, expected, descriptor)
+            changed_diagnostic = json.loads(json.dumps(diagnostic))
+            changed_diagnostic["sequence"]["outcome"]["broker_exit"] = 0
+            rejects(_validate_retained_terminal_join, unit_row, manager, changed_diagnostic,
+                    failed_rows, expected, descriptor)
+            changed = json.loads(json.dumps(unit_row))
+            changed["retained_failed_terminal"]["raw_show"]["sha256"] = "0" * 64
+            rejects(_validate_retained_terminal_join, changed, manager, diagnostic, failed_rows, expected, descriptor)
+            changed = json.loads(json.dumps(unit_row))
+            altered = stdout.replace(b"ExecMainPID=123\n", b"ExecMainPID=124\n")
+            changed["retained_failed_terminal"]["raw_show"] = fixture_ref("altered.txt", altered)
+            rejects(_validate_retained_terminal_join, changed, manager, diagnostic, failed_rows, expected, descriptor)
+            changed_failures = json.loads(json.dumps(next(iter(failed_rows.values()))))
+            changed_failures["exit"]["status"] = "2"
+            rejects(_validate_retained_terminal_join, unit_row, manager, diagnostic,
+                    {next(iter(failed_rows)): changed_failures}, expected, descriptor)
+        finally:
+            os.close(descriptor)
+    skipped = {"boot_id": expected["boot_id"], "unit": unit, "object_path": unit_path, "generation": 1,
+        "trigger_event_seq": 3, "started_monotonic_ns": 5_300_000, "finished_monotonic_ns": 5_300_001,
+        "post_removal_unstarted": True, "incomplete_reasons": ["unit_removed_before_snapshot"],
+        "complete": False, "manager_properties_complete": False, "process_capture_complete": False,
+        "main_pid": 0, "process_started": False, "proc_capture": {}, "systemctl_timed_out": False}
+    require(_post_removal_unstarted(skipped, unit_row, removed), "never-started redundant query fixture failed")
+    checks += 1
+    rejects(_post_removal_unstarted, {**skipped, "raw_show": {"path": "not-empty"}}, unit_row, removed)
+    rejects(_post_removal_unstarted, {**skipped, "systemctl_exit": 0}, unit_row, removed)
+    for key, value in (("result", "success"), ("active_state", "active"), ("substate", "running"),
+                       ("exec_main_status", "0"), ("invocation_id_observed", invocation),
+                       ("exec_main_start_timestamp_monotonic", 1),
+                       ("process_capture_state", "full_process_witness"),
+                       ("initial_exe_observed", "/usr/local/libexec/buster-benchmark-broker"),
+                       ("proc_cgroup_raw", "0::/system.slice/example"),
+                       ("preliminary_property_miss", True),
+                       ("preliminary_property_miss_reason", "unit_new_before_process_start"),
+                       ("main_pid", False)):
+        rejects(_post_removal_unstarted, {**skipped, key: value}, unit_row, removed)
+    rejects(_post_removal_unstarted, {**skipped, "trigger_event_seq": 4}, unit_row, removed)
+    require(not _post_removal_unstarted(skipped, {**unit_row, "snapshots": []}, removed),
+            "never-started query without earlier full witness was accepted")
+    checks += 1
 
     print(f"issue1162 broker evidence self-test: {checks} checks passed")
     return 0
