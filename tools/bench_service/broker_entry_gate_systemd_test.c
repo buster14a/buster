@@ -55,21 +55,21 @@
 typedef enum BqEgMutation
 {
     BQEG_POSITIVE, BQEG_RECEIPT_ABSENT, BQEG_RECEIPT_MODE,
-    BQEG_RECEIPT_SERVICE_GID, BQEG_NSSWITCH_MERGE, BQEG_NSCD_SOCKET,
-    BQEG_PRIMARY_GID, BQEG_MISSING_GROUP, BQEG_EXTRA_GROUP,
+    BQEG_RECEIPT_SERVICE_GID, BQEG_PRIMARY_GID, BQEG_MISSING_GROUP, BQEG_EXTRA_GROUP,
     BQEG_BOUNDING_CAP, BQEG_AMBIENT_CAP, BQEG_NNP_OFF, BQEG_SECCOMP_OFF,
     BQEG_ROOT_RW, BQEG_SUBMOUNT_RW, BQEG_WRONG_FD0, BQEG_ABSENT_FD0,
     BQEG_CLOEXEC_FD0, BQEG_BROKER_MODE, BQEG_BROKER_ELF,
-    BQEG_BROKER_STACK, BQEG_JOURNAL_FAIL, BQEG_CANDIDATE_UID, BQEG_RUNNER_GID
+    BQEG_BROKER_STACK, BQEG_JOURNAL_FAIL, BQEG_NSSWITCH_MERGE, BQEG_NSCD_SOCKET,
+    BQEG_CANDIDATE_UID, BQEG_RUNNER_GID
 } BqEgMutation;
 
 static char const* const bqeg_names[BQEG_CASES] = {
     "positive", "receipt-absent", "receipt-mode", "receipt-service-gid",
-    "nsswitch-merge", "nscd-socket", "primary-gid",
+    "primary-gid",
     "missing-group", "extra-group", "bounding-cap", "ambient-cap",
     "nnp-off", "seccomp-off", "root-rw", "protected-submount-rw",
     "wrong-fd0", "absent-fd0", "cloexec-fd0", "broker-mode",
-    "broker-elf", "broker-exec-stack", "journal-send-fails",
+    "broker-elf", "broker-exec-stack", "journal-send-fails", "nsswitch-merge", "nscd-socket",
     "candidate-uid-rebound", "runner-gid-rebound"
 };
 
@@ -460,7 +460,7 @@ static bool bqeg_nscd_socket(void)
 static bool bqeg_mutate(BqEgMutation kind, char const* log)
 {
     bool ok = true;
-    if (kind == BQEG_RECEIPT_ABSENT) ok = rename(BQ_ENTRY_ACCOUNTS, BQEG_ROOT "/receipt-held") == 0;
+    if (kind == BQEG_RECEIPT_ABSENT) ok = rename(BQ_ENTRY_ACCOUNTS, BQ_ENTRY_ACCOUNTS ".held") == 0;
     if (kind == BQEG_RECEIPT_MODE) ok = chmod(BQ_ENTRY_ACCOUNTS, 0644) == 0;
     if (kind == BQEG_RECEIPT_SERVICE_GID)
     {
@@ -495,7 +495,7 @@ static bool bqeg_mutate(BqEgMutation kind, char const* log)
 static bool bqeg_restore(BqEgMutation kind, char const* log)
 {
     bool ok = true;
-    if (kind == BQEG_RECEIPT_ABSENT) ok = rename(BQEG_ROOT "/receipt-held", BQ_ENTRY_ACCOUNTS) == 0;
+    if (kind == BQEG_RECEIPT_ABSENT) ok = rename(BQ_ENTRY_ACCOUNTS ".held", BQ_ENTRY_ACCOUNTS) == 0;
     if (kind == BQEG_RECEIPT_MODE) ok = chmod(BQ_ENTRY_ACCOUNTS, 0444) == 0;
     if (kind == BQEG_RECEIPT_SERVICE_GID) ok = bqeg_write_text(BQ_ENTRY_ACCOUNTS, bqeg_receipt, 0444);
     if (kind == BQEG_CANDIDATE_UID)
