@@ -388,6 +388,64 @@ within the existing deadline. Fatal reporters use recoverable output attempts
 so an output failure cannot recursively report itself. These are unsuccessful
 process controls, not successful compiler or missing-evidence observations.
 
+## Fixture start records and the hang watchdog
+
+Verbose and CI runs print a start record when each arena scope opens, before
+anything the scope itself reports, so the last start line of a hung or crashed
+serial run names its fixture (`body` is the module scope):
+
+```text
+TEST_FIXTURE_START_V1 kind=fixture module=c_frontend_tests fixture=c_test_enum_runtime index=17
+```
+
+This line is a **format example**. Parallel lanes buffer their start records
+with the rest of their output, so only the watchdog can name a lane's hang.
+
+Every registered module also runs under a wall-clock watchdog on desktop
+Linux, macOS and Windows. Each scope begin or end publishes the module's
+innermost open scope. When one position stays current longer than
+`BUSTER_TEST_FIXTURE_TIMEOUT_SECONDS`, the runner prints one record per
+expired module and ends the process with status 124:
+
+```text
+TEST_FIXTURE_TIMEOUT_V1 kind=fixture module=c_frontend_tests fixture=c_test_enum_runtime index=17 elapsed_ms=1800012 deadline_seconds=1800 last_completed=c_test_volatile_split_bit_fields
+```
+
+This is also a format example; the index and elapsed time are illustrative.
+`elapsed_ms` counts from when that scope last became innermost: its begin or
+the end of its most recent nested scope. `last_completed` names the module's
+most recently closed scope, which localizes a hang in a `body` between
+fixtures. The deadline therefore bounds the longest stretch between scope transitions, not a
+whole module. The default is 1800 seconds. The slowest recorded module,
+`compiler_driver_tests` under sanitized Clang Debug on hosted Windows x86-64,
+took 414 seconds across 39 scopes (see
+[driver test timing](../driver-test-timing.md)). The default is still far below
+the 300-minute desktop job timeout that such a hang used to exhaust.
+Set a whole number of seconds to override it, or `0` to disable it. An invalid
+value keeps the default and fails the run with a
+`TEST_FIXTURE_WATCHDOG_V1 status=invalid-deadline` record. Verbose and CI runs
+state the deadline in force with `TEST_FIXTURE_WATCHDOG_V1 status=...`:
+
+| Status | Meaning |
+|---|---|
+| `armed` | The watchdog thread is running |
+| `disabled` | The deadline is `0` |
+| `debugger` | A debugger was attached at startup, and a breakpoint would look like a hang |
+| `unsupported` | Android, iOS or `BUSTER_SINGLE_THREADED` builds; the mobile launchers keep their own deadlines |
+| `thread-failed` | The thread could not start; the run fails |
+
+The watchdog thread is created with `ThreadCreateOptions.untracked`. It reads
+only its slots, and `os_is_only_live_thread()` must stay true for modules
+that check serial initialization. On expiry it terminates the process without
+running exit handlers, because the stuck thread may hold any lock.
+`test_fixture_watchdog_self_test` covers deadline parsing, start records,
+nested transitions, expiry and the record text without a thread or a sleep.
+`os_tests` also runs a real `ide test` child through the private
+`BUSTER_TEST_WATCHDOG_CHILD_MODE` payload. That payload spins in one fixture
+under a one-second override. The child must exit with status 124, print the
+timeout record after the fixture's start record, write no stderr, and take at
+least the deadline. This check adds about one second to `os_tests`.
+
 ## Node-backed Wasm oracle deadlines
 
 The compiler-driver Node oracles use a bounded 30-second deadline on Linux and macOS and a bounded 60-second deadline on Windows. The Windows allowance covers measured hosted-runner startup and execution variance without changing the process-deadline primitive or other platforms.

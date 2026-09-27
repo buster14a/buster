@@ -8,6 +8,10 @@
 // Arena scopes publish TEST_ARENA_V1 and
 // TEST_ARENA_TOP_V1 counters with diagnostics copied before rewind. Opt-in
 // TEST_FIXTURE_TIMING_V1 rows observe the same scopes; see docs/driver-test-timing.md.
+// The same scopes print TEST_FIXTURE_START_V1 on entry and feed the fixture
+// watchdog (TestWatchSlot, test_watchdog_start, test_watchdog_thread), which
+// ends a run stuck in one scope past BUSTER_TEST_FIXTURE_TIMEOUT_SECONDS;
+// test_watchdog_child_run is its private hanging payload.
 // A descriptor marked table_audit runs only
 // on the canonical tree per platform (BUSTER_TEST_TABLE_AUDITS, default
 // on) — reserve that flag for results that are a pure function of the
@@ -209,6 +213,143 @@ BUSTER_GLOBAL_LOCAL bool test_fixture_timing_selected(String8 selection, String8
            (string_equal(selection, S8("all")) || string_equal(selection, module));
 }
 
+// The fixture watchdog. Each scope transition publishes the module's innermost
+// open scope to that module's slot; a thread polls the slots and, when one
+// position has stayed current past the deadline, prints TEST_FIXTURE_TIMEOUT_V1
+// and terminates the process. Positions reset at every begin and end, so the
+// deadline bounds the longest stretch between transitions, not a module.
+//
+// The default is generous: the slowest recorded module, compiler_driver_tests
+// under sanitized Clang Debug on hosted Windows x86-64, took 414 s in total
+// across 39 scopes (docs/driver-test-timing.md). It stays far below the
+// 300-minute desktop job budget that a hang used to exhaust silently.
+enum
+{
+    TEST_FIXTURE_TIMEOUT_DEFAULT_SECONDS = 1800,
+    // timeout(1)'s status, so logs and wrappers read it as a deadline.
+    TEST_FIXTURE_TIMEOUT_EXIT_CODE = 124,
+    TEST_WATCHDOG_POLL_MILLISECONDS = 50,
+};
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SINGLE_THREADED
+// Mobile launchers own their own shorter deadlines; single-threaded builds
+// have no second thread to watch from.
+#define BUSTER_TEST_WATCHDOG_SUPPORTED 1
+#else
+#define BUSTER_TEST_WATCHDOG_SUPPORTED 0
+#endif
+
+// A seqlock with one writer, the thread running the module: sequence is odd
+// while it rewrites the fields, and a reader trusts only fields read between
+// two equal even values. Names are static tokens, like the arena records'.
+struct TestWatchSlot
+{
+    AtomicU64 sequence;
+    String8 module;
+    // Empty while no scope of the module is open.
+    String8 fixture;
+    String8 last_completed;
+    u64 index;
+    u64 since_microseconds;
+    bool module_scope;
+    u8 reserved[7];
+};
+
+typedef struct TestWatchSnapshot TestWatchSnapshot;
+struct TestWatchSnapshot
+{
+    String8 module;
+    String8 fixture;
+    String8 last_completed;
+    u64 index;
+    u64 since_microseconds;
+    bool module_scope;
+    bool consistent;
+    u8 reserved[6];
+};
+
+typedef struct TestFixtureDeadline TestFixtureDeadline;
+struct TestFixtureDeadline
+{
+    u64 seconds;
+    bool valid;
+    u8 reserved[7];
+};
+
+// Empty selects the default and zero disables the watchdog. Anything else must
+// be a whole decimal count of seconds that still fits in microseconds; an
+// invalid value keeps the default.
+BUSTER_GLOBAL_LOCAL TestFixtureDeadline test_fixture_deadline_parse(String8 text)
+{
+    TestFixtureDeadline result = {.seconds = TEST_FIXTURE_TIMEOUT_DEFAULT_SECONDS, .valid = true};
+    if (text.length)
+    {
+        IntegerParsingU64 parsed = string8_parse_u64_decimal(text);
+        result.valid = parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == text.length && parsed.value <= UINT64_MAX / 1000000;
+        result.seconds = result.valid ? parsed.value : result.seconds;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void test_watch_publish(TestWatchSlot* slot, String8 module, String8 fixture, u64 index, bool module_scope, String8 last_completed)
+{
+    // Sequentially consistent read-modify-writes keep the plain stores between
+    // them on every compiler, including MSVC's Interlocked implementation.
+    atomic_u64_increment(&slot->sequence);
+    slot->module = module;
+    slot->fixture = fixture;
+    slot->last_completed = last_completed;
+    slot->index = index;
+    slot->module_scope = module_scope;
+    slot->since_microseconds = os_now_microseconds();
+    atomic_u64_increment(&slot->sequence);
+}
+
+BUSTER_GLOBAL_LOCAL TestWatchSnapshot test_watch_snapshot(TestWatchSlot* slot)
+{
+    // Adding zero is the sequentially consistent load every AtomicU64 build has.
+    u64 before = atomic_u64_add(&slot->sequence, 0);
+    TestWatchSnapshot result = {
+        .module = slot->module,
+        .fixture = slot->fixture,
+        .last_completed = slot->last_completed,
+        .index = slot->index,
+        .since_microseconds = slot->since_microseconds,
+        .module_scope = slot->module_scope,
+    };
+    u64 after = atomic_u64_add(&slot->sequence, 0);
+    result.consistent = before == after && !(before & 1);
+    return result;
+}
+
+// Inclusive at the deadline. A torn read, a closed module, or a clock sample
+// older than the position never expires.
+BUSTER_GLOBAL_LOCAL bool test_watch_expired(TestWatchSnapshot snapshot, u64 now_microseconds, u64 deadline_microseconds)
+{
+    return snapshot.consistent && snapshot.fixture.length && now_microseconds >= snapshot.since_microseconds &&
+           now_microseconds - snapshot.since_microseconds >= deadline_microseconds;
+}
+
+// elapsed_ms counts from when the named scope last became innermost: its begin
+// or the end of its latest nested scope. last_completed is the module's most
+// recently closed scope, which localizes a hang in code between fixtures.
+BUSTER_GLOBAL_LOCAL String8 test_watch_report(Arena* arena, TestWatchSnapshot snapshot, u64 now_microseconds, u64 deadline_seconds)
+{
+    return string_format(arena,
+        S8("TEST_FIXTURE_TIMEOUT_V1 kind={S8} module={S8} fixture={S8} index={u64} elapsed_ms={u64} deadline_seconds={u64} last_completed={S8}\n"),
+        snapshot.module_scope ? S8("module") : S8("fixture"), snapshot.module, snapshot.fixture, snapshot.index,
+        (now_microseconds - snapshot.since_microseconds) / 1000, deadline_seconds,
+        snapshot.last_completed.length ? snapshot.last_completed : S8("none"));
+}
+
+// Slot zero is the supplied arena; the rest are the selected context's scratch
+// arenas unless one of them is the supplied arena.
+BUSTER_GLOBAL_LOCAL Arena* test_arena_observed(ThreadContext* context, Arena* arena, u32 slot)
+{
+    Arena* observed = slot ? (context ? context->arenas[slot - 1] : 0) : arena;
+    return observed && (!slot || observed != arena) ? observed : 0;
+}
+
 // Scope-local peaks include temporary allocations discarded inside the body.
 // Saving/restoring the parent's peak makes nested scopes independent of older
 // fixtures while preserving the module maximum. Arena zeroing state is untouched.
@@ -217,10 +358,32 @@ TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* aren
     TestArenaScope result = {.name = name, .index = module ? 0 : arguments->memory_fixture_index++, .module = module,
                             .timing = arguments->fixture_timing_report};
     ThreadContext* context = thread_context_selected();
+    if (arguments->memory_report)
+    {
+        // Published before the scope opens, so a hang or crash inside it still
+        // names it; completion records come only from end. As with end's
+        // reporting, the formatting scratch stays out of enclosing peaks.
+        u64 high_waters[BUSTER_ARRAY_LENGTH(result.marks)] = {0};
+        for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(result.marks); slot += 1)
+        {
+            Arena* observed = test_arena_observed(context, arena, slot);
+            high_waters[slot] = observed ? observed->test_high_water : 0;
+        }
+        arguments->show(arguments, S8("TEST_FIXTURE_START_V1 kind={S8} module={S8} fixture={S8} index={u64}\n"),
+                        module ? S8("module") : S8("fixture"), arguments->memory_module, name, result.index);
+        for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(result.marks); slot += 1)
+        {
+            Arena* observed = test_arena_observed(context, arena, slot);
+            if (observed)
+            {
+                observed->test_high_water = high_waters[slot];
+            }
+        }
+    }
     for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(result.marks); slot += 1)
     {
-        Arena* observed = slot ? (context ? context->arenas[slot - 1] : 0) : arena;
-        if (observed && (!slot || observed != arena))
+        Arena* observed = test_arena_observed(context, arena, slot);
+        if (observed)
         {
             result.marks[slot] = (TestArenaMark){.arena = observed, .start = observed->position, .previous_high_water = observed->test_high_water};
             observed->test_high_water = observed->position;
@@ -233,6 +396,15 @@ TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* aren
         arguments->memory_top_peak_fixture = S8("none");
         arguments->memory_top_retained_bytes = 0;
         arguments->memory_top_peak_bytes = 0;
+    }
+    TestWatchSlot* watch = arguments->watch_slot;
+    if (watch)
+    {
+        // This thread is the slot's only writer, so reading it back is plain.
+        result.watch_parent = watch->fixture;
+        result.watch_parent_index = watch->index;
+        result.watch_parent_module = watch->module_scope;
+        test_watch_publish(watch, arguments->memory_module, name, result.index, module, module ? (String8){0} : watch->last_completed);
     }
     if (result.timing)
     {
@@ -322,6 +494,12 @@ void buster_test_arena_end(UnitTestArguments* arguments, TestArenaScope scope, b
             mark.arena->test_high_water = BUSTER_MAX(mark.previous_high_water, peaks[slot]);
         }
     }
+    // Last, so the watched position stays on this scope until it has closed.
+    TestWatchSlot* watch = arguments->watch_slot;
+    if (watch)
+    {
+        test_watch_publish(watch, arguments->memory_module, scope.watch_parent, scope.watch_parent_index, scope.watch_parent_module, scope.name);
+    }
 }
 
 typedef struct TestTimingRecord TestTimingRecord;
@@ -399,12 +577,88 @@ BUSTER_GLOBAL_LOCAL void test_timing_report(UnitTestArguments* arguments, TestTi
                     record.result.test_count, status);
 }
 
+// A real `ide test` child whose only fixture spins, run under a one-second
+// BUSTER_TEST_FIXTURE_TIMEOUT_SECONDS, must end itself with the timeout status
+// and a record naming that fixture after the fixture's start record. The
+// parent's own wait deadline catches a watchdog that never fires.
+BUSTER_GLOBAL_LOCAL UnitTestResult test_fixture_watchdog_child(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_TEST_WATCHDOG_SUPPORTED
+    enum { TEST_WATCHDOG_CHILD_TIMEOUT_US = 30000000, TEST_WATCHDOG_CHILD_DEADLINE_US = 1000000 };
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test"), S8("--ci=1")};
+    SliceString8 inherited_keys = program_state->input.environment_keys;
+    SliceString8 inherited_values = program_state->input.environment_values;
+    String8* keys = arena_allocate(arena, String8, inherited_keys.length + 2);
+    String8* values = arena_allocate(arena, String8, inherited_keys.length + 2);
+    keys[0] = S8("BUSTER_TEST_WATCHDOG_CHILD_MODE");
+    values[0] = S8("hang");
+    keys[1] = S8("BUSTER_TEST_FIXTURE_TIMEOUT_SECONDS");
+    values[1] = S8("1");
+    u64 count = 2;
+    for (u64 inherited = 0; inherited < inherited_keys.length; inherited += 1)
+    {
+        if (!string_equal(inherited_keys.pointer[inherited], keys[0]) && !string_equal(inherited_keys.pointer[inherited], keys[1]))
+        {
+            keys[count] = inherited_keys.pointer[inherited];
+            values[count] = inherited_values.pointer[inherited];
+            count += 1;
+        }
+    }
+    TimeDataType start = timestamp_take();
+    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+        (SliceString8){keys, count}, (SliceString8){values, count},
+        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+    if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
+    {
+        ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, TEST_WATCHDOG_CHILD_TIMEOUT_US);
+        u64 duration_ns = timestamp_ns_between(start, timestamp_take());
+        BUSTER_TEST(arguments, !wait.timed_out);
+#if BUSTER_WINDOWS
+        BUSTER_TEST(arguments, wait.platform_status == TEST_FIXTURE_TIMEOUT_EXIT_CODE);
+#else
+        // Darwin's wait macros require an addressable native int.
+        int native_status = (int)wait.platform_status;
+        BUSTER_TEST(arguments, WIFEXITED(native_status) && WEXITSTATUS(native_status) == TEST_FIXTURE_TIMEOUT_EXIT_CODE);
+#endif
+        String8 output = {(char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, wait.streams[STANDARD_STREAM_OUTPUT].length};
+        u64 started = string_first_sequence(output,
+            S8("TEST_FIXTURE_START_V1 kind=fixture module=fixture_watchdog_self_test fixture=test_watchdog_hang_fixture index=0\n"));
+        u64 expired = string_first_sequence(output,
+            S8("TEST_FIXTURE_TIMEOUT_V1 kind=fixture module=fixture_watchdog_self_test fixture=test_watchdog_hang_fixture index=0 elapsed_ms="));
+        BUSTER_TEST(arguments, started != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, expired != BUSTER_STRING_NO_MATCH && expired > started);
+        BUSTER_TEST(arguments, string_first_sequence(output, S8(" deadline_seconds=1 last_completed=none\n")) != BUSTER_STRING_NO_MATCH);
+        // The deadline bounds the child from below, the wait above.
+        BUSTER_TEST(arguments, duration_ns >= (u64)TEST_WATCHDOG_CHILD_DEADLINE_US * 1000);
+        BUSTER_TEST(arguments, wait.streams[STANDARD_STREAM_ERROR].length == 0);
+        arguments->show(arguments,
+            S8("TEST_FIXTURE_WATCHDOG_CHILD_V1 duration_ns={u64} timed_out={u32} platform_status={u64} stdout_bytes={u64} stderr_bytes={u64}\n"),
+            duration_ns, (u32)wait.timed_out, (u64)wait.platform_status, wait.streams[STANDARD_STREAM_OUTPUT].length,
+            wait.streams[STANDARD_STREAM_ERROR].length);
+    }
+    else
+    {
+        arguments->show(arguments, S8("TEST_FIXTURE_WATCHDOG_CHILD_V1 status=spawn-failed\n"));
+    }
+    arena_set_position(arena, position);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // Keep the original OS tests, including every closed/full-stream control. These
 // additional live probes make late child dispatch observable even on fast hosts:
 // verbose nested modules write stdout, whereas the fatal payload writes only stderr.
 BUSTER_GLOBAL_LOCAL UnitTestResult test_os_with_fatal_child_isolation(UnitTestArguments* arguments)
 {
     UnitTestResult result = os_tests(arguments);
+    UnitTestResult watchdog = test_fixture_watchdog_child(arguments);
+    result.succeeded_test_count += watchdog.succeeded_test_count;
+    result.test_count += watchdog.test_count;
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     enum { TEST_FATAL_CHILD_REPETITIONS = 3, TEST_FATAL_CHILD_TIMEOUT_US = 30000000 };
     Arena* arena = arguments->arena;
@@ -596,6 +850,137 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == TEST_ID_COUNT);
 
+// Slots are indexed by descriptor, so serial modules and parallel lanes share
+// one table. The runner publishes only while slots is set.
+typedef struct TestWatchdog TestWatchdog;
+struct TestWatchdog
+{
+    TestWatchSlot* slots;
+    u64 slot_count;
+    u64 deadline_seconds;
+    OsThreadHandle* thread;
+    AtomicU64 stop;
+};
+
+BUSTER_GLOBAL_LOCAL TestWatchdog test_watchdog;
+
+#if BUSTER_TEST_WATCHDOG_SUPPORTED
+BUSTER_GLOBAL_LOCAL TestWatchSlot test_watch_slots[TEST_ID_COUNT];
+
+BUSTER_GLOBAL_LOCAL void test_watchdog_sleep(u32 milliseconds)
+{
+#if defined(_WIN32)
+    Sleep(milliseconds);
+#else
+    (void)poll(0, 0, (int)milliseconds);
+#endif
+}
+
+// The timed-out thread is still running and may hold any lock, so neither
+// exit handlers nor exit-time sanitizer reports may run behind it.
+BUSTER_GLOBAL_LOCAL void test_watchdog_terminate(u32 code)
+{
+#if defined(_WIN32)
+    (void)TerminateProcess(GetCurrentProcess(), code);
+    os_exit(code);
+#else
+    _exit((int)code);
+#endif
+}
+
+// Polls instead of waiting on an event: stopping costs at most one interval.
+// Every expired slot is reported before the process ends.
+BUSTER_GLOBAL_LOCAL ThreadReturnType test_watchdog_thread(void* argument)
+{
+    TestWatchdog* watchdog = (TestWatchdog*)argument;
+    u64 deadline_microseconds = watchdog->deadline_seconds * 1000000;
+    bool expired = false;
+    while (!expired && !atomic_u64_add(&watchdog->stop, 0))
+    {
+        test_watchdog_sleep(TEST_WATCHDOG_POLL_MILLISECONDS);
+        for (u64 index = 0; index < watchdog->slot_count; index += 1)
+        {
+            TestWatchSnapshot snapshot = test_watch_snapshot(&watchdog->slots[index]);
+            u64 now = os_now_microseconds();
+            if (test_watch_expired(snapshot, now, deadline_microseconds))
+            {
+                TemporalArena scratch = scratch_begin(0, 0);
+                String8 report = test_watch_report(scratch.arena, snapshot, now, watchdog->deadline_seconds);
+                (void)os_file_write_attempt(os_get_stdout(), BUSTER_SLICE_TO_BYTE_SLICE(report));
+                scratch_end(scratch);
+                expired = true;
+            }
+        }
+    }
+    if (expired)
+    {
+        test_watchdog_terminate(TEST_FIXTURE_TIMEOUT_EXIT_CODE);
+    }
+}
+#endif
+
+// Arms the watchdog over slot_count descriptor slots. False asks the caller
+// to record one harness failure: an invalid deadline (the default still
+// applies) or a thread that could not start. Verbose and CI runs always get a
+// status record; failures get one in every mode.
+BUSTER_GLOBAL_LOCAL bool test_watchdog_start(UnitTestArguments* arguments, u64 slot_count)
+{
+    String8 text = os_get_environment_variable(S8("BUSTER_TEST_FIXTURE_TIMEOUT_SECONDS"));
+    TestFixtureDeadline deadline = test_fixture_deadline_parse(text);
+    bool result = deadline.valid;
+    if (!deadline.valid)
+    {
+        arguments->show(arguments, S8("TEST_FIXTURE_WATCHDOG_V1 status=invalid-deadline value={S8} deadline_seconds={u64}\n"), text, deadline.seconds);
+    }
+    String8 status = S8("unsupported");
+#if BUSTER_TEST_WATCHDOG_SUPPORTED
+    BUSTER_CHECK(slot_count <= BUSTER_ARRAY_LENGTH(test_watch_slots) && !test_watchdog.thread);
+    status = S8("disabled");
+    if (deadline.seconds && is_debugger_present())
+    {
+        // A breakpoint would look exactly like a hang.
+        status = S8("debugger");
+    }
+    else if (deadline.seconds)
+    {
+        memset(test_watch_slots, 0, sizeof(test_watch_slots));
+        test_watchdog.slots = test_watch_slots;
+        test_watchdog.slot_count = slot_count;
+        test_watchdog.deadline_seconds = deadline.seconds;
+        test_watchdog.stop = 0;
+        // Untracked: it reads only its slots, and modules that assert the
+        // process is serial must still see it that way.
+        test_watchdog.thread = os_thread_create((ThreadCreateOptions){.callback = &test_watchdog_thread, .argument = &test_watchdog, .untracked = true});
+        status = test_watchdog.thread ? S8("armed") : S8("thread-failed");
+        result = result && test_watchdog.thread != 0;
+        test_watchdog.slots = test_watchdog.thread ? test_watchdog.slots : 0;
+    }
+#else
+    BUSTER_UNUSED(slot_count);
+#endif
+    if (arguments->memory_report || !result)
+    {
+        arguments->show(arguments, S8("TEST_FIXTURE_WATCHDOG_V1 status={S8} deadline_seconds={u64}\n"), status, deadline.seconds);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool test_watchdog_stop(void)
+{
+    bool result = true;
+#if BUSTER_TEST_WATCHDOG_SUPPORTED
+    if (test_watchdog.thread)
+    {
+        atomic_u64_increment(&test_watchdog.stop);
+        result = os_thread_join(test_watchdog.thread);
+        test_watchdog.thread = 0;
+    }
+#endif
+    test_watchdog.slots = 0;
+    test_watchdog.slot_count = 0;
+    return result;
+}
+
 typedef struct TestParallelRecord TestParallelRecord;
 struct TestParallelRecord
 {
@@ -613,6 +998,7 @@ struct TestParallelState
     TestDescriptor* descriptors;
     u64* eligible_indices;
     TestParallelRecord* records;
+    TestWatchSlot* watch_slots;
     u64 eligible_count;
     bool memory_report;
     u8 reserved[7];
@@ -758,6 +1144,84 @@ BUSTER_GLOBAL_LOCAL bool test_fixture_timing_self_test(void)
     return passed;
 }
 
+// The watchdog's harness regression, without a thread, sleep or duration
+// threshold: deadline parsing, start records, the transition protocol through
+// nested scopes, expiry and the timeout record. test_fixture_watchdog_child
+// in os_tests covers the thread and the process exit.
+BUSTER_GLOBAL_LOCAL bool test_fixture_watchdog_self_test(void)
+{
+    TestFixtureDeadline defaulted = test_fixture_deadline_parse((String8){0});
+    TestFixtureDeadline disabled = test_fixture_deadline_parse(S8("0"));
+    TestFixtureDeadline largest = test_fixture_deadline_parse(S8("18446744073709"));
+    bool passed = defaulted.valid && defaulted.seconds == TEST_FIXTURE_TIMEOUT_DEFAULT_SECONDS && disabled.valid && !disabled.seconds &&
+                  largest.valid && largest.seconds == 18446744073709ull;
+    String8 invalid[] = {S8("1s"), S8("-1"), S8(" 1"), S8("18446744073710")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        TestFixtureDeadline parsed = test_fixture_deadline_parse(invalid[index]);
+        passed = passed && !parsed.valid && parsed.seconds == TEST_FIXTURE_TIMEOUT_DEFAULT_SECONDS;
+    }
+
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64), .flags = {.no_pool = 1}});
+    Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64), .flags = {.no_pool = 1}});
+    BUSTER_CHECK(arena != 0 && output != 0);
+    TestWatchSlot slot = {0};
+    TestParallelArguments arguments = {
+        .base = {.arena = arena, .show = &test_parallel_show, .memory_module = S8("watchdog_self_test"), .memory_report = true, .watch_slot = &slot},
+        .output_arena = output,
+    };
+    TestArenaScope module = buster_test_arena_begin(&arguments.base, arena, S8("body"), true);
+    TestWatchSnapshot body = test_watch_snapshot(&slot);
+    TestArenaScope outer = buster_test_arena_begin(&arguments.base, arena, S8("outer"), false);
+    TestArenaScope inner = buster_test_arena_begin(&arguments.base, arena, S8("inner"), false);
+    TestWatchSnapshot nested = test_watch_snapshot(&slot);
+    buster_test_arena_end(&arguments.base, inner, true);
+    TestWatchSnapshot resumed = test_watch_snapshot(&slot);
+    buster_test_arena_end(&arguments.base, outer, true);
+    TestWatchSnapshot body_again = test_watch_snapshot(&slot);
+    // Watching does not depend on reporting: a quiet scope still moves the slot.
+    arguments.base.memory_report = false;
+    u64 reported = arena_buffer_size(output);
+    TestArenaScope quiet = buster_test_arena_begin(&arguments.base, arena, S8("quiet"), false);
+    TestWatchSnapshot quiet_nested = test_watch_snapshot(&slot);
+    buster_test_arena_end(&arguments.base, quiet, true);
+    buster_test_arena_end(&arguments.base, module, true);
+    TestWatchSnapshot closed = test_watch_snapshot(&slot);
+
+    passed = passed && body.consistent && body.module_scope && string_equal(body.module, S8("watchdog_self_test")) &&
+             string_equal(body.fixture, S8("body")) && !body.last_completed.length;
+    passed = passed && nested.consistent && !nested.module_scope && string_equal(nested.fixture, S8("inner")) && nested.index == 1 &&
+             !nested.last_completed.length;
+    passed = passed && resumed.consistent && !resumed.module_scope && string_equal(resumed.fixture, S8("outer")) && resumed.index == 0 &&
+             string_equal(resumed.last_completed, S8("inner"));
+    passed = passed && body_again.module_scope && string_equal(body_again.fixture, S8("body")) && string_equal(body_again.last_completed, S8("outer"));
+    passed = passed && string_equal(quiet_nested.fixture, S8("quiet")) && arena_buffer_size(output) == reported;
+    passed = passed && closed.consistent && !closed.fixture.length && string_equal(closed.last_completed, S8("body")) &&
+             !test_watch_expired(closed, UINT64_MAX, 0);
+
+    // A start record precedes everything its scope reports.
+    String8 text = {(char8*)arena_buffer_start(output), arena_buffer_size(output)};
+    u64 inner_start = string_first_sequence(text, S8("TEST_FIXTURE_START_V1 kind=fixture module=watchdog_self_test fixture=inner index=1\n"));
+    u64 inner_end = string_first_sequence(text, S8("TEST_ARENA_V1 kind=fixture module=watchdog_self_test fixture=inner index=1 arena_slot=0 "));
+    passed = passed && string_first_sequence(text, S8("TEST_FIXTURE_START_V1 kind=module module=watchdog_self_test fixture=body index=0\n")) == 0;
+    passed = passed && string_first_sequence(text, S8("TEST_FIXTURE_START_V1 kind=fixture module=watchdog_self_test fixture=outer index=0\n")) != BUSTER_STRING_NO_MATCH;
+    passed = passed && inner_start != BUSTER_STRING_NO_MATCH && inner_end != BUSTER_STRING_NO_MATCH && inner_start < inner_end;
+    passed = passed && string_first_sequence(text, S8("fixture=quiet")) == BUSTER_STRING_NO_MATCH;
+
+    TestWatchSnapshot stalled = resumed;
+    stalled.since_microseconds = 5000000;
+    passed = passed && !test_watch_expired(stalled, 5999999, 1000000) && test_watch_expired(stalled, 6000000, 1000000) &&
+             !test_watch_expired(stalled, 4000000, 1000000);
+    String8 report = test_watch_report(arena, stalled, 6250000, 1);
+    passed = passed && string_equal(report,
+        S8("TEST_FIXTURE_TIMEOUT_V1 kind=fixture module=watchdog_self_test fixture=outer index=0 elapsed_ms=1250 deadline_seconds=1 last_completed=inner\n"));
+    stalled.consistent = false;
+    passed = passed && !test_watch_expired(stalled, 6000000, 1000000);
+    passed = arena_destroy(arena, 1) && passed;
+    passed = arena_destroy(output, 1) && passed;
+    return passed;
+}
+
 BUSTER_GLOBAL_LOCAL bool test_require_self_test(void)
 {
     Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
@@ -818,7 +1282,8 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType test_parallel_lane(void* argument)
         BUSTER_CHECK(arena != 0 && output_arena != 0);
         TestParallelArguments arguments = {
             .base = {.arena = arena, .show = &test_parallel_show, .memory_module = descriptor.name, .memory_report = state->memory_report,
-                     .fixture_timing_report = test_fixture_timing_selected(os_get_environment_variable(S8("BUSTER_TEST_FIXTURE_TIMING")), descriptor.name)},
+                     .fixture_timing_report = test_fixture_timing_selected(os_get_environment_variable(S8("BUSTER_TEST_FIXTURE_TIMING")), descriptor.name),
+                     .watch_slot = state->watch_slots ? state->watch_slots + descriptor_index : 0},
             .output_arena = output_arena,
         };
         TestArenaScope module_scope = buster_test_arena_begin(&arguments.base, arena, S8("body"), true);
@@ -1166,6 +1631,9 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_descriptors(UnitTestArgument
         arguments->memory_module = descriptor.name;
         arguments->memory_fixture_index = 0;
         arguments->fixture_timing_report = test_fixture_timing_selected(os_get_environment_variable(S8("BUSTER_TEST_FIXTURE_TIMING")), descriptor.name);
+        // Indexed like the parallel lanes', by the descriptor's table position.
+        BUSTER_CHECK(!test_watchdog.slots || descriptor_index_base + i < test_watchdog.slot_count);
+        arguments->watch_slot = test_watchdog.slots ? test_watchdog.slots + descriptor_index_base + i : 0;
         TestArenaScope module_scope = buster_test_arena_begin(arguments, arguments->arena, S8("body"), true);
         if (timing_enabled)
         {
@@ -1181,6 +1649,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_descriptors(UnitTestArgument
             consume_unit_tests(&result, unit_test_result);
             buster_test_arena_end(arguments, module_scope, true);
         }
+        arguments->watch_slot = 0;
 
         if (buster_test_temporary_root_failed)
         {
@@ -1225,10 +1694,12 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
         }
     }
 
+    // Buffered lane output cannot name a hang in time; the watchdog's slots can.
     TestParallelState state = {
         .descriptors = descriptors,
         .eligible_indices = eligible_indices,
         .records = records,
+        .watch_slots = test_watchdog.slots,
         .eligible_count = eligible_count,
         .memory_report = arguments->memory_report,
     };
@@ -1301,6 +1772,45 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
     return result;
 }
 
+#if BUSTER_TEST_WATCHDOG_SUPPORTED
+BUSTER_GLOBAL_LOCAL UnitTestResult test_watchdog_hang_fixture(UnitTestArguments* arguments)
+{
+    BUSTER_UNUSED(arguments);
+    // Spins like the stale-index scan behind #1575. The bound matters only if
+    // the watchdog failed, and the parent's wait deadline ends the child first.
+    enum { TEST_WATCHDOG_CHILD_SPIN_MICROSECONDS = 60000000 };
+    u64 start = os_now_microseconds();
+    while (os_now_microseconds() - start < TEST_WATCHDOG_CHILD_SPIN_MICROSECONDS)
+    {
+    }
+    return (UnitTestResult){0, 1};
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult test_watchdog_hang_module(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, test_watchdog_hang_fixture);
+    return result;
+}
+
+// The private payload of test_fixture_watchdog_child: one hanging descriptor
+// through the ordinary serial runner under the environment's deadline, with no
+// prewarm and no registered module. Reaching the exit means the watchdog never
+// ended the process.
+BUSTER_GLOBAL_LOCAL void test_watchdog_child_run(UnitTestArguments* arguments)
+{
+    enum { TEST_WATCHDOG_CHILD_UNEXPECTED_RETURN = 125 };
+    TestDescriptor descriptor = {.name = S8("fixture_watchdog_self_test"), .function = &test_watchdog_hang_module};
+    arguments->memory_report = true;
+    if (test_watchdog_start(arguments, 1))
+    {
+        u64 timing_record_count = 0;
+        buster_test_run_descriptors(arguments, &descriptor, 1, false, &timing_record_count, 0);
+    }
+    os_exit(TEST_WATCHDOG_CHILD_UNEXPECTED_RETURN);
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL UnitTestResult buster_test_temporary_root_failure_body(UnitTestArguments* arguments)
 {
     buster_test_temporary_root_failure_body_called = true;
@@ -1365,6 +1875,12 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     }
 #endif
     compiler_driver_test_wasm_node_child_run();
+#if BUSTER_TEST_WATCHDOG_SUPPORTED
+    if (os_get_environment_variable(S8("BUSTER_TEST_WATCHDOG_CHILD_MODE")).length)
+    {
+        test_watchdog_child_run(arguments);
+    }
+#endif
 
     // Some test modules intentionally leave a resident lane gang available
     // for later work on their selected context. Fill every compiler-global
@@ -1396,6 +1912,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     BUSTER_VALIDATE(test_arena_self_test());
     BUSTER_VALIDATE(test_require_self_test());
     BUSTER_CHECK(test_fixture_timing_self_test());
+    BUSTER_CHECK(test_fixture_watchdog_self_test());
 
     bool timing_enabled = program_state != 0 && program_flag_get(PROGRAM_FLAG_VERBOSE);
     arguments->memory_report = program_state != 0 && (timing_enabled || program_flag_get(PROGRAM_FLAG_CI));
@@ -1404,8 +1921,11 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
         BUSTER_CHECK(test_timing_self_test(arguments));
     }
 
+    bool watchdog_started = test_watchdog_start(arguments, TEST_ID_COUNT);
     u64 timing_record_count = 0;
     result = buster_test_run_parallel_descriptors(arguments, test_descriptors, BUSTER_ARRAY_LENGTH(test_descriptors), timing_enabled, &timing_record_count);
+    bool watchdog_stopped = test_watchdog_stop();
+    result.unit_test_count += (u64)!watchdog_started + (u64)!watchdog_stopped;
     // Every descriptor that ran must have reported a timing row. Audits this
     // tree does not own report nothing at all rather than a zero row, so they
     // come out of the expected count instead of out of the invariant.
