@@ -1,0 +1,192 @@
+name: Work ledger research
+
+# Research-only workflow for the whole-compiler efficiency campaign. It lives on
+# the campaign's research branch and is not part of any merge candidate.
+# Every subject listed in tools/work_ledger/subjects.tsv is built twice (ledger
+# counters on and off), compiles the frozen corpus with both builds, proves the
+# counters change no output byte, collects exact callgrind instruction totals
+# and, when requested, runs the ordinary correctness gates. GitHub-hosted
+# runners only; nothing here selects a self-hosted or dedicated machine.
+on:
+  push:
+    branches: ['claude/buster-efficiency-campaign-5a6k5g-research']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: work-ledger-research-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CFLAGS: -Wno-invalid-feature-combination
+
+jobs:
+  plan:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    outputs:
+      subjects: ${{ steps.plan.outputs.subjects }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          rows = []
+          for line in open("tools/work_ledger/subjects.tsv"):
+              line = line.strip()
+              if not line or line.startswith("#"):
+                  continue
+              label, sha, gates = line.split("\t")
+              rows.append({"label": label, "sha": sha, "gates": gates})
+          print("subjects=" + json.dumps(rows))
+          PY
+
+  corpus:
+    needs: plan
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        subject: ${{ fromJSON(needs.plan.outputs.subjects) }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/subject" '${{ matrix.subject.sha }}'
+          git worktree add --detach "$RUNNER_TEMP/frozen" ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          test "$(git -C "$RUNNER_TEMP/frozen" rev-parse 'HEAD^{tree}')" = 4c5306221fdb22fccc929b55e333163742de17d0
+          mkdir -p evidence
+          { echo "subject=${{ matrix.subject.label }}"; echo "subject_sha=$(git -C "$RUNNER_TEMP/subject" rev-parse HEAD)";
+            echo "subject_tree=$(git -C "$RUNNER_TEMP/subject" rev-parse 'HEAD^{tree}')";
+            echo "frozen_sha=$(git -C "$RUNNER_TEMP/frozen" rev-parse HEAD)"; echo "research_sha=$(git rev-parse HEAD)";
+            clang --version | head -1; uname -a; grep -m1 'model name' /proc/cpuinfo; nproc; } | tee evidence/identity.txt
+      - name: Prepare pristine cJSON input
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: external/cjson
+          persist-credentials: false
+      - name: Prepare authenticated Lua and SQLite inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location https://www.lua.org/ftp/lua-5.4.8.tar.gz -o external/lua.tar.gz
+          printf '%s  %s\n' 4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae external/lua.tar.gz | sha256sum --check
+          tar -xzf external/lua.tar.gz -C external
+          curl --fail --location https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip -o external/sqlite-amalgamation.zip
+          printf '%s  %s\n' 1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d external/sqlite-amalgamation.zip | sha256sum --check
+          unzip -q external/sqlite-amalgamation.zip -d external
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq valgrind > /dev/null
+          valgrind --version | tee -a evidence/identity.txt
+      - name: Build subject compilers
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools/work_ledger/build_subject.sh "$RUNNER_TEMP/subject" "$RUNNER_TEMP/compilers" | tee -a evidence/identity.txt
+      - name: Run corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/work_ledger/run_corpus.py --subject '${{ matrix.subject.label }}' \
+            --ledger-compiler "$RUNNER_TEMP/compilers/ide-ledger" --plain-compiler "$RUNNER_TEMP/compilers/ide-plain" \
+            --self-host-root "$RUNNER_TEMP/frozen" --fixtures tools/work_ledger/fixtures.txt \
+            --sqlite-root external/sqlite-amalgamation-3530400 --lua-root external/lua-5.4.8/src --cjson-root external/cjson \
+            --callgrind selfhost,sqlite,lua,cjson,fixtures --callgrind-every 12 --output evidence/corpus
+      - name: Compress evidence
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf evidence/corpus/artifacts evidence/corpus/ledger-artifacts
+          if [ -d evidence/corpus/callgrind ]; then gzip -9 evidence/corpus/callgrind/*.out || true; fi
+          cp "$RUNNER_TEMP/compilers/ide-plain" evidence/ide-plain
+          cp "$RUNNER_TEMP/compilers/ide-ledger" evidence/ide-ledger
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: work-ledger-${{ matrix.subject.label }}
+          path: evidence
+          retention-days: 30
+          if-no-files-found: error
+
+  gates:
+    needs: plan
+    runs-on: ubuntu-26.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        subject: ${{ fromJSON(needs.plan.outputs.subjects) }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        if: ${{ matrix.subject.gates == 'yes' }}
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test suite and self-host fixed point
+        if: ${{ matrix.subject.gates == 'yes' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach '${{ matrix.subject.sha }}'
+          mkdir -p "$RUNNER_TEMP/gates"
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF 2>&1 | tail -n 5
+          "$driver" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/gates/test_all.log" | grep -E "TEST_MODULE_TIMING|FAIL|failed|passed" | tail -n 80
+          "$driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/gates/self_host.log" | grep -E "SELF_HOST|fixed_point|STEP_INSTRUCTIONS|took" | tail -n 40
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() && matrix.subject.gates == 'yes' }}
+        with:
+          name: work-ledger-gates-${{ matrix.subject.label }}
+          path: ${{ runner.temp }}/gates
+          retention-days: 30
+          if-no-files-found: warn
+
+  report:
+    needs: corpus
+    if: ${{ always() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: work-ledger-*
+          path: downloaded
+      - name: Build ledger report
+        shell: bash
+        run: |
+          set -euo pipefail
+          specs=()
+          while IFS=$'\t' read -r label sha gates; do
+            case "$label" in ''|'#'*) continue;; esac
+            if [ -f "downloaded/work-ledger-$label/corpus/results.json" ]; then
+              specs+=("$label=downloaded/work-ledger-$label/corpus/results.json")
+            fi
+          done < tools/work_ledger/subjects.tsv
+          mkdir -p report
+          python3 tools/work_ledger/ledger_report.py "${specs[@]}" --output report/ledger.md --json report/ledger.json
+          cat report/ledger.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: work-ledger-report
+          path: report
+          retention-days: 30
