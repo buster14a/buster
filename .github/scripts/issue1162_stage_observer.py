@@ -748,6 +748,27 @@ def self_test() -> None:
             assert outcome["verdict"] == "OBSERVATION_INCONCLUSIVE"
             assert "missing live stage" in " ".join(outcome["causes"])
             checks += 1
+        (tmp / "between-polls-output").mkdir(mode=0o700)
+        poll_gaps = []
+        def transient_leaf_between_polls(seconds):
+            poll_gaps.append(seconds)
+            hint_leaf.mkdir()
+            hint_leaf.rmdir()
+        def outer_until_gap(unit, timeout):
+            assert unit == identity["outer_unit"]
+            return {"InvocationID": identity["outer_invocation"],
+                    "ActiveState": "inactive" if poll_gaps else "active"}, ""
+        with patch(__name__ + ".record_identity", return_value=hint_identity), \
+             patch.object(probe, "CGROUP_ROOT", str(hint_root)), \
+             patch.object(probe, "_systemd", side_effect=outer_until_gap), \
+             patch.object(time, "sleep", side_effect=transient_leaf_between_polls), \
+             patch(__name__ + ".capture_stage") as no_capture, \
+             patch(__name__ + ".read_stage_manifest", side_effect=FileNotFoundError):
+            outcome = observe(7, request, "1" * 40, "2" * 40, 1, tmp / "between-polls-output")
+            assert len(poll_gaps) == 1 and not no_capture.called and not outcome["stages"]
+            assert outcome["verdict"] == "OBSERVATION_INCONCLUSIVE"
+            assert "missing live stage" in " ".join(outcome["causes"])
+            checks += 1
         (tmp / "positive-observe-output").mkdir(mode=0o700)
         def active(unit, timeout):
             return {"ActiveState": "active", "MainPID": "123", "Id": unit}, ""
