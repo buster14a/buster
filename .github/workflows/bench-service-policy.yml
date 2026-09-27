@@ -55,3 +55,12 @@ jobs:
             tools/bench_service/exclusive_admission_test.c \
             -o "$RUNNER_TEMP/exclusive-admission-test"
           "$RUNNER_TEMP/exclusive-admission-test"
+      - name: Reject contaminated broker account groups before state inspection
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -O2 -Wall -Wextra -Werror \
+            -fwrapv -fno-strict-aliasing -funsigned-char \
+            tools/bench_service/systemd_broker_group_test.c \
+            -o "$RUNNER_TEMP/systemd-broker-group-test"
+          "$RUNNER_TEMP/systemd-broker-group-test"
