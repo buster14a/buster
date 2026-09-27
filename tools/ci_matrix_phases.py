@@ -219,12 +219,12 @@ def analyze(root, coverage, environment=None):
                 expected = Path(tree["build_directory"]) / "Release" / "ide"
                 require(same_path(argv[0], expected) and len(argv) > 1 and argv[1] == "x86_64_completion_census", f"census executable/tree mismatch: {name}")
             elif task["phase"] in ("build", "validation", "post_test", "self_host", "clean"):
+                # Both schedulers run tree checks as `cmake --build TREE --target ...`
+                # (build.c tree_check_names), so every tree command names its tree.
                 option = "--build-directory" if task["phase"] == "self_host" else "--build"
-                if option in argv:
-                    at = argv.index(option)
-                    require(at + 1 < len(argv) and same_path(argv[at + 1], tree["build_directory"]), f"child build/tree mismatch: {name}")
-                else:
-                    require(task["phase"] == "post_test" and len(argv) > 2 and argv[1] == "clang_analyze" and same_path(argv[2], tree["build_directory"]), f"missing tree command: {name}")
+                require(option in argv, f"missing tree command: {name}")
+                at = argv.index(option)
+                require(at + 1 < len(argv) and same_path(argv[at + 1], tree["build_directory"]), f"child build/tree mismatch: {name}")
                 if task["phase"] == "build" and plan["scheduler"] == "pooled":
                     require("--parallel" in argv and argv.index("--parallel") + 1 < len(argv) and argv[argv.index("--parallel") + 1] == str(task["inner_jobs"]), f"Ninja quota mismatch: {name}")
         records[name] = end

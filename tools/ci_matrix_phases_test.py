@@ -322,7 +322,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
                     String8* args = arena_allocate(arena, String8, 7);
                     memcpy(args, commands, sizeof(commands));
                     run->arguments = (SliceString8){.pointer = args, .length = 7};
-                    if (row.unity) { clang_analyze_command_add(arena, gen.build_directory, (CmakeBuildOptions){.config = row.configuration}); }
+                    if (row.unity) { tree_checks_run_add(arena, step_add(arena), gen.build_directory, (CmakeBuildOptions){.config = row.configuration}); }
                 }
             }
             count += 1;

@@ -11,6 +11,9 @@
 //   instruction_counter_open                     STEP_INSTRUCTIONS hardware
 //                                                counters (Linux only)
 //   build_gcc_*, build_compiler_discovery_*      GCC selection and identity checks
+//   tree_check_names                             the only registration of
+//                                                whole-tree checks for CMake
+//                                                and both matrix schedulers
 //   build_artifact_fanout_*, self_host_*         self-host stages, stage
 //                                                comparison, and the
 //                                                provenance-checked artifact
@@ -1698,6 +1701,47 @@ BUSTER_GLOBAL_LOCAL String8 generate_config(Generate generate)
     return result;
 }
 
+// Tree checks are build-driver commands that inspect a whole configured Clang
+// tree through its compile database: `NAME BUILD_DIRECTORY --config C --quiet`.
+// This table is their only registration (#1598). generate_add passes it to
+// CMakeLists.txt as BUSTER_TREE_CHECKS, which defines one target per name, and
+// both desktop matrix schedulers build every name in one command against the
+// canonical unsanitized optimized Clang tree: the direct scheduler through
+// tree_checks_run_add, the superbuild through BUSTER_SUPERBUILD_TREE_CHECKS in
+// matrix_superbuild_manifest_write. A check therefore cannot run under one
+// scheduler and silently not exist under the other.
+BUSTER_GLOBAL_LOCAL String8 tree_check_names[] = {
+    S8_INITIALIZER("clang_analyze"),
+};
+
+BUSTER_GLOBAL_LOCAL String8 tree_check_name_list(Arena* arena, String8 separator)
+{
+    String8 parts[2 * BUSTER_ARRAY_LENGTH(tree_check_names)];
+    u64 part_count = 0;
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(tree_check_names); i += 1)
+    {
+        if (i)
+        {
+            parts[part_count] = separator;
+            part_count += 1;
+        }
+        parts[part_count] = tree_check_names[i];
+        part_count += 1;
+    }
+    String8 result = string_join_arena(arena, (SliceString8){.pointer = parts, .length = part_count}, true);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool tree_check_name_is_registered(String8 name)
+{
+    bool result = false;
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(tree_check_names); i += 1)
+    {
+        result = result || string_equal(name, tree_check_names[i]);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate generate)
 {
     remove_path_recursive(arena, generate.build_directory);
@@ -1738,6 +1782,7 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     String8 check_optional_warnings = cmake_flag(arena, S8("BUSTER_CHECK_OPTIONAL_WARNINGS"), generate.check_optional_warnings);
     String8 developer_targets = cmake_flag(arena, S8("BUSTER_DEVELOPER_TARGETS"), generate.developer_targets);
     String8 build_driver = cmake_string(arena, S8("BUSTER_BUILD_DRIVER"), build_running_driver(arena));
+    String8 tree_checks = cmake_string(arena, S8("BUSTER_TREE_CHECKS"), tree_check_name_list(arena, S8(";")));
     // State the production default on every generation so a prior cached ON
     // cannot survive the policy change. User passthrough arguments remain
     // later and therefore retain their explicit override semantics.
@@ -1778,6 +1823,7 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     os_argument_builder_append(b, check_optional_warnings);
     os_argument_builder_append(b, developer_targets);
     os_argument_builder_append(b, build_driver);
+    os_argument_builder_append(b, tree_checks);
 
     if (generate_cc_contains(generate, cc_command, S8("zig")))
     {
@@ -3264,6 +3310,16 @@ BUSTER_GLOBAL_LOCAL void build_add(Arena* arena, String8 build_directory, SliceS
 {
     BuildStep* step = step_add(arena);
     build_run_add(arena, step, build_directory, targets, native_arguments, options);
+}
+
+// The direct scheduler's tree-check command, identical to the superbuild's:
+// every registered tree check (tree_check_names) in one CMake invocation. The
+// checks own their parallelism, so no Ninja job quota is passed.
+BUSTER_GLOBAL_LOCAL ProcessRun* tree_checks_run_add(Arena* arena, BuildStep* step, String8 build_directory, CmakeBuildOptions options)
+{
+    options.parallel_jobs = 0;
+    ProcessRun* result = build_run_add(arena, step, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(tree_check_names), (SliceString8){0}, options);
+    return result;
 }
 
 // Source metrics are evidence, not an optional performance hint. The writer
@@ -6342,31 +6398,6 @@ BUSTER_GLOBAL_LOCAL String8 clang_analyze_compile_commands_path(Arena* arena, St
 }
 
 #include "tools/clang_analyze.c"
-
-BUSTER_GLOBAL_LOCAL void clang_analyze_command_add(Arena* arena, String8 build_directory, CmakeBuildOptions options)
-{
-    BuildStep* step = step_add(arena);
-    ProcessRun* run = run_add(arena, step);
-    OsArgumentBuilder builder = os_argument_builder_start(arena);
-    String8 self = program_state->input.arguments.length ? program_state->input.arguments.pointer[0] : S8("build/build");
-    os_argument_builder_append(&builder, self);
-    os_argument_builder_append(&builder, S8("clang_analyze"));
-    os_argument_builder_append(&builder, build_directory);
-    os_argument_builder_append(&builder, S8("--config"));
-    os_argument_builder_append(&builder, cmake_build_config(options));
-    if (options.quiet)
-    {
-        os_argument_builder_append(&builder, S8("--quiet"));
-    }
-
-    *run = (ProcessRun){
-        .arguments = os_argument_builder_flush(&builder),
-        .spawn_options =
-            (ProcessSpawnOptions){
-                .use_process_environment = 1,
-            },
-    };
-}
 
 BUSTER_GLOBAL_LOCAL void cmake_profile_summary_add(Arena* arena, BuildStep* step, String8 profile, u64 limit)
 {
@@ -24290,6 +24321,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
             .combination_count = 1,
             .parallel_jobs = 1,
             .unity_only = 1,
+            .unity_analysis_scheduled = 1,
         },
         {
             .build_directory = S8("build/gcc-debug"),
@@ -24325,8 +24357,42 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_BUILD_TARGETS ide:Debug)")) != BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_CONFIG )")) != BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_TARGET )")) != BUSTER_STRING_NO_MATCH;
+
+    // Both schedulers must run every registered tree check (#1598): the
+    // superbuild on the canonical tree only, through its manifest list, and
+    // the direct scheduler through one CMake command naming the same targets.
+    String8 superbuild_tree_checks = string_format(arena, S8("set(BUSTER_SUPERBUILD_TREE_CHECKS {S8})"), tree_check_name_list(arena, S8(" ")));
+    CmakeBuildOptions tree_check_options = manifest_combinations[0].options;
+    tree_check_options.parallel_jobs = 4;
+    BuildStep tree_check_step = {0};
+    SliceString8 direct_tree_checks =
+        tree_checks_run_add(arena, &tree_check_step, manifest_trees[0].build_directory, tree_check_options)->arguments;
+    u64 direct_target_index = direct_tree_checks.length;
+    bool direct_parallel = false;
+    for (u64 i = 0; i < direct_tree_checks.length; i += 1)
+    {
+        if (direct_target_index == direct_tree_checks.length && string_equal(direct_tree_checks.pointer[i], S8("--target")))
+        {
+            direct_target_index = i;
+        }
+        direct_parallel = direct_parallel || string_equal(direct_tree_checks.pointer[i], S8("--parallel"));
+    }
+    bool tree_checks_valid = manifest.pointer && !direct_parallel &&
+                             string_first_sequence(manifest, superbuild_tree_checks) != BUSTER_STRING_NO_MATCH &&
+                             string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_0_TREE_CHECK_CONFIG Release)")) != BUSTER_STRING_NO_MATCH &&
+                             string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TREE_CHECK_CONFIG )")) != BUSTER_STRING_NO_MATCH &&
+                             direct_target_index + BUSTER_ARRAY_LENGTH(tree_check_names) < direct_tree_checks.length;
+    for (u64 i = 0; tree_checks_valid && i < BUSTER_ARRAY_LENGTH(tree_check_names); i += 1)
+    {
+        String8 target = direct_tree_checks.pointer[direct_target_index + 1 + i];
+        tree_checks_valid = string_equal(target, tree_check_names[i]) && tree_check_name_is_registered(target);
+    }
     remove_path_recursive(arena, manifest_path);
-    if (matrix_superbuild_outer_jobs(4, BUSTER_ARRAY_LENGTH(windows_trees)) != 4 || matrix_superbuild_outer_jobs(16, 5) != 5 ||
+    if (!tree_checks_valid)
+    {
+        string_print(S8("error: the direct and superbuild matrix schedulers disagree on the registered tree checks\n"));
+    }
+    if (!tree_checks_valid || matrix_superbuild_outer_jobs(4, BUSTER_ARRAY_LENGTH(windows_trees)) != 4 || matrix_superbuild_outer_jobs(16, 5) != 5 ||
         matrix_superbuild_outer_jobs(0, 0) != 0 || matrix_superbuild_self_host_enabled(true, true) ||
         !matrix_superbuild_self_host_enabled(false, true) || matrix_superbuild_self_host_enabled(false, false) ||
         !matrix_superbuild_self_host_plan_valid(windows_self_host, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
@@ -24377,6 +24443,8 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
                       string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_USES_INNER_NINJA {u32})\n"), self_host.uses_inner_ninja));
     string8_list_push(arena, &lines,
                       string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_PRODUCER_CLEAN_REQUIRED {u32})\n"), self_host.producer_clean_required));
+    string8_list_push(arena, &lines,
+                      string_format(arena, S8("set(BUSTER_SUPERBUILD_TREE_CHECKS {S8})\n"), tree_check_name_list(arena, S8(" "))));
 
     for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
     {
@@ -24396,13 +24464,13 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
             second_target = second.run_tests ? S8("test_all") : (String8){0};
         }
 
-        String8 analyze_config = {0};
+        String8 tree_check_config = {0};
         for (u32 combination_i = 0; tree.unity_analysis_scheduled && combination_i < tree.combination_count; combination_i += 1)
         {
             MatrixTestCombination combination = combinations[tree.combination_indices[combination_i]];
             if (combination.compiler == BUILD_COMPILER_CLANG && !combination.sanitize && combination.options.optimize)
             {
-                analyze_config = cmake_build_config(combination.options);
+                tree_check_config = cmake_build_config(combination.options);
             }
         }
 
@@ -24423,11 +24491,11 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
                                S8("validation"), second_test_config, test_pool,
                                string_format(arena, S8("{S8}-validation-{S8}"), phase_tree, first_test_config), tree.parallel_jobs);
         }
-        if (analyze_config.length)
+        if (tree_check_config.length)
         {
-            matrix_phase_cmake(arena, &lines, string_format(arena, S8("{S8}_ANALYZE_OBSERVER"), prefix), phase_tree,
-                               S8("post_test"), analyze_config, test_pool,
-                               string_format(arena, S8("{S8}-validation-{S8}"), phase_tree, analyze_config), 0);
+            matrix_phase_cmake(arena, &lines, string_format(arena, S8("{S8}_TREE_CHECK_OBSERVER"), prefix), phase_tree,
+                               S8("post_test"), tree_check_config, test_pool,
+                               string_format(arena, S8("{S8}-validation-{S8}"), phase_tree, tree_check_config), 0);
         }
 
         string8_list_push(arena, &lines,
@@ -24448,9 +24516,9 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_0_TARGET {S8})\n"), prefix, first_target));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_1_CONFIG {S8})\n"), prefix, second_test_config));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_1_TARGET {S8})\n"), prefix, second_target));
-        string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_ANALYZE_CONFIG {S8})\n"), prefix, analyze_config));
+        string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TREE_CHECK_CONFIG {S8})\n"), prefix, tree_check_config));
         // Whole-table audits ride on the same canonical tree that already
-        // owns clang_analyze: unsanitized optimized Clang, exactly one tree
+        // owns the tree checks: unsanitized optimized Clang, exactly one tree
         // per platform. They read only generated metadata tables and source
         // text, so a second compiler or configuration re-derives the same
         // answer at full cost -- see the note in AGENTS.md.
@@ -25007,7 +25075,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
 
         if (coverage_obligations.unity_analysis_scheduled && combination.compiler == BUILD_COMPILER_CLANG && !combination.sanitize && combination.options.optimize)
         {
-            clang_analyze_command_add(arena, combination.build_directory, combination.options);
+            tree_checks_run_add(arena, step_add(arena), combination.build_directory, combination.options);
         }
     }
     if (coverage_obligations.self_host_scheduled)

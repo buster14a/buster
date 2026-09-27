@@ -416,7 +416,7 @@ class BootstrapBuildGraphTests(unittest.TestCase):
     def test_recursive_targets_use_the_selected_immutable_driver(self):
         cmake = (ROOT / "CMakeLists.txt").read_text()
         driver = (ROOT / "build.c").read_text()
-        self.assertIn('set(BUSTER_CLANG_ANALYZE_DRIVER "${BUSTER_BUILD_DRIVER}")', cmake)
+        self.assertIn('set(BUSTER_TREE_CHECK_DRIVER "${BUSTER_BUILD_DRIVER}")', cmake)
         self.assertEqual(cmake.count('"${BUSTER_BUILD_DRIVER}"'), 3)
         self.assertIn('S8("BUSTER_BUILD_DRIVER"), build_running_driver(arena)', driver)
         self.assertNotIn('os_path_absolute(arena, S8("build/build.exe"), true)', driver)

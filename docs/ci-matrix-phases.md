@@ -63,7 +63,8 @@ competing edge. Its time is retained, not attributed to compiler tests.
 
 For a direct `test_all` command, the nested test observer separates compilation
 before the test from the actual test payload. The enclosing command's measured
-tail after the test, plus explicit native analyzer work, is `post_test`.
+tail after the test, plus the tree-check command (`clang_analyze` and any other
+check in `build.c`'s `tree_check_names`), is `post_test`.
 For a pooled test target, any pre-test work is included in build time by the
 same rule. Absent tests are compile-only rows, not fabricated successful tests.
 

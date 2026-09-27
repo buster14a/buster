@@ -265,29 +265,14 @@ BUSTER_GLOBAL_LOCAL bool matrix_phase_plan(Arena* arena, bool direct)
                         if (string_equal(arg, S8("--config"))) { config = run->arguments.pointer[i + 1]; }
                         if (string_equal(arg, S8("--target")) && string_equal(run->arguments.pointer[i + 1], S8("test_all"))) { phase = S8("validation"); }
                         if (string_equal(arg, S8("--target")) && string_equal(run->arguments.pointer[i + 1], S8("clean"))) { phase = S8("clean"); }
+                        // tree_checks_run_add: the same command the superbuild's post_test step runs.
+                        if (string_equal(arg, S8("--target")) && tree_check_name_is_registered(run->arguments.pointer[i + 1])) { phase = S8("post_test"); }
                     }
                     if (run->arguments.length > 1 && string_equal(run->arguments.pointer[1], S8("x86_64_completion_census")))
                     {
                         directory = path_parent(arena, path_parent(arena, run->arguments.pointer[0]));
                         config = S8("Release");
                         phase = S8("census");
-                    }
-                    if (direct && !directory.length)
-                    {
-                        for (u64 i = 0; i < run->arguments.length; i += 1)
-                        {
-                            for (u32 j = 0; j < matrix_phase.tree_count; j += 1)
-                            {
-                                String8 database = path_join(arena, matrix_phase.tree[j].directory, S8("compile_commands.json"));
-                                if (string_equal(run->arguments.pointer[i], database) ||
-                                    (run->arguments.length > 1 && string_equal(run->arguments.pointer[1], S8("clang_analyze")) &&
-                                     string_equal(run->arguments.pointer[i], matrix_phase.tree[j].directory)))
-                                {
-                                    directory = matrix_phase.tree[j].directory;
-                                    phase = S8("post_test");
-                                }
-                            }
-                        }
                     }
                     String8 tree = matrix_phase_find_tree(directory);
                     if (tree.length && (direct || string_equal(phase, S8("clean")) || string_equal(phase, S8("census"))))

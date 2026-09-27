@@ -220,11 +220,14 @@ fallback. Compiler invocations default to one worker. The opt-in
 `ide cc -fcompile-jobs=N` native C link path also owns a bounded TU gang;
 callers enabling it must budget compiler workers together with build-level
 concurrency. It does not infer available RAM from virtual arena reservations. Trees are declared longest-first — sanitized Debug,
-sanitized Release, the unity Release tree that also runs `clang_analyze`, trees
+sanitized Release, the unity Release tree that also runs the tree checks, trees
 covering two configurations, then the rest — because Ninja admits ready edges
 from a shared pool in declaration order and a fresh CI checkout has no
-`.ninja_log` for its critical-path scheduler to learn from. Set
-`BUSTER_MATRIX_DIRECT=1` only to diagnose the retained legacy scheduler,
+`.ninja_log` for its critical-path scheduler to learn from. The retained
+direct scheduler is not only a diagnostic path: every Intel macOS matrix run,
+CI included, uses it instead of the superbuild (`direct_matrix` in `build.c`),
+so a matrix change must keep both schedulers equivalent. Elsewhere, set
+`BUSTER_MATRIX_DIRECT=1` to diagnose it,
 `BUSTER_MATRIX_NO_TREE_ORDER=1` to restore the previous declaration order, and
 `BUSTER_MATRIX_THREADS=<n>` to state a CPU budget instead of the detected one
 (`get_nprocs()` ignores CPU affinity, so `taskset` alone cannot reproduce a
@@ -279,14 +282,28 @@ Clang static analysis runs only against unsanitized Release. The native driver
 now freezes deterministic module shards and requires complete fail-closed
 aggregation; CI also exercises the authoritative split-source Clang database.
 See [analyzer sharding](../clang-analyze-shards.md) for independent shard
-reproduction, deadlines, retained evidence and CI measurement semantics. Every Clang matrix
+reproduction, deadlines, retained evidence and CI measurement semantics.
+`clang_analyze` is a **tree check**: a build-driver command,
+`NAME BUILD_DIRECTORY --config C --quiet`, that inspects a whole configured
+Clang tree through its compile database and runs once per desktop lane on the
+canonical unsanitized optimized Clang tree. Register a new tree check only by
+adding its name to `tree_check_names` in `build.c` and dispatching the command.
+That table is the only registration: `generate` passes it to `CMakeLists.txt`
+as `BUSTER_TREE_CHECKS`, which defines one Ninja target per name, and the
+superbuild (`BUSTER_SUPERBUILD_TREE_CHECKS` in its manifest) and the direct
+scheduler (`tree_checks_run_add`) both build every listed target in one
+`cmake --build TREE --target ...` command. Do not add a tree-check target to
+`CMakeLists.txt` or a command to either scheduler by hand: nothing fails when a
+check is missing from one scheduler, so it would silently skip that scheduler's
+platforms (#1598). The `test_all` preflight fails if the two schedulers'
+commands disagree with the table. Every Clang matrix
 configuration runs `test_all`; GCC, Zig, and MSVC are compile-only, and platform
 packages use their native test runner.
 The one carve-out inside `test_all` is a **whole-table audit**: a module whose
 result is a function of the generated metadata tables and the repository's
 source text alone, so no compiler, configuration or optimization level can
 change its answer. Those modules run on the same single canonical tree per
-platform that already owns `clang_analyze` — unsanitized optimized Clang —
+platform that already runs the tree checks — unsanitized optimized Clang —
 because re-deriving one identical answer in eight to ten configurations cost
 more than any other single thing in CI. Mark such a module with
 `table_audit` in the `test_descriptors` table of `src/buster/tests/test.c`;
@@ -338,7 +355,8 @@ drives the simulator), `bench_all` (desktop only — runs `ide bench`),
 `test_self_host` (Linux and Windows x86-64, and macOS), `test_mode_matrix`
 (same platforms), `run_ide`,
 `test_ide`, `debug_ide`,
-`buster_shaders`, `apk` (Android), `clang_analyze`. Rendering backends and
+`buster_shaders`, `apk` (Android), and one target per tree check
+(`clang_analyze`) in Clang trees. Rendering backends and
 shader compilation are retained as opt-in infrastructure and default off. The
 Vulkan SDK (`VULKAN_SDK` env) is required only when Vulkan or Slang shader
 compilation is explicitly enabled.

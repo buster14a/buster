@@ -906,7 +906,8 @@ endif()
 if (NOT DEFINED BUSTER_BUILD_DRIVER OR BUSTER_BUILD_DRIVER STREQUAL "")
     set(BUSTER_BUILD_DRIVER "${CMAKE_SOURCE_DIR}/build/build${CMAKE_EXECUTABLE_SUFFIX}")
 endif()
-set(BUSTER_CLANG_ANALYZE_DRIVER "${BUSTER_BUILD_DRIVER}")
+set(BUSTER_TREE_CHECK_DRIVER "${BUSTER_BUILD_DRIVER}")
+message(STATUS "BUSTER_TREE_CHECKS: ${BUSTER_TREE_CHECKS}")
 
 if (BUSTER_DEVELOPER_TARGETS)
     message(STATUS "GDB: ${gdb_executable}")
@@ -2264,22 +2265,28 @@ else()
     )
 endif()
 
+# Tree checks (clang_analyze, ...) are registered once, in build.c's
+# tree_check_names, which generate passes as BUSTER_TREE_CHECKS. Never add one
+# here by hand: both desktop matrix schedulers build exactly that list, so a
+# target missing from it runs on no platform. See docs/agents/build.md.
 if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMANDS)
-    if (EXISTS "${BUSTER_CLANG_ANALYZE_DRIVER}")
-        add_custom_target(clang_analyze
-            COMMAND "${BUSTER_CLANG_ANALYZE_DRIVER}"
-                clang_analyze
-                "${CMAKE_BINARY_DIR}/compile_commands.json"
-                --config "$<CONFIG>"
-                --quiet
-            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-            USES_TERMINAL
-            COMMENT "Running clang --analyze"
-            VERBATIM
-        )
+    if (EXISTS "${BUSTER_TREE_CHECK_DRIVER}")
+        foreach(BUSTER_TREE_CHECK IN LISTS BUSTER_TREE_CHECKS)
+            add_custom_target(${BUSTER_TREE_CHECK}
+                COMMAND "${BUSTER_TREE_CHECK_DRIVER}"
+                    ${BUSTER_TREE_CHECK}
+                    "${CMAKE_BINARY_DIR}"
+                    --config "$<CONFIG>"
+                    --quiet
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                USES_TERMINAL
+                COMMENT "Running ${BUSTER_TREE_CHECK}"
+                VERBATIM
+            )
+        endforeach()
     else()
-        message(STATUS "clang_analyze target disabled: ${BUSTER_CLANG_ANALYZE_DRIVER} not found")
+        message(STATUS "tree check targets disabled: ${BUSTER_TREE_CHECK_DRIVER} not found")
     endif()
 elseif (C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG)
-    message(STATUS "clang_analyze target disabled: CMAKE_EXPORT_COMPILE_COMMANDS is OFF")
+    message(STATUS "tree check targets disabled: CMAKE_EXPORT_COMPILE_COMMANDS is OFF")
 endif()
