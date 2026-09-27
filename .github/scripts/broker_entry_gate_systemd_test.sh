@@ -83,7 +83,8 @@ CMD ["/sbin/init"]
 DOCKERFILE
 sudo timeout 300 docker build --pull --no-cache -t "$image" "$payload" 2>&1 | tee "$proof/image-build.log"
 sudo docker image inspect "$image" > "$proof/image-inspect.json"
-sudo docker run -d --name "$guest" --privileged --cgroup-parent=docker.slice --cgroupns=private \
+sudo docker run -d --name "$guest" --privileged --security-opt seccomp=unconfined \
+  --cgroup-parent=docker.slice --cgroupns=private \
   --network none --env container=docker --tmpfs /tmp --tmpfs /run --tmpfs /run/lock "$image"
 ready=false
 for attempt in {1..30}; do
@@ -91,6 +92,8 @@ for attempt in {1..30}; do
   sleep 1
 done
 [[ $ready == true ]]
+sudo docker exec "$guest" /usr/bin/grep -H '^Seccomp' /proc/1/status /proc/self/status \
+  > "$proof/guest-baseline-seccomp.txt"
 # PID1 can mount its own private /run; all setup and proof collection stay in
 # that isolated guest namespace. Its installed broker is this harmless fixture.
 sudo docker exec "$guest" /usr/bin/install -o root -g root -m 0644 \
