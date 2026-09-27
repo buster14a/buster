@@ -75,7 +75,9 @@ bootstrap with TCC.
 Because every hosted driver is Clang-built, the `Workflow lint` job in
 `.github/workflows/ci.yml` also runs the Ubuntu image's GCC over `build.c` with
 `-Wall -Werror -fsyntax-only` and the driver's usual flags. It covers only the
-POSIX side of the driver and produces no binary. GCC exempts only a top-level
+POSIX side of the driver, produces no binary, and cannot see GCC diagnostics
+emitted during code generation, such as the fortify-dependent
+`-Wunused-result` at `-O1` and above. GCC exempts only a top-level
 `{0}` from `-Wmissing-braces`, so a zeroed element of an array whose first
 member is a struct needs a designator such as `{.build_directory = {0}}`.
 
