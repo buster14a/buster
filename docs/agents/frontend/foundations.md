@@ -416,6 +416,17 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   ran correctly to their last statement before dying on the brace with SIGILL.
   `tests/basic_c_main_implicit_return.c` pins it under every allocator, and
   exit zero is reachable there only through the closing brace.
+- A noreturn call and `__builtin_unreachable()` end their block with
+  `IR_OPCODE_UNREACHABLE` only when nothing in the statement lowers after
+  them: the call is the whole expression statement or its last comma operand,
+  through parentheses. Everywhere else, including every branching operand,
+  `return (abort(), 0)` and even `(void)abort()`, the block stays open,
+  because the enclosing expression still emits its value, store, conversion
+  or merge branch there. `c_ir_lowering_resumes_after_call` owns the rule, and
+  `c_ir_call_ends_statement` owns the statement test. The optimized
+  `BUSTER_CHECK` depends on it through its `(__builtin_unreachable(), 0)` arm.
+  `c_test_cast_and_noreturn_operands` pins it with canonical validation, and
+  `c_test_cast_and_noreturn_operand_runtime` pins it under every allocator.
 - `builder->size_type` and `builder->ptrdiff_type` are chosen against the width
   of the scalar type the lowering built, not against `program->data_layout`'s
   own `unsigned long` entry. The two can disagree: the layout comes from the

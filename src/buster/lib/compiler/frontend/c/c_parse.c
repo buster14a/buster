@@ -3705,6 +3705,9 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
     }
     else if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
     {
+        // Every frame the leaf nested has completed and released its tasks,
+        // so the tail handed back before the push is free to reclaim.
+        machine->expression_task_count = frame->task_mark + frame->task_capacity;
         frame->type = machine->result_valid ? machine->result_type : C_TYPE_ID_INVALID;
         frame->task_count -= 1;
         frame->stage = C_TYPE_PARSE_STAGE_FINISH;
@@ -3922,6 +3925,15 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             frame->task_count = task_count;
             frame->type = last;
             frame->stage = C_TYPE_PARSE_STAGE_CHILD;
+            // Only the live task chain stays reserved while the leaf runs. A
+            // checked cast leaf types its operand in a nested frame of this
+            // kind, one per cast in `(int)((int)(b))`, and each reserving its
+            // whole range on top of this frame's whole range grew the total
+            // with the square of the nesting: a unit holding little more than
+            // that expression ran out of its token-count budget. The live
+            // tasks of every nested frame form one chain of nested ranges, so
+            // the total now stays within the outermost range.
+            machine->expression_task_count = frame->task_mark + task_count;
             if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                       .result = result,
                                                       .preprocess = preprocess,
@@ -10474,6 +10486,18 @@ BUSTER_C_INTERNAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 
     }
     if (machine->failed)
     {
+        // The discarded frames never complete, so the first expression frame
+        // among them hands back the tasks and scratch they held; otherwise a
+        // failure a speculative parse rolls back shrinks every later budget.
+        for (u32 index = frame_start; index < machine->frame_count; index += 1)
+        {
+            if (machine->frames[index].kind == C_TYPE_PARSE_FRAME_SIZEOF)
+            {
+                machine->expression_task_count = machine->frames[index].task_mark;
+                arena_set_position(machine->scratch_arena, machine->frames[index].arena_mark);
+                break;
+            }
+        }
         machine->frame_count = frame_start;
         machine->result_type = C_TYPE_ID_INVALID;
         machine->result_valid = false;

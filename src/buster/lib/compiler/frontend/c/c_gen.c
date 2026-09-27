@@ -13295,6 +13295,11 @@ struct CIrLowerBodyState
     u32 switch_body_start;
     u32 switch_body_close;
     u32 vla_alignment;
+    // The expression statement a C_IR_LOWER_BODY_CONTINUE_STATEMENT child is
+    // lowering: c_ir_lowering_resumes_after_call reads it to find the one
+    // position from which a noreturn call may end its block.
+    u32 statement_start;
+    u32 statement_end;
     CIrLowerBodyContinuation continuation;
     u64 temporary_mark;
     bool statement_expression_mode;
@@ -14835,6 +14840,68 @@ BUSTER_C_INTERNAL bool c_ir_signature_call_supported(CIntegerIrBuilder* builder,
     return result;
 }
 
+// Whether `call` is the last thing the expression statement `start .. end`
+// evaluates: the whole statement or its last comma operand, under any
+// parentheses. The optimized BUSTER_CHECK's `(__builtin_unreachable(), 0)`
+// is neither, and os_fail_message_raw's `((void)(...), os_fail_raw(...))`
+// statement is the second. A cast is not seen through, `(void)` included:
+// the conversion is lowered after its operand.
+BUSTER_C_INTERNAL bool c_ir_call_ends_statement(CIntegerIrBuilder* builder, CIrPreparedCall const* call, u32 start, u32 end)
+{
+    CToken const* tokens = builder->preprocess.tokens;
+    bool narrowed = true;
+    while (narrowed && start < end)
+    {
+        narrowed = false;
+        if (c_token_is_punctuator(&tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+            c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
+        {
+            start += 1;
+            end -= 1;
+            narrowed = true;
+        }
+        else
+        {
+            u32 last_comma = UINT32_MAX;
+            u32 depth = 0;
+            u32 conditionals = 0;
+            for (u32 index = start; index < end; index += 1)
+            {
+                CToken token = tokens[index];
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+                    c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    depth += 1;
+                }
+                else if ((c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                          c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE)) &&
+                         depth)
+                {
+                    depth -= 1;
+                }
+                else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+                {
+                    conditionals += 1;
+                }
+                else if (!depth && conditionals && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+                {
+                    conditionals -= 1;
+                }
+                else if (!depth && !conditionals && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+                {
+                    last_comma = index;
+                }
+            }
+            if (last_comma != UINT32_MAX)
+            {
+                start = last_comma + 1;
+                narrowed = true;
+            }
+        }
+    }
+    return start == call->token_index && end == call->close_index + 1;
+}
+
 // A call to abort-like entry points terminates an ordinary body, but GNU
 // statement expressions still need to hand their value/control back to the
 // enclosing expression walker.  Keep the context query local to lowering so
@@ -14846,10 +14913,20 @@ BUSTER_C_INTERNAL bool c_ir_signature_call_supported(CIntegerIrBuilder* builder,
    branching expression -- `? :`, `&&`, `||`, and a lowered branch condition --
    created a merge block its arm is expected to reach. Buster's own
    BUSTER_CHECK puts a noreturn call in a conditional operand, so this is not
-   a hypothetical shape. */
+   a hypothetical shape.
+
+   Without a branch, the statement itself still resumes after a call it does
+   not end with: `return (abort(), 0)` returns the comma's value, `x + h()`
+   adds, `(int)h()` converts, and each of those lands in the block the call
+   would have closed. Only an expression statement that ends with the call
+   (c_ir_call_ends_statement) lowers nothing after it; everywhere else the
+   call leaves its block open like any other, and the unreachable arm is
+   simply never run. */
 BUSTER_C_INTERNAL bool c_ir_lowering_resumes_after_call(CIntegerIrBuilder* builder)
 {
     bool result = false;
+    CIrLowerBodyState const* body = 0;
+    CIrPreparedCall const* call = 0;
     for (u32 index = 0; index < builder->lower_machine.frame_count && !result; index += 1)
     {
         CIrLowerFrame* frame = &builder->lower_machine.frames[index];
@@ -14874,11 +14951,21 @@ BUSTER_C_INTERNAL bool c_ir_lowering_resumes_after_call(CIntegerIrBuilder* build
             result = true;
             break;
         case C_IR_LOWER_FRAME_BODY:
-            result = frame->as.body.state && frame->as.body.state->statement_expression_mode;
+            body = frame->as.body.state;
+            result = body && body->statement_expression_mode;
+            break;
+        case C_IR_LOWER_FRAME_PREPARED_CALL:
+            call = frame->as.prepared_call.call_index < builder->prepared_call_count ? builder->prepared_calls + frame->as.prepared_call.call_index
+                                                                                     : 0;
             break;
         default:
             break;
         }
+    }
+    if (!result)
+    {
+        result = !body || !call || body->continuation != C_IR_LOWER_BODY_CONTINUE_STATEMENT ||
+                 !c_ir_call_ends_statement(builder, call, body->statement_start, body->statement_end);
     }
 
     return result;
@@ -20529,11 +20616,13 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             {
                 return false;
             }
+            // The builtin ends control flow exactly as a noreturn callee
+            // does, so it shares that callee's rule
+            // (c_ir_lowering_resumes_after_call): only a statement that ends
+            // with it closes the block, and the optimized BUSTER_CHECK's
+            // `c ? (__builtin_unreachable(), 0) : 0` arm reaches its merge.
             selected->result = c_ir_emit_integer_value(builder, 0, false, token);
-            IrSourceRange unreachable_source = c_ir_token_source_range(builder, token);
-            IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type);
-            c_ir_append_instruction(builder, unreachable, unreachable_source);
-            builder->function->blocks[builder->current_block.value].terminated = true;
+            c_ir_end_control_flow_after_call(builder, true, c_ir_token_source_range(builder, token));
             selected->emitted = true;
             remaining -= 1;
             continue;
@@ -39090,6 +39179,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 // The assignment fast path would otherwise feed the value of
                 // the final comma operand back into the first assignment
                 // (for example `scan += 2, match++`).
+                state->statement_start = index;
+                state->statement_end = end;
                 if (first_top_level_comma != UINT32_MAX)
                 {
                     c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1,
