@@ -137,6 +137,110 @@ static void entry_account_tests(void)
     ENTRY_CHECK(!bq_entry_identity_valid(&accounts, &identity));
 }
 
+static void entry_account_source_tests(void)
+{
+    static char const receipt[] = "BQ-ACCOUNTS-V1\nservice-uid=65000\nservice-gid=65000\n"
+        "candidate-uid=65001\ncandidate-gid=65001\nrunner-uid=65002\nrunner-gid=65002\n";
+    static char const passwd[] = "root:x:0:0:root:/root:/bin/sh\n"
+        "buster-bench:x:65000:65000:service:/var/lib/buster-bench:/usr/sbin/nologin\n"
+        "buster-bench-candidate:x:65001:65001:candidate:/nonexistent:/usr/sbin/nologin\n"
+        "buster-github-runner:x:65002:65002:runner:/nonexistent:/usr/sbin/nologin\n";
+    static char const group[] = "root:x:0:\n"
+        "buster-bench:x:65000:\n"
+        "buster-bench-candidate:x:65001:buster-bench\n"
+        "buster-github-runner:x:65002:\n";
+    static char const nss[] = "# local accounts\npasswd: files systemd\ngroup: files systemd\n"
+        "initgroups: files\nhosts: files dns\n";
+    BqEntryAccounts accounts = {0};
+    ENTRY_CHECK(bq_entry_accounts_parse(receipt, sizeof(receipt) - 1, &accounts));
+    ENTRY_CHECK(bq_entry_local_records(passwd, sizeof(passwd) - 1, &accounts, true));
+    ENTRY_CHECK(bq_entry_local_records(group, sizeof(group) - 1, &accounts, false));
+    for (unsigned role = 0; role < 3; role += 1)
+    {
+        BqEntryAccounts stale = accounts;
+        stale.ids[2 * role] += 10;
+        ENTRY_CHECK(!bq_entry_local_records(passwd, sizeof(passwd) - 1, &stale, true));
+        stale = accounts;
+        stale.ids[2 * role + 1] += 10;
+        ENTRY_CHECK(!bq_entry_local_records(passwd, sizeof(passwd) - 1, &stale, true));
+        ENTRY_CHECK(!bq_entry_local_records(group, sizeof(group) - 1, &stale, false));
+    }
+    static char const* const passwd_bad[] =
+    {
+        "buster-bench:x:65000:65000:x:/tmp:/bin/sh\nbuster-bench:x:65000:65000:x:/tmp:/bin/sh\n",
+        "buster-bench:x:65000:65000:x:/tmp:/bin/sh\nbuster-bench-candidate:x:65001:65001:x:/tmp:/bin/sh\n"
+            "buster-github-runner:x:65002:65002:x:/tmp:/bin/sh\nshadow:x:65002:60000:x:/tmp:/bin/sh\n",
+        "buster-bench:x:65000:65000:x:/tmp:/bin/sh\nbuster-bench-candidate:x:65001:65001:x:/tmp:/bin/sh\n",
+        "buster-bench:x:65000:65000:x:/tmp:/bin/sh\nbuster-bench-candidate:x:65001:65001:x:/tmp:/bin/sh\n"
+            "buster-github-runner:x:065002:65002:x:/tmp:/bin/sh\n",
+        "+::::::\n"
+    };
+    for (unsigned index = 0; index < sizeof(passwd_bad) / sizeof(passwd_bad[0]); index += 1)
+        ENTRY_CHECK(!bq_entry_local_records(passwd_bad[index], strlen(passwd_bad[index]), &accounts, true));
+    static char const* const group_bad[] =
+    {
+        "buster-bench:x:65000:\nbuster-bench:x:65000:\n",
+        "buster-bench:x:65000:\nbuster-bench-candidate:x:65001:\n"
+            "buster-github-runner:x:65002:\nalias:x:65002:\n",
+        "buster-bench:x:65000:\nbuster-bench-candidate:x:65001:\n",
+        "buster-bench:x:65000:\nbuster-bench-candidate:x:65001:\n"
+            "buster-github-runner:x:065002:\n"
+    };
+    for (unsigned index = 0; index < sizeof(group_bad) / sizeof(group_bad[0]); index += 1)
+        ENTRY_CHECK(!bq_entry_local_records(group_bad[index], strlen(group_bad[index]), &accounts, false));
+    ENTRY_CHECK(!bq_entry_local_records(passwd, sizeof(passwd) - 2, &accounts, true));
+    ENTRY_CHECK(!bq_entry_local_records(group, sizeof(group) - 2, &accounts, false));
+    ENTRY_CHECK(bq_entry_nss_policy(nss, sizeof(nss) - 1));
+    ENTRY_CHECK(bq_entry_nss_policy("passwd: files\ngroup: files\n", sizeof("passwd: files\ngroup: files\n") - 1));
+    ENTRY_CHECK(bq_entry_nss_policy("passwd: files systemd\ngroup: files systemd\n",
+                                   sizeof("passwd: files systemd\ngroup: files systemd\n") - 1));
+    static char const* const nss_bad[] =
+    {
+        "passwd: files [SUCCESS=merge] systemd\ngroup: files\n",
+        "passwd: files systemd\ngroup: files [SUCCESS=merge] systemd\n",
+        "passwd: files sss\ngroup: files\n",
+        "passwd: systemd files\ngroup: files\n",
+        "passwd: files\ngroup: files nscd\n",
+        "passwd: files\npasswd: files\ngroup: files\n",
+        "passwd: files\ngroup: files\ngroup: files\n",
+        "passwd: files\ngroup: files\ninitgroups: files systemd\n",
+        "passwd: files\ngroup: files\ninitgroups: files\ninitgroups: files\n",
+        "passwd: files\n",
+        "group: files\n",
+        "passwd: files\ngroup: files"
+    };
+    for (unsigned index = 0; index < sizeof(nss_bad) / sizeof(nss_bad[0]); index += 1)
+        ENTRY_CHECK(!bq_entry_nss_policy(nss_bad[index], strlen(nss_bad[index])));
+    struct stat file = {.st_mode = S_IFREG | 0644, .st_uid = 0, .st_nlink = 1,
+                        .st_size = (off_t)(sizeof(passwd) - 1)};
+    struct statvfs mount = {.f_flag = ST_RDONLY};
+    ENTRY_CHECK(bq_entry_source_metadata(&file, &mount));
+    mount.f_flag = 0;
+    ENTRY_CHECK(!bq_entry_source_metadata(&file, &mount));
+    mount.f_flag = ST_RDONLY;
+    file.st_uid = 65000;
+    ENTRY_CHECK(!bq_entry_source_metadata(&file, &mount));
+    file.st_uid = 0;
+    file.st_nlink = 2;
+    ENTRY_CHECK(!bq_entry_source_metadata(&file, &mount));
+    file.st_nlink = 1;
+    file.st_mode = S_IFREG | 0664;
+    ENTRY_CHECK(!bq_entry_source_metadata(&file, &mount));
+    file.st_mode = S_IFDIR | 0555;
+    ENTRY_CHECK(!bq_entry_source_metadata(&file, &mount));
+    file.st_mode = S_IFREG | 0644;
+    file.st_size = BQ_ENTRY_SOURCE_LIMIT + 1;
+    ENTRY_CHECK(!bq_entry_source_metadata(&file, &mount));
+    file.st_size = 0;
+    ENTRY_CHECK(!bq_entry_source_metadata(&file, &mount));
+    Sha256 sha;
+    char hex[SHA256_HEX_CAPACITY];
+    sha256_init(&sha);
+    sha256_add(&sha, "abc", 3);
+    sha256_finish_hex(&sha, (char8*)hex);
+    ENTRY_CHECK(!strcmp(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
+}
+
 static void entry_privilege_tests(void)
 {
     ENTRY_CHECK(bq_entry_privileges());
@@ -319,6 +423,39 @@ static void entry_evidence_tests(void)
     after = before;
     after.st_ino += 1;
     ENTRY_CHECK(!bq_entry_same_file(&before, &after));
+    BqEntryAccounts accounts = {.ids = {UINT32_MAX - 6, UINT32_MAX - 5, UINT32_MAX - 4,
+                                         UINT32_MAX - 3, UINT32_MAX - 2, UINT32_MAX - 1}};
+    struct stat maximum = {.st_dev = (dev_t)UINT64_MAX, .st_ino = (ino_t)UINT64_MAX,
+        .st_size = INT64_MAX};
+    maximum.st_mtim.tv_sec = INT64_MAX;
+    maximum.st_mtim.tv_nsec = 999999999;
+    maximum.st_ctim = maximum.st_mtim;
+    BqEntrySource sources[BQ_ENTRY_SOURCE_COUNT] =
+    {
+        {.descriptor = -1, .identity = maximum}, {.descriptor = -1, .identity = maximum},
+        {.descriptor = -1, .identity = maximum}
+    };
+    for (unsigned index = 0; index < BQ_ENTRY_SOURCE_COUNT; index += 1)
+        memset(sources[index].sha256, 'a' + index, sizeof(sources[index].sha256) - 1);
+    char worst_path[BQ_ENTRY_PATH_LIMIT];
+    worst_path[0] = '/';
+    memset(worst_path + 1, 'a', sizeof(worst_path) - 2);
+    worst_path[sizeof(worst_path) - 1] = 0;
+    char line[2048];
+    int size = bq_entry_evidence_line(line, sizeof(line), &accounts, &maximum, sources,
+                                     &maximum, &maximum, &maximum,
+                                     "01234567-89ab-cdef-0123-456789abcdef", UINT64_MAX, worst_path,
+                                     "0123456789abcdef0123456789abcdef");
+    /* Leave room for a maximum decimal PID beyond this test process's PID. */
+    ENTRY_CHECK(size > 0 && (size_t)size + 10 < sizeof(line));
+    ENTRY_CHECK(strstr(line, "passwd-sha256=") && strstr(line, "group-sha256=") &&
+                strstr(line, "nsswitch-sha256=") && strstr(line, "nsswitch="));
+    char too_small[64];
+    int truncated = bq_entry_evidence_line(too_small, sizeof(too_small), &accounts, &maximum, sources,
+                                           &maximum, &maximum, &maximum,
+                                           "01234567-89ab-cdef-0123-456789abcdef", UINT64_MAX, worst_path,
+                                           "0123456789abcdef0123456789abcdef");
+    ENTRY_CHECK(truncated >= (int)sizeof(too_small));
     ENTRY_CHECK(bq_entry_original_main(2, NULL) == 126);
 }
 
@@ -328,6 +465,7 @@ int main(int argc, char** argv)
     if (argc == 3)
     {
         entry_account_tests();
+        entry_account_source_tests();
         entry_privilege_tests();
         entry_mount_tests();
         entry_socket_tests();

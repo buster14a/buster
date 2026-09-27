@@ -51,15 +51,33 @@ broker. This component is not an installation release or service-readiness
 verdict. The payload credential gate below remains unchanged.
 
 The new entry executable accepts no arguments. It reads the canonical numeric
-account receipt through root-owned nonsymlink ancestry, rejects changes during
-the read, and checks all four root UIDs and service GIDs. Its complete expected
+account receipt and the local `/etc/passwd`, `/etc/group` and `/etc/nsswitch.conf`
+through root-owned, group/world-nonwritable nonsymlink ancestry. Each local
+source must be a regular single-link root-owned file without group/world write
+permission on a read-only covered mount, at most 64 KiB, with a stable
+device/inode/mode/owner/link/size/mtime/ctime tuple before and after the read.
+The gate checks all six receipt IDs against exactly one named local passwd and
+group entry for `buster-bench`, `buster-bench-candidate` and
+`buster-github-runner`. Duplicate dedicated names or a different name using
+any dedicated UID/GID fail before PASS. It also checks all four inherited root
+UIDs and service GIDs. Its complete expected
 supplementary set is **exactly** group 0, the receipt's service GID and its
 candidate GID, once each, in any kernel order. Future unit integration must
 explicitly pin `SupplementaryGroups=root buster-bench buster-bench-candidate`;
 it must not silently inherit whichever subset an NSS configuration produces.
-The receipt remains installation authority. This static gate performs no NSS
-lookup; the broker's existing request-time NSS/receipt and role-membership
-checks still apply. Changing any account requires the disabled/drained
+Effective NSS `passwd` and `group` directives must each occur once and contain
+exactly `files` or `files systemd` in that order, with default success-return
+semantics; `[SUCCESS=merge]`, action overrides, cache or additional sources
+fail. `initgroups`, if specified, must be exactly `files`. The gate verifies
+`/var/run` is the root-owned symlink to `/run`, `/var` is covered read-only,
+and neither `/run/nscd/socket` nor its `/var/run` alias exists. Its parent
+`/run/nscd`, if present, must be a root-owned non-group/world-writable
+directory. The installation must independently confirm nscd is disabled or
+absent throughout the lease; a pre-exec socket absence check cannot prevent
+later trusted-root reconfiguration. The receipt remains installation authority.
+This static gate performs no NSS lookup. The broker's existing request-time
+NSS/receipt and complete role-membership checks still apply. Changing account
+files, NSS policy or cache configuration requires the disabled/drained
 installation procedure and a new authenticated inventory.
 
 Before executing the broker, the gate requires empty effective, permitted,
@@ -86,10 +104,18 @@ failure exits 126; a PASS without the matching broker records cannot pass
 the eventual evidence consumer.
 
 The receipt binds boot ID, PID/start ticks, invocation ID, broker-unit cgroup,
-FD0 device/inode, gate/broker/account-file device/inode/size/mtime/ctime and
-the six canonical numeric account values. File tuples are not binary hashes;
-independent installation readback must bind them to exact reviewed binaries,
-receipt bytes and unit/filter hashes. Seccomp mode 2 does not identify a
+FD0 device/inode, gate/broker/account-file device/inode/size/mtime/ctime,
+the six canonical numeric account values, and `passwd`, `group`, `nsswitch`
+file tuples and SHA-256 byte hashes. The new fields use
+`passwd=<dev>:<ino>:<size>:<mtime_sec>:<mtime_nsec>:<ctime_sec>:<ctime_nsec>`
+(likewise `group` and `nsswitch`) and `passwd-sha256=<64 lowercase hex>`
+(likewise `group-sha256` and `nsswitch-sha256`). The evidence consumer must
+bind all fields to the same activation and independent installation readback.
+Outside the unit, read the installed source bytes and metadata before and
+after the read-only mount operation and compare their hashes/tuples with the
+gate PASS; independently bind the named account mapping, exact NSS directives,
+nscd-disabled contract, reviewed binaries, receipt bytes and unit/filter
+hashes. A mismatched file or policy fails the entire attempt. Seccomp mode 2 does not identify a
 filter. Trusted installation and the verified immutable systemd filter are
 mandatory parts of the claim, as are the existing namespace and mount policy.
 
@@ -99,7 +125,9 @@ and independent exact-source review (including absence of later broker
 credential, namespace, mount and parent-FD0 changes). Missing, duplicate or
 inconsistent evidence must reject the whole attempt. The fresh disposable
 real-systemd full-service proof must cover every required positive operation
-and negative mutation, including account rebinding, groups, capability sets,
+and negative mutation, including UID-only and runner-GID rebinding with zero
+PASS/BEGIN/manager effect, duplicate names/aliases, NSS actions/cache,
+groups, capability sets,
 NNP/seccomp/mount weakening, FD0, ELF tampering and missing evidence, with
 zero broker BEGIN/manager effects for rejected entry. Component fixtures
 use synthetic capability queries and a real socketpair with a synthetic
