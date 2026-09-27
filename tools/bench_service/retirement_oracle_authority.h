@@ -3,7 +3,7 @@
  * logical runtime commands. Fresh build bytes and /proc/self/fd commands are
  * observed inside one attempt. The independent builder must issue the opaque
  * VerifiedBuild token; this module does not claim that matching hashes prove
- * who built a program. No production issuer exists while that gate is absent.
+ * who built a program. The producer binds that token to the live issuer.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_ORACLE_AUTHORITY_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_ORACLE_AUTHORITY_H
@@ -27,8 +27,7 @@ typedef struct BqRetirementOracleTemplate
     BqRetirementOracleTemplateRow const* references;
 } BqRetirementOracleTemplate;
 
-/* Issued only by an independently authenticated reference build producer.
- * This child has a test-only miniature issuer, not a production issuer. */
+/* Issued only by an independently authenticated reference build producer. */
 typedef struct BqRetirementOracleVerifiedBuild BqRetirementOracleVerifiedBuild;
 
 typedef struct BqRetirementOracleAuthority

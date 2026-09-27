@@ -5,7 +5,9 @@
  * installed pin. observe checks the held program and completed process log.
  * The caller still owns independent builder provenance, lease, and #509.
  */
+#ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include "retirement_correctness_oracle.h"
 #include "../throughput/retirement_command.h"
 #include <errno.h>

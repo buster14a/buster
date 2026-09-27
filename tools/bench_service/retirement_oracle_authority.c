@@ -3,8 +3,11 @@
  * join one observed attempt to an opaque independently issued build token.
  * This file intentionally has no production token issuer or policy pin.
  */
+#ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include "retirement_oracle_authority.h"
+#include "retirement_reference_producer.h"
 #include "../throughput/retirement_command.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -16,19 +19,6 @@
 #define BQ_ORACLE_SOURCE_CAP (512u * 1024u * 1024u)
 #define BQ_ORACLE_BINARY_CAP (512u * 1024u * 1024u)
 #define BQ_ORACLE_RECEIPT_CAP (1024u * 1024u)
-
-/* This type is deliberately incomplete in the header. A reviewed independent
- * builder must gain a production issuer in a later change. */
-struct BqRetirementOracleVerifiedBuild
-{
-    uint64_t job_id, attempt_token;
-    uint32_t row, census_row, target;
-    int source, binary, receipt;
-    char preparation_sha256[65], source_sha256[65];
-    char configuration_sha256[65];
-    char toolchain_identity_sha256[65], build_command_sha256[65];
-    char binary_sha256[65], receipt_sha256[65];
-};
 
 /* Core entries are private to the B producer and are not public recipe APIs. */
 bool bq_retirement_oracle_begin_observing(BqRetirementOracleLedger* ledger,
@@ -470,6 +460,9 @@ bool bq_retirement_oracle_authority_next(BqRetirementOracleAuthority* authority,
         build->job_id == authority->job_id &&
         build->attempt_token == authority->attempt_token &&
         build->row == reference->row &&
+#ifndef BQ_RETIREMENT_ORACLE_AUTHORITY_TEST_ONLY
+        bq_retirement_reference_producer_token_valid(build, authority) &&
+#endif
         build->census_row == reference->census_row &&
         build->target == reference->target &&
         !strcmp(build->preparation_sha256, ledger->prepared.preparation_sha256) &&
@@ -510,6 +503,9 @@ bool bq_retirement_oracle_authority_next(BqRetirementOracleAuthority* authority,
             bq_oracle_authority_observation_step(authority->observed_sha256,
                 index, reference, ledger->rows + reference->row,
                 next_observation_sha256);
+#ifndef BQ_RETIREMENT_ORACLE_AUTHORITY_TEST_ONLY
+        if (ok) ok = bq_retirement_reference_producer_consume(build);
+#endif
         if (ok)
         {
             memcpy(authority->observed_sha256, next_observation_sha256, 65);
