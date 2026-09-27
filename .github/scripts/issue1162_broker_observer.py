@@ -3512,15 +3512,16 @@ def _self_test() -> None:
         assert final_observer.bus_dispatch_count == queued
         checks += 1
     import issue1162_live_probe as state_probe
-    def fd0_state_fixture(pid, ticks, _cgroup, _executable, output, deadline):
-        writer = EvidenceWriter(str(output))
+    def fd0_state_fixture(pid, ticks, _cgroup, _executable, _output, deadline):
+        # The state fixture runs on an ordinary hosted runner account. Exercise
+        # the real FD-0 readback with the existing bounded in-memory writer;
+        # production EvidenceWriter's root-owned directory rule belongs only
+        # to the guest observer's evidence path.
+        writer = FixtureWriter()
         reader = object.__new__(BrokerObserver)
         reader.writer, reader.deadline = writer, deadline
-        try:
-            result = reader._capture_fd0(pid, ticks, "state-fixture", 1)
-            assert result["identity"]["stable"] and result["identity"]["start_ticks_after"] == ticks
-        finally:
-            writer.close()
+        result = reader._capture_fd0(pid, ticks, "state-fixture", 1)
+        assert result["identity"]["stable"] and result["identity"]["start_ticks_after"] == ticks
     checks += state_probe._self_test_live_state_capture(fd0_state_fixture)
     for before_state, after_state in (("S", "R"), ("R", "S")):
         assert BrokerObserver._stable_exe_identity((before_state, 123, 456), BROKER_EXECUTABLE,
