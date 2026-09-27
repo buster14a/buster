@@ -1818,6 +1818,81 @@ static void test_retirement_records(char const* root)
         lines == 1 && !strcmp(digest, manifest.sha256));
     if (spool) CHECK(fclose(spool) == 0);
 
+    /* The actual transcript format's maximum-width producer fields are
+     * bounded by the schedule/token/digest domains: sequence 0..134217727,
+     * row 0..99999, pair 0..253, round 0..1, uint64 timestamps/PID/start
+     * token/attempt, INT_MAX CPU, INT64_MAX code bytes, exact-integer RSS up
+     * to 2^53-1, and at most 15 characters for the one-day seconds format.
+     * Job/boot tokens are at most 128 safe ASCII characters and only their
+     * fixed-width process digest is emitted. A compiler-only 100000-row
+     * schedule can reach sequence 101999999 while retaining code/RSS fields.
+     * Across all legal even pair counts, the largest complete schedule under
+     * the 4096*32768 transcript cap has 134217720 invocations (254 pairs,
+     * 131586 combined compiler/runtime rows), so sequence 134217719 belongs
+     * to a runtime record whose optional compiler fields are null. */
+    uint64_t max_elapsed = UINT64_C(86399999999999);
+    char max_job[129], max_boot[129], max_hash[65];
+    memset(max_job, 'a', sizeof(max_job) - 1); max_job[sizeof(max_job) - 1] = 0;
+    memset(max_boot, 'b', sizeof(max_boot) - 1); max_boot[sizeof(max_boot) - 1] = 0;
+    memset(max_hash, 'e', 64); max_hash[64] = 0;
+    TpRetirementInvocation max_invocation = {
+        .sequence = UINT64_C(101999999),
+        .row = TP_RETIREMENT_MAX_CELLS - 1, .kind = 0, .phase = 1, .variant = 1,
+        .round = TP_RETIREMENT_ROUNDS - 1, .pair = TP_RETIREMENT_EXECUTION_MAX_PAIRS - 1,
+        .warmup = -1, .position = 1};
+    TpProcessObservation max_observed = {.pid = UINT64_MAX, .start_token = UINT64_MAX,
+        .started_ns = UINT64_MAX - max_elapsed, .finished_ns = UINT64_MAX, .valid = 1};
+    TpProcess max_process = {.wall_seconds = (double)max_elapsed / 1000000000.0,
+        .peak_rss_bytes = 9007199254740991.0};
+    TpRetirementOutput max_identities = {max_hash, max_hash, max_hash, max_hash, INT64_MAX};
+    size_t max_count = tp_retirement_execution_record(line, sizeof(line), &max_invocation,
+        &max_observed, &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX);
+    CHECK(max_count == 901 && line[max_count - 1] == '\n');
+    CHECK(tp_retirement_execution_record(line, max_count, &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_count = tp_retirement_execution_record(line, 902, &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX);
+    CHECK(max_count == 901 && line[max_count - 1] == '\n');
+    max_identities.code_section_bytes = (uint64_t)INT64_MAX + 1;
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_identities.code_section_bytes = INT64_MAX;
+    max_process.peak_rss_bytes = 9007199254740992.0;
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_process.peak_rss_bytes = 9007199254740991.0;
+    char overlong_job[130];
+    memset(overlong_job, 'a', sizeof(overlong_job) - 1); overlong_job[sizeof(overlong_job) - 1] = 0;
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, overlong_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_job[127] = '"';
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_job[127] = 'a';
+    max_boot[127] = '\\';
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_boot[127] = 'b';
+    max_count = tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX);
+    CHECK(max_count == 901 && tp_path(path, root, "retirement-execution-max.jsonl"));
+    file = fopen(path, "wb");
+    CHECK(file && fwrite(line, 1, max_count, file) == max_count);
+    if (file) CHECK(fclose(file) == 0);
+
+    max_invocation.sequence = (uint64_t)TP_RETIREMENT_TRANSCRIPT_SHARDS *
+        TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS - 9;
+    max_invocation.kind = 1;
+    max_identities.code_section_sha256 = NULL;
+    max_identities.code_section_bytes = 0;
+    max_count = tp_retirement_execution_record(line, sizeof(line), &max_invocation,
+        &max_observed, &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX);
+    CHECK(max_count > 0 && max_count < 901 && line[max_count - 1] == '\n');
+    CHECK(tp_path(path, root, "retirement-execution-max-runtime.jsonl"));
+    file = fopen(path, "wb");
+    CHECK(file && fwrite(line, 1, max_count, file) == max_count);
+    if (file) CHECK(fclose(file) == 0);
+
     /* Every missing required observation and every failed child is invalid. */
     CHECK(tp_retirement_execution_init(&state, 1, 3, runtime_rows, 2, 60, workspace, 12));
     CHECK(tp_retirement_execution_peek(&state, &invocation) == TP_RETIREMENT_NEXT_READY);
