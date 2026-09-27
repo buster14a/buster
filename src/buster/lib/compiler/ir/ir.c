@@ -466,7 +466,9 @@ BUSTER_GLOBAL_LOCAL IrSourcePosition ir_source_region_position(IrSourceRegion co
 // that a full position runs after it — the difference between the two is paid
 // once per lowered instruction, so the short answer has its own entry point,
 // and the key it reads carries the source beside the start it matched on.
-u32 ir_source_map_source(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor)
+// Forced inline: lowering's per-instruction range path depends on it, and a
+// second caller (record sites) was enough for Clang to outline it there.
+BUSTER_SHARED_INLINE u32 ir_source_map_source(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor)
 {
     u32 result;
     IR_DIAGNOSTIC_CENSUS_RECORD(SOURCE_QUERIES, 1);

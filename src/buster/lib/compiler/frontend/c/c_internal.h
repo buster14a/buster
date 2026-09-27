@@ -445,6 +445,7 @@ BUSTER_C_EXTERN CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId
 BUSTER_C_EXTERN bool c_parse_atomic_drops_type_alignment(CParseResult const* result, CTypeId base, bool adds_atomic);
 BUSTER_C_EXTERN bool c_parse_type_qualifier_word(String8 spelling, CType* type);
 BUSTER_C_EXTERN u32 c_preprocess_token_source(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor);
+BUSTER_C_EXTERN CSourceSite c_preprocess_token_site_cursor(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor);
 BUSTER_C_EXTERN CSourceLocation c_preprocess_token_location_cursor(CPreprocessResult const* preprocess, CToken token,
                                                                      IrSourceMapCursor* cursor);
 BUSTER_C_EXTERN bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess,

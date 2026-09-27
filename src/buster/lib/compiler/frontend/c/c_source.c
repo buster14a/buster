@@ -13,6 +13,8 @@
 //                                              into
 //   c_source_map_append, c_source_map_sort,    location checkpoints (see
 //   c_lex_token_location                       CTranslatedSource below)
+//   c_preprocess_token_site,                   record sites and their on-demand
+//   c_preprocess_site_location                 recovery (CSourceSite in c.h)
 //   c_identifier_start ..                      character classes and the
 //   c_literal_plain_run_end                    prewarmed run tables
 //   c_translate_source                         phase-1/2 translation with
@@ -953,6 +955,43 @@ CSourceLocation c_preprocess_token_location(CPreprocessResult const* preprocess,
     return c_source_location_from_position(token.offset, recovery ? ir_source_map_position(&recovery->map, token.offset, 0) : (IrSourcePosition){0});
 }
 
+BUSTER_C_SHARED CSourceSite c_preprocess_token_site_cursor(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
+{
+    IR_DIAGNOSTIC_CENSUS_RECORD(C_RECORD_SITES, 1);
+    BUSTER_CHECK(token.offset < UINT32_MAX);
+    CSourceSite result = {
+        .map_offset_plus_one = token.offset + 1,
+        .file = c_preprocess_token_source(preprocess, token, cursor),
+    };
+#if !BUSTER_OPTIMIZE
+    // The source a region's key names is the source every position in that
+    // region resolves to (TEXT regions answer region->source, STAMP regions a
+    // stamp built with the same source), so the site agrees with the eager
+    // location it replaces.
+    BUSTER_CHECK(result.file == c_preprocess_token_location(preprocess, token).file);
+#endif
+    return result;
+}
+
+CSourceSite c_preprocess_token_site(CPreprocessResult const* preprocess, CToken token)
+{
+    return c_preprocess_token_site_cursor(preprocess, token, 0);
+}
+
+CSourceLocation c_preprocess_site_location(CPreprocessResult const* preprocess, CSourceSite site)
+{
+    IR_DIAGNOSTIC_CENSUS_RECORD(C_SITE_RESOLUTIONS, 1);
+    CSourceLocation result = {0};
+    if (site.map_offset_plus_one)
+    {
+        CToken token = {
+            .offset = site.map_offset_plus_one - 1,
+        };
+        result = c_preprocess_token_location(preprocess, token);
+    }
+    return result;
+}
+
 // The amortized variant for consumers whose queries mostly ascend (parsing
 // walks tokens roughly in stream order).
 BUSTER_C_SHARED CSourceLocation c_preprocess_token_location_cursor(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
@@ -964,8 +1003,9 @@ BUSTER_C_SHARED CSourceLocation c_preprocess_token_location_cursor(CPreprocessRe
 
 // Which source a token belongs to, without recovering its line and column:
 // what lowering wants, since an IR source range is a source plus the offset
-// the token already carries.
-BUSTER_C_SHARED u32 c_preprocess_token_source(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
+// the token already carries. Forced inline with ir_source_map_source: every
+// lowered instruction asks, and record sites are a second caller.
+BUSTER_C_SHARED BUSTER_SHARED_INLINE u32 c_preprocess_token_source(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
 {
     CSourceMapRecovery const* recovery = preprocess->recovery;
     return recovery ? ir_source_map_source(&recovery->map, token.offset, cursor) : 0;

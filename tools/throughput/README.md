@@ -490,8 +490,7 @@ saturation (`overflowed=1`) and failed-attempt rules as `ir_construction.*`.
 | `source_queries` | `ir_source_map_source` calls: a region lookup without the per-line search. |
 | `original_queries`, `original_steps` | `ir_source_map_original_position` calls and the stamp-origin steps they walk. |
 | `text_position_queries`, `text_bytes_scanned` | `ir_source_text_position` calls and bytes rescanned for newlines. |
-| `c_eager_locations` | Parser locations resolved into semantic records, or ahead of a failure that has not happened, before any diagnostic reads them. |
-| `c_record_sites`, `c_site_resolutions` | Record sites taken (offset plus source, no line/column), and sites later resolved to a full location. |
+| `c_record_sites`, `c_site_resolutions` | Record sites taken (offset plus source, no line/column; see `CSourceSite`), and sites later resolved to a full location. Before records kept sites, the parser resolved the full location eagerly (`c_eager_locations` in the first census revision). |
 | `c_visibility_locations` | Reference locations resolved by the declared-before fallback, a semantic read. |
 | `c_directive_locations`, `c_stamp_locations` | Lexer-local location recoveries for directive lines and macro-invocation stamps. |
 | `c_metrics_token_visits` | Tokens visited by the spelled-byte pass that feeds only `-v` and `-fsource-metrics`. |

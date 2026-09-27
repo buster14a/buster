@@ -24,7 +24,6 @@
     X(ORIGINAL_STEPS, original_steps) \
     X(TEXT_POSITION_QUERIES, text_position_queries) \
     X(TEXT_BYTES_SCANNED, text_bytes_scanned) \
-    X(C_EAGER_LOCATIONS, c_eager_locations) \
     X(C_RECORD_SITES, c_record_sites) \
     X(C_SITE_RESOLUTIONS, c_site_resolutions) \
     X(C_VISIBILITY_LOCATIONS, c_visibility_locations) \
