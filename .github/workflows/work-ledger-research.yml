@@ -186,6 +186,17 @@ jobs:
           python3 tools/work_ledger/ledger_report.py "${specs[@]}" --output report/ledger.md --json report/ledger.json
           cat report/ledger.md >> "$GITHUB_STEP_SUMMARY"
           cat report/ledger.md
+          # Counter changes need a counting baseline: every ledger-* subject
+          # against the unmodified ledger build.
+          ledger_specs=()
+          for spec in "${specs[@]}"; do
+            case "$spec" in ledger=*|ledger-*) ledger_specs+=("$spec");; esac
+          done
+          if [ "${#ledger_specs[@]}" -gt 1 ]; then
+            python3 tools/work_ledger/ledger_report.py "${ledger_specs[@]}" --output report/ledger-counters.md --json report/ledger-counters.json
+            echo "==== ledger-counters.md"
+            cat report/ledger-counters.md
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: work-ledger-report
