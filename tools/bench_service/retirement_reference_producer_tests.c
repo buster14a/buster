@@ -17,6 +17,7 @@
 #include "retirement_correctness.c"
 #include "retirement_artifact_service.c"
 #include "retirement_correctness_oracle.c"
+#define BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED 1
 #include "retirement_oracle_authority.c"
 #include "retirement_reference_producer.c"
 
