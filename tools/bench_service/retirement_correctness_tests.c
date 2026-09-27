@@ -1500,6 +1500,17 @@ static void test_oracle_authority_adapter(char const* executable)
                 faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
             char cancellation_byte = 0;
             CHECK(read(cancellation[0], &cancellation_byte, 1) == 1);
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11));
+            changed = build;
+            changed.build_command_sha256[0] ^= 1;
+            references[0].build_command_sha256[0] ^= 1;
+            CHECK(!bq_retirement_oracle_authority_next(&authority, &changed,
+                &command, output, cancellation[0], deadline) &&
+                authority.ledger.failed &&
+                faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
             BqRetirementOracleTemplateRow bad_row = approved;
             bad_row.row += 1;
             template.references = &bad_row;
@@ -1536,6 +1547,17 @@ static void test_oracle_authority_adapter(char const* executable)
                 bq_retirement_oracle_authority_finish(&authority) &&
                 bq_retirement_oracle_authority_ready(&authority) &&
                 !strcmp(authority.template_sha256, template_sha256));
+            authority.toolchain_identity_sha256[0] ^= 1;
+            CHECK(!bq_retirement_oracle_authority_ready(&authority));
+            authority.toolchain_identity_sha256[0] ^= 1;
+            authority.ledger.prepared.source_sha256[0][0] ^= 1;
+            CHECK(!bq_retirement_oracle_authority_ready(&authority));
+            authority.ledger.prepared.source_sha256[0][0] ^= 1;
+            BqRetirementOracleReference const* saved_references = authority.ledger.references;
+            authority.ledger.references = NULL;
+            CHECK(!bq_retirement_oracle_authority_ready(&authority));
+            authority.ledger.references = saved_references;
+            CHECK(bq_retirement_oracle_authority_ready(&authority));
             char first_attempt_sha256[65] = {0};
             char first_command_sha256[65] = {0};
             memcpy(first_attempt_sha256, authority.attempt_sha256, 65);

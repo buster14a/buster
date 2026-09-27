@@ -307,6 +307,54 @@ BUSTER_GLOBAL_LOCAL bool bq_oracle_authority_workdir(int descriptor,
     return ok;
 }
 
+BUSTER_GLOBAL_LOCAL bool bq_oracle_authority_top_static(
+    BqRetirementOracleAuthority const* authority)
+{
+    BqRetirementOracleLedger const* ledger = authority ? &authority->ledger : NULL;
+    BqRetirementOracleTemplate const* template = authority ? authority->template : NULL;
+    bool ok = ledger && template && template->references && authority->references &&
+        ledger->references == authority->references &&
+        ledger->count == template->reference_count &&
+        ledger->job_id == authority->job_id &&
+        ledger->attempt_token == authority->attempt_token &&
+        !memcmp(ledger->template_sha256, authority->template_sha256, 65) &&
+        !memcmp(authority->toolchain_identity_sha256,
+            template->toolchain_identity_sha256, 65) &&
+        ledger->prepared.rows == template->population_rows &&
+        ledger->prepared.object_rows == template->object_rows &&
+        ledger->prepared.native_target == template->native_target &&
+        !memcmp(ledger->prepared.support_sha256, template->support_sha256, 65) &&
+        !memcmp(ledger->prepared.census_sha256, template->census_sha256, 65);
+    for (unsigned side = 0; ok && side < 2; side += 1)
+        ok = !memcmp(ledger->prepared.source_sha256[side],
+            template->source_sha256[side], 65);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_oracle_authority_reference_static(
+    BqRetirementOracleAuthority const* authority, uint32_t index)
+{
+    BqRetirementOracleLedger const* ledger = authority ? &authority->ledger : NULL;
+    BqRetirementOracleTemplate const* template = authority ? authority->template : NULL;
+    BqRetirementOracleReference const* reference = authority && authority->references &&
+        ledger && index < ledger->count ? authority->references + index : NULL;
+    BqRetirementOracleTemplateRow const* approved = template && template->references &&
+        index < template->reference_count ? template->references + index : NULL;
+    bool ok = reference && approved && bq_oracle_authority_top_static(authority) &&
+        reference->row == approved->row &&
+        reference->census_row == approved->census_row &&
+        reference->target == approved->target &&
+        !memcmp(reference->preparation_sha256, ledger->prepared.preparation_sha256, 65) &&
+        !memcmp(reference->source_sha256, approved->source_sha256, 65) &&
+        !memcmp(reference->configuration_sha256, approved->configuration_sha256, 65) &&
+        !memcmp(reference->build_command_sha256, approved->build_command_sha256, 65) &&
+        !memcmp(reference->logical_command_sha256, approved->logical_command_sha256, 65) &&
+        bq_oracle_authority_name(reference->output_name) &&
+        bq_oracle_authority_name(approved->output_name) &&
+        !strcmp(reference->output_name, approved->output_name);
+    return ok;
+}
+
 bool bq_retirement_oracle_authority_next(BqRetirementOracleAuthority* authority,
     BqRetirementOracleVerifiedBuild const* build,
     BqRetirementProcessCommand const* command, BqRetirementArtifactLocation output,
@@ -322,6 +370,7 @@ bool bq_retirement_oracle_authority_next(BqRetirementOracleAuthority* authority,
     char concrete_sha256[65] = {0}, executable[64] = {0};
     bool ok = ledger && ledger->authority_bound && !ledger->failed &&
         !ledger->finished && !authority->finished && reference && build &&
+        bq_oracle_authority_reference_static(authority, index) &&
         command && command->arguments && command->argument_count &&
         output.name && !strcmp(output.name, reference->output_name) &&
         build->job_id == authority->job_id &&
@@ -418,6 +467,8 @@ bool bq_retirement_oracle_authority_ready(BqRetirementOracleAuthority const* aut
         !strcmp(population_sha256, authority->template->population_sha256) &&
         bq_oracle_authority_attempt_hash(authority, attempt_sha256) &&
         !strcmp(attempt_sha256, authority->attempt_sha256);
+    for (uint32_t i = 0; ok && i < authority->ledger.count; i += 1)
+        ok = bq_oracle_authority_reference_static(authority, i);
     return ok;
 }
 
