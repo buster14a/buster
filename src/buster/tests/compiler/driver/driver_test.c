@@ -2101,6 +2101,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_results(UnitTestArg
     return result;
 }
 
+// preprocessed.bytes is read only by the -v source report and the
+// -fsource-metrics file, so the driver sums it only when one of them is
+// requested; the other preprocessed counts are gathered either way.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_spelled_byte_metrics_on_request(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-spelled-byte-metrics"), S8(".c"));
+    String8 metrics = buster_test_temporary_path(arena, S8("buster-spelled-byte-metrics"), S8(".metrics"));
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8("#define WIDE long long\nWIDE value = 12;\n"))));
+    String8 plain_command[] = {S8("-g0"), S8("-fsyntax-only"), input};
+    String8 verbose_command[] = {S8("-g0"), S8("-v"), S8("-fsyntax-only"), input};
+    String8 metrics_command[] = {S8("-g0"), string_format(arena, S8("-fsource-metrics={S8}"), metrics), S8("-fsyntax-only"), input};
+    CompilerDriverResult plain = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(plain_command)));
+    CompilerDriverResult verbose = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(verbose_command)));
+    CompilerDriverResult measured = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(metrics_command)));
+    BUSTER_TEST(arguments, plain.error == COMPILER_DRIVER_ERROR_NONE && verbose.error == COMPILER_DRIVER_ERROR_NONE && measured.error == COMPILER_DRIVER_ERROR_NONE);
+    // "long" "long" "value" "=" "12" ";"
+    BUSTER_TEST(arguments, verbose.preprocessed.bytes == 17 && measured.preprocessed.bytes == 17);
+    BUSTER_TEST(arguments, plain.preprocessed.bytes == 0);
+    BUSTER_TEST(arguments, plain.preprocessed.tokens == 6 && verbose.preprocessed.tokens == 6 && measured.preprocessed.tokens == 6);
+    BUSTER_TEST(arguments, plain.preprocessed.expansions == verbose.preprocessed.expansions && plain.source_lexed.bytes == verbose.source_lexed.bytes);
+    scratch_end(temporary);
+    return result;
+}
+
 // Every structured record of a compilation, one line each, with the input's
 // temporary paths replaced by `main` and `header` so the text is stable.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_record_dump(Arena* arena, CompilerDriverResult result, String8 main_path, String8 header_path)
@@ -11301,6 +11328,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_batches);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_record_diagnostic_equivalence);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_spelled_byte_metrics_on_request);
 
     TestArenaScope driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("prewarm"), false);
 
