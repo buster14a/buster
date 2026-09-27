@@ -12,6 +12,16 @@
 #include "queue.c"
 #include "exclusive_admission.c"
 #include "workspace.c"
+#ifdef __linux__
+/* Keep the private B adapters in the installed service translation unit.
+ * Their production importer remains fail-closed until independent policy,
+ * semantic receipts and the reference-build producer are connected. */
+#include "retirement_correctness.c"
+#include "retirement_correctness_service.c"
+#include "retirement_artifact_service.c"
+#include "retirement_correctness_oracle.c"
+#include "retirement_oracle_authority.c"
+#endif
 #include "worker_linux.c"
 #include "export.c"
 #include "protocol.c"

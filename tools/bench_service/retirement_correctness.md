@@ -6,10 +6,18 @@ does not change the blocked recipe descriptor. The service-side validator
 projection is wired as a fail-closed check, but the production worker has no
 caller for a ready correctness gate or timed launch.
 
+On Linux the installed service translation unit includes the correctness,
+service projection, artifact/runtime observation and oracle adapters. The
+preparation and validator fixtures use those same includes through `main.c`.
+Their lower-level caller-pinned test seams are excluded from production with
+`BQ_RETIREMENT_CORRECTNESS_TEST_ONLY`. Compilation is not recipe admission:
+the fixed in-unit caller, independently installed policy and #509 authority
+remain prerequisites before any timed child.
+
 The lower-level `_built_pinned` seams read same-attempt preparation,
 matched-build receipts and binary records through service-held descriptors.
-The public `begin_service` performs only a staged eligibility projection and
-stops before matched-build import. That projection separately pins #508 support, inputs, rows,
+The public `begin_service` reimports A, matched-build and binary records before
+performing the staged eligibility projection. That projection separately pins #508 support, inputs, rows,
 manifest, the source applicability ledger, schema-2 report, and applicability
 and skip sidecars. It recomputes the raw identities, checks the complete fixed
 matrix and report class-row partition, and requires the exact source-derived

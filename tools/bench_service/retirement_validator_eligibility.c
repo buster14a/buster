@@ -1,11 +1,10 @@
 /* Standalone exercise of the B-owned #508 schema-2 eligibility projection.
  * The Python fixture creates genuine validator evidence and supplies its
  * temporary profile pins; this probe never synthesizes classifications. */
+#define BQ_RETIREMENT_CORRECTNESS_TEST_ONLY 1
 #define main bq_service_cli_main
 #include "main.c"
 #undef main
-#include "retirement_correctness.c"
-#include "retirement_correctness_service.c"
 #include <stdlib.h>
 
 int main(int argc, char** argv)

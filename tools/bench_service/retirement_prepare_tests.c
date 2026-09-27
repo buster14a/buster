@@ -2,11 +2,10 @@
  * intentionally does not change the shared service test registration owned by
  * the #923 integrator. It uses the real descriptor-backed materializer.
  */
+#define BQ_RETIREMENT_CORRECTNESS_TEST_ONLY 1
 #define main bq_service_cli_main
 #include "main.c"
 #undef main
-#include "retirement_correctness.c"
-#include "retirement_correctness_service.c"
 #include <stdlib.h>
 #include <time.h>
 

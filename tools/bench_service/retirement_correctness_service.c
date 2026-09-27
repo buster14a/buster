@@ -259,6 +259,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_support_projection_subjects(int file, Str
     return ok;
 }
 
+#if defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
 BUSTER_GLOBAL_LOCAL bool bq_retirement_support_projection(int file, String8 profile,
     BqRetirementPrepared const* prepared, BqRetirementTrustedRow const* rows)
 {
@@ -266,6 +267,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_support_projection(int file, String8 prof
                                                          NULL, 0, NULL);
     return ok;
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL bool bq_retirement_inputs_line_fields(String8 line, String8 fields[8])
 {
@@ -2130,6 +2132,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_eligibility_projection(int supp
     return ok;
 }
 
+#if defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_correctness_begin_service_pinned(BqQueue* queue, BqJob const* job,
     int installed, int workspaces, String8 profile, char const preparation_sha256[SHA256_HEX_CAPACITY],
     char const record_sha256[SHA256_HEX_CAPACITY], BqRetirementPrepared const* prepared,
@@ -2195,6 +2198,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_correctness_begin_service_built_pinned
     else if (fresh) gate->failed = 1;
     return result;
 }
+#endif
 
 BqError bq_retirement_correctness_begin_service(BqQueue* queue, BqJob const* job,
     int installed, int workspaces, int support_declaration, int source_applicability_ledger,
