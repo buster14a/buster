@@ -4542,6 +4542,68 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_block_tls(UnitTestArguments* a
     return result;
 }
 
+// Issue 1603: an internal or inline definition nothing reaches is dropped
+// whether or not a prototype came first. The prototype's function stays
+// bodiless as NOT_LOWERED, never the REJECTED placeholder a lowered definition
+// starts from: that state means lowering failed, and the LLVM bitcode,
+// WebAssembly and eBPF emitters refuse the whole unit on it. The cycle's
+// unprototyped half is the no-prototype path, which leaves no function at all.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unneeded_prototyped_definitions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("static int unneeded_static(void);\n"
+                                               "static int unneeded_static(void) { return 1; }\n"
+                                               "static inline int unneeded_inline(void);\n"
+                                               "static inline int unneeded_inline(void) { return 2; }\n"
+                                               "inline int unneeded_external_inline(void);\n"
+                                               "inline int unneeded_external_inline(void) { return 3; }\n"
+                                               "static int unneeded_cycle_a(void);\n"
+                                               "static int unneeded_cycle_b(void) { return unneeded_cycle_a(); }\n"
+                                               "static int unneeded_cycle_a(void) { return unneeded_cycle_b(); }\n"
+                                               "static int needed_static(void);\n"
+                                               "int keep(void) { return needed_static(); }\n"
+                                               "static int needed_static(void) { return 4; }\n"),
+                                            (CPreprocessOptions){
+                                                .target = target_native,
+                                                .data_layout = target_data_layout(target_native),
+                                            });
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("unneeded-prototyped-definitions.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, lowered.program != 0))
+    {
+        IrModule* module = lowered.program->modules;
+        BUSTER_TEST(arguments, module->rejected_function_count == 0);
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            BUSTER_TEST(arguments, module->functions[function_index].state != IR_FUNCTION_REJECTED);
+        }
+        String8 unneeded[] = {S8("unneeded_static"), S8("unneeded_inline"), S8("unneeded_external_inline"), S8("unneeded_cycle_a")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unneeded); index += 1)
+        {
+            IrFunction* function = c_test_find_ir_function(module, unneeded[index]);
+            if (BUSTER_REQUIRE(arguments, function != 0))
+            {
+                IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, function->symbol);
+                BUSTER_TEST(arguments, function->state == IR_FUNCTION_NOT_LOWERED && !function->block_count);
+                BUSTER_TEST(arguments, symbol && !symbol->is_definition);
+            }
+        }
+        BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("unneeded_cycle_b")) == 0);
+        IrFunction* needed = c_test_find_ir_function(module, S8("needed_static"));
+        IrFunction* keep = c_test_find_ir_function(module, S8("keep"));
+        BUSTER_TEST(arguments, needed && needed->state == IR_FUNCTION_LOWERED);
+        BUSTER_TEST(arguments, keep && keep->state == IR_FUNCTION_LOWERED);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_repeated_incomplete_arrays(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23334,6 +23396,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_parenthesized_operand);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_invalid_block_tls);
+
+    BUSTER_TEST_FIXTURE(arguments, c_test_unneeded_prototyped_definitions);
 
     {
         TemporalArena artifact_temporary = scratch_begin(0, 0);

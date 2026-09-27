@@ -8586,6 +8586,68 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_has_builtin_targets(Unit
     return result;
 }
 
+// Issue 1603: a prototype followed by a definition nothing reaches left that
+// definition's REJECTED placeholder in the IR. Native code generation skipped
+// it, but the LLVM bitcode, WebAssembly and eBPF emitters refused the unit,
+// so every shape below failed on all three. A refusal that does concern a
+// function must name it and point at it, as a native refusal does.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unneeded_prototyped_definitions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("static int unneeded_static(void);\n"
+                        "static int unneeded_static(void) { return 1; }\n"
+                        "static inline int unneeded_inline(void);\n"
+                        "static inline int unneeded_inline(void) { return 2; }\n"
+                        "inline int unneeded_external_inline(void);\n"
+                        "inline int unneeded_external_inline(void) { return 3; }\n"
+                        "static int unneeded_cycle_a(void);\n"
+                        "static int unneeded_cycle_b(void) { return unneeded_cycle_a(); }\n"
+                        "static int unneeded_cycle_a(void) { return unneeded_cycle_b(); }\n"
+                        "static int needed_static(void);\n"
+                        "int main(void) { return needed_static(); }\n"
+                        "static int needed_static(void) { return 4; }\n");
+    // The first target is compiled with -emit-llvm; the others select their
+    // direct emitter by target alone.
+    String8 target_names[] = {S8("x86_64-unknown-linux-gnu"), S8("wasm32-unknown-wasi"), S8("bpfel-unknown-linux")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_names); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-unneeded-prototyped"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-unneeded-prototyped"), S8(".out"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 command[] = {S8("-emit-llvm"), S8("-c"), S8("-nostdinc"), S8("-target"), target_names[target_index], S8("-o"), output, input};
+            u32 skipped = target_index != 0;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command + skipped, .length = BUSTER_ARRAY_LENGTH(command) - skipped}));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+            {
+                BUSTER_TEST(arguments, target_index == 0 ? compiled.has_llvm_bitcode : target_index == 1 ? compiled.has_wasm : compiled.has_ebpf);
+                BUSTER_TEST(arguments, file_read(arena, output, (FileReadOptions){0}).length != 0);
+            }
+        }
+        scratch_end(temporary);
+    }
+    String8 refusal_targets[] = {S8("wasm64-unknown-freestanding"), S8("bpfel-unknown-linux")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(refusal_targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 output = buster_test_temporary_path(arena, S8("buster-emitter-refusal"), S8(".out"));
+        String8 command[] = {S8("-c"), S8("-target"), refusal_targets[target_index], S8("-DABI_TEST_MODE=0"), S8("-o"), output,
+                             S8("tests/basic_c_llvm_abi_unsupported.c")};
+        CompilerDriverResult refused = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, refused.error == (target_index == 0 ? COMPILER_DRIVER_ERROR_WASM : COMPILER_DRIVER_ERROR_EBPF));
+        BUSTER_TEST_RAW(arguments, string_starts_with_sequence(refused.diagnostic, S8("tests/basic_c_llvm_abi_unsupported.c:3:")), refused.diagnostic);
+        BUSTER_TEST_RAW(arguments, string_ends_with_sequence(refused.diagnostic, S8(" (in function 'return_pair')")), refused.diagnostic);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // #666: inspect the bytes the selected object writer actually emitted, not
 // just IrSymbol.is_weak (which COFF accepts but cannot serialize). The same
 // guarded fixture must also survive native source/object linking and exit.
@@ -9115,6 +9177,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_coff_section_alignment);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unneeded_prototyped_definitions);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_common_storage_option);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC

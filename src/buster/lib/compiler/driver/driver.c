@@ -3006,8 +3006,8 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_llvm_bitcode_path(Arena* are
                                                     });
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_write_llvm_bitcode(Arena* arena, CompilerDriverInvocation invocation, LlvmBitcodeArtifact artifact,
-                                                              CompilerDriverResult* result)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_write_llvm_bitcode(Arena* arena, CompilerDriverInvocation invocation, IrProgram* program, IrModule* module,
+                                                              LlvmBitcodeArtifact artifact, CompilerDriverResult* result)
 {
     if (!result)
     {
@@ -3017,9 +3017,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_llvm_bitcode(Arena* arena, Compil
     if (!llvm_bitcode_artifact_is_valid(artifact))
     {
         result->error = COMPILER_DRIVER_ERROR_LLVM_BITCODE;
-        result->diagnostic = artifact.error.diagnostic.length ? artifact.error.diagnostic
-                             : artifact.error.message.length  ? artifact.error.message
-                                                               : S8("LLVM bitcode emission failed");
+        String8 message = artifact.error.diagnostic.length ? artifact.error.diagnostic
+                          : artifact.error.message.length  ? artifact.error.message
+                                                            : S8("LLVM bitcode emission failed");
+        result->diagnostic = compiler_driver_emitter_diagnostic(arena, program, module, artifact.error.function, artifact.error.instruction, message);
         return false;
     }
     result->has_llvm_bitcode = true;
@@ -3055,8 +3056,8 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_wasm_path(Arena* arena, Stri
                                                       });
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriverInvocation invocation, WasmArtifact artifact,
-                                                     CompilerDriverResult* result)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriverInvocation invocation, IrProgram* program, IrModule* module,
+                                                     WasmArtifact artifact, CompilerDriverResult* result)
 {
     if (!result)
     {
@@ -3067,9 +3068,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriver
     if (artifact.error.code != WASM64_ERROR_NONE)
     {
         result->error = COMPILER_DRIVER_ERROR_WASM;
-        result->diagnostic = artifact.error.diagnostic.length ? artifact.error.diagnostic
-                             : artifact.error.message.length  ? artifact.error.message
-                                                               : S8("WebAssembly code generation failed");
+        String8 message = artifact.error.diagnostic.length ? artifact.error.diagnostic
+                          : artifact.error.message.length  ? artifact.error.message
+                                                            : S8("WebAssembly code generation failed");
+        result->diagnostic = compiler_driver_emitter_diagnostic(arena, program, module, artifact.error.function, artifact.error.instruction, message);
         return false;
     }
     result->has_wasm = true;
@@ -3087,8 +3089,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriver
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriverInvocation invocation, EbpfArtifact artifact,
-                                                     CompilerDriverResult* result)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriverInvocation invocation, IrProgram* program, IrModule* module,
+                                                     EbpfArtifact artifact, CompilerDriverResult* result)
 {
     if (!result)
     {
@@ -3098,9 +3100,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
     if (artifact.error.code != EBPF_ERROR_NONE)
     {
         result->error = COMPILER_DRIVER_ERROR_EBPF;
-        result->diagnostic = artifact.error.diagnostic.length ? artifact.error.diagnostic
-                             : artifact.error.message.length  ? artifact.error.message
-                                                               : S8("eBPF code generation failed");
+        String8 message = artifact.error.diagnostic.length ? artifact.error.diagnostic
+                          : artifact.error.message.length  ? artifact.error.message
+                                                            : S8("eBPF code generation failed");
+        result->diagnostic = compiler_driver_emitter_diagnostic(arena, program, module, artifact.error.function, artifact.error.instruction, message);
         return false;
     }
     result->has_ebpf = true;
@@ -3694,19 +3697,19 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         LlvmBitcodeArtifact artifact =
             llvm_bitcode_emit_with_options(arena, lowered.program, module, 1,
                                            compiler_driver_llvm_bitcode_options(invocation.target, invocation.input_paths[0]));
-        compiler_driver_write_llvm_bitcode(arena, invocation, artifact, &result);
+        compiler_driver_write_llvm_bitcode(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }
     if (compiler_driver_target_is_wasm(invocation.target))
     {
         WasmArtifact artifact = wasm_emit(arena, lowered.program, module, 1, compiler_driver_wasm_options(invocation.target));
-        compiler_driver_write_wasm(arena, invocation, artifact, &result);
+        compiler_driver_write_wasm(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }
     if (invocation.target.cpu_arch == CPU_ARCH_BPFEL)
     {
         EbpfArtifact artifact = ebpf_emit(arena, lowered.program, module, 1);
-        compiler_driver_write_ebpf(arena, invocation, artifact, &result);
+        compiler_driver_write_ebpf(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }
     BootstrapTrace mir_trace = {0};

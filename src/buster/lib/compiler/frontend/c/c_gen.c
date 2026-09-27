@@ -50427,6 +50427,10 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             };
             continue;
         }
+        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
+        bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
+        bool unneeded_definition = (internal || inline_definition) && declaration.is_definition && !function_needed[declaration_index] &&
+                                   !c_declaration_section_name(arena, preprocess, declaration).length;
         IrFunction* existing_function = 0;
         CIntegerIrBuilder lookup_builder = {
             .function_names = &function_names,
@@ -50445,6 +50449,21 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 existing_function = declaration_functions[previous];
                 break;
             }
+        }
+        if (existing_function && unneeded_definition)
+        {
+            // A definition nothing reaches is dropped whether or not a
+            // prototype came first: it claims no function, so no call can
+            // bind to it. The prototype's function becomes NOT_LOWERED, not
+            // the REJECTED placeholder a lowered definition starts from:
+            // that state means lowering failed, and the LLVM bitcode,
+            // WebAssembly and eBPF emitters refuse the unit on it. Left a
+            // DECLARATION, bitcode would carry an invalid `declare internal`.
+            if (existing_function->state == IR_FUNCTION_DECLARATION)
+            {
+                existing_function->state = IR_FUNCTION_NOT_LOWERED;
+            }
+            continue;
         }
         if (existing_function)
         {
@@ -50478,10 +50497,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             };
             continue;
         }
-        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
-        bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
-        if ((internal || inline_definition) && declaration.is_definition && !function_needed[declaration_index] &&
-            !c_declaration_section_name(arena, preprocess, declaration).length)
+        if (unneeded_definition)
         {
             continue;
         }
