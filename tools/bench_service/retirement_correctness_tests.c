@@ -16,6 +16,8 @@
 #include "retirement_correctness.c"
 #include "retirement_artifact_service.c"
 #include "retirement_correctness_oracle.c"
+#define BQ_RETIREMENT_ORACLE_AUTHORITY_TEST_ONLY 1
+#include "retirement_oracle_authority.c"
 
 #define BQ_TEST_ROWS 6u
 #define BQ_TEST_CHECKS (BQ_RETIREMENT_CHECK_COUNT - 1u)
@@ -45,6 +47,17 @@ static void digest(char value[65], char fill)
 {
     memset(value, fill, 64);
     value[64] = 0;
+}
+
+/* The original miniature ledger test exercises structural mutation checks.
+ * Only the authority adapter can make a ledger ready for a timed handoff. */
+static bool test_oracle_structural_ready(BqRetirementOracleLedger const* ledger)
+{
+    char observed[65] = {0};
+    bool ok = ledger && ledger->finished && !ledger->failed &&
+        bq_retirement_oracle_seal(ledger, observed) &&
+        !strcmp(observed, ledger->sealed_sha256);
+    return ok;
 }
 
 static void fixture_init(BqCorrectnessFixture* fixture)
@@ -898,7 +911,7 @@ static void test_independent_oracle(char const* executable)
             references[0].binary_sha256[0] ^= 1;
             ledger = (BqRetirementOracleLedger){0};
             CHECK(bq_retirement_oracle_begin(&ledger, &fixture.prepared,
-                fixture.trusted, references, 2, pin) && !bq_retirement_oracle_ready(&ledger));
+                fixture.trusted, references, 2, pin) && !test_oracle_structural_ready(&ledger));
             BqRetirementRuntimeStart starts[2] = {0};
             int outputs[2] = {-1, -1};
             for (unsigned i = 0; i < 2; i += 1)
@@ -966,19 +979,19 @@ static void test_independent_oracle(char const* executable)
                 &starts[0], outputs[0]));
             CHECK(bq_retirement_oracle_observe(&ledger, reference_binary, &command,
                 &starts[1], outputs[1]));
-            CHECK(bq_retirement_oracle_finish(&ledger) && bq_retirement_oracle_ready(&ledger));
+            CHECK(bq_retirement_oracle_finish(&ledger) && test_oracle_structural_ready(&ledger));
             fixture.trusted[5].independent_oracle_sha256[0] ^= 1;
-            CHECK(!bq_retirement_oracle_ready(&ledger));
+            CHECK(!test_oracle_structural_ready(&ledger));
             fixture.trusted[5].independent_oracle_sha256[0] ^= 1;
-            CHECK(bq_retirement_oracle_ready(&ledger));
+            CHECK(test_oracle_structural_ready(&ledger));
             references[1].command_sha256[0] ^= 1;
-            CHECK(!bq_retirement_oracle_ready(&ledger));
+            CHECK(!test_oracle_structural_ready(&ledger));
             references[1].command_sha256[0] ^= 1;
-            CHECK(bq_retirement_oracle_ready(&ledger));
+            CHECK(test_oracle_structural_ready(&ledger));
             fixture.trusted[0].compiler_eligible ^= 1;
-            CHECK(!bq_retirement_oracle_ready(&ledger));
+            CHECK(!test_oracle_structural_ready(&ledger));
             fixture.trusted[0].compiler_eligible ^= 1;
-            CHECK(bq_retirement_oracle_ready(&ledger));
+            CHECK(test_oracle_structural_ready(&ledger));
             /* The B gate compares both measured sides to the newly observed
              * reference bytes. A changed candidate output never reaches a
              * timed-start decision in this private fixture. */
@@ -1090,28 +1103,28 @@ static void test_oracle_producer(char const* executable)
             uint64_t deadline = now + UINT64_C(30000000000);
             BqRetirementArtifactLocation output = {directory, "observed"};
             BqRetirementOracleLedger gate = {0};
-            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
-                fixture.trusted, &reference, 1, pin));
+            CHECK(bq_retirement_oracle_begin_observing(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin, 1, 2));
             CHECK(!bq_retirement_oracle_produce_next(&gate, binary, -1, &command,
                 output, cancellation[0], deadline) && gate.failed && gate.done == 0 &&
                 faccessat(directory, "observed", F_OK, 0) < 0 && errno == ENOENT);
             gate = (BqRetirementOracleLedger){0};
-            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
-                fixture.trusted, &reference, 1, pin));
+            CHECK(bq_retirement_oracle_begin_observing(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin, 1, 2));
             reference.build_receipt_sha256[0] ^= 1;
             CHECK(!bq_retirement_oracle_produce_next(&gate, binary, receipt, &command,
                 output, cancellation[0], deadline) && gate.failed && gate.done == 0 &&
                 faccessat(directory, "observed", F_OK, 0) < 0 && errno == ENOENT);
             reference.build_receipt_sha256[0] ^= 1;
             gate = (BqRetirementOracleLedger){0};
-            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
-                fixture.trusted, &reference, 1, pin));
+            CHECK(bq_retirement_oracle_begin_observing(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin, 1, 2));
             CHECK(!bq_retirement_oracle_produce_next(&gate, binary, receipt, &command,
                 output, cancellation[0], now) && gate.failed && gate.done == 0 &&
                 faccessat(directory, "observed", F_OK, 0) < 0 && errno == ENOENT);
             gate = (BqRetirementOracleLedger){0};
-            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
-                fixture.trusted, &reference, 1, pin));
+            CHECK(bq_retirement_oracle_begin_observing(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin, 1, 2));
             CHECK(write(cancellation[1], "x", 1) == 1 &&
                   !bq_retirement_oracle_produce_next(&gate, binary, receipt, &command,
                     output, cancellation[0], deadline) && gate.failed && gate.done == 0 &&
@@ -1119,8 +1132,8 @@ static void test_oracle_producer(char const* executable)
             char signal_byte = 0;
             CHECK(read(cancellation[0], &signal_byte, 1) == 1);
             gate = (BqRetirementOracleLedger){0};
-            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
-                fixture.trusted, &reference, 1, pin));
+            CHECK(bq_retirement_oracle_begin_observing(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin, 1, 2));
             char* const bad_args[] = {fd_path, "--retirement-oracle-fail", NULL};
             BqRetirementProcessCommand bad_command = {bad_args, environment, root, 2, 3};
             CHECK(!bq_retirement_oracle_produce_next(&gate, binary, receipt, &bad_command,
@@ -1130,8 +1143,8 @@ static void test_oracle_producer(char const* executable)
                 reference.command_sha256) &&
                 bq_retirement_oracle_spec_hash(&fixture.prepared, &reference, 1, pin));
             gate = (BqRetirementOracleLedger){0};
-            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
-                fixture.trusted, &reference, 1, pin));
+            CHECK(bq_retirement_oracle_begin_observing(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin, 1, 2));
             CHECK(!bq_retirement_oracle_produce_next(&gate, binary, receipt, &bad_command,
                 output, cancellation[0], deadline) && gate.failed && gate.done == 0 &&
                 !bq_retirement_oracle_ready(&gate) &&
@@ -1143,8 +1156,8 @@ static void test_oracle_producer(char const* executable)
                 reference.command_sha256) &&
                 bq_retirement_oracle_spec_hash(&fixture.prepared, &reference, 1, pin));
             gate = (BqRetirementOracleLedger){0};
-            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
-                fixture.trusted, &reference, 1, pin));
+            CHECK(bq_retirement_oracle_begin_observing(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin, 1, 2));
             CHECK(!bq_retirement_oracle_produce_next(&gate, binary, receipt, &fork_command,
                 output, cancellation[0], deadline) && gate.failed && gate.done == 0 &&
                 !bq_retirement_oracle_ready(&gate) &&
@@ -1157,8 +1170,8 @@ static void test_oracle_producer(char const* executable)
                 bq_retirement_oracle_spec_hash(&fixture.prepared, &reference, 1, pin) &&
                 bq_retirement_oracle_clock(&now));
             gate = (BqRetirementOracleLedger){0};
-            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
-                fixture.trusted, &reference, 1, pin));
+            CHECK(bq_retirement_oracle_begin_observing(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin, 1, 2));
             CHECK(!bq_retirement_oracle_produce_next(&gate, binary, receipt, &slow_command,
                 output, cancellation[0], now + UINT64_C(30000000)) &&
                 gate.failed && gate.done == 0 && !bq_retirement_oracle_ready(&gate));
@@ -1172,8 +1185,8 @@ static void test_oracle_producer(char const* executable)
             }
             CHECK(canceller > 0);
             gate = (BqRetirementOracleLedger){0};
-            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
-                fixture.trusted, &reference, 1, pin));
+            CHECK(bq_retirement_oracle_begin_observing(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin, 1, 2));
             CHECK(!bq_retirement_oracle_produce_next(&gate, binary, receipt, &slow_command,
                 output, cancellation[0], deadline) && gate.failed && gate.done == 0 &&
                 !bq_retirement_oracle_ready(&gate));
@@ -1188,8 +1201,8 @@ static void test_oracle_producer(char const* executable)
                 reference.command_sha256) &&
                 bq_retirement_oracle_spec_hash(&fixture.prepared, &reference, 1, pin));
             gate = (BqRetirementOracleLedger){0};
-            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
-                fixture.trusted, &reference, 1, pin));
+            CHECK(bq_retirement_oracle_begin_observing(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin, 1, 2));
             struct stat excess = {0};
             CHECK(!bq_retirement_oracle_produce_next(&gate, binary, receipt, &excess_command,
                 output, cancellation[0], deadline) && gate.failed && gate.done == 0 &&
@@ -1199,8 +1212,8 @@ static void test_oracle_producer(char const* executable)
             memcpy(reference.command_sha256, command_hash, 65);
             CHECK(bq_retirement_oracle_spec_hash(&fixture.prepared, &reference, 1, pin));
             gate = (BqRetirementOracleLedger){0};
-            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
-                fixture.trusted, &reference, 1, pin) &&
+            CHECK(bq_retirement_oracle_begin_observing(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin, 1, 2) &&
                   bq_retirement_oracle_produce_next(&gate, binary, receipt, &command,
                     output, cancellation[0], deadline) && gate.done == 1 &&
                   bq_retirement_oracle_finish(&gate) && bq_retirement_oracle_ready(&gate) &&
@@ -1214,8 +1227,8 @@ static void test_oracle_producer(char const* executable)
                 bq_retirement_oracle_spec_hash(&fixture.prepared, &reference, 1, pin));
             gate = (BqRetirementOracleLedger){0};
             struct stat side_file = {0};
-            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
-                fixture.trusted, &reference, 1, pin) &&
+            CHECK(bq_retirement_oracle_begin_observing(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin, 1, 2) &&
                   bq_retirement_oracle_produce_next(&gate, binary, receipt, &side_command,
                     output, cancellation[0], deadline) &&
                   bq_retirement_oracle_finish(&gate) && bq_retirement_oracle_ready(&gate) &&
@@ -1230,6 +1243,326 @@ static void test_oracle_producer(char const* executable)
         CHECK(unlinkat(directory, "reference", 0) == 0 &&
               unlinkat(directory, "independent-build-receipt", 0) == 0 &&
               close(directory) == 0);
+    }
+    if (created) CHECK(rmdir(root) == 0);
+}
+
+/* The installed template is independent of fresh A, receipt, binary and FD
+ * numbers. This fixture's token issuer is compiled out of production. */
+static void test_oracle_authority_adapter(char const* executable)
+{
+    char root[] = "/tmp/bq-retirement-authority-XXXXXX";
+    bool created = mkdtemp(root) != NULL;
+    int directory = created ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    CHECK(directory >= 3);
+    if (directory >= 3)
+    {
+        char path[4096] = {0};
+        char const* input = executable;
+        if (executable[0] != '/')
+        {
+            CHECK(getcwd(path, sizeof(path)) != NULL &&
+                strlen(path) + strlen(executable) + 2 < sizeof(path));
+            size_t length = strlen(path);
+            path[length] = '/';
+            memcpy(path + length + 1, executable, strlen(executable) + 1);
+            input = path;
+        }
+        CHECK(copy_frozen_artifact(directory, input, "reference") &&
+            fchmodat(directory, "reference", 0500, 0) == 0);
+        int source_writer = openat(directory, "reference-source",
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        int receipt_writer = openat(directory, "reference-receipt",
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        static char const source_bytes[] = "independent source fixture\n";
+        static char const receipt_bytes[] = "independent build receipt fixture\n";
+        CHECK(source_writer >= 3 && receipt_writer >= 3 &&
+            write(source_writer, source_bytes, sizeof(source_bytes) - 1) ==
+                (ssize_t)(sizeof(source_bytes) - 1) &&
+            write(receipt_writer, receipt_bytes, sizeof(receipt_bytes) - 1) ==
+                (ssize_t)(sizeof(receipt_bytes) - 1) &&
+            fsync(source_writer) == 0 && fsync(receipt_writer) == 0 &&
+            fchmod(source_writer, 0400) == 0 && fchmod(receipt_writer, 0400) == 0);
+        if (source_writer >= 0) CHECK(close(source_writer) == 0);
+        if (receipt_writer >= 0) CHECK(close(receipt_writer) == 0);
+        int binary = openat(directory, "reference", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        int source = openat(directory, "reference-source", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        int receipt = openat(directory, "reference-receipt", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        int cancellation[2] = {-1, -1};
+        CHECK(binary >= 3 && source >= 3 && receipt >= 3 &&
+            pipe(cancellation) == 0 &&
+            fcntl(cancellation[0], F_SETFD, FD_CLOEXEC) == 0 &&
+            fcntl(cancellation[1], F_SETFD, FD_CLOEXEC) == 0);
+        if (binary >= 3 && source >= 3 && receipt >= 3 && cancellation[0] >= 3)
+        {
+            BqCorrectnessFixture fixture;
+            fixture_init(&fixture);
+            memset(fixture.trusted[1].independent_oracle_sha256, 0, 65);
+            memset(fixture.trusted[5].independent_oracle_sha256, 0, 65);
+            fixture.trusted[5].compiler_eligible = 0;
+            fixture.trusted[5].execution_obligation = 0;
+            digest(fixture.trusted[5].skip_proof_sha256, 'e');
+            char source_sha256[65] = {0};
+            CHECK(bq_retirement_oracle_file_hash(source, BQ_ORACLE_SOURCE_CAP,
+                false, source_sha256));
+            memcpy(fixture.trusted[1].source_sha256, source_sha256, 65);
+            BqRetirementOracleTemplateRow approved = {0};
+            approved.row = fixture.trusted[1].row;
+            approved.census_row = fixture.trusted[1].census_row;
+            approved.target = fixture.trusted[1].target;
+            memcpy(approved.source_sha256, source_sha256, 65);
+            memcpy(approved.configuration_sha256,
+                fixture.trusted[1].configuration_sha256, 65);
+            digest(approved.build_command_sha256, '8');
+            strcpy(approved.output_name, "authority-output");
+            BqRetirementOracleTemplate template = {0};
+            template.references = &approved;
+            template.population_rows = fixture.prepared.rows;
+            template.object_rows = fixture.prepared.object_rows;
+            template.native_target = fixture.prepared.native_target;
+            template.reference_count = 1;
+            memcpy(template.support_sha256, fixture.prepared.support_sha256, 65);
+            memcpy(template.census_sha256, fixture.prepared.census_sha256, 65);
+            for (unsigned side = 0; side < 2; side += 1)
+            {
+                memset(template.source_commit[side], side ? 'b' : 'a', 40);
+                memset(template.source_tree[side], side ? 'd' : 'c', 40);
+                memcpy(template.source_sha256[side],
+                    fixture.prepared.source_sha256[side], 65);
+            }
+            digest(template.toolchain_identity_sha256, '9');
+            char executable_path[64] = {0}, workdir_path[64] = {0};
+            CHECK(snprintf(executable_path, sizeof(executable_path),
+                "/proc/self/fd/%d", binary) > 0 &&
+                snprintf(workdir_path, sizeof(workdir_path),
+                "/proc/self/fd/%d", directory) > 0);
+            char* const argv[] = {executable_path, "--retirement-oracle-output", NULL};
+            char* const environment[] = {"ASAN_OPTIONS=detect_leaks=0",
+                "HOME=/nonexistent", "LC_ALL=C", NULL};
+            BqRetirementProcessCommand command = {argv, environment, workdir_path, 2, 3};
+            CHECK(bq_retirement_oracle_logical_command_hash(&command,
+                approved.logical_command_sha256) &&
+                bq_retirement_oracle_population_hash(fixture.trusted,
+                    fixture.prepared.rows, template.population_sha256));
+            char template_sha256[65] = {0};
+            CHECK(bq_retirement_oracle_template_hash(&template, template_sha256));
+            BqRetirementOracleVerifiedBuild build = {0};
+            CHECK(bq_oracle_authority_fixture_build(&build, 7, 11,
+                fixture.prepared.preparation_sha256, source, binary, receipt,
+                template.toolchain_identity_sha256, approved.build_command_sha256));
+            BqRetirementOracleReference references[1] = {0};
+            BqRetirementOracleAuthority authority = {0};
+            BqRetirementArtifactLocation output = {directory, "authority-output"};
+            uint64_t now = 0;
+            CHECK(bq_retirement_oracle_clock(&now));
+            uint64_t deadline = now + UINT64_C(30000000000);
+            char concrete_sha256[65] = {0}, dynamic_sha256[65] = {0};
+            CHECK(tp_retirement_command_fields_hash(argv, 2, workdir_path,
+                environment, 3, concrete_sha256));
+            BqRetirementOracleReference self_pinned = {0};
+            self_pinned.row = approved.row;
+            self_pinned.census_row = approved.census_row;
+            self_pinned.target = approved.target;
+            memcpy(self_pinned.preparation_sha256,
+                fixture.prepared.preparation_sha256, 65);
+            memcpy(self_pinned.source_sha256, approved.source_sha256, 65);
+            memcpy(self_pinned.configuration_sha256, approved.configuration_sha256, 65);
+            memcpy(self_pinned.binary_sha256, build.binary_sha256, 65);
+            memcpy(self_pinned.build_receipt_sha256, build.receipt_sha256, 65);
+            memcpy(self_pinned.command_sha256, concrete_sha256, 65);
+            strcpy(self_pinned.output_name, "authority-output");
+            CHECK(bq_retirement_oracle_spec_hash(&fixture.prepared,
+                &self_pinned, 1, dynamic_sha256));
+            CHECK(!bq_retirement_oracle_authority_begin(&authority, &template,
+                dynamic_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11) && authority.ledger.failed);
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(bq_retirement_oracle_begin(&authority.ledger, &fixture.prepared,
+                fixture.trusted, &self_pinned, 1, dynamic_sha256) &&
+                !bq_retirement_oracle_ready(&authority.ledger) &&
+                !bq_retirement_oracle_produce_next(&authority.ledger,
+                    binary, receipt, &command, output, cancellation[0], deadline) &&
+                faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11));
+            CHECK(!bq_retirement_oracle_authority_next(&authority, NULL,
+                &command, output, cancellation[0], deadline) &&
+                authority.ledger.failed &&
+                faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
+            BqRetirementOracleVerifiedBuild changed = build;
+            changed.job_id += 1;
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11) &&
+                !bq_retirement_oracle_authority_next(&authority, &changed,
+                    &command, output, cancellation[0], deadline) &&
+                faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
+            changed = build;
+            changed.attempt_token += 1;
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11) &&
+                !bq_retirement_oracle_authority_next(&authority, &changed,
+                    &command, output, cancellation[0], deadline) &&
+                faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
+            changed = build;
+            changed.preparation_sha256[0] ^= 1;
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11) &&
+                !bq_retirement_oracle_authority_next(&authority, &changed,
+                    &command, output, cancellation[0], deadline) &&
+                faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
+            changed = build;
+            changed.source_sha256[0] ^= 1;
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11) &&
+                !bq_retirement_oracle_authority_next(&authority, &changed,
+                    &command, output, cancellation[0], deadline) &&
+                faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
+            changed = build;
+            changed.toolchain_identity_sha256[0] ^= 1;
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11) &&
+                !bq_retirement_oracle_authority_next(&authority, &changed,
+                    &command, output, cancellation[0], deadline) &&
+                faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
+            changed = build;
+            changed.binary_sha256[0] ^= 1;
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11) &&
+                !bq_retirement_oracle_authority_next(&authority, &changed,
+                    &command, output, cancellation[0], deadline) &&
+                faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
+            changed = build;
+            changed.receipt = source;
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11) &&
+                !bq_retirement_oracle_authority_next(&authority, &changed,
+                    &command, output, cancellation[0], deadline) &&
+                faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
+            char* const wrong_args[] = {executable_path, "--retirement-oracle-fail", NULL};
+            BqRetirementProcessCommand wrong = {wrong_args, environment, workdir_path, 2, 3};
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11) &&
+                !bq_retirement_oracle_authority_next(&authority, &build,
+                    &wrong, output, cancellation[0], deadline) &&
+                faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11) &&
+                !bq_retirement_oracle_authority_next(&authority, &build,
+                    &command, output, cancellation[0], now) &&
+                faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
+            CHECK(write(cancellation[1], "x", 1) == 1);
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11) &&
+                !bq_retirement_oracle_authority_next(&authority, &build,
+                    &command, output, cancellation[0], deadline) &&
+                faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
+            char cancellation_byte = 0;
+            CHECK(read(cancellation[0], &cancellation_byte, 1) == 1);
+            BqRetirementOracleTemplateRow bad_row = approved;
+            bad_row.row += 1;
+            template.references = &bad_row;
+            char bad_pin[65] = {0};
+            CHECK(bq_retirement_oracle_template_hash(&template, bad_pin));
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(!bq_retirement_oracle_authority_begin(&authority, &template,
+                bad_pin, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11));
+            template.references = &approved;
+            template.reference_count = 0;
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(!bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11));
+            BqRetirementOracleTemplateRow duplicate[2] = {approved, approved};
+            template.references = duplicate;
+            template.reference_count = 2;
+            CHECK(!bq_retirement_oracle_template_hash(&template, bad_pin));
+            template.references = &approved;
+            template.reference_count = 1;
+            approved.configuration_sha256[0] ^= 1;
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(!bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11));
+            approved.configuration_sha256[0] ^= 1;
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11) &&
+                bq_retirement_oracle_authority_next(&authority, &build,
+                    &command, output, cancellation[0], deadline) &&
+                bq_retirement_oracle_authority_finish(&authority) &&
+                bq_retirement_oracle_authority_ready(&authority) &&
+                !strcmp(authority.template_sha256, template_sha256));
+            char first_attempt_sha256[65] = {0};
+            char first_command_sha256[65] = {0};
+            memcpy(first_attempt_sha256, authority.attempt_sha256, 65);
+            memcpy(first_command_sha256, references[0].command_sha256, 65);
+            CHECK(unlinkat(directory, "authority-output", 0) == 0);
+            memset(fixture.trusted[1].independent_oracle_sha256, 0, 65);
+            int other_binary = fcntl(binary, F_DUPFD_CLOEXEC, 30);
+            CHECK(other_binary >= 3 && other_binary != binary);
+            if (other_binary >= 3)
+            {
+                BqRetirementOracleVerifiedBuild second = {0};
+                CHECK(bq_oracle_authority_fixture_build(&second, 7, 11,
+                    fixture.prepared.preparation_sha256, source, other_binary, receipt,
+                    template.toolchain_identity_sha256, approved.build_command_sha256));
+                char second_executable_path[64] = {0};
+                CHECK(snprintf(second_executable_path, sizeof(second_executable_path),
+                    "/proc/self/fd/%d", other_binary) > 0);
+                char* const second_argv[] = {second_executable_path,
+                    "--retirement-oracle-output", NULL};
+                BqRetirementProcessCommand second_command = {
+                    second_argv, environment, workdir_path, 2, 3};
+                char second_logical_sha256[65] = {0};
+                CHECK(bq_retirement_oracle_logical_command_hash(&second_command,
+                    second_logical_sha256) &&
+                    !strcmp(second_logical_sha256, approved.logical_command_sha256));
+                authority = (BqRetirementOracleAuthority){0};
+                CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
+                    template_sha256, &fixture.prepared, fixture.trusted,
+                    references, 1, 7, 11) &&
+                    bq_retirement_oracle_authority_next(&authority, &second,
+                        &second_command, output, cancellation[0], deadline) &&
+                    bq_retirement_oracle_authority_finish(&authority) &&
+                    bq_retirement_oracle_authority_ready(&authority) &&
+                    strcmp(first_command_sha256, references[0].command_sha256) &&
+                    strcmp(first_attempt_sha256, authority.attempt_sha256));
+                CHECK(close(other_binary) == 0 &&
+                    unlinkat(directory, "authority-output", 0) == 0);
+            }
+            CHECK(close(cancellation[0]) == 0 && close(cancellation[1]) == 0);
+        }
+        if (binary >= 0) CHECK(close(binary) == 0);
+        if (source >= 0) CHECK(close(source) == 0);
+        if (receipt >= 0) CHECK(close(receipt) == 0);
+        CHECK(unlinkat(directory, "reference", 0) == 0 &&
+            unlinkat(directory, "reference-source", 0) == 0 &&
+            unlinkat(directory, "reference-receipt", 0) == 0 &&
+            close(directory) == 0);
     }
     if (created) CHECK(rmdir(root) == 0);
 }
@@ -1293,6 +1626,7 @@ int main(int argc, char** argv)
         test_large_population();
         if (argc > 0) test_independent_oracle(argv[0]);
         if (argc > 0) test_oracle_producer(argv[0]);
+        if (argc > 0) test_oracle_authority_adapter(argv[0]);
         if (argc > 0) test_frozen_artifact_readback(argv[0]);
         printf("RETIREMENT_CORRECTNESS_TEST assertions=%u failures=%u launches=%u\n",
                assertions, failures, launches);

@@ -1,5 +1,5 @@
 /* Private #1020 native-runtime oracle producer. A separately admitted,
- * profile-pinned reference ledger covers every eligible native execution row.
+ * immutable authority template covers every eligible native execution row.
  * The service runs its held reference program through the normal deadline-
  * controlled process runner; observed frozen output becomes the expectation.
  * The candidate never supplies expected output bytes or a skip decision.
@@ -13,6 +13,8 @@ typedef struct BqRetirementOracleReference
     uint32_t row, census_row, target;
     char preparation_sha256[65], source_sha256[65], configuration_sha256[65];
     char build_receipt_sha256[65], binary_sha256[65], command_sha256[65];
+    /* Static authority snapshots. Empty only in structural fixture ledgers. */
+    char build_command_sha256[65], logical_command_sha256[65];
     char output_name[BQ_RETIREMENT_OUTPUT_NAME_CAP];
 } BqRetirementOracleReference;
 
@@ -22,13 +24,15 @@ typedef struct BqRetirementOracleLedger
     BqRetirementTrustedRow* rows;
     BqRetirementOracleReference const* references;
     uint32_t count, done;
-    uint32_t failed, finished;
-    char pinned_sha256[65], sealed_sha256[65];
+    uint32_t failed, finished, authority_bound;
+    uint64_t job_id, attempt_token;
+    char template_sha256[65], pinned_sha256[65], sealed_sha256[65];
 } BqRetirementOracleLedger;
 
-/* The caller obtains pinned_sha256 from installed policy, independently of
- * this array, the request, and either measured compiler. The service must
- * authenticate each independent build receipt before calling begin. */
+/* Structural fixture entry only. This compares a caller-supplied dynamic
+ * digest to the array, but cannot establish installed authority. A ledger
+ * started here cannot launch an oracle child or become ready for timing.
+ * Production must use the separate authority adapter and installed template. */
 BUSTER_F_DECL bool bq_retirement_oracle_begin(BqRetirementOracleLedger* ledger,
     BqRetirementPrepared const* prepared, BqRetirementTrustedRow* rows,
     BqRetirementOracleReference const* references, uint32_t count,

@@ -1,10 +1,9 @@
-/* #1020 independent native-output producer. The reference ledger joins every
+/* #1020 independent native-output producer. The structural ledger joins every
  * eligible native runtime row to a separately built, frozen program and an
- * exact service command. begin checks the installed-policy ledger pin;
- * observe checks the held program and the actual completed process log;
- * finish seals the resulting expectations before the correctness gate begins.
- * The caller owns provenance for the pinned reference build, deadline, lease,
- * and complete semantic execution; this module cannot grant them alone.
+ * exact service command. The authority adapter checks the immutable template
+ * before binding this attempt; a freshly computed spec digest is not an
+ * installed pin. observe checks the held program and completed process log.
+ * The caller still owns independent builder provenance, lease, and #509.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "retirement_correctness_oracle.h"
@@ -83,7 +82,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_oracle_same_file(
 
 /* pread avoids shared-descriptor seek state. The before/after metadata check
  * also rejects replacement or mutation during the bounded read. */
-BUSTER_GLOBAL_LOCAL bool bq_retirement_oracle_file_hash(
+bool bq_retirement_oracle_file_hash(
     int descriptor, uint64_t cap, bool executable, char digest[65])
 {
     struct stat before = {0}, after = {0};
@@ -155,6 +154,8 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_oracle_spec_hash(
             sha256_add(&hash, reference->build_receipt_sha256, 64);
             sha256_add(&hash, reference->binary_sha256, 64);
             sha256_add(&hash, reference->command_sha256, 64);
+            sha256_add(&hash, reference->build_command_sha256, 65);
+            sha256_add(&hash, reference->logical_command_sha256, 65);
             size_t length = strnlen(reference->output_name,
                 BQ_RETIREMENT_OUTPUT_NAME_CAP);
             bq_retirement_oracle_number(&hash, (uint32_t)length);
@@ -166,15 +167,17 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_oracle_spec_hash(
     return ok;
 }
 
-bool bq_retirement_oracle_begin(BqRetirementOracleLedger* ledger,
+BUSTER_GLOBAL_LOCAL bool bq_retirement_oracle_begin_internal(BqRetirementOracleLedger* ledger,
     BqRetirementPrepared const* prepared, BqRetirementTrustedRow* rows,
     BqRetirementOracleReference const* references, uint32_t count,
-    char const pinned_sha256[65])
+    char const pinned_sha256[65], char const template_sha256[65],
+    uint64_t job_id, uint64_t attempt_token, bool observing)
 {
-    bool ok = ledger && prepared && rows && references && pinned_sha256 &&
+    bool ok = ledger && prepared && rows && references &&
+        (observing ? template_sha256 && bq_retirement_oracle_hex(template_sha256) &&
+            job_id && attempt_token : pinned_sha256 && bq_retirement_oracle_hex(pinned_sha256)) &&
         count && count <= prepared->rows &&
-        prepared->rows <= BQ_RETIREMENT_CORRECTNESS_ROWS_CAP &&
-        bq_retirement_oracle_hex(pinned_sha256);
+        prepared->rows <= BQ_RETIREMENT_CORRECTNESS_ROWS_CAP;
     uint32_t matched = 0;
     for (uint32_t index = 0; ok && index < prepared->rows; index += 1)
     {
@@ -193,9 +196,12 @@ bool bq_retirement_oracle_begin(BqRetirementOracleLedger* ledger,
                 !memcmp(reference->preparation_sha256, prepared->preparation_sha256, 65) &&
                 !memcmp(reference->source_sha256, row->source_sha256, 65) &&
                 !memcmp(reference->configuration_sha256, row->configuration_sha256, 65) &&
-                bq_retirement_oracle_hex(reference->build_receipt_sha256) &&
-                bq_retirement_oracle_hex(reference->binary_sha256) &&
-                bq_retirement_oracle_hex(reference->command_sha256) &&
+                (bq_retirement_oracle_hex(reference->build_receipt_sha256) ||
+                    (observing && bq_retirement_oracle_empty(reference->build_receipt_sha256))) &&
+                (bq_retirement_oracle_hex(reference->binary_sha256) ||
+                    (observing && bq_retirement_oracle_empty(reference->binary_sha256))) &&
+                (bq_retirement_oracle_hex(reference->command_sha256) ||
+                    (observing && bq_retirement_oracle_empty(reference->command_sha256))) &&
                 bq_retirement_oracle_name(reference->output_name) &&
                 strcmp(reference->binary_sha256, prepared->binary_sha256[0]) &&
                 strcmp(reference->binary_sha256, prepared->binary_sha256[1]);
@@ -204,8 +210,9 @@ bool bq_retirement_oracle_begin(BqRetirementOracleLedger* ledger,
     }
     if (ok) ok = matched == count;
     char computed[65] = {0};
-    if (ok) ok = bq_retirement_oracle_spec_hash(prepared, references, count, computed) &&
-        !strcmp(computed, pinned_sha256);
+    if (ok && !observing)
+        ok = bq_retirement_oracle_spec_hash(prepared, references, count, computed) &&
+            !strcmp(computed, pinned_sha256);
     if (ledger)
     {
         *ledger = (BqRetirementOracleLedger){.failed = !ok};
@@ -215,9 +222,35 @@ bool bq_retirement_oracle_begin(BqRetirementOracleLedger* ledger,
             ledger->rows = rows;
             ledger->references = references;
             ledger->count = count;
-            memcpy(ledger->pinned_sha256, pinned_sha256, 65);
+            ledger->authority_bound = observing;
+            ledger->job_id = job_id;
+            ledger->attempt_token = attempt_token;
+            if (observing) memcpy(ledger->template_sha256, template_sha256, 65);
+            else memcpy(ledger->pinned_sha256, pinned_sha256, 65);
         }
     }
+    return ok;
+}
+
+bool bq_retirement_oracle_begin(BqRetirementOracleLedger* ledger,
+    BqRetirementPrepared const* prepared, BqRetirementTrustedRow* rows,
+    BqRetirementOracleReference const* references, uint32_t count,
+    char const pinned_sha256[65])
+{
+    bool ok = bq_retirement_oracle_begin_internal(ledger, prepared, rows,
+        references, count, pinned_sha256, NULL, 0, 0, false);
+    return ok;
+}
+
+/* Called only after the private adapter verifies an independently installed
+ * template. The concrete /proc/self/fd command hashes are filled per row. */
+bool bq_retirement_oracle_begin_observing(BqRetirementOracleLedger* ledger,
+    BqRetirementPrepared const* prepared, BqRetirementTrustedRow* rows,
+    BqRetirementOracleReference const* references, uint32_t count,
+    char const template_sha256[65], uint64_t job_id, uint64_t attempt_token)
+{
+    bool ok = bq_retirement_oracle_begin_internal(ledger, prepared, rows,
+        references, count, NULL, template_sha256, job_id, attempt_token, true);
     return ok;
 }
 
@@ -326,7 +359,7 @@ bool bq_retirement_oracle_produce_next(BqRetirementOracleLedger* ledger,
     BqRetirementProcessCommand const* command, BqRetirementArtifactLocation output,
     int cancellation_fd, uint64_t absolute_deadline_ns)
 {
-    BqRetirementOracleReference const* reference = ledger && !ledger->failed &&
+    BqRetirementOracleReference const* reference = ledger && ledger->authority_bound && !ledger->failed &&
         !ledger->finished && ledger->done < ledger->count ? ledger->references + ledger->done : NULL;
     uint64_t now = 0;
     char binary_sha256[65] = {0}, receipt_sha256[65] = {0}, command_sha256[65] = {0};
@@ -444,7 +477,11 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_oracle_seal(
 
 bool bq_retirement_oracle_finish(BqRetirementOracleLedger* ledger)
 {
-    bool ok = ledger && !ledger->failed && !ledger->finished &&
+    bool spec_ok = true;
+    if (ledger && ledger->authority_bound && !ledger->failed && !ledger->finished)
+        spec_ok = bq_retirement_oracle_spec_hash(&ledger->prepared, ledger->references,
+            ledger->count, ledger->pinned_sha256);
+    bool ok = spec_ok && ledger && !ledger->failed && !ledger->finished &&
         bq_retirement_oracle_seal(ledger, ledger->sealed_sha256);
     if (ledger)
     {
@@ -456,7 +493,7 @@ bool bq_retirement_oracle_finish(BqRetirementOracleLedger* ledger)
 
 bool bq_retirement_oracle_ready(BqRetirementOracleLedger const* ledger)
 {
-    bool ok = ledger && ledger->finished && !ledger->failed;
+    bool ok = ledger && ledger->authority_bound && ledger->finished && !ledger->failed;
     char digest[65] = {0};
     if (ok) ok = bq_retirement_oracle_seal(ledger, digest) &&
         !strcmp(digest, ledger->sealed_sha256);
