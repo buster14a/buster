@@ -592,8 +592,13 @@ static bool bqeg_positive(char const* journal, char const* reply, char const* sh
                      invocation + sizeof("InvocationID=") - 1);
             snprintf(cgroup_text, sizeof(cgroup_text), "ControlGroup=%.*s\n",
                      (int)(cgroup_end - (cgroup + 8)), cgroup + 8);
+            /* RemainAfterExit retains the manager unit after its last task;
+             * systemd may already have deleted the empty cgroup, yielding an
+             * empty terminal ControlGroup. The gate's live kernel path still
+             * must end in this exact freshly attributed instance. */
             ok = strstr(pass, socket_text) != NULL && strstr(pass, invocation_text) != NULL &&
-                strstr(show, cgroup_text) != NULL && strstr(show, pid_text) != NULL &&
+                (strstr(show, cgroup_text) != NULL || strstr(show, "ControlGroup=\n") != NULL) &&
+                strstr(show, pid_text) != NULL &&
                 !memcmp(cgroup_end - strlen(unit), unit, strlen(unit));
         }
     }
@@ -639,15 +644,64 @@ static bool bqeg_connect(char reply[128])
     return ok;
 }
 
+static bool bqeg_fresh_unit(char const* before, char const* after, char unit[128])
+{
+    unsigned fresh = 0;
+    char const* line = after;
+    bool ok = true;
+    while (ok && *line)
+    {
+        char const* end_line = strchr(line, '\n');
+        if (!end_line) end_line = line + strlen(line);
+        char const* at = strstr(line, "buster-bench-systemd-broker@");
+        if (at && at < end_line)
+        {
+            char const* end = strstr(at, ".service");
+            ok = end && end + 8 <= end_line && end + 8 - at < 128;
+            if (ok)
+            {
+                char name[128];
+                memcpy(name, at, (size_t)(end + 8 - at));
+                name[end + 8 - at] = 0;
+                if (!strstr(before, name))
+                {
+                    fresh += 1;
+                    memcpy(unit, name, strlen(name) + 1);
+                }
+            }
+        }
+        line = *end_line ? end_line + 1 : end_line;
+    }
+    return ok && fresh == 1;
+}
+
+static bool bqeg_current_show(char const* show, char const* unit, uint64_t since)
+{
+    static char const key[] = "ExecMainStartTimestampMonotonic=";
+    char const* at = strstr(show, key);
+    char const* end = at ? strchr(at, '\n') : NULL;
+    uint64_t started = 0;
+    char const* invocation = strstr(show, "InvocationID=");
+    char unit_text[160];
+    snprintf(unit_text, sizeof(unit_text), "Id=%s\n", unit);
+    bool ok = at && end && bq_entry_number(at + sizeof(key) - 1,
+             (size_t)(end - (at + sizeof(key) - 1)), &started) && started >= since &&
+        invocation && bq_entry_hex(invocation + sizeof("InvocationID=") - 1, 32, false) &&
+        invocation[sizeof("InvocationID=") - 1 + 32] == '\n' &&
+        strstr(show, unit_text) != NULL;
+    return ok;
+}
+
 static bool bqeg_case(BqEgMutation kind)
 {
     char prefix[160], command_log[200], cursor_log[200], journal_log[200],
-         journal_export_log[200], units_log[200], show_log[200], cleanup_log[200];
+         journal_export_log[200], before_log[200], units_log[200], show_log[200], cleanup_log[200];
     snprintf(prefix, sizeof(prefix), BQEG_ROOT "/%02d-%s", kind, bqeg_names[kind]);
     snprintf(command_log, sizeof(command_log), "%s-mutation.log", prefix);
     snprintf(cursor_log, sizeof(cursor_log), "%s-cursor.txt", prefix);
     snprintf(journal_log, sizeof(journal_log), "%s-journal.cat", prefix);
     snprintf(journal_export_log, sizeof(journal_export_log), "%s-journal.export", prefix);
+    snprintf(before_log, sizeof(before_log), "%s-before-units.txt", prefix);
     snprintf(units_log, sizeof(units_log), "%s-units.txt", prefix);
     snprintf(show_log, sizeof(show_log), "%s-show.txt", prefix);
     snprintf(cleanup_log, sizeof(cleanup_log), "%s-cleanup.txt", prefix);
@@ -663,22 +717,20 @@ static bool bqeg_case(BqEgMutation kind)
     bool ok = bqeg_unit(kind) && bqeg_command(reload, command_log, 10) == 0 &&
         bqeg_mutate(kind, command_log);
     char cursor[256] = {0};
-    if (ok) ok = bqeg_cursor(cursor, cursor_log) && bqeg_command(start, command_log, 10) == 0;
+    char before[8192] = {0};
+    struct timespec clock = {0};
+    if (ok) ok = bqeg_cursor(cursor, cursor_log) &&
+                 bqeg_command(list, before_log, 10) == 0 &&
+                 bqeg_file(before_log, before, sizeof(before)) &&
+                 clock_gettime(CLOCK_MONOTONIC, &clock) == 0 &&
+                 bqeg_command(start, command_log, 10) == 0;
     char reply[128] = {0};
     if (ok) ok = bqeg_connect(reply);
     if (ok) ok = bqeg_command(list, units_log, 10) == 0;
     char units[8192] = {0}, unit[128] = {0};
     if (ok)
     {
-        ok = bqeg_file(units_log, units, sizeof(units));
-        char* at = ok ? strstr(units, "buster-bench-systemd-broker@") : NULL;
-        char* end = at ? strstr(at, ".service") : NULL;
-        ok = ok && at && end && end + 8 - at < (ptrdiff_t)sizeof(unit);
-        if (ok)
-        {
-            memcpy(unit, at, (size_t)(end + 8 - at));
-            unit[end + 8 - at] = 0;
-        }
+        ok = bqeg_file(units_log, units, sizeof(units)) && bqeg_fresh_unit(before, units, unit);
     }
     if (ok)
     {
@@ -694,6 +746,8 @@ static bool bqeg_case(BqEgMutation kind)
                  bqeg_command(export, journal_export_log, 10) == 0;
     char record[131072] = {0}, show[65536] = {0};
     if (ok) ok = bqeg_file(journal_log, record, sizeof(record)) && bqeg_file(show_log, show, sizeof(show));
+    uint64_t since = (uint64_t)clock.tv_sec * 1000000u + (uint64_t)clock.tv_nsec / 1000u;
+    if (ok) ok = bqeg_current_show(show, unit, since) && strstr(record, unit) != NULL;
     bool pass = strstr(record, "BQ-BROKER-ENTRY-V1 PASS ") != NULL;
     bool begin = strstr(record, "BQ-ENTRY-SYNTHETIC-BEGIN-V1 ") != NULL;
     struct stat marker = {0};
@@ -717,10 +771,12 @@ static bool bqeg_case(BqEgMutation kind)
     }
     if (ok && kind == BQEG_POSITIVE)
         ok = !no_entered && bqeg_positive(record, reply, show, unit) &&
-             strstr(show, "ExecMainStatus=0\n") != NULL;
+             strstr(show, "ExecMainStatus=0\n") != NULL &&
+             strstr(show, "Result=success\n") != NULL;
     else if (ok)
         ok = !pass && !begin && no_marker && no_entered && !reply[0] &&
-             strstr(show, "ExecMainStatus=126\n") != NULL;
+             strstr(show, "ExecMainStatus=126\n") != NULL &&
+             strstr(show, "Result=exit-code\n") != NULL;
     printf("BQEG_CASE name=%s unit=%s pass=%d synthetic_begin=%d entered=%d marker=%d status=%s\n",
            bqeg_names[kind], unit, pass, begin, !no_entered, !no_marker, ok ? "pass" : "fail");
     fflush(stdout);
@@ -729,8 +785,18 @@ static bool bqeg_case(BqEgMutation kind)
     {
         char* const stop_unit[] = {"/usr/bin/systemctl", "stop", unit, NULL};
         char* const reset[] = {"/usr/bin/systemctl", "reset-failed", unit, NULL};
+        char* const final_show[] = {"/usr/bin/systemctl", "show", "--no-pager",
+            "--property=Id,LoadState,ActiveState,MainPID,ControlGroup", unit, NULL};
         clean = bqeg_command(stop_unit, cleanup_log, 10) == 0 && clean;
-        clean = bqeg_command(reset, cleanup_log, 10) == 0 && clean;
+        int reset_status = bqeg_command(reset, cleanup_log, 10);
+        clean = bqeg_command(final_show, cleanup_log, 10) == 0 && clean;
+        char final[8192] = {0};
+        clean = bqeg_file(cleanup_log, final, sizeof(final)) && clean;
+        bool unloaded = strstr(final, "LoadState=not-found\n") != NULL &&
+            strstr(final, "ActiveState=inactive\n") != NULL &&
+            strstr(final, "MainPID=0\n") != NULL &&
+            strstr(final, "ControlGroup=\n") != NULL;
+        clean = clean && unloaded && (reset_status == 0 || unloaded);
     }
     clean = bqeg_restore(kind, command_log) && clean;
     printf("BQEG_CLEANUP name=%s status=%s\n", bqeg_names[kind], clean ? "pass" : "fail");
