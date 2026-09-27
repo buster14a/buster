@@ -13,6 +13,7 @@
 #define _GNU_SOURCE 1
 #endif
 #include <errno.h>
+#include <elf.h>
 #include <fcntl.h>
 #include <grp.h>
 #include <inttypes.h>
@@ -35,6 +36,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/xattr.h>
 
 #define BQ_BROKER_SOCKET "/run/buster-bench-systemd-broker/control.sock"
 #define BQ_BROKER_QUEUE "/var/lib/buster-bench/queue"
@@ -46,6 +48,7 @@
 #define BQ_BROKER_SERVICE "/usr/local/libexec/buster-bench-service"
 #define BQ_BROKER_BUILD "/usr/local/libexec/buster-bench-build"
 #define BQ_BROKER_THROUGHPUT "/usr/local/libexec/buster-bench-throughput"
+#define BQ_BROKER_GATE "/usr/local/libexec/buster-bench-credential-gate"
 #define BQ_BROKER_RUN "/usr/bin/systemd-run"
 #define BQ_BROKER_CTL "/usr/bin/systemctl"
 #define BQ_BROKER_MAGIC 0x42515344u
@@ -128,6 +131,14 @@ typedef struct BqBrokerAccounts
     uid_t runner_uid;
     gid_t runner_gid;
 } BqBrokerAccounts;
+
+typedef struct BqBrokerStartGroups
+{
+    gid_t ids[2][BQ_BROKER_ACCOUNT_GROUP_LIMIT];
+    int count[2];
+    uid_t uid[2];
+    gid_t gid[2];
+} BqBrokerStartGroups;
 
 static char const* const bq_broker_stages[] = {
     "", "base-generate", "base-build", "candidate-generate", "candidate-build", "throughput"
@@ -260,7 +271,37 @@ static void bq_broker_common_sandbox(BqBrokerCommand* command)
         bq_broker_add(command, properties[index]);
 }
 
-static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerCommand* command)
+static void bq_broker_add_gate(BqBrokerCommand* command, BqBrokerRequest const* request,
+                               BqBrokerStartGroups const* groups)
+{
+    unsigned role = request->stage <= BQ_BROKER_BASE_BUILD ? 0u : 1u;
+    char list[384] = {0};
+    size_t used = 0;
+    bool ok = groups && groups->count[role] > 0 &&
+              groups->count[role] <= BQ_BROKER_ACCOUNT_GROUP_LIMIT &&
+              groups->uid[role] != 0 && groups->gid[role] != 0;
+    for (int index = 0; ok && index < groups->count[role]; index += 1)
+    {
+        int written = snprintf(list + used, sizeof(list) - used, "%s%u",
+                               index ? "," : "", (unsigned)groups->ids[role][index]);
+        ok = written > 0 && (size_t)written < sizeof(list) - used;
+        if (ok) used += (size_t)written;
+    }
+    if (ok)
+    {
+        bq_broker_add(command, BQ_BROKER_GATE);
+        bq_broker_add_format(command, "%u", request->stage);
+        bq_broker_add_format(command, "%u", (unsigned)groups->uid[role]);
+        bq_broker_add_format(command, "%u", (unsigned)groups->gid[role]);
+        bq_broker_add_format(command, "%s", list);
+        bq_broker_add(command, "--");
+    }
+    else
+        command->valid = false;
+}
+
+static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroups const* groups,
+                              BqBrokerCommand* command)
 {
     BqBrokerPaths paths;
     bool ok = bq_broker_request_valid(request) && bq_broker_paths(request, &paths);
@@ -345,6 +386,7 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerCommand* c
                                  BQ_BROKER_LEASE, paths.result);
         }
         bq_broker_add(command, "--property=PrivateNetwork=yes");
+        bq_broker_add_gate(command, request, groups);
         if (request->stage == BQ_BROKER_OUTER)
         {
             bq_broker_add(command, BQ_BROKER_SERVICE);
@@ -609,7 +651,54 @@ static bool bq_broker_manifest(BqBrokerRequest const* request, BqBrokerPaths con
     return ok;
 }
 
-static bool bq_broker_installed_binary(char const* path)
+static bool bq_broker_static_elf(int descriptor, off_t length)
+{
+    Elf64_Ehdr header;
+    bool ok = length >= (off_t)sizeof(header) &&
+              pread(descriptor, &header, sizeof(header), 0) == sizeof(header) &&
+              !memcmp(header.e_ident, ELFMAG, SELFMAG) &&
+              header.e_ident[EI_CLASS] == ELFCLASS64 &&
+              header.e_ident[EI_DATA] == ELFDATA2LSB &&
+              header.e_ident[EI_VERSION] == EV_CURRENT &&
+              header.e_type == ET_EXEC && header.e_version == EV_CURRENT &&
+              header.e_ehsize == sizeof(header) &&
+              header.e_phentsize == sizeof(Elf64_Phdr) &&
+              header.e_phnum > 0 && header.e_phnum <= 128 &&
+              header.e_phoff <= (uint64_t)length &&
+              (uint64_t)header.e_phnum * sizeof(Elf64_Phdr) <= (uint64_t)length - header.e_phoff;
+    for (unsigned index = 0; ok && index < header.e_phnum; index += 1)
+    {
+        Elf64_Phdr program;
+        off_t offset = (off_t)(header.e_phoff + (uint64_t)index * sizeof(program));
+        ok = pread(descriptor, &program, sizeof(program), offset) == sizeof(program) &&
+             program.p_type != PT_INTERP && program.p_type != PT_DYNAMIC;
+    }
+    return ok;
+}
+
+static bool bq_broker_gate_parent(void)
+{
+    static char const* const components[] = {"usr", "local", "libexec"};
+    int descriptor = open("/", O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool ok = descriptor >= 0;
+    for (unsigned index = 0; ok && index <= sizeof(components) / sizeof(components[0]); index += 1)
+    {
+        struct stat info;
+        ok = fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) &&
+             info.st_uid == 0 && (info.st_mode & 0022) == 0;
+        if (ok && index < sizeof(components) / sizeof(components[0]))
+        {
+            int next = openat(descriptor, components[index], O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            close(descriptor);
+            descriptor = next;
+            ok = descriptor >= 0;
+        }
+    }
+    if (descriptor >= 0) close(descriptor);
+    return ok;
+}
+
+static bool bq_broker_installed_binary(char const* path, bool static_gate)
 {
     char const* slash = strrchr(path, '/');
     char parent[256];
@@ -624,6 +713,14 @@ static bool bq_broker_installed_binary(char const* path)
         ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISREG(info.st_mode) &&
              info.st_uid == 0 && info.st_nlink == 1 && (info.st_mode & 0022) == 0 &&
              (info.st_mode & 0111) != 0;
+        if (ok && static_gate)
+        {
+            ssize_t capability_size = fgetxattr(descriptor, "security.capability", NULL, 0);
+            int capability_errno = errno;
+            ok = bq_broker_gate_parent() && !(info.st_mode & (S_ISUID | S_ISGID)) &&
+                 capability_size < 0 && capability_errno == ENODATA &&
+                 bq_broker_static_elf(descriptor, info.st_size);
+        }
         if (descriptor >= 0) close(descriptor);
         if (directory >= 0) close(directory);
     }
@@ -647,9 +744,10 @@ static bool bq_broker_state(BqBrokerRequest const* request, uid_t service_uid,
     {
         ok = bq_broker_manifest(request, &paths, service_uid, false) &&
              bq_broker_manifest(request, &paths, service_uid, true) &&
-             bq_broker_installed_binary(BQ_BROKER_SERVICE) &&
-             bq_broker_installed_binary(BQ_BROKER_BUILD) &&
-             bq_broker_installed_binary(BQ_BROKER_THROUGHPUT);
+             bq_broker_installed_binary(BQ_BROKER_SERVICE, false) &&
+             bq_broker_installed_binary(BQ_BROKER_BUILD, false) &&
+             bq_broker_installed_binary(BQ_BROKER_THROUGHPUT, false) &&
+             bq_broker_installed_binary(BQ_BROKER_GATE, true);
         if (ok && request->stage == BQ_BROKER_CANDIDATE_GENERATE)
             ok = bq_broker_directory(paths.candidate_staging, service_uid, true);
     }
@@ -720,6 +818,19 @@ static bool bq_broker_exec_path(char const* text, char const* expected)
     bool ok = value && !strncmp(value, "{ path=", 7) &&
               !strncmp(value + 7, expected, length) &&
               !strncmp(value + 7 + length, " ;", 2);
+    return ok;
+}
+
+static bool bq_broker_exec_identity(char const* text, BqBrokerRequest const* request)
+{
+    bool ok = bq_broker_exec_path(text, BQ_BROKER_GATE);
+    if (!ok && request->signal_number != BQ_BROKER_CONT)
+    {
+        char const* previous = request->stage == BQ_BROKER_OUTER ? BQ_BROKER_SERVICE :
+                               request->stage == BQ_BROKER_THROUGHPUT_STAGE ?
+                               BQ_BROKER_THROUGHPUT : BQ_BROKER_BUILD;
+        ok = bq_broker_exec_path(text, previous);
+    }
     return ok;
 }
 
@@ -1126,18 +1237,16 @@ static bool bq_broker_signal_identity(BqBrokerRequest const* request)
              strnlen((char const*)(record + 288), 192) < 192 &&
              bq_broker_field_equals(output, "User", "buster-bench") &&
              bq_broker_field_equals(output, "Group", "buster-bench") &&
-             bq_broker_exec_path(output, BQ_BROKER_SERVICE) &&
+             bq_broker_exec_identity(output, request) &&
              bq_broker_field_equals(output, "InvocationID", (char const*)(record + 232)) &&
              bq_broker_field_equals(output, "ControlGroup", (char const*)(record + 288));
     }
     else if (ok)
     {
         char const* identity = request->stage <= BQ_BROKER_BASE_BUILD ? "buster-bench" : "buster-bench-candidate";
-        char const* executable = request->stage == BQ_BROKER_THROUGHPUT_STAGE ?
-                                 BQ_BROKER_THROUGHPUT : BQ_BROKER_BUILD;
         ok = bq_broker_field_equals(output, "User", identity) &&
              bq_broker_field_equals(output, "Group", identity) &&
-             bq_broker_exec_path(output, executable) &&
+             bq_broker_exec_identity(output, request) &&
              bq_broker_field_has_unit(output, "PartOf", paths.parent) &&
              bq_broker_field_has_unit(output, "BindsTo", paths.parent) &&
              bq_broker_field_has_unit(output, "After", paths.parent);
@@ -1291,7 +1400,7 @@ static bool bq_broker_account_group_set_valid(BqBrokerAccounts const* accounts, 
 {
     bool ok = accounts && bq_broker_accounts_valid(accounts) && groups &&
               role >= BQ_BROKER_SERVICE_ACCOUNT && role <= BQ_BROKER_RUNNER_ACCOUNT &&
-              count > 0 && count <= BQ_BROKER_ACCOUNT_GROUP_LIMIT;
+              count == (role == BQ_BROKER_SERVICE_ACCOUNT ? 2 : 1);
     gid_t primary = 0;
     if (ok)
     {
@@ -1306,18 +1415,18 @@ static bool bq_broker_account_group_set_valid(BqBrokerAccounts const* accounts, 
         gid_t group = groups[index];
         primary_seen |= group == primary;
         candidate_seen |= group == accounts->candidate_gid;
-        ok = group != 0 && group != (gid_t)-1 &&
-             !(role == BQ_BROKER_CANDIDATE_ACCOUNT && group == accounts->service_gid) &&
-             !(role == BQ_BROKER_RUNNER_ACCOUNT &&
-               (group == accounts->service_gid || group == accounts->candidate_gid));
+        ok = group == primary ||
+             (role == BQ_BROKER_SERVICE_ACCOUNT && group == accounts->candidate_gid);
     }
     return ok && primary_seen && (role != BQ_BROKER_SERVICE_ACCOUNT || candidate_seen);
 }
 
-static bool bq_broker_account_groups_valid(BqBrokerAccounts const* accounts)
+static bool bq_broker_account_groups_valid(BqBrokerAccounts const* accounts,
+                                           BqBrokerStartGroups* snapshot)
 {
     static char const* const names[] = {"buster-bench", "buster-bench-candidate", "buster-github-runner"};
-    bool ok = bq_broker_accounts_valid(accounts);
+    bool ok = bq_broker_accounts_valid(accounts) && snapshot;
+    if (snapshot) memset(snapshot, 0, sizeof(*snapshot));
     gid_t primary[3] = {0};
     if (ok)
     {
@@ -1332,6 +1441,29 @@ static bool bq_broker_account_groups_valid(BqBrokerAccounts const* accounts)
         int found = getgrouplist(names[role], primary[role], groups, &count);
         ok = found > 0 && found == count &&
              bq_broker_account_group_set_valid(accounts, role, groups, count);
+        if (ok && role < 2)
+        {
+            for (int index = 0; index < count; index += 1)
+            {
+                int position = index;
+                while (position > 0 && snapshot->ids[role][position - 1] > groups[index])
+                {
+                    snapshot->ids[role][position] = snapshot->ids[role][position - 1];
+                    position -= 1;
+                }
+                snapshot->ids[role][position] = groups[index];
+            }
+            for (int index = 1; ok && index < count; index += 1)
+                ok = snapshot->ids[role][index - 1] < snapshot->ids[role][index];
+            if (ok) snapshot->count[role] = count;
+        }
+    }
+    if (ok)
+    {
+        snapshot->uid[0] = accounts->service_uid;
+        snapshot->gid[0] = accounts->service_gid;
+        snapshot->uid[1] = accounts->candidate_uid;
+        snapshot->gid[1] = accounts->candidate_gid;
     }
     return ok;
 }
@@ -1402,8 +1534,9 @@ static int bq_broker_server(void)
     ok = parsed;
     /* A signal can still clean an exact old unit if account membership changed.
      * A fresh start must reject contaminated NSS groups before manager launch. */
+    BqBrokerStartGroups start_groups = {0};
     if (ok && request.operation == BQ_BROKER_START)
-        ok = bq_broker_account_groups_valid(&accounts);
+        ok = bq_broker_account_groups_valid(&accounts, &start_groups);
     bool state_checked = ok;
     if (ok) ok = bq_broker_state(&request, accounts.service_uid, accounts.service_gid, accounts.candidate_gid);
     bool state_valid = state_checked && ok;
@@ -1412,7 +1545,7 @@ static int bq_broker_server(void)
     bool signal_valid = signal_checked && ok;
     BqBrokerCommand command;
     bool command_checked = ok;
-    if (ok) ok = bq_broker_command(&request, &command);
+    if (ok) ok = bq_broker_command(&request, &start_groups, &command);
     bool command_valid = command_checked && ok;
     bq_broker_diag_request(&diagnostic, peer_known, peer, poll_called, recv_called,
                            received, message.msg_flags, parsed, state_checked, state_valid,
@@ -1569,6 +1702,9 @@ static int bq_broker_self_test(void)
     BqBrokerAccounts accounts = {.service_uid = 65000, .service_gid = 65000,
                                  .candidate_uid = 65001, .candidate_gid = 65001,
                                  .runner_uid = 65002, .runner_gid = 65002};
+    BqBrokerStartGroups start_groups = {.ids = {{65000, 65001}, {65001}},
+                                         .count = {2, 1}, .uid = {65000, 65001},
+                                         .gid = {65000, 65001}};
     gid_t permitted_groups[] = {0, 65000, 65001};
     gid_t foreign_groups[] = {65000, 65001, 65002};
     BQ_BROKER_CHECK(bq_broker_accounts_valid(&accounts) &&
@@ -1592,28 +1728,37 @@ static int bq_broker_self_test(void)
                     bq_broker_group_set_valid(permitted_groups, 3, accounts.service_gid, accounts.candidate_gid));
     gid_t service_without_staging[] = {65000};
     gid_t service_with_root[] = {65000, 65001, 0};
+    gid_t service_with_foreign[] = {65000, 65001, 65003};
     BQ_BROKER_CHECK(!bq_broker_account_group_set_valid(&accounts, BQ_BROKER_SERVICE_ACCOUNT,
                                                       service_without_staging, 1) &&
                     !bq_broker_account_group_set_valid(&accounts, BQ_BROKER_SERVICE_ACCOUNT,
-                                                      service_with_root, 3));
+                                                      service_with_root, 3) &&
+                    !bq_broker_account_group_set_valid(&accounts, BQ_BROKER_SERVICE_ACCOUNT,
+                                                      service_with_foreign, 3));
     gid_t candidate_service[] = {65001, 65000};
     gid_t candidate_root[] = {65001, 0};
     gid_t candidate_without_primary[] = {65003};
+    gid_t candidate_with_foreign[] = {65001, 65003};
     BQ_BROKER_CHECK(!bq_broker_account_group_set_valid(&accounts, BQ_BROKER_CANDIDATE_ACCOUNT,
                                                       candidate_service, 2) &&
                     !bq_broker_account_group_set_valid(&accounts, BQ_BROKER_CANDIDATE_ACCOUNT,
                                                       candidate_root, 2) &&
                     !bq_broker_account_group_set_valid(&accounts, BQ_BROKER_CANDIDATE_ACCOUNT,
-                                                      candidate_without_primary, 1));
+                                                      candidate_without_primary, 1) &&
+                    !bq_broker_account_group_set_valid(&accounts, BQ_BROKER_CANDIDATE_ACCOUNT,
+                                                      candidate_with_foreign, 2));
     gid_t runner_service[] = {65002, 65000};
     gid_t runner_root[] = {65002, 0};
     gid_t runner_candidate[] = {65002, 65001};
+    gid_t runner_with_foreign[] = {65002, 65003};
     BQ_BROKER_CHECK(!bq_broker_account_group_set_valid(&accounts, BQ_BROKER_RUNNER_ACCOUNT,
                                                       runner_service, 2) &&
                     !bq_broker_account_group_set_valid(&accounts, BQ_BROKER_RUNNER_ACCOUNT,
                                                       runner_root, 2) &&
                     !bq_broker_account_group_set_valid(&accounts, BQ_BROKER_RUNNER_ACCOUNT,
-                                                      runner_candidate, 2));
+                                                      runner_candidate, 2) &&
+                    !bq_broker_account_group_set_valid(&accounts, BQ_BROKER_RUNNER_ACCOUNT,
+                                                      runner_with_foreign, 2));
     BQ_BROKER_CHECK(!bq_broker_account_group_set_valid(NULL, BQ_BROKER_CANDIDATE_ACCOUNT,
                                                       candidate_groups, 1) &&
                     !bq_broker_account_group_set_valid(&accounts, -1, candidate_groups, 1) &&
@@ -1664,10 +1809,33 @@ static int bq_broker_self_test(void)
     accounts.candidate_uid = 65001;
     accounts.runner_gid = (gid_t)-1;
     BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
+    accounts.runner_gid = 65002;
+    char const* gated_show = "ExecStart={ path=" BQ_BROKER_GATE " ; argv[]=fixed }\n";
+    char const* legacy_outer_show = "ExecStart={ path=" BQ_BROKER_SERVICE " ; argv[]=fixed }\n";
+    char const* legacy_build_show = "ExecStart={ path=" BQ_BROKER_BUILD " ; argv[]=fixed }\n";
+    char const* legacy_throughput_show = "ExecStart={ path=" BQ_BROKER_THROUGHPUT " ; argv[]=fixed }\n";
+    request.operation = BQ_BROKER_SIGNAL;
+    request.signal_number = BQ_BROKER_CONT;
+    request.stage = BQ_BROKER_OUTER;
+    BQ_BROKER_CHECK(bq_broker_exec_identity(gated_show, &request) &&
+                    !bq_broker_exec_identity(legacy_outer_show, &request));
+    request.signal_number = BQ_BROKER_TERM;
+    BQ_BROKER_CHECK(bq_broker_exec_identity(gated_show, &request) &&
+                    bq_broker_exec_identity(legacy_outer_show, &request) &&
+                    !bq_broker_exec_identity(legacy_build_show, &request));
+    request.stage = BQ_BROKER_CANDIDATE_BUILD;
+    BQ_BROKER_CHECK(bq_broker_exec_identity(legacy_build_show, &request) &&
+                    !bq_broker_exec_identity(legacy_throughput_show, &request));
+    request.stage = BQ_BROKER_THROUGHPUT_STAGE;
+    request.signal_number = BQ_BROKER_KILL;
+    BQ_BROKER_CHECK(bq_broker_exec_identity(legacy_throughput_show, &request) &&
+                    !bq_broker_exec_identity(legacy_build_show, &request));
+    request.operation = BQ_BROKER_START;
+    request.signal_number = 0;
     for (uint32_t stage = 0; stage <= BQ_BROKER_THROUGHPUT_STAGE; stage += 1)
     {
         request.stage = stage;
-        BQ_BROKER_CHECK(bq_broker_command(&request, &command));
+        BQ_BROKER_CHECK(bq_broker_command(&request, &start_groups, &command));
         BqBrokerPaths paths;
         BQ_BROKER_CHECK(bq_broker_paths(&request, &paths));
         char unit_option[256], parent_option[256], result_option[600];
@@ -1678,6 +1846,20 @@ static int bq_broker_self_test(void)
                                          BQ_BROKER_LEASE, paths.result));
         BQ_BROKER_CHECK(command.count < BQ_BROKER_MAX_ARGS && command.argv[0] &&
                         !strcmp(command.argv[0], BQ_BROKER_RUN) && command.argv[command.count] == NULL);
+        unsigned gate_index = 0;
+        while (gate_index < command.count && strcmp(command.argv[gate_index], BQ_BROKER_GATE)) gate_index += 1;
+        unsigned role = stage <= BQ_BROKER_BASE_BUILD ? 0u : 1u;
+        BQ_BROKER_CHECK(gate_index + 7 < command.count &&
+                        !strcmp(command.argv[gate_index + 1], stage == 0 ? "0" :
+                                stage == 1 ? "1" : stage == 2 ? "2" :
+                                stage == 3 ? "3" : stage == 4 ? "4" : "5") &&
+                        !strcmp(command.argv[gate_index + 2], role ? "65001" : "65000") &&
+                        !strcmp(command.argv[gate_index + 3], role ? "65001" : "65000") &&
+                        !strcmp(command.argv[gate_index + 4], role ? "65001" : "65000,65001") &&
+                        !strcmp(command.argv[gate_index + 5], "--") &&
+                        !strcmp(command.argv[gate_index + 6], stage == BQ_BROKER_OUTER ?
+                                BQ_BROKER_SERVICE : stage == BQ_BROKER_THROUGHPUT_STAGE ?
+                                BQ_BROKER_THROUGHPUT : BQ_BROKER_BUILD));
         BQ_BROKER_CHECK(bq_broker_has_argument(&command, unit_option) &&
                         bq_broker_argument_count(&command, unit_option) == 1 &&
                         bq_broker_argument_count(&command, "--property=NoNewPrivileges=yes") == 1);
@@ -1720,40 +1902,40 @@ static int bq_broker_self_test(void)
         }
     }
     request.stage = BQ_BROKER_THROUGHPUT_STAGE + 1;
-    BQ_BROKER_CHECK(!bq_broker_command(&request, &command));
+    BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
     request.stage = BQ_BROKER_OUTER;
     request.base[0] = '/';
-    BQ_BROKER_CHECK(!bq_broker_command(&request, &command));
+    BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
     request.base[0] = 'a';
     request.candidate[40] = 'c';
-    BQ_BROKER_CHECK(!bq_broker_command(&request, &command));
+    BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
     request.candidate[40] = 0;
     request.magic = 0;
-    BQ_BROKER_CHECK(!bq_broker_command(&request, &command));
+    BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
     request.magic = BQ_BROKER_MAGIC;
     request.version = 2;
-    BQ_BROKER_CHECK(!bq_broker_command(&request, &command));
+    BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
     request.version = 1;
     request.attempt = 0;
-    BQ_BROKER_CHECK(!bq_broker_command(&request, &command));
+    BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
     request.attempt = 2;
     request.operation = BQ_BROKER_SIGNAL;
     request.signal_number = BQ_BROKER_TERM;
-    BQ_BROKER_CHECK(!bq_broker_command(&request, &command));
+    BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
     memset(request.base, 0, sizeof(request.base));
     memset(request.candidate, 0, sizeof(request.candidate));
-    BQ_BROKER_CHECK(bq_broker_command(&request, &command) &&
+    BQ_BROKER_CHECK(bq_broker_command(&request, &start_groups, &command) &&
                     bq_broker_has_argument(&command, "--signal=TERM") &&
                     !bq_broker_has_argument(&command, "--signal=KILL"));
     request.signal_number = BQ_BROKER_CONT;
-    BQ_BROKER_CHECK(bq_broker_command(&request, &command) &&
+    BQ_BROKER_CHECK(bq_broker_command(&request, &start_groups, &command) &&
                     bq_broker_has_argument(&command, "--signal=CONT") &&
                     !bq_broker_has_argument(&command, "--signal=KILL"));
     request.stage = BQ_BROKER_BASE_BUILD;
-    BQ_BROKER_CHECK(!bq_broker_command(&request, &command));
+    BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
     request.stage = BQ_BROKER_OUTER;
     request.signal_number = 4;
-    BQ_BROKER_CHECK(!bq_broker_command(&request, &command));
+    BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
     BqBrokerRequest parsed;
     BQ_BROKER_CHECK(bq_broker_unit_from_text("buster-bench-1-2-throughput.service", &parsed) &&
                     parsed.job == 1 && parsed.attempt == 2 && parsed.stage == BQ_BROKER_THROUGHPUT_STAGE);

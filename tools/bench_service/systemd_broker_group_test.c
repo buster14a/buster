@@ -78,10 +78,12 @@ int bq_review_getgrouplist(char const* user, gid_t primary, gid_t* groups, int* 
                   !strcmp(user, "buster-github-runner") ? review_runner_extra : review_service_extra;
     review_account_group_queries += 1;
     if (review_list_failure) { *count = review_list_failure == 1 ? 33 : 0; return -1; }
-    int needed = extra == primary ? 1 : 2;
+    bool service_foreign = !strcmp(user, "buster-bench") && extra == 65003;
+    int needed = service_foreign ? 3 : extra == primary ? 1 : 2;
     if (*count < needed) { *count = needed; return -1; }
     groups[0] = primary;
-    if (needed == 2) groups[1] = extra;
+    if (needed >= 2) groups[1] = service_foreign ? 65001 : extra;
+    if (service_foreign) groups[2] = extra;
     *count = needed;
     return needed;
 }
@@ -144,11 +146,14 @@ int main(void)
     ok &= run_case("valid", 65001, 65001, 65002, 0, 3, true);
     ok &= run_case("service_missing_candidate", 65000, 65001, 65002, 0, 1, false);
     ok &= run_case("service_root", 0, 65001, 65002, 0, 1, false);
+    ok &= run_case("service_foreign", 65003, 65001, 65002, 0, 1, false);
     ok &= run_case("candidate_service", 65001, 65000, 65002, 0, 2, false);
     ok &= run_case("candidate_root", 65001, 0, 65002, 0, 2, false);
+    ok &= run_case("candidate_foreign", 65001, 65003, 65002, 0, 2, false);
     ok &= run_case("runner_service", 65001, 65001, 65000, 0, 3, false);
     ok &= run_case("runner_root", 65001, 65001, 0, 0, 3, false);
     ok &= run_case("runner_candidate", 65001, 65001, 65001, 0, 3, false);
+    ok &= run_case("runner_foreign", 65001, 65001, 65003, 0, 3, false);
     ok &= run_case("nss_oversize", 65001, 65001, 65002, 1, 1, false);
     ok &= run_case("nss_failure", 65001, 65001, 65002, 2, 1, false);
     return ok ? 0 : 1;
