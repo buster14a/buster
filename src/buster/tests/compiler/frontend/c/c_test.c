@@ -13763,6 +13763,104 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
 // Geometric depths exercise the whole typeof task machine and the direct
 // base/postfix continuation independently. A separate scratch arena exposes
 // released storage too, so a correct type cannot hide suffix-sized retention.
+// A lone numeric or character literal is answered without the type machine.
+// The machine path is the oracle: for every literal token of a valid and of an
+// invalid source, in both checking modes, with and without published scalar
+// types, alone, under an outer frame and against a seeded cache slot, both
+// answers and every piece of machine and result state they leave must agree.
+// A whole compile through the driver must also produce identical objects and
+// diagnostics in both modes.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("static const unsigned long long table[] = {0, 1, 42, 0x7f, 0XFFFFFFFF, 4294967296, 18446744073709551615u, 077, 1u, 1U, 1l, 1L,\n"
+           "    1ul, 1LU, 1ll, 1ULL, 0b101, 1'000, 'a', '\\n', '\\x41', 'ab', L'x', u'y', U'z', u8'q'};\n"
+           "static const double reals[] = {0x1p3, 1.5, 1.5f, 1.5L, 1e10, .5e-3, 1.0f16, 0x1.8p-1f};\n"
+           "int f(int x) { return x + 1 + (int)sizeof(2.0) + 'c' + (int)sizeof(2.0i) + (int)sizeof(3.0fi); }\n"),
+        S8("int a = 08; int b = 1e; int c = 0x; int d = 1.2.3; int e = 1uu; int g = 99999999999999999999999; int h = 1.0q;\n"),
+    };
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, sources[source_index], (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        u32 literal_count = 0;
+        for (u32 token = 0; token < tokens.token_count; token += 1)
+        {
+            CTokenKind kind = tokens.tokens[token].kind;
+            if (kind != C_TOKEN_PREPROCESSING_NUMBER && kind != C_TOKEN_CHARACTER_LITERAL)
+            {
+                continue;
+            }
+            literal_count += 1;
+            for (u32 variant = 0; variant < 24; variant += 1)
+            {
+                bool checked = (variant & 1) != 0;
+                bool scalars = (variant & 2) != 0;
+                bool nested = (variant & 4) != 0;
+                u32 cache_mode = variant >> 3;
+                CTypeId cached = cache_mode == 0 ? C_TYPE_ID_INVALID : cache_mode == 1 ? (CTypeId){.value = 0} : (CTypeId){.value = parse.type_count};
+                u32 type_count = parse.type_count;
+                u32 diagnostic_count = parse.diagnostic_count;
+                Arena* probe = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(4)});
+                CTestExpressionQuery fast = c_test_expression_type_query(probe, tokens, &parse, token, token + 1, checked, nested, cached, scalars, false);
+                u32 fast_type_count = parse.type_count;
+                parse.type_count = type_count;
+                parse.diagnostic_count = diagnostic_count;
+                CTestExpressionQuery oracle = c_test_expression_type_query(probe, tokens, &parse, token, token + 1, checked, nested, cached, scalars, true);
+                BUSTER_TEST(arguments, fast_type_count == parse.type_count);
+                parse.type_count = type_count;
+                parse.diagnostic_count = diagnostic_count;
+                BUSTER_TEST(arguments, arena_destroy(probe, 1));
+                bool same = fast.valid == oracle.valid && fast.type.value == oracle.type.value && fast.kind == oracle.kind &&
+                            fast.type_count_delta == oracle.type_count_delta && fast.diagnostic_delta == oracle.diagnostic_delta &&
+                            fast.result_type.value == oracle.result_type.value && fast.result_index == oracle.result_index &&
+                            fast.result_valid == oracle.result_valid && fast.failed == oracle.failed && fast.frame_count == oracle.frame_count &&
+                            fast.mutation_count == oracle.mutation_count && fast.mutation_type_limit == oracle.mutation_type_limit &&
+                            fast.expression_task_count == oracle.expression_task_count && fast.scratch_delta == oracle.scratch_delta &&
+                            fast.published_end == oracle.published_end && fast.published_type.value == oracle.published_type.value &&
+                            fast.published_flags == oracle.published_flags;
+                BUSTER_TEST_RAW(arguments, same,
+                                string_format(temporary.arena, S8("source={u32} token='{S8}' variant={u32} fast valid={u32} kind={u32} types+{u32} oracle valid={u32} kind={u32} types+{u32}"),
+                                              source_index, c_token_spelling(tokens.spelling_base, tokens.tokens[token]), variant, (u32)fast.valid,
+                                              (u32)fast.kind, fast.type_count_delta, (u32)oracle.valid, (u32)oracle.kind, oracle.type_count_delta));
+            }
+        }
+        BUSTER_TEST(arguments, literal_count >= (source_index == 0 ? 30u : 7u));
+        scratch_end(temporary);
+    }
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-literal-queries"), S8(".c"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(sources[source_index])));
+        ByteSlice objects[2] = {0};
+        String8 diagnostics[2] = {0};
+        CompilerDriverError errors[2] = {0};
+        for (u32 mode = 0; mode < 2; mode += 1)
+        {
+            String8 output = buster_test_temporary_path(arena, string_format(arena, S8("buster-literal-queries-{u32}-{u32}"), source_index, mode), S8(".o"));
+            String8 command[] = {S8("-nostdinc"), S8("-g"), S8("-std=gnu23"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"), output, input};
+            c_test_set_literal_query_machine_only(mode == 1);
+            CompilerDriverResult compiled =
+                compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            c_test_set_literal_query_machine_only(false);
+            errors[mode] = compiled.error;
+            diagnostics[mode] = compiled.diagnostic;
+            objects[mode] = compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
+        }
+        BUSTER_TEST(arguments, errors[0] == errors[1]);
+        BUSTER_TEST(arguments, (errors[0] == COMPILER_DRIVER_ERROR_NONE) == (source_index == 0));
+        BUSTER_STRING_TEST(arguments, diagnostics[0], diagnostics[1]);
+        BUSTER_TEST(arguments, objects[0].length == objects[1].length &&
+                                   (!objects[0].length || memcmp(objects[0].pointer, objects[1].pointer, objects[0].length) == 0));
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_expression_frames(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23228,6 +23326,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_conditional_type);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
+    BUSTER_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
     BUSTER_TEST_FIXTURE(arguments, c_test_pointer_width_integer_conversion);
