@@ -307,10 +307,101 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
     return result;
 }
 
+// The work ledger observes an ordinary compile without changing it: every
+// family that the source exercises counts, the counters keep their documented
+// relationships, each pipeline phase is entered once per native compile, and
+// the phase rows partition the arena traffic exactly. A syntax-only compile is
+// the negative control -- it reaches no lowering, machine or output counter.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_work_ledger(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-work-ledger"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-work-ledger"), S8(".o"));
+    String8 source = S8("static const unsigned char table[] = {1, 2, 3, 'x', 0x10};\n"
+                        "struct Inner { int a; };\n"
+                        "struct Outer { struct { int b; }; struct Inner inner; };\n"
+                        "int f(struct Outer* o, int x) { return o->b + o->inner.a + table[x & 3] + (int)sizeof(struct Outer); }\n");
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    String8 object_command[] = {S8("-nostdinc"), S8("-g0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"), output, input};
+    String8 syntax_command[] = {S8("-nostdinc"), S8("-g0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-fsyntax-only"), input};
+    CompilerDriverInvocation object_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command));
+    CompilerDriverInvocation syntax_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command));
+    BUSTER_TEST(arguments, object_invocation.error == COMPILER_DRIVER_ERROR_NONE && syntax_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+#if BUSTER_BENCH_ALLOCATIONS
+    WorkLedgerCounters before = work_ledger_counters();
+    ArenaBenchmarkCounters arena_before = arena_benchmark_counters();
+#endif
+    CompilerDriverResult object = compiler_driver_execute_invocation(arena, object_invocation);
+    BUSTER_TEST(arguments, object.error == COMPILER_DRIVER_ERROR_NONE);
+#if BUSTER_BENCH_ALLOCATIONS
+    WorkLedgerCounters after = work_ledger_counters();
+    ArenaBenchmarkCounters arena_after = arena_benchmark_counters();
+    BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+    u64 delta[WORK_LEDGER_COUNT];
+    for (u32 counter = 0; counter < WORK_LEDGER_COUNT; counter += 1)
+    {
+        BUSTER_TEST(arguments, after.values[counter] >= before.values[counter]);
+        delta[counter] = after.values[counter] - before.values[counter];
+    }
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_ROOTS] != 0);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_CACHE_HITS] + delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_UNCACHED] ==
+                               delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_ROOTS]);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_SNAPSHOT_QUERY_CHECKPOINTS] == 2 * delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_UNCACHED]);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_SNAPSHOT_FRAME_PUSHES] != 0 &&
+                               delta[WORK_LEDGER_SNAPSHOT_FRAME_BYTES] % delta[WORK_LEDGER_SNAPSHOT_FRAME_PUSHES] == 0);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_INITIALIZER_ELEMENTS] >= delta[WORK_LEDGER_REDERIVE_INITIALIZER_LITERAL_ELEMENTS] &&
+                               delta[WORK_LEDGER_REDERIVE_INITIALIZER_LITERAL_ELEMENTS] >= 5);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_POPULATION_MEMBER_PROMOTED_SEARCHES] != 0);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_LITERAL_NUMBER_CONVERSIONS] != 0);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERNS] != 0 &&
+                               delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERN_PROBES] >= delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERNS]);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_MACHINE_FUNCTIONS_SELECTED] == 1 && delta[WORK_LEDGER_MACHINE_ROWS] != 0 &&
+                               delta[WORK_LEDGER_MACHINE_ENCODED_BYTES] != 0);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_OUTPUT_OBJECT_BYTES] != 0 && delta[WORK_LEDGER_OUTPUT_LINK_IMAGE_BYTES] == 0);
+    WorkLedgerPhase entered[] = {WORK_LEDGER_PHASE_PREPROCESS, WORK_LEDGER_PHASE_PARSE, WORK_LEDGER_PHASE_SEMANTIC, WORK_LEDGER_PHASE_LOWER,
+                                 WORK_LEDGER_PHASE_PREPARE, WORK_LEDGER_PHASE_TARGET_PREWARM, WORK_LEDGER_PHASE_OBJECT, WORK_LEDGER_PHASE_OUTPUT};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(entered); index += 1)
+    {
+        BUSTER_TEST(arguments, after.phases[entered[index]].marks == before.phases[entered[index]].marks + 1);
+    }
+    // Codegen is entered by the driver and again after the target prewarm.
+    BUSTER_TEST(arguments, after.phases[WORK_LEDGER_PHASE_CODEGEN].marks == before.phases[WORK_LEDGER_PHASE_CODEGEN].marks + 2);
+    u64 phase_calls = 0;
+    u64 phase_bytes = 0;
+    for (u32 phase = 0; phase < WORK_LEDGER_PHASE_COUNT; phase += 1)
+    {
+        phase_calls += after.phases[phase].arena_calls - before.phases[phase].arena_calls;
+        phase_bytes += after.phases[phase].arena_bytes - before.phases[phase].arena_bytes;
+    }
+    BUSTER_TEST(arguments, phase_calls == arena_after.calls - arena_before.calls);
+    BUSTER_TEST(arguments, phase_bytes == arena_after.requested_bytes - arena_before.requested_bytes);
+    WorkLedgerCounters syntax_before = work_ledger_counters();
+#endif
+    CompilerDriverResult syntax = compiler_driver_execute_invocation(arena, syntax_invocation);
+    BUSTER_TEST(arguments, syntax.error == COMPILER_DRIVER_ERROR_NONE);
+#if BUSTER_BENCH_ALLOCATIONS
+    WorkLedgerCounters syntax_after = work_ledger_counters();
+    WorkLedgerCounter untouched[] = {WORK_LEDGER_REDERIVE_LOWER_QUERY_ROOTS, WORK_LEDGER_MACHINE_FUNCTIONS_SELECTED, WORK_LEDGER_MACHINE_ROWS,
+                                     WORK_LEDGER_MACHINE_ENCODED_BYTES, WORK_LEDGER_OUTPUT_OBJECT_BYTES};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(untouched); index += 1)
+    {
+        BUSTER_TEST(arguments, syntax_after.values[untouched[index]] == syntax_before.values[untouched[index]]);
+    }
+    BUSTER_TEST(arguments, syntax_after.values[WORK_LEDGER_REDERIVE_TYPE_QUERY_ROOTS] > syntax_before.values[WORK_LEDGER_REDERIVE_TYPE_QUERY_ROOTS]);
+    BUSTER_TEST(arguments, syntax_after.phases[WORK_LEDGER_PHASE_LOWER].marks == syntax_before.phases[WORK_LEDGER_PHASE_LOWER].marks);
+    BUSTER_TEST(arguments, syntax_after.phases[WORK_LEDGER_PHASE_SEMANTIC].marks == syntax_before.phases[WORK_LEDGER_PHASE_SEMANTIC].marks + 1);
+#endif
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_local_sizeof_static_asserts);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_work_ledger);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_positional_languages);
     String8 default_command[] = {S8("source.c")};
     CompilerDriverInvocation default_invocation = compiler_driver_parse_arguments(arguments->arena,

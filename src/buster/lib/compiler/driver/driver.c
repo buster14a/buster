@@ -39,6 +39,7 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/aarch64_semantics.h>
 #include <buster/lib/compiler/object/object.h>
+#include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/file.h>
 #include <buster/lib/string.h>
 #include <buster/lib/compiler/driver/archive.c>
@@ -3156,6 +3157,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
                                      : string_format(arena, S8("native object serialization failed with error {u32}"), (u32)artifact.error);
             return;
         }
+        WORK_LEDGER_RECORD(OUTPUT_OBJECT_BYTES, artifact.bytes.length);
         String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
         if (!file_publish(output, artifact.bytes))
         {
@@ -3232,6 +3234,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
                                                     .debug_info = invocation.debug_info,
                                                 });
     compiler_driver_dynamic_libraries_release(&dynamic_libraries);
+    WORK_LEDGER_RECORD(OUTPUT_LINK_IMAGE_BYTES, result->native_link.executable.length);
     if (result->native_link.error != LINK_ERROR_NONE)
     {
         result->error = COMPILER_DRIVER_ERROR_LINK;
@@ -3551,6 +3554,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     {
         definitions[index] = compiler_driver_c_definition(invocation.definitions[index]);
     }
+    WORK_LEDGER_PHASE(PREPROCESS);
     CPreprocessResult preprocess = c_preprocess(arena, BYTE_SLICE_TO_STRING(8, bytes),
                                                 (CPreprocessOptions){
                                                     .macro_operations = invocation.macro_operations,
@@ -3616,6 +3620,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             goto end;
         }
     }
+    WORK_LEDGER_PHASE(PARSE);
     CParserResult syntax = c_parse_ast(arena, preprocess);
     result.parser_diagnostic_count = syntax.diagnostic_count;
     if (syntax.diagnostic_count)
@@ -3625,6 +3630,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                   syntax.diagnostic_count, invocation.input_paths[0], (String8){0});
         goto end;
     }
+    WORK_LEDGER_PHASE(SEMANTIC);
     if (invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
     {
         CAnalysisResult semantic = c_analyze_semantics_only(arena, preprocess, syntax);
@@ -3664,6 +3670,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion;
     lowered.program->fast_passes = invocation.fast_passes;
     lowered.program->measure_fast_passes = invocation.measure_fast_passes;
+    WORK_LEDGER_PHASE(PREPARE);
     IrValidationResult validation = ir_prepare_canonical_module(lowered.program, module,
                                                                 lowered.canonical_ir_certified && !invocation.bootstrap_trace_prefix.length && !invocation.verify_codegen);
     result.local_promotion = module->local_promotion;
@@ -3689,6 +3696,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                           boundary, (u32)validation.error, validation.function.value, function_name, validation.block.value, validation.instruction.value, opcode);
         goto end;
     }
+    WORK_LEDGER_PHASE(CODEGEN);
     if (invocation.emit_llvm_bitcode)
     {
         LlvmBitcodeArtifact artifact =
@@ -3870,6 +3878,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.diagnostic = compiler_diagnostic_render(arena, diagnostic);
         goto end;
     }
+    WORK_LEDGER_PHASE(OBJECT);
     ObjectFile object = object_from_canonical_codegen_module(arena, lowered.program, &code, invocation.target);
     result.object_error = object.error;
     if (object.error != OBJECT_ERROR_NONE)
@@ -3882,6 +3891,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     result.object = object;
     result.has_object = true;
+    WORK_LEDGER_PHASE(OUTPUT);
     compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result);
 end:
     file_map_unmap(source_file);
@@ -4821,6 +4831,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                                     .debug_info = invocation.debug_info,
                                                 });
     compiler_driver_dynamic_libraries_release(&dynamic_libraries);
+    WORK_LEDGER_RECORD(OUTPUT_LINK_IMAGE_BYTES, result.native_link.executable.length);
     if (result.native_link.error != LINK_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;

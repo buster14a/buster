@@ -1700,6 +1700,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges(Arena* arena, MachineFun
         }
         u32 first = prepass->predecessor_offsets[block_index];
         u32 limit = prepass->predecessor_offsets[block_index + 1u];
+        // The block's own transfer plus one merge per predecessor edge.
+        WORK_LEDGER_RECORD(MACHINE_LIVENESS_WORD_UPDATES, (u64)words * (1u + limit - first));
         for (u32 entry = first; entry < limit; entry += 1)
         {
             u32 predecessor = prepass->predecessor_list[entry];
