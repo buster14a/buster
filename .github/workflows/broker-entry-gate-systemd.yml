@@ -4,12 +4,14 @@ on:
   pull_request:
     paths:
       - 'tools/bench_service/broker_entry_gate*.c'
+      - 'src/buster/lib/hash.c'
       - '.github/scripts/broker_entry_gate_systemd_test.sh'
       - '.github/workflows/broker-entry-gate-systemd.yml'
   push:
     branches: [main]
     paths:
       - 'tools/bench_service/broker_entry_gate*.c'
+      - 'src/buster/lib/hash.c'
       - '.github/scripts/broker_entry_gate_systemd_test.sh'
       - '.github/workflows/broker-entry-gate-systemd.yml'
 
