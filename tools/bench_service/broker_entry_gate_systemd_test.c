@@ -351,13 +351,18 @@ static bool bqeg_unit(BqEgMutation kind)
             "RestrictSUIDSGID=yes\nRestrictAddressFamilies=AF_UNIX\n"
             "SystemCallArchitectures=native\nSystemCallFilter=@system-service\n"
             "SystemCallErrorNumber=EPERM\n";
+        /* PrivateDevices may add a syscall filter even without an explicit
+         * SystemCallFilter. Keep the root/mount/identity/socket prerequisites,
+         * and let the prestart probe prove actual mode zero. */
+        char const* private_options = kind == BQEG_SECCOMP_OFF ? "" :
+            "PrivateTmp=yes\nPrivateDevices=yes\nPrivateNetwork=yes\nProtectHome=yes\n";
         fprintf(file, "[Unit]\nDescription=Disposable synthetic broker entry component\n"
             "[Service]\nType=exec\nRemainAfterExit=yes\nUser=root\nGroup=%s\n"
             "SupplementaryGroups=%s\nUMask=0077\n%sExecStart=%s\n"
             "StandardInput=%s\nStandardOutput=journal\nStandardError=%s\n"
             "WorkingDirectory=/\nRestart=no\nTimeoutStartSec=10s\nRuntimeMaxSec=10s\n"
             "NoNewPrivileges=%s\nCapabilityBoundingSet=%s\nAmbientCapabilities=%s\n"
-            "PrivateTmp=yes\nPrivateDevices=yes\nPrivateNetwork=yes\nProtectHome=yes\n"
+            "%s"
             "ProtectSystem=%s\nReadOnlyPaths=/etc/buster-bench\n"
             "ReadOnlyPaths=/opt/buster-bench/installed\nReadOnlyPaths=/var/lib/buster-bench\n"
             "ReadWritePaths=" BQEG_ROOT "\n%s%s",
@@ -367,6 +372,7 @@ static bool bqeg_unit(BqEgMutation kind)
             kind == BQEG_NNP_OFF ? "no" : "yes",
             kind == BQEG_BOUNDING_CAP || kind == BQEG_AMBIENT_CAP ? "CAP_CHOWN" : "",
             kind == BQEG_AMBIENT_CAP ? "CAP_CHOWN" : "",
+            private_options,
             kind == BQEG_ROOT_RW ? "full" : "strict",
             kind == BQEG_SUBMOUNT_RW ? "ReadWritePaths=/var/lib/buster-bench/sub\n" : "",
             filters);
