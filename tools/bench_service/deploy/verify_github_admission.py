@@ -2,9 +2,9 @@
 """Read-only comparison of the protected benchmark environment and switch.
 
 The administrator captures three GET responses during preflight. The caller
-also checks the existing main ruleset, requester policy, administrator
-permission and restricted runner group. This check does not authorize host
-provisioning or workflow dispatch.
+also checks the existing main ruleset, requester policy, administrator and
+independent reviewer identities, and restricted runner group. This check does
+not authorize host provisioning or workflow dispatch.
 """
 
 import argparse
@@ -39,10 +39,10 @@ def verify(environment, branches, variable):
     rules = environment.get("protection_rules")
     require(isinstance(rules, list), "environment protection rules missing")
     reviewers = [rule for rule in rules if rule.get("type") == "required_reviewers"]
-    require(len(reviewers) == 1, "environment must require one administrator reviewer")
+    require(len(reviewers) == 1, "environment must require one independent reviewer")
     require(reviewers[0].get("prevent_self_review") is True,
             "environment must prevent self-review")
-    matching([{"type": "User", "reviewer": {"login": "davidgmbb", "id": 39247043}}],
+    matching([{"type": "User", "reviewer": {"login": "buster14a14a", "id": 333046628}}],
              reviewers[0].get("reviewers"), "environment reviewers")
     require(branches.get("total_count") == 1 and
             len(branches.get("branch_policies", [])) == 1,

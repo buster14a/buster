@@ -12,7 +12,8 @@ Record the current main commit and tree, the merged #1017 and #1058 identities,
 the authenticated administrator and the installed Actions actor policy. Confirm
 it permits exactly Repository admin, `davidgmbb`, ChatGPT Codex Connector,
 Claude and Devin.ai Integration to request the fixed workflow through manual
-dispatch. Confirm `davidgmbb` has repository admin permission and is the sole
+dispatch. Confirm `davidgmbb` has repository admin permission and
+`buster14a14a` (user 333046628) retains repository access as the sole
 required `benchmark-9700x` reviewer, with self-review prevention. Edits to
 the workflow, policy and installed gateway still require review under the
 repository trust policy.
@@ -43,7 +44,7 @@ ruleset may be present. The main queue must retain eight Actions-bound checks,
 non-strict status checks, 20-build/one-merge `ALLGREEN` and exactly the two
 reviewed standing bypass actors, Repository admin (role 5) and `davidgmbb`
 (user 39247043), both in `always` mode. The environment must require
-`davidgmbb` to approve with self-review prevention and must allow only the
+`buster14a14a` to approve with self-review prevention and must allow only the
 exact `main` deployment branch.
 
 Record the runner registration, its actual runner group, allowed repository
@@ -83,7 +84,7 @@ install or approve it.
 After the administrator and host operator sign off the actual receipts,
 explicitly enable admission. A reviewed requester starts only
 `.github/workflows/9700x-service-dispatch.yml` on protected `main`, and the
-administrator approves or rejects the pending environment job before the
+independent reviewer approves or rejects the pending environment job before the
 runner executes the fixed gateway.
 Predeclare distinct idempotency keys and record workflow run/job, request
 digest, principal, job/attempt, installed inventory and boot/lease identities.

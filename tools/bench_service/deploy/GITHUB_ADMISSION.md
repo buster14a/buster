@@ -64,22 +64,23 @@ normal main protection. This is administrator authority under the reviewed
 contract, not a workflow admission result or a connector permission.
 
 The preflight verifies that `davidgmbb` still has repository `admin`
-permission and is the sole required reviewer for
+permission and that the separate `buster14a14a` account (user 333046628)
+retains repository access and is the sole required reviewer for
 `benchmark-9700x` with self-review prevention. The environment remains
 restricted to the one exact `main` deployment branch. Connector requests
-wait for that administrator's approval before the runner is assigned a job;
-an administrator starting a run cannot approve their own request. If any
+wait for that review before the runner is assigned a job;
+a reviewer starting a run cannot approve their own request. If any
 readback fails, leave dispatch disabled and investigate before retrying.
 GitHub currently allows repository administrators to bypass environment
 protection; using that control is also an explicit administrator release and
 must be recorded as such. It does not count as the required review receipt.
 The preflight fetches the environment, deployment branch policies and
-repository variable again. It checks the administrator reviewer and
+repository variable again. It checks the independent reviewer and
 self-review prevention, the one exact `main` branch, and literal `false`
 dispatch state. It separately rereads the requester policy and administrator
-permission. Keep those responses, the organization installation mapping and
-the preflight log as administrator receipts; they do not replace the physical
-host checks.
+and reviewer permissions. Keep those responses, the organization installation
+mapping and the preflight log as administrator receipts; they do not replace
+the physical host checks.
 
 The actor restriction governs **who starts the workflow**, not who edits its
 definition or the installed gateway. Admins must control changes to the
@@ -117,7 +118,7 @@ gh variable set BENCH_SERVICE_DISPATCH_ENABLED --body true --repo buster14a/bust
 
 An approved connector can request the fixed workflow from protected `main`
 with full lowercase immutable commit IDs and a stable idempotency key. The
-reviewed repository administrator approves or rejects the pending environment
+reviewed independent reviewer approves or rejects the pending environment
 job after checking the request. The service
 owns idle-only atomic admission and cleanup; Actions concurrency is only a UI
 guard. Leave the variable enabled during normal verified operation. Disable
