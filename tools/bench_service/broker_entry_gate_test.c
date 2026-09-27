@@ -201,6 +201,8 @@ static void entry_account_source_tests(void)
         "passwd: files sss\ngroup: files\n",
         "passwd: systemd files\ngroup: files\n",
         "passwd: files\ngroup: files nscd\n",
+        "passwd: files#systemd\ngroup: files\n",
+        "passwd: files\ngroup: files # systemd\n",
         "passwd: files\npasswd: files\ngroup: files\n",
         "passwd: files\ngroup: files\ngroup: files\n",
         "passwd: files\ngroup: files\ninitgroups: files systemd\n",

@@ -334,6 +334,7 @@ static bool bq_entry_nss_policy(char const* bytes, size_t size)
             while (value < end && bq_entry_space((unsigned char)bytes[value])) value += 1;
             size_t limit = value;
             while (limit < end && bytes[limit] != '#') limit += 1;
+            bool inline_comment = limit < end;
             while (limit > value && bq_entry_space((unsigned char)bytes[limit - 1])) limit -= 1;
             for (size_t index = value; ok && index < limit; index += 1)
             {
@@ -342,7 +343,9 @@ static bool bq_entry_nss_policy(char const* bytes, size_t size)
             }
             if (ok && database < 3)
             {
-                ok = !seen[database] &&
+                /* A `#` inside the source list has libc-dependent parsing;
+                 * require the protected directives to have no inline comment. */
+                ok = !inline_comment && !seen[database] &&
                      (bq_entry_field_is(bytes + value, limit - value, "files") ||
                       (database != 2 && bq_entry_field_is(bytes + value, limit - value, "files systemd")));
                 if (ok) seen[database] = true;

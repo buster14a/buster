@@ -67,7 +67,7 @@ explicitly pin `SupplementaryGroups=root buster-bench buster-bench-candidate`;
 it must not silently inherit whichever subset an NSS configuration produces.
 Effective NSS `passwd` and `group` directives must each occur once and contain
 exactly `files` or `files systemd` in that order, with default success-return
-semantics; `[SUCCESS=merge]`, action overrides, cache or additional sources
+semantics and no inline comment; `[SUCCESS=merge]`, action overrides, cache or additional sources
 fail. `initgroups`, if specified, must be exactly `files`. The gate verifies
 `/var/run` is the root-owned symlink to `/run`, `/var` is covered read-only,
 and neither `/run/nscd/socket` nor its `/var/run` alias exists. Its parent
