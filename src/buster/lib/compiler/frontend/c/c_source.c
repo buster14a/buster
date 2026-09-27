@@ -1324,6 +1324,10 @@ struct CLexState
 {
     CLexResult* result;
     CTranslatedSource translated;
+    // The result's arena. Diagnostic rows grow in diagnostic_arena, which is
+    // rewound or destroyed once lexing ends and the rows are copied out, so
+    // anything a row points at -- a formatted message -- lives here instead.
+    Arena* arena;
     Arena* diagnostic_arena;
     u64 diagnostic_capacity;
     u64 maximum_diagnostic_count;
@@ -1705,7 +1709,7 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
     }
     c_token_push(result, translated, offset, offset + 1, C_TOKEN_INVALID, C_PUNCTUATOR_NONE);
     c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, offset, C_DIAGNOSTIC_INVALID_CHARACTER,
-                      string_format(state->diagnostic_arena, S8("invalid character byte {u32} in C source"), (u32)character));
+                      string_format(state->arena, S8("invalid character byte {u32} in C source"), (u32)character));
     return offset + 1;
 }
 
@@ -2678,6 +2682,7 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
                     CLexState state = {
                         .result = &result,
                         .translated = translated,
+                        .arena = arena,
                         .diagnostic_arena = diagnostic_arena,
                         .maximum_diagnostic_count = translated.source.length + 1,
                     };
