@@ -2470,6 +2470,101 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_include_population(UnitT
 }
 
 
+// Whether `index` is the first definition in `object` carrying its name: the
+// resolution every named reference in an object has always had.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_first_definition(ObjectFile const* object, u32 index)
+{
+    bool first = index < object->symbol_count && object->symbols[index].section != OBJECT_SECTION_UNDEFINED;
+    for (u32 candidate = 0; first && candidate < index; candidate += 1)
+    {
+        first = object->symbols[candidate].section == OBJECT_SECTION_UNDEFINED ||
+                !string_equal(object->symbols[candidate].name, object->symbols[index].name);
+    }
+    return first;
+}
+
+// A global variable's code relocations and its debug address relocations
+// (DWARF DW_OP_addr; CodeView S_GDATA32 SECREL32 and SECTION16) resolve
+// through its program symbol, which the object writer maps to the first
+// definition carrying its link name -- the answer the name lookup it replaced
+// gave. The fixture mixes the spellings that make names and identities
+// diverge: two block-scope statics spelled alike, an asm label, a tentative
+// definition completed later, and a block-scope extern redeclaration.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_global_relocations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = S8("int alpha = 1;\n"
+                        "int beta;\n"
+                        "static int gamma_value = 3;\n"
+                        "int renamed __asm__(\"renamed_link\") = 5;\n"
+                        "int beta = 2;\n"
+                        "int first(void) { static int counter = 6; extern int alpha; return alpha + beta + gamma_value + renamed + counter++; }\n"
+                        "int second(void) { static int counter = 7; return counter++ + first(); }\n");
+    String8 path = buster_test_temporary_path(temporary.arena, S8("buster-debug-global-relocations"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    String8 const targets[] = {S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu"), S8("x86_64-windows")};
+    // DWARF writes one address per global; CodeView two (offset, section).
+    u32 const relocations_per_global[] = {1, 1, 2};
+    String8 const named[] = {S8("alpha"), S8("beta"), S8("gamma_value"), S8("renamed_link")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        String8 output = buster_test_temporary_path(temporary.arena, S8("buster-debug-global-relocations"), S8(".o"));
+        String8 command[] = {S8("-c"), S8("-g"), S8("-target"), targets[target_index], S8("-o"), output, path};
+        CompilerDriverResult built = compiler_driver_execute_invocation(temporary.arena,
+            compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST_RAW(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object, targets[target_index]);
+        if (built.error != COMPILER_DRIVER_ERROR_NONE || !built.has_object)
+        {
+            continue;
+        }
+        ObjectFile* object = &built.object;
+        u32 debug_references = 0;
+        u32 code_references = 0;
+        u32 first_definitions = 0;
+        u32 distinct_debug_targets = 0;
+        bool named_found[BUSTER_ARRAY_LENGTH(named)] = {0};
+        u8* seen = arena_allocate(temporary.arena, u8, object->symbol_count ? object->symbol_count : 1);
+        memset(seen, 0, object->symbol_count);
+        for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+        {
+            ObjectRelocation relocation = object->relocations[relocation_index];
+            ObjectSymbol const* symbol = relocation.symbol < object->symbol_count ? object->symbols + relocation.symbol : 0;
+            bool data = symbol && symbol->kind == OBJECT_SYMBOL_DATA &&
+                        (symbol->section == OBJECT_SECTION_DATA || symbol->section == OBJECT_SECTION_READ_ONLY_DATA ||
+                         symbol->section == OBJECT_SECTION_ZERO);
+            bool debug = relocation.section == OBJECT_SECTION_DEBUG_INFO || relocation.section == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS;
+            if (!data || (!debug && relocation.section != OBJECT_SECTION_TEXT))
+            {
+                continue;
+            }
+            debug_references += debug;
+            code_references += !debug;
+            first_definitions += compiler_driver_test_first_definition(object, relocation.symbol);
+            if (debug && !seen[relocation.symbol])
+            {
+                seen[relocation.symbol] = 1;
+                distinct_debug_targets += 1;
+                for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(named); name_index += 1)
+                {
+                    named_found[name_index] |= string_equal(symbol->name, named[name_index]);
+                }
+            }
+        }
+        // alpha, beta, gamma_value, renamed_link and the two counters.
+        BUSTER_TEST_RAW(arguments, distinct_debug_targets == 6, targets[target_index]);
+        BUSTER_TEST_RAW(arguments, debug_references == 6 * relocations_per_global[target_index], targets[target_index]);
+        BUSTER_TEST_RAW(arguments, code_references >= 6, targets[target_index]);
+        BUSTER_TEST_RAW(arguments, first_definitions == debug_references + code_references, targets[target_index]);
+        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(named); name_index += 1)
+        {
+            BUSTER_TEST_RAW(arguments, named_found[name_index], named[name_index]);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // A valid C identifier can still exceed CodeView's single-record limit.
 // Reject -g explicitly instead of succeeding with no .debug$S/.debug$T.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_codeview_limit(UnitTestArguments* arguments)
@@ -9160,6 +9255,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_arm64_unwind);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_dwarf5_objects);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_codeview_limit);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_global_relocations);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_data_scaling);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_link_boundaries);

@@ -40,6 +40,8 @@
 //   object_read_mach_o64, object_read              and their dispatcher
 //   object_bytes_are_object, object_archive_read   archives and detection
 //   object_symbol_name_slot                        symbol-name interning
+//   object_symbol_for_program_symbol               debug relocations by
+//                                                  program symbol
 //   object_windows_x64_unwind_layout/build         Windows unwind info from
 //                                                  codegen unwind actions
 //   object_relocation_kind_from_codegen            codegen -> format
@@ -9478,9 +9480,11 @@ BUSTER_GLOBAL_LOCAL ObjectSymbolNameSlot* object_symbol_name_slot(ObjectSymbolNa
     return slot;
 }
 
-BUSTER_GLOBAL_LOCAL void object_symbol_name_index_add(ObjectSymbolNameIndex table, ObjectSymbol* symbol, u32 symbol_index)
+// Records `symbol` in the slot a probe for its name ended on, which for a
+// name the index lacks is exactly where an insertion lands: a lookup that
+// misses can claim its own slot without hashing the name a second time.
+BUSTER_GLOBAL_LOCAL void object_symbol_name_slot_claim(ObjectSymbolNameSlot* slot, ObjectSymbol* symbol, u32 symbol_index)
 {
-    ObjectSymbolNameSlot* slot = object_symbol_name_slot(table, symbol->name);
     if (!slot->used)
     {
         slot->used = true;
@@ -9501,10 +9505,20 @@ BUSTER_GLOBAL_LOCAL void object_symbol_name_index_add(ObjectSymbolNameIndex tabl
     }
 }
 
+BUSTER_GLOBAL_LOCAL ObjectSymbolNameSlot* object_symbol_name_index_add(ObjectSymbolNameIndex table, ObjectSymbol* symbol, u32 symbol_index)
+{
+    ObjectSymbolNameSlot* slot = object_symbol_name_slot(table, symbol->name);
+    object_symbol_name_slot_claim(slot, symbol, symbol_index);
+    return slot;
+}
+
 // symbol_capacity bounds every add the caller will make, including symbols it
 // appends after building; the table stays under half full so probing stays
-// short.
-BUSTER_GLOBAL_LOCAL ObjectSymbolNameIndex object_symbol_name_index_build(Arena* arena, ObjectSymbol* symbols, u32 symbol_count, u64 symbol_capacity)
+// short. `defined_owner`, when given, receives for each defined symbol the
+// definition its name resolves to -- the first one carrying it -- which no
+// later add can change: only the first definition of a name is recorded.
+BUSTER_GLOBAL_LOCAL ObjectSymbolNameIndex object_symbol_name_index_build(Arena* arena, ObjectSymbol* symbols, u32 symbol_count, u64 symbol_capacity,
+                                                                         u32* defined_owner)
 {
     u64 capacity = 16;
     while (capacity < symbol_capacity * 2 + 1)
@@ -9518,15 +9532,39 @@ BUSTER_GLOBAL_LOCAL ObjectSymbolNameIndex object_symbol_name_index_build(Arena* 
     };
     for (u32 symbol_index = 0; symbol_index < symbol_count; symbol_index += 1)
     {
-        object_symbol_name_index_add(table, symbols + symbol_index, symbol_index);
+        ObjectSymbolNameSlot* slot = object_symbol_name_index_add(table, symbols + symbol_index, symbol_index);
+        if (defined_owner)
+        {
+            defined_owner[symbol_index] = slot->defined;
+        }
     }
     return table;
 }
 
+// The object symbol a program symbol's debug relocation resolves to, taken
+// from the module writer's program-symbol map when that already names a
+// definition. The map holds, for a definition, the first definition of its
+// name -- what the name path answers -- and every symbol appended after it
+// has a higher index, so that stays the first definition. Anything else
+// (no id, an unreferenced or undefined symbol) answers UINT32_MAX and the
+// caller keeps the name path.
+BUSTER_GLOBAL_LOCAL u32 object_symbol_for_program_symbol(ObjectFile const* object, u32 const* by_symbol, u32 by_symbol_capacity, IrSymbolId symbol)
+{
+    u32 result = UINT32_MAX;
+    if (by_symbol && symbol.value < by_symbol_capacity)
+    {
+        u32 candidate = by_symbol[symbol.value];
+        result = candidate < object->symbol_count && object->symbols[candidate].section != OBJECT_SECTION_UNDEFINED ? candidate : UINT32_MAX;
+    }
+    return result;
+}
+
 // Appends the built CodeView sections. Relocations resolve against the
 // per-entry function symbols, which both module object builders place at
-// symbol indices [0, entry_count).
-BUSTER_GLOBAL_LOCAL void object_append_codeview(ObjectFile* object, CodeviewResult built)
+// symbol indices [0, entry_count). A global variable's relocations carry its
+// program symbol, which `by_symbol` (the module writer's map, or null)
+// resolves without its name.
+BUSTER_GLOBAL_LOCAL void object_append_codeview(ObjectFile* object, CodeviewResult built, u32 const* by_symbol, u32 by_symbol_capacity)
 {
     if (!built.valid)
     {
@@ -9544,13 +9582,28 @@ BUSTER_GLOBAL_LOCAL void object_append_codeview(ObjectFile* object, CodeviewResu
     {
         CodeviewRelocation relocation = built.relocations[relocation_index];
         u32 symbol_index = relocation.function;
-        if (relocation.symbol_name.length)
+        u32 by_program_symbol =
+            relocation.symbol_name.length ? object_symbol_for_program_symbol(object, by_symbol, by_symbol_capacity, relocation.symbol) : UINT32_MAX;
+        if (by_program_symbol != UINT32_MAX)
+        {
+            symbol_index = by_program_symbol;
+#if !BUSTER_OPTIMIZE
+            u32 by_name = UINT32_MAX;
+            for (u32 candidate_index = 0; candidate_index < object->symbol_count && by_name == UINT32_MAX; candidate_index += 1)
+            {
+                ObjectSymbol* candidate = object->symbols + candidate_index;
+                by_name = candidate->section != OBJECT_SECTION_UNDEFINED && string_equal(candidate->name, relocation.symbol_name) ? candidate_index : UINT32_MAX;
+            }
+            BUSTER_CHECK(by_name == symbol_index);
+#endif
+        }
+        else if (relocation.symbol_name.length)
         {
             named_relocation_count += 1;
             if (!name_index_initialized && named_relocation_count == OBJECT_LOOKUP_INDEX_MIN_QUERY_COUNT)
             {
                 name_temporary = scratch_begin(0, 0);
-                name_index = object_symbol_name_index_build(name_temporary.arena, object->symbols, object->symbol_count, object->symbol_count);
+                name_index = object_symbol_name_index_build(name_temporary.arena, object->symbols, object->symbol_count, object->symbol_count, 0);
                 name_index_initialized = true;
             }
             if (name_index_initialized)
@@ -9647,7 +9700,10 @@ enum
 // resolution. Building a second table here cost a 2 MB zero fill and a
 // byte-serial FNV hash of every symbol name in the module to answer the
 // 13.790 named relocations a self-host stage brings.
-BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult built, ObjectSymbolNameIndex name_index)
+// A global variable's address relocation carries its program symbol, which
+// `by_symbol` resolves to the same definition the name lookup would find.
+BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult built, ObjectSymbolNameIndex name_index, u32 const* by_symbol,
+                                            u32 by_symbol_capacity)
 {
     if (!built.valid)
     {
@@ -9680,7 +9736,18 @@ BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult buil
     {
         DwarfRelocation relocation = built.relocations[relocation_index];
         u32 relocation_symbol = relocation.address ? text_symbol : debug_symbols[relocation.target];
-        if (relocation.symbol_address && relocation.symbol_name.length)
+        u32 by_program_symbol = relocation.symbol_address && relocation.symbol_name.length
+                                    ? object_symbol_for_program_symbol(object, by_symbol, by_symbol_capacity, relocation.symbol)
+                                    : UINT32_MAX;
+        if (by_program_symbol != UINT32_MAX)
+        {
+            relocation_symbol = by_program_symbol;
+#if !BUSTER_OPTIMIZE
+            ObjectSymbolNameSlot* slot = object_symbol_name_slot(name_index, relocation.symbol_name);
+            BUSTER_CHECK(slot->used && slot->defined == relocation_symbol);
+#endif
+        }
+        else if (relocation.symbol_address && relocation.symbol_name.length)
         {
             ObjectSymbolNameSlot* slot = object_symbol_name_slot(name_index, relocation.symbol_name);
             if (slot->used && slot->defined != UINT32_MAX)
@@ -10880,8 +10947,30 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     // to hold 18 k names.
     u64 name_index_capacity =
         (u64)result.symbol_count + program->symbols.count + 1 + (dwarf.valid ? (u64)OBJECT_DWARF_EXTRA_SYMBOLS : 0);
+    u32* defined_owner = arena_allocate(name_temporary.arena, u32, result.symbol_count ? result.symbol_count : 1);
     ObjectSymbolNameIndex name_index =
-        object_symbol_name_index_build(name_temporary.arena, result.symbols, result.symbol_count, name_index_capacity);
+        object_symbol_name_index_build(name_temporary.arena, result.symbols, result.symbol_count, name_index_capacity, defined_owner);
+    // Globals and aliases were placed just above at entry_count + index, in
+    // order, and each program symbol keeps one name, so the definition its
+    // relocations resolve to is the one the build just recorded for that
+    // position. Seeding it here spares their first reference the name hash;
+    // entries keep their own index as before.
+    for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+    {
+        u32 symbol_value = module->globals[global_index].symbol.value;
+        if (symbol_value < entry_symbol_capacity && entry_by_symbol[symbol_value] == UINT32_MAX)
+        {
+            entry_by_symbol[symbol_value] = defined_owner[module->entry_count + global_index];
+        }
+    }
+    for (u32 alias_index = 0; alias_index < alias_count; alias_index += 1)
+    {
+        u32 symbol_value = ir_module->aliases[alias_index].symbol.value;
+        if (symbol_value < entry_symbol_capacity && entry_by_symbol[symbol_value] == UINT32_MAX)
+        {
+            entry_by_symbol[symbol_value] = defined_owner[module->entry_count + module->global_count + alias_index];
+        }
+    }
     for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
     {
         CodegenModuleRelocation source = module->relocations[relocation_index];
@@ -10914,9 +11003,10 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         String8 name = tls_get_addr                        ? S8("__tls_get_addr")
                        : target_symbol->link_name.length   ? target_symbol->link_name
                                                            : target_symbol->name;
+        ObjectSymbolNameSlot* slot = 0;
         if (symbol_index == UINT32_MAX)
         {
-            ObjectSymbolNameSlot* slot = object_symbol_name_slot(name_index, name);
+            slot = object_symbol_name_slot(name_index, name);
             if (slot->used)
             {
                 symbol_index = slot->defined != UINT32_MAX ? slot->defined : slot->undefined;
@@ -10935,7 +11025,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                 .thread_local_state = tls_get_addr ? OBJECT_SYMBOL_THREAD_LOCAL_NO
                                                    : target_symbol->is_thread_local ? OBJECT_SYMBOL_THREAD_LOCAL_YES : OBJECT_SYMBOL_THREAD_LOCAL_NO,
             };
-            object_symbol_name_index_add(name_index, &result.symbols[symbol_index], symbol_index);
+            object_symbol_name_slot_claim(slot, &result.symbols[symbol_index], symbol_index);
         }
         // The answer holds for the rest of the loop -- a name in the index is
         // never added again, and only undefined symbols are added here, so a
@@ -10991,8 +11081,8 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     }
     if (result.error == OBJECT_ERROR_NONE)
     {
-        u32 dwarf_text_symbol = object_append_dwarf(&result, dwarf, name_index);
-        object_append_codeview(&result, codeview);
+        u32 dwarf_text_symbol = object_append_dwarf(&result, dwarf, name_index, entry_by_symbol, entry_symbol_capacity);
+        object_append_codeview(&result, codeview, entry_by_symbol, entry_symbol_capacity);
         // One local symbol over the text section, added only for the code
         // model that needs it and only when the debug sections did not
         // already contribute the same one, so an object built without -fPIC
