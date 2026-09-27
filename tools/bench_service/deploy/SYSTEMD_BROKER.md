@@ -119,7 +119,11 @@ does not replace the TCC bootstrap used by `build.sh`.
 `./build.sh bench_service_broker self-test` also builds
 `build/bench-service-tools/systemd-broker-live-test` from
 `tools/bench_service/systemd_broker_live_test.c` with the broker's warning and
-integer flags. In a disposable, provisioned real-systemd
+integer flags. In self-test mode it also builds and runs the deterministic
+`systemd-broker-group-test` source-inclusion fixture, which checks the valid
+seqpacket START path stops contaminated account groups before state inspection.
+This fixture intercepts state access and makes no manager call; it does not
+prove the groups later assigned by PID1. In a disposable, provisioned real-systemd
 container, start the reviewed service, submit one exact fixed-recipe job, and
 run that test as root while its outer unit is active with
 `BUSTER_BROKER_LIVE_TEST=1` and arguments `JOB ATTEMPT BASE_REVISION
@@ -169,9 +173,9 @@ Before deployment, also read `/proc/PID/status` for the actual service,
 candidate stage and runner processes: account snapshots do not prove that an
 already-running unit has no additional groups from unit-specific settings.
 
-The regular `bench_service_broker self-test` now runs both the existing command
-construction test and the probe's unprivileged `--self-test` identity-policy
-controls. Neither replaces the provisioned live regression. On disposable
+The regular `bench_service_broker self-test` runs the command construction
+test, the probe's unprivileged `--self-test` identity-policy controls, and the
+request-time group fixture. These do not replace the provisioned live regression. On disposable
 root-capable test infrastructure with the three fixed accounts provisioned,
 `build/bench-service-tools/service-tests --cleanup-identity-only` exercises the
 real cleanup traversal under the service UID, including exact candidate

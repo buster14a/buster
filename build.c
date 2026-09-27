@@ -39799,6 +39799,26 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_broker_add(Arena* arena, SliceSt
                                      .spawn_options = {.use_process_environment = 1}};
         if (self_test)
         {
+            ProcessRun* group_compile = run_add(arena, step_add(arena));
+            builder = os_argument_builder_start(arena);
+            os_argument_builder_append(&builder, compiler);
+            os_argument_builder_append(&builder, S8("-std=c11"));
+            os_argument_builder_append(&builder, S8("-O2"));
+            os_argument_builder_append(&builder, S8("-Wall"));
+            os_argument_builder_append(&builder, S8("-Wextra"));
+            os_argument_builder_append(&builder, S8("-Werror"));
+            os_argument_builder_append(&builder, S8("-fwrapv"));
+            os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
+            os_argument_builder_append(&builder, S8("-funsigned-char"));
+            os_argument_builder_append(&builder, S8("tools/bench_service/systemd_broker_group_test.c"));
+            os_argument_builder_append(&builder, S8("-o"));
+            os_argument_builder_append(&builder, S8("build/bench-service-tools/systemd-broker-group-test"));
+            *group_compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder),
+                                          .working_directory = S8("."),
+                                          .spawn_options = {.use_process_environment = 1}};
+        }
+        if (self_test)
+        {
             ProcessRun* test = run_add(arena, step_add(arena));
             String8 command[] = {executable, S8("self-test")};
             *test = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(command),
@@ -39807,6 +39827,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_broker_add(Arena* arena, SliceSt
             String8 identity_command[] = {S8("build/bench-service-tools/systemd-broker-live-test"), S8("--self-test")};
             *identities = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(identity_command),
                                       .working_directory = S8("."), .spawn_options = {.use_process_environment = 1}};
+            ProcessRun* group_test = run_add(arena, step_add(arena));
+            String8 group_command[] = {S8("build/bench-service-tools/systemd-broker-group-test")};
+            *group_test = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(group_command),
+                                        .working_directory = S8("."),
+                                        .spawn_options = {.use_process_environment = 1}};
         }
     }
 #else
