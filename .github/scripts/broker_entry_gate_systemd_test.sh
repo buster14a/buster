@@ -40,7 +40,7 @@ trap cleanup EXIT
   sha256sum tools/bench_service/broker_entry_gate.c tools/bench_service/broker_entry_gate_systemd_test.c src/buster/lib/hash.c
 } > "$proof/source-and-toolchain.txt"
 flags=(-std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char)
-clang "${flags[@]}" -Isrc -static -no-pie -Wl,-z,noexecstack \
+clang "${flags[@]}" -Isrc -static -Wl,-z,noexecstack \
   tools/bench_service/broker_entry_gate.c src/buster/lib/hash.c -o "$payload/buster-bench-broker-entry-gate"
 clang "${flags[@]}" -Isrc -Wl,-z,noexecstack \
   tools/bench_service/broker_entry_gate_systemd_test.c src/buster/lib/hash.c \
