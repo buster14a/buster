@@ -157,6 +157,24 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   `IrSimdShape` owns integer/internal-predicate boundaries, consumed by C
   result typing and canonical validation. C masks remain integer values.
 
+- Identifier identity is established once, by `c_symbol_intern` in the
+  preprocessor: the token pass interns every lexed identifier and the `##`
+  paste interns the identifier it forms, so every identifier in the final
+  stream carries its exact id. Semantic analysis and lowering key names on
+  the id a token, entity (`CEntity.symbol`), member (`CMember.symbol`),
+  enumerator or parameter carries, so no lexed or pasted name is interned
+  again after preprocessing (the stage-1 self-host unit and the pinned
+  fixture grow the table by nothing). Every entity is named by an identifier
+  token, so entity and typedef lookups answer a punctuator or literal token
+  with "none" instead of interning its spelling. The lowering function-name
+  index inserts nothing: it groups declarations by their entity's id, and a
+  spelling without a carried id (a builtin's link name) asks the read-only
+  `c_symbol_find`. Spelling fallbacks, which may intern, remain for
+  symbol-less synthesized or hand-built rows and for parses without a table. `c_test_identifier_identity_once`
+  pins the no-growth contract, `c_test_symbol_find_collisions` the exact
+  probe on names sharing the whole key, and `c_test_pasted_keyword_body_walk`
+  both the carried ids and the fallback on the same stream with ids cleared.
+
 - `c_parse_binding_bind` publishes a previously unbound enclosing-scope name
   without scanning unrelated undo records. A live undo record implies a valid
   current binding: bind installs the new entity, and unwind removes its record
