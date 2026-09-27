@@ -39796,7 +39796,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_broker_add(Arena* arena, SliceSt
         os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
         os_argument_builder_append(&builder, S8("-funsigned-char"));
         os_argument_builder_append(&builder, S8("-static"));
-        os_argument_builder_append(&builder, S8("-no-pie"));
         os_argument_builder_append(&builder, S8("-Wl,-z,noexecstack"));
         os_argument_builder_append(&builder, S8("tools/bench_service/credential_gate.c"));
         os_argument_builder_append(&builder, S8("-o"));

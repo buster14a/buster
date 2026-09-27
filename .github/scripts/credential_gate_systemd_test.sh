@@ -33,7 +33,7 @@ trap cleanup EXIT
   uname -a
 } > "$proof/source-and-toolchain.txt"
 flags=(-std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char)
-clang "${flags[@]}" -static -no-pie -Wl,-z,noexecstack tools/bench_service/credential_gate.c -o "$payload/buster-bench-credential-gate"
+clang "${flags[@]}" -static -Wl,-z,noexecstack tools/bench_service/credential_gate.c -o "$payload/buster-bench-credential-gate"
 clang "${flags[@]}" tools/bench_service/credential_gate_systemd_test.c -o "$payload/credential-gate-systemd-test"
 readelf -W -l "$payload/buster-bench-credential-gate" > "$proof/gate-elf.txt"
 if grep -Eq 'INTERP|DYNAMIC|GNU_STACK.*RWE' "$proof/gate-elf.txt"; then exit 1; fi
