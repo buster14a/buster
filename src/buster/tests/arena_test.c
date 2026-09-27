@@ -67,6 +67,22 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
 
 #if BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS
     String8 failure_mode = os_get_environment_variable(S8("BUSTER_ARENA_FAILURE_MODE"));
+#if BUSTER_SANITIZE
+    // The stale-reference defense itself: a read through a pointer into a
+    // released phase range must be reported by AddressSanitizer at the read.
+    if (string_equal(failure_mode, S8("released_read")))
+    {
+        Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = 1}});
+        if (arena)
+        {
+            u64 mark = arena->position;
+            u8 volatile* bytes = arena_allocate(arena, u8, 64);
+            bytes[0] = 1;
+            arena_release_to_position(arena, mark);
+            os_exit(bytes[0]);
+        }
+    }
+#endif
     // Requesting prefaulting changes none of this: the commit is what the
     // arena depends on, so its failure stays fatal and keeps its diagnostic.
     bool prefaulting_mode = string_equal(failure_mode, S8("commit_prefault"));
@@ -503,6 +519,94 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED);
                 BUSTER_TEST(arguments, string_first_sequence(error, diagnostics[mode_index]) != BUSTER_STRING_NO_MATCH);
             }
+        }
+    }
+#endif
+
+    // Phase reclamation rewinds like arena_set_position, reports what it
+    // released and keeps the dirty mark over it. With the test fill enabled
+    // the released bytes carry the fill, and a new allocation over them
+    // starts from it rather than from a stale value.
+    {
+        Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = 1}});
+        BUSTER_TEST(arguments, arena != 0);
+        if (arena)
+        {
+            u64 mark = arena->position;
+            u8* bytes = arena_allocate(arena, u8, 100);
+            memset(bytes, 0x11, 100);
+            u64 end = arena->position;
+            arena_test_fill_releases(true);
+            u64 released = arena_release_to_position(arena, mark);
+            arena_test_fill_releases(false);
+            BUSTER_TEST(arguments, released == end - mark);
+            BUSTER_TEST(arguments, arena->position == mark && arena_dirty_position(arena) >= end);
+            u8* again = arena_allocate(arena, u8, 100);
+            BUSTER_TEST(arguments, again == bytes && again[0] == ARENA_TEST_RELEASE_FILL && again[99] == ARENA_TEST_RELEASE_FILL);
+            BUSTER_TEST(arguments, arena_release_to_position(arena, arena->position) == 0);
+            BUSTER_TEST(arguments, arena_range_contains(arena, mark, arena->position, again));
+            BUSTER_TEST(arguments, !arena_range_contains(arena, mark, arena->position, again + 100));
+            BUSTER_TEST(arguments, arena_destroy(arena, 1));
+        }
+    }
+
+    // arena_retire returns what lies past its retained prefix and parks the
+    // mapping: the next creation of the same shape on this thread gets it
+    // back with only that prefix still committed.
+    {
+        arena_pool_release_thread();
+        ArenaCreation shape = {.reserved_size = BUSTER_MB(64) + BUSTER_KB(64), .flags = {.pool_reuse = 1}};
+        Arena* arena = arena_create(shape);
+        BUSTER_TEST(arguments, arena != 0);
+        if (arena)
+        {
+            u8* bytes = arena_allocate(arena, u8, BUSTER_MB(8));
+            memset(bytes, 0x5a, BUSTER_MB(8));
+            BUSTER_TEST(arguments, arena->os_position >= arena_minimum_position + BUSTER_MB(8));
+            arena_retire(arena, BUSTER_MB(1));
+            Arena* reused = arena_create(shape);
+            BUSTER_TEST(arguments, reused == arena);
+            if (reused)
+            {
+                BUSTER_TEST(arguments, reused->position == arena_minimum_position);
+                BUSTER_TEST(arguments, reused->os_position >= arena_minimum_position + BUSTER_MB(1) && reused->os_position < BUSTER_MB(2));
+#if !defined(__APPLE__)
+                // Darwin's discard may preserve bytes, so its dirty mark stays.
+                BUSTER_TEST(arguments, arena_dirty_position(reused) <= reused->os_position);
+#endif
+                BUSTER_TEST(arguments, arena_destroy(reused, 1));
+            }
+            arena_pool_release_thread();
+        }
+    }
+
+#if BUSTER_SANITIZE && (BUSTER_LINUX || BUSTER_MACOS)
+    // Positive control for the poisoning: run the stale read in a child and
+    // require AddressSanitizer's report instead of a silent read.
+    {
+        String8 child_arguments[] = {
+            program_state->input.arguments.pointer[0],
+            S8("test"),
+        };
+        String8 environment_keys[] = {S8("BUSTER_ARENA_FAILURE_MODE")};
+        String8 environment_values[] = {S8("released_read")};
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+                                                     (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_keys),
+                                                     (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_values),
+                                                     (ProcessSpawnOptions){
+                                                         .capture = (u64)1 << STANDARD_STREAM_ERROR,
+                                                     });
+        BUSTER_TEST(arguments, spawn.handle != 0);
+        if (spawn.handle)
+        {
+            ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+            String8 error = {
+                .pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer,
+                .length = wait.streams[STANDARD_STREAM_ERROR].length,
+            };
+            BUSTER_TEST(arguments, !wait.timed_out);
+            BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED);
+            BUSTER_TEST(arguments, string_first_sequence(error, S8("use-after-poison")) != BUSTER_STRING_NO_MATCH);
         }
     }
 #endif
