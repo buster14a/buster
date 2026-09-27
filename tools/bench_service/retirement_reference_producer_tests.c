@@ -307,6 +307,12 @@ static void test_fail_closed(void)
     CHECK(fixture_init(&changed));
     if (changed.inventory >= 3)
     {
+        char candidate_inventory[65] = {0};
+        changed.plan_row.source_side = 1;
+        CHECK(!bq_retirement_reference_inventory_encode(&changed.plan,
+            changed.source, changed.template.toolchain_identity_sha256,
+            -1, candidate_inventory));
+        changed.plan_row.source_side = 0;
         CHECK(bq_retirement_oracle_authority_begin(&changed.authority,
             &changed.template, changed.template_sha256, &changed.prepared,
             changed.rows, changed.references, 1, 13, 17));

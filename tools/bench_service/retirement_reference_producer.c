@@ -170,7 +170,9 @@ BUSTER_GLOBAL_LOCAL bool bq_ref_plan_row(BqRetirementReferencePlanRow const* row
     BqRetirementOracleTemplateRow const* approved, char digest[65])
 {
     bool ok = row && approved && digest && row->row == approved->row &&
-        row->source_side < 2 && bq_ref_path(row->source_path) &&
+        /* Native reference bytes must come from the archived direct-native
+         * side; candidate source may never define its own expected output. */
+        row->source_side == 0 && bq_ref_path(row->source_path) &&
         bq_ref_hex(row->source_sha256, 64) &&
         !strcmp(row->source_sha256, approved->source_sha256) &&
         row->flag_count <= BQ_RETIREMENT_REFERENCE_FLAGS_CAP &&
