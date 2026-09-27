@@ -61,4 +61,6 @@ typedef enum CIncludeFileStatus
 BUSTER_F_DECL CIncludeFileStatus c_test_include_file_entry(CIncludeFileTable* table, CIncludeFileIdentity identity, String8 spelling, CIncludeFileEntry** entry_out);
 BUSTER_F_DECL bool c_test_include_file_table_grow(CIncludeFileTable* table);
 BUSTER_F_DECL void c_test_source_map_sort(Arena* arena, IrSourceRegion* regions, u32 count);
+// Test the private append-only finalization boundary, not arbitrary map edits.
+BUSTER_F_DECL void c_test_source_map_publish_appended(Arena* arena, CSourceMapRecovery* recovery, IrSourceRegion* regions, u32 count, u32 capacity);
 #endif

@@ -89,6 +89,8 @@ only as part of the reviewed queue rollout; never remove an existing requirement
 | Native retirement merge admission | api-migration-policy.yml | Exact head and trusted integration evidence | Exact generated tree plus successful trusted writer publication |
 | Main integration admission | merge-queue-admission.yml | Readiness/regression checks only | Trusted-base verification of the exact group and all six gates |
 
+`CI complete` also runs the [merge-parent preservation guard](merge-parent-preservation.md) over merges introduced by each PR candidate, merge-group candidate, and main push. It uses the event's exact base commit and does not require a feature branch to be updated when `main` advances.
+
 `CI complete` retains desktop x86-64/AArch64, mobile, native-mode, UEFI, lint and
 static-analysis ownership. The independent self-host and canonical bootstrap
 checks are not replaced by it. GPU Metal remains optional; a failed optional

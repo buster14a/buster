@@ -220,13 +220,24 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   association by token range without flattening or copying the translation
   unit, and unselected associations are never evaluated. The nested
   generic-constant cases cover this path (GitHub #797).
+- Legacy integer constant ranges and static assertions share the private
+  `c_parse_constant_expression_evaluate` walker over original token indices.
+  The shape sidecar and parse position index describe that stream; copying a
+  range into a synthesized token view while retaining either derived index
+  gives the wrong classification. Spelling, source recovery, and pack changes
+  still belong to the original preprocess result (GitHub #629).
 - Preprocessing integer-expression reductions carry signedness and a deferred
   arithmetic-fault bit in the same byte. Division by zero and signed
   `INT64_MIN / -1` (including remainder) never execute as host arithmetic.
   `&&`, `||` and `?:` propagate faults only from evaluated operands; the
   conditional's common unsigned type still depends on both arms. Syntax
-  validation remains unconditional. `c_test_preprocessor_short_circuit` covers
-  generated `#if`/`#elif`, live-fault and malformed-dead-operand controls;
+  validation remains unconditional. Character constants obtain their
+  preprocessing signedness from the decoded target scalar type, including
+  target-dependent `L` and C23 `u8` literals. Parse-side constant folds retain
+  ordinary C promotions and do not inherit this `intmax_t`/`uintmax_t` widening.
+  `c_macro_conditional_tests` covers those character types alongside ordinary C
+  controls; `c_test_preprocessor_short_circuit` covers generated `#if`/`#elif`,
+  live-fault and malformed-dead-operand controls;
   `tests/basic_c_preprocessor_short_circuit.c` runs in the existing native
   allocator matrix (GitHub #147, #258).
 - A folded conditional expression converts its selected value to the common
@@ -263,6 +274,14 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   over the 32-bit key. The one temporary row buffer is rewound before origin
   recovery and publication; the original region array remains authoritative.
   Do not restore displacement-dependent insertion sorting for `#line` splits.
+  Publish lookup keys before C23 respelling so its origin queries can read the
+  existing prefix. `c_source_map_publish_appended` rebuilds keys afterwards only
+  if that append-only phase added regions; without an append, keep the original
+  keys and sentinel. Count equality is not a general mutation-cache contract.
+  Respelling may move the region array, but must not invalidate the published
+  key prefix while querying it. Neither publication rewinds the TU arena:
+  canonical lowering copies the map's pointers into `IrProgram.source_map`,
+  whose diagnostic, DWARF and CodeView consumers still borrow their storage.
 - Zero-initialize aggregate tables before publishing a partially resolved type.
   Recursive and mutually dependent declarations can expose an aggregate while
   later members are still unresolved; an uninitialized `IrField` must never be
@@ -286,6 +305,16 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   selected x86-64 float-to-u64 conversion whose binary32 threshold encoded
   2^31 instead of 2^63. Runtime float-to-128-bit conversion on x86-64 remains
   unsupported; constant conversion supports both integer limbs.
+- Automatic chained designators in `c_ir_lower_nested_compound_literal_step`
+  retain a continuation cursor for every selected aggregate container. A
+  following positional item resumes at the innermost remaining sibling and
+  advances outward only when that container is exhausted. Named members may
+  cross anonymous structs or unions; `c_ir_nested_initializer_field_cursors`
+  records each emitted field edge, while array steps record their selected
+  index directly. The driver's `c_designator_continuation_source` checks
+  automatic and file-static values, compound literals, and outward
+  continuation across both frontend forms and all native allocators (GitHub
+  #1206).
 - `c_parse_index_scope_children` stores siblings in token-interval order.
   Source-ordered rows keep a linear construction path; synthesized rows use
   iterative merging with the finished CSR cursor storage as scratch.
@@ -455,6 +484,14 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   pointer-local reads restore their declaration's bounds. Explicit scalar
   pointer casts discard it, even when canonical pointer types match. `sizeof`
   of a named VLA pointer's dereference reads the cached suffix size.
+  A saved size does not suppress evaluation of a VLA-typed operand. The
+  sizeof continuation evaluates its operand once through the existing
+  expression machine, discards the row address, and retains that size.
+  The remaining original C type decides evaluation: a variable outer
+  bound does not make a fixed-size row or scalar operand evaluated.
+  Declaration bounds are not reevaluated and array data is not read.
+  `c_test_sizeof_vla_evaluation` checks raw calls/volatile stores and
+  runtime results across contexts, saved bounds and outer sizeof.
   Compatible conditional pointer results retain their shape through the
   result slot and remain rvalues. Concrete consumers normalize any pointer
   shell retained by unevaluated type prediction before applying scalar element

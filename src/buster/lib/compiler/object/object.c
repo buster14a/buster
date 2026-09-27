@@ -615,6 +615,7 @@ ObjectFormat object_format_for_target(Target target)
     case OPERATING_SYSTEM_FREESTANDING:
         result = OBJECT_FORMAT_ELF64;
         break;
+    case OPERATING_SYSTEM_WASI:
     default:
         result = OBJECT_FORMAT_COUNT;
         break;
@@ -5115,6 +5116,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 // untyped exported text label as a callable entry point.
                 bool untyped_code = target.cpu_arch == CPU_ARCH_AARCH64 && symbol_type == 0 && binding != 0 &&
                                     section_index && section_kinds[section_index] == OBJECT_SECTION_TEXT;
+                bool section_thread_local = section_index &&
+                                             (section_kinds[section_index] == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                                              section_kinds[section_index] == OBJECT_SECTION_THREAD_LOCAL_ZERO);
                 *destination = (ObjectSymbol){
                     .name = string_duplicate_arena(arena, name, false),
                     .value = symbol_value,
@@ -5123,6 +5127,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     .kind = symbol_type == 2 || untyped_code ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
                     .global = binding != 0,
                     .weak = binding == 2,
+                    .thread_local_state = symbol_type == 6 || section_thread_local ? OBJECT_SYMBOL_THREAD_LOCAL_YES
+                                          : !section_index && symbol_type == 0 ? OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN
+                                                                               : OBJECT_SYMBOL_THREAD_LOCAL_NO,
                     // st_other's low two bits are st_visibility; STV_HIDDEN
                     // is 2 and STV_INTERNAL 3, both of which mean the symbol
                     // does not leave the image.
@@ -5555,6 +5562,8 @@ enum
     OBJECT_COFF_SECTION_ALIGNMENT_SHIFT = 20,
     OBJECT_COFF_SECTION_ALIGNMENT_MASK = 0x00f00000,
     OBJECT_COFF_SECTION_MAX_ALIGNMENT = 8192,
+    // COFF counts the overflow marker itself; 65,536 real entries need 65,537.
+    OBJECT_COFF_RELOCATION_OVERFLOW_MINIMUM_MARKER_COUNT = UINT16_MAX + 2,
     OBJECT_COFF_STORAGE_EXTERNAL = 2,
     OBJECT_COFF_STORAGE_STATIC = 3,
     OBJECT_COFF_STORAGE_WEAK_EXTERNAL = 105,
@@ -5737,13 +5746,13 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                 if (!object_read_u32(bytes, relocation_offset, &overflow_count) ||
                     !object_read_u32(bytes, (u64)relocation_offset + 4, &overflow_symbol) ||
                     !object_read_u16(bytes, (u64)relocation_offset + 8, &overflow_type) ||
-                    overflow_count <= UINT16_MAX || overflow_symbol || overflow_type)
+                    overflow_count < OBJECT_COFF_RELOCATION_OVERFLOW_MINIMUM_MARKER_COUNT || overflow_symbol || overflow_type)
                 {
                     read_ok = false;
                 }
                 else
                 {
-                    actual_relocation_count = overflow_count;
+                    actual_relocation_count = overflow_count - 1;
                 }
             }
             u64 relocation_bytes = (u64)actual_relocation_count * COFF_RELOCATION_SIZE +
@@ -6249,13 +6258,13 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                 if (!object_read_u32(bytes, relocation_offset, &overflow_count) ||
                     !object_read_u32(bytes, (u64)relocation_offset + 4, &overflow_symbol) ||
                     !object_read_u16(bytes, (u64)relocation_offset + 8, &overflow_type) ||
-                    overflow_count <= UINT16_MAX || overflow_symbol || overflow_type)
+                    overflow_count < OBJECT_COFF_RELOCATION_OVERFLOW_MINIMUM_MARKER_COUNT || overflow_symbol || overflow_type)
                 {
                     read_ok = false;
                 }
                 else
                 {
-                    actual_relocation_count = overflow_count;
+                    actual_relocation_count = overflow_count - 1;
                     relocation_data_offset += COFF_RELOCATION_SIZE;
                 }
             }
@@ -10759,6 +10768,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .global = symbol->linkage != IR_LINKAGE_INTERNAL,
             .weak = symbol->is_weak,
             .hidden = symbol->is_hidden,
+            .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO,
         };
     }
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
@@ -10794,6 +10804,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .global = symbol->linkage != IR_LINKAGE_INTERNAL,
             .weak = symbol->is_weak,
             .hidden = symbol->is_hidden,
+            .thread_local_state = global.is_thread_local ? OBJECT_SYMBOL_THREAD_LOCAL_YES : OBJECT_SYMBOL_THREAD_LOCAL_NO,
         };
     }
     // An alias owns no storage: it is a second name for a definition this
@@ -10831,6 +10842,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .global = symbol->linkage != IR_LINKAGE_INTERNAL,
             .weak = symbol->is_weak,
             .hidden = symbol->is_hidden,
+            .thread_local_state = definition.thread_local_state,
         };
     }
     if (apple_thread_local)
@@ -10920,6 +10932,8 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                 .global = true,
                 .weak = !tls_get_addr && target_symbol->is_weak,
                 .hidden = !tls_get_addr && target_symbol->is_hidden,
+                .thread_local_state = tls_get_addr ? OBJECT_SYMBOL_THREAD_LOCAL_NO
+                                                   : target_symbol->is_thread_local ? OBJECT_SYMBOL_THREAD_LOCAL_YES : OBJECT_SYMBOL_THREAD_LOCAL_NO,
             };
             object_symbol_name_index_add(name_index, &result.symbols[symbol_index], symbol_index);
         }
@@ -11317,8 +11331,11 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64_with_capacity(Arena* arena
         ObjectSymbol* source = object->symbols + symbol;
         u64 offset = symbol_table_offset + (u64)ordered_symbol * ELF_SYMBOL_SIZE;
         object_write_u32_at(&buffer, offset, symbol_name_offsets[symbol]);
-        bool is_thread_local = source->section < object->section_count && (object->sections[source->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
-                                                                           object->sections[source->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO);
+        bool section_thread_local = source->section < object->section_count &&
+                                    (object->sections[source->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                                     object->sections[source->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO);
+        bool is_defined = source->section != OBJECT_SECTION_UNDEFINED && source->section < object->section_count;
+        bool is_thread_local = is_defined ? section_thread_local : source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES;
         // Binding is gated on global because the symbol table is partitioned
         // local-then-global and sh_info below counts that split: a local
         // STB_WEAK entry would contradict it.
@@ -11620,7 +11637,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
     for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
     {
         ObjectRelocation* source = object->relocations + relocation;
-        if (source->section >= section_count || relocation_counts[source->section] == UINT32_MAX)
+        // Leave room for the COFF marker's N+1 count in its 32-bit field.
+        if (source->section >= section_count || relocation_counts[source->section] >= UINT32_MAX - 1)
         {
             buffer.error = OBJECT_ERROR_INVALID_INPUT;
             break;
@@ -11712,7 +11730,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
         {
             u64 overflow_offset = buffer.count;
             object_buffer_zero(&buffer, COFF_RELOCATION_SIZE);
-            object_write_u32_at(&buffer, overflow_offset, relocation_counts[section]);
+            // The 32-bit field counts the marker as well as all real relocations.
+            object_write_u32_at(&buffer, overflow_offset, relocation_counts[section] + 1);
         }
         for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
         {

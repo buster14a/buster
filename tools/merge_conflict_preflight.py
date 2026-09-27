@@ -11,10 +11,15 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import datetime
+import email.utils
+import errno
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -74,10 +79,70 @@ OUTCOME_CLEAN = 3
 OUTCOME_POLICY = 4
 MAX_STABLE_ATTEMPTS = 3
 MAX_API_PAGES = 10
+MAX_GET_ATTEMPTS = 3
+MAX_RETRY_DELAY_SECONDS = 30
+REFRESH_BUDGET_SECONDS = 240  # Leave the five-minute job time to retain reports.
+REFRESH_SCHEMA = "buster-merge-conflict-refresh-v1"
 
 
 class PreflightError(Exception):
     """A malformed repository, merge-tree result, event, or API response."""
+
+
+class RefreshBudgetError(PreflightError):
+    """The default-branch refresh has no time left for another operation."""
+
+
+class ApiRequestError(PreflightError):
+    """An API request failed with a recorded retry and rate-limit decision."""
+
+    def __init__(self, message: str, attempts: int, retryable: bool,
+                 systemic: bool) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+        self.retryable = retryable
+        self.systemic = systemic
+        self.retry_exhausted = retryable and attempts >= MAX_GET_ATTEMPTS
+
+
+def _retry_after(headers, rate_limited: bool) -> float | None:
+    """Return the server's minimum delay, or None if no guidance was supplied."""
+    value = headers.get("Retry-After") if headers is not None else None
+    delay = None
+    if value is not None:
+        try:
+            delay = float(value)
+        except (TypeError, ValueError):
+            try:
+                date = email.utils.parsedate_to_datetime(value)
+                if date.tzinfo is None:
+                    date = date.replace(tzinfo=datetime.timezone.utc)
+                delay = date.timestamp() - time.time()
+            except (TypeError, ValueError, OverflowError):
+                pass
+        if delay is not None:
+            delay = max(0.0, delay) if math.isfinite(delay) else None
+    if rate_limited and headers is not None and headers.get("X-RateLimit-Remaining") == "0":
+        try:
+            reset_delay = float(headers["X-RateLimit-Reset"]) - time.time()
+            if math.isfinite(reset_delay):
+                delay = max(delay or 0.0, reset_delay)
+        except (KeyError, TypeError, ValueError):
+            pass
+    return delay
+
+
+def _transient_url_error(error: urllib.error.URLError) -> bool:
+    reason = error.reason
+    if isinstance(reason, (TimeoutError, ConnectionError)):
+        return True
+    if isinstance(reason, OSError):
+        return reason.errno in {
+            errno.ETIMEDOUT, errno.ECONNRESET, errno.ECONNABORTED,
+            errno.ECONNREFUSED, errno.EPIPE, errno.ENETUNREACH,
+            errno.EHOSTUNREACH, socket.EAI_AGAIN,
+        }
+    return False
 
 
 @dataclass(frozen=True)
@@ -127,6 +192,22 @@ class GitHubApi:
         self.repository = repository
         self.token = token
         self.api_url = api_url.rstrip("/")
+        self.deadline: float | None = None
+
+    def _remaining(self) -> float:
+        return (self.deadline - time.monotonic() if self.deadline is not None
+                else float("inf"))
+
+    def _wait_for_retry(self, attempt: int, guidance: float | None,
+                        rate_limited: bool) -> bool:
+        # A rate limit without timing guidance is not a license to probe it.
+        if rate_limited and guidance is None:
+            return False
+        delay = max(float(2 ** (attempt - 1)), guidance or 0.0)
+        if delay > MAX_RETRY_DELAY_SECONDS or delay >= self._remaining():
+            return False
+        time.sleep(delay)
+        return True
 
     def _request(self, method: str, path: str, payload: dict | None = None):
         url = self.api_url + path
@@ -141,14 +222,43 @@ class GitHubApi:
             data = json.dumps(payload, sort_keys=True).encode("utf-8")
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                body = response.read()
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", "replace")
-            raise PreflightError(f"GitHub API {method} {path} failed: HTTP {error.code}: {detail}") from error
-        except urllib.error.URLError as error:
-            raise PreflightError(f"GitHub API {method} {path} failed: {error}") from error
+        attempts = MAX_GET_ATTEMPTS if method == "GET" else 1
+        for attempt in range(1, attempts + 1):
+            remaining = self._remaining()
+            if remaining <= 0:
+                raise RefreshBudgetError("merge-conflict refresh time budget exhausted")
+            try:
+                with urllib.request.urlopen(request, timeout=min(30, remaining)) as response:
+                    body = response.read()
+                if attempt > 1:
+                    print(f"merge-conflict-preflight: recovered GitHub API {method} {path} "
+                          f"after {attempt} attempts", file=sys.stderr)
+                break
+            except urllib.error.HTTPError as error:
+                detail = error.read().decode("utf-8", "replace")
+                rate_limited = (error.code == 429 or (error.code == 403 and (
+                    error.headers is not None and
+                    error.headers.get("X-RateLimit-Remaining") == "0" or
+                    "rate limit" in detail.lower())))
+                retryable = method == "GET" and (
+                    error.code in (408, 500, 502, 503, 504) or rate_limited)
+                guidance = _retry_after(error.headers, rate_limited)
+                if (retryable and attempt < attempts and
+                        self._wait_for_retry(attempt, guidance, rate_limited)):
+                    continue
+                raise ApiRequestError(
+                    f"GitHub API {method} {path} failed after {attempt} attempt(s): "
+                    f"HTTP {error.code}: {detail}", attempt, retryable,
+                    rate_limited or (error.code == 503 and guidance is not None)) from error
+            except (urllib.error.URLError, TimeoutError) as error:
+                retryable = method == "GET" and (
+                    isinstance(error, TimeoutError) or _transient_url_error(error))
+                if (retryable and attempt < attempts and
+                        self._wait_for_retry(attempt, None, False)):
+                    continue
+                raise ApiRequestError(
+                    f"GitHub API {method} {path} failed after {attempt} attempt(s): {error}",
+                    attempt, retryable, False) from error
         if not body:
             return None
         try:
@@ -264,7 +374,8 @@ def _canonical_path(path: str) -> str:
     return candidate.as_posix()
 
 
-def _git(repo: Path, *arguments: str, check: bool = True) -> GitResult:
+def _git(repo: Path, *arguments: str, check: bool = True,
+         timeout: float | None = None) -> GitResult:
     environment = os.environ.copy()
     environment.update({
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -275,7 +386,11 @@ def _git(repo: Path, *arguments: str, check: bool = True) -> GitResult:
         "git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
         "-C", os.fspath(repo), *arguments,
     )
-    process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
+    try:
+        process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 env=environment, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        raise PreflightError(f"git {' '.join(arguments)} timed out") from error
     result = GitResult(tuple(command), process.returncode, process.stdout, process.stderr)
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout).decode("utf-8", "replace").strip()
@@ -737,8 +852,13 @@ def _event(path: Path) -> dict:
     return value
 
 
-def _fetch_ref(repo: Path, source: str, destination: str) -> str:
-    _git(repo, "fetch", "--no-tags", "--force", "origin", f"+{source}:{destination}")
+def _fetch_ref(repo: Path, source: str, destination: str,
+               deadline: float | None = None) -> str:
+    remaining = deadline - time.monotonic() if deadline is not None else None
+    if remaining is not None and remaining <= 0:
+        raise RefreshBudgetError("merge-conflict refresh time budget exhausted")
+    _git(repo, "fetch", "--no-tags", "--force", "origin", f"+{source}:{destination}",
+         timeout=min(30, remaining) if remaining is not None else None)
     return _commit(repo, destination)
 
 
@@ -771,8 +891,8 @@ def _analyze_stable_pull(repo: Path, api: GitHubApi, number: int, context: str) 
             raise PreflightError(f"pull-request API returned #{number_before} while resolving #{number}")
         main_ref = "refs/merge-conflict-preflight/main"
         head_ref = f"refs/merge-conflict-preflight/pr-{number}"
-        main = _fetch_ref(repo, f"refs/heads/{base}", main_ref)
-        head = _fetch_ref(repo, f"refs/pull/{number}/head", head_ref)
+        main = _fetch_ref(repo, f"refs/heads/{base}", main_ref, api.deadline)
+        head = _fetch_ref(repo, f"refs/pull/{number}/head", head_ref, api.deadline)
         if head != expected_head:
             continue
         previous = api.previous_status(head, context)
@@ -781,7 +901,7 @@ def _analyze_stable_pull(repo: Path, api: GitHubApi, number: int, context: str) 
             candidate = analyze(repo, main, head, previous, api.retirement_status(head))
         pull_after = api.pull_request(number)
         _, current_head, current_base = _pull_identity(pull_after)
-        current_main = _fetch_ref(repo, f"refs/heads/{current_base}", main_ref)
+        current_main = _fetch_ref(repo, f"refs/heads/{current_base}", main_ref, api.deadline)
         if current_head == head and current_base == base and current_main == main:
             report = candidate
             break
@@ -828,34 +948,129 @@ def _github_workflow_run_event(repo: Path, api: GitHubApi, event: dict,
     api.publish_status(head, report, context, _target_url())
     return bool(report["outcome"]["blocking"])
 
+
+def _refresh_failure(error: PreflightError, scope: str, stage: str,
+                     number: int | None = None, head_hint: str | None = None) -> dict:
+    details = {
+        "type": "api" if isinstance(error, ApiRequestError) else "preflight",
+        "message": str(error),
+    }
+    if isinstance(error, ApiRequestError):
+        details.update(attempts=error.attempts, retryable=error.retryable,
+                       retry_exhausted=error.retry_exhausted,
+                       systemic=error.systemic)
+    return {
+        "schema": REFRESH_SCHEMA,
+        "authoritative_for_exact_identities": False,
+        "scope": scope,
+        "stage": stage,
+        "pull_request": number,
+        "listed_head_hint_unvalidated": head_hint,
+        "status_publication": (
+            "not_attempted" if isinstance(error, RefreshBudgetError) and stage == "publish" else
+            "unknown" if stage == "publish" else "none"
+        ),
+        "error": details,
+    }
+
+
+def _finish_refresh(refresh: dict, report_dir: Path, summary: Path | None) -> int:
+    refresh["coverage_complete"] = (
+        refresh["inventory_complete"] and not refresh["failed"] and
+        not refresh["not_attempted"])
+    _write_report(refresh, report_dir / "refresh.json", None)
+    if summary is not None:
+        summary.parent.mkdir(parents=True, exist_ok=True)
+        with summary.open("a", encoding="utf-8") as stream:
+            stream.write(
+                f"\nRefresh {'complete' if refresh['coverage_complete'] else 'incomplete'}: "
+                f"completed {len(refresh['completed'])}, failed {len(refresh['failed'])}, "
+                f"not attempted {len(refresh['not_attempted']) if refresh['inventory_complete'] else 'unknown'}; "
+                f"{refresh['blocking_count']} PR(s) received a blocking preflight status.\n"
+            )
+            for failure in refresh["failed"]:
+                stream.write(
+                    f"- {failure['scope']} "
+                    f"{failure['pull_request'] if failure['pull_request'] is not None else ''}: "
+                    f"{failure['error']['message']}\n"
+                )
+            if refresh["not_attempted"]:
+                stream.write(f"- Not attempted (listed PR numbers): {refresh['not_attempted']}\n")
+            stream.write("Open-PR conflicts do not make the new main commit itself fail.\n")
+    return 0 if refresh["coverage_complete"] else 2
+
+
 def _github_push_event(repo: Path, api: GitHubApi, event: dict, report_dir: Path,
-                       summary: Path | None, context: str) -> bool:
+                       summary: Path | None, context: str) -> int:
     repository = event.get("repository")
     default_branch = repository.get("default_branch") if isinstance(repository, dict) else None
     if not isinstance(default_branch, str) or not default_branch:
         default_branch = "main"
-    pulls = api.open_pull_requests(default_branch)
-    blocking_count = 0
+    api.deadline = time.monotonic() + REFRESH_BUDGET_SECONDS
+    refresh = {
+        "schema": REFRESH_SCHEMA,
+        "default_branch": default_branch,
+        "budget_seconds": REFRESH_BUDGET_SECONDS,
+        "inventory_complete": False,
+        "listed_pull_requests": None,
+        "completed": [],
+        "failed": [],
+        "not_attempted": [],
+        "blocking_count": 0,
+    }
+    try:
+        pulls = api.open_pull_requests(default_branch)
+    except PreflightError as error:
+        failure = _refresh_failure(error, "inventory", "list")
+        refresh["failed"].append(failure)
+        _write_report(failure, report_dir / "inventory-error.json", None)
+        return _finish_refresh(refresh, report_dir, summary)
+    refresh["inventory_complete"] = True
+    refresh["listed_pull_requests"] = len(pulls)
     if summary is not None:
         summary.parent.mkdir(parents=True, exist_ok=True)
         with summary.open("a", encoding="utf-8") as stream:
             stream.write(f"## Default-branch conflict refresh for {len(pulls)} open PR(s)\n\n")
-    for pull in pulls:
-        number, _, base = _pull_identity(pull)
-        if base != default_branch:
-            continue
-        report, head = _analyze_stable_pull(repo, api, number, context)
-        output = report_dir / f"pr-{number}-{head}.json"
-        _write_report(report, output, summary, f"PR #{number}")
-        api.publish_status(head, report, context, _target_url())
-        blocking_count += int(report["outcome"]["blocking"])
-    if summary is not None:
-        with summary.open("a", encoding="utf-8") as stream:
-            stream.write(
-                f"\nRefresh completed; {blocking_count} PR(s) received a blocking preflight status. "
-                "Open-PR conflicts do not make the new main commit itself fail.\n"
-            )
-    return False
+    for index, pull in enumerate(pulls):
+        if time.monotonic() >= api.deadline:
+            refresh["not_attempted"] = [
+                item.get("number") if isinstance(item, dict) else None
+                for item in pulls[index:]
+            ]
+            break
+        number = pull.get("number") if isinstance(pull, dict) else None
+        number = number if isinstance(number, int) and number > 0 else None
+        head_hint = pull.get("head") if isinstance(pull, dict) else None
+        head_hint = head_hint.get("sha") if isinstance(head_hint, dict) else None
+        head_hint = head_hint if isinstance(head_hint, str) and HEX_OBJECT.fullmatch(head_hint) else None
+        stage = "resolve"
+        try:
+            resolved_number, _, base = _pull_identity(pull)
+            if resolved_number != number or base != default_branch:
+                raise PreflightError(f"listed pull request #{number} has an invalid/default-branch base")
+            report, head = _analyze_stable_pull(repo, api, number, context)
+            _write_report(report, report_dir / f"pr-{number}-{head}.json", summary,
+                          f"PR #{number}")
+            stage = "publish"
+            api.publish_status(head, report, context, _target_url())
+            refresh["completed"].append({"pull_request": number, "head": head,
+                                         "main": report["main"]["sha"],
+                                         "blocking": report["outcome"]["blocking"]})
+            refresh["blocking_count"] += int(report["outcome"]["blocking"])
+        except PreflightError as error:
+            failure = _refresh_failure(error, "pull_request", stage, number, head_hint)
+            refresh["failed"].append(failure)
+            _write_report(failure, report_dir / (
+                f"pr-{number}-error.json" if number is not None else
+                f"pr-unidentified-{index}-error.json"), None)
+            if (isinstance(error, RefreshBudgetError) or
+                    isinstance(error, ApiRequestError) and error.systemic):
+                refresh["not_attempted"] = [
+                    item.get("number") if isinstance(item, dict) else None
+                    for item in pulls[index + 1:]
+                ]
+                break
+    return _finish_refresh(refresh, report_dir, summary)
 
 
 def _github_merge_group_event(repo: Path, api: GitHubApi, event: dict, report_dir: Path,
@@ -904,7 +1119,7 @@ def github_event(repo: Path, event_path: Path, repository: str, report_dir: Path
     if event_name == "workflow_run":
         blocking = _github_workflow_run_event(repo, api, event, report_dir, summary, context)
     elif event_name in ("push", "workflow_dispatch"):
-        blocking = _github_push_event(repo, api, event, report_dir, summary, context)
+        return _github_push_event(repo, api, event, report_dir, summary, context)
     elif event_name == "merge_group":
         blocking = _github_merge_group_event(repo, api, event, report_dir, summary, context)
     else:

@@ -96,9 +96,31 @@ LLVM consumer `-O0` and `-O2`, including guarded zero for count-leading/trailing
 and unguarded zero for population count.
 
 Canonical operations that do not yet have an LLVM record mapping, including
-instruction-cache clearing, slice/reverse helpers, variadic intrinsics, inline
-assembly, SIMD, label addresses, indirect branches, and debug traps, are
-deliberate diagnostics.
+instruction-cache clearing, slice/reverse helpers, inline assembly, SIMD,
+label addresses, indirect branches, and debug traps, are deliberate diagnostics.
+
+Scalar `va_start`, `va_copy`, `va_end`, and `va_arg` are admitted only for
+x86-64 Linux (System V) and x86-64 Windows (Win64) variadic definitions using
+the target's public `va_list` layout. `va_arg` accepts promoted 32- or 64-bit
+integers, `double`, and pointers. The list operations preserve separate cursor
+storage for copies; the writer declares `llvm.va_start`, `llvm.va_copy`, and
+`llvm.va_end` as needed and emits LLVM's typed `va_arg` instruction. Calls to
+variadic declarations with scalar anonymous arguments remain supported. Win64
+32-bit integer reads consume an eight-byte variadic slot before truncation.
+
+| Target of `-emit-llvm` | List operations | `va_arg` types |
+|---|---|---|
+| x86-64 Linux, System V | Start, copy, end | i32, i64, double, pointer |
+| x86-64 Windows, Win64 | Start, copy, end | i32, i64, double, pointer |
+| Other targets, or mismatched explicit calling convention | Diagnostic | None |
+
+Use `va_arg(ap, int)` and `va_arg(ap, double)` for arguments promoted from
+narrow integer and float expressions. Smaller integer/floating types, 128-bit
+integers, wide floats, aggregates and other unsupported reads receive an
+explicit diagnostic. Aggregate anonymous call arguments remain a separate
+unsupported boundary. The consumer regression compiles the other side of
+calls and public-list exchanges with Clang at `-O0` and `-O2` on admitted
+native hosts; cross-target object validation does not substitute for execution.
 
 Aggregate storage preserves canonical field offsets, packing, and tail padding.
 Global pointer initializers may reference data or function symbols with a

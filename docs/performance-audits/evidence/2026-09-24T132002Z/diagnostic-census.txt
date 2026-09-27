@@ -1,0 +1,548 @@
+functions 5140 dynamic_stack 0
+row 0 294380
+row 1 287413
+row 2 13439
+row 3 2739
+row 4 115
+row 5 17874
+row 6 19000
+row 7 7944
+row 8 10884
+row 9 39019
+row 10 2843
+row 11 9429
+row 12 2432
+row 13 6504
+row 14 1410
+row 15 5752
+row 16 77
+row 17 92
+row 18 564
+row 19 5329
+row 20 29
+row 21 91
+row 22 68
+row 23 108
+row 25 2
+row 28 48925
+row 30 21265
+row 31 1
+row 32 17
+row 33 1
+row 34 2
+row 36 16
+row 37 32368
+row 38 10259
+row 39 36786
+row 40 3807
+row 41 43128
+row 42 30882
+row 43 8824
+row 44 40822
+row 45 168423
+row 46 15017
+row 47 2809
+row 48 34179
+row 49 28922
+row 50 4309
+row 51 1257
+row 52 10911
+row 53 4022
+row 54 82003
+row 55 75606
+row 56 14684
+row 57 629
+row 58 392
+row 59 49
+row 60 22
+row 61 545
+row 62 356
+row 63 29
+row 64 49
+row 65 251
+row 66 8971
+row 67 4
+row 68 11
+row 69 52
+row 70 112
+row 71 40361
+row 72 86350
+row 73 49893
+row 74 12
+row 77 316
+row 78 63594
+row 79 8054
+row 80 27497
+row 81 19
+row 82 24
+row 83 9
+row 84 10
+row 86 5
+row 89 69
+row 90 61
+row 91 22978
+row 92 4
+row 93 17
+row 94 71728
+row 95 2113
+row 96 3001
+row 97 6272
+row 99 6
+row 100 1
+row 101 1
+row 102 1
+row 105 269
+row 106 108
+row 107 2
+row 110 9
+row 111 1
+row 115 38
+row 116 2
+row 124 1
+row 237 1
+row 238 1
+row 251 14
+row 252 30
+row 253 37
+row 254 3
+row 255 19
+row 257 40
+row 259 9
+row 260 3
+row 262 2
+recipe single_gpr 1 61101
+recipe single_gpr 2 13439
+recipe single_gpr 3 2739
+recipe single_gpr 4 115
+recipe single_gpr 5 17874
+recipe single_gpr 6 19000
+recipe single_gpr 7 7944
+recipe single_gpr 8 10884
+recipe single_gpr 9 39019
+recipe single_gpr 10 2843
+recipe single_gpr 11 9429
+recipe single_gpr 12 2432
+recipe single_gpr 13 6504
+recipe single_gpr 14 1410
+recipe single_gpr 15 5752
+recipe single_gpr 16 77
+recipe single_gpr 17 92
+recipe single_gpr 18 564
+recipe single_gpr 19 5329
+recipe single_gpr 20 29
+recipe single_gpr 21 91
+recipe single_gpr 22 68
+recipe single_gpr 23 108
+recipe single_gpr 31 1
+recipe single_gpr 32 17
+recipe single_gpr 33 1
+recipe single_gpr 34 2
+recipe single_gpr 36 16
+recipe single_gpr 37 32368
+recipe single_gpr 38 10259
+recipe single_gpr 39 36786
+recipe single_gpr 41 43128
+recipe single_gpr 42 30882
+recipe single_gpr 43 8824
+recipe single_gpr 44 40822
+recipe single_gpr 45 168423
+recipe single_gpr 46 15017
+recipe single_gpr 47 2809
+recipe single_gpr 48 34179
+recipe single_gpr 49 28922
+recipe single_gpr 50 4309
+recipe single_gpr 51 1257
+recipe single_gpr 52 10911
+recipe single_gpr 53 4022
+recipe single_gpr 57 629
+recipe single_gpr 58 392
+recipe single_gpr 59 49
+recipe single_gpr 60 22
+recipe single_gpr 61 545
+recipe single_gpr 62 356
+recipe single_gpr 72 86350
+recipe single_gpr 91 22978
+recipe single_gpr 94 71728
+recipe single_gpr 95 2113
+recipe single_gpr 96 3001
+recipe single_gpr 97 6272
+recipe variant_gpr 0 294380
+recipe variant_gpr 30 21265
+recipe gpr_selfcopy_noop 1 226312
+recipe varmem 28 48925
+recipe fixed 54 82003
+recipe fixed 73 49893
+recipe fixed 105 269
+recipe metadata_form 89 69
+recipe metadata_form 90 61
+recipe metadata_form 100 1
+recipe metadata_form 107 2
+recipe metadata_form 110 9
+recipe metadata_form 111 1
+recipe metadata_form 115 38
+recipe metadata_form 116 2
+recipe metadata_form 124 1
+sequence 40 3807
+sequence 55 75606
+sequence 81 19
+sequence 82 24
+sequence 83 9
+sequence 84 10
+sequence 86 5
+sequence 102 1
+sequence 257 40
+sequence 259 9
+sequence 260 3
+sequence 262 2
+form_calls 2257 rbp 147 rebased 0
+form_slot 1 74
+form_slot 5 28
+form_slot 7 23
+form_slot 10 2
+form_slot 11 2
+form_slot 18 35
+form_slot 22 46
+form_slot 23 773
+form_slot 24 257
+form_slot 25 16
+form_slot 27 34
+form_slot 28 2
+form_slot 29 1
+form_slot 30 1
+form_slot 31 12
+form_slot 32 50
+form_slot 33 30
+form_slot 34 36
+form_slot 38 6
+form_slot 43 59
+form_slot 44 47
+form_slot 55 1
+form_slot 57 38
+form_slot 58 2
+form_slot 60 1
+form_slot 62 2
+form_slot 63 2
+form_slot 64 13
+form_slot 65 12
+form_slot 66 1
+form_slot 67 1
+form_slot 68 3
+form_slot 69 3
+form_slot 70 3
+form_slot 71 3
+form_slot 72 3
+form_slot 73 3
+form_slot 74 1
+form_slot 75 1
+form_slot 76 9
+form_slot 77 1
+form_slot 78 1
+form_slot 79 1
+form_slot 80 1
+form_slot 81 1
+form_slot 82 1
+form_slot 83 1
+form_slot 84 1
+form_slot 85 2
+form_slot 86 2
+form_slot 87 1
+form_slot 88 18
+form_slot 89 1
+form_slot 90 1
+form_slot 91 1
+form_slot 92 1
+form_slot 93 1
+form_slot 94 1
+form_slot 95 1
+form_slot 96 1
+form_slot 97 1
+form_slot 98 1
+form_slot 99 1
+form_slot 100 1
+form_slot 101 3
+form_slot 102 1
+form_slot 103 1
+form_slot 104 1
+form_slot 105 6
+form_slot 106 8
+form_slot 107 6
+form_slot 108 1
+form_slot 109 1
+form_slot 110 16
+form_slot 111 20
+form_slot 112 16
+form_slot 113 16
+form_slot 115 110
+form_slot 117 38
+form_slot 118 124
+form_slot 121 1
+form_slot 122 1
+form_slot 124 2
+form_slot 129 1
+form_slot 130 1
+form_slot 131 1
+form_slot 132 1
+form_slot 133 1
+form_slot 136 1
+form_slot 137 1
+form_slot 142 2
+form_slot 143 1
+form_slot 147 36
+form_slot 148 3
+form_slot 149 19
+form_slot 152 12
+form_slot 153 11
+form_slot 154 16
+form_slot 155 16
+form_slot 156 2
+form_slot 157 2
+form_slot 160 16
+form_slot 169 2
+form_slot 171 2
+form_slot 172 4
+form_slot 174 17
+form_slot 176 1
+form_slot 179 1
+form_slot 180 2
+form_slot 181 2
+form_slot 188 32
+fixed 3 2052
+fixed 5 5140
+fixed 12 1130
+fixed 13 576
+fixed 14 293
+fixed 15 174
+fixed 19 8317
+fixed 21 14684
+fixed 28 5735
+fixed 29 3852
+fixed 30 2592
+fixed 31 2048
+fixed 42 6
+fixed 81 4526
+fixed 96 4556
+fixed 112 49
+fixed 130 5140
+fixed 131 6367
+fixed 132 1825
+fixed 133 3986
+fixed 134 5811
+fixed 135 8317
+fixed 136 797
+fixed 137 14684
+fixed 138 40361
+fixed 139 316
+fixed 140 4605
+fixed 141 70
+fixed 142 108
+fixed 143 303
+fixed 144 9083
+fixed 145 303
+fixed 146 9083
+fixed 147 33
+fixed 148 60
+fixed 149 33
+fixed 150 60
+fixed 151 56
+fixed 152 123
+fixed 157 107
+fixed 158 107
+fixed 159 25
+fixed 160 25
+fixed 161 893
+fixed 162 893
+fixed 163 2613
+fixed 164 2613
+fixed 165 71
+fixed 166 71
+fixed 167 35
+fixed 168 35
+fixed 177 27
+fixed 178 27
+fixed 179 17
+fixed 180 17
+fixed 181 13
+fixed 182 13
+fixed 183 6
+fixed 184 6
+fixed 185 82003
+fixed 190 7295
+fixed 191 7295
+fixed 192 2299
+fixed 193 2299
+fixed 194 27964
+fixed 195 27964
+fixed 196 33001
+fixed 197 33001
+fixed 198 1136
+fixed 199 1136
+fixed 200 2254
+fixed 201 2254
+fixed 210 416
+fixed 211 416
+fixed 212 528
+fixed 213 528
+fixed 214 286
+fixed 215 286
+fixed 216 427
+fixed 217 427
+fixed 218 21570
+fixed 219 6201
+fixed 220 7116
+fixed 221 333
+fixed 224 4715
+fixed 225 3788
+fixed 226 2608
+fixed 227 1702
+fixed 228 972
+fixed 229 579
+fixed 230 109
+fixed 231 93
+fixed 232 62
+fixed 233 45
+fixed 432 1
+fixed 437 2
+fixed 439 1
+fixed 449 1
+fixed 452 1
+fixed 454 1
+fixed 457 1
+fixed 462 4
+fixed 466 1
+fixed 470 1
+fixed 471 1
+fixed 472 1
+fixed 486 2
+fixed 501 1
+fixed 503 1
+fixed 511 2
+fixed 520 1
+fixed 521 1
+fixed 528 2
+fixed 529 1
+fixed 535 2
+fixed 536 2
+fixed 539 1
+fixed 545 3
+fixed 550 1
+fixed 551 2
+fixed 552 1
+fixed 553 1
+fixed 560 8
+fixed 563 3
+fixed 564 1
+fixed 569 1
+fixed 570 3
+fixed 577 1
+fixed 578 1
+fixed 584 1
+fixed 585 2
+fixed 594 1
+fixed 595 1
+fixed 599 1
+fixed 600 2
+fixed 609 5
+fixed 612 1
+fixed 616 1
+fixed 618 1
+fixed 619 2
+fixed 837 4
+fixed 854 4
+fixed 868 4
+fixed 869 4
+fixed 870 4
+fixed 872 12
+fixed 889 12
+fixed 903 12
+fixed 904 12
+fixed 905 12
+fixed 907 2
+fixed 924 2
+fixed 938 2
+fixed 939 2
+fixed 940 2
+fixed 942 2
+fixed 959 2
+fixed 973 2
+fixed 974 2
+fixed 975 2
+fixed 977 2
+fixed 994 2
+fixed 1008 2
+fixed 1009 2
+fixed 1010 2
+fixed 1012 2
+fixed 1029 2
+fixed 1043 2
+fixed 1044 2
+fixed 1045 2
+fixed 1046 2
+fixed 1047 3
+fixed 1048 1
+fixed 1052 2
+fixed 1053 1
+fixed 1062 9
+fixed 1064 2
+fixed 1065 3
+fixed 1069 1
+fixed 1070 2
+fixed 1071 1
+fixed 1079 3
+fixed 1080 4
+fixed 1081 3
+fixed 1095 10
+fixed 1097 2
+fixed 1098 4
+fixed 1102 4
+fixed 1146 2
+fixed 1150 1
+fixed 1154 2
+fixed 1167 3
+fixed 1171 2
+fixed 1242 1
+fixed 1273 269
+varmem class0 35620 class1 130272 class2 1669669 rbp 1588777 rbp_rebased 0
+chunk frame_hit 1588773 frame_fallback 0 pointer_hit 197863 pointer_fallback 0
+edit 1 201149
+edit 2 247210
+edit 3 178658
+edit 4 75596
+edit 5 75596
+edit 6 42300
+mnemonic PUSH 16
+mnemonic POP 16
+mnemonic CALL 17
+mnemonic JMP 36
+mnemonic LEA 18
+mnemonic MOV 140
+mnemonic CMP 51
+mnemonic SUB 4
+mnemonic TEST 3
+mnemonic RET 1
+mnemonic JZ 1
+mnemonic VZEROUPPER 1
+mnemonic UD2 1
+mnemonic XOR 2
+mnemonic DIV 2
+mnemonic IDIV 2
+mnemonic CDQ 1
+mnemonic CQO 1
+mnemonic ADD 59
+mnemonic CMPXCHG 1
+mnemonic JNZ 1
+mnemonic MOVDQU 32
+mnemonic JNBE 17
+mnemonic AND 4
+mnemonic CPUID 1
+mnemonic XGETBV 1
+mnemonic JNS 2
+mnemonic SHR 2
+mnemonic OR 2
+mnemonic CVTSI2SD 4
+mnemonic ADDSD 2
+mnemonic MOVQ 4
+mnemonic VMOVDQU8 84
+mnemonic KORQ 19
+mnemonic KMOVQ 101
+mnemonic KANDQ 3
+mnemonic KMOVW 3
