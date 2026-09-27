@@ -120,16 +120,17 @@ static bool bqcg_fixed_text(char const* path, char const* expected)
     return ok;
 }
 
-static bool bqcg_container_guard(void)
+static bool bqcg_container_guard(bool require_manager)
 {
     struct stat docker = {0}, running = {0}, installed = {0};
     /* /sbin/init may preserve the comm name "init". Bind PID1 to the installed
      * systemd inode rather than treating its mutable process name as identity. */
-    bool manager = stat("/proc/1/exe", &running) == 0 &&
+    bool manager = require_manager && stat("/proc/1/exe", &running) == 0 &&
                    stat("/usr/lib/systemd/systemd", &installed) == 0 &&
                    S_ISREG(installed.st_mode) && installed.st_uid == 0 &&
                    (installed.st_mode & 0022) == 0 &&
                    running.st_dev == installed.st_dev && running.st_ino == installed.st_ino;
+    if (!require_manager) manager = bqcg_fixed_text(BQCG_ROOT "/manager-verified", "BQCG_PID1_VERIFIED_V1\n");
     bool marker = lstat("/.dockerenv", &docker) == 0 && S_ISREG(docker.st_mode);
     bool opt_in = bqcg_fixed_text(BQCG_OPT_IN, BQCG_OPT_IN_TEXT);
     bool ok = manager && marker && opt_in;
@@ -750,13 +751,18 @@ static bool bqcg_case(int index, char const* log)
 
 static bool bqcg_run(void)
 {
-    bool ok = geteuid() == 0 && getuid() == 0 && bqcg_container_guard();
+    bool ok = geteuid() == 0 && getuid() == 0 && bqcg_container_guard(true);
     char const* opt_in = getenv(BQCG_ENV);
     ok = ok && opt_in && strcmp(opt_in, BQCG_ENV_VALUE) == 0 &&
          bqcg_root_binary(BQCG_GATE) && bqcg_root_binary(BQCG_BUILD) &&
          bqcg_root_binary(BQCG_SERVICE) && bqcg_fixture_copy(BQCG_BUILD) &&
          bqcg_fixture_copy(BQCG_SERVICE) && mkdir(BQCG_ROOT, 0711) == 0 &&
          chmod(BQCG_ROOT, 0711) == 0;
+    int receipt = ok ? open(BQCG_ROOT "/manager-verified", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0644) : -1;
+    static char const manager_receipt[] = "BQCG_PID1_VERIFIED_V1\n";
+    ok = ok && receipt >= 0 && fchmod(receipt, 0644) == 0 &&
+         write(receipt, manager_receipt, sizeof(manager_receipt) - 1) == sizeof(manager_receipt) - 1;
+    if (receipt >= 0) close(receipt);
     char log[] = BQCG_ROOT "/commands.log";
     if (ok)
         ok = bqcg_group("bqcg-service", 65420, log) &&
@@ -784,7 +790,7 @@ static bool bqcg_run(void)
 int main(int argc, char** argv)
 {
     int result = 77;
-    bool guarded = bqcg_container_guard();
+    bool guarded = bqcg_container_guard(argc == 2 && !strcmp(argv[1], "--run"));
     if (guarded && argc == 2 && !strcmp(argv[1], "--run"))
         result = bqcg_run() ? 0 : 1;
     else if (guarded && argc == 3)

@@ -15,8 +15,10 @@ cleanup() {
   inspect_status=$?
   sudo timeout 20 docker logs "$guest" > "$proof/container-console.log" 2>&1
   console_status=$?
-  sudo timeout 30 docker cp "$guest:/run/buster-bench-credential-gate-test" "$proof/guest-proof"
-  copy_status=$?
+  sudo timeout 30 docker exec "$guest" /usr/bin/tar -C /run -cf - buster-bench-credential-gate-test | head -c 33554433 > "$proof/guest-proof.tar"
+  export_statuses=("${PIPESTATUS[@]}")
+  copy_status=0
+  if [[ ${export_statuses[0]} != 0 || ${export_statuses[1]} != 0 || $(wc -c < "$proof/guest-proof.tar") -gt 33554432 ]]; then copy_status=1; fi
   sudo timeout 30 docker rm --force "$guest" > "$proof/container-removal.log" 2>&1
   removal=$?
   sudo chown -R "$(id -u):$(id -g)" "$proof"
@@ -38,9 +40,12 @@ clang "${flags[@]}" tools/bench_service/credential_gate_systemd_test.c -o "$payl
 readelf -W -l "$payload/buster-bench-credential-gate" > "$proof/gate-elf.txt"
 if grep -Eq 'INTERP|DYNAMIC|GNU_STACK.*RWE' "$proof/gate-elf.txt"; then exit 1; fi
 sha256sum "$payload/buster-bench-credential-gate" "$payload/credential-gate-systemd-test" > "$proof/binary-sha256.txt"
+printf 'buster14a/buster disposable credential-gate component test\n' > "$payload/opt-in"
+chmod 0644 "$payload/opt-in"
 cat > "$payload/Dockerfile" <<'DOCKERFILE'
 FROM ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv dbus passwd && rm -rf /var/lib/apt/lists/*
+COPY opt-in /root/credential-gate-test.opt-in
 COPY buster-bench-credential-gate /usr/local/libexec/buster-bench-credential-gate
 COPY credential-gate-systemd-test /root/credential-gate-systemd-test
 COPY credential-gate-systemd-test /usr/local/libexec/buster-bench-build
@@ -58,9 +63,8 @@ for attempt in {1..30}; do
   sleep 1
 done
 [[ $ready == true ]]
-printf 'buster14a/buster disposable credential-gate component test\n' > "$payload/opt-in"
-chmod 0644 "$payload/opt-in"
-sudo docker cp "$payload/opt-in" "$guest:/run/buster-bench-credential-gate-test.opt-in"
+# PID1 can mount a private /run. Write and export within the guest namespace.
+sudo docker exec "$guest" /usr/bin/install -o root -g root -m 0644 /root/credential-gate-test.opt-in /run/buster-bench-credential-gate-test.opt-in
 sudo docker exec "$guest" /usr/bin/stat -Lc '%n uid=%u gid=%g mode=%a links=%h dev=%d inode=%i' /proc/1/exe /usr/lib/systemd/systemd /.dockerenv /run/buster-bench-credential-gate-test.opt-in > "$proof/isolation-metadata.txt"
 sudo docker exec "$guest" /usr/bin/cat /proc/1/comm > "$proof/pid1-comm.txt"
 sudo timeout 600 docker exec --env BUSTER_CREDENTIAL_GATE_DISPOSABLE_SYSTEMD=isolated-docker-systemd-test "$guest" /root/credential-gate-systemd-test --run 2>&1 | tee "$proof/fixture.log"
