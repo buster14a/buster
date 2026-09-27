@@ -218,6 +218,10 @@ def run(command, cwd=None, timeout=300):
     return process.returncode, process.stdout.decode(errors="replace"), process.stderr.decode(errors="replace")
 
 
+def llvm_tool(arguments, name):
+    return os.path.join(arguments.llvm_bin, name) if arguments.llvm_bin else name
+
+
 def tools(arguments):
     os.makedirs(arguments.output, exist_ok=True)
     files = inputs(arguments)
@@ -238,9 +242,9 @@ def tools(arguments):
         results.append(("object", None))
         status, out, err = run(["readelf", "-W", "-a", obj])
         results.append(("readelf_clean", None) if status == 0 and not err.strip() else ("readelf", err or out[-400:]))
-        status, out, err = run(["llvm-readelf", "--all", obj])
+        status, out, err = run([llvm_tool(arguments, "llvm-readelf"), "--all", obj])
         results.append(("llvm_readelf_clean", None) if status == 0 and "warning" not in err.lower() and "error" not in err.lower() else ("llvm-readelf", err))
-        status, out, err = run(["llvm-objdump", "-d", "-r", obj])
+        status, out, err = run([llvm_tool(arguments, "llvm-objdump"), "-d", "-r", obj])
         results.append(("objdump_clean", None) if status == 0 and "error" not in err.lower() else ("llvm-objdump", err))
         # GNU ld is built for the host; x86-64 hosts usually carry no AArch64
         # emulation, so that row is skipped (LLD covers both machines).
@@ -248,7 +252,7 @@ def tools(arguments):
             emulation = "elf_x86_64" if target.startswith("x86_64") else "aarch64linux"
             status, out, err = run(["ld", "-m", emulation, "-r", obj, "-o", obj + ".ld-r.o"])
             results.append(("ld_relocatable", err.strip()) if status == 0 else ("ld -r", err))
-        status, out, err = run(["ld.lld", "-r", obj, "-o", obj + ".lld-r.o"])
+        status, out, err = run([llvm_tool(arguments, "ld.lld"), "-r", obj, "-o", obj + ".lld-r.o"])
         results.append(("lld_relocatable", None) if status == 0 and not err.strip() else ("ld.lld -r", err))
         with open(path, errors="replace") as handle:
             has_main = re.search(r"\bint\s+main\s*\(", handle.read()) is not None
@@ -258,7 +262,8 @@ def tools(arguments):
             if status_own == 0:
                 own_status, _, _ = run([own], cwd=arguments.output, timeout=60)
                 results.append(("runnable", None))
-                for kind, linker in (("gnu_ld_matches", []), ("lld_matches", ["-fuse-ld=lld"])):
+                lld = ["--ld-path=" + llvm_tool(arguments, "ld.lld")] if arguments.llvm_bin else ["-fuse-ld=lld"]
+                for kind, linker in (("gnu_ld_matches", ["-fuse-ld=bfd"]), ("lld_matches", lld)):
                     exe = obj + "." + kind
                     status, out, err = run(["clang"] + linker + ["-no-pie", obj, "-o", exe, "-lm"])
                     if status != 0:
@@ -330,6 +335,7 @@ def main():
     command.add_argument("--extra", action="append")
     command.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
     command.add_argument("--gnu-ld-aarch64", action="store_true", help="GNU ld supports the aarch64linux emulation")
+    command.add_argument("--llvm-bin", help="directory holding llvm-readelf, llvm-objdump and ld.lld (default: PATH)")
     arguments = parser.parse_args()
     handlers = dict(generate=generate, corpus=corpus, ledger=ledger, tools=tools)
     return handlers[arguments.command](arguments) or 0
