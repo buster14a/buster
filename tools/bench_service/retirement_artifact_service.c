@@ -18,7 +18,6 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -125,7 +124,9 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_runtime_absent(BqRetirementRuntimeStart c
 {
     return start && bq_retirement_output_absent(&start->location) &&
         !start->file_device && !start->file_inode && !start->writer &&
-        !start->process && !start->process_group && !start->command_sha256[0] && !start->state;
+        !start->capture_reader && !start->process && !start->process_group &&
+        !start->captured_bytes && !start->command_sha256[0] && !start->state &&
+        !start->capture_eof;
 }
 
 bool bq_retirement_runtime_start(BqRetirementArtifactLocation location,
@@ -149,6 +150,7 @@ bool bq_retirement_runtime_start(BqRetirementArtifactLocation location,
             start->file_device = (uint64_t)file.st_dev;
             start->file_inode = (uint64_t)file.st_ino;
             start->writer = writer;
+            start->capture_reader = -1;
             start->state = BQ_RETIREMENT_RUNTIME_CREATED;
         }
     }
@@ -163,6 +165,7 @@ void bq_retirement_runtime_abort(BqRetirementRuntimeStart* start)
         if (start->state != BQ_RETIREMENT_RUNTIME_RUNNING)
         {
             if (start->state && start->writer >= 3) close(start->writer);
+            if (start->state && start->capture_reader >= 3) close(start->capture_reader);
             *start = (BqRetirementRuntimeStart){0};
         }
     }
@@ -176,8 +179,10 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_runtime_started(BqRetirementRuntimeStart 
     if (start) location = (BqRetirementArtifactLocation){start->location.directory, start->location.name};
     bool ok = start && start->state == BQ_RETIREMENT_RUNTIME_FROZEN && !start->process && start->command_sha256[0] &&
         start->process_group > 0 && kill(-start->process_group, 0) < 0 && errno == ESRCH &&
+        start->capture_eof && start->capture_reader == -1 &&
         bq_retirement_output_started(location, &start->location) &&
         descriptor >= 3 && fstat(descriptor, &file) == 0 &&
+        file.st_size >= 0 && (uint64_t)file.st_size == start->captured_bytes &&
         fstatat(location.directory, location.name, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
         bq_retirement_artifact_stable(&file, &named) &&
         start->file_device == (uint64_t)file.st_dev && start->file_inode == (uint64_t)file.st_ino;
@@ -190,11 +195,13 @@ bool bq_retirement_runtime_finish(BqRetirementRuntimeStart* start, int* read_des
     bool live = start && start->state == BQ_RETIREMENT_RUNTIME_RUNNING;
     bool ok = start && read_descriptor && start->state == BQ_RETIREMENT_RUNTIME_REAPED && !start->process &&
         start->process_group > 0 && kill(-start->process_group, 0) < 0 && errno == ESRCH &&
+        start->capture_eof && start->capture_reader == -1 &&
         start->command_sha256[0] && start->writer >= 3 &&
         fstat(start->writer, &file) == 0 && S_ISREG(file.st_mode) &&
         file.st_uid == geteuid() && file.st_nlink == 1 &&
         start->file_device == (uint64_t)file.st_dev && start->file_inode == (uint64_t)file.st_ino &&
-        file.st_size >= 0 && (uint64_t)file.st_size <= BQ_RETIREMENT_RUNTIME_LOG_CAP &&
+        file.st_size >= 0 && (uint64_t)file.st_size == start->captured_bytes &&
+        (uint64_t)file.st_size <= BQ_RETIREMENT_RUNTIME_LOG_CAP &&
         fchmod(start->writer, 0400) == 0 && fsync(start->writer) == 0;
     if (read_descriptor) *read_descriptor = -1;
     if (start && !live && start->state && start->writer >= 3)
@@ -342,9 +349,7 @@ BUSTER_GLOBAL_LOCAL pid_t bq_retirement_execute(BqRetirementProcessCommand const
         if (private_group)
         {
             close(status_pipe[0]);
-            struct rlimit limit = {BQ_RETIREMENT_RUNTIME_LOG_CAP, BQ_RETIREMENT_RUNTIME_LOG_CAP};
-            if (setpgid(0, 0) != 0 || setrlimit(RLIMIT_FSIZE, &limit) != 0 ||
-                write(status_pipe[1], "1", 1) != 1) _exit(126);
+            if (setpgid(0, 0) != 0 || write(status_pipe[1], "1", 1) != 1) _exit(126);
             close(status_pipe[1]);
         }
         if (writer >= 3 &&
@@ -444,14 +449,57 @@ bool bq_retirement_runtime_launch(BqRetirementRuntimeStart* start,
         fstat(start->writer, &file) == 0 && S_ISREG(file.st_mode) &&
         start->file_device == (uint64_t)file.st_dev &&
         start->file_inode == (uint64_t)file.st_ino && file.st_nlink == 1;
-    pid_t child = ok ? bq_retirement_execute(command, start->writer, true) : -1;
+    int capture[2] = {-1, -1};
+    if (ok) ok = pipe(capture) == 0 && capture[0] >= 3 && capture[1] >= 3 &&
+                 fcntl(capture[0], F_SETFD, FD_CLOEXEC) == 0 &&
+                 fcntl(capture[1], F_SETFD, FD_CLOEXEC) == 0 &&
+                 fcntl(capture[0], F_SETFL, O_NONBLOCK) == 0;
+    pid_t child = ok ? bq_retirement_execute(command, capture[1], true) : -1;
     ok = ok && child > 0;
+    if (capture[1] >= 0) close(capture[1]);
+    if (!ok && capture[0] >= 0) close(capture[0]);
     if (ok)
     {
         start->process = child;
         start->process_group = child;
+        start->capture_reader = capture[0];
         memcpy(start->command_sha256, digest, sizeof(digest));
         start->state = BQ_RETIREMENT_RUNTIME_RUNNING;
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_runtime_capture(BqRetirementRuntimeStart* start)
+{
+    bool ok = start && start->capture_reader >= 3 && start->writer >= 3 &&
+        !start->capture_eof;
+    unsigned char bytes[16384];
+    bool more = true;
+    while (ok && more)
+    {
+        ssize_t count = read(start->capture_reader, bytes, sizeof(bytes));
+        if (count > 0)
+        {
+            ok = (uint64_t)count <= BQ_RETIREMENT_RUNTIME_LOG_CAP - start->captured_bytes;
+            size_t written = 0;
+            while (ok && written < (size_t)count)
+            {
+                ssize_t amount = write(start->writer, bytes + written, (size_t)count - written);
+                if (amount < 0 && errno == EINTR) continue;
+                ok = amount > 0;
+                if (ok) written += (size_t)amount;
+            }
+            if (ok) start->captured_bytes += (uint64_t)count;
+        }
+        else if (count == 0)
+        {
+            ok = close(start->capture_reader) == 0;
+            start->capture_reader = -1;
+            start->capture_eof = 1;
+            more = false;
+        }
+        else if (errno == EAGAIN || errno == EWOULDBLOCK) more = false;
+        else if (errno != EINTR) ok = false;
     }
     return ok;
 }
@@ -459,23 +507,43 @@ bool bq_retirement_runtime_launch(BqRetirementRuntimeStart* start,
 int bq_retirement_runtime_poll(BqRetirementRuntimeStart* start)
 {
     int result = -1;
-    if (start && start->state == BQ_RETIREMENT_RUNTIME_RUNNING && start->process > 0)
+    if (start && start->state == BQ_RETIREMENT_RUNTIME_RUNNING)
     {
-        int status = 0;
-        pid_t waited = waitpid(start->process, &status, WNOHANG);
-        if (waited == 0 || (waited < 0 && errno == EINTR)) result = 0;
+        bool ok = start->capture_eof || bq_retirement_runtime_capture(start);
+        if (!ok)
+        {
+            bq_retirement_runtime_stop_group(start);
+            result = -1;
+        }
         else
         {
-            bool passed = waited == start->process && WIFEXITED(status) &&
-                WEXITSTATUS(status) == 0;
-            bool group_gone = start->process_group > 0 &&
-                kill(-start->process_group, 0) < 0 && errno == ESRCH;
-            if (!group_gone && start->process_group > 0)
-                kill(-start->process_group, SIGKILL);
-            passed = passed && group_gone;
-            start->process = 0;
-            start->state = passed ? BQ_RETIREMENT_RUNTIME_REAPED : BQ_RETIREMENT_RUNTIME_FAILED;
-            result = passed ? 1 : -1;
+            result = 0;
+            if (start->process > 0)
+            {
+                int status = 0;
+                pid_t waited = waitpid(start->process, &status, WNOHANG);
+                if (waited != 0 && !(waited < 0 && errno == EINTR))
+                {
+                    bool passed = waited == start->process && WIFEXITED(status) &&
+                        WEXITSTATUS(status) == 0;
+                    bool group_gone = start->process_group > 0 &&
+                        kill(-start->process_group, 0) < 0 && errno == ESRCH;
+                    if (!group_gone && start->process_group > 0)
+                        kill(-start->process_group, SIGKILL);
+                    start->process = 0;
+                    if (!passed || !group_gone)
+                    {
+                        start->state = BQ_RETIREMENT_RUNTIME_FAILED;
+                        result = -1;
+                    }
+                }
+            }
+            if (start->state == BQ_RETIREMENT_RUNTIME_RUNNING && !start->process &&
+                start->capture_eof)
+            {
+                start->state = BQ_RETIREMENT_RUNTIME_REAPED;
+                result = 1;
+            }
         }
     }
     return result;
@@ -484,15 +552,20 @@ int bq_retirement_runtime_poll(BqRetirementRuntimeStart* start)
 bool bq_retirement_runtime_stop_group(BqRetirementRuntimeStart* start)
 {
     bool valid = start && start->process_group > 0 &&
-        start->state == BQ_RETIREMENT_RUNTIME_RUNNING && start->process > 0;
+        start->state == BQ_RETIREMENT_RUNTIME_RUNNING;
     if (valid) kill(-start->process_group, SIGKILL);
-    bool reaped = valid && bq_retirement_wait_child_bounded(start->process);
+    bool reaped = valid && (!start->process || bq_retirement_wait_child_bounded(start->process));
+    if (valid && start->capture_reader >= 3)
+    {
+        close(start->capture_reader);
+        start->capture_reader = -1;
+    }
     if (reaped)
     {
         start->process = 0;
         start->state = BQ_RETIREMENT_RUNTIME_FAILED;
     }
-    else if (valid && start->writer >= 3)
+    if (valid && !reaped && start->writer >= 3)
     {
         close(start->writer);
         start->writer = -1;

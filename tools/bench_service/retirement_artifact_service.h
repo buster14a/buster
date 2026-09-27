@@ -46,9 +46,11 @@ typedef struct BqRetirementRuntimeStart
     BqRetirementArtifactStart location;
     uint64_t file_device, file_inode;
     int writer;
+    int capture_reader;
     pid_t process, process_group;
+    uint64_t captured_bytes;
     char command_sha256[65];
-    unsigned state;
+    unsigned state, capture_eof;
 } BqRetirementRuntimeStart;
 
 typedef struct BqRetirementProcessCommand

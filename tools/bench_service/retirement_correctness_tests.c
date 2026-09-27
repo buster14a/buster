@@ -1205,7 +1205,24 @@ static void test_oracle_producer(char const* executable)
                     output, cancellation[0], deadline) && gate.done == 1 &&
                   bq_retirement_oracle_finish(&gate) && bq_retirement_oracle_ready(&gate) &&
                   faccessat(directory, "observed", F_OK, 0) == 0);
+            CHECK(unlinkat(directory, "observed", 0) == 0);
+            memset(fixture.trusted[1].independent_oracle_sha256, 0, 65);
+            char* const side_args[] = {fd_path, "--retirement-oracle-sidefile", NULL};
+            BqRetirementProcessCommand side_command = {side_args, environment, root, 2, 3};
+            CHECK(tp_retirement_command_fields_hash(side_args, 2, root, environment, 3,
+                reference.command_sha256) &&
+                bq_retirement_oracle_spec_hash(&fixture.prepared, &reference, 1, pin));
+            gate = (BqRetirementOracleLedger){0};
+            struct stat side_file = {0};
+            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin) &&
+                  bq_retirement_oracle_produce_next(&gate, binary, receipt, &side_command,
+                    output, cancellation[0], deadline) &&
+                  bq_retirement_oracle_finish(&gate) && bq_retirement_oracle_ready(&gate) &&
+                  fstatat(directory, "large-side-output", &side_file, AT_SYMLINK_NOFOLLOW) == 0 &&
+                  side_file.st_size > BQ_RETIREMENT_RUNTIME_LOG_CAP);
             CHECK(unlinkat(directory, "observed", 0) == 0 &&
+                  unlinkat(directory, "large-side-output", 0) == 0 &&
                   close(cancellation[0]) == 0 && close(cancellation[1]) == 0);
         }
         if (receipt >= 0) CHECK(close(receipt) == 0);
@@ -1248,6 +1265,16 @@ int main(int argc, char** argv)
         for (unsigned i = 0; i < BQ_RETIREMENT_RUNTIME_LOG_CAP / sizeof(bytes) + 1; i += 1)
             if (fwrite(bytes, 1, sizeof(bytes), stdout) != sizeof(bytes)) break;
         result = 8;
+    }
+    else if (argc == 2 && !strcmp(argv[1], "--retirement-oracle-sidefile"))
+    {
+        int file = open("large-side-output", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        char bytes[4096] = {0};
+        result = file < 0 ? 8 : 0;
+        for (unsigned i = 0; !result && i < 17u * 1024u * 1024u / sizeof(bytes); i += 1)
+            if (write(file, bytes, sizeof(bytes)) != (ssize_t)sizeof(bytes)) result = 8;
+        if (file >= 0 && close(file) != 0) result = 8;
+        if (!result) result = fputs("small output\n", stdout) < 0 || fflush(stdout) != 0;
     }
     else if (argc == 3 && !strcmp(argv[1], "--retirement-copy-self"))
     {
