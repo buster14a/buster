@@ -132,6 +132,96 @@ class NativeExecutionTests(unittest.TestCase):
             self.assertEqual(event["process_instance_sha256"], binding._process_instance_digest(
                 "job-1", 2, "boot-123", event["pid"], event["process_start_token"]))
 
+    def test_maximum_serialized_records_fit_the_shard_byte_cap(self):
+        transcript_line = (self.root / "retirement-execution-max.jsonl").read_bytes()
+        transcript_shard = {"path": "retirement-execution-max.jsonl",
+            "bytes": len(transcript_line), "sha256": hashlib.sha256(transcript_line).hexdigest(),
+            "records": 1}
+        transcript = list(binding._execution_trace_records(self.root, [transcript_shard], 1))
+        self.assertEqual(len(transcript), 1)
+        event = transcript[0]
+        self.assertEqual(len(transcript_line), 901)
+        self.assertEqual(event["sequence"], 101999999)
+        self.assertEqual(event["row"], 99999)
+        self.assertEqual((event["round"], event["pair"], event["variant"]), (1, 253, "candidate"))
+        self.assertEqual((event["pid"], event["process_start_token"]),
+                         (2**64 - 1, str(2**64 - 1)))
+        self.assertEqual((event["started_ns"], event["finished_ns"]),
+                         (2**64 - 1 - 86399999999999, 2**64 - 1))
+        self.assertEqual(event["code_section_bytes"], 2**63 - 1)
+        self.assertEqual(event["peak_rss_bytes"], 2**53 - 1)
+        self.assertEqual(event["wall_seconds"], 86399.999999999)
+        self.assertEqual(event["cpu"], 2**31 - 1)
+        for key in ("code_section_sha256", "command_sha256", "executable_sha256",
+                    "output_sha256", "process_instance_sha256"):
+            self.assertEqual(len(event[key]), 64)
+        self.assertEqual(event["process_instance_sha256"], binding._process_instance_digest(
+            "a" * 128, 2**64 - 1, "b" * 128, 2**64 - 1, str(2**64 - 1)))
+        self.assertNotIn(b'"job_id"', transcript_line)
+        self.assertNotIn(b'"boot_id"', transcript_line)
+
+        warmup_line = (self.root / "retirement-execution-max-warmup.jsonl").read_bytes()
+        warmup_shard = {"path": "retirement-execution-max-warmup.jsonl",
+            "bytes": len(warmup_line), "sha256": hashlib.sha256(warmup_line).hexdigest(),
+            "records": 1}
+        warmup = list(binding._execution_trace_records(self.root, [warmup_shard], 1))[0]
+        self.assertEqual(len(warmup_line), 902)
+        self.assertEqual((warmup["sequence"], warmup["row"], warmup["phase"], warmup["warmup"]),
+                         (399999, 99999, "warmup", 1))
+        self.assertIsNone(warmup["round"])
+        self.assertIsNone(warmup["pair"])
+        self.assertIsNone(warmup["position"])
+        self.assertEqual(warmup["code_section_bytes"], 2**63 - 1)
+        self.assertEqual(warmup["peak_rss_bytes"], 2**53 - 1)
+        self.assertEqual(warmup["process_instance_sha256"], event["process_instance_sha256"])
+
+        runtime_line = (self.root / "retirement-execution-max-runtime.jsonl").read_bytes()
+        runtime_shard = {"path": "retirement-execution-max-runtime.jsonl",
+            "bytes": len(runtime_line), "sha256": hashlib.sha256(runtime_line).hexdigest(),
+            "records": 1}
+        runtime = list(binding._execution_trace_records(self.root, [runtime_shard], 1))[0]
+        self.assertLess(len(runtime_line), len(transcript_line))
+        self.assertEqual(runtime["sequence"], 134217719)
+        self.assertEqual((runtime["kind"], runtime["row"]), ("runtime", 99999))
+        self.assertIsNone(runtime["code_section_bytes"])
+        self.assertIsNone(runtime["peak_rss_bytes"])
+        self.assertEqual(runtime["process_instance_sha256"], binding._process_instance_digest(
+            "a" * 128, 2**64 - 1, "b" * 128, 2**64 - 1, str(2**64 - 1)))
+
+        sample_line = (self.root / "retirement-samples-max.jsonl").read_bytes()
+        self.assertEqual(len(sample_line), 415)
+        sample = json.loads(sample_line)
+        self.assertEqual(sample_line, (json.dumps(sample, sort_keys=True,
+            separators=(",", ":")) + "\n").encode())
+        self.assertEqual((sample["row"], sample["round"], sample["pair"]), (99999, 1, 253))
+        measurements = sample["measurements"]
+        self.assertEqual(measurements["compiler_peak_rss"], {
+            "baseline": 2**53 - 1, "candidate": 2**53 - 1})
+        self.assertEqual(measurements["compiler_wall_time"], {
+            "baseline": 86399.999999999, "candidate": 86399.999999999})
+        self.assertEqual(measurements["generated_code_bytes"], {
+            "baseline": 2**63 - 1, "candidate": 2**63 - 1})
+        self.assertEqual(measurements["generated_runtime"], {
+            "baseline": 86399.999999999, "candidate": 86399.999999999})
+        rows = {99999: {"row": 99999, "metrics": {
+            "compiler_peak_rss": True, "compiler_wall_time": True,
+            "generated_code_bytes": True, "generated_runtime": True}}}
+        seen, digest = [0], hashlib.sha256()
+        binding._consume_result_record(sample, {99999: 0}, rows, 2, 254, 507, seen, digest)
+        self.assertEqual(seen, [1])
+        self.assertEqual(digest.hexdigest(), hashlib.sha256(sample_line).hexdigest())
+
+        # These are source-domain line upper bounds: each serializer fixture
+        # sets all its independently bounded fields to their maximal width.
+        # A complete shard has at most 32768 records and the native cap is 64 MiB.
+        # Compiler warmups are one byte longer than the sampled record:
+        # three null schedule fields outweigh their shorter sequence number.
+        transcript_upper = 902 * 32768
+        sample_upper = 415 * 32768
+        self.assertEqual((transcript_upper, sample_upper), (29556736, 13598720))
+        self.assertLessEqual(transcript_upper, 67108864)
+        self.assertLessEqual(sample_upper, 67108864)
+
     def test_native_receipt_binds_two_complete_transcript_shards(self):
         data = (self.root / "retirement-invocation-receipt.json").read_bytes()
         receipt = json.loads(data)

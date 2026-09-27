@@ -161,9 +161,53 @@ static void test_sample_manifest_partitions(char const* root)
     }
 }
 
+/* The sample producer supplies only schedule-valid coordinates: row IDs are
+ * below the 100000-row population cap, rounds are 0..1, and pairs are 0..253.
+ * All four metric groups can be emitted together. Their accepted numeric
+ * maxima are 15-character day-bounded seconds, 16-character exact-integer RSS,
+ * and 19-character signed-64-bit code sizes. The serializer uses fixed JSON
+ * keys and decimal-only record IDs, so no variable string escaping is needed.
+ * This maximum-width record is 415 bytes including LF. */
+static void test_retirement_sample_max_record(char const* root)
+{
+    uint64_t elapsed = UINT64_C(86399999999999);
+    uint64_t values[9] = {elapsed, elapsed, UINT64_C(9007199254740991),
+        UINT64_C(9007199254740991), INT64_MAX, INT64_MAX, elapsed, elapsed, 3};
+    unsigned row = TP_RETIREMENT_MAX_CELLS - 1;
+    unsigned round = TP_RETIREMENT_ROUNDS - 1;
+    unsigned pair = TP_RETIREMENT_EXECUTION_MAX_PAIRS - 1;
+    unsigned metrics = TP_RETIREMENT_SAMPLE_CODE | TP_RETIREMENT_SAMPLE_RUNTIME;
+    char line[TP_RETIREMENT_SAMPLE_LINE_CAP];
+    size_t count = tp_retirement_sample_record(line, sizeof(line), row, round, pair, metrics, values);
+    CHECK(count == 415 && line[count - 1] == '\n');
+    CHECK(tp_retirement_sample_record(line, count, row, round, pair, metrics, values) == 0 && !line[0]);
+    count = tp_retirement_sample_record(line, 416, row, round, pair, metrics, values);
+    CHECK(count == 415 && line[count - 1] == '\n');
+    values[6] = UINT64_C(86400000000001);
+    CHECK(tp_retirement_sample_record(line, sizeof(line), row, round, pair, metrics, values) == 0 && !line[0]);
+    values[6] = elapsed;
+    values[0] = UINT64_C(86400000000001);
+    CHECK(tp_retirement_sample_record(line, sizeof(line), row, round, pair, metrics, values) == 0 && !line[0]);
+    values[0] = elapsed;
+    values[2] = UINT64_C(9007199254740992);
+    CHECK(tp_retirement_sample_record(line, sizeof(line), row, round, pair, metrics, values) == 0 && !line[0]);
+    values[2] = UINT64_C(9007199254740991);
+    values[4] = (uint64_t)INT64_MAX + 1;
+    CHECK(tp_retirement_sample_record(line, sizeof(line), row, round, pair, metrics, values) == 0 && !line[0]);
+    values[4] = INT64_MAX;
+    count = tp_retirement_sample_record(line, sizeof(line), row, round, pair, metrics, values);
+    CHECK(count == 415);
+    char path[TP_PATH_CAP];
+    CHECK(tp_path(path, root, "retirement-samples-max.jsonl"));
+    FILE* file = fopen(path, "wb");
+    CHECK(file && fwrite(line, 1, count, file) == count);
+    if (file) CHECK(fclose(file) == 0);
+}
+
 static void test_retirement_samples(char const* root)
 {
     test_sample_manifest_partitions(root);
+    test_retirement_sample_max_record(root);
     /* A parsed zero-byte candidate code section is an observed zero, not an
      * absent metric. The baseline remains the positive ratio denominator. */
     TpSampleTest* zero_code = (TpSampleTest*)malloc(sizeof(*zero_code));
