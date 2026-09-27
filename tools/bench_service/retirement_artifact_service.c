@@ -14,10 +14,14 @@
 #include "../throughput/retirement_command.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define BQ_RETIREMENT_ARTIFACT_READ_CAP (512u * 1024u * 1024u)
@@ -121,7 +125,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_runtime_absent(BqRetirementRuntimeStart c
 {
     return start && bq_retirement_output_absent(&start->location) &&
         !start->file_device && !start->file_inode && !start->writer &&
-        !start->process && !start->command_sha256[0] && !start->state;
+        !start->process && !start->process_group && !start->command_sha256[0] && !start->state;
 }
 
 bool bq_retirement_runtime_start(BqRetirementArtifactLocation location,
@@ -171,6 +175,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_runtime_started(BqRetirementRuntimeStart 
     BqRetirementArtifactLocation location = {0};
     if (start) location = (BqRetirementArtifactLocation){start->location.directory, start->location.name};
     bool ok = start && start->state == BQ_RETIREMENT_RUNTIME_FROZEN && !start->process && start->command_sha256[0] &&
+        start->process_group > 0 && kill(-start->process_group, 0) < 0 && errno == ESRCH &&
         bq_retirement_output_started(location, &start->location) &&
         descriptor >= 3 && fstat(descriptor, &file) == 0 &&
         fstatat(location.directory, location.name, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
@@ -184,6 +189,7 @@ bool bq_retirement_runtime_finish(BqRetirementRuntimeStart* start, int* read_des
     struct stat file = {0};
     bool live = start && start->state == BQ_RETIREMENT_RUNTIME_RUNNING;
     bool ok = start && read_descriptor && start->state == BQ_RETIREMENT_RUNTIME_REAPED && !start->process &&
+        start->process_group > 0 && kill(-start->process_group, 0) < 0 && errno == ESRCH &&
         start->command_sha256[0] && start->writer >= 3 &&
         fstat(start->writer, &file) == 0 && S_ISREG(file.st_mode) &&
         file.st_uid == geteuid() && file.st_nlink == 1 &&
@@ -296,12 +302,51 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_command_hash(BqRetirementProcessCommand c
     return ok;
 }
 
-BUSTER_GLOBAL_LOCAL pid_t bq_retirement_execute(BqRetirementProcessCommand const* command,
-    int writer)
+BUSTER_GLOBAL_LOCAL bool bq_retirement_wait_child_bounded(pid_t child)
 {
-    pid_t child = fork();
+    struct timespec start = {0}, now = {0};
+    bool ok = child > 0 && clock_gettime(CLOCK_MONOTONIC, &start) == 0;
+    bool reaped = false;
+    while (ok && !reaped)
+    {
+        int status = 0;
+        pid_t waited = waitpid(child, &status, WNOHANG);
+        reaped = waited == child || (waited < 0 && errno == ECHILD);
+        if (!reaped)
+        {
+            ok = (waited == 0 || errno == EINTR) &&
+                clock_gettime(CLOCK_MONOTONIC, &now) == 0 &&
+                (now.tv_sec - start.tv_sec) * 1000 +
+                    (now.tv_nsec - start.tv_nsec) / 1000000 < 1000;
+            if (ok)
+            {
+                struct timespec pause = {0, 1000000};
+                nanosleep(&pause, NULL);
+            }
+        }
+    }
+    return reaped;
+}
+
+BUSTER_GLOBAL_LOCAL pid_t bq_retirement_execute(BqRetirementProcessCommand const* command,
+    int writer, bool private_group)
+{
+    int status_pipe[2] = {-1, -1};
+    bool prepared = !private_group ||
+        (pipe(status_pipe) == 0 &&
+         fcntl(status_pipe[0], F_SETFD, FD_CLOEXEC) == 0 &&
+         fcntl(status_pipe[1], F_SETFD, FD_CLOEXEC) == 0);
+    pid_t child = prepared ? fork() : -1;
     if (child == 0)
     {
+        if (private_group)
+        {
+            close(status_pipe[0]);
+            struct rlimit limit = {BQ_RETIREMENT_RUNTIME_LOG_CAP, BQ_RETIREMENT_RUNTIME_LOG_CAP};
+            if (setpgid(0, 0) != 0 || setrlimit(RLIMIT_FSIZE, &limit) != 0 ||
+                write(status_pipe[1], "1", 1) != 1) _exit(126);
+            close(status_pipe[1]);
+        }
         if (writer >= 3 &&
             (dup2(writer, STDOUT_FILENO) < 0 ||
              dup2(writer, STDERR_FILENO) < 0)) _exit(126);
@@ -309,6 +354,22 @@ BUSTER_GLOBAL_LOCAL pid_t bq_retirement_execute(BqRetirementProcessCommand const
         if (chdir(command->directory) != 0) _exit(126);
         execve(command->arguments[0], command->arguments, command->environment);
         _exit(127);
+    }
+    if (private_group)
+    {
+        if (status_pipe[1] >= 0) close(status_pipe[1]);
+        struct pollfd ready = {.fd = status_pipe[0], .events = POLLIN};
+        char acknowledged = 0;
+        bool established = child > 0 && poll(&ready, 1, 1000) == 1 &&
+            (ready.revents & POLLIN) && read(status_pipe[0], &acknowledged, 1) == 1 &&
+            acknowledged == '1';
+        if (status_pipe[0] >= 0) close(status_pipe[0]);
+        if (!established && child > 0)
+        {
+            kill(child, SIGKILL);
+            bq_retirement_wait_child_bounded(child);
+            child = -1;
+        }
     }
     return child;
 }
@@ -325,7 +386,7 @@ bool bq_retirement_artifact_launch(BqRetirementArtifactStart* start,
         command->arguments[0][0] == '/' && bq_retirement_output_started(location, start) &&
         fstatat(start->directory, start->name, &existing, AT_SYMLINK_NOFOLLOW) < 0 &&
         errno == ENOENT;
-    pid_t child = ok ? bq_retirement_execute(command, -1) : -1;
+    pid_t child = ok ? bq_retirement_execute(command, -1, false) : -1;
     ok = ok && child > 0;
     if (ok)
     {
@@ -383,11 +444,12 @@ bool bq_retirement_runtime_launch(BqRetirementRuntimeStart* start,
         fstat(start->writer, &file) == 0 && S_ISREG(file.st_mode) &&
         start->file_device == (uint64_t)file.st_dev &&
         start->file_inode == (uint64_t)file.st_ino && file.st_nlink == 1;
-    pid_t child = ok ? bq_retirement_execute(command, start->writer) : -1;
+    pid_t child = ok ? bq_retirement_execute(command, start->writer, true) : -1;
     ok = ok && child > 0;
     if (ok)
     {
         start->process = child;
+        start->process_group = child;
         memcpy(start->command_sha256, digest, sizeof(digest));
         start->state = BQ_RETIREMENT_RUNTIME_RUNNING;
     }
@@ -406,12 +468,36 @@ int bq_retirement_runtime_poll(BqRetirementRuntimeStart* start)
         {
             bool passed = waited == start->process && WIFEXITED(status) &&
                 WEXITSTATUS(status) == 0;
+            bool group_gone = start->process_group > 0 &&
+                kill(-start->process_group, 0) < 0 && errno == ESRCH;
+            if (!group_gone && start->process_group > 0)
+                kill(-start->process_group, SIGKILL);
+            passed = passed && group_gone;
             start->process = 0;
             start->state = passed ? BQ_RETIREMENT_RUNTIME_REAPED : BQ_RETIREMENT_RUNTIME_FAILED;
             result = passed ? 1 : -1;
         }
     }
     return result;
+}
+
+bool bq_retirement_runtime_stop_group(BqRetirementRuntimeStart* start)
+{
+    bool valid = start && start->process_group > 0 &&
+        start->state == BQ_RETIREMENT_RUNTIME_RUNNING && start->process > 0;
+    if (valid) kill(-start->process_group, SIGKILL);
+    bool reaped = valid && bq_retirement_wait_child_bounded(start->process);
+    if (reaped)
+    {
+        start->process = 0;
+        start->state = BQ_RETIREMENT_RUNTIME_FAILED;
+    }
+    else if (valid && start->writer >= 3)
+    {
+        close(start->writer);
+        start->writer = -1;
+    }
+    return reaped;
 }
 
 bool bq_retirement_correctness_row_service(BqRetirementCorrectness* gate,

@@ -230,6 +230,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_oracle_output(
         fcntl(start->location.directory, F_GETFD) : -1;
     bool ok = start && start->state == BQ_RETIREMENT_RUNTIME_FROZEN &&
         !start->process && start->writer == -1 && start->location.armed == 1 &&
+        start->process_group > 0 && kill(-start->process_group, 0) < 0 && errno == ESRCH &&
         bq_retirement_oracle_name(name) &&
         !strcmp(start->location.name, name) &&
         folder_fd >= 0 && (folder_fd & FD_CLOEXEC) &&
@@ -372,14 +373,7 @@ bool bq_retirement_oracle_produce_next(BqRetirementOracleLedger* ledger,
     if (ok) ok = status == 1 && bq_retirement_runtime_finish(&start, &frozen) &&
                  bq_retirement_oracle_observe(ledger, reference_binary, command, &start, frozen);
     if (!ok && start.state == BQ_RETIREMENT_RUNTIME_RUNNING && start.process > 0)
-    {
-        pid_t child = start.process;
-        int waited = 0;
-        kill(child, SIGKILL);
-        while (waitpid(child, &waited, 0) < 0 && errno == EINTR) {}
-        start.process = 0;
-        start.state = BQ_RETIREMENT_RUNTIME_FAILED;
-    }
+        bq_retirement_runtime_stop_group(&start);
     if (frozen >= 0 && close(frozen) != 0) ok = false;
     bq_retirement_runtime_abort(&start);
     if (ledger && !ok) ledger->failed = 1;

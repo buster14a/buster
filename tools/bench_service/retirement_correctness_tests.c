@@ -1137,6 +1137,65 @@ static void test_oracle_producer(char const* executable)
                 !bq_retirement_oracle_ready(&gate) &&
                 faccessat(directory, "observed", F_OK, 0) == 0);
             CHECK(unlinkat(directory, "observed", 0) == 0);
+            char* const fork_args[] = {fd_path, "--retirement-oracle-fork-output", NULL};
+            BqRetirementProcessCommand fork_command = {fork_args, environment, root, 2, 3};
+            CHECK(tp_retirement_command_fields_hash(fork_args, 2, root, environment, 3,
+                reference.command_sha256) &&
+                bq_retirement_oracle_spec_hash(&fixture.prepared, &reference, 1, pin));
+            gate = (BqRetirementOracleLedger){0};
+            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin));
+            CHECK(!bq_retirement_oracle_produce_next(&gate, binary, receipt, &fork_command,
+                output, cancellation[0], deadline) && gate.failed && gate.done == 0 &&
+                !bq_retirement_oracle_ready(&gate) &&
+                faccessat(directory, "observed", F_OK, 0) == 0);
+            CHECK(unlinkat(directory, "observed", 0) == 0);
+            char* const slow_args[] = {fd_path, "--retirement-oracle-slow", NULL};
+            BqRetirementProcessCommand slow_command = {slow_args, environment, root, 2, 3};
+            CHECK(tp_retirement_command_fields_hash(slow_args, 2, root, environment, 3,
+                reference.command_sha256) &&
+                bq_retirement_oracle_spec_hash(&fixture.prepared, &reference, 1, pin) &&
+                bq_retirement_oracle_clock(&now));
+            gate = (BqRetirementOracleLedger){0};
+            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin));
+            CHECK(!bq_retirement_oracle_produce_next(&gate, binary, receipt, &slow_command,
+                output, cancellation[0], now + UINT64_C(30000000)) &&
+                gate.failed && gate.done == 0 && !bq_retirement_oracle_ready(&gate));
+            CHECK(unlinkat(directory, "observed", 0) == 0);
+            pid_t canceller = fork();
+            if (canceller == 0)
+            {
+                struct timespec pause = {0, 20000000};
+                nanosleep(&pause, NULL);
+                _exit(write(cancellation[1], "x", 1) == 1 ? 0 : 9);
+            }
+            CHECK(canceller > 0);
+            gate = (BqRetirementOracleLedger){0};
+            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin));
+            CHECK(!bq_retirement_oracle_produce_next(&gate, binary, receipt, &slow_command,
+                output, cancellation[0], deadline) && gate.failed && gate.done == 0 &&
+                !bq_retirement_oracle_ready(&gate));
+            int cancelled_status = 0;
+            CHECK(waitpid(canceller, &cancelled_status, 0) == canceller &&
+                  WIFEXITED(cancelled_status) && WEXITSTATUS(cancelled_status) == 0 &&
+                  read(cancellation[0], &signal_byte, 1) == 1 &&
+                  unlinkat(directory, "observed", 0) == 0);
+            char* const excess_args[] = {fd_path, "--retirement-oracle-overflow", NULL};
+            BqRetirementProcessCommand excess_command = {excess_args, environment, root, 2, 3};
+            CHECK(tp_retirement_command_fields_hash(excess_args, 2, root, environment, 3,
+                reference.command_sha256) &&
+                bq_retirement_oracle_spec_hash(&fixture.prepared, &reference, 1, pin));
+            gate = (BqRetirementOracleLedger){0};
+            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin));
+            struct stat excess = {0};
+            CHECK(!bq_retirement_oracle_produce_next(&gate, binary, receipt, &excess_command,
+                output, cancellation[0], deadline) && gate.failed && gate.done == 0 &&
+                fstatat(directory, "observed", &excess, AT_SYMLINK_NOFOLLOW) == 0 &&
+                excess.st_size <= BQ_RETIREMENT_RUNTIME_LOG_CAP &&
+                unlinkat(directory, "observed", 0) == 0);
             memcpy(reference.command_sha256, command_hash, 65);
             CHECK(bq_retirement_oracle_spec_hash(&fixture.prepared, &reference, 1, pin));
             gate = (BqRetirementOracleLedger){0};
@@ -1164,6 +1223,32 @@ int main(int argc, char** argv)
     if (argc == 2 && !strcmp(argv[1], "--retirement-oracle-output"))
         result = fputs("independent-oracle-output\n", stdout) < 0 || fflush(stdout) != 0;
     else if (argc == 2 && !strcmp(argv[1], "--retirement-oracle-fail")) result = 7;
+    else if (argc == 2 && !strcmp(argv[1], "--retirement-oracle-fork-output"))
+    {
+        pid_t descendant = fork();
+        if (descendant == 0)
+        {
+            struct timespec pause = {0, 200000000};
+            nanosleep(&pause, NULL);
+            fputs("late descendant output\n", stdout);
+            fflush(stdout);
+            _exit(0);
+        }
+        result = descendant < 0 ? 8 : 0;
+    }
+    else if (argc == 2 && !strcmp(argv[1], "--retirement-oracle-slow"))
+    {
+        struct timespec pause = {1, 0};
+        result = nanosleep(&pause, NULL) != 0 ? 9 :
+            fputs("slow output\n", stdout) < 0 || fflush(stdout) != 0;
+    }
+    else if (argc == 2 && !strcmp(argv[1], "--retirement-oracle-overflow"))
+    {
+        char bytes[4096] = {0};
+        for (unsigned i = 0; i < BQ_RETIREMENT_RUNTIME_LOG_CAP / sizeof(bytes) + 1; i += 1)
+            if (fwrite(bytes, 1, sizeof(bytes), stdout) != sizeof(bytes)) break;
+        result = 8;
+    }
     else if (argc == 3 && !strcmp(argv[1], "--retirement-copy-self"))
     {
         int directory = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);

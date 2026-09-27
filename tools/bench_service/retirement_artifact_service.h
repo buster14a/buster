@@ -46,7 +46,7 @@ typedef struct BqRetirementRuntimeStart
     BqRetirementArtifactStart location;
     uint64_t file_device, file_inode;
     int writer;
-    pid_t process;
+    pid_t process, process_group;
     char command_sha256[65];
     unsigned state;
 } BqRetirementRuntimeStart;
@@ -88,6 +88,9 @@ BUSTER_F_DECL bool bq_retirement_runtime_start(BqRetirementArtifactLocation loca
 BUSTER_F_DECL bool bq_retirement_runtime_launch(BqRetirementRuntimeStart* start,
     BqRetirementProcessCommand const* command);
 BUSTER_F_DECL int bq_retirement_runtime_poll(BqRetirementRuntimeStart* start);
+/* Kill the runtime process group and wait only a bounded interval for its
+ * direct child. The enclosing worker still owns whole-unit cgroup cleanup. */
+BUSTER_F_DECL bool bq_retirement_runtime_stop_group(BqRetirementRuntimeStart* start);
 BUSTER_F_DECL bool bq_retirement_runtime_finish(BqRetirementRuntimeStart* start, int* read_descriptor);
 BUSTER_F_DECL void bq_retirement_runtime_abort(BqRetirementRuntimeStart* start);
 
