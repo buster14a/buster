@@ -2782,6 +2782,130 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fresh_binding_publication(UnitTestArgu
     return result;
 }
 
+// Compares c_parse_types_compatible on (type, type) with the unchanged pair
+// walk: the same verdict and the same number of rows appended to the type
+// table (the walk's c_parse_unqualified_type side effect). Both runs start
+// from the same table length; the rows either appends are discarded.
+BUSTER_GLOBAL_LOCAL bool c_test_type_self_matches_walk(Arena* arena, CParseResult* parse, CPreprocessResult preprocess, CTypeId type,
+                                                       bool* verdict_out)
+{
+    u32 base = parse->type_count;
+    bool walk = c_test_types_compatible_walk(arena, parse, preprocess, type, type);
+    u32 walk_rows = parse->type_count - base;
+    parse->type_count = base;
+    bool chain = c_test_types_compatible(arena, parse, preprocess, type, type);
+    u32 chain_rows = parse->type_count - base;
+    parse->type_count = base;
+    *verdict_out = chain;
+    return walk == chain && walk_rows == chain_rows;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_self_compatibility(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    // Every type kind, qualified and unqualified, through typedefs, arrays of
+    // known, unknown and variable length, function types of every prototype
+    // shape, vectors, enums with and without a fixed underlying type, and a
+    // qualified tagged aggregate whose unqualified link is made on demand.
+    CPreprocessResult preprocess = c_preprocess(
+        temporary.arena,
+        S8("struct node { struct node* next; int value; };\n"
+           "union cell { int i; float f; };\n"
+           "enum color { RED, GREEN };\n"
+           "enum fixed : unsigned char { A, B };\n"
+           "typedef const struct node const_node;\n"
+           "typedef volatile union cell volatile_cell;\n"
+           "typedef int vector4 __attribute__((vector_size(16)));\n"
+           "typedef int (*handler)(int, char const*, ...);\n"
+           "typedef void old_style();\n"
+           "extern int table[4][8];\n"
+           "extern char open_array[];\n"
+           "const_node* const* volatile deep;\n"
+           "_Atomic(long) counter;\n"
+           "int apply(handler h, int n, int values[static 4], int (*grid)[n]);\n"
+           "int apply(handler h, int n, int values[static 4], int (*grid)[n]);\n"
+           "void consume(const_node n, volatile_cell c, enum color k, enum fixed f, vector4 v);\n"),
+        (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    u32 parsed_count = parse.type_count;
+    u32 agreements = 0;
+    u32 compatible = 0;
+    for (u32 index = 0; index < parsed_count; index += 1)
+    {
+        bool verdict = false;
+        agreements += c_test_type_self_matches_walk(temporary.arena, &parse, preprocess, (CTypeId){.value = index}, &verdict);
+        compatible += verdict;
+    }
+    BUSTER_TEST(arguments, parsed_count > 32);
+    BUSTER_TEST(arguments, agreements == parsed_count);
+    BUSTER_TEST(arguments, compatible == parsed_count);
+    // Hand-built rows the walk rejects even against themselves, and chains
+    // it has to keep: each must agree with the walk verdict for verdict and
+    // row for row.
+    u32 const chain_depth = 100000;
+    if (BUSTER_REQUIRE(arguments, c_test_parse_reserve_types(&parse, chain_depth + 16)))
+    {
+        CTypeId int_type = {.value = C_ID_UNDERLYING_INVALID};
+        CTypeId node_type = {.value = C_ID_UNDERLYING_INVALID};
+        CTypeId function_type = {.value = C_ID_UNDERLYING_INVALID};
+        for (u32 index = 0; index < parsed_count; index += 1)
+        {
+            CType type = parse.types[index];
+            int_type = type.kind == C_TYPE_INT && !type.is_const && int_type.value == C_ID_UNDERLYING_INVALID ? (CTypeId){.value = index} : int_type;
+            node_type = type.kind == C_TYPE_STRUCT && !type.has_unqualified_type && string_equal(type.tag, S8("node")) ? (CTypeId){.value = index} : node_type;
+            function_type = type.kind == C_TYPE_FUNCTION && type.parameter_count ? (CTypeId){.value = index} : function_type;
+        }
+        BUSTER_TEST(arguments, int_type.value < parsed_count && node_type.value < parsed_count && function_type.value < parsed_count);
+        u32 first = parse.type_count;
+        // [0] array whose bound record is out of range; [1] pointer to an id
+        // past the table; [2] enum whose underlying id is past the table;
+        // [3] enum whose underlying type is a pointer (left to the walk);
+        // [4] const struct with no unqualified link (appends rows);
+        // [5] pointer to [4]; [6] pointer to the function type (walk).
+        parse.types[parse.type_count++] = (CType){.kind = C_TYPE_ARRAY, .element_type = int_type, .array_bound = UINT32_MAX - 1};
+        parse.types[parse.type_count++] = (CType){.kind = C_TYPE_POINTER, .element_type = {.value = UINT32_MAX - 7}};
+        parse.types[parse.type_count++] = (CType){.kind = C_TYPE_ENUM, .tag = S8("broken"), .element_type = {.value = UINT32_MAX - 3}};
+        parse.types[parse.type_count++] = (CType){.kind = C_TYPE_ENUM, .tag = S8("odd"), .element_type = {.value = first + 1}};
+        CType qualified_node = parse.types[node_type.value];
+        qualified_node.is_const = true;
+        qualified_node.has_unqualified_type = false;
+        qualified_node.unqualified_type = C_TYPE_ID_INVALID;
+        parse.types[parse.type_count++] = qualified_node;
+        parse.types[parse.type_count++] = (CType){.kind = C_TYPE_POINTER, .element_type = {.value = first + 4}};
+        parse.types[parse.type_count++] = (CType){.kind = C_TYPE_POINTER, .element_type = function_type};
+        CTypeId chain = int_type;
+        for (u32 depth = 0; depth < chain_depth; depth += 1)
+        {
+            parse.types[parse.type_count] = (CType){.kind = depth % 3 == 2 ? C_TYPE_VECTOR : C_TYPE_POINTER, .element_type = chain, .vector_byte_size = 16};
+            chain = (CTypeId){.value = parse.type_count++};
+        }
+        bool expected[] = {false, false, false, false, true, true, true};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected); index += 1)
+        {
+            bool verdict = !expected[index];
+            BUSTER_TEST(arguments, c_test_type_self_matches_walk(temporary.arena, &parse, preprocess, (CTypeId){.value = first + index}, &verdict));
+            BUSTER_TEST(arguments, verdict == expected[index]);
+        }
+        // The qualified aggregate appends its two unqualified rows through
+        // the chain exactly as through the walk.
+        u32 before = parse.type_count;
+        BUSTER_TEST(arguments, c_test_types_compatible(temporary.arena, &parse, preprocess, (CTypeId){.value = first + 5}, (CTypeId){.value = first + 5}));
+        BUSTER_TEST(arguments, parse.type_count == before + 2);
+        parse.type_count = before;
+        bool deep = false;
+        BUSTER_TEST(arguments, c_test_type_self_matches_walk(temporary.arena, &parse, preprocess, chain, &deep));
+        BUSTER_TEST(arguments, deep);
+        // Distinct ids still take the walk and keep its verdicts.
+        BUSTER_TEST(arguments, !c_test_types_compatible(temporary.arena, &parse, preprocess, int_type, node_type));
+        BUSTER_TEST(arguments, !c_test_types_compatible(temporary.arena, &parse, preprocess, chain, (CTypeId){.value = chain.value - 1}));
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_growth(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23289,6 +23413,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 
     BUSTER_TEST_FIXTURE(arguments, c_test_fresh_binding_publication);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_growth);
+    BUSTER_TEST_FIXTURE(arguments, c_test_type_self_compatibility);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_tag_scope_typedef_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
