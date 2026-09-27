@@ -1,3 +1,5 @@
 # label	sha	gates (yes/no)
 main	ade6ac4b6ecb21f30b61b656439bac476c145e2f	no
-ledger	20dfa8635c52d8d4814a73afbe29e298fa9d3f2d	yes
+ledger	2ca89b6a20849ace397ac08a2a2ccd868ee34c56	no
+A	9f24962ee77bb0b97179aff61a20f266dc533a4a	yes
+ledger-A	029feebf434d204f8aacab303b9d42f95cd7c4c6	no

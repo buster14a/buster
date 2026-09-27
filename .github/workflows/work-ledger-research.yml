@@ -148,8 +148,8 @@ jobs:
           driver="$RUNNER_TEMP/buster-build"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
           "$driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF 2>&1 | tail -n 5
-          "$driver" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/gates/test_all.log" | grep -E "TEST_MODULE_TIMING|FAIL|failed|passed" | tail -n 80
-          "$driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/gates/self_host.log" | grep -E "SELF_HOST|fixed_point|STEP_INSTRUCTIONS|took" | tail -n 40
+          "$driver" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/gates/test_all.log" | grep -aE "TEST_MODULE_TIMING|failed at" | tail -n 80
+          "$driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/gates/self_host.log" | grep -aE "SELF_HOST|fixed_point|STEP_INSTRUCTIONS|took" | tail -n 40
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ always() && matrix.subject.gates == 'yes' }}
         with:
@@ -185,6 +185,7 @@ jobs:
           mkdir -p report
           python3 tools/work_ledger/ledger_report.py "${specs[@]}" --output report/ledger.md --json report/ledger.json
           cat report/ledger.md >> "$GITHUB_STEP_SUMMARY"
+          cat report/ledger.md
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: work-ledger-report
