@@ -616,6 +616,21 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   Regressions:
   `c_test_type_specifier_diagnostics` and `compiler_driver_test_type_specifiers`,
   which also verify a refused compilation preserves or never creates the output.
+- A failed member segment abandons its whole aggregate definition. Its
+  rollback goes through `c_type_parse_aggregate_segment_fail`, which keeps the
+  diagnostic count the way `c_type_parse_root_finish` does, so a diagnostic
+  raised while parsing the member survives while its type, member and
+  alignment records are rolled back. A member declarator followed by a token
+  it cannot absorb (`struct B { int member junk; };`, `int a, b c;`,
+  `int (*fp)(void) junk;`) is `C_DIAGNOSTIC_EXPECTED_DECLARATION`, "unexpected
+  token after member declarator", at that token. Each declarator of `} a, b;`
+  parses the failed definition again; `member_trailing_diagnostic_plus_one` on
+  the machine suppresses the repeat while the first report stands. The report
+  is withheld where the member path misreads valid source: a decoration
+  keyword taken as the name (`int * __attribute__((aligned(16))) p;`,
+  `typeof(int) _Alignas(8) m;`) and the width of a parenthesized bit-field
+  name (`int (x) : 3;`). Those segments still fail silently. Regression:
+  `c_test_member_declarator_trailing_token_diagnostics` (GitHub #1534).
 
 ## Immutable aggregate and complex construction
 

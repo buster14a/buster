@@ -877,6 +877,12 @@ struct CTypeParseMachine
     // are visible before ordinary entity publication; the start bounds lookup
     // to this definition so an unrelated enum cannot satisfy an identifier.
     u32 enum_constant_member_start;
+    // The diagnostic the last trailing-token report on a member declarator
+    // appended, plus one. A failed aggregate definition leaves nothing for a
+    // later parse to find, so each declarator of `struct B { int m junk; } a,
+    // b;` parses it again; the report is repeated only once this one no
+    // longer stands.
+    u32 member_trailing_diagnostic_plus_one;
     bool result_valid;
     bool failed;
     bool semantic_constant_queries;
