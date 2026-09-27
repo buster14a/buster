@@ -11456,7 +11456,7 @@ struct ObjectElfPlan
 
 // A plan-sized table, or null when the arena cannot hold it: counts that
 // reach this far are hostile, and refusing them must not abort the process.
-BUSTER_GLOBAL_LOCAL void* object_writer_table_allocate(Arena* arena, u64 count, u64 element_size, u64 alignment)
+BUSTER_GLOBAL_LOCAL void* object_writer_table_allocate_bytes(Arena* arena, u64 count, u64 element_size, u64 alignment)
 {
     void* result = 0;
     if (object_reader_arena_can_allocate_count(arena, count ? count : 1, element_size, alignment))
@@ -11465,6 +11465,8 @@ BUSTER_GLOBAL_LOCAL void* object_writer_table_allocate(Arena* arena, u64 count, 
     }
     return result;
 }
+
+#define object_writer_table_allocate(arena, T, count) ((T*)object_writer_table_allocate_bytes((arena), (count), sizeof(T), BUSTER_ALIGN_OF(T)))
 
 BUSTER_GLOBAL_LOCAL bool object_elf64_section_is_thread_local(ObjectSection const* section)
 {
@@ -11488,7 +11490,7 @@ BUSTER_GLOBAL_LOCAL ObjectError object_elf64_plan(Arena* scratch, ObjectFile* ob
     }
     if (result == OBJECT_ERROR_NONE)
     {
-        plan->relocation_counts = object_writer_table_allocate(scratch, input_count, sizeof(u32), BUSTER_ALIGN_OF(u32));
+        plan->relocation_counts = object_writer_table_allocate(scratch, u32, input_count);
         result = plan->relocation_counts ? OBJECT_ERROR_NONE : OBJECT_ERROR_CAPACITY;
     }
     if (result == OBJECT_ERROR_NONE)
@@ -11527,10 +11529,10 @@ BUSTER_GLOBAL_LOCAL ObjectError object_elf64_plan(Arena* scratch, ObjectFile* ob
         plan->symbol_section = plan->relocation_section + plan->relocation_section_count;
         plan->string_section = plan->symbol_section + 1;
         plan->section_string_section = plan->string_section + 1;
-        plan->offsets = object_writer_table_allocate(scratch, header_count, sizeof(u64), BUSTER_ALIGN_OF(u64));
-        plan->sizes = object_writer_table_allocate(scratch, header_count, sizeof(u64), BUSTER_ALIGN_OF(u64));
-        plan->name_offsets = object_writer_table_allocate(scratch, header_count, sizeof(u32), BUSTER_ALIGN_OF(u32));
-        plan->relocation_targets = object_writer_table_allocate(scratch, plan->relocation_section_count, sizeof(u32), BUSTER_ALIGN_OF(u32));
+        plan->offsets = object_writer_table_allocate(scratch, u64, header_count);
+        plan->sizes = object_writer_table_allocate(scratch, u64, header_count);
+        plan->name_offsets = object_writer_table_allocate(scratch, u32, header_count);
+        plan->relocation_targets = object_writer_table_allocate(scratch, u32, plan->relocation_section_count);
         result = plan->offsets && plan->sizes && plan->name_offsets && plan->relocation_targets ? OBJECT_ERROR_NONE : OBJECT_ERROR_CAPACITY;
     }
     // Symbols: the local count, which fixes every symbol's slot, and .strtab:
@@ -11853,9 +11855,9 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
     ObjectImageRange* relocation_ranges = 0;
     if (result.error == OBJECT_ERROR_NONE)
     {
-        symbol_indices = object_writer_table_allocate(scratch.arena, split_object.symbol_count, sizeof(u32), BUSTER_ALIGN_OF(u32));
+        symbol_indices = object_writer_table_allocate(scratch.arena, u32, split_object.symbol_count);
         relocation_ranges =
-            object_writer_table_allocate(scratch.arena, split_object.section_count, sizeof(ObjectImageRange), BUSTER_ALIGN_OF(ObjectImageRange));
+            object_writer_table_allocate(scratch.arena, ObjectImageRange, split_object.section_count);
         result.error =
             symbol_indices && relocation_ranges && object_reader_arena_can_allocate_bytes(arena, plan.size, 1) ? OBJECT_ERROR_NONE : OBJECT_ERROR_CAPACITY;
     }
