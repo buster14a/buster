@@ -45,6 +45,7 @@
 #define BQEG_OPT "/run/buster-bench-entry-test.opt-in"
 #define BQEG_OPT_TEXT "buster14a/buster disposable broker-entry systemd component test\n"
 #define BQEG_ROOT "/run/buster-bench-entry-test"
+#define BQEG_MANAGER_TEXT "BQEG_PID1_VERIFIED_V1\n"
 #define BQEG_UNIT "/etc/systemd/system/buster-bench-systemd-broker@.service"
 #define BQEG_SOCKET_UNIT "buster-bench-systemd-broker.socket"
 #define BQEG_ENV "BUSTER_BROKER_ENTRY_DISPOSABLE_SYSTEMD"
@@ -89,21 +90,35 @@ typedef struct BqEgMarker
 
 extern char** environ;
 
-static bool bqeg_opt_in(void)
+static bool bqeg_opt_in(bool require_manager)
 {
     struct stat docker = {0}, opt = {0}, pid1 = {0}, installed = {0};
     char bytes[sizeof(BQEG_OPT_TEXT)] = {0};
     int fd = open(BQEG_OPT, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     ssize_t size = fd >= 0 ? read(fd, bytes, sizeof(bytes)) : -1;
     if (fd >= 0) close(fd);
+    bool manager = require_manager && stat("/proc/1/exe", &pid1) == 0 &&
+        stat("/usr/lib/systemd/systemd", &installed) == 0 &&
+        pid1.st_dev == installed.st_dev && pid1.st_ino == installed.st_ino;
+    if (!require_manager)
+    {
+        char receipt[sizeof(BQEG_MANAGER_TEXT)] = {0};
+        struct stat verified = {0};
+        int marker = open(BQEG_ROOT "/manager-verified", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        ssize_t count = marker >= 0 ? read(marker, receipt, sizeof(receipt)) : -1;
+        if (marker >= 0) close(marker);
+        manager = lstat(BQEG_ROOT "/manager-verified", &verified) == 0 &&
+            S_ISREG(verified.st_mode) && verified.st_uid == 0 && verified.st_gid == 0 &&
+            verified.st_nlink == 1 && (verified.st_mode & 07777) == 0644 &&
+            count == (ssize_t)sizeof(BQEG_MANAGER_TEXT) - 1 &&
+            !memcmp(receipt, BQEG_MANAGER_TEXT, sizeof(BQEG_MANAGER_TEXT) - 1);
+    }
     bool ok = lstat("/.dockerenv", &docker) == 0 && S_ISREG(docker.st_mode) &&
         lstat(BQEG_OPT, &opt) == 0 && S_ISREG(opt.st_mode) && opt.st_uid == 0 &&
         opt.st_gid == 0 && opt.st_nlink == 1 && (opt.st_mode & 07777) == 0644 &&
         size == (ssize_t)sizeof(BQEG_OPT_TEXT) - 1 &&
         !memcmp(bytes, BQEG_OPT_TEXT, sizeof(BQEG_OPT_TEXT) - 1) &&
-        stat("/proc/1/exe", &pid1) == 0 &&
-        stat("/usr/lib/systemd/systemd", &installed) == 0 &&
-        pid1.st_dev == installed.st_dev && pid1.st_ino == installed.st_ino;
+        manager;
     return ok;
 }
 
@@ -218,7 +233,7 @@ static bool bqeg_fixture(void)
     socklen_t type_size = sizeof(type);
     char process[4096];
     size_t process_size = 0;
-    bool guard = bqeg_opt_in();
+    bool guard = bqeg_opt_in(false);
     bool ok = entered_ok && guard && fstat(STDIN_FILENO, &socket) == 0 &&
         S_ISSOCK(socket.st_mode) && getsockopt(STDIN_FILENO, SOL_SOCKET, SO_TYPE,
         &type, &type_size) == 0 && type_size == sizeof(type) && type == SOCK_SEQPACKET &&
@@ -273,7 +288,7 @@ static bool bqeg_fixture(void)
 
 static int bqeg_bridge(char const* mode)
 {
-    bool ok = bqeg_opt_in();
+    bool ok = bqeg_opt_in(false);
     struct stat info = {0};
     int type = 0;
     socklen_t length = sizeof(type);
@@ -310,7 +325,7 @@ static bool bqeg_probe(void)
     BqEgProbe probe = {.magic = 0x42454750u,
         .nnp = prctl(PR_GET_NO_NEW_PRIVS, 0UL, 0UL, 0UL, 0UL),
         .seccomp = prctl(PR_GET_SECCOMP, 0UL, 0UL, 0UL, 0UL)};
-    bool ok = bqeg_opt_in() && probe.nnp >= 0 && probe.seccomp >= 0;
+    bool ok = bqeg_opt_in(false) && probe.nnp >= 0 && probe.seccomp >= 0;
     int fd = ok ? open(BQEG_ROOT "/probe", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
     ok = ok && fd >= 0 && write(fd, &probe, sizeof(probe)) == sizeof(probe) && fsync(fd) == 0;
     if (fd >= 0 && close(fd) != 0) ok = false;
@@ -734,10 +749,11 @@ static bool bqeg_run(void)
         struct group* group = getgrnam(names[index]);
         roles = roles && group && group->gr_gid == 65000u + index;
     }
-    bool ok = getuid() == 0 && geteuid() == 0 && bqeg_opt_in() && opt &&
+    bool ok = getuid() == 0 && geteuid() == 0 && bqeg_opt_in(true) && opt &&
         !strcmp(opt, BQEG_ENV_TEXT) && roles && bqeg_copy_matches() &&
         mkdir(BQEG_ROOT, 0700) == 0 &&
-        bqeg_write_text(BQ_ENTRY_ACCOUNTS, bqeg_receipt, 0444);
+        bqeg_write_text(BQ_ENTRY_ACCOUNTS, bqeg_receipt, 0444) &&
+        bqeg_write_text(BQEG_ROOT "/manager-verified", BQEG_MANAGER_TEXT, 0644);
     char nsswitch[8192];
     if (ok) ok = bqeg_file("/etc/nsswitch.conf", nsswitch, sizeof(nsswitch)) &&
                  bqeg_write_text(BQEG_ROOT "/nsswitch-held", nsswitch, 0600);
