@@ -61,4 +61,6 @@ done
 printf 'buster14a/buster disposable credential-gate component test\n' > "$payload/opt-in"
 chmod 0644 "$payload/opt-in"
 sudo docker cp "$payload/opt-in" "$guest:/run/buster-bench-credential-gate-test.opt-in"
+sudo docker exec "$guest" /usr/bin/stat -Lc '%n uid=%u gid=%g mode=%a links=%h dev=%d inode=%i' /proc/1/exe /usr/lib/systemd/systemd /.dockerenv /run/buster-bench-credential-gate-test.opt-in > "$proof/isolation-metadata.txt"
+sudo docker exec "$guest" /usr/bin/cat /proc/1/comm > "$proof/pid1-comm.txt"
 sudo timeout 600 docker exec --env BUSTER_CREDENTIAL_GATE_DISPOSABLE_SYSTEMD=isolated-docker-systemd-test "$guest" /root/credential-gate-systemd-test --run 2>&1 | tee "$proof/fixture.log"

@@ -122,14 +122,19 @@ static bool bqcg_fixed_text(char const* path, char const* expected)
 
 static bool bqcg_container_guard(void)
 {
-    struct stat docker = {0};
-    char pid1[32] = {0};
-    int fd = open("/proc/1/comm", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    ssize_t size = fd >= 0 ? read(fd, pid1, sizeof(pid1)) : -1;
-    if (fd >= 0) close(fd);
-    bool ok = lstat("/.dockerenv", &docker) == 0 && S_ISREG(docker.st_mode) &&
-              size == (ssize_t)strlen("systemd\n") && !memcmp(pid1, "systemd\n", (size_t)size) &&
-              bqcg_fixed_text(BQCG_OPT_IN, BQCG_OPT_IN_TEXT);
+    struct stat docker = {0}, running = {0}, installed = {0};
+    /* /sbin/init may preserve the comm name "init". Bind PID1 to the installed
+     * systemd inode rather than treating its mutable process name as identity. */
+    bool manager = stat("/proc/1/exe", &running) == 0 &&
+                   stat("/usr/lib/systemd/systemd", &installed) == 0 &&
+                   S_ISREG(installed.st_mode) && installed.st_uid == 0 &&
+                   (installed.st_mode & 0022) == 0 &&
+                   running.st_dev == installed.st_dev && running.st_ino == installed.st_ino;
+    bool marker = lstat("/.dockerenv", &docker) == 0 && S_ISREG(docker.st_mode);
+    bool opt_in = bqcg_fixed_text(BQCG_OPT_IN, BQCG_OPT_IN_TEXT);
+    bool ok = manager && marker && opt_in;
+    if (!ok) fprintf(stderr, "BQCG_GUARD manager_inode=%d docker_marker=%d root_opt_in=%d\n",
+                     manager, marker, opt_in);
     return ok;
 }
 
