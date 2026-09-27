@@ -552,7 +552,9 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
 
     // arena_retire returns what lies past its retained prefix and parks the
     // mapping: the next creation of the same shape on this thread gets it
-    // back with only that prefix still committed.
+    // back with only that prefix still committed. The prefix it keeps was
+    // released like any phase range, so with the test fill it carries the
+    // fill (past the pool's link word) instead of the retired contents.
     {
         arena_pool_release_thread();
         ArenaCreation shape = {.reserved_size = BUSTER_MB(64) + BUSTER_KB(64), .flags = {.pool_reuse = 1}};
@@ -563,12 +565,16 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
             u8* bytes = arena_allocate(arena, u8, BUSTER_MB(8));
             memset(bytes, 0x5a, BUSTER_MB(8));
             BUSTER_TEST(arguments, arena->os_position >= arena_minimum_position + BUSTER_MB(8));
+            arena_test_fill_releases(true);
             arena_retire(arena, BUSTER_MB(1));
+            arena_test_fill_releases(false);
             Arena* reused = arena_create(shape);
             BUSTER_TEST(arguments, reused == arena);
             if (reused)
             {
                 BUSTER_TEST(arguments, reused->position == arena_minimum_position);
+                u8* again = arena_allocate(reused, u8, 4096);
+                BUSTER_TEST(arguments, again == bytes && again[sizeof(Arena*)] == ARENA_TEST_RELEASE_FILL && again[4095] == ARENA_TEST_RELEASE_FILL);
                 BUSTER_TEST(arguments, reused->os_position >= arena_minimum_position + BUSTER_MB(1) && reused->os_position < BUSTER_MB(2));
 #if !defined(__APPLE__)
                 // Darwin's discard may preserve bytes, so its dirty mark stays.

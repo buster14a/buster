@@ -234,6 +234,10 @@ void arena_retire(Arena* arena, u64 retained_size)
 {
     BUSTER_VALIDATE(retained_size <= arena->reserved_size - arena_minimum_position);
     u64 retained = arena_minimum_position + retained_size;
+    // Nothing in the arena survives it. The release fills what the retained
+    // prefix keeps for a stale reader to find in tests; destruction below
+    // unpoisons the whole range for the arena's next user.
+    arena_release_to_position(arena, arena_minimum_position);
     if (arena->os_position > retained)
     {
         // Decommit moves the cursor to its boundary, so the cursor visits the
