@@ -9456,6 +9456,45 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     }
 }
 
+// Whether `token`, left over after a type name that c_parse_pointer_chain and
+// c_parse_array_suffixes extended inside a `sizeof`, `_Alignof` or `typeof`
+// operand, proves the operand malformed.  A type name there must end at the
+// operand's `)`.  An opening delimiter may still begin an abstract declarator
+// the scalar parse does not model (`int (*)(void)`), and an identifier may be
+// an attribute or qualifier word, so both keep their existing handling.  A
+// literal or any other punctuator continues no type name, and a type name not
+// wrapped in its own cast parentheses is no expression operand either:
+// `sizeof (typeof (char) * 2)` answered 4 as if `char` were a value, where C
+// requires the `)` after the type name (#1535).
+BUSTER_C_INTERNAL bool c_parse_type_name_operand_trailer_invalid(CToken token)
+{
+    bool invalid = token.kind != C_TOKEN_IDENTIFIER;
+    if (token.kind == C_TOKEN_PUNCTUATOR)
+    {
+        invalid = !c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN);
+    }
+    return invalid;
+}
+
+// Whether the operand's first token names an object, function or enumerator.
+// The scalar parse falls back to the file's typedef table when its scoped
+// lookup misses, so `typedef long T; ... int T; sizeof (T + 1)` reads `T` as
+// the type; the recorded use, or the scoped lookup, still sees the object, and
+// that operand is an expression whatever the type parse left over.
+BUSTER_C_INTERNAL bool c_parse_type_name_operand_names_value(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 token_index)
+{
+    bool value = false;
+    if (preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER)
+    {
+        u32 use = c_parse_identifier_use_index(result, token_index);
+        CEntityId entity = use != C_ID_UNDERLYING_INVALID
+                               ? result->identifier_uses[use].entity
+                               : c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[token_index]);
+        value = entity.value < result->entity_count && result->entities[entity.value].kind != C_ENTITY_TYPEDEF;
+    }
+    return value;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
@@ -9622,16 +9661,27 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
         if (frame->stage == C_TYPE_PARSE_STAGE_CHILD && (type.value == C_ID_UNDERLYING_INVALID || type_index != operand_end))
         {
             c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+            // A type name that stops short of the `)` is not re-read as an
+            // expression.  The fallback failed `typedef typeof (typeof (x) + 1)
+            // t;` without a diagnostic, so only a later use of `t` reported it.
+            bool malformed_type_name = type.value != C_ID_UNDERLYING_INVALID && type_index < operand_end &&
+                                       c_parse_type_name_operand_trailer_invalid(preprocess.tokens[type_index]) &&
+                                       !c_parse_type_name_operand_names_value(result, preprocess, frame->scope, operand_start);
+            if (malformed_type_name)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[type_index]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                                   S8("expected ')' after type name"));
+            }
             frame->stage = C_TYPE_PARSE_STAGE_FALLBACK;
-            if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
-                                                      .result = result,
-                                                      .preprocess = preprocess,
-                                                      .arena = machine->scratch_arena,
-                                                      .scope = frame->scope,
-                                                      .start = operand_start,
-                                                      .end = operand_end,
-                                                      .kind = C_TYPE_PARSE_FRAME_SIZEOF,
-                                                  }))
+            if (malformed_type_name || !c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                                             .result = result,
+                                                                             .preprocess = preprocess,
+                                                                             .arena = machine->scratch_arena,
+                                                                             .scope = frame->scope,
+                                                                             .start = operand_start,
+                                                                             .end = operand_end,
+                                                                             .kind = C_TYPE_PARSE_FRAME_SIZEOF,
+                                                                         }))
             {
                 c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->specifier_index, false);
             }
@@ -19965,8 +20015,11 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
                 if (type.value < result->type_count)
                 {
                     type = c_parse_pointer_chain(result, preprocess, type, &cursor, close);
-                    c_parse_array_suffixes(result, preprocess, type, &cursor, close);
+                    type = c_parse_array_suffixes(result, preprocess, type, &cursor, close);
                 }
+                if (type.value < result->type_count && cursor < close && c_parse_type_name_operand_trailer_invalid(preprocess.tokens[cursor]) &&
+                    !c_parse_type_name_operand_names_value(result, preprocess, operand_scope, operand_start))
+                    diagnostic = (CParseInitializerDiagnostic){.message = S8("expected ')' after type name"), .token = cursor};
             }
         }
         for (u32 update = operand_start; !diagnostic.message.length && update < operand_end; update += 1)
