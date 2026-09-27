@@ -41083,7 +41083,7 @@ bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool*
         .mutation_count = 1,
         .mutation_capacity = 1,
     };
-    c_type_parse_rollback(&machine, &result, checkpoint, 0);
+    c_type_parse_rollback(&machine, &result, &checkpoint, 0);
     bool restored_pointer = result.types == checkpoint_types && result.type_count == 1;
     bool old_tag_restored = !checkpoint_types[0].is_complete && checkpoint_types[0].member_count == 0 && string_equal(checkpoint_types[0].tag, S8("RollbackTag"));
     bool grown_tag_preserved = grown_types[0].is_complete && grown_types[0].member_count == 1 && string_equal(grown_types[0].tag, S8("RollbackTag"));
