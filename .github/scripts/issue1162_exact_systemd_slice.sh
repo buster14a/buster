@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Temporary, isolated #1162 validation transport. Never install on a protected host.
 set -Eeuo pipefail
-subject=fd1e80c36fb7fa4cecf7912f0ff8ad4722742ad6
-subject_tree=11d655e8f4b370f2cff7e74d63be8db2efe40c2d
-subject_build_blob=1ea24b90629a2c771c3d0e7d3d517b042ddb4c35
+subject=5c5c3eb1fbd6ea1b82730da63be87643d21aca64
+subject_tree=6f16db7e6dabb681f64bd10142793f609c7adab1
+subject_build_blob=9825adbe2a3f488fcea55a6cd533be6193030d9b
 baseline=ade6ac4b6ecb21f30b61b656439bac476c145e2f
 evidence="${RUNNER_TEMP:?}/issue1162-exact-slice-evidence"
 source_root="$RUNNER_TEMP/issue1162-source"
@@ -177,7 +177,7 @@ for path in files:
 manifest = ("\n".join(lines) + "\n").encode()
 expected = {
     "ade6ac4b6ecb21f30b61b656439bac476c145e2f": (375, 42585, "ebf4a4b4e5943dc60dd9fd9d175af643fbe0d0eee72e70e245c688aaabcb3007"),
-    "fd1e80c36fb7fa4cecf7912f0ff8ad4722742ad6": (372, 42199, "23ec0e7f879b5d636bbddaa67a2d9f39f21e106f6dc94dc8ff4610479c728973"),
+    "5c5c3eb1fbd6ea1b82730da63be87643d21aca64": (375, 42585, "35617564a362e47ff44decf7d06887823ef6800e251773a91667c079b8b05b2c"),
 }[rev]
 actual = (len(files), len(manifest), hashlib.sha256(manifest).hexdigest())
 print("SOURCE_CLOSURE", rev, "files", actual[0], "bytes", actual[1], "sha256", actual[2], flush=True)
@@ -196,7 +196,7 @@ readelf -W -l build/buster-bench-build | tee "$evidence/build-driver-elf.txt"
 grep -E 'GNU_STACK.*RW[[:space:]]' "$evidence/build-driver-elf.txt"
 build/buster-bench-build bench_service capabilities
 build/buster-bench-build bench_service self-test | tee "$evidence/service-self-test.txt"
-build/buster-bench-build bench_service_broker
+build/buster-bench-build bench_service_broker self-test | tee "$evidence/broker-and-gate-self-test.txt"
 clang -Isrc -DBUSTER_SINGLE_THREADED=1 -std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/throughput/throughput.c tools/throughput/shared.c -lm -o build/throughput
 cat > "$payload/broker-state-probe.c" <<'PROBE'
 #define main bq_original_broker_main
@@ -232,8 +232,9 @@ int main(int argc, char** argv)
            bq_broker_lease_held(uid, gid), bq_broker_manifest(&request, &paths, uid, false),
            bq_broker_manifest(&request, &paths, uid, true));
     printf("installed-service=%d build=%d throughput=%d\n",
-           bq_broker_installed_binary(BQ_BROKER_SERVICE), bq_broker_installed_binary(BQ_BROKER_BUILD),
-           bq_broker_installed_binary(BQ_BROKER_THROUGHPUT));
+           bq_broker_installed_binary(BQ_BROKER_SERVICE, false), bq_broker_installed_binary(BQ_BROKER_BUILD, false),
+           bq_broker_installed_binary(BQ_BROKER_THROUGHPUT, false));
+    printf("installed-static-gate=%d\n", bq_broker_installed_binary(BQ_BROKER_GATE, true));
     return 0;
 }
 PROBE
@@ -241,6 +242,9 @@ clang -I "$source_root" -std=c11 -O0 -g -Wno-unused-function "$payload/broker-st
 install -m 0755 build/buster-bench-build "$payload/binaries/buster-bench-build"
 install -m 0755 build/bench-service-tools/service "$payload/binaries/buster-bench-service"
 install -m 0755 build/bench-service-tools/systemd-broker "$payload/binaries/buster-bench-systemd-broker"
+install -m 0755 build/bench-service-tools/credential-gate "$payload/binaries/buster-bench-credential-gate"
+readelf -W -l "$payload/binaries/buster-bench-credential-gate" | tee "$evidence/credential-gate-elf.txt"
+if grep -Eq 'INTERP|DYNAMIC|GNU_STACK.*RWE' "$evidence/credential-gate-elf.txt"; then exit 1; fi
 install -m 0755 build/bench-service-tools/systemd-broker-live-test "$payload/binaries/systemd-broker-live-test"
 install -m 0755 build/throughput "$payload/binaries/buster-bench-throughput"
 # The existing root-only cleanup regression owns fresh /tmp fixtures and is
@@ -324,10 +328,16 @@ printf 'device=%s\ninode=%s\n' \
   > /etc/buster-bench/systemd-broker-lease.identity
 chown root:root /etc/buster-bench/systemd-broker-lease.identity
 chmod 0444 /etc/buster-bench/systemd-broker-lease.identity
+printf 'BQ-ACCOUNTS-V1\nservice-uid=65000\nservice-gid=65000\ncandidate-uid=65001\ncandidate-gid=65001\nrunner-uid=65002\nrunner-gid=65002\n' > /etc/buster-bench/systemd-broker-accounts.identity
+chown root:root /etc/buster-bench/systemd-broker-accounts.identity
+chmod 0444 /etc/buster-bench/systemd-broker-accounts.identity
+sha256sum /etc/buster-bench/systemd-broker-accounts.identity
+cat /etc/buster-bench/systemd-broker-accounts.identity
 # The broker checks its receipt parent as a root-owned, nonwritable directory.
 chmod 0555 /etc/buster-bench
 test "$(stat -c %a:%u:%g /etc/buster-bench)" = 555:0:0
 test "$(stat -c %a:%u:%g /etc/buster-bench/systemd-broker-lease.identity)" = 444:0:0
+test "$(stat -c %a:%u:%g /etc/buster-bench/systemd-broker-accounts.identity)" = 444:0:0
 printf 'GUEST_IDENTITIES\n'; id buster-bench; id buster-bench-candidate; id buster-github-runner
 stat -c 'LEASE_DEVICE=%d LEASE_INODE=%i MODE=%a OWNER=%u:%g LINKS=%h' /var/lib/buster-bench/lease/host.lock
 stat -c '%a %u:%g %n' /var/lib/buster-bench /var/lib/buster-bench/queue /var/lib/buster-bench/workspaces /var/lib/buster-bench/lease /var/lib/buster-bench/workspaces/results /etc/buster-bench /etc/buster-bench/systemd-broker-lease.identity

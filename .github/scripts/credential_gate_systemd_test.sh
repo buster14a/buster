@@ -39,7 +39,9 @@ clang "${flags[@]}" -static -Wl,-z,noexecstack tools/bench_service/credential_ga
 clang "${flags[@]}" tools/bench_service/credential_gate_systemd_test.c -o "$payload/credential-gate-systemd-test"
 readelf -W -l "$payload/buster-bench-credential-gate" > "$proof/gate-elf.txt"
 if grep -Eq 'INTERP|DYNAMIC|GNU_STACK.*RWE' "$proof/gate-elf.txt"; then exit 1; fi
-sha256sum "$payload/buster-bench-credential-gate" "$payload/credential-gate-systemd-test" > "$proof/binary-sha256.txt"
+mkdir -p "$proof/binaries"
+cp "$payload/buster-bench-credential-gate" "$payload/credential-gate-systemd-test" "$proof/binaries/"
+(cd "$proof/binaries" && sha256sum buster-bench-credential-gate credential-gate-systemd-test) > "$proof/binary-sha256.txt"
 printf 'buster14a/buster disposable credential-gate component test\n' > "$payload/opt-in"
 chmod 0644 "$payload/opt-in"
 cat > "$payload/Dockerfile" <<'DOCKERFILE'
