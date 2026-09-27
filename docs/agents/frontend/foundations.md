@@ -220,12 +220,42 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   association by token range without flattening or copying the translation
   unit, and unselected associations are never evaluated. The nested
   generic-constant cases cover this path (GitHub #797).
-- Legacy integer constant ranges and static assertions share the private
+- Legacy integer constant ranges share the private
   `c_parse_constant_expression_evaluate` walker over original token indices.
   The shape sidecar and parse position index describe that stream; copying a
   range into a synthesized token view while retaining either derived index
   gives the wrong classification. Spelling, source recovery, and pack changes
   still belong to the original preprocess result (GitHub #629).
+- A `_Static_assert` whose expression types as an integer takes its value
+  from the typed evaluator (`c_parse_typed_constant`), with C's types,
+  promotions and conversions: `0u - 1 == 4294967295u` holds and
+  `-1 < sizeof(int)` fails. The legacy retokenizer still runs first and
+  still decides which assertions wait for the deferred typed check (casts,
+  unary `sizeof`, enumerators), so deferred diagnostics keep their wording;
+  its `intmax_t` arithmetic (preprocessing's rule, C17 6.10.1p4) answers
+  only shapes the typed evaluator does not model. A typed fault (division by
+  zero, a shift count outside the promoted width) is final. An assertion
+  decided at the declaration reports `static assertion failed: "<message>"`
+  (GitHub #1238).
+- Compile-time integer arithmetic has one implementation, `ir_integer_*`
+  (`ir_integer.c`): fixed-width two's-complement values of 1..128 bits and
+  the canonical operations, each result carrying its exact-value faults
+  (signed overflow, unsigned wrap, division by zero, shift count, negative
+  shifted operand). `c_integer_operation` maps a C operator and the
+  signedness of its operation type to the canonical operation for runtime
+  lowering (`c_ir_operation`, `c_ir_apply_operation`) and for the three
+  constant evaluators; `c_integer_constant_binary/unary` apply C's constant
+  policy. Preprocessing (`c_conditional_apply`) keeps its `intmax_t` rule and
+  deferred faults; integer constant expressions (`c_parse_constant_binary`,
+  `c_ir_constant_apply_binary`) are not constant on a division by zero or a
+  shift count outside `[0, width)` of the separately promoted left operand,
+  and keep the wrapped value on signed overflow (the value GCC and Clang
+  fold to; the C17 6.6p4 diagnostic needs a warning channel the frontend
+  does not have). Lowering's value queries (`c_ir_value_integer_constant_evaluate`)
+  read conversions by their canonical operation, so a signed widening
+  sign-extends (GitHub #1347). `ir_integer_test.c` checks every operation
+  exhaustively at widths 1..8 and against the host's 128-bit type at wider
+  widths.
 - Preprocessing integer-expression reductions carry signedness and a deferred
   arithmetic-fault bit in the same byte. Division by zero and signed
   `INT64_MIN / -1` (including remainder) never execute as host arithmetic.

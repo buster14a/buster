@@ -645,6 +645,31 @@ typedef enum CConditionalOperator
 BUSTER_C_EXTERN u32 c_conditional_precedence(CConditionalOperator operation);
 BUSTER_C_EXTERN bool c_conditional_is_unary(CConditionalOperator operation);
 BUSTER_C_EXTERN bool c_conditional_operator(CToken token, bool unary, CConditionalOperator* operation);
+// C integer operators over the one integer semantics (ir_integer_*). The
+// operation table maps a C operator and the signedness of its operation type
+// to the canonical operation; runtime lowering (c_ir_operation) and the three
+// constant evaluators -- preprocessing conditionals (c_conditional_apply), the
+// parser's typed evaluator (c_parse_constant_binary) and lowering's constant
+// evaluator (c_ir_constant_apply_binary) -- all select through it, so a folded
+// constant and the executed instruction are the same operation.
+BUSTER_C_EXTERN bool c_integer_operation(CConditionalOperator operation, bool is_signed, IrUnaryOperation* unary_out, IrBinaryOperation* binary_out);
+// One C integer operator on constants already converted as C requires: both
+// operands to the operation type (`width`, `is_signed`), except that a shift
+// count keeps its own promoted width. `constant` is C's answer to whether the
+// expression has a value: false for a division by zero, a shift count outside
+// [0, width) and a non-integer operator. Signed overflow keeps the wrapped
+// bits GCC and Clang fold to; `faults` retains it for a caller that diagnoses.
+typedef struct CIntegerConstantResult CIntegerConstantResult;
+struct CIntegerConstantResult
+{
+    IrInteger bits;
+    u8 faults;
+    bool constant;
+    bool comparison;
+};
+BUSTER_C_EXTERN CIntegerConstantResult c_integer_constant_binary(CConditionalOperator operation, IrInteger left, IrInteger right, u32 width,
+                                                                 bool is_signed, u32 count_width);
+BUSTER_C_EXTERN CIntegerConstantResult c_integer_constant_unary(CConditionalOperator operation, IrInteger operand, u32 width);
 typedef enum CIrStringEncoding
 {
     C_IR_STRING_ENCODING_ORDINARY,
