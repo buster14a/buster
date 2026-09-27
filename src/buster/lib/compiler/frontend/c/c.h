@@ -1446,6 +1446,10 @@ BUSTER_F_DECL u32 c_preprocess_pack_alignment(CPreprocessResult const* preproces
 // of the final stream.
 BUSTER_F_DECL CSourceLocation c_lex_token_location(CLexResult* lex, CToken token);
 BUSTER_F_DECL CSourceLocation c_preprocess_token_location(CPreprocessResult const* preprocess, CToken token);
+// Whether printing `current` straight after `previous` would lex as different
+// tokens, so a printer that reproduces source adjacency must still separate
+// them. The -E printer and diagnostics quoting source text share this rule.
+BUSTER_F_DECL bool c_token_requires_separator(CToken previous, String8 previous_spelling, CToken current, String8 current_spelling);
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTokenShape const* c_preprocess_token_shapes(CPreprocessResult const* preprocess)
 {
     CTokenShape const* result = preprocess && preprocess->recovery ? preprocess->recovery->token_shapes : 0;

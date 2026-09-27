@@ -2633,91 +2633,12 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
 // conditional's size is not information), and adjacency is the previous
 // token's column plus its emitted width reaching the next token's column.
 // Respelling and replacement can make those different coordinate systems
-// coincide accidentally, so compiler_driver_preprocess_requires_separator
-// protects every apparent adjacency. Tokens a macro expansion synthesized
-// share the use site's location, where the column arithmetic does not hold;
-// they keep the single space, which is also what a hand-built result with no
-// recovery map degrades to for every token.
-BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocess_literal_has_prefix(String8 spelling)
-{
-    bool result = spelling.length && spelling.pointer[0] != '\'' && spelling.pointer[0] != '"';
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocess_identifier_is_literal_prefix(String8 spelling)
-{
-    bool result = (spelling.length == 1 &&
-                   (spelling.pointer[0] == 'u' || spelling.pointer[0] == 'U' || spelling.pointer[0] == 'L')) ||
-                  (spelling.length == 2 && spelling.pointer[0] == 'u' && spelling.pointer[1] == '8');
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocess_punctuators_join(CToken previous, String8 current)
-{
-    char8 first = current.length ? current.pointer[0] : 0;
-    bool result = false;
-    switch ((CPunctuator)previous.punctuator)
-    {
-    case C_PUNCTUATOR_PERCENT: result = first == ':' || first == '>'; break;
-    case C_PUNCTUATOR_HASH_DIGRAPH: result = first == '%'; break;
-    case C_PUNCTUATOR_LESS: result = first == '<' || first == '=' || first == ':' || first == '%'; break;
-    case C_PUNCTUATOR_GREATER: result = first == '>' || first == '='; break;
-    case C_PUNCTUATOR_EQUAL:
-    case C_PUNCTUATOR_EXCLAMATION:
-    case C_PUNCTUATOR_STAR:
-    case C_PUNCTUATOR_CARET: result = first == '='; break;
-    case C_PUNCTUATOR_AMPERSAND: result = first == '&' || first == '='; break;
-    case C_PUNCTUATOR_PIPE: result = first == '|' || first == '='; break;
-    case C_PUNCTUATOR_SLASH: result = first == '/' || first == '*' || first == '='; break;
-    case C_PUNCTUATOR_PLUS: result = first == '+' || first == '='; break;
-    case C_PUNCTUATOR_MINUS: result = first == '-' || first == '>' || first == '='; break;
-    case C_PUNCTUATOR_HASH: result = first == '#'; break;
-    case C_PUNCTUATOR_COLON: result = first == '>'; break;
-    case C_PUNCTUATOR_DOT: result = first == '.'; break;
-    case C_PUNCTUATOR_SHIFT_LEFT:
-    case C_PUNCTUATOR_SHIFT_RIGHT: result = first == '='; break;
-    default: break;
-    }
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocess_requires_separator(CToken previous, String8 previous_spelling, CToken current,
-                                                                         String8 current_spelling)
-{
-    bool result = false;
-    if (previous.kind == C_TOKEN_IDENTIFIER)
-    {
-        result = current.kind == C_TOKEN_IDENTIFIER ||
-                 (current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length && current_spelling.pointer[0] != '.');
-        if (!result && (current.kind == C_TOKEN_CHARACTER_LITERAL || current.kind == C_TOKEN_STRING_LITERAL))
-        {
-            result = compiler_driver_preprocess_literal_has_prefix(current_spelling) ||
-                     compiler_driver_preprocess_identifier_is_literal_prefix(previous_spelling);
-        }
-    }
-    else if (previous.kind == C_TOKEN_PREPROCESSING_NUMBER)
-    {
-        result = current.kind == C_TOKEN_IDENTIFIER || current.kind == C_TOKEN_PREPROCESSING_NUMBER ||
-                 current.kind == C_TOKEN_CHARACTER_LITERAL ||
-                 (current.kind == C_TOKEN_STRING_LITERAL && compiler_driver_preprocess_literal_has_prefix(current_spelling));
-        if (!result && current.kind == C_TOKEN_PUNCTUATOR && previous_spelling.length)
-        {
-            char8 last = previous_spelling.pointer[previous_spelling.length - 1];
-            char8 first = current_spelling.length ? current_spelling.pointer[0] : 0;
-            result = first == '.' ||
-                     ((first == '+' || first == '-') &&
-                      (last == 'e' || last == 'E' || last == 'p' || last == 'P'));
-        }
-    }
-    else if (previous.kind == C_TOKEN_PUNCTUATOR)
-    {
-        result = (previous.punctuator == C_PUNCTUATOR_DOT && current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length &&
-                  current_spelling.pointer[0] != '.') ||
-                 (current.kind == C_TOKEN_PUNCTUATOR && compiler_driver_preprocess_punctuators_join(previous, current_spelling));
-    }
-    return result;
-}
-
+// coincide accidentally, so c_token_requires_separator (shared with the
+// frontend's source-quoting diagnostics) protects every apparent adjacency.
+// Tokens a macro expansion synthesized share the use site's location, where
+// the column arithmetic does not hold; they keep the single space, which is
+// also what a hand-built result with no recovery map degrades to for every
+// token.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPreprocessResult preprocess, u64 lookup_offset, CSourceLocation* lookup)
 {
     enum { compiler_driver_preprocess_line_gap_cap = 8 };
@@ -2769,7 +2690,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
                 }
             }
             else if (location.column != previous_end_column ||
-                     compiler_driver_preprocess_requires_separator(previous_token, previous_spelling, token, spelling))
+                     c_token_requires_separator(previous_token, previous_spelling, token, spelling))
             {
                 text[length++] = ' ';
             }

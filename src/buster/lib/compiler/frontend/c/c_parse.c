@@ -48,6 +48,8 @@
 //   c_parse_constant_expression_evaluate          shared original-token-range
 //   c_parse_static_assert_evaluate                evaluator and _Static_assert
 //                                                 deferral past unresolved bounds
+//   c_parse_token_range_text,                     the one-line source quote a
+//   c_parse_static_assert_check                   non-constant assertion prints
 //   c_parse_initializer_designator,               initializer shapes and
 //   c_parse_infer_initializer_array_count_core    array-bound inference
 //   c_parse_add_type, c_parse_aggregate_lookup,   type interning and
@@ -5038,6 +5040,48 @@ BUSTER_C_INTERNAL void c_parse_defer_static_assert(CPreprocessResult preprocess,
     };
 }
 
+// The tokens [start, end) as a diagnostic quotes them: on one line, touching
+// where they touched in the source and otherwise one space apart, so a line
+// break, a comment or a macro boundary reads as the space it stood for. This
+// is the -E printer's adjacency rule (compiler_driver_preprocess_text) with
+// line breaks folded, guarded by the same c_token_requires_separator.
+BUSTER_C_INTERNAL String8 c_parse_token_range_text(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u64 capacity = 1;
+    for (u32 index = start; index < end; index += 1)
+    {
+        capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[index]) + 1;
+    }
+    char8* text = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    CSourceLocation previous_location = {0};
+    CToken previous_token = {0};
+    String8 previous_spelling = {0};
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        CSourceLocation location = c_preprocess_token_location(&preprocess, token);
+        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        if (index != start &&
+            (location.file != previous_location.file || location.line != previous_location.line ||
+             location.column != previous_location.column + previous_spelling.length ||
+             c_token_requires_separator(previous_token, previous_spelling, token, spelling)))
+        {
+            text[length++] = ' ';
+        }
+        memcpy(text + length, spelling.pointer, spelling.length);
+        length += spelling.length;
+        previous_location = location;
+        previous_token = token;
+        previous_spelling = spelling;
+    }
+    text[length] = 0;
+    return (String8){
+        .pointer = text,
+        .length = length,
+    };
+}
+
 BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                      CDeclaration declaration, CScopeId scope)
 {
@@ -5071,7 +5115,8 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
     bool expression_is_integer = true;
     u32 expression_start = 0;
     u32 expression_end = 0;
-    if (machine && c_parse_static_assert_expression_range(preprocess, declaration, &expression_start, &expression_end))
+    bool has_expression = c_parse_static_assert_expression_range(preprocess, declaration, &expression_start, &expression_end);
+    if (machine && has_expression)
     {
         CTypeId expression_type = C_TYPE_ID_INVALID;
         if (c_parse_expression_type_query(machine, arena, preprocess, result, scope, expression_start, expression_end, &expression_type) &&
@@ -5092,29 +5137,14 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
     }
     else if (!evaluated)
     {
-        String8* parts = arena_allocate(arena, String8, declaration.token_count * 2);
-        u32 part_count = 0;
-        for (u32 token_offset = 2; token_offset < declaration.token_count; token_offset += 1)
-        {
-            CToken token = preprocess.tokens[declaration.token_start + token_offset];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-            {
-                break;
-            }
-            if (part_count)
-            {
-                parts[part_count++] = S8(" ");
-            }
-            parts[part_count++] = c_token_spelling(preprocess.spelling_base, token);
-        }
-        String8 expression = string_join_arena(arena,
-                                               (SliceString8){
-                                                   .pointer = parts,
-                                                   .length = part_count,
-                                               },
-                                               false);
+        // Quote the whole controlling expression: the range ends at the
+        // separator comma or closing parenthesis at the assertion's own depth,
+        // not at the first one inside a parenthesized operand or a call.
+        String8 expression = has_expression ? c_parse_token_range_text(arena, preprocess, expression_start, expression_end) : (String8){0};
         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
-                           string_format(arena, S8("static assertion expression is not an integer constant expression: {S8}"), expression));
+                           expression.length
+                               ? string_format(arena, S8("static assertion expression is not an integer constant expression: {S8}"), expression)
+                               : S8("static assertion expression is not an integer constant expression"));
     }
     else if (!value)
     {
