@@ -49,12 +49,13 @@
 #define BQEG_SOCKET_UNIT "buster-bench-systemd-broker.socket"
 #define BQEG_ENV "BUSTER_BROKER_ENTRY_DISPOSABLE_SYSTEMD"
 #define BQEG_ENV_TEXT "isolated-docker-systemd-test"
-#define BQEG_CASES 22
+#define BQEG_CASES 24
 
 typedef enum BqEgMutation
 {
     BQEG_POSITIVE, BQEG_RECEIPT_ABSENT, BQEG_RECEIPT_MODE,
     BQEG_RECEIPT_SERVICE_GID, BQEG_CANDIDATE_UID, BQEG_RUNNER_GID,
+    BQEG_NSSWITCH_MERGE, BQEG_NSCD_SOCKET,
     BQEG_PRIMARY_GID, BQEG_MISSING_GROUP, BQEG_EXTRA_GROUP,
     BQEG_BOUNDING_CAP, BQEG_AMBIENT_CAP, BQEG_NNP_OFF, BQEG_SECCOMP_OFF,
     BQEG_ROOT_RW, BQEG_SUBMOUNT_RW, BQEG_WRONG_FD0, BQEG_ABSENT_FD0,
@@ -64,7 +65,7 @@ typedef enum BqEgMutation
 
 static char const* const bqeg_names[BQEG_CASES] = {
     "positive", "receipt-absent", "receipt-mode", "receipt-service-gid",
-    "candidate-uid-rebound", "runner-gid-rebound", "primary-gid",
+    "candidate-uid-rebound", "runner-gid-rebound", "nsswitch-merge", "nscd-socket", "primary-gid",
     "missing-group", "extra-group", "bounding-cap", "ambient-cap",
     "nnp-off", "seccomp-off", "root-rw", "protected-submount-rw",
     "wrong-fd0", "absent-fd0", "cloexec-fd0", "broker-mode",
@@ -73,6 +74,7 @@ static char const* const bqeg_names[BQEG_CASES] = {
 
 static char const bqeg_receipt[] = "BQ-ACCOUNTS-V1\nservice-uid=65000\nservice-gid=65000\n"
     "candidate-uid=65001\ncandidate-gid=65001\nrunner-uid=65002\nrunner-gid=65002\n";
+static int bqeg_nscd = -1;
 
 typedef struct BqEgMarker
 {
@@ -204,12 +206,20 @@ static bool bqeg_file(char const* path, char* output, size_t capacity)
 static bool bqeg_fixture(void)
 {
     BqEgMarker record = {.magic = 0x42454731u, .version = 1, .pid = getpid()};
+    /* Mirror production BEGIN ordering. This is the first fixture operation,
+     * before its own validation can reject a wrongly admitted gate state. */
+    dprintf(STDERR_FILENO, "BQ-ENTRY-SYNTHETIC-BEGIN-V1 pid=%ld\n", (long)getpid());
+    int entered = open(BQEG_ROOT "/entered", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    bool entered_ok = entered >= 0 && write(entered, &record.pid, sizeof(record.pid)) == sizeof(record.pid) &&
+        fsync(entered) == 0;
+    if (entered >= 0 && close(entered) != 0) entered_ok = false;
     struct stat socket = {0};
     int type = 0;
     socklen_t type_size = sizeof(type);
     char process[4096];
     size_t process_size = 0;
-    bool ok = bqeg_opt_in() && fstat(STDIN_FILENO, &socket) == 0 &&
+    bool guard = bqeg_opt_in();
+    bool ok = entered_ok && guard && fstat(STDIN_FILENO, &socket) == 0 &&
         S_ISSOCK(socket.st_mode) && getsockopt(STDIN_FILENO, SOL_SOCKET, SO_TYPE,
         &type, &type_size) == 0 && type_size == sizeof(type) && type == SOCK_SEQPACKET &&
         bq_entry_read_path("/proc/self/stat", process, sizeof(process), &process_size) &&
@@ -242,17 +252,22 @@ static bool bqeg_fixture(void)
             ok = !caps[index].effective && !caps[index].permitted && !caps[index].inheritable;
         }
     }
+    if (!ok)
+        dprintf(STDERR_FILENO, "BQEG_SYNTHETIC_REFUSAL entered=%d guard=%d groups=%d nnp=%d seccomp=%d env=%d errno=%d\n",
+                entered_ok, guard, record.group_count, record.nnp, record.seccomp,
+                record.environment_count, errno);
     int fd = ok ? open(BQEG_ROOT "/marker", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
     ok = ok && fd >= 0 && write(fd, &record, sizeof(record)) == sizeof(record) && fsync(fd) == 0;
     if (fd >= 0 && close(fd) != 0) ok = false;
     if (ok)
     {
-        dprintf(STDERR_FILENO, "BQ-ENTRY-SYNTHETIC-BEGIN-V1 pid=%ld ticks=%llu fd0=%llu:%llu\n",
+        dprintf(STDERR_FILENO, "BQ-ENTRY-SYNTHETIC-SNAPSHOT-V1 pid=%ld ticks=%llu fd0=%llu:%llu\n",
                 (long)record.pid, (unsigned long long)record.ticks,
                 (unsigned long long)record.socket_device, (unsigned long long)record.socket_inode);
         static char const reply[] = "BQ-ENTRY-SYNTHETIC-OK\n";
         ok = send(STDIN_FILENO, reply, sizeof(reply) - 1, MSG_NOSIGNAL) == sizeof(reply) - 1;
     }
+    if (!ok) dprintf(STDERR_FILENO, "BQEG_SYNTHETIC_RESULT failure errno=%d\n", errno);
     return ok;
 }
 
@@ -277,9 +292,31 @@ static int bqeg_bridge(char const* mode)
         /* Exec clears a CLOEXEC FD before gate code can inspect it. Calling
          * the exact compiled gate main in this disposable process injects
          * that otherwise unrepresentable state into its real main path. */
-        result = fcntl(0, F_SETFD, FD_CLOEXEC) == 0 ? bqeg_gate_main(1, NULL) : 127;
+        struct stat ignored = {0};
+        result = fcntl(0, F_SETFD, FD_CLOEXEC) == 0 &&
+            !bq_entry_connection(0, &ignored) ? bqeg_gate_main(1, NULL) : 127;
     }
     return result;
+}
+
+typedef struct BqEgProbe
+{
+    uint32_t magic;
+    int nnp, seccomp;
+} BqEgProbe;
+
+static bool bqeg_probe(void)
+{
+    BqEgProbe probe = {.magic = 0x42454750u,
+        .nnp = prctl(PR_GET_NO_NEW_PRIVS, 0UL, 0UL, 0UL, 0UL),
+        .seccomp = prctl(PR_GET_SECCOMP, 0UL, 0UL, 0UL, 0UL)};
+    bool ok = bqeg_opt_in() && probe.nnp >= 0 && probe.seccomp >= 0;
+    int fd = ok ? open(BQEG_ROOT "/probe", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    ok = ok && fd >= 0 && write(fd, &probe, sizeof(probe)) == sizeof(probe) && fsync(fd) == 0;
+    if (fd >= 0 && close(fd) != 0) ok = false;
+    dprintf(STDERR_FILENO, "BQEG_SANDBOX_PROBE nnp=%d seccomp=%d status=%d\n",
+            probe.nnp, probe.seccomp, ok);
+    return ok;
 }
 
 static bool bqeg_unit(BqEgMutation kind)
@@ -293,19 +330,23 @@ static bool bqeg_unit(BqEgMutation kind)
             "root buster-bench buster-bench-candidate";
         char const* exec = kind == BQEG_ABSENT_FD0 ? BQEG_BRIDGE " bridge absent" :
             kind == BQEG_CLOEXEC_FD0 ? BQEG_BRIDGE " bridge cloexec" : BQEG_GATE;
+        char const* probe = kind == BQEG_NNP_OFF || kind == BQEG_SECCOMP_OFF ?
+            "ExecStartPre=" BQEG_BRIDGE " probe\n" : "";
+        char const* filters = kind == BQEG_SECCOMP_OFF ? "" :
+            "RestrictSUIDSGID=yes\nRestrictAddressFamilies=AF_UNIX\n"
+            "SystemCallArchitectures=native\nSystemCallFilter=@system-service\n"
+            "SystemCallErrorNumber=EPERM\n";
         fprintf(file, "[Unit]\nDescription=Disposable synthetic broker entry component\n"
             "[Service]\nType=exec\nRemainAfterExit=yes\nUser=root\nGroup=%s\n"
-            "SupplementaryGroups=%s\nUMask=0077\nExecStart=%s\n"
+            "SupplementaryGroups=%s\nUMask=0077\n%sExecStart=%s\n"
             "StandardInput=%s\nStandardOutput=journal\nStandardError=%s\n"
             "WorkingDirectory=/\nRestart=no\nTimeoutStartSec=10s\nRuntimeMaxSec=10s\n"
             "NoNewPrivileges=%s\nCapabilityBoundingSet=%s\nAmbientCapabilities=%s\n"
             "PrivateTmp=yes\nPrivateDevices=yes\nPrivateNetwork=yes\nProtectHome=yes\n"
             "ProtectSystem=%s\nReadOnlyPaths=/etc/buster-bench\n"
             "ReadOnlyPaths=/opt/buster-bench/installed\nReadOnlyPaths=/var/lib/buster-bench\n"
-            "ReadWritePaths=" BQEG_ROOT "\n%s"
-            "RestrictSUIDSGID=yes\nRestrictAddressFamilies=AF_UNIX\n"
-            "SystemCallArchitectures=native\n%s\nSystemCallErrorNumber=EPERM\n",
-            kind == BQEG_PRIMARY_GID ? "root" : "buster-bench", groups, exec,
+            "ReadWritePaths=" BQEG_ROOT "\n%s%s",
+            kind == BQEG_PRIMARY_GID ? "root" : "buster-bench", groups, probe, exec,
             kind == BQEG_WRONG_FD0 ? "null" : "socket",
             kind == BQEG_JOURNAL_FAIL ? "null" : "journal",
             kind == BQEG_NNP_OFF ? "no" : "yes",
@@ -313,8 +354,10 @@ static bool bqeg_unit(BqEgMutation kind)
             kind == BQEG_AMBIENT_CAP ? "CAP_CHOWN" : "",
             kind == BQEG_ROOT_RW ? "full" : "strict",
             kind == BQEG_SUBMOUNT_RW ? "ReadWritePaths=/var/lib/buster-bench/sub\n" : "",
-            kind == BQEG_SECCOMP_OFF ? "" : "SystemCallFilter=@system-service");
-        ok = ferror(file) == 0 && fclose(file) == 0;
+            filters);
+        bool written = ferror(file) == 0;
+        if (fclose(file) != 0) written = false;
+        ok = written;
     }
     return ok;
 }
@@ -367,6 +410,38 @@ static bool bqeg_patch_broker(bool stack)
     return ok;
 }
 
+static bool bqeg_nsswitch_merge(void)
+{
+    char original[8192], changed[8192];
+    bool ok = bqeg_file("/etc/nsswitch.conf", original, sizeof(original));
+    char* line = ok ? strstr(original, "\ngroup:") : NULL;
+    char* end = line ? strchr(line + 1, '\n') : NULL;
+    ok = ok && line && end;
+    if (ok)
+    {
+        size_t before = (size_t)(line + 1 - original);
+        int size = snprintf(changed, sizeof(changed), "%.*sgroup: files [SUCCESS=merge] systemd%s",
+                            (int)before, original, end);
+        ok = size > 0 && (size_t)size < sizeof(changed) &&
+             bqeg_write_text("/etc/nsswitch.conf", changed, 0644);
+    }
+    return ok;
+}
+
+static bool bqeg_nscd_socket(void)
+{
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
+    static char const path[] = "/run/nscd/socket";
+    bool ok = mkdir("/run/nscd", 0755) == 0;
+    bqeg_nscd = ok ? socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0) : -1;
+    memcpy(address.sun_path, path, sizeof(path));
+    ok = ok && bqeg_nscd >= 0 &&
+         bind(bqeg_nscd, (struct sockaddr*)&address,
+              offsetof(struct sockaddr_un, sun_path) + sizeof(path)) == 0 &&
+         listen(bqeg_nscd, 1) == 0;
+    return ok;
+}
+
 static bool bqeg_mutate(BqEgMutation kind, char const* log)
 {
     bool ok = true;
@@ -394,6 +469,8 @@ static bool bqeg_mutate(BqEgMutation kind, char const* log)
         char* const command[] = {"/usr/sbin/groupmod", "-g", "65005", "buster-github-runner", NULL};
         ok = bqeg_command(command, log, 10) == 0;
     }
+    if (kind == BQEG_NSSWITCH_MERGE) ok = bqeg_nsswitch_merge();
+    if (kind == BQEG_NSCD_SOCKET) ok = bqeg_nscd_socket();
     if (kind == BQEG_BROKER_MODE) ok = chmod(BQEG_BROKER, 0775) == 0;
     if (kind == BQEG_BROKER_ELF || kind == BQEG_BROKER_STACK)
         ok = bqeg_patch_broker(kind == BQEG_BROKER_STACK);
@@ -416,6 +493,18 @@ static bool bqeg_restore(BqEgMutation kind, char const* log)
         char* const command[] = {"/usr/sbin/groupmod", "-g", "65002", "buster-github-runner", NULL};
         ok = bqeg_command(command, log, 10) == 0;
     }
+    if (kind == BQEG_NSSWITCH_MERGE)
+    {
+        char original[8192];
+        ok = bqeg_file(BQEG_ROOT "/nsswitch-held", original, sizeof(original)) &&
+             bqeg_write_text("/etc/nsswitch.conf", original, 0644);
+    }
+    if (kind == BQEG_NSCD_SOCKET)
+    {
+        if (bqeg_nscd >= 0) close(bqeg_nscd);
+        bqeg_nscd = -1;
+        ok = unlink("/run/nscd/socket") == 0 && rmdir("/run/nscd") == 0;
+    }
     if (kind == BQEG_BROKER_MODE || kind == BQEG_BROKER_ELF || kind == BQEG_BROKER_STACK)
         ok = bqeg_replace_broker() && ok;
     return ok;
@@ -436,19 +525,22 @@ static bool bqeg_marker(BqEgMarker* marker)
 static bool bqeg_positive(char const* journal, char const* reply, char const* show, char const* unit)
 {
     BqEgMarker marker = {0};
-    char const* pass = strstr(journal, "MESSAGE=BQ-BROKER-ENTRY-V1 PASS ");
-    char const* begin = strstr(journal, "MESSAGE=BQ-ENTRY-SYNTHETIC-BEGIN-V1 ");
-    long pid = 0, begin_pid = 0;
+    char const* pass = strstr(journal, "BQ-BROKER-ENTRY-V1 PASS ");
+    char const* begin = strstr(journal, "BQ-ENTRY-SYNTHETIC-BEGIN-V1 ");
+    char const* snapshot = strstr(journal, "BQ-ENTRY-SYNTHETIC-SNAPSHOT-V1 ");
+    long pid = 0, begin_pid = 0, snapshot_pid = 0;
     unsigned long long ticks = 0, begin_ticks = 0, device = 0, inode = 0;
-    bool ok = bqeg_marker(&marker) && pass && begin &&
-        strstr(journal, "MESSAGE=BQ-BROKER-ENTRY-V1 PASS ") == pass &&
-        strstr(pass + 1, "MESSAGE=BQ-BROKER-ENTRY-V1 PASS ") == NULL &&
-        strstr(begin + 1, "MESSAGE=BQ-ENTRY-SYNTHETIC-BEGIN-V1 ") == NULL &&
-        pass < begin && !strcmp(reply, "BQ-ENTRY-SYNTHETIC-OK\n") &&
-        sscanf(pass, "MESSAGE=BQ-BROKER-ENTRY-V1 PASS boot=%*36s pid=%ld ticks=%llu", &pid, &ticks) == 2 &&
-        sscanf(begin, "MESSAGE=BQ-ENTRY-SYNTHETIC-BEGIN-V1 pid=%ld ticks=%llu fd0=%llu:%llu",
-               &begin_pid, &begin_ticks, &device, &inode) == 4 &&
-        pid == begin_pid && ticks == begin_ticks && pid == marker.pid && ticks == marker.ticks &&
+    bool ok = bqeg_marker(&marker) && pass && begin && snapshot &&
+        strstr(pass + 1, "BQ-BROKER-ENTRY-V1 PASS ") == NULL &&
+        strstr(begin + 1, "BQ-ENTRY-SYNTHETIC-BEGIN-V1 ") == NULL &&
+        strstr(snapshot + 1, "BQ-ENTRY-SYNTHETIC-SNAPSHOT-V1 ") == NULL &&
+        pass < begin && begin < snapshot && !strcmp(reply, "BQ-ENTRY-SYNTHETIC-OK\n") &&
+        sscanf(pass, "BQ-BROKER-ENTRY-V1 PASS boot=%*36s pid=%ld ticks=%llu", &pid, &ticks) == 2 &&
+        sscanf(begin, "BQ-ENTRY-SYNTHETIC-BEGIN-V1 pid=%ld", &begin_pid) == 1 &&
+        sscanf(snapshot, "BQ-ENTRY-SYNTHETIC-SNAPSHOT-V1 pid=%ld ticks=%llu fd0=%llu:%llu",
+               &snapshot_pid, &begin_ticks, &device, &inode) == 4 &&
+        pid == begin_pid && pid == snapshot_pid && ticks == begin_ticks &&
+        pid == marker.pid && ticks == marker.ticks &&
         device == marker.socket_device &&
         inode == marker.socket_inode && marker.type == SOCK_SEQPACKET && marker.cloexec == 0 &&
         marker.nnp == 1 && marker.seccomp == 2 && marker.environment_count == 3 &&
@@ -468,20 +560,26 @@ static bool bqeg_positive(char const* journal, char const* reply, char const* sh
         ok = !marker.cap_effective[i] && !marker.cap_permitted[i] && !marker.cap_inheritable[i];
     if (ok)
     {
-        char socket_text[80], invocation_text[96], cgroup_text[192], pid_text[64];
+        char socket_text[80], invocation_text[96], cgroup_text[512], pid_text[64];
         snprintf(socket_text, sizeof(socket_text), "socket=%llu:%llu ", device, inode);
-        snprintf(cgroup_text, sizeof(cgroup_text), "cgroup=/system.slice/%s ", unit);
         snprintf(pid_text, sizeof(pid_text), "ExecMainPID=%ld\n", pid);
         char const* invocation = strstr(show, "InvocationID=");
+        char const* cgroup = strstr(pass, " cgroup=");
+        char const* cgroup_end = cgroup ? strchr(cgroup + 8, ' ') : NULL;
         ok = invocation && strlen(unit) < 128 &&
             strlen(invocation) > strlen("InvocationID=") + 32 &&
-            invocation[sizeof("InvocationID=") - 1 + 32] == '\n';
+            invocation[sizeof("InvocationID=") - 1 + 32] == '\n' &&
+            cgroup_end && cgroup_end - (cgroup + 8) > (ptrdiff_t)strlen(unit) &&
+            cgroup_end - (cgroup + 8) < 480;
         if (ok)
         {
             snprintf(invocation_text, sizeof(invocation_text), "invocation=%.*s cgroup=", 32,
                      invocation + sizeof("InvocationID=") - 1);
+            snprintf(cgroup_text, sizeof(cgroup_text), "ControlGroup=%.*s\n",
+                     (int)(cgroup_end - (cgroup + 8)), cgroup + 8);
             ok = strstr(pass, socket_text) != NULL && strstr(pass, invocation_text) != NULL &&
-                strstr(pass, cgroup_text) != NULL && strstr(show, pid_text) != NULL;
+                strstr(show, cgroup_text) != NULL && strstr(show, pid_text) != NULL &&
+                !memcmp(cgroup_end - strlen(unit), unit, strlen(unit));
         }
     }
     printf("BQEG_POSITIVE pid=%ld ticks=%llu fd0=%llu:%llu match=%d synthetic=1\n",
@@ -529,15 +627,18 @@ static bool bqeg_connect(char reply[128])
 static bool bqeg_case(BqEgMutation kind)
 {
     char prefix[160], command_log[200], cursor_log[200], journal_log[200],
-         units_log[200], show_log[200], cleanup_log[200];
+         journal_export_log[200], units_log[200], show_log[200], cleanup_log[200];
     snprintf(prefix, sizeof(prefix), BQEG_ROOT "/%02d-%s", kind, bqeg_names[kind]);
     snprintf(command_log, sizeof(command_log), "%s-mutation.log", prefix);
     snprintf(cursor_log, sizeof(cursor_log), "%s-cursor.txt", prefix);
-    snprintf(journal_log, sizeof(journal_log), "%s-journal.export", prefix);
+    snprintf(journal_log, sizeof(journal_log), "%s-journal.cat", prefix);
+    snprintf(journal_export_log, sizeof(journal_export_log), "%s-journal.export", prefix);
     snprintf(units_log, sizeof(units_log), "%s-units.txt", prefix);
     snprintf(show_log, sizeof(show_log), "%s-show.txt", prefix);
     snprintf(cleanup_log, sizeof(cleanup_log), "%s-cleanup.txt", prefix);
     unlink(BQEG_ROOT "/marker");
+    unlink(BQEG_ROOT "/entered");
+    unlink(BQEG_ROOT "/probe");
     char* const reload[] = {"/usr/bin/systemctl", "daemon-reload", NULL};
     char* const start[] = {"/usr/bin/systemctl", "start", BQEG_SOCKET_UNIT, NULL};
     char* const stop[] = {"/usr/bin/systemctl", "stop", BQEG_SOCKET_UNIT, NULL};
@@ -571,23 +672,42 @@ static bool bqeg_case(BqEgMutation kind)
     }
     char after[300];
     snprintf(after, sizeof(after), "--after-cursor=%s", cursor);
-    char* const journal[] = {"/usr/bin/journalctl", "--no-pager", "-o", "export", after, NULL};
+    char* const journal[] = {"/usr/bin/journalctl", "--no-pager", "-o", "cat", after, NULL};
+    char* const export[] = {"/usr/bin/journalctl", "--no-pager", "-o", "export", after, NULL};
     if (ok) ok = bqeg_command(sync, command_log, 10) == 0 &&
-                 bqeg_command(journal, journal_log, 10) == 0;
+                 bqeg_command(journal, journal_log, 10) == 0 &&
+                 bqeg_command(export, journal_export_log, 10) == 0;
     char record[131072] = {0}, show[65536] = {0};
     if (ok) ok = bqeg_file(journal_log, record, sizeof(record)) && bqeg_file(show_log, show, sizeof(show));
-    bool pass = strstr(record, "MESSAGE=BQ-BROKER-ENTRY-V1 PASS ") != NULL;
-    bool begin = strstr(record, "MESSAGE=BQ-ENTRY-SYNTHETIC-BEGIN-V1 ") != NULL;
+    bool pass = strstr(record, "BQ-BROKER-ENTRY-V1 PASS ") != NULL;
+    bool begin = strstr(record, "BQ-ENTRY-SYNTHETIC-BEGIN-V1 ") != NULL;
     struct stat marker = {0};
     errno = 0;
     bool no_marker = lstat(BQEG_ROOT "/marker", &marker) < 0 && errno == ENOENT;
+    errno = 0;
+    bool no_entered = lstat(BQEG_ROOT "/entered", &marker) < 0 && errno == ENOENT;
+    if (ok && (kind == BQEG_NNP_OFF || kind == BQEG_SECCOMP_OFF))
+    {
+        BqEgProbe probe = {0};
+        struct stat info = {0};
+        int fd = open(BQEG_ROOT "/probe", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        ok = fd >= 0 && fstat(fd, &info) == 0 && S_ISREG(info.st_mode) &&
+            info.st_uid == 0 && info.st_size == sizeof(probe) &&
+            read(fd, &probe, sizeof(probe)) == sizeof(probe) && probe.magic == 0x42454750u;
+        if (fd >= 0) close(fd);
+        ok = ok && (kind == BQEG_NNP_OFF ? probe.nnp == 0 && probe.seccomp == 2 :
+                   probe.nnp == 1 && probe.seccomp == 0);
+        printf("BQEG_PROBE name=%s nnp=%d seccomp=%d target=%d\n",
+               bqeg_names[kind], probe.nnp, probe.seccomp, ok);
+    }
     if (ok && kind == BQEG_POSITIVE)
-        ok = bqeg_positive(record, reply, show, unit) && strstr(show, "ExecMainStatus=0\n") != NULL;
+        ok = !no_entered && bqeg_positive(record, reply, show, unit) &&
+             strstr(show, "ExecMainStatus=0\n") != NULL;
     else if (ok)
-        ok = !pass && !begin && no_marker && !reply[0] &&
+        ok = !pass && !begin && no_marker && no_entered && !reply[0] &&
              strstr(show, "ExecMainStatus=126\n") != NULL;
-    printf("BQEG_CASE name=%s unit=%s pass=%d synthetic_begin=%d marker=%d status=%s\n",
-           bqeg_names[kind], unit, pass, begin, !no_marker, ok ? "pass" : "fail");
+    printf("BQEG_CASE name=%s unit=%s pass=%d synthetic_begin=%d entered=%d marker=%d status=%s\n",
+           bqeg_names[kind], unit, pass, begin, !no_entered, !no_marker, ok ? "pass" : "fail");
     fflush(stdout);
     bool clean = bqeg_command(stop, cleanup_log, 10) == 0;
     if (unit[0])
@@ -618,6 +738,9 @@ static bool bqeg_run(void)
         !strcmp(opt, BQEG_ENV_TEXT) && roles && bqeg_copy_matches() &&
         mkdir(BQEG_ROOT, 0700) == 0 &&
         bqeg_write_text(BQ_ENTRY_ACCOUNTS, bqeg_receipt, 0444);
+    char nsswitch[8192];
+    if (ok) ok = bqeg_file("/etc/nsswitch.conf", nsswitch, sizeof(nsswitch)) &&
+                 bqeg_write_text(BQEG_ROOT "/nsswitch-held", nsswitch, 0600);
     int attempted = 0;
     for (int index = 0; ok && index < BQEG_CASES; index += 1)
     {
@@ -635,6 +758,7 @@ int main(int argc, char** argv)
     if (argc == 2 && !strcmp(argv[1], "--run")) result = bqeg_run() ? 0 : 1;
     else if (argc == 2 && !strcmp(argv[1], "serve-connection")) result = bqeg_fixture() ? 0 : 1;
     else if (argc == 3 && !strcmp(argv[1], "bridge")) result = bqeg_bridge(argv[2]);
+    else if (argc == 2 && !strcmp(argv[1], "probe")) result = bqeg_probe() ? 0 : 1;
     if (result == 77) fprintf(stderr, "BQEG_ISOLATION_REFUSAL: exact disposable guest and argv required\n");
     return result;
 }
