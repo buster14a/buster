@@ -61,7 +61,9 @@ existing issue if one tracks it. Group symptoms with the same root cause in one
 record and separate independent problems. Report a blocker on its owning issue
 or PR as soon as it changes the next action. Do not open a new issue for every
 flaky retry or known duplicate. When access prevents publication, preserve a
-ready-to-post body and explicitly identify the unposted report in the handoff. Write the body as a **prompt**: what
+ready-to-post body and explicitly identify the unposted report in the handoff.
+
+Write the body as a **prompt**: what
 is wrong and how it was diagnosed, the file and symbol names to start from,
 the constraints and do-not-retries that earlier work already paid for, how to
 validate the fix (which oracle, which harness, which counters), and a
