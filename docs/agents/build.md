@@ -81,7 +81,9 @@ twice to prove both cold publication and warm reuse. This check does not select
 the dedicated benchmark runner or require privileged installation.
 The same hosted check runs native service tests, their ASan/UBSan variant, and
 the fixed smoke recipe self-test through this TCC-built driver. These use
-temporary fixtures and do not provision or qualify the benchmark host.
+temporary fixtures and do not provision or qualify the benchmark host. It also
+runs the [source-size report and change ratchet](../source-size.md) on the
+validated merge revision against its first parent.
 
 On Linux, distribution TCC 0.9.27 can reject inferred-size arrays containing
 compound literals in shared `string.c`/`os.c` before the driver runs. TinyCC
@@ -118,8 +120,12 @@ Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `benc
 `native_retirement_census`,
 `x86_64_completion_census`,
 `test_all_combinations`,
-`test_all_combinations_ci`, `test_uefi`; `self_host_from_existing` is an internal
+`test_all_combinations_ci`, `test_uefi`, `source_size`; `self_host_from_existing` is an internal
 build-driver worker command used only by the pooled artifact-fanout target.
+
+`source_size` reports the tracked bytes of a revision by category and enforces
+the per-change ratchet on hand-maintained production and build code; see
+[source-size policy](../source-size.md).
 
 `native_retirement_census` freezes the tracked C regression inputs and the full
 native target/allocator/frontend/PIC object matrix before running any selected
