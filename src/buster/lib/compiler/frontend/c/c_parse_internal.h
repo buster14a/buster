@@ -19,6 +19,8 @@ BUSTER_F_DECL void c_test_aggregate_lookup_rollback(CParseResult* result, CParse
 BUSTER_F_DECL u64 c_test_type_parse_frame_bytes(void);
 // Whether nested frames' rollback snapshots stay independent; see c_parse.c.
 BUSTER_F_DECL bool c_test_type_parse_snapshot_rows_restore(Arena* arena, u32 depth);
+// Promoted-member searches on this thread, and how many needed a per-type table.
+BUSTER_F_DECL void c_test_member_search_counts(u64* searches, u64* tables);
 BUSTER_F_DECL bool c_test_parse_direct_expression_type(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                      u32 start, u32 end, CTypeId* type_out);
 // A single file-scope expression-type query, reported field by field; see
