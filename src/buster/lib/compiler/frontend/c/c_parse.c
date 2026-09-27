@@ -4225,6 +4225,49 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
     c_type_parse_frame_complete(machine, last, end, true);
 }
 
+// A lone numeric or character literal is typed by
+// c_parse_expression_leaf_without_cast however its query is asked: the SIZEOF
+// frame c_parse_expression_type_query would push hands a one-token task
+// straight to that leaf ("A single token cannot contain a cast or an
+// operator"), after consulting the same per-body cache the frame's task
+// lookup reads. This answers such a query exactly as that frame would, and
+// leaves the machine exactly as the frame's completion and the root finish
+// would -- without the result checkpoint, the frame row, the task reservation
+// and the rollback hand-off. Neither leaf appends, mutates or diagnoses
+// anything on failure, so the rollback the machine path performs there has
+// nothing to restore. Callers route here only when the frame could have been
+// pushed and its tasks reserved, so the machine's capacity failures keep their
+// one owner.
+#if BUSTER_INCLUDE_TESTS
+// Test oracle: route every literal query through the machine, so a test can
+// compare both answers and the machine state each leaves on the same input.
+BUSTER_GLOBAL_LOCAL bool c_parse_literal_query_machine_only;
+#endif
+
+BUSTER_C_INTERNAL bool c_parse_expression_literal_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                          CScopeId scope, u32 start, u32 end, u32 flags, CTypeId* type_out)
+{
+    CParseExpressionQuery* query = !machine->enum_constant_members_active && machine->expression_queries &&
+        machine->expression_query_result == result && machine->expression_query_tokens == preprocess.tokens &&
+        start >= machine->expression_query_start && end <= machine->expression_query_end
+            ? machine->expression_queries + start - machine->expression_query_start : 0;
+    machine->mutation_type_limit = result->type_count;
+    CTypeId type = query && query->end == end && query->scope.value == scope.value &&
+                           (query->flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) == (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
+                           (query->flags & flags) == flags && query->type.value < result->type_count
+                       ? query->type
+                       : c_parse_expression_leaf_without_cast(arena, preprocess, result, scope, start, end);
+    bool valid = type.value < result->type_count;
+    machine->result_type = valid ? type : C_TYPE_ID_INVALID;
+    machine->result_index = valid ? end : start;
+    machine->result_valid = valid;
+    if (valid)
+    {
+        *type_out = type;
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                        CScopeId scope, u32 start, u32 end, CTypeId* type_out)
 {
@@ -4237,12 +4280,29 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
         (machine->runtime_expression_constraints ? C_PARSE_EXPRESSION_QUERY_RUNTIME : 0u) |
         (machine->semantic_constant_queries ? C_PARSE_EXPRESSION_QUERY_CONSTANT : 0u);
     bool valid;
+    // The frame push and the one-token task reservation the machine path makes
+    // first, so a query that would fail there still fails there.
+    bool literal = end == start + 1 && start < preprocess.token_count &&
+                   (preprocess.tokens[start].kind == C_TOKEN_PREPROCESSING_NUMBER ||
+                    preprocess.tokens[start].kind == C_TOKEN_CHARACTER_LITERAL) &&
+                   !machine->failed && machine->frame_count < machine->frame_capacity &&
+                   machine->expression_task_count <= machine->expression_task_capacity &&
+                   machine->expression_task_capacity - machine->expression_task_count >= 2;
+#if BUSTER_INCLUDE_TESTS
+    literal &= !c_parse_literal_query_machine_only;
+#endif
     if (query && query->end == end && query->scope.value == scope.value &&
         (query->flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) == (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
         (query->flags & flags) == flags && query->type.value < result->type_count)
     {
         *type_out = query->type;
         valid = true;
+    }
+    else if (literal)
+    {
+        valid = c_parse_expression_literal_query(machine, arena, preprocess, result, scope, start, end, flags, type_out);
+        if (query && valid && !machine->expression_constraint.length)
+            *query = (CParseExpressionQuery){.end = end, .scope = scope, .type = *type_out, .flags = flags};
     }
     else
     {
@@ -4275,6 +4335,88 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
     }
     return valid;
 }
+
+#if BUSTER_INCLUDE_TESTS
+void c_test_set_literal_query_machine_only(bool machine_only)
+{
+    c_parse_literal_query_machine_only = machine_only;
+}
+
+// One file-scope expression query on a private machine: `nested` runs it under
+// an outer frame the way a query made from inside a machine step runs, and a
+// valid `cached` seeds the per-body cache slot the query and the frame's task
+// both consult. The state after the query is reported field by field.
+CTestExpressionQuery c_test_expression_type_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, u32 start, u32 end,
+                                                  bool checked, bool nested, CTypeId cached, bool scalars, bool machine_only)
+{
+    CTestExpressionQuery report = {0};
+    // `scalars` publishes the immutable scalar query types first, as semantic
+    // validation does; without it every scalar answer appends a type row.
+    CTypeId scalar_types[C_TYPE_COUNT];
+    memset(scalar_types, 0xff, sizeof(scalar_types));
+    CTypeId* previous_scalars = result->expression_scalar_types;
+    result->expression_scalar_types = scalars ? scalar_types : 0;
+    for (u32 kind = C_TYPE_VOID; scalars && kind <= C_TYPE_NULLPTR; kind += 1)
+    {
+        if (kind != C_TYPE_VA_LIST) c_parse_expression_scalar_type(result, (CTypeKind)kind);
+    }
+    u32 capacity = end - start + 64;
+    CTypeParseMachine machine = {
+        .frames = arena_allocate(scratch, CTypeParseFrame, capacity),
+        .mutations = arena_allocate(scratch, CTypeMutation, capacity),
+        .expression_tasks = arena_allocate(scratch, CParseExpressionTypeTask, capacity),
+        .scratch_arena = scratch,
+        .layout_cache = {.tokens = preprocess.tokens},
+        .frame_capacity = capacity,
+        .mutation_capacity = capacity,
+        .expression_task_capacity = capacity,
+        .validate_expression_constraints = checked,
+    };
+    if (cached.value != C_ID_UNDERLYING_INVALID)
+    {
+        machine.expression_queries = arena_allocate_zeroed(scratch, CParseExpressionQuery, end - start);
+        machine.expression_query_result = result;
+        machine.expression_query_tokens = preprocess.tokens;
+        machine.expression_query_start = start;
+        machine.expression_query_end = end;
+        machine.expression_queries[0] = (CParseExpressionQuery){
+            .end = end, .type = cached, .flags = C_PARSE_EXPRESSION_QUERY_VALID | C_PARSE_EXPRESSION_QUERY_CHECKED};
+    }
+    if (nested)
+    {
+        machine.frames[0] = (CTypeParseFrame){.kind = C_TYPE_PARSE_FRAME_SCALAR};
+        machine.frame_count = 1;
+    }
+    u32 type_count = result->type_count;
+    u32 diagnostic_count = result->diagnostic_count;
+    u64 position = scratch->position;
+    bool previous = c_parse_literal_query_machine_only;
+    c_parse_literal_query_machine_only = machine_only;
+    report.type = C_TYPE_ID_INVALID;
+    report.valid = c_parse_expression_type_query(&machine, scratch, preprocess, result, (CScopeId){.value = 0}, start, end, &report.type);
+    c_parse_literal_query_machine_only = previous;
+    report.kind = report.type.value < result->type_count ? result->types[report.type.value].kind : C_TYPE_INVALID;
+    result->expression_scalar_types = previous_scalars;
+    report.type_count_delta = result->type_count - type_count;
+    report.diagnostic_delta = result->diagnostic_count - diagnostic_count;
+    report.result_type = machine.result_type;
+    report.result_index = machine.result_index;
+    report.result_valid = machine.result_valid;
+    report.failed = machine.failed;
+    report.frame_count = machine.frame_count;
+    report.mutation_count = machine.mutation_count;
+    report.mutation_type_limit = machine.mutation_type_limit;
+    report.expression_task_count = machine.expression_task_count;
+    report.scratch_delta = scratch->position - position;
+    if (machine.expression_queries)
+    {
+        report.published_end = machine.expression_queries[0].end;
+        report.published_type = machine.expression_queries[0].type;
+        report.published_flags = machine.expression_queries[0].flags;
+    }
+    return report;
+}
+#endif
 
 // Resolve one generic selection for typed semantic constant evaluation. Return
 // only the selected association's token range; no unselected association value
