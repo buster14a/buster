@@ -751,7 +751,7 @@ bool os_is_only_live_thread(void)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void thread_entry_point(ThreadCallback* user_entry_point, void* user_argument)
+BUSTER_GLOBAL_LOCAL void thread_entry_point(ThreadCallback* user_entry_point, void* user_argument, bool observer)
 {
     ThreadContext* thread_context = thread_context_allocate();
     thread_context_select(thread_context);
@@ -766,21 +766,24 @@ BUSTER_GLOBAL_LOCAL void thread_entry_point(ThreadCallback* user_entry_point, vo
 #endif
     // Last, so the count covers every instant this thread could still have
     // touched a shared global. os_thread_join returns after this store.
-    atomic_u64_decrement(&os_live_thread_count);
+    if (!observer)
+    {
+        atomic_u64_decrement(&os_live_thread_count);
+    }
 }
 
 #if defined(__linux__) || defined(__APPLE__)
 BUSTER_GLOBAL_LOCAL void* pthread_entry_point(void* argument)
 {
     OsEntity* entity = (OsEntity*)argument;
-    thread_entry_point(entity->thread.callback, entity->thread.argument);
+    thread_entry_point(entity->thread.callback, entity->thread.argument, entity->thread.observer);
     return (void*)0;
 }
 #elif defined(_WIN32)
 BUSTER_GLOBAL_LOCAL DWORD WINAPI windows_thread_entry_point(LPVOID argument)
 {
     OsEntity* entity = (OsEntity*)argument;
-    thread_entry_point(entity->thread.callback, entity->thread.argument);
+    thread_entry_point(entity->thread.callback, entity->thread.argument, entity->thread.observer);
     return 0;
 }
 #endif
@@ -797,15 +800,17 @@ OsThreadHandle* os_thread_create(ThreadCreateOptions options)
         result = os_entity_allocate(OS_ENTITY_KIND_THREAD);
         result->thread.callback = options.callback;
         result->thread.argument = options.argument;
+        result->thread.observer = options.observer;
         // Counted before the thread exists rather than from inside it, so no
         // window has the new thread running while the process still looks serial.
-        atomic_u64_increment(&os_live_thread_count);
+        u64 counted = options.observer ? 0 : 1;
+        atomic_u64_add(&os_live_thread_count, counted);
 #if defined(__linux__) || defined(__APPLE__)
         int create_result = pthread_create(&result->thread.handle, 0, &pthread_entry_point, result);
         bool os_result = create_result == 0;
         if (!os_result)
         {
-            atomic_u64_decrement(&os_live_thread_count);
+            atomic_u64_add(&os_live_thread_count, 0 - counted);
             os_entity_release(result);
             result = 0;
         }
@@ -817,7 +822,7 @@ OsThreadHandle* os_thread_create(ThreadCreateOptions options)
         }
         else
         {
-            atomic_u64_decrement(&os_live_thread_count);
+            atomic_u64_add(&os_live_thread_count, 0 - counted);
             os_entity_release(result);
             result = 0;
         }
@@ -1073,6 +1078,34 @@ u64 atomic_u64_decrement(AtomicU64* address)
     // to anyway; there is no separate fetch_sub to reach for on MSVC.
     u64 result = atomic_u64_add(address, ~(u64)0);
     return result;
+}
+
+u64 atomic_u64_load(AtomicU64* address)
+{
+    u64 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+#elif BUSTER_COMPILER_MSVC
+    result = (u64)_InterlockedCompareExchange64((volatile long long*)address, 0, 0);
+#elif defined(__clang__)
+    result = __c11_atomic_load(address, __ATOMIC_SEQ_CST);
+#else
+    result = __atomic_load_n(address, __ATOMIC_SEQ_CST);
+#endif
+    return result;
+}
+
+void atomic_u64_store(AtomicU64* address, u64 value)
+{
+#if BUSTER_SINGLE_THREADED
+    *address = value;
+#elif BUSTER_COMPILER_MSVC
+    _InterlockedExchange64((volatile long long*)address, (long long)value);
+#elif defined(__clang__)
+    __c11_atomic_store(address, value, __ATOMIC_SEQ_CST);
+#else
+    __atomic_store_n(address, value, __ATOMIC_SEQ_CST);
+#endif
 }
 
 String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_terminate)

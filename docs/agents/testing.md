@@ -31,6 +31,26 @@
   `if (BUSTER_REQUIRE(arguments, prerequisite))`. It records the prerequisite
   with normal assertion accounting, evaluates it once, and skips only the
   guarded body when it fails; unrelated fixtures and modules continue.
+- `ide test` does not wait forever on a fixture that never returns. Every
+  arena scope (a module's `body`, each `BUSTER_TEST_FIXTURE`, and inline
+  scopes) publishes itself to its runner's slot. An observer thread
+  (`test_deadline_watch` in `src/buster/tests/test.c`) fails the run when the
+  innermost open scope has run for `BUSTER_TEST_FIXTURE_TIMEOUT_SECONDS` since it
+  began or since its last nested scope ended, so a long module made of short
+  fixtures never trips it. The default is 1800 seconds, several times the slowest
+  recorded stretch: about 200 seconds for the fixture-less
+  `metamorphic_tests` in a sanitized Linux run, and 414 seconds for all of
+  `compiler_driver_tests` in a sanitized Debug Windows run. `0` disables it,
+  and a malformed value keeps the default. On expiry it
+  writes one `TEST_FIXTURE_TIMEOUT_V1 kind= module= fixture= index= elapsed_ms=
+  deadline_seconds= status=failed` row per stalled slot to stderr, then exits
+  with status 124 without running exit handlers. `--verbose=1` and `--ci=1` runs
+  also print `TEST_FIXTURE_DEADLINE_V1` once, then `TEST_FIXTURE_START_V1` as
+  each scope begins, so the last line of a hung or crashed serial run names its
+  fixture. Parallel lanes buffer their rows; their slots still name a hang.
+  Single-threaded builds print start rows but have no watchdog.
+  `test_deadline_tests` checks the reporting in-process, then runs a child
+  whose fixture never returns under a one-second override.
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.

@@ -2287,6 +2287,8 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, counter == 13);
         BUSTER_TEST(arguments, atomic_u64_decrement(&counter) == 13);
         BUSTER_TEST(arguments, counter == 12);
+        atomic_u64_store(&counter, 40);
+        BUSTER_TEST(arguments, atomic_u64_load(&counter) == 40);
     }
 
     // os_is_only_live_thread() is what BUSTER_CHECK_SERIAL_INITIALIZATION
@@ -2313,6 +2315,27 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, os_thread_join(thread));
             BUSTER_TEST(arguments, os_is_only_live_thread());
             BUSTER_TEST(arguments, liveness.worker_saw_only_live_thread == 0);
+        }
+
+        // An observer (the test-deadline watchdog) is outside the count at
+        // both edges: the process still reads as serial while it runs.
+        OsTestThreadLivenessState observed = {0};
+        OsThreadHandle* observer = os_thread_create((ThreadCreateOptions){
+            .callback = &os_test_thread_liveness,
+            .argument = &observed,
+            .observer = true,
+        });
+        BUSTER_TEST(arguments, observer != 0);
+        if (observer)
+        {
+            while (!observed.started)
+            {
+            }
+            BUSTER_TEST(arguments, os_is_only_live_thread());
+            atomic_u64_increment(&observed.release);
+            BUSTER_TEST(arguments, os_thread_join(observer));
+            BUSTER_TEST(arguments, os_is_only_live_thread());
+            BUSTER_TEST(arguments, observed.worker_saw_only_live_thread == 1);
         }
 #endif
     }

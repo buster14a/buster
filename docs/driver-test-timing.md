@@ -81,7 +81,9 @@ nested scope work and nested reporting; do not sum nested intervals or infer CPU
 cost. Module-scope intervals have slightly different boundaries from the existing
 `TEST_MODULE_TIMING` rows and must not replace that series. `status=completed`
 means only that the scope ended, **not** that assertions passed. A crash/timeout
-may have no ending row. Existing assertion/failure totals and process outcomes
+may have no ending row; the `TEST_FIXTURE_START_V1` row that verbose and CI runs
+print as each scope begins, and the fixture-deadline `TEST_FIXTURE_TIMEOUT_V1`
+row, name it instead (see [tests and CI](agents/testing.md)). Existing assertion/failure totals and process outcomes
 remain authoritative.
 
 ## Reading a capture and remaining acceptance work

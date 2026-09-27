@@ -58,6 +58,9 @@ struct BatchTestResult
 
 typedef struct UnitTestArguments UnitTestArguments;
 typedef void ShowCallback(UnitTestArguments*, String8, ...);
+#if BUSTER_INCLUDE_TESTS
+typedef struct TestDeadlineSlot TestDeadlineSlot;
+#endif
 struct UnitTestArguments
 {
     Arena* arena;
@@ -70,9 +73,14 @@ struct UnitTestArguments
     String8 memory_top_peak_fixture;
     u64 memory_top_retained_bytes;
     u64 memory_top_peak_bytes;
+    // The runner's fixture-deadline slot (test.c), or null when unwatched.
+    // Every scope of one slot opens and closes on one thread.
+    TestDeadlineSlot* deadline_slot;
     bool memory_report;
     bool fixture_timing_report;
-    u8 reserved[6];
+    // Emit TEST_FIXTURE_START_V1 through show as each scope begins.
+    bool fixture_start_report;
+    u8 reserved[5];
 #endif
 };
 
@@ -103,6 +111,11 @@ struct TestArenaScope
     String8 name;
     u64 index;
     TimeDataType start;
+    // The enclosing scope this one replaced in the deadline slot; ending this
+    // scope republishes it with a fresh clock.
+    String8 deadline_parent_name;
+    u64 deadline_parent_index;
+    u64 deadline_parent_kind;
     bool module;
     bool timing;
     u8 reserved[6];

@@ -117,6 +117,11 @@ struct ThreadCreateOptions
 {
     ThreadCallback* callback;
     void* argument;
+    // An observer reads only atomics that other threads publish and never a
+    // table built on first use, so os_is_only_live_thread() leaves it out: a
+    // watchdog must not turn legitimate serial initialization into a failure.
+    bool observer;
+    u8 reserved[7];
 };
 
 typedef
@@ -413,6 +418,7 @@ BUSTER_F_DECL OsThreadHandle* os_thread_create(ThreadCreateOptions options);
 BUSTER_F_DECL bool os_thread_join(OsThreadHandle* handle);
 // True while every thread this process started through os_thread_create has
 // been joined, so the caller is the only one that can be touching a global.
+// Observer threads (ThreadCreateOptions.observer) are not counted.
 BUSTER_F_DECL bool os_is_only_live_thread(void);
 BUSTER_F_DECL OsMutexHandle* os_mutex_create(void);
 BUSTER_F_DECL void os_mutex_lock(OsMutexHandle* handle);
@@ -468,6 +474,9 @@ BUSTER_F_DECL bool process_control_atomic_set_if_zero(ProcessControlAtomic* addr
 BUSTER_F_DECL u64 atomic_u64_increment(AtomicU64* address);
 BUSTER_F_DECL u64 atomic_u64_decrement(AtomicU64* address);
 BUSTER_F_DECL u64 atomic_u64_add(AtomicU64* address, u64 addend);
+// Sequentially consistent, including on MSVC where AtomicU64 is a plain u64.
+BUSTER_F_DECL u64 atomic_u64_load(AtomicU64* address);
+BUSTER_F_DECL void atomic_u64_store(AtomicU64* address, u64 value);
 
 typedef enum ProgramFlag
 {
