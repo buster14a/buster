@@ -52,6 +52,52 @@ def stage_unit(job: int, attempt: int, stage: str) -> str:
     return f"buster-bench-{job}-{attempt}-{stage}.service"
 
 
+def stage_leaf_present(stage: str, identity: dict, deadline: float) -> bool:
+    """Readiness hint only; the full manager/process capture remains mandatory.
+
+    Querying a future unit with systemctl show can load a manager object that
+    is immediately collected. Avoid generating that traffic while polling.
+    Only absence of the exact leaf is pending; unreadable or changed ancestry
+    and unsafe leaf types are observation failures.
+    """
+    unit = stage_unit(identity["job"], identity["attempt"], stage)
+    probe._remaining(deadline)
+    present = False
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    with ExitStack() as handles:
+        root_fd = probe._open_dir_nofollow(probe.CGROUP_ROOT)
+        handles.callback(os.close, root_fd)
+        parent_fd = os.open("buster.slice", flags, dir_fd=root_fd)
+        handles.callback(os.close, parent_fd)
+        bench_fd = os.open("buster-bench.slice", flags, dir_fd=parent_fd)
+        handles.callback(os.close, bench_fd)
+        root, bench = os.fstat(root_fd), os.fstat(bench_fd)
+        require((root.st_dev, root.st_ino) ==
+                (identity["cgroup_root_device"], identity["cgroup_root_inode"]) and
+                (bench.st_dev, bench.st_ino) == (identity["slice_device"], identity["slice_inode"]),
+                "stage readiness cgroup ancestry changed")
+        try:
+            leaf = os.stat(unit, dir_fd=bench_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            require(stat.S_ISDIR(leaf.st_mode) and leaf.st_dev == bench.st_dev,
+                    "stage readiness leaf is not a same-filesystem directory")
+            present = True
+        # Keep the original descriptors open while reopening canonical paths;
+        # a replaced path must not turn into a harmless "not ready" result.
+        for path, expected in ((probe.CGROUP_ROOT, (root.st_dev, root.st_ino)),
+                               (probe.CGROUP_ROOT + "/buster.slice/buster-bench.slice",
+                                (bench.st_dev, bench.st_ino))):
+            check_fd = probe._open_dir_nofollow(path)
+            handles.callback(os.close, check_fd)
+            check_info = os.fstat(check_fd)
+            require((check_info.st_dev, check_info.st_ino) == expected,
+                    "stage readiness canonical cgroup ancestry changed")
+    probe._remaining(deadline)
+    return present
+
+
 def record_identity(job: int, request_sha: str, expected: dict | None = None,
                     output: Path | None = None, prefix: str = "") -> dict:
     worker, instance, identity = probe._open_records(job, request_sha, output, prefix)
@@ -375,6 +421,8 @@ def observe(job: int, request_sha: str, baseline: str, subject: str,
                 if stage in outcome["stages"] or stage in failed_stages:
                     continue
                 unit = stage_unit(job, identity["attempt"], stage)
+                if not stage_leaf_present(stage, identity, deadline):
+                    continue
                 props, raw = probe._systemd(unit, min(1.0, probe._remaining(deadline)))
                 require(len(raw) <= 128 * 1024, "systemd stage response exceeds bound")
                 if props.get("ActiveState") == "active" and props.get("MainPID", "0").isdecimal() and int(props["MainPID"]) > 0:
@@ -554,6 +602,57 @@ def self_test() -> None:
                     "instance_sha256": "e" * 64,
                     "cgroup_root_device": 1, "cgroup_root_inode": 2,
                     "slice_device": 3, "slice_inode": 4}
+        hint_root = tmp / "cgroup"
+        hint_slice = hint_root / "buster.slice" / "buster-bench.slice"
+        hint_slice.mkdir(parents=True)
+        hint_identity = {**identity,
+                         "cgroup_root_device": hint_root.stat().st_dev,
+                         "cgroup_root_inode": hint_root.stat().st_ino,
+                         "slice_device": hint_slice.stat().st_dev,
+                         "slice_inode": hint_slice.stat().st_ino}
+        hint_leaf = hint_slice / stage_unit(7, 4, "base-build")
+        with patch.object(probe, "CGROUP_ROOT", str(hint_root)):
+            assert not stage_leaf_present("base-build", hint_identity, time.monotonic() + 1)
+            checks += 1
+            hint_leaf.mkdir()
+            assert stage_leaf_present("base-build", hint_identity, time.monotonic() + 1)
+            checks += 1
+            for key in ("cgroup_root_device", "cgroup_root_inode", "slice_device", "slice_inode"):
+                reject(lambda: stage_leaf_present("base-build", {**hint_identity, key: -1},
+                                                   time.monotonic() + 1), "ancestry changed")
+            reject(lambda: stage_leaf_present("base-build", hint_identity, time.monotonic() - 1),
+                   "deadline exhausted")
+            hint_leaf.rmdir()
+            hint_leaf.write_text("not a cgroup")
+            reject(lambda: stage_leaf_present("base-build", hint_identity, time.monotonic() + 1),
+                   "not a same-filesystem directory")
+            hint_leaf.unlink()
+            hint_leaf.symlink_to(hint_slice, target_is_directory=True)
+            reject(lambda: stage_leaf_present("base-build", hint_identity, time.monotonic() + 1),
+                   "not a same-filesystem directory")
+            hint_leaf.unlink()
+            hint_slice.rename(hint_slice.with_name("saved-slice"))
+            reject(lambda: stage_leaf_present("base-build", hint_identity, time.monotonic() + 1),
+                   "No such file")
+            hint_slice.symlink_to(hint_slice.with_name("saved-slice"), target_is_directory=True)
+            reject(lambda: stage_leaf_present("base-build", hint_identity, time.monotonic() + 1),
+                   "Not a directory")
+            hint_slice.unlink()
+            hint_slice.with_name("saved-slice").rename(hint_slice)
+            hint_leaf.mkdir()
+            real_stat = os.stat
+            def replace_hint_slice(path, *args, **kwargs):
+                value = real_stat(path, *args, **kwargs)
+                if path == hint_leaf.name:
+                    hint_slice.rename(hint_slice.with_name("saved-slice"))
+                    hint_slice.mkdir()
+                return value
+            with patch.object(os, "stat", side_effect=replace_hint_slice):
+                reject(lambda: stage_leaf_present("base-build", hint_identity, time.monotonic() + 1),
+                       "canonical cgroup ancestry changed")
+            hint_slice.rmdir()
+            hint_slice.with_name("saved-slice").rename(hint_slice)
+            hint_leaf.rmdir()
         workspace = tmp / "workspaces"
         result = workspace / "results" / "job-7-attempt-4"
         result.mkdir(parents=True)
@@ -631,9 +730,22 @@ def self_test() -> None:
                 return {"InvocationID": identity["outer_invocation"], "ActiveState": "inactive"}, ""
             return {"ActiveState": "inactive", "LoadState": "not-found"}, ""
         with patch(__name__ + ".record_identity", return_value=identity), \
+             patch(__name__ + ".stage_leaf_present", return_value=True), \
              patch.object(probe, "_systemd", side_effect=departed), \
              patch(__name__ + ".read_stage_manifest", side_effect=FileNotFoundError):
             outcome = observe(7, request, "1" * 40, "2" * 40, 1, tmp / "departed-output")
+            assert "missing live stage" in " ".join(outcome["causes"])
+            checks += 1
+        (tmp / "no-loading-query-output").mkdir(mode=0o700)
+        with patch(__name__ + ".record_identity", return_value=hint_identity), \
+             patch.object(probe, "CGROUP_ROOT", str(hint_root)), \
+             patch.object(probe, "_systemd", side_effect=departed) as show_calls, \
+             patch(__name__ + ".capture_stage") as no_capture, \
+             patch(__name__ + ".read_stage_manifest", side_effect=FileNotFoundError):
+            outcome = observe(7, request, "1" * 40, "2" * 40, 1, tmp / "no-loading-query-output")
+            assert [call.args[0] for call in show_calls.call_args_list] == [identity["outer_unit"]]
+            assert not no_capture.called and not outcome["stages"]
+            assert outcome["verdict"] == "OBSERVATION_INCONCLUSIVE"
             assert "missing live stage" in " ".join(outcome["causes"])
             checks += 1
         (tmp / "positive-observe-output").mkdir(mode=0o700)
@@ -646,7 +758,10 @@ def self_test() -> None:
             return {"stage": stage, "boot_id": ident["boot_id"],
                     "complete_monotonic_us": 999, "node_count": 1,
                     "nodes": [{"path": ".", "mode": 0o550}]}
-        with patch(__name__ + ".record_identity", return_value=identity), \
+        for stage in STAGES:
+            (hint_slice / stage_unit(7, 4, stage)).mkdir()
+        with patch(__name__ + ".record_identity", return_value=hint_identity), \
+             patch.object(probe, "CGROUP_ROOT", str(hint_root)), \
              patch.object(probe, "_systemd", side_effect=active), \
              patch(__name__ + ".capture_stage", side_effect=captured), \
              patch(__name__ + ".read_stage_manifest", return_value={"manifest_sha256": digest}), \
@@ -657,11 +772,14 @@ def self_test() -> None:
             assert json.loads((tmp / "positive-observe-output" / "base-build-inventory.json").read_text())["nodes"]
             assert outcome["structural_capture_complete"] and outcome["inventory_before_throughput"]
             checks += 1
+        for stage in STAGES:
+            (hint_slice / stage_unit(7, 4, stage)).rmdir()
         def late_inventory(ident, stage, manifest, deadline, output):
             result = invented(ident, stage, manifest, deadline, output)
             result["complete_monotonic_us"] = 1001
             return result
         with patch(__name__ + ".record_identity", return_value=identity) as records, \
+             patch(__name__ + ".stage_leaf_present", return_value=True), \
              patch.object(probe, "_systemd", side_effect=active), \
              patch(__name__ + ".capture_stage", side_effect=captured), \
              patch(__name__ + ".read_stage_manifest", return_value={"manifest_sha256": digest}), \
@@ -674,6 +792,7 @@ def self_test() -> None:
             assert outcome["inventories"]["candidate-build"]["complete_monotonic_us"] == 1001
             checks += 1
         with patch(__name__ + ".record_identity", side_effect=[identity, probe.ProbeError("final identity changed")]), \
+             patch(__name__ + ".stage_leaf_present", return_value=True), \
              patch.object(probe, "_systemd", side_effect=active), \
              patch(__name__ + ".capture_stage", side_effect=captured), \
              patch(__name__ + ".read_stage_manifest", return_value={"manifest_sha256": digest}), \
