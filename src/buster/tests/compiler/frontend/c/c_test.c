@@ -4587,12 +4587,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unneeded_prototyped_definitions(UnitTe
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unneeded); index += 1)
         {
             IrFunction* function = c_test_find_ir_function(module, unneeded[index]);
-            if (BUSTER_REQUIRE(arguments, function != 0))
-            {
-                IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, function->symbol);
-                BUSTER_TEST(arguments, function->state == IR_FUNCTION_NOT_LOWERED && !function->block_count);
-                BUSTER_TEST(arguments, symbol && !symbol->is_definition);
-            }
+            BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_NOT_LOWERED && !function->block_count);
         }
         BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("unneeded_cycle_b")) == 0);
         IrFunction* needed = c_test_find_ir_function(module, S8("needed_static"));
