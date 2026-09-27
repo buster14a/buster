@@ -12,11 +12,24 @@
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/frontend/c/c_gen_internal.h>
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 #include <buster/lib/file.h>
 #include <buster/lib/hash.h>
 #include <buster/lib/integer.h>
 #include <buster/lib/simd.h>
 #include <buster/lib/string.h>
+
+// Diagnostic rows reserved before any diagnostic exists, by the stage that
+// reserves them (LEX, PREPROCESS, SEMANTIC, EVALUATION, LOWERING), for the
+// allocation diagnostic build's census; normal builds evaluate nothing.
+#define C_DIAGNOSTIC_RESERVATION_CENSUS(stage, rows)                                                 \
+    do                                                                                               \
+    {                                                                                                \
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTIC_RESERVATIONS, 1);                                   \
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTIC_ROWS_RESERVED, (rows));                             \
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTIC_BYTES_RESERVED, (u64)(rows) * sizeof(CDiagnostic)); \
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTIC_##stage##_ROWS, (rows));                            \
+    } while (0)
 
 #if BUSTER_SIMD_512 && !defined(__BUSTER__)
 #define BUSTER_C_LEX_COMPACT 1

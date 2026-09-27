@@ -49235,6 +49235,7 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* buil
         }
         tokens[token_count++] = c_space_retoken(&bound_space, preprocess.spelling_base, token);
     }
+    C_DIAGNOSTIC_RESERVATION_CENSUS(EVALUATION, bound.token_count + 1);
     CPreprocessResult evaluation = {
         .diagnostics = arena_allocate(arena, CDiagnostic, bound.token_count + 1),
         .target = preprocess.target,
@@ -49498,9 +49499,10 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     // The trailing two slots are the funnel's own and the
     // single report the array-type-name resolver makes for an array type name
     // that never reached the type table, and so has no bound record either.
-    result.diagnostics = arena_allocate(arena, CDiagnostic,
-                                        4 * parse.declaration_count + 2 * parse.entity_count + parse.deferred_static_assert_count + parse.type_count +
-                                            parse.array_bound_count + 2);
+    u64 lowering_diagnostic_capacity = 4 * parse.declaration_count + 2 * parse.entity_count + parse.deferred_static_assert_count + parse.type_count +
+                                       parse.array_bound_count + 2;
+    C_DIAGNOSTIC_RESERVATION_CENSUS(LOWERING, lowering_diagnostic_capacity);
+    result.diagnostics = arena_allocate(arena, CDiagnostic, lowering_diagnostic_capacity);
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
     u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
     *program = ir_program_initialize(arena, 1, (u32)type_capacity, (u32)symbol_capacity, source_capacity);

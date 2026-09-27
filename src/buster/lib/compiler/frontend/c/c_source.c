@@ -1128,6 +1128,7 @@ BUSTER_C_INTERNAL void c_token_push(CLexResult* result, CTranslatedSource transl
 BUSTER_C_INTERNAL void c_diagnostic_push(CLexResult* result, Arena* diagnostic_arena, u64* diagnostic_capacity, u64 maximum_diagnostic_count,
                                            u64 offset, CDiagnosticKind kind, String8 message)
 {
+    IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTICS_RECORDED, 1);
     BUSTER_VALIDATE(result->diagnostic_count < maximum_diagnostic_count);
     if (result->diagnostic_count == *diagnostic_capacity)
     {
@@ -2673,6 +2674,8 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
                 if (!diagnostic_arena_is_scratch)
                 {
                     scratch_end(diagnostic_temporary);
+                    IR_DIAGNOSTIC_CENSUS_RECORD(C_LEX_DIAGNOSTIC_ARENAS, 1);
+                    IR_DIAGNOSTIC_CENSUS_RECORD(C_LEX_DIAGNOSTIC_ARENA_BYTES, BUSTER_MAX(BUSTER_MB(64), diagnostic_reserve_size));
                     diagnostic_arena = arena_create((ArenaCreation){
                         .reserved_size = BUSTER_MAX(BUSTER_MB(64), diagnostic_reserve_size),
                     });
@@ -2687,6 +2690,7 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
                         .maximum_diagnostic_count = translated.source.length + 1,
                     };
                     state.diagnostic_capacity = BUSTER_MIN(state.maximum_diagnostic_count, UINT64_C(64));
+                    C_DIAGNOSTIC_RESERVATION_CENSUS(LEX, state.diagnostic_capacity);
                     result.diagnostics = arena_allocate(diagnostic_arena, CDiagnostic, state.diagnostic_capacity);
                     // Source measurement rides the branches the lexer already takes; see
                     // CSourceMetrics.
@@ -4018,6 +4022,7 @@ BUSTER_C_INTERNAL void c_preprocess_diagnostic_reserve(Arena* arena, CPreprocess
 BUSTER_C_INTERNAL void c_preprocess_diagnostic_push_severity(Arena* arena, CPreprocessResult* result, CSourceLocation location, CDiagnosticKind kind,
                                                                CDiagnosticSeverity severity, String8 message)
 {
+    IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTICS_RECORDED, 1);
     c_preprocess_diagnostic_reserve(arena, result);
     result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
         .message = message,
@@ -4898,6 +4903,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
                     // carries, and what its diagnostics point at.
                     if (!token.foreign && !token.stamp)
                     {
+                        IR_DIAGNOSTIC_CENSUS_RECORD(C_STAMP_LOCATIONS, 1);
                         token.stamp = c_pp_stamp_push(stamps, c_preprocess_recover_location(frame, file, token.token)) & C_PP_STAMP_MASK;
                     }
                     CMacroArgument* arguments = 0;
@@ -8301,6 +8307,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     CPpClassMasks root_class_masks;
     c_pp_class_masks_build(arena, &root_class_masks, root_lex.token_shapes, root_lex.token_count);
     result.diagnostic_capacity = BUSTER_MIN(source.length + options.macro_operation_count + options.definition_count + 1, UINT64_C(64));
+    C_DIAGNOSTIC_RESERVATION_CENSUS(PREPROCESS, result.diagnostic_capacity);
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
     for (u64 diagnostic_index = 0; diagnostic_index < root_lex.diagnostic_count; diagnostic_index += 1)
     {
@@ -8958,6 +8965,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 {
                     token_index += 1;
                 }
+                IR_DIAGNOSTIC_CENSUS_RECORD(C_DIRECTIVE_LOCATIONS, 2);
                 u32 physical_directive_line = c_lex_token_location(&source_frame->lex, directive).line;
                 CSourceLocation directive_location = c_preprocess_logical_location(source_frame, c_lex_token_location(&source_frame->lex, directive));
                 u64 line_end = class_masks->word_count ? c_pp_line_end_masked(class_masks, lex.token_count, token_index) : c_preprocess_line_end(lex, token_index);
@@ -9596,6 +9604,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         char8 const* spelling_base = space->base;
         CToken const* stream = result.tokens;
         u64 spelled_bytes = 0;
+        IR_DIAGNOSTIC_CENSUS_RECORD(C_METRICS_TOKEN_VISITS, output_count);
         for (u64 token_index = 0; token_index < output_count; token_index += 1)
         {
             spelled_bytes += c_token_length(spelling_base, stream[token_index]);
