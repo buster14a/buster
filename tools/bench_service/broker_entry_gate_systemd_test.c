@@ -317,20 +317,32 @@ static int bqeg_bridge(char const* mode)
 typedef struct BqEgProbe
 {
     uint32_t magic;
-    int nnp, seccomp;
+    int nnp, seccomp, root_ro, submount_ro, bounding_chown, ambient_chown;
 } BqEgProbe;
 
 static bool bqeg_probe(void)
 {
     BqEgProbe probe = {.magic = 0x42454750u,
         .nnp = prctl(PR_GET_NO_NEW_PRIVS, 0UL, 0UL, 0UL, 0UL),
-        .seccomp = prctl(PR_GET_SECCOMP, 0UL, 0UL, 0UL, 0UL)};
-    bool ok = bqeg_opt_in(false) && probe.nnp >= 0 && probe.seccomp >= 0;
+        .seccomp = prctl(PR_GET_SECCOMP, 0UL, 0UL, 0UL, 0UL),
+        .bounding_chown = prctl(PR_CAPBSET_READ, (unsigned long)CAP_CHOWN, 0UL, 0UL, 0UL),
+        .ambient_chown = prctl(PR_CAP_AMBIENT, (unsigned long)PR_CAP_AMBIENT_IS_SET,
+                              (unsigned long)CAP_CHOWN, 0UL, 0UL)};
+    struct statvfs root = {0}, submount = {0};
+    bool ok = bqeg_opt_in(false) && probe.nnp >= 0 && probe.seccomp >= 0 &&
+        probe.bounding_chown >= 0 && probe.ambient_chown >= 0 &&
+        statvfs("/", &root) == 0 && statvfs("/var/lib/buster-bench/sub", &submount) == 0;
+    if (ok)
+    {
+        probe.root_ro = !!(root.f_flag & ST_RDONLY);
+        probe.submount_ro = !!(submount.f_flag & ST_RDONLY);
+    }
     int fd = ok ? open(BQEG_ROOT "/probe", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
     ok = ok && fd >= 0 && write(fd, &probe, sizeof(probe)) == sizeof(probe) && fsync(fd) == 0;
     if (fd >= 0 && close(fd) != 0) ok = false;
-    dprintf(STDERR_FILENO, "BQEG_SANDBOX_PROBE nnp=%d seccomp=%d status=%d\n",
-            probe.nnp, probe.seccomp, ok);
+    dprintf(STDERR_FILENO, "BQEG_SANDBOX_PROBE nnp=%d seccomp=%d root_ro=%d submount_ro=%d bounding_chown=%d ambient_chown=%d status=%d\n",
+            probe.nnp, probe.seccomp, probe.root_ro, probe.submount_ro,
+            probe.bounding_chown, probe.ambient_chown, ok);
     return ok;
 }
 
@@ -345,7 +357,9 @@ static bool bqeg_unit(BqEgMutation kind)
             "root buster-bench buster-bench-candidate";
         char const* exec = kind == BQEG_ABSENT_FD0 ? BQEG_BRIDGE " bridge absent" :
             kind == BQEG_CLOEXEC_FD0 ? BQEG_BRIDGE " bridge cloexec" : BQEG_GATE;
-        char const* probe = kind == BQEG_NNP_OFF || kind == BQEG_SECCOMP_OFF ?
+        char const* probe = kind == BQEG_NNP_OFF || kind == BQEG_SECCOMP_OFF ||
+            kind == BQEG_ROOT_RW || kind == BQEG_SUBMOUNT_RW ||
+            kind == BQEG_BOUNDING_CAP || kind == BQEG_AMBIENT_CAP ?
             "ExecStartPre=" BQEG_BRIDGE " probe\n" : "";
         char const* filters = kind == BQEG_SECCOMP_OFF ? "" :
             "RestrictSUIDSGID=yes\nRestrictAddressFamilies=AF_UNIX\n"
@@ -762,7 +776,9 @@ static bool bqeg_case(BqEgMutation kind)
     bool no_marker = lstat(BQEG_ROOT "/marker", &marker) < 0 && errno == ENOENT;
     errno = 0;
     bool no_entered = lstat(BQEG_ROOT "/entered", &marker) < 0 && errno == ENOENT;
-    if (ok && (kind == BQEG_NNP_OFF || kind == BQEG_SECCOMP_OFF))
+    if (ok && (kind == BQEG_NNP_OFF || kind == BQEG_SECCOMP_OFF ||
+               kind == BQEG_ROOT_RW || kind == BQEG_SUBMOUNT_RW ||
+               kind == BQEG_BOUNDING_CAP || kind == BQEG_AMBIENT_CAP))
     {
         BqEgProbe probe = {0};
         struct stat info = {0};
@@ -771,10 +787,22 @@ static bool bqeg_case(BqEgMutation kind)
             info.st_uid == 0 && info.st_size == sizeof(probe) &&
             read(fd, &probe, sizeof(probe)) == sizeof(probe) && probe.magic == 0x42454750u;
         if (fd >= 0) close(fd);
-        ok = ok && (kind == BQEG_NNP_OFF ? probe.nnp == 0 && probe.seccomp == 2 :
-                   probe.nnp == 1 && probe.seccomp == 0);
-        printf("BQEG_PROBE name=%s nnp=%d seccomp=%d target=%d\n",
-               bqeg_names[kind], probe.nnp, probe.seccomp, ok);
+        if (ok)
+        {
+            switch (kind)
+            {
+                case BQEG_NNP_OFF: ok = probe.nnp == 0 && probe.seccomp == 2; break;
+                case BQEG_SECCOMP_OFF: ok = probe.nnp == 1 && probe.seccomp == 0; break;
+                case BQEG_ROOT_RW: ok = probe.root_ro == 0; break;
+                case BQEG_SUBMOUNT_RW: ok = probe.root_ro == 1 && probe.submount_ro == 0; break;
+                case BQEG_BOUNDING_CAP: ok = probe.bounding_chown == 1; break;
+                case BQEG_AMBIENT_CAP: ok = probe.ambient_chown == 1; break;
+                default: ok = false; break;
+            }
+        }
+        printf("BQEG_PROBE name=%s nnp=%d seccomp=%d root_ro=%d submount_ro=%d bounding_chown=%d ambient_chown=%d target=%d\n",
+               bqeg_names[kind], probe.nnp, probe.seccomp, probe.root_ro,
+               probe.submount_ro, probe.bounding_chown, probe.ambient_chown, ok);
     }
     if (ok && kind == BQEG_POSITIVE)
         ok = !no_entered && bqeg_positive(record, reply, show, unit) &&
