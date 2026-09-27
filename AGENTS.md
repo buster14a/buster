@@ -142,8 +142,10 @@ URL already identifies its issue and must not be remapped.
 
 Write issue/PR bodies using structured arguments or a body file. Do not interpolate
 Markdown into shell commands. Use `--force-with-lease`, never bare `--force`,
-when an authorized rebase requires a force-push. Report every actionable problem discovered during a task on this repository's GitHub
-forge before ending the session or handing off. This includes defects, missing
+when an authorized rebase requires a force-push.
+
+Report every actionable problem discovered during a task on this repository's
+GitHub forge before ending the session or handing off. This includes defects, missing
 coverage, CI or infrastructure failures, and blockers, even when the assigned
 task is different. Search open and closed issues and PRs first; add new evidence
 to the relevant issue or PR instead of opening a duplicate. If no record exists,
