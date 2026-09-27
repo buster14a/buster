@@ -30,6 +30,13 @@ class AdmissionReadbackTest(unittest.TestCase):
         verify(self.environment, self.branches, self.variable)
 
     def test_environment_and_disabled_admission(self):
+        self.check()
+        identity = self.environment["protection_rules"][0]["reviewers"][0]["reviewer"]
+        identity["id"] = 1
+        with self.assertRaises(ValueError):
+            self.check()
+        identity["id"] = 39247043
+        self.check()
         self.environment["protection_rules"].clear()
         with self.assertRaises(ValueError):
             self.check()
