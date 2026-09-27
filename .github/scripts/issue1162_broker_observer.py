@@ -65,12 +65,23 @@ SUPERSEDABLE_CAPTURE_STATES = frozenset(("transient_proc_disappeared",
 MAX_RUN_SECONDS = 4000.0
 MAX_EVENTS = 512
 MAX_EVENTS_PER_UNIT = 128
-MAX_BUS_DISPATCHES = 4096
+# Attempt 21 observed ~46 unrelated manager messages/second over 89 seconds.
+# Bound *all* traffic, including ignored messages, by both burst and sustained
+# rates. A 4000-second run has at most 400 complete ten-second windows and one
+# boundary second; the derived lifetime bound is a safety backstop, not a
+# replacement for either window check.
+MAX_DISPATCHES_PER_SECOND = 512
+DISPATCH_WINDOW_SECONDS = 10
+MAX_DISPATCHES_PER_WINDOW = 2560
+MAX_DISPATCH_BUCKETS = int(MAX_RUN_SECONDS) + 1
+MAX_BUS_DISPATCHES = (int(MAX_RUN_SECONDS) // DISPATCH_WINDOW_SECONDS *
+                      MAX_DISPATCHES_PER_WINDOW + MAX_DISPATCHES_PER_SECOND)
 MAX_DISPATCHES_PER_DRAIN = 64
 MAX_GENERATIONS = 128
 MAX_CONCURRENT_QUERIES = 1
 MAX_SNAPSHOTS_PER_GENERATION = 6
 MAX_PRESTOP_SNAPSHOTS_PER_GENERATION = 5
+MAX_PROVISIONAL_CAPTURES_PER_GENERATION = 2
 MAX_PROPERTY_SNAPSHOTS = MAX_GENERATIONS * MAX_SNAPSHOTS_PER_GENERATION
 MAX_PROPERTIES = 512
 MAX_PROPERTY_NAME_BYTES = 128
@@ -680,6 +691,7 @@ class Lifecycle:
         self.main_pid_values: set[int] = set()
         self.last_mainpid_zero_event_seq: int | None = None
         self.snapshots: list[dict[str, object]] = []
+        self.provisional_captures: list[dict[str, object]] = []
         self.retained_failed_terminal: dict[str, object] | None = None
         self.incomplete_reasons: list[str] = []
         self.manager_incomplete_reasons: list[str] = []
@@ -824,6 +836,7 @@ class Lifecycle:
                 "preliminary_property_misses": self.preliminary_property_misses,
                 "incomplete_reasons": incomplete_reasons,
                 "snapshots": self.snapshots,
+                "provisional_captures": self.provisional_captures,
                 "retained_failed_terminal": terminal}
 
 
@@ -933,6 +946,10 @@ class BrokerObserver:
         self.event_seq = 0
         self.bus_dispatch_count = 0
         self.dispatch_diagnostics = self._new_dispatch_diagnostics()
+        self.dispatch_buckets: list[dict[str, int]] = []
+        self.dispatch_window: deque[tuple[int, int]] = deque()
+        self.dispatch_window_total = 0
+        self.last_dispatch_monotonic_ns = 0
         self.template_metadata_events: list[dict[str, object]] = []
         self.bus_budget_exhausted = False
         self.units: list[Lifecycle] = []
@@ -950,6 +967,7 @@ class BrokerObserver:
         self.terminal_phase_started_monotonic_ns: int | None = None
         self.terminal_phase_finished_monotonic_ns: int | None = None
         self.snapshot_number = 0
+        self.provisional_number = 0
         self.observer_pid = 0
         self.observer_start_ticks = 0
 
@@ -958,7 +976,9 @@ class BrokerObserver:
             self.global_reasons.append(reason[:512])
         self.event_loss_detected = self.event_loss_detected or event_loss
 
-    def _record_dispatch(self, message: dict[str, object] | None) -> None:
+    def _record_dispatch(self, message: dict[str, object] | None) -> bool:
+        now_ns = time.monotonic_ns()
+        self.last_dispatch_monotonic_ns = now_ns
         self.bus_dispatch_count += 1
         kind = ("positive_with_message" if message is not None else
                 getattr(self.bus, "last_dispatch_kind", "unclassified_without_message"))
@@ -967,6 +987,32 @@ class BrokerObserver:
                         "unclassified_without_message"):
             kind = "unclassified_without_message"
         self.dispatch_diagnostics[kind] += 1
+        second = max(0, (now_ns - self.ready_ns) // 1_000_000_000)
+        if not self.dispatch_buckets or self.dispatch_buckets[-1]["second"] != second:
+            self.dispatch_buckets.append({"second": second, "count": 0,
+                                          "first_monotonic_ns": now_ns,
+                                          "last_monotonic_ns": now_ns})
+            self.dispatch_window.append((second, 0))
+        bucket = self.dispatch_buckets[-1]
+        bucket["count"] += 1
+        bucket["last_monotonic_ns"] = now_ns
+        window_second, window_count = self.dispatch_window.pop()
+        self.dispatch_window.append((window_second, window_count + 1))
+        self.dispatch_window_total += 1
+        # A real sliding ten-second interval can intersect eleven aligned
+        # second buckets. Charging all eleven is deliberately conservative;
+        # the bounded ledger can then be independently replayed without a
+        # per-message timestamp artifact approaching the evidence byte cap.
+        while self.dispatch_window and second - self.dispatch_window[0][0] > DISPATCH_WINDOW_SECONDS:
+            self.dispatch_window_total -= self.dispatch_window.popleft()[1]
+        valid = (now_ns >= self.ready_ns and second < MAX_DISPATCH_BUCKETS and
+                 bucket["count"] <= MAX_DISPATCHES_PER_SECOND and
+                 self.dispatch_window_total <= MAX_DISPATCHES_PER_WINDOW and
+                 self.bus_dispatch_count <= MAX_BUS_DISPATCHES)
+        if not valid:
+            self.bus_budget_exhausted = True
+            self.mark_global("manager_bus_dispatch_rate_exceeded", event_loss=True)
+        return valid
 
     def _record_noncanonical_unit(self, message: dict[str, object]) -> None:
         diagnostics = self.dispatch_diagnostics
@@ -1010,6 +1056,8 @@ class BrokerObserver:
         event_ns = time.monotonic_ns()
         event = {"schema": SCHEMA, "boot_id": self.boot_id, "boot_id_raw": self.boot_id_raw,
                  "seq": self.event_seq, "monotonic_ns": event_ns,
+                 "bus_dispatch_ordinal": self.bus_dispatch_count,
+                 "bus_dispatch_monotonic_ns": getattr(self, "last_dispatch_monotonic_ns", event_ns),
                  "observer_show_query_inflight": query_context, **body}
         self.writer.event(event)
         return self.event_seq, event_ns
@@ -1121,7 +1169,9 @@ class BrokerObserver:
                 "unit": unit, "object_path": path, "sender": message["sender"],
                 "member": member, "interface": message["interface"],
                 "path": message["path"], "signature": message["signature"],
-                "bus_dispatch_ordinal": ordinal, "monotonic_ns": event_ns})
+                "bus_dispatch_ordinal": ordinal,
+                "bus_dispatch_monotonic_ns": self.last_dispatch_monotonic_ns,
+                "monotonic_ns": event_ns})
             return
         try:
             parse_broker_unit(unit)
@@ -1222,8 +1272,59 @@ class BrokerObserver:
                     lifecycle.main_pid_values.add(key)
                     self._schedule(lifecycle, "mainpid:" + str(key), seq)
         if (message["unit_interface"] == "org.freedesktop.systemd1.Service" and
-                "MainPID" in changed and len(main_pids) == 1):
+                "MainPID" in changed and len(main_pids) == 1 and main_pids[0] > 0):
+            self._capture_positive_signal(lifecycle, int(main_pids[0]), seq, event_ns)
             self._schedule_preexec_retry(lifecycle, int(main_pids[0]), seq, event_ns)
+
+    def _capture_positive_signal(self, lifecycle: Lifecycle, pid: int,
+                                 seq: int, event_ns: int) -> None:
+        # The authenticated signal is only a hint until an independently
+        # successful all-show binds PID, cgroup, invocation and exec start.
+        # Repeated signals are eligible for one retry only after a transient
+        # or known pre-exec capture failure; no timer or broker control exists.
+        prior = lifecycle.provisional_captures
+        if (lifecycle.removed or self.stop_seen or time.monotonic() >= self.deadline or
+                len(prior) >= MAX_PROVISIONAL_CAPTURES_PER_GENERATION or
+                (prior and (prior[-1]["main_pid"] != pid or
+                 prior[-1]["capture_state"] not in SUPERSEDABLE_CAPTURE_STATES))):
+            return
+        self.provisional_number += 1
+        label = f"signal-{self.provisional_number:06d}"
+        record: dict[str, object] = {"trigger_event_seq": seq,
+            "signal_monotonic_ns": event_ns, "started_monotonic_ns": time.monotonic_ns(),
+            "finished_monotonic_ns": None, "main_pid": pid,
+            "start_ticks": None, "cgroup": None, "proc_cgroup_raw": None,
+            "initial_exe_observed": None, "exe": None, "exe_sha256": None,
+            "proc_capture": {}, "socket_fd0": None, "capture_complete": False,
+            "capture_state": None, "capture_error": None,
+            "bound_snapshot_index": None}
+        prior.append(record)
+        try:
+            import issue1162_live_probe as live_probe
+            raw_cgroup = live_probe._bounded_file(Path(f"/proc/{pid}/cgroup"),
+                                                    MAX_PROC_CGROUP_BYTES, self.deadline, reserve=0.0)
+            cgroups = raw_cgroup.decode("ascii", "strict").splitlines()
+            require(len(cgroups) == 1 and cgroups[0].startswith("0::/") and
+                    ".." not in cgroups[0][3:].split("/"),
+                    "signal process has no single canonical cgroup-v2 path")
+            record["cgroup"] = cgroups[0][3:]
+            ref = self.writer.capture(f"{label}.proc-cgroup-signal", raw_cgroup,
+                                      MAX_PROC_CGROUP_BYTES)
+            record["proc_capture"]["proc-cgroup-signal"] = {
+                **ref, "exit": 0, "timed_out": False}
+            self._capture_process(lifecycle, record, pid, self.provisional_number,
+                                  label=label, bind_lifecycle=False)
+            record["capture_complete"] = True
+            record["capture_state"] = "full_process_witness"
+        except (OSError, ObserverError, ValueError, RuntimeError, UnicodeError) as exc:
+            record["capture_state"] = self._capture_failure_state(
+                exc, record, pid, self.provisional_number, label=label,
+                signal_phase=True)
+            record["capture_error"] = f"{type(exc).__name__}:{str(exc)[:300]}"
+            if record["capture_state"] == "identity_contradiction_or_capture_error":
+                lifecycle.mark_process_incomplete("signal_process_identity_contradiction_or_capture_error")
+        finally:
+            record["finished_monotonic_ns"] = time.monotonic_ns()
 
     def handle_message(self, message: dict[str, object]) -> None:
         member = str(message["member"])
@@ -1245,10 +1346,7 @@ class BrokerObserver:
             result, message = self.bus.process_one()
             if result == 0:
                 break
-            self._record_dispatch(message)
-            if self.bus_dispatch_count > MAX_BUS_DISPATCHES:
-                self.bus_budget_exhausted = True
-                self.mark_global("manager_bus_dispatch_budget_exceeded", event_loss=True)
+            if not self._record_dispatch(message):
                 return
             if message is not None:
                 self.handle_message(message)
@@ -1256,6 +1354,13 @@ class BrokerObserver:
     def _start_next_query(self) -> None:
         if self.current_query is not None:
             return
+        # A positive PID has a much shorter live interval than redundant
+        # UnitNew/first-property reads. The fixed queue stays bounded by the
+        # existing per-generation trigger and snapshot limits.
+        for index, (_row, trigger, _seq) in enumerate(self.queue):
+            if trigger.startswith("mainpid:") and trigger != "mainpid:0" and trigger != "mainpid:-1":
+                self.queue.rotate(-index)
+                break
         while self.queue:
             lifecycle, trigger, seq = self.queue.popleft()
             snapshot: dict[str, object] = {"boot_id": self.boot_id,
@@ -1552,19 +1657,20 @@ class BrokerObserver:
                current_exe in PREEXEC_EXECUTABLES
 
     def _capture_failure_state(self, exc: Exception, snapshot: dict[str, object],
-                               pid: int, capture_number: int) -> str:
+                               pid: int, capture_number: int, label: str | None = None,
+                               signal_phase: bool = False) -> str:
         # The known systemd executor may occupy Type=exec's MainPID before it
         # enters the fixed broker image. It is preliminary only when the full
         # show still reports the start phase and the independently read ticks
         # later bind to a full broker witness. A different executable, cgroup,
         # hash, socket FD, or process identity is a hard contradiction.
-        label = f"broker-{capture_number:06d}"
+        label = label or f"broker-{capture_number:06d}"
         expected_preexec = f"process executable path mismatch for {label}: "
         preexec_error = (str(exc) == expected_preexec + str(snapshot.get("initial_exe_observed")) or
                          str(exc) == f"process cgroup mismatch for {label}")
         if (type(exc).__name__ == "ProbeError" and
-                snapshot.get("active_state") == "activating" and
-                snapshot.get("substate") == "start" and
+                (signal_phase or (snapshot.get("active_state") == "activating" and
+                                  snapshot.get("substate") == "start")) and
                 isinstance(snapshot.get("start_ticks"), int) and
                 snapshot.get("initial_exe_observed") in PREEXEC_EXECUTABLES and
                 preexec_error and self._recheck_known_preexec(pid, snapshot, label)):
@@ -1659,7 +1765,41 @@ class BrokerObserver:
                 "exec_main_start_timestamp_monotonic": exec_start})
             if pid > 0:
                 try:
-                    self._capture_process(lifecycle, snapshot, pid, capture_number)
+                    provisional = next((row for row in lifecycle.provisional_captures
+                        if row["main_pid"] == pid and row["capture_complete"] is True and
+                        row["bound_snapshot_index"] is None), None)
+                    if provisional is not None:
+                        require(provisional["cgroup"] == snapshot["cgroup"] and
+                                exec_start > 0 and exec_start * 1000 <=
+                                    provisional["signal_monotonic_ns"] and
+                                provisional["finished_monotonic_ns"] <= time.monotonic_ns() and
+                                provisional["exe"] == BROKER_EXECUTABLE and
+                                isinstance(provisional["exe_sha256"], str) and
+                                re.fullmatch(r"[0-9a-f]{64}", provisional["exe_sha256"]) is not None and
+                                isinstance(provisional["socket_fd0"], dict) and
+                                provisional["socket_fd0"].get("stable") is True and
+                                provisional["socket_fd0"].get("start_ticks_before") ==
+                                    provisional["start_ticks"] ==
+                                    provisional["socket_fd0"].get("start_ticks_after") and
+                                provisional["socket_fd0"].get("target") ==
+                                    f"socket:[{provisional['socket_fd0'].get('inode')}]" and
+                                (lifecycle.start_ticks is None or
+                                 lifecycle.start_ticks == provisional["start_ticks"]),
+                                "provisional process differs from successful manager show")
+                        for field in ("start_ticks", "initial_exe_observed", "proc_cgroup_raw",
+                                      "exe", "exe_sha256", "proc_capture", "socket_fd0"):
+                            snapshot[field] = provisional[field]
+                        snapshot["provisional_event_seq"] = provisional["trigger_event_seq"]
+                        provisional["bound_snapshot_index"] = next(index for index, row in
+                            enumerate(lifecycle.snapshots) if row is snapshot)
+                        if lifecycle.start_ticks is None:
+                            lifecycle.start_ticks = int(snapshot["start_ticks"])
+                            lifecycle.main_pid = pid
+                            lifecycle.cgroup = str(snapshot["cgroup"])
+                            lifecycle.exe = str(snapshot["exe"])
+                            lifecycle.exe_sha256 = str(snapshot["exe_sha256"])
+                    else:
+                        self._capture_process(lifecycle, snapshot, pid, capture_number)
                     snapshot["process_capture_complete"] = bool(invocation_ok and exec_start > 0)
                 except (OSError, ObserverError, ValueError, RuntimeError) as exc:
                     snapshot["process_capture_state"] = self._capture_failure_state(
@@ -1720,7 +1860,8 @@ class BrokerObserver:
         self.current_query = None
 
     def _capture_process(self, lifecycle: Lifecycle, snapshot: dict[str, object],
-                         pid: int, capture_number: int) -> None:
+                         pid: int, capture_number: int, label: str | None = None,
+                         bind_lifecycle: bool = True) -> None:
         try:
             import issue1162_live_probe as live_probe
         except ImportError as exc:
@@ -1729,14 +1870,19 @@ class BrokerObserver:
                 snapshot["cgroup"].startswith("/"),
                 "live MainPID has no valid systemd ControlGroup")
         expected_exe = BROKER_EXECUTABLE
-        label = f"broker-{capture_number:06d}"
-        references = {}
+        label = label or f"broker-{capture_number:06d}"
+        references = dict(snapshot.get("proc_capture", {}))
         proc_path = Path(f"/proc/{pid}")
+        initial_raw = live_probe._bounded_file(
+            proc_path / "stat", MAX_PROC_STAT_BYTES, self.deadline, reserve=0.0)
         initial_stat = live_probe._proc_stat_identity(
-            live_probe._bounded_file(proc_path / "stat", MAX_PROC_STAT_BYTES, self.deadline, reserve=0.0),
-            label)
+            initial_raw, label)
         require(initial_stat[2] > 0, "positive MainPID has invalid proc start ticks")
         snapshot["start_ticks"] = initial_stat[2]
+        first_ref = self.writer.capture(f"{label}.proc-stat-before", initial_raw,
+                                        MAX_PROC_STAT_BYTES)
+        references["proc-stat-before"] = {**first_ref, "exit": 0, "timed_out": False}
+        snapshot["proc_capture"] = dict(references)
         snapshot["initial_exe_observed"] = self._read_stable_process_exe(
             pid, initial_stat[2], label)
         with tempfile.TemporaryDirectory(prefix="issue1162-broker-proc-") as temp_dir:
@@ -1767,9 +1913,19 @@ class BrokerObserver:
         snapshot["proc_capture"].update({"fd0_link": fd0["link_ref"],
                                          "fd0_info": fd0["fdinfo_ref"]})
         snapshot["socket_fd0"] = fd0["identity"]
+        final_raw = live_probe._bounded_file(
+            proc_path / "stat", MAX_PROC_STAT_BYTES, self.deadline, reserve=0.0)
+        final_stat = live_probe._proc_stat_identity(final_raw, label)
+        require(final_stat[0] not in ("Z", "X", "x") and
+                final_stat[1:] == initial_stat[1:],
+                "positive MainPID identity changed after FD-0 capture")
+        final_ref = self.writer.capture(f"{label}.proc-stat-after", final_raw,
+                                        MAX_PROC_STAT_BYTES)
+        snapshot["proc_capture"]["proc-stat-after"] = {
+            **final_ref, "exit": 0, "timed_out": False}
         snapshot["start_ticks"] = int(proc["starttime_ticks"])
         snapshot["main_pid"] = int(proc["pid"])
-        if lifecycle.start_ticks is None:
+        if bind_lifecycle and lifecycle.start_ticks is None:
             lifecycle.start_ticks = int(proc["starttime_ticks"])
             lifecycle.main_pid = int(proc["pid"])
             lifecycle.cgroup = str(snapshot["cgroup"])
@@ -1805,9 +1961,9 @@ class BrokerObserver:
                 (target_after.st_dev, target_after.st_ino, target_after.st_mode),
                 "accepted socket FD 0 changed during capture")
         link_bytes = (link_before + "\n").encode("ascii", "strict")
-        link_ref = self.writer.capture(f"broker-{capture_number:06d}.proc-fd0-link",
+        link_ref = self.writer.capture(f"{label}.proc-fd0-link",
                                        link_bytes, 4096)
-        fdinfo_ref = self.writer.capture(f"broker-{capture_number:06d}.proc-fd0-info",
+        fdinfo_ref = self.writer.capture(f"{label}.proc-fd0-info",
                                          fdinfo, MAX_FDINFO_BYTES)
         link_ref.update({"exit": 0, "timed_out": False})
         fdinfo_ref.update({"exit": 0, "timed_out": False})
@@ -1949,10 +2105,7 @@ class BrokerObserver:
             result, message = self.bus.process_one()
             if result == 0:
                 break
-            self._record_dispatch(message)
-            if self.bus_dispatch_count > MAX_BUS_DISPATCHES:
-                self.bus_budget_exhausted = True
-                self.mark_global("manager_bus_dispatch_budget_exceeded", event_loss=True)
+            if not self._record_dispatch(message):
                 break
             if message is not None:
                 self.handle_message(message)
@@ -2035,6 +2188,7 @@ class BrokerObserver:
                 "terminal_phase_finished_monotonic_ns": self.terminal_phase_finished_monotonic_ns,
                 "event_count": self.writer.event_count, "event_bytes": self.writer.event_bytes,
                 "bus_dispatch_count": self.bus_dispatch_count,
+                "dispatch_buckets": self.dispatch_buckets,
                 "dispatch_diagnostics": self.dispatch_diagnostics,
                 "template_metadata_events": self.template_metadata_events,
                 "capture_bytes": self.writer.capture_bytes,
@@ -2049,11 +2203,17 @@ class BrokerObserver:
                 "global_incomplete_reasons": list(self.global_reasons),
                 "limits": {"max_events": MAX_EVENTS, "max_events_per_unit": MAX_EVENTS_PER_UNIT,
                            "max_bus_dispatches": MAX_BUS_DISPATCHES,
+                           "max_dispatches_per_second": MAX_DISPATCHES_PER_SECOND,
+                           "dispatch_window_seconds": DISPATCH_WINDOW_SECONDS,
+                           "max_dispatches_per_window": MAX_DISPATCHES_PER_WINDOW,
+                           "max_dispatch_buckets": MAX_DISPATCH_BUCKETS,
                            "max_dispatches_per_drain": MAX_DISPATCHES_PER_DRAIN,
                            "max_generations": MAX_GENERATIONS,
                            "max_concurrent_queries": MAX_CONCURRENT_QUERIES,
                            "max_snapshots_per_generation": MAX_SNAPSHOTS_PER_GENERATION,
                            "max_prestop_snapshots_per_generation": MAX_PRESTOP_SNAPSHOTS_PER_GENERATION,
+                           "max_provisional_captures_per_generation":
+                               MAX_PROVISIONAL_CAPTURES_PER_GENERATION,
                            "max_property_snapshots": MAX_PROPERTY_SNAPSHOTS,
                            "max_show_bytes": MAX_SHOW_BYTES, "max_stderr_bytes": MAX_STDERR_BYTES,
                            "max_evidence_bytes": MAX_EVIDENCE_BYTES,
@@ -2833,7 +2993,8 @@ def _self_test() -> None:
     retained = paired.template_metadata_events
     expected_template_keys = {"boot_id", "boot_id_raw", "unit", "object_path",
                               "sender", "member", "interface", "path", "signature",
-                              "bus_dispatch_ordinal", "monotonic_ns"}
+                              "bus_dispatch_ordinal", "bus_dispatch_monotonic_ns",
+                              "monotonic_ns"}
     assert len(retained) == 2 and all(set(item) == expected_template_keys for item in retained)
     assert [item["member"] for item in retained] == ["UnitNew", "UnitRemoved"]
     assert [item["bus_dispatch_ordinal"] for item in retained] == [1, 2]
@@ -2878,7 +3039,7 @@ def _self_test() -> None:
     over_budget.bus_dispatch_count = MAX_BUS_DISPATCHES
     over_budget._current_process_events()
     assert over_budget.bus_budget_exhausted and not over_budget.template_metadata_events
-    assert over_budget.global_reasons == ["manager_bus_dispatch_budget_exceeded"]
+    assert over_budget.global_reasons == ["manager_bus_dispatch_rate_exceeded"]
     checks += 1
 
     event_observer = object.__new__(BrokerObserver)
@@ -2897,6 +3058,8 @@ def _self_test() -> None:
     event_observer.global_reasons = []
     event_observer.event_loss_detected = False
     event_observer.dispatch_diagnostics = BrokerObserver._new_dispatch_diagnostics()
+    event_observer.bus_dispatch_count = 1
+    event_observer._capture_positive_signal = lambda *_args: None
     event_observer.template_metadata_events = []
     event_observer.deadline = time.monotonic() + 5.0
     event_observer.stop_seen = False
@@ -2969,6 +3132,8 @@ def _self_test() -> None:
     retry_observer.global_reasons = []
     retry_observer.event_loss_detected = False
     retry_observer.dispatch_diagnostics = BrokerObserver._new_dispatch_diagnostics()
+    retry_observer.bus_dispatch_count = 1
+    retry_observer._capture_positive_signal = lambda *_args: None
     retry_observer.stop_seen = False
     later_service = {"member": "PropertiesChanged", "path": retry_path,
                      "unit_interface": "org.freedesktop.systemd1.Service",
@@ -3049,6 +3214,10 @@ def _self_test() -> None:
     checks += 1
     retry_observer.bus.last_dispatch_kind = "positive_null"
     retry_observer.bus_dispatch_count = 0
+    retry_observer.dispatch_buckets = []
+    retry_observer.dispatch_window = deque()
+    retry_observer.dispatch_window_total = 0
+    retry_observer.ready_ns = time.monotonic_ns() - 100_000_000
     retry_observer._record_dispatch(None)
     retry_observer.bus.last_dispatch_kind = "observer_control"
     retry_observer._record_dispatch(None)
@@ -3164,6 +3333,10 @@ def _self_test() -> None:
             terminal_observer.snapshot_number = 1
             terminal_observer.bus_dispatch_count = 0
             terminal_observer.dispatch_diagnostics = BrokerObserver._new_dispatch_diagnostics()
+            terminal_observer.dispatch_buckets = []
+            terminal_observer.dispatch_window = deque()
+            terminal_observer.dispatch_window_total = 0
+            terminal_observer.ready_ns = time.monotonic_ns() - 100_000_000
             terminal_observer.bus_budget_exhausted = False
             terminal_observer.global_reasons = []
             terminal_observer.event_loss_detected = False
@@ -3327,6 +3500,10 @@ def _self_test() -> None:
         final_observer.deadline = time.monotonic() + 5.0
         final_observer.bus_dispatch_count = 0
         final_observer.dispatch_diagnostics = BrokerObserver._new_dispatch_diagnostics()
+        final_observer.dispatch_buckets = []
+        final_observer.dispatch_window = deque()
+        final_observer.dispatch_window_total = 0
+        final_observer.ready_ns = time.monotonic_ns() - 100_000_000
         final_observer.bus_budget_exhausted = False
         final_observer.global_reasons = []
         final_observer.event_loss_detected = False
@@ -3355,6 +3532,228 @@ def _self_test() -> None:
         assert not BrokerObserver._stable_exe_identity(("S", 123, 456), BROKER_EXECUTABLE,
             (state, 123, 456), BROKER_EXECUTABLE, 456)
         checks += 2
+    # Use the production accounting seam with a virtual monotonic clock. The
+    # 300-second, 46 unrelated messages/second case exceeds the former 4096
+    # lifetime cap without approaching either new rate limit.
+    original_clock = time.monotonic_ns
+    clock = [10_000_000_000]
+    try:
+        time.monotonic_ns = lambda: clock[0]
+        rate_bus = FixtureMetadataBus([])
+        rate_bus.last_dispatch_kind = "ignored_unrelated_properties"
+        rate_observer = BrokerObserver(rate_bus, FixtureEventWriter(), boot, raw,
+                                       time.monotonic() + 5.0, "1", 1)
+        rate_observer.ready_ns = clock[0]
+        for second in range(300):
+            clock[0] = rate_observer.ready_ns + second * 1_000_000_000 + 1_000
+            for _ in range(46):
+                assert rate_observer._record_dispatch(None)
+            assert rate_observer._record_dispatch({"member": "UnitNew"})
+        assert rate_observer.bus_dispatch_count == 300 * 47 > 4096
+        assert len(rate_observer.dispatch_buckets) == 300 and not rate_observer.global_reasons
+        checks += 1
+        for pattern, maximum in (([513], 512), ([512] * 5 + [1], 2560)):
+            clock[0] += 20_000_000_000
+            overloaded = BrokerObserver(rate_bus, FixtureEventWriter(), boot, raw,
+                                        time.monotonic() + 5.0, "1", 1)
+            overloaded.ready_ns = clock[0]
+            for second, amount in enumerate(pattern):
+                clock[0] = overloaded.ready_ns + second * 1_000_000_000 + 1_000
+                for number in range(amount):
+                    accepted = overloaded._record_dispatch(None)
+                    assert accepted == (not (second == len(pattern) - 1 and number == amount - 1))
+            assert overloaded.bus_budget_exhausted and overloaded.event_loss_detected
+            assert overloaded.global_reasons == ["manager_bus_dispatch_rate_exceeded"]
+            assert overloaded.bus_dispatch_count == maximum + 1
+            checks += 1
+    finally:
+        time.monotonic_ns = original_clock
+    # A signal capture happens synchronously before the queued show can finish.
+    # The deliberately held query is a local exited client with synthetic raw
+    # output; the capture seam receives real authenticated-shaped signal data.
+    class SignalWriter(FixtureEventWriter, FixtureWriter):
+        def capture_path(self, name: str, path: Path, maximum: int,
+                         exit_code: int | None = 0,
+                         timed_out: bool = False) -> dict[str, object]:
+            return {**self.capture(name, path.read_bytes(), maximum),
+                    "exit": exit_code, "timed_out": timed_out}
+
+    class SignalProbe:
+        @staticmethod
+        def _bounded_file(path: Path, _maximum: int, _deadline: float,
+                          reserve: float = 0.0) -> bytes:
+            assert str(path) == "/proc/741/cgroup" and reserve == 0.0
+            return b"0::/system.slice/broker.instance\n"
+
+    signal_writer = SignalWriter()
+    signal_observer = BrokerObserver(FixtureMetadataBus([]), signal_writer, boot, raw,
+                                     time.monotonic() + 5.0, "1", 1)
+    signal_observer.ready_ns = time.monotonic_ns() - 1_000_000
+    signal_observer.bus_dispatch_count = 1
+    signal_observer.handle_message(canonical_new)
+    signal_row = signal_observer.units[0]
+    order: list[str] = []
+    def signal_capture(_row: Lifecycle, capture: dict[str, object], pid: int,
+                       _number: int, label: str, bind_lifecycle: bool) -> None:
+        assert pid == 741 and label.startswith("signal-") and not bind_lifecycle
+        order.append("proc-before-show")
+        capture.update({"start_ticks": 5812, "main_pid": pid,
+                        "initial_exe_observed": BROKER_EXECUTABLE,
+                        "proc_cgroup_raw": "0::/system.slice/broker.instance",
+                        "exe": BROKER_EXECUTABLE, "exe_sha256": "f" * 64,
+                        "socket_fd0": {"inode": 123, "target": "socket:[123]",
+                                       "stable": True, "start_ticks_before": 5812,
+                                       "start_ticks_after": 5812},
+                        "proc_capture": {**capture["proc_capture"],
+                                         "proc-status": {"bytes": 1}}})
+    signal_observer._capture_process = signal_capture
+    saved_probe = sys.modules.get("issue1162_live_probe")
+    try:
+        sys.modules["issue1162_live_probe"] = SignalProbe()
+        signal_observer.bus_dispatch_count = 2
+        signal_observer.handle_message({"member": "PropertiesChanged",
+            "unit_interface": "org.freedesktop.systemd1.Service", "sender": ":1.4",
+            "path": signal_row.object_path, "changed_properties": ["MainPID"],
+            "invalidated_properties": [], "main_pids": [741]})
+    finally:
+        if saved_probe is None:
+            sys.modules.pop("issue1162_live_probe", None)
+        else:
+            sys.modules["issue1162_live_probe"] = saved_probe
+    assert order == ["proc-before-show"] and len(signal_row.provisional_captures) == 1
+    signal_record = signal_row.provisional_captures[0]
+    assert signal_record["capture_complete"] and signal_record["bound_snapshot_index"] is None
+    checks += 1
+    # The exact raw manager identity binds the provisional capture; a changed
+    # PID/cgroup/start, executable or socket cannot be promoted by a late show.
+    signal_show = positive_show.replace("ExecMainStartTimestampMonotonic=912345",
+                                        "ExecMainStartTimestampMonotonic=1")
+    def finish_signal_case(changed: str | None = None) -> tuple[dict[str, object], Lifecycle]:
+        case = Lifecycle(signal_row.unit, signal_row.object_path, 1, 1,
+                         signal_row.first_monotonic_ns)
+        case.provisional_captures = [dict(signal_record)]
+        capture = case.provisional_captures[0]
+        if changed == "cgroup":
+            capture["cgroup"] = "/system.slice/other"
+        elif changed == "ticks":
+            case.start_ticks = 5813
+        elif changed == "exe":
+            capture["exe"] = "/usr/local/bin/other"
+        elif changed == "socket":
+            capture["socket_fd0"] = {"inode": 456}
+        client = subprocess.Popen(["/usr/bin/true"], stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+        client.wait(timeout=1.0)
+        snap = {"raw_show": None, "raw_stderr": None, "process_capture_complete": False,
+                "manager_properties_complete": False, "incomplete_reasons": [],
+                "main_pid": 0, "process_start_observed_before_query": True,
+                "trigger": "mainpid:741", "trigger_event_seq": 2,
+                "started_monotonic_ns": time.monotonic_ns()}
+        case.snapshots.append(snap)
+        query = {"lifecycle": case, "snapshot": snap, "process": client,
+                 "stdout": bytearray(signal_show.encode()), "stderr": bytearray(),
+                 "capture_number": 1, "limit_reason": None, "cancel_reason": None}
+        signal_observer.current_query = query
+        signal_observer._finish_query(query)
+        order.append("show-finished")
+        return snap, case
+    snap, case = finish_signal_case()
+    assert order == ["proc-before-show", "show-finished"] and snap["complete"]
+    assert snap["provisional_event_seq"] == 2 and case.provisional_captures[0]["bound_snapshot_index"] == 0
+    checks += 1
+    for altered in ("cgroup", "ticks"):
+        snap, case = finish_signal_case(altered)
+        assert not snap["complete"] and case.process_incomplete_reasons
+        assert case.provisional_captures[0]["bound_snapshot_index"] is None
+        checks += 1
+    # Executable/socket alterations remain visible to offline artifact checks
+    # even when the manager fields themselves match.
+    for altered in ("exe", "socket"):
+        snap, case = finish_signal_case(altered)
+        assert not snap["complete"] and case.process_incomplete_reasons
+        assert case.provisional_captures[0]["bound_snapshot_index"] is None
+        checks += 1
+    # Exercise the shared real capture adapter with fake bounded /proc reads.
+    # It retains the first stat on a later PID-reuse race and requires an
+    # independently stable final stat after FD0, without binding a lifecycle.
+    class ProcessProbe:
+        def __init__(self):
+            self.stat_reads = 0
+            self.reuse = False
+            self.wrong_cgroup = False
+
+        def _bounded_file(self, path: Path, maximum: int, _deadline: float,
+                          reserve: float = 0.0) -> bytes:
+            assert str(path) == "/proc/741/stat" and maximum == MAX_PROC_STAT_BYTES
+            self.stat_reads += 1
+            return b"stat-reused" if self.reuse and self.stat_reads >= 2 else b"stat-stable"
+
+        @staticmethod
+        def _proc_stat_identity(raw: bytes, _label: str) -> tuple[str, int, int]:
+            return ("R", 1, 5813) if raw == b"stat-reused" else ("S", 1, 5812)
+
+        def _capture_process(self, pid: int, label: str, output: Path,
+                             _deadline: float, cgroup: str, exe: str,
+                             reserve: float = 0.0) -> dict[str, object]:
+            assert pid == 741 and cgroup == "/system.slice/broker.instance"
+            assert exe == BROKER_EXECUTABLE and reserve == 0.0
+            for suffix, data in (("proc-status", b"Pid:\t741\n"),
+                                 ("proc-mountinfo", b"1 1 0:1 / / ro - tmpfs tmpfs ro\n"),
+                                 ("proc-cgroup", b"0::/system.slice/broker.instance\n")):
+                (output / f"{label}.{suffix}").write_bytes(data)
+            return {"starttime_ticks": 5812, "pid": 741,
+                    "cgroup": "0::/system.slice/other" if self.wrong_cgroup else
+                              "0::/system.slice/broker.instance",
+                    "exe": BROKER_EXECUTABLE, "exe_sha256": "f" * 64}
+
+    process_reader = object.__new__(BrokerObserver)
+    process_reader.writer = SignalWriter()
+    process_reader.deadline = time.monotonic() + 5.0
+    process_reader._read_stable_process_exe = lambda *_args: BROKER_EXECUTABLE
+    process_reader._capture_fd0 = lambda *_args: {
+        "identity": {"fd": 0, "inode": 123, "target": "socket:[123]",
+                     "stable": True, "start_ticks_before": 5812,
+                     "start_ticks_after": 5812},
+        "link_ref": {"bytes": 1}, "fdinfo_ref": {"bytes": 1}}
+    probe = ProcessProbe()
+    saved_probe = sys.modules.get("issue1162_live_probe")
+    try:
+        sys.modules["issue1162_live_probe"] = probe
+        stable = {"cgroup": "/system.slice/broker.instance", "proc_capture": {}}
+        process_reader._capture_process(signal_row, stable, 741, 5,
+                                        label="signal-000005", bind_lifecycle=False)
+        assert set(stable["proc_capture"]) == {
+            "proc-stat-before", "proc-stat-after", "proc-status", "proc-mountinfo",
+            "proc-cgroup", "fd0_link", "fd0_info"}
+        assert stable["start_ticks"] == 5812 and signal_row.start_ticks is None
+        checks += 1
+        probe.stat_reads, probe.reuse = 0, True
+        reused = {"cgroup": "/system.slice/broker.instance", "proc_capture": {}}
+        try:
+            process_reader._capture_process(signal_row, reused, 741, 6,
+                                            label="signal-000006", bind_lifecycle=False)
+        except ObserverError:
+            assert "proc-stat-before" in reused["proc_capture"] and \
+                   "proc-stat-after" not in reused["proc_capture"]
+            checks += 1
+        else:
+            raise AssertionError("PID reuse after FD0 was accepted")
+        probe.stat_reads, probe.reuse, probe.wrong_cgroup = 0, False, True
+        wrong = {"cgroup": "/system.slice/broker.instance", "proc_capture": {}}
+        try:
+            process_reader._capture_process(signal_row, wrong, 741, 7,
+                                            label="signal-000007", bind_lifecycle=False)
+        except ObserverError:
+            assert "proc-stat-before" in wrong["proc_capture"] and \
+                   "proc-status" not in wrong["proc_capture"]
+            checks += 1
+        else:
+            raise AssertionError("process cgroup changed before FD0")
+    finally:
+        if saved_probe is None:
+            sys.modules.pop("issue1162_live_probe", None)
+        else:
+            sys.modules["issue1162_live_probe"] = saved_probe
     print(f"BROKER_OBSERVER_SELF_TEST checks={checks} failures=0 fixtures-only-no-live-bus")
 
 
