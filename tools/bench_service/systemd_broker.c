@@ -14,6 +14,7 @@
 #endif
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <inttypes.h>
 #include <stddef.h>
 #include <poll.h>
@@ -54,6 +55,8 @@
 #define BQ_BROKER_DIAG_CHUNK 512u
 #define BQ_BROKER_DIAG_OUTPUT (512u * 1024u)
 #define BQ_BROKER_DIAG_MILLISECONDS 500u
+/* A larger NSS group list is refused, never accepted from a truncated buffer. */
+#define BQ_BROKER_ACCOUNT_GROUP_LIMIT 32
 
 enum { BQ_BROKER_START = 1, BQ_BROKER_SIGNAL = 2 };
 enum { BQ_BROKER_OUTER = 0, BQ_BROKER_BASE_GENERATE = 1, BQ_BROKER_BASE_BUILD = 2,
@@ -1263,8 +1266,8 @@ static int bq_broker_execute(BqBrokerCommand const* command, int connection, boo
 
 static bool bq_broker_accounts_valid(BqBrokerAccounts const* accounts)
 {
-    /* Root belongs only to this constrained broker process.  The names sent
-     * to systemd-run must resolve to distinct non-root primary identities. */
+    /* Root belongs only to this constrained broker process.  At request time,
+     * the fixed names must map to distinct non-root primary identities. */
     bool ok = accounts &&
               accounts->service_uid != (uid_t)-1 && accounts->service_uid != 0 &&
               accounts->service_gid != (gid_t)-1 && accounts->service_gid != 0 &&
@@ -1278,6 +1281,58 @@ static bool bq_broker_accounts_valid(BqBrokerAccounts const* accounts)
               accounts->runner_uid != accounts->candidate_uid &&
               accounts->runner_gid != accounts->service_gid &&
               accounts->runner_gid != accounts->candidate_gid;
+    return ok;
+}
+
+enum { BQ_BROKER_SERVICE_ACCOUNT, BQ_BROKER_CANDIDATE_ACCOUNT, BQ_BROKER_RUNNER_ACCOUNT };
+
+static bool bq_broker_account_group_set_valid(BqBrokerAccounts const* accounts, int role,
+                                               gid_t const* groups, int count)
+{
+    bool ok = accounts && bq_broker_accounts_valid(accounts) && groups &&
+              role >= BQ_BROKER_SERVICE_ACCOUNT && role <= BQ_BROKER_RUNNER_ACCOUNT &&
+              count > 0 && count <= BQ_BROKER_ACCOUNT_GROUP_LIMIT;
+    gid_t primary = 0;
+    if (ok)
+    {
+        if (role == BQ_BROKER_SERVICE_ACCOUNT) primary = accounts->service_gid;
+        else if (role == BQ_BROKER_CANDIDATE_ACCOUNT) primary = accounts->candidate_gid;
+        else primary = accounts->runner_gid;
+    }
+    bool primary_seen = false;
+    bool candidate_seen = false;
+    for (int index = 0; ok && index < count; index += 1)
+    {
+        gid_t group = groups[index];
+        primary_seen |= group == primary;
+        candidate_seen |= group == accounts->candidate_gid;
+        ok = group != 0 && group != (gid_t)-1 &&
+             !(role == BQ_BROKER_CANDIDATE_ACCOUNT && group == accounts->service_gid) &&
+             !(role == BQ_BROKER_RUNNER_ACCOUNT &&
+               (group == accounts->service_gid || group == accounts->candidate_gid));
+    }
+    return ok && primary_seen && (role != BQ_BROKER_SERVICE_ACCOUNT || candidate_seen);
+}
+
+static bool bq_broker_account_groups_valid(BqBrokerAccounts const* accounts)
+{
+    static char const* const names[] = {"buster-bench", "buster-bench-candidate", "buster-github-runner"};
+    bool ok = bq_broker_accounts_valid(accounts);
+    gid_t primary[3] = {0};
+    if (ok)
+    {
+        primary[0] = accounts->service_gid;
+        primary[1] = accounts->candidate_gid;
+        primary[2] = accounts->runner_gid;
+    }
+    for (int role = 0; ok && role < 3; role += 1)
+    {
+        gid_t groups[BQ_BROKER_ACCOUNT_GROUP_LIMIT];
+        int count = BQ_BROKER_ACCOUNT_GROUP_LIMIT;
+        int found = getgrouplist(names[role], primary[role], groups, &count);
+        ok = found > 0 && found == count &&
+             bq_broker_account_group_set_valid(accounts, role, groups, count);
+    }
     return ok;
 }
 
@@ -1345,6 +1400,10 @@ static int bq_broker_server(void)
     bool parsed = ok && received == sizeof(request) && !(message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) &&
                   bq_broker_request_valid(&request);
     ok = parsed;
+    /* A signal can still clean an exact old unit if account membership changed.
+     * A fresh start must reject contaminated NSS groups before manager launch. */
+    if (ok && request.operation == BQ_BROKER_START)
+        ok = bq_broker_account_groups_valid(&accounts);
     bool state_checked = ok;
     if (ok) ok = bq_broker_state(&request, accounts.service_uid, accounts.service_gid, accounts.candidate_gid);
     bool state_valid = state_checked && ok;
@@ -1521,6 +1580,46 @@ static int bq_broker_self_test(void)
     BQ_BROKER_CHECK(!bq_broker_group_set_valid(foreign_groups, 3, accounts.service_gid, accounts.candidate_gid) &&
                     !bq_broker_group_set_valid(permitted_groups, 2, accounts.service_gid, accounts.candidate_gid) &&
                     !bq_broker_group_set_valid(NULL, -1, accounts.service_gid, accounts.candidate_gid));
+    gid_t service_groups[] = {65000, 65001};
+    gid_t candidate_groups[] = {65001};
+    gid_t runner_groups[] = {65002};
+    BQ_BROKER_CHECK(bq_broker_account_group_set_valid(&accounts, BQ_BROKER_SERVICE_ACCOUNT,
+                                                     service_groups, 2) &&
+                    bq_broker_account_group_set_valid(&accounts, BQ_BROKER_CANDIDATE_ACCOUNT,
+                                                     candidate_groups, 1) &&
+                    bq_broker_account_group_set_valid(&accounts, BQ_BROKER_RUNNER_ACCOUNT,
+                                                     runner_groups, 1) &&
+                    bq_broker_group_set_valid(permitted_groups, 3, accounts.service_gid, accounts.candidate_gid));
+    gid_t service_without_staging[] = {65000};
+    gid_t service_with_root[] = {65000, 65001, 0};
+    BQ_BROKER_CHECK(!bq_broker_account_group_set_valid(&accounts, BQ_BROKER_SERVICE_ACCOUNT,
+                                                      service_without_staging, 1) &&
+                    !bq_broker_account_group_set_valid(&accounts, BQ_BROKER_SERVICE_ACCOUNT,
+                                                      service_with_root, 3));
+    gid_t candidate_service[] = {65001, 65000};
+    gid_t candidate_root[] = {65001, 0};
+    gid_t candidate_without_primary[] = {65003};
+    BQ_BROKER_CHECK(!bq_broker_account_group_set_valid(&accounts, BQ_BROKER_CANDIDATE_ACCOUNT,
+                                                      candidate_service, 2) &&
+                    !bq_broker_account_group_set_valid(&accounts, BQ_BROKER_CANDIDATE_ACCOUNT,
+                                                      candidate_root, 2) &&
+                    !bq_broker_account_group_set_valid(&accounts, BQ_BROKER_CANDIDATE_ACCOUNT,
+                                                      candidate_without_primary, 1));
+    gid_t runner_service[] = {65002, 65000};
+    gid_t runner_root[] = {65002, 0};
+    gid_t runner_candidate[] = {65002, 65001};
+    BQ_BROKER_CHECK(!bq_broker_account_group_set_valid(&accounts, BQ_BROKER_RUNNER_ACCOUNT,
+                                                      runner_service, 2) &&
+                    !bq_broker_account_group_set_valid(&accounts, BQ_BROKER_RUNNER_ACCOUNT,
+                                                      runner_root, 2) &&
+                    !bq_broker_account_group_set_valid(&accounts, BQ_BROKER_RUNNER_ACCOUNT,
+                                                      runner_candidate, 2));
+    BQ_BROKER_CHECK(!bq_broker_account_group_set_valid(NULL, BQ_BROKER_CANDIDATE_ACCOUNT,
+                                                      candidate_groups, 1) &&
+                    !bq_broker_account_group_set_valid(&accounts, -1, candidate_groups, 1) &&
+                    !bq_broker_account_group_set_valid(&accounts, BQ_BROKER_CANDIDATE_ACCOUNT, NULL, 1) &&
+                    !bq_broker_account_group_set_valid(&accounts, BQ_BROKER_CANDIDATE_ACCOUNT,
+                                                      candidate_groups, BQ_BROKER_ACCOUNT_GROUP_LIMIT + 1));
     accounts.service_uid = 0;
     BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
     accounts.service_uid = 65000;
