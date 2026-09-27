@@ -104,8 +104,8 @@ not a code-enforced whole-lease pin. Any authorization change requires a new
 safe disabled/drained installation window. Keep TERM/KILL recovery available.
 
 LOCAL must publish all five authenticated recovery scenarios, a safe subsequent
-job, export and clean replay receipts before #880 acceptance. Cloud then alone
-submits a frozen physical plan through the existing protected-main gateway,
+job, export and clean replay receipts before #880 acceptance. Cloud alone
+submits each frozen physical plan through the existing protected-main gateway,
 after shared request ID/readiness and independent authorizations are present.
 No such submission is authorized by this preparation packet.
 

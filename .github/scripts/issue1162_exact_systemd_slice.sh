@@ -277,7 +277,12 @@ for tool in clang cmake ninja; do
 done >"$evidence/build-tool-dependencies.txt" 2>&1
 for binary in "$payload"/binaries/* "$payload/cleanup-identity-tests"; do
   printf 'binary=%s\n' "$binary"
-  ldd "$binary"
+  if [[ "$binary" == "$payload/binaries/buster-bench-credential-gate" ]]; then
+    printf 'static-gate: no dynamic loader or shared-library dependencies\n'
+    readelf -W -l "$binary"
+  else
+    ldd "$binary"
+  fi
 done >"$evidence/installed-binary-dependencies.txt" 2>&1
 printf 'PATH=%s\nLANG=%s\nLC_ALL=%s\n' "$PATH" "${LANG-}" "${LC_ALL-}" >"$evidence/build-environment.txt"
 cat > "$payload/Dockerfile" <<'DOCKERFILE'
@@ -370,7 +375,15 @@ dpkg-query -W -f='${Package} ${Version}\n'
 for executable in /usr/local/libexec/buster-bench-* /usr/local/libexec/systemd-broker-live-test /root/issue1162-install/cleanup-identity-tests /usr/bin/clang /usr/bin/cmake /usr/bin/ninja; do
   printf 'runtime-executable=%s resolved=%s\n' "$executable" "$(readlink -f "$executable")"
   sha256sum "$executable"
-  dependencies="$(ldd "$executable")"
+  if [ "$executable" = /usr/local/libexec/buster-bench-credential-gate ]; then
+    headers="$(readelf -W -l "$executable")"
+    printf '%s\n' "$headers"
+    if printf '%s\n' "$headers" | grep -Eq 'INTERP|DYNAMIC|GNU_STACK.*RWE'; then exit 1; fi
+    printf 'static-gate: no dynamic loader or shared-library dependencies\n'
+    dependencies=
+  else
+    dependencies="$(ldd "$executable")"
+  fi
   printf '%s\n' "$dependencies"
   printf '%s\n' "$dependencies" | awk '$2 == "=>" && $3 ~ /^\// {print $3} $1 ~ /^\// {print $1}' | while IFS= read -r library; do
     sha256sum "$library"
