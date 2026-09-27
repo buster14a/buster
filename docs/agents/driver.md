@@ -391,6 +391,16 @@ things in the x86-64 dynamic writer, and the AArch64 one through it:
   Clang-differential fixture** — a harness that reads "Clang refuses, Buster
   accepts" as a Buster success measures nothing (issue #660).
 
+## Object output (`-c`)
+
+`-c` writes the object through `object_write`. The ELF64 writer plans the
+whole file with checked arithmetic, then stores each byte once; it refuses an
+object whose section count reaches `SHN_LORESERVE`, whose string tables need
+offsets past 32 bits, or whose size overflows or exceeds the arena, with the
+diagnostic `native elf64 object exceeds a format limit (...)`, and leaves an
+existing output file untouched. `-v` prints the writer's exact work as one
+`OBJECT_WRITE` record. See [object emission](../object-emission.md).
+
 ## External ELF debug information
 
 The ELF object reader carries the DWARF 5 `.debug_addr`, `.debug_str_offsets`,
