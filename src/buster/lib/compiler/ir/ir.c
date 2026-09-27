@@ -17,7 +17,9 @@
 // ir_cfg.c), and the module validator
 // (ir_validate_canonical_module) that every producer runs before machine
 // selection or Wasm emission so a diagnosed frontend failure cannot leak a
-// half-built function into codegen.
+// half-built function into codegen. Its module-scope and per-function halves
+// (ir_validate_canonical_scope, ir_validate_canonical_function) let FAST
+// decline one function instead of the whole module.
 
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/ir_internal.h>
@@ -5734,7 +5736,10 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_initializer(IrProgram* program
     return result;
 }
 
-IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
+// The module-scope half of ir_validate_canonical_module: the argument guard,
+// the ownership proof for every lowered function, and the globals, aliases and
+// initializers. A failure here is not a verdict on one function's rows.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_scope(IrProgram* program, IrModule* module)
 {
     IrValidationResult result = ir_validation_ok();
     IR_CONSTRUCTION_RECORD(VALIDATION_CALLS, 1);
@@ -5763,32 +5768,55 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
             IR_CONSTRUCTION_RECORD(VALIDATION_INITIALIZERS, 1);
             result.error = ir_validate_initializer(program, module, module->initializers[initializer_index]);
         }
-        for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
+    }
+    return result;
+}
+
+// The function-scope half: one lowered function's signature, values, blocks
+// and rows. It walks instruction chains without a cycle guard, so it runs only
+// after ir_validate_canonical_scope has proven ownership for the module.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_function(IrProgram* program, IrFunction* function)
+{
+    IrValidationResult result;
+    IR_CONSTRUCTION_RECORD(VALIDATION_FUNCTIONS, 1);
+    IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
+    if (!signature || signature->kind != IR_TYPE_FUNCTION ||
+        (signature->parameter_count && !signature->parameter_types) ||
+        !ir_type_from_id(&program->types, signature->return_type) || function->entry.value >= function->block_count)
+    {
+        result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+    }
+    else
+    {
+        result = ir_validate_function_values(program, function);
+        if (result.error == IR_VALIDATION_NONE)
         {
-            IrFunction* function = module->functions + function_index;
-            if (function->state != IR_FUNCTION_LOWERED)
-            {
-                continue;
-            }
-            IR_CONSTRUCTION_RECORD(VALIDATION_FUNCTIONS, 1);
-            IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
-            if (!signature || signature->kind != IR_TYPE_FUNCTION ||
-                (signature->parameter_count && !signature->parameter_types) ||
-                !ir_type_from_id(&program->types, signature->return_type) || function->entry.value >= function->block_count)
-            {
-                result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
-            }
-            else
-            {
-                result = ir_validate_function_values(program, function);
-                if (result.error == IR_VALIDATION_NONE)
-                {
-                    result = ir_validate_function_blocks(program, function, signature);
-                }
-            }
+            result = ir_validate_function_blocks(program, function, signature);
         }
     }
     return result;
+}
+
+// The whole module except the lowered functions `excluded` marks, indexed like
+// module->functions; a null mask excludes none. FAST leaves a function it
+// declined untouched, so its output check leaves that function out.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_module_excluding(IrProgram* program, IrModule* module, u8 const* excluded)
+{
+    IrValidationResult result = ir_validate_canonical_scope(program, module);
+    for (u32 function_index = 0; result.error == IR_VALIDATION_NONE && function_index < module->function_count; function_index += 1)
+    {
+        IrFunction* function = module->functions + function_index;
+        if (function->state == IR_FUNCTION_LOWERED && !(excluded && excluded[function_index]))
+        {
+            result = ir_validate_canonical_function(program, function);
+        }
+    }
+    return result;
+}
+
+IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
+{
+    return ir_validate_canonical_module_excluding(program, module, 0);
 }
 
 #include <buster/lib/compiler/ir/ir_cfg.c>

@@ -96,9 +96,90 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_span_tests(UnitTestArguments* 
     return result;
 }
 
+// A producer-certified module holding one function the strict validator
+// rejects: FAST declines that function alone and still rewrites the other
+// (#1602). A failure outside every function still declines them all. Neither
+// may become a preparation error, including under the FAST-output check that
+// Debug/test/sanitizer builds run, and the decline must not hide the defect.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_decline_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 module_scope = 0; module_scope < 2; module_scope += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        CIRLowerResult lowered = ir_promotion_lower(arguments->arena,
+            S8("int storage=1;int broken(int x){return x+0;}int kept(int y){return y+0;}"), target_native);
+        BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+        if (lowered.program && !lowered.diagnostic_count)
+        {
+            IrProgram* program = lowered.program;
+            IrModule* module = program->modules;
+            IrFunction* broken = 0;
+            IrFunction* kept = 0;
+            IrGlobal* storage = 0;
+            for (u32 index = 0; index < module->function_count; index += 1)
+            {
+                IrFunction* candidate = module->functions + index;
+                if (string_equal(candidate->name, S8("broken"))) broken = candidate;
+                if (string_equal(candidate->name, S8("kept"))) kept = candidate;
+            }
+            for (u32 index = 0; index < module->global_count; index += 1)
+            {
+                IrSymbol* symbol = ir_symbol_from_id(&program->symbols, module->globals[index].symbol);
+                if (symbol && string_equal(symbol->name, S8("storage"))) storage = module->globals + index;
+            }
+            bool corrupted = false;
+            if (broken && kept && storage)
+            {
+                if (module_scope)
+                {
+                    storage->alignment = 3;
+                    corrupted = true;
+                }
+                for (u32 index = 0; !module_scope && index < broken->instruction_count && !corrupted; index += 1)
+                {
+                    IrInstruction* row = broken->instructions + index;
+                    if (row->opcode == IR_OPCODE_BINARY)
+                    {
+                        row->binary_operation = IR_BINARY_COUNT;
+                        corrupted = true;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, corrupted);
+            if (corrupted)
+            {
+                u32 broken_count = broken->instruction_count;
+                u32 kept_count = kept->instruction_count;
+                program->disable_local_promotion = true;
+                program->fast_passes = IR_FAST_ALL;
+                IrValidationResult prepared = ir_prepare_canonical_module(program, module, true);
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && module->fast_complete);
+                BUSTER_TEST(arguments, broken->instruction_count == broken_count);
+                if (module_scope)
+                {
+                    BUSTER_TEST(arguments, module->fast.validation_skips == 2 && module->fast.functions == 0);
+                    BUSTER_TEST(arguments, kept->instruction_count == kept_count);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.functions == 1);
+                    BUSTER_TEST(arguments, module->fast.passes[IR_FAST_FOLD].changes != 0 && kept->instruction_count < kept_count);
+                }
+                IrValidationResult strict = ir_validate_canonical_module(program, module);
+                BUSTER_TEST(arguments, strict.error == (module_scope ? IR_VALIDATION_ALIGNMENT : IR_VALIDATION_OPERATION));
+                BUSTER_TEST(arguments, strict.function.value == (module_scope ? IR_ID_UNDERLYING_INVALID : broken->id.value));
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_publication_span_tests(arguments);
+    BUSTER_TEST_FIXTURE(arguments, ir_fast_decline_tests);
     String8 source = S8("volatile int observed;int effect(int);"
                        "int test(int input,int* p){int x=input+0;int unused=x*9;"
                        "int a=3,b=4;int* q=&*p;observed=effect(x);return x+(a+b)+*q+observed;}");

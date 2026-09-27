@@ -46,10 +46,17 @@ certificate. Mutating a prepared module requires clearing the relevant
 preparation markers and revoking the caller's input certificate. Repeated
 untrusted preparation still validates. Published CFG/address facts must be
 invalidated before mutation and rebuilt after these transforms (#38/#44).
-Producer-certified modules that do not yet satisfy the stricter canonical
-validator are left unchanged as a unit and increment `validation_skips`.
+A producer-certified function that does not yet satisfy the stricter
+canonical validator is left unchanged and increments `validation_skips`; the
+other functions of its module still run FAST (#1602). Each pass reads and
+rewrites only the function it is given, so that function's own verdict is its
+whole precondition. A failure the validator cannot attribute to one function
+(ownership, globals, aliases, initializers) still declines every function of
+the module, and `validation_skips` counts all of them. The FAST output check
+leaves declined functions out, since their rows did not change.
 Optional transformation must never turn an otherwise accepted legacy source
-shape into a new diagnostic.
+shape into a new diagnostic. `-fverify-codegen` names the first function and
+validation error behind a decline.
 
 When preparation has already run that validator over the module in exactly
 its current state -- the promotion-output scan of a Debug/test/sanitizer/

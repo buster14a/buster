@@ -4,7 +4,9 @@
 // one forward pass; ir_fast_dce uses counts plus a deletion queue (no use CSR);
 // ir_fast_parameters has a hard sweep cap. ir_prepare_canonical_module owns
 // input, promotion-output and FAST-output certification boundaries, then
-// publishes the final canonical CFG after all selected transformations.
+// publishes the final canonical CFG after all selected transformations. Its
+// FAST input guard declines only the functions that fail the strict validator
+// (ir_validate_canonical_scope and ir_validate_canonical_function in ir.c).
 #include <buster/lib/time.h>
 
 String8 ir_fast_pass_name(IrFastPass pass)
@@ -560,40 +562,52 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             module->fast = (IrFastStatistics){0};
             // A producer certificate is sufficient for the ordinary backend,
             // but some legacy accepted shapes do not yet satisfy the stricter
-            // canonical validator. Optional rewrites decline those modules as
-            // a unit: this keeps explicit/default FAST safe without turning an
-            // existing accepted source into a diagnostic.
-            bool fast_input_valid = true;
+            // canonical validator. Optional rewrites decline each such
+            // function on its own: every pass reads and rewrites only the rows
+            // of the function it is given, so that function's verdict is the
+            // whole precondition for rewriting it, and one legacy shape no
+            // longer takes FAST away from the rest of the translation unit. A
+            // failure outside any function (ownership, globals, aliases,
+            // initializers) still declines every function. Either way an
+            // existing accepted source never turns into a diagnostic, and each
+            // verdict depends only on the module's own rows.
+            TemporalArena scratch = scratch_begin(&program->arena, 1);
+            u8* declined = 0;
             if (!validated)
             {
                 IR_CONSTRUCTION_RECORD(PREPARATION_FAST_INPUT_VALIDATIONS, 1);
-                IrValidationResult fast_input = ir_validate_canonical_module(program, module);
-                fast_input_valid = fast_input.error == IR_VALIDATION_NONE;
-            }
-            if (!fast_input_valid)
-            {
-                module->fast.validation_skips = 1;
-            }
-            else
-            {
+                bool scope_valid = ir_validate_canonical_scope(program, module).error == IR_VALIDATION_NONE;
+                declined = arena_allocate(scratch.arena, u8, module->function_count);
                 for (u32 index = 0; index < module->function_count; index += 1)
                 {
+                    // The function checks rely on the scope's ownership proof.
                     IrFunction* function = module->functions + index;
-                    if (function->state == IR_FUNCTION_LOWERED)
-                    {
-                        IR_CONSTRUCTION_RECORD(PREPARATION_FAST_FUNCTIONS, 1);
-                        ir_fast_function(program, function, &module->fast);
-                    }
-                }
-                u64 changes = 0;
-                for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1) changes += module->fast.passes[pass].changes;
-                if (changes && (!input_certified || BUSTER_IR_TRANSFORM_CHECKS))
-                {
-                    IR_CONSTRUCTION_RECORD(PREPARATION_FAST_OUTPUT_VALIDATIONS, 1);
-                    result = ir_validate_canonical_module(program, module);
-                    result.boundary = IR_VALIDATION_BOUNDARY_FAST_OUTPUT;
+                    declined[index] = function->state == IR_FUNCTION_LOWERED &&
+                                      (!scope_valid || ir_validate_canonical_function(program, function).error != IR_VALIDATION_NONE);
                 }
             }
+            for (u32 index = 0; index < module->function_count; index += 1)
+            {
+                IrFunction* function = module->functions + index;
+                if (declined && declined[index])
+                {
+                    module->fast.validation_skips += 1;
+                }
+                else if (function->state == IR_FUNCTION_LOWERED)
+                {
+                    IR_CONSTRUCTION_RECORD(PREPARATION_FAST_FUNCTIONS, 1);
+                    ir_fast_function(program, function, &module->fast);
+                }
+            }
+            u64 changes = 0;
+            for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1) changes += module->fast.passes[pass].changes;
+            if (changes && (!input_certified || BUSTER_IR_TRANSFORM_CHECKS))
+            {
+                IR_CONSTRUCTION_RECORD(PREPARATION_FAST_OUTPUT_VALIDATIONS, 1);
+                result = ir_validate_canonical_module_excluding(program, module, declined);
+                result.boundary = IR_VALIDATION_BOUNDARY_FAST_OUTPUT;
+            }
+            scratch_end(scratch);
             module->fast_complete = result.error == IR_VALIDATION_NONE;
         }
         for (u32 index = 0; index < module->function_count && result.error == IR_VALIDATION_NONE; index += 1)
