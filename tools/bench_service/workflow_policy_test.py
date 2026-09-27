@@ -256,6 +256,15 @@ def main() -> int:
         if marker not in dispatch:
             errors.append(f"dispatch workflow is missing required policy marker: {marker}")
 
+    concurrency = (
+        "concurrency:\n"
+        "  group: buster-9700x-service-dispatch\n"
+        "  queue: max\n"
+        "  cancel-in-progress: false\n"
+    )
+    if dispatch.count("\nconcurrency:\n") != 1 or concurrency not in dispatch:
+        errors.append("dispatch must retain bounded pending runs without replacing or canceling active work")
+
     forbidden = (
         "actions/checkout@",
         "pull_request:",

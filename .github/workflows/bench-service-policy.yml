@@ -40,6 +40,7 @@ jobs:
           python3 -B tools/bench_service/deploy/verify_github_actor_policy_test.py
           python3 -B tools/bench_service/deploy/verify_github_admission_test.py
           python3 -B tools/bench_service/deploy/verify_github_queue_test.py
+          python3 -B tools/bench_service/resolve_pr_request_test.py
       - name: Replay Zen 5 qualification formats
         run: |
           python3 -B tools/zen5_host_qualification.py --self-test
