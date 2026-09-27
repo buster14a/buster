@@ -50449,6 +50449,20 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         if (existing_function)
         {
             declaration_functions[declaration_index] = existing_function;
+            // Each declarator builds its own C function types, and each of
+            // those maps to its own IR function type, so a return type that
+            // contains one -- `int (*f(int))(int)` spelled on a prototype and
+            // again on the definition -- names a different pointer type in
+            // each declaration. The function keeps the type of the declaration
+            // that registered it, and the validator checks RETURN rows and
+            // direct call results against that type's return, so this
+            // declaration's signature takes the same return type. A typedef'd
+            // return type is one C type in every declaration and already did.
+            IrType* registered_type = ir_type_from_id(&program->types, existing_function->canonical_type);
+            if (registered_type && registered_type->kind == IR_TYPE_FUNCTION && ir_type_from_id(&program->types, registered_type->return_type))
+            {
+                signatures[declaration_index].return_type = registered_type->return_type;
+            }
             if (declaration.is_definition)
             {
                 IrSymbol* symbol = ir_symbol_from_id(&program->symbols, existing_function->symbol);
