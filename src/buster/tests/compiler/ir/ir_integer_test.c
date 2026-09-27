@@ -661,6 +661,51 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_integer_test_constant_decode(UnitTestArgum
     return result;
 }
 
+// The validator and the constructor state one constant contract: a row whose
+// spelled number lies outside [-2^(width-1), 2^width) is invalid, because a
+// native emitter materializes the magnitude unreduced.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_integer_test_constant_validation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    CIRLowerResult lowered = ir_promotion_lower(arguments->arena, S8("int seven(void) { return 7; }"), target_native);
+    BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+    if (lowered.program && !lowered.diagnostic_count)
+    {
+        IrProgram* program = lowered.program;
+        IrInstruction* narrow = 0;
+        for (u32 function_index = 0; function_index < program->modules->function_count; function_index += 1)
+        {
+            IrFunction* function = program->modules->functions + function_index;
+            for (u32 row = 0; row < function->instruction_count; row += 1)
+            {
+                IrInstruction* instruction = function->instructions + row;
+                if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER &&
+                    ir_integer_type_width(ir_type_from_id(&program->types, instruction->canonical_type)) == 32)
+                {
+                    narrow = instruction;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, narrow && ir_validate_canonical_module(program, program->modules).error == IR_VALIDATION_NONE);
+        if (narrow)
+        {
+            u64 original = narrow->immediates[0];
+            bool original_negative = narrow->immediate_is_negative;
+            narrow->immediates[0] = UINT64_C(0x100000007);
+            narrow->immediate_is_negative = false;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(program, program->modules).error == IR_VALIDATION_OPERATION);
+            narrow->immediates[0] = 5;
+            narrow->immediate_is_negative = true;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(program, program->modules).error == IR_VALIDATION_NONE);
+            narrow->immediates[0] = original;
+            narrow->immediate_is_negative = original_negative;
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_integer_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_integer_test_reduced_widths(arguments);
@@ -670,6 +715,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_integer_tests(UnitTestArguments* arguments
     UnitTestResult decode = ir_integer_test_constant_decode(arguments);
     result.test_count += decode.test_count;
     result.succeeded_test_count += decode.succeeded_test_count;
+    UnitTestResult validation = ir_integer_test_constant_validation(arguments);
+    result.test_count += validation.test_count;
+    result.succeeded_test_count += validation.succeeded_test_count;
 #if defined(__SIZEOF_INT128__) && !defined(__BUSTER__)
     UnitTestResult randomized = ir_integer_test_random_widths(arguments);
     result.test_count += randomized.test_count;
