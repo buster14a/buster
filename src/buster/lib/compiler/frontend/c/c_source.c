@@ -2712,6 +2712,12 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
                     {
                         memcpy(diagnostics, result.diagnostics, sizeof(*diagnostics) * result.diagnostic_count);
                     }
+                    // Messages are formatted in the diagnostic arena too, and
+                    // it is rewound or destroyed below: they leave with the rows.
+                    for (u64 diagnostic_index = 0; diagnostic_index < result.diagnostic_count; diagnostic_index += 1)
+                    {
+                        diagnostics[diagnostic_index].message = string_duplicate_arena(arena, diagnostics[diagnostic_index].message, false);
+                    }
                     result.diagnostics = diagnostics;
                     if (diagnostic_arena_is_scratch)
                     {

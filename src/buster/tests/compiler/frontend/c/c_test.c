@@ -1763,6 +1763,40 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vla_row_places(UnitTestArguments* argu
     return result;
 }
 
+// c_lex_dispatch collects diagnostics in a temporary arena -- thread scratch,
+// or a private arena for a large source -- and rewinds or destroys it before
+// returning. The messages are formatted there too, so they must leave with the
+// rows: overwrite the free space of both scratch arenas after the lex and read
+// the message back. (A driver compile of an invalid byte printed an empty
+// message once another scratch user reached those bytes first.)
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lexer_diagnostic_message_lifetime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = 1}});
+    BUSTER_TEST(arguments, arena != 0);
+    if (arena)
+    {
+        CLexResult lex = c_lex(arena, S8("int x = 1;\x18\n"));
+        BUSTER_TEST(arguments, lex.diagnostic_count == 1);
+        TemporalArena first = scratch_begin(&arena, 1);
+        Arena* conflicts[] = {
+            arena,
+            first.arena,
+        };
+        TemporalArena second = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        memset(arena_allocate(first.arena, u8, BUSTER_KB(64)), 'Z', BUSTER_KB(64));
+        memset(arena_allocate(second.arena, u8, BUSTER_KB(64)), 'Z', BUSTER_KB(64));
+        scratch_end(second);
+        scratch_end(first);
+        if (lex.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, lex.diagnostics[0].message, S8("invalid character byte 24 in C source"));
+        }
+        BUSTER_TEST(arguments, arena_destroy(arena, 1));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lexer_rewind_zeroed(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23165,6 +23199,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
     BUSTER_TEST_FIXTURE(arguments, c_test_vla_row_places);
     BUSTER_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
+    BUSTER_TEST_FIXTURE(arguments, c_test_lexer_diagnostic_message_lifetime);
     BUSTER_TEST_FIXTURE(arguments, c_test_scope_interval_index);
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
