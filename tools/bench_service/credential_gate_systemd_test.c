@@ -428,7 +428,7 @@ static bool bqcg_resolved(BqCgCase const* current, BqCgPin const* pin, BqCgPin* 
                 break;
             case BQCG_CHANGE_GID:
                 ok = resolved->uid == pin->uid && resolved->gid == 65423 &&
-                     account_gid == pin->gid &&
+                     account_gid == resolved->gid &&
                      resolved->count == 1 && resolved->groups[0] == 65423;
                 break;
             case BQCG_REMOVE_CANDIDATE:
@@ -437,6 +437,8 @@ static bool bqcg_resolved(BqCgCase const* current, BqCgPin const* pin, BqCgPin* 
                 break;
         }
     }
+    printf("BQCG_NSS_RESOLVED case=%s account_gid=%u named_gid=%u groups=%d valid=%d\n",
+           current->name, (unsigned)account_gid, (unsigned)resolved->gid, resolved->count, ok);
     if (ok && current->change == BQCG_CLEAN)
         for (int index = 0; index < pin->count; index += 1)
             ok = ok && resolved->groups[index] == pin->groups[index];
@@ -740,7 +742,7 @@ static bool bqcg_case(int index, char const* log)
     else if (ok)
         ok = bqcg_no_marker(index);
     printf("BQCG_CASE name=%s stage=%u pinned_uid=%u pinned_gid=%u pinned_groups=%s resolved_uid=%u resolved_gid=%u status=%s payload=%s\n",
-           current->name, current->service ? 0u : 1u, (unsigned)pin.uid, (unsigned)pin.gid,
+           current->name, current->service ? 0u : 3u, (unsigned)pin.uid, (unsigned)pin.gid,
            pin.arguments, (unsigned)resolved.uid, (unsigned)resolved.gid,
            ok ? "pass" : "fail", current->change == BQCG_CLEAN ? "expected" : "forbidden");
     if (observed.magic) bqcg_print_identity("BQCG_PID1_PROBE", &observed);
