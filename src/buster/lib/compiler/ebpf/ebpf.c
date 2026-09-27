@@ -1733,10 +1733,28 @@ static void ebpf_fe_emit_switch(EbpfFunctionEmitter* emitter, IrBlock* predecess
         return;
     }
     ebpf_fe_emit_value(emitter, EBPF_REG_8, instruction->operands[0]);
+    // The condition register holds the value normalized to 64 bits by its
+    // type's signedness (ebpf_fe_normalize); each case label is a value of
+    // that type and must be compared in the same image, so `case -1` of an
+    // int switch is all ones, not its 32-bit mask.
+    IrType* condition_type = instruction->operands[0].value < emitter->function->value_count
+                                 ? ebpf_type(emitter->context, emitter->function->values[instruction->operands[0].value].canonical_type)
+                                 : 0;
+    u32 condition_bits = condition_type ? ebpf_type_bits(condition_type) : 64;
+    bool condition_signed = condition_type && condition_type->kind == IR_TYPE_INTEGER && condition_type->is_signed;
+    // An argument reaches the register unnormalized; bring the condition to
+    // the same image the labels take below.
+    ebpf_fe_normalize(emitter, EBPF_REG_8, condition_type, condition_signed);
     u32* case_jumps = arena_allocate(emitter->context->arena, u32, instruction->immediate_count ? instruction->immediate_count : 1);
     for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
     {
-        ebpf_fe_mov_imm(emitter, EBPF_REG_9, (s64)instruction->immediates[case_index]);
+        IrInteger label = {.low = instruction->immediates[case_index]};
+        u64 image =
+            condition_bits && condition_bits < 64
+                ? ir_integer_convert(condition_signed ? IR_CONVERSION_INTEGER_SIGN_EXTEND : IR_CONVERSION_INTEGER_ZERO_EXTEND, label, condition_bits, 64)
+                      .bits.low
+                : label.low;
+        ebpf_fe_mov_imm(emitter, EBPF_REG_9, (s64)image);
         case_jumps[case_index] = ebpf_section_instruction_count(emitter->section);
         ebpf_fe_insn(emitter, EBPF_CLASS_JMP | EBPF_JEQ | EBPF_SRC_X, EBPF_REG_8, EBPF_REG_9, 0, 0);
     }
@@ -2378,9 +2396,17 @@ static bool ebpf_collect_global(EbpfContext* context, IrGlobal* global)
                           global->symbol);
                 return false;
             }
-            for (u32 byte = 0; byte < (u32)size; byte += 1)
             {
-                destination[byte] = (u8)(global->initializer_bits >> (byte * 8));
+                // An integer initializer is a sign and a magnitude; its bytes
+                // are that number at the object's width, as every other object
+                // writer emits it (`int g = -1;` is ff ff ff ff, not 01 00 00 00).
+                u64 bits = global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER
+                               ? ir_integer_from_magnitude((IrInteger){.low = global->initializer_bits}, global->initializer_is_negative, (u32)size * 8).low
+                               : global->initializer_bits;
+                for (u32 byte = 0; byte < (u32)size; byte += 1)
+                {
+                    destination[byte] = (u8)(bits >> (byte * 8));
+                }
             }
             break;
         case IR_GLOBAL_INITIALIZER_BYTES:

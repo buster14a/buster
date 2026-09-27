@@ -399,6 +399,74 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_scalars(UnitTestArguments* 
     return result;
 }
 
+// Integer images the eBPF writer builds from canonical constants: a signed
+// switch compares every label in the condition's normalized image, whatever
+// the caller left in the argument register's upper bits, and an integer
+// global initializer is its sign and magnitude at the object's width.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_integer_images(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    Target target = {.cpu_arch = CPU_ARCH_BPFEL, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    String8 switch_source = S8("long probe(int a, int b) { (void)b; switch (a) { case -1: return 7; case -2147483647 - 1: return 8; "
+                               "case 5: return 9; default: return 3; } }");
+    CPreprocessResult switch_tokens = c_preprocess(arena, switch_source, (CPreprocessOptions){0});
+    CParseResult switch_parse = c_parse(arena, switch_tokens);
+    CIRLowerResult switch_lowered = c_lower_to_ir(arena, S8("ebpf-switch.c"), switch_tokens, switch_parse, target);
+    BUSTER_TEST(arguments, switch_lowered.program && switch_lowered.diagnostic_count == 0);
+    if (switch_lowered.program && switch_lowered.diagnostic_count == 0)
+    {
+        EbpfArtifact artifact = ebpf_emit_program(arena, switch_lowered.program);
+        BUSTER_TEST(arguments, artifact.success);
+        struct
+        {
+            u64 argument;
+            u64 expected;
+        } cases[] = {
+            {UINT64_MAX, 7},
+            {UINT64_C(0xffffffff), 7},
+            {UINT64_C(0xffffffff80000000), 8},
+            {UINT64_C(0x80000000), 8},
+            {5, 9},
+            {UINT64_C(0x100000005), 9},
+            {0, 3},
+            {UINT64_C(0x7fffffff), 3},
+        };
+        for (u32 index = 0; artifact.success && index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            u64 actual = 0;
+            bool ran = codegen_test_ebpf_execute(artifact.bytes, cases[index].argument, 0, &actual);
+            BUSTER_TEST(arguments, ran && actual == cases[index].expected);
+        }
+    }
+    String8 data_source = S8("int g = -1; long h = -2; short s = -3; unsigned char u = 200; long probe(long a, long b) { return a + b; }");
+    CPreprocessResult data_tokens = c_preprocess(arena, data_source, (CPreprocessOptions){0});
+    CParseResult data_parse = c_parse(arena, data_tokens);
+    CIRLowerResult data_lowered = c_lower_to_ir(arena, S8("ebpf-data.c"), data_tokens, data_parse, target);
+    BUSTER_TEST(arguments, data_lowered.program && data_lowered.diagnostic_count == 0);
+    if (data_lowered.program && data_lowered.diagnostic_count == 0)
+    {
+        EbpfArtifact artifact = ebpf_emit_program(arena, data_lowered.program);
+        BUSTER_TEST(arguments, artifact.success);
+        ByteSlice data = {0};
+        u32 section_count = artifact.success ? (u32)codegen_test_ebpf_read(artifact.bytes.pointer + 60, 2) : 0;
+        for (u32 section = 1; section < section_count; section += 1)
+        {
+            ByteSlice header = codegen_test_ebpf_section(artifact.bytes, section);
+            u64 flags = header.length ? codegen_test_ebpf_read(header.pointer + 8, 8) : 0;
+            if (header.length && codegen_test_ebpf_read(header.pointer + 4, 4) == 1 && (flags & 1) && !(flags & 4))
+            {
+                data = codegen_test_ebpf_section_data(artifact.bytes, section);
+            }
+        }
+        u8 expected[] = {0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfd, 0xff, 200};
+        BUSTER_TEST(arguments, data.length >= sizeof(expected) && memcmp(data.pointer, expected, sizeof(expected)) == 0);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_local_aggregates(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
