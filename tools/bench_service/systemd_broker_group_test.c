@@ -1,6 +1,6 @@
 /* Source-inclusion regression for the broker's request-time NSS boundary.
  * The real server receives a valid seqpacket, but account/peer credentials and
- * group lists are deterministic. The first private-state open is intercepted
+ * group lists are deterministic. The first protected-path open is intercepted
  * and refused: no manager or host state is touched. Compiling this fixture
  * against the pre-guard broker source fails the contaminated-role cases.
  * Run from the repository root with:
@@ -26,11 +26,12 @@
 #undef getgrouplist
 #undef getsockopt
 #undef open
+static uint32_t review_operation;
 static uid_t review_candidate_uid;
 static gid_t review_candidate_gid;
 static gid_t review_service_gid;
 static uid_t review_runner_uid;
-static unsigned review_state_opens;
+static unsigned review_protected_opens;
 static gid_t review_candidate_extra;
 static gid_t review_runner_extra;
 static gid_t review_service_extra;
@@ -98,14 +99,14 @@ int bq_review_getsockopt(int fd, int level, int option, void* output, socklen_t*
 int bq_review_open(char const* path, int flags, ...)
 {
     (void)flags;
-    if (!strcmp(path, "/")) review_state_opens += 1;
+    if (!strcmp(path, "/")) review_protected_opens += 1;
     errno = EACCES;
     return -1;
 }
 
 static bool run_case(char const* label, gid_t service_extra, gid_t candidate_extra,
                      gid_t runner_extra, int list_failure, unsigned expected_queries,
-                     bool expect_state)
+                     bool expect_protected_path)
 {
     int peers[2] = {-1, -1};
     int saved_stdin = dup(STDIN_FILENO);
@@ -118,14 +119,16 @@ static bool run_case(char const* label, gid_t service_extra, gid_t candidate_ext
     review_runner_extra = runner_extra;
     review_service_extra = service_extra;
     review_list_failure = list_failure;
-    review_state_opens = 0;
+    review_protected_opens = 0;
     review_account_group_queries = 0;
     if (ok)
     {
-        BqBrokerRequest request = {.magic=BQ_BROKER_MAGIC, .version=1, .operation=BQ_BROKER_START,
+        BqBrokerRequest request = {.magic=BQ_BROKER_MAGIC, .version=1, .operation=review_operation,
+            .signal_number=review_operation == BQ_BROKER_SIGNAL ? BQ_BROKER_CONT : 0,
             .job=1, .attempt=2,
             .base="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             .candidate="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"};
+        if (review_operation == BQ_BROKER_SIGNAL) { memset(request.base, 0, sizeof(request.base)); memset(request.candidate, 0, sizeof(request.candidate)); }
         ok = send(peers[1], &request, sizeof(request), 0) == sizeof(request) &&
              dup2(peers[0], STDIN_FILENO) == STDIN_FILENO;
     }
@@ -133,16 +136,19 @@ static bool run_case(char const* label, gid_t service_extra, gid_t candidate_ext
     if (saved_stdin >= 0) { dup2(saved_stdin, STDIN_FILENO); close(saved_stdin); }
     if (peers[0] >= 0) close(peers[0]);
     if (peers[1] >= 0) close(peers[1]);
-    printf("%s service_extra=%u candidate_extra=%u runner_extra=%u list_failure=%d queries=%u state_checked=%u\n",
-           label, service_extra, candidate_extra, runner_extra, list_failure,
-           review_account_group_queries, review_state_opens > 0);
+    printf("%s op=%u service_extra=%u candidate_extra=%u runner_extra=%u list_failure=%d queries=%u protected_path_checked=%u\n",
+           label, review_operation, service_extra, candidate_extra, runner_extra, list_failure,
+           review_account_group_queries, review_protected_opens > 0);
     return ok && review_account_group_queries == expected_queries &&
-           (review_state_opens > 0) == expect_state;
+           (review_protected_opens > 0) == expect_protected_path;
 }
 
 int main(void)
 {
     bool ok = true;
+    for (unsigned operation = 0; operation < 2; operation += 1)
+    {
+    review_operation = operation ? BQ_BROKER_SIGNAL : BQ_BROKER_START;
     ok &= run_case("valid", 65001, 65001, 65002, 0, 3, true);
     ok &= run_case("service_missing_candidate", 65000, 65001, 65002, 0, 1, false);
     ok &= run_case("service_root", 0, 65001, 65002, 0, 1, false);
@@ -156,5 +162,6 @@ int main(void)
     ok &= run_case("runner_foreign", 65001, 65001, 65003, 0, 3, false);
     ok &= run_case("nss_oversize", 65001, 65001, 65002, 1, 1, false);
     ok &= run_case("nss_failure", 65001, 65001, 65002, 2, 1, false);
+    }
     return ok ? 0 : 1;
 }

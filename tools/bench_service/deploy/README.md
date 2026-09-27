@@ -47,6 +47,12 @@ The fixed recipe handoff additionally expects the reviewed build driver at
 `/usr/local/libexec/buster-bench-throughput`. The service supplies only the
 six recipe identities documented in the service README; those two executable
 paths and every build/throughput option remain build-policy constants.
+Each new transient unit first runs the static root-owned
+`/usr/local/libexec/buster-bench-credential-gate`, which checks the actual
+numeric credentials and complete groups before the fixed payload. Build,
+install and hash it with the other binaries. Its ELF must have no interpreter
+or dynamic segment and a nonexecutable stack; see
+[the effective-credential boundary](SYSTEMD_BROKER.md#effective-credentials-before-each-transient-payload).
 The installed build driver must have a nonexecutable ELF stack (a `GNU_STACK`
 program header with `RW`, without `E`). The reference transient sandbox keeps
 `MemoryDenyWriteExecute=yes`; a TCC bootstrap executable without that header

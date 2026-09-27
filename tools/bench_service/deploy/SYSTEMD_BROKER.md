@@ -41,6 +41,76 @@ directory components with `O_PATH`, checks the exact owner/group/mode, and
 reads only the named records and manifests. Candidate and runner accounts
 have neither service-group membership nor access to the socket.
 
+### Effective credentials before each transient payload
+
+An independent installation receipt fixes the six numeric service, candidate
+and runner UID/GID values. The broker compares current NSS resolution with
+`/etc/buster-bench/systemd-broker-accounts.identity` before START or CONT and
+before private-state inspection. The canonical ASCII form is:
+
+```text
+BQ-ACCOUNTS-V1
+service-uid=<decimal>
+service-gid=<decimal>
+candidate-uid=<decimal>
+candidate-gid=<decimal>
+runner-uid=<decimal>
+runner-gid=<decimal>
+```
+
+Replace each placeholder with the authenticated dedicated account's numeric
+value, using canonical decimal with no sign or leading zero and exactly one
+newline after each line. IDs are nonzero; all three UIDs and all three GIDs
+are distinct. LOCAL installs the regular single-link file as root with exact
+mode `0444` under root-owned, group/world-nonwritable, nonsymlink directory
+ancestry. Missing, unsafe, writable, truncated, extra, noncanonical or
+mismatched bytes, and metadata changes during the read, fail closed. The
+code does not detect trusted-root replacement between separate requests;
+the disabled/drained installation rule owns that boundary. Bind the receipt bytes/SHA-256 to the installation source and
+stable lease device/inode in the operator receipt. Changes require dispatch
+disabled, old units drained and a newly authenticated inventory. The receipt
+must never be regenerated automatically from changed NSS values during a job.
+
+Every new transient start first executes the fixed
+`/usr/local/libexec/buster-bench-credential-gate`. The broker supplies the
+stage and the numeric UID, GID and complete supplementary group set captured
+from the three fixed accounts. Request-time membership is restricted to the
+service and candidate groups for the service account, the candidate group
+alone for the candidate, and the runner group alone for the runner. Extra
+groups fail admission even when they are neither root nor the service group.
+
+The gate runs under PID1's already-dropped unprivileged identity. Before any
+job payload it checks real, effective, saved and filesystem UID/GID, the
+complete supplementary group set, no-new-privileges and empty capability
+sets. A mismatch exits without executing the payload. It performs no NSS
+lookup or privilege transition. After validation it replaces the environment
+with the fixed PATH and locale and executes the existing stage-specific
+absolute executable. The typed broker protocol still owns all payload
+arguments; the helper is not a new request interface.
+
+Build the gate statically with no ELF interpreter or dynamic segment and a
+nonexecutable stack. The installed broker checks the root-owned immutable
+path, file and ELF properties before starting a unit; a dynamic substitute
+fails closed. Root-owned installation paths and the exact protected-source
+binary digest remain mandatory. This prevents a dynamic loader or untrusted
+payload from running before the credential check. The original unit sandbox
+and empty capability settings stay in force.
+
+This is a per-launch enforcement boundary, not whole-host acceptance. The
+operator must retain an authenticated numeric account inventory and actual
+`/proc/PID/status` UID/GID, Groups, Cap* and NoNewPrivs readbacks for the
+long-lived service and runner before admission. Account/authorization changes
+during the whole lease are forbidden by the installation contract; stop
+admission and reconcile any change. A successful transient gate does not
+validate credentials retained by an already-running service or runner.
+Independent service/security disposition and disposable real-systemd
+membership-change evidence are required before this draft can be installed.
+
+For recovery, exact old direct-executable units retain TERM/KILL cleanup.
+CONT requires the new gated outer-unit identity. Drain old units and prove
+their cgroups absent before changing installed source; do not resume an old
+unit into a mixed installation.
+
 These are group-scoped filesystem grants, not per-request capabilities. The
 broker's code restricts which named objects and manager operations a request
 may use; membership can also read other reachable group-readable objects.
@@ -117,6 +187,10 @@ is actually installed. This command produces an installation candidate; it
 does not replace the TCC bootstrap used by `build.sh`.
 
 `./build.sh bench_service_broker self-test` also builds
+`build/bench-service-tools/credential-gate` with static linking and runs its
+credential/parser self-test. Retain `readelf -W -l` and SHA-256 readbacks for
+the exact installed gate; require no INTERP or DYNAMIC entry and GNU_STACK
+without execute permission. It also builds
 `build/bench-service-tools/systemd-broker-live-test` from
 `tools/bench_service/systemd_broker_live_test.c` with the broker's warning and
 integer flags. In self-test mode it also builds and runs the deterministic
