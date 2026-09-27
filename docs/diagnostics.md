@@ -73,6 +73,16 @@ error. All records are available even though the compatibility text selects the
 first error. The shared terminal renderer handles both C and assembler records
 and optional notes; it adds no eager formatting on successful parse paths.
 
+Debug information is on by default; only `-g0` turns it off, and then the
+work that exists only for debug output is skipped rather than built and
+discarded. The driver lowers with `CIRLowerOptions.omit_debug_locals`, so
+functions carry no `IrDebugLocal` records (their readers -- MIR debug values,
+debug locations and the debug model -- run only with debug output), and
+native code generation neither resolves each function's declaration position
+nor reads each canonical instruction's range without a line table. Objects are
+unchanged; the census `debug_locals` field and the position counters measure
+the difference.
+
 A clean compile allocates no record array. API callers can set
 `CompilerDriverInvocation.suppress_diagnostic_records` to avoid retaining the
 structured copies while preserving error text and warnings. This is an API-only

@@ -3891,7 +3891,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     CIRLowerResult lowered = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
                                                   (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
-                                                                    .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer});
+                                                                    .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer,
+                                                                    .omit_debug_locals = !invocation.debug_info});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.type_layout = lowered.type_layout;

@@ -496,6 +496,7 @@ saturation (`overflowed=1`) and failed-attempt rules as `ir_construction.*`.
 | `c_metrics_token_visits` | Tokens visited by the spelled-byte pass that feeds only `-v` and `-fsource-metrics`. |
 | `c_diagnostics_recorded` | C diagnostics recorded by the lexer, preprocessor, syntax and semantic funnels (lowering writes its rows directly and is not counted). |
 | `c_diagnostic_reservations`, `c_diagnostic_rows_reserved`, `c_diagnostic_bytes_reserved`, `c_diagnostic_{lex,preprocess,semantic,evaluation,lowering}_rows` | `CDiagnostic` storage reserved before any diagnostic exists, by reserving stage. Bytes are logical arena requests, not committed or touched pages. |
+| `debug_locals` | `IrDebugLocal` records lowering attaches to functions; zero under `-g0`. |
 | `c_lex_diagnostic_arenas`, `c_lex_diagnostic_arena_bytes` | Dedicated arenas the lexer creates for possible diagnostics when a file's worst case does not fit its scratch arena, and their reservations. |
 
 Measure successful and failing compilations separately:
