@@ -11765,6 +11765,77 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unprototyped_call_arguments(UnitTestAr
     return result;
 }
 
+/* An unprototyped `long add();` followed by its prototyped definition declares
+   one function, and C11 6.2.7p3 makes the prototype the composite type. The
+   name index resolves every call through the prototype, so the entity's one
+   IrFunction and its symbol carry the prototype's type as well. The definition
+   used to take a second row for the same symbol: the LLVM writer refused the
+   duplicate, and with a function-pointer return the call's reference named a
+   return type the symbol's did not, which canonical validation rejected. */
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unprototyped_then_prototyped(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    struct
+    {
+        String8 source;
+        u32 parameter_count;
+    } cases[] = {
+        {S8("long add();\n"
+            "long add(long a, long b) { return a + b; }\n"
+            "int main(void) { return (int)add(2, 3) - 5; }\n"),
+         2},
+        {S8("static int twice(int x) { return 2 * x; }\n"
+            "int (*add())(int);\n"
+            "int (*add(int w))(int) { (void)w; return twice; }\n"
+            "int main(void) { int (*a)(int) = add(1); return a(4) != 8; }\n"),
+         1},
+        {S8("long add();\n"
+            "int main(void) { return (int)add(2L, 3L) - 5; }\n"
+            "long add(long a, long b);\n"
+            "long add(long a, long b) { return a + b; }\n"),
+         2},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = {0};
+        CParseResult parse = {0};
+        CIRLowerResult ir = c_test_lower_source(temporary.arena, cases[case_index].source, S8("unprototyped-then-prototyped.c"), target_native,
+                                                &tokens, &parse);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, ir.program != 0))
+        {
+            IrModule* module = &ir.program->modules[0];
+            IrFunction* row = 0;
+            u32 row_count = 0;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                if (string_equal(module->functions[function_index].name, S8("add")))
+                {
+                    row = &module->functions[function_index];
+                    row_count += 1;
+                }
+            }
+            if (BUSTER_REQUIRE(arguments, row_count == 1))
+            {
+                IrSymbol* symbol = ir_symbol_from_id(&ir.program->symbols, row->symbol);
+                IrType* type = ir_type_from_id(&ir.program->types, row->canonical_type);
+                BUSTER_TEST(arguments, row->state == IR_FUNCTION_LOWERED);
+                BUSTER_TEST(arguments, symbol && symbol->is_definition && symbol->type.value == row->canonical_type.value);
+                BUSTER_TEST(arguments, type && type->kind == IR_TYPE_FUNCTION && !type->is_unprototyped &&
+                                           type->parameter_count == cases[case_index].parameter_count);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
+
+    return result;
+}
+
 /* C23 made `()` mean `(void)`, so the same calls are a constraint violation
    there, and every dialect refuses a call that overruns a real parameter list.
    Both used to report only that the call could not be prepared, which named
@@ -23209,6 +23280,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_void_object_refusals);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
+    BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
