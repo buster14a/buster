@@ -26,4 +26,8 @@ BUSTER_F_DECL bool c_test_parse_label_values_needed(CParseResult* result, CPrepr
 // two-population cursor over every [start, end) up to limit.
 BUSTER_F_DECL u32 c_test_parse_call_shape_mismatches(CTokenShape const* shapes, u32 count);
 BUSTER_F_DECL u32 c_test_parse_candidate_merge_mismatches(u32* first, u32 first_count, u32* second, u32 second_count, u32 limit);
+// Tokens of [start, start + count) where the body scope map built under root
+// disagrees with c_parse_scope_for_token's descent; UINT32_MAX without a
+// children index.
+BUSTER_F_DECL u32 c_test_parse_body_scope_mismatches(CParseResult* result, Arena* arena, CScopeId root, u32 start, u32 count);
 #endif

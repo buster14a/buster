@@ -20909,7 +20909,89 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_scope_interval_index(UnitTestArguments
         }
         BUSTER_TEST(arguments, c_parse_scope_for_token(&parse, (CScopeId){siblings}, 4).value == siblings + depth);
         BUSTER_TEST(arguments, c_parse_scope_for_token(&parse, (CScopeId){0}, siblings * 4 + 8).value == 0);
+        BUSTER_TEST(arguments, c_test_parse_body_scope_mismatches(&parse, temporary.arena, (CScopeId){0}, 0, siblings * 4 + 9) == 0);
+        BUSTER_TEST(arguments, c_test_parse_body_scope_mismatches(&parse, temporary.arena, (CScopeId){siblings}, 2, 8) == 0);
     }
+    scratch_end(temporary);
+    return result;
+}
+
+// The body scope map against the descent it replaces during lowering-constraint
+// checks. The hand-built tree holds the shapes the descent resolves by its
+// last-child-starting-at-or-before rule rather than by containment: an empty
+// sibling at a nonempty one's start, overlapping siblings, a child reaching
+// past its parent, and a child with its parent's exact range. The parsed
+// corpus nests blocks, loop and selection scopes and statement expressions.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_scope_map(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    CScope scopes[] = {
+        {.parent = C_SCOPE_ID_INVALID, .token_start = 0, .token_end = 100},
+        {.parent = {0}, .token_start = 10, .token_end = 30},
+        {.parent = {1}, .token_start = 12, .token_end = 20},
+        {.parent = {1}, .token_start = 20, .token_end = 20},
+        {.parent = {1}, .token_start = 25, .token_end = 30},
+        {.parent = {4}, .token_start = 25, .token_end = 30},
+        {.parent = {0}, .token_start = 30, .token_end = 30},
+        {.parent = {0}, .token_start = 30, .token_end = 50},
+        {.parent = {7}, .token_start = 35, .token_end = 60},
+        {.parent = {0}, .token_start = 70, .token_end = 90},
+        {.parent = {0}, .token_start = 80, .token_end = 85},
+        {.parent = {9}, .token_start = 72, .token_end = 95},
+    };
+    CParseResult tree = {.scopes = scopes, .scope_count = BUSTER_ARRAY_LENGTH(scopes)};
+    c_parse_index_scope_children(&tree, temporary.arena);
+    for (u32 root = 0; root < tree.scope_count; root += 1)
+    {
+        BUSTER_TEST(arguments, c_test_parse_body_scope_mismatches(&tree, temporary.arena, (CScopeId){root}, 0, 110) == 0);
+        BUSTER_TEST(arguments, c_test_parse_body_scope_mismatches(&tree, temporary.arena, (CScopeId){root}, 27, 51) == 0);
+    }
+    BUSTER_TEST(arguments, c_parse_scope_for_token(&tree, (CScopeId){0}, 27).value == 5);
+    BUSTER_TEST(arguments, c_parse_scope_for_token(&tree, (CScopeId){0}, 55).value == 0);
+    BUSTER_TEST(arguments, c_parse_scope_for_token(&tree, (CScopeId){0}, 87).value == 0);
+
+    u64 source_capacity = BUSTER_KB(64);
+    char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+    u64 source_length = 0;
+    for (u32 item = 0; item < 40; item += 1)
+    {
+        c_test_append_source(source_bytes, source_capacity, &source_length,
+                             string_format(temporary.arena,
+                                           S8("int nest_{u32}(int x) {{ int a = x; {{ int b = a; if (b) {{ int c = b; while (c) {{ c -= 1; {{ }} }} }}"
+                                              " else {{ int d = 0; for (int i = 0; i < {u32}; i += 1) {{ d += i; }} a = d; }} }}"
+                                              " switch (a) {{ case 1: {{ int e = 1; a += e; }} break; default: break; }}"
+                                              " return ({{ int f = a; f; }}); }}\n"),
+                                           item, item % 5 + 1));
+    }
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){.pointer = source_bytes, .length = source_length}, (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    if (!parse.scope_children_offsets)
+    {
+        c_parse_index_scope_children(&parse, temporary.arena);
+    }
+    u32 bodies = 0;
+    u32 mismatches = 0;
+    u32 nested_tokens = 0;
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        CDeclaration* declaration = parse.declarations + declaration_index;
+        if (declaration->kind == C_DECLARATION_FUNCTION && declaration->is_definition && declaration->body_token_count)
+        {
+            bodies += 1;
+            mismatches += c_test_parse_body_scope_mismatches(&parse, temporary.arena, declaration->scope, declaration->body_start,
+                                                             declaration->body_token_count);
+            for (u32 offset = 0; offset < declaration->body_token_count; offset += 1)
+            {
+                nested_tokens +=
+                    c_parse_scope_for_token(&parse, declaration->scope, declaration->body_start + offset).value != declaration->scope.value;
+            }
+        }
+    }
+    BUSTER_TEST(arguments, bodies == 40);
+    BUSTER_TEST(arguments, mismatches == 0);
+    BUSTER_TEST(arguments, nested_tokens > bodies * 20);
     scratch_end(temporary);
     return result;
 }
@@ -23411,6 +23493,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
     BUSTER_TEST_FIXTURE(arguments, c_test_position_index_tiles);
     BUSTER_TEST_FIXTURE(arguments, c_test_validation_candidates);
+    BUSTER_TEST_FIXTURE(arguments, c_test_body_scope_map);
     BUSTER_TEST_FIXTURE(arguments, c_test_oversized_token_spellings);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_source_metrics);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_metrics_path_identity);
