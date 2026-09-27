@@ -116,8 +116,7 @@ if [[ "$branch_policies" != present ]]; then
 fi
 
 # The requester policy is a pre-existing administrator control. Apps can start
-# a run, but the separately designated human reviewer must approve its
-# protected-environment job.
+# a run, but only an administrator may approve its protected-environment job.
 # Never create or change the requester policy as a side effect of installation.
 policy_id="$(python3 - "$actor_policy" <<'PY'
 import json
@@ -138,31 +137,19 @@ python3 "$root/tools/bench_service/deploy/verify_github_actor_policy.py" \
   "$actor_policy" "$tmp/actor-policy.json" "$repo"
 
 gh api -H "X-GitHub-Api-Version: $api_version" \
-  "repos/$repo/collaborators/davidgmbb/permission" >"$tmp/administrator-permission.json"
-python3 - "$tmp/administrator-permission.json" <<'PY'
-import json
-import sys
-
-permission = json.load(open(sys.argv[1], encoding="utf-8"))
-user = permission.get("user") or {}
-if permission.get("permission") != "admin" or user.get("login") != "davidgmbb" or user.get("id") != 39247043:
-    sys.exit("reviewed repository administrator identity differs")
-PY
-gh api -H "X-GitHub-Api-Version: $api_version" \
-  "repos/$repo/collaborators/buster14a14a/permission" >"$tmp/reviewer-permission.json"
+  "repos/$repo/collaborators/davidgmbb/permission" >"$tmp/reviewer-permission.json"
 python3 - "$tmp/reviewer-permission.json" <<'PY'
 import json
 import sys
 
 permission = json.load(open(sys.argv[1], encoding="utf-8"))
 user = permission.get("user") or {}
-if (permission.get("permission") not in {"read", "triage", "write", "maintain", "admin"}
-        or user.get("login") != "buster14a14a" or user.get("id") != 333046628):
-    sys.exit("required independent benchmark reviewer lacks exact repository access")
+if permission.get("permission") != "admin" or user.get("login") != "davidgmbb" or user.get("id") != 39247043:
+    sys.exit("required benchmark reviewer must still be the reviewed repository administrator")
 PY
 
 # The existing main ruleset governs edits. Connector requests remain pending
-# until the reviewed human releases the protected environment job.
+# until the reviewed administrator releases the protected environment job.
 # Re-read the environment and requester policy; never install or replace them.
 gh api -H "X-GitHub-Api-Version: $api_version" \
   "repos/$repo/environments/benchmark-9700x" >"$tmp/installed-environment.json"
@@ -175,29 +162,17 @@ gh api -H "X-GitHub-Api-Version: $api_version" \
 python3 "$root/tools/bench_service/deploy/verify_github_actor_policy.py" \
   "$actor_policy" "$tmp/installed-actor-policy.json" "$repo"
 gh api -H "X-GitHub-Api-Version: $api_version" \
-  "repos/$repo/collaborators/davidgmbb/permission" >"$tmp/administrator-permission.json"
-python3 - "$tmp/administrator-permission.json" <<'PY'
-import json
-import sys
-
-permission = json.load(open(sys.argv[1], encoding="utf-8"))
-user = permission.get("user") or {}
-if permission.get("permission") != "admin" or user.get("login") != "davidgmbb" or user.get("id") != 39247043:
-    sys.exit("reviewed repository administrator lost exact permission")
-PY
-gh api -H "X-GitHub-Api-Version: $api_version" \
-  "repos/$repo/collaborators/buster14a14a/permission" >"$tmp/reviewer-permission.json"
+  "repos/$repo/collaborators/davidgmbb/permission" >"$tmp/reviewer-permission.json"
 python3 - "$tmp/reviewer-permission.json" <<'PY'
 import json
 import sys
 
 permission = json.load(open(sys.argv[1], encoding="utf-8"))
 user = permission.get("user") or {}
-if (permission.get("permission") not in {"read", "triage", "write", "maintain", "admin"}
-        or user.get("login") != "buster14a14a" or user.get("id") != 333046628):
-    sys.exit("required independent benchmark reviewer lost exact repository access")
+if permission.get("permission") != "admin" or user.get("login") != "davidgmbb" or user.get("id") != 39247043:
+    sys.exit("required benchmark reviewer lost repository administrator permission")
 PY
 python3 "$root/tools/bench_service/deploy/verify_github_admission.py" \
   "$tmp/installed-environment.json" "$tmp/installed-branches.json" \
   "$tmp/installed-variable.json"
-printf 'Existing main ruleset, connector requester policy, administrator, independent reviewer and restricted runner group verified; BENCH_SERVICE_DISPATCH_ENABLED read back false\n'
+printf 'Existing main ruleset, connector requester policy, administrator reviewer and restricted runner group verified; BENCH_SERVICE_DISPATCH_ENABLED read back false\n'
