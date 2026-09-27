@@ -1096,8 +1096,8 @@ class BrokerObserver:
         path = str(message["object_path"])
         if unit == TEMPLATE_METADATA_UNIT:
             # An Accept=yes socket loads this fixed, non-peer template while
-            # opening its listener for SELinux-label metadata. It is never a
-            # broker process witness. Preserve the one pre-peer manager pair
+            # opening its listener for SELinux-label metadata. This paired
+            # signal alone is not process evidence. Preserve the manager pair
             # for independent PID1/journal reconciliation.
             previous = self.template_metadata_events
             event_ns = time.monotonic_ns()
