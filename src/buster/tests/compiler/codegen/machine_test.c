@@ -7044,11 +7044,118 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_constant_short_circuit(UnitTestA
     return result;
 }
 
+// A machine encoder given the caller's buffer writes there exactly what it
+// writes into its own: the same bytes, sites, offsets and validity, bounded
+// by the same budget. A buffer smaller than the budget is not used at all.
+// Module generation relies on this to encode straight into the code buffer
+// instead of copying each function in.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_encode_into_caller_buffer(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = S8("extern long sink(long);\n"
+                        "long table[8] = {1, 2, 3, 4, 5, 6, 7, 8};\n"
+                        "static long mix(long a, long b) { return a * 31 + (b ^ (a >> 3)); }\n"
+                        "long entry(long a, long b)\n"
+                        "{\n"
+                        "    long s = 0;\n"
+                        "    for (long i = 0; i < (b & 15); i += 1)\n"
+                        "    {\n"
+                        "        switch ((a + i) & 3)\n"
+                        "        {\n"
+                        "            case 0: s += table[i & 7]; break;\n"
+                        "            case 1: s -= mix(a, i); break;\n"
+                        "            case 2: s ^= b; break;\n"
+                        "            default: s += sink(s);\n"
+                        "        }\n"
+                        "    }\n"
+                        "    return s + mix(a, b);\n"
+                        "}\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    u64 caller_capacity = BUSTER_KB(64);
+    u8* caller_bytes = arena_allocate(temporary.arena, u8, caller_capacity);
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        Target target = targets[target_index];
+        IrProgram* program = machine_test_compile_c(temporary.arena, S8("encode_into.c"), source, target);
+        if (!BUSTER_REQUIRE(arguments, program && program->module_count))
+        {
+            continue;
+        }
+        IrModule* module = program->modules;
+        u32 compared = 0;
+        u32 defined = 0;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            defined += function->block_count ? 1 : 0;
+            // Three independent selections, so no encoding can observe another's.
+            MachineEncodeResult encoded[3] = {0};
+            for (u32 variant = 0; variant < 3; variant += 1)
+            {
+                MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                if (!selected.supported || machine_verify_function(&selected.function).error != MACHINE_VERIFY_NONE)
+                {
+                    continue;
+                }
+                MachineStackPlacement placement = machine_stack_placement_build(temporary.arena, &selected.function);
+                memset(caller_bytes, 0xa5, caller_capacity);
+                u64 capacity = variant == 0 ? 0 : variant == 1 ? caller_capacity : 1;
+                u8* destination = variant == 0 ? 0 : caller_bytes;
+                encoded[variant] = target.cpu_arch == CPU_ARCH_AARCH64
+                                       ? machine_encode_aarch64_into(temporary.arena, &selected.function, &placement, destination, capacity)
+                                       : machine_encode_x86_64_into(temporary.arena, &selected.function, &placement, destination, capacity);
+                if (variant == 1 && encoded[1].valid)
+                {
+                    // Snapshot the in-place bytes before the next variant
+                    // refills the caller buffer.
+                    u8* copy = arena_allocate(temporary.arena, u8, encoded[1].byte_count ? encoded[1].byte_count : 1);
+                    memcpy(copy, encoded[1].bytes, encoded[1].byte_count);
+                    BUSTER_TEST(arguments, encoded[1].bytes == caller_bytes);
+                    encoded[1].bytes = copy;
+                }
+            }
+            if (!encoded[0].valid)
+            {
+                continue;
+            }
+            compared += 1;
+            BUSTER_TEST(arguments, encoded[2].valid && encoded[2].bytes != caller_bytes);
+            for (u32 variant = 1; variant < 3; variant += 1)
+            {
+                MachineEncodeResult* candidate = encoded + variant;
+                bool same = candidate->valid && candidate->byte_count == encoded[0].byte_count &&
+                            memcmp(candidate->bytes, encoded[0].bytes, encoded[0].byte_count) == 0 &&
+                            candidate->call_site_count == encoded[0].call_site_count &&
+                            (!encoded[0].call_site_count ||
+                             memcmp(candidate->call_sites, encoded[0].call_sites, sizeof(MachineCallSite) * encoded[0].call_site_count) == 0) &&
+                            candidate->epilog_count == encoded[0].epilog_count && candidate->frame_allocation_offset == encoded[0].frame_allocation_offset &&
+                            candidate->frame_pointer_offset == encoded[0].frame_pointer_offset;
+                BUSTER_TEST_RAW(arguments, same, function->name);
+            }
+        }
+        BUSTER_TEST(arguments, compared == defined && defined == 2);
+        // Module generation encodes every machine function in place: the
+        // code buffer is reserved far above any single function's budget.
+        CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                                                                    (CodegenModuleOptions){.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST});
+        BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.statistics.fallback_function_count == 0);
+        BUSTER_TEST(arguments, generated.statistics.machine_code_bytes_in_place > 0 && generated.statistics.machine_code_bytes_copied == 0 &&
+                                   generated.statistics.machine_code_bytes_in_place <= generated.code.length);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, machine_fast_close_live_ranges_test(arguments->arena));
     BUSTER_TEST_FIXTURE(arguments, machine_test_sparse_local_state);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_encode_into_caller_buffer);
     BUSTER_TEST_FIXTURE(arguments, machine_test_constant_short_circuit);
     BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_line_mark_repair);
     BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_trace_equivalence);

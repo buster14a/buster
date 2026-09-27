@@ -2327,6 +2327,8 @@ void codegen_statistics_add(CodegenStatistics* total, CodegenStatistics* unit)
     total->verified_ir_module_count += unit->verified_ir_module_count;
     total->verified_mir_function_count += unit->verified_mir_function_count;
     total->verified_scheduled_function_count += unit->verified_scheduled_function_count;
+    total->machine_code_bytes_in_place += unit->machine_code_bytes_in_place;
+    total->machine_code_bytes_copied += unit->machine_code_bytes_copied;
     for (u32 index = 0; index < IR_OPCODE_COUNT + 1; index += 1)
     {
         total->fallback_opcode_counts[index] += unit->fallback_opcode_counts[index];
@@ -12287,10 +12289,19 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 {
                     MachineEncodeResult encoded;
 
+                    // The encoder writes where the function will live when
+                    // its worst-case budget fits what the code buffer has
+                    // left, which leaves nothing to copy below; a failed or
+                    // abandoned encoding there is overwritten by whatever
+                    // this position receives instead.
+                    u8* code_destination = buffer.bytes + buffer.count;
+                    u64 code_remaining = buffer.count <= buffer.capacity ? buffer.capacity - buffer.count : 0;
                     switch (target.cpu_arch)
                     {
-                        break; case CPU_ARCH_AARCH64: encoded = machine_encode_aarch64(machine_scratch.arena, &selected.function, &placement);
-                        break; case CPU_ARCH_X86_64: encoded = machine_encode_x86_64(machine_scratch.arena, &selected.function, &placement);
+                        break; case CPU_ARCH_AARCH64: encoded = machine_encode_aarch64_into(machine_scratch.arena, &selected.function, &placement,
+                                                                                           code_destination, code_remaining);
+                        break; case CPU_ARCH_X86_64: encoded = machine_encode_x86_64_into(machine_scratch.arena, &selected.function, &placement,
+                                                                                         code_destination, code_remaining);
                         break; default: BUSTER_TODO();
                     }
 
@@ -12466,7 +12477,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (machine_unwind_valid)
                         {
-                            memcpy(buffer.bytes + buffer.count, encoded.bytes, encoded.byte_count);
+                            if (encoded.bytes == code_destination)
+                            {
+                                result.statistics.machine_code_bytes_in_place += encoded.byte_count;
+                            }
+                            else
+                            {
+                                memcpy(code_destination, encoded.bytes, encoded.byte_count);
+                                result.statistics.machine_code_bytes_copied += encoded.byte_count;
+                            }
                             codegen_record_machine_line_marks(program, function, &result, line_entry_capacity, line_source_limit, &selected.function,
                                                               encoded.row_offsets, (u32)buffer.count);
                             for (u32 site_index = 0; site_index < encoded.call_site_count; site_index += 1)
@@ -12645,7 +12664,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (machine_unwind_valid)
                         {
-                            memcpy(buffer.bytes + buffer.count, encoded.bytes, encoded.byte_count);
+                            if (encoded.bytes == code_destination)
+                            {
+                                result.statistics.machine_code_bytes_in_place += encoded.byte_count;
+                            }
+                            else
+                            {
+                                memcpy(code_destination, encoded.bytes, encoded.byte_count);
+                                result.statistics.machine_code_bytes_copied += encoded.byte_count;
+                            }
                             codegen_record_machine_line_marks(program, function, &result, line_entry_capacity, line_source_limit, &selected.function,
                                                               encoded.row_offsets, (u32)buffer.count);
                             for (u32 site_index = 0; site_index < encoded.call_site_count; site_index += 1)

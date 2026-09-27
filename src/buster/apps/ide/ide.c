@@ -1060,6 +1060,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         string_print(S8("CODEGEN_ENCODER exact_attempts={u64} exact_successes={u64} exact_failures={u64}\n"),
                      compile.codegen_statistics.exact_attempts, compile.codegen_statistics.exact_successes, compile.codegen_statistics.exact_failures);
         string_print(S8("CODEGEN_MIR mutable_virtual_registers={u64}\n"), compile.codegen_statistics.mutable_virtual_register_count);
+        string_print(S8("CODEGEN_EMIT machine_code_in_place={u64} machine_code_copied={u64}\n"),
+                     compile.codegen_statistics.machine_code_bytes_in_place, compile.codegen_statistics.machine_code_bytes_copied);
         if (compile.object_write_statistics.output_bytes)
         {
             ObjectWriteStatistics written = compile.object_write_statistics;
