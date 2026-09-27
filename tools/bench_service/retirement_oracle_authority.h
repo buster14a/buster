@@ -37,8 +37,9 @@ typedef struct BqRetirementOracleAuthority
     BqRetirementOracleTemplate const* template;
     BqRetirementOracleReference* references;
     uint64_t job_id, attempt_token;
-    char template_sha256[65], toolchain_identity_sha256[65], attempt_sha256[65];
-    uint32_t finished;
+    char template_sha256[65], toolchain_identity_sha256[65];
+    char observed_sha256[65], attempt_sha256[65];
+    uint32_t observed_rows, finished;
 } BqRetirementOracleAuthority;
 
 BUSTER_F_DECL bool bq_retirement_oracle_population_hash(

@@ -351,15 +351,29 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_oracle_cancellation(int descriptor)
     return ok;
 }
 
-/* No output child is launched until its ledger row, held independent build
- * receipt, exact command and cancellation/deadline boundary are checked.
- * The worker retains whole-job process-group/cgroup cleanup responsibility. */
+/* Private to the authority adapter and lower-level fixture. The one-call
+ * launcher guard catches an accidental direct-core call; the adapter owns
+ * independent builder provenance and immutable template verification. The
+ * worker retains whole-job process-group/cgroup cleanup responsibility. */
 bool bq_retirement_oracle_produce_next(BqRetirementOracleLedger* ledger,
     int reference_binary, int independent_build_receipt,
     BqRetirementProcessCommand const* command, BqRetirementArtifactLocation output,
     int cancellation_fd, uint64_t absolute_deadline_ns)
 {
-    BqRetirementOracleReference const* reference = ledger && ledger->authority_bound && !ledger->failed &&
+    bool armed = ledger && ledger->launch_armed == 1 &&
+        ledger->launch_row == ledger->done &&
+        ledger->launch_count == ledger->count &&
+        ledger->launch_job_id == ledger->job_id &&
+        ledger->launch_attempt_token == ledger->attempt_token;
+    if (ledger)
+    {
+        ledger->launch_armed = 0;
+        ledger->launch_row = 0;
+        ledger->launch_count = 0;
+        ledger->launch_job_id = 0;
+        ledger->launch_attempt_token = 0;
+    }
+    BqRetirementOracleReference const* reference = armed && ledger->authority_bound && !ledger->failed &&
         !ledger->finished && ledger->done < ledger->count ? ledger->references + ledger->done : NULL;
     uint64_t now = 0;
     char binary_sha256[65] = {0}, receipt_sha256[65] = {0}, command_sha256[65] = {0};

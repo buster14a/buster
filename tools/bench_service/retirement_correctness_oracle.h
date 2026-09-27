@@ -26,6 +26,10 @@ typedef struct BqRetirementOracleLedger
     uint32_t count, done;
     uint32_t failed, finished, authority_bound;
     uint64_t job_id, attempt_token;
+    /* Internal one-call launcher guard, consumed even on failure. It only
+     * catches trusted-caller misuse; it is not build provenance. */
+    uint32_t launch_armed, launch_row, launch_count;
+    uint64_t launch_job_id, launch_attempt_token;
     char template_sha256[65], pinned_sha256[65], sealed_sha256[65];
 } BqRetirementOracleLedger;
 
@@ -46,16 +50,6 @@ BUSTER_F_DECL bool bq_retirement_oracle_begin(BqRetirementOracleLedger* ledger,
 BUSTER_F_DECL bool bq_retirement_oracle_observe(BqRetirementOracleLedger* ledger,
     int reference_binary, BqRetirementProcessCommand const* command,
     BqRetirementRuntimeStart const* start, int output);
-/* Run the next independently pinned native reference through the actual
- * service child boundary. The caller supplies a dedicated cancellation pipe
- * (read end, CLOEXEC), the worker's absolute monotonic deadline, and a held
- * build receipt from its independently authorized producer. It must verify
- * lease/job/attempt continuity before and after each call; the receipt's
- * digest alone does not establish its independent build provenance. */
-BUSTER_F_DECL bool bq_retirement_oracle_produce_next(BqRetirementOracleLedger* ledger,
-    int reference_binary, int independent_build_receipt,
-    BqRetirementProcessCommand const* command, BqRetirementArtifactLocation output,
-    int cancellation_fd, uint64_t absolute_deadline_ns);
 BUSTER_F_DECL bool bq_retirement_oracle_finish(BqRetirementOracleLedger* ledger);
 BUSTER_F_DECL bool bq_retirement_oracle_ready(BqRetirementOracleLedger const* ledger);
 #endif

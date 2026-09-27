@@ -37,6 +37,12 @@ bool bq_retirement_oracle_begin_observing(BqRetirementOracleLedger* ledger,
     char const template_sha256[65], uint64_t job_id, uint64_t attempt_token);
 bool bq_retirement_oracle_file_hash(int descriptor, uint64_t cap,
     bool executable, char digest[65]);
+bool bq_retirement_oracle_produce_next(BqRetirementOracleLedger* ledger,
+    int reference_binary, int independent_build_receipt,
+    BqRetirementProcessCommand const* command, BqRetirementArtifactLocation output,
+    int cancellation_fd, uint64_t absolute_deadline_ns);
+BUSTER_GLOBAL_LOCAL bool bq_oracle_authority_observation_seed(
+    BqRetirementOracleAuthority const* authority, char digest[65]);
 
 BUSTER_GLOBAL_LOCAL bool bq_oracle_authority_hex(char const* value, size_t length)
 {
@@ -288,7 +294,9 @@ bool bq_retirement_oracle_authority_begin(BqRetirementOracleAuthority* authority
         if (ok) memcpy(authority->template_sha256, template_sha256, 65);
         if (ok) memcpy(authority->toolchain_identity_sha256,
             template->toolchain_identity_sha256, 65);
-        else authority->ledger.failed = 1;
+        if (ok) ok = bq_oracle_authority_observation_seed(authority,
+            authority->observed_sha256);
+        if (!ok) authority->ledger.failed = 1;
     }
     return ok;
 }
@@ -341,6 +349,7 @@ BUSTER_GLOBAL_LOCAL bool bq_oracle_authority_reference_static(
     BqRetirementOracleTemplateRow const* approved = template && template->references &&
         index < template->reference_count ? template->references + index : NULL;
     bool ok = reference && approved && bq_oracle_authority_top_static(authority) &&
+        reference->row < ledger->prepared.rows &&
         reference->row == approved->row &&
         reference->census_row == approved->census_row &&
         reference->target == approved->target &&
@@ -352,6 +361,85 @@ BUSTER_GLOBAL_LOCAL bool bq_oracle_authority_reference_static(
         bq_oracle_authority_name(reference->output_name) &&
         bq_oracle_authority_name(approved->output_name) &&
         !strcmp(reference->output_name, approved->output_name);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_oracle_authority_observation_seed(
+    BqRetirementOracleAuthority const* authority, char digest[65])
+{
+    BqRetirementOracleLedger const* ledger = authority ? &authority->ledger : NULL;
+    bool ok = ledger && digest && authority->job_id && authority->attempt_token &&
+        bq_oracle_authority_hex(authority->template_sha256, 64) &&
+        bq_oracle_authority_hex(ledger->prepared.preparation_sha256, 64);
+    if (ok)
+    {
+        Sha256 hash;
+        sha256_init(&hash);
+        static char const domain[] = "bq-retirement-oracle-observation-seed-v1";
+        sha256_add(&hash, domain, sizeof(domain) - 1);
+        sha256_add(&hash, authority->template_sha256, 64);
+        bq_oracle_authority_u64(&hash, authority->job_id);
+        bq_oracle_authority_u64(&hash, authority->attempt_token);
+        sha256_add(&hash, ledger->prepared.preparation_sha256, 64);
+        sha256_finish_hex(&hash, digest);
+    }
+    else if (digest) digest[0] = 0;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_oracle_authority_observation_step(
+    char const previous[65], uint32_t index,
+    BqRetirementOracleReference const* reference,
+    BqRetirementTrustedRow const* row, char digest[65])
+{
+    bool ok = previous && reference && row && digest &&
+        bq_oracle_authority_hex(previous, 64) &&
+        row->row == reference->row &&
+        bq_oracle_authority_hex(reference->build_receipt_sha256, 64) &&
+        bq_oracle_authority_hex(reference->binary_sha256, 64) &&
+        bq_oracle_authority_hex(reference->command_sha256, 64) &&
+        bq_oracle_authority_hex(row->independent_oracle_sha256, 64);
+    if (ok)
+    {
+        Sha256 hash;
+        sha256_init(&hash);
+        static char const domain[] = "bq-retirement-oracle-observation-step-v1";
+        sha256_add(&hash, domain, sizeof(domain) - 1);
+        sha256_add(&hash, previous, 64);
+        bq_oracle_authority_u32(&hash, index);
+        bq_oracle_authority_u32(&hash, reference->row);
+        bq_oracle_authority_u32(&hash, reference->census_row);
+        bq_oracle_authority_u32(&hash, reference->target);
+        sha256_add(&hash, reference->build_receipt_sha256, 64);
+        sha256_add(&hash, reference->binary_sha256, 64);
+        sha256_add(&hash, reference->command_sha256, 64);
+        sha256_add(&hash, row->independent_oracle_sha256, 64);
+        sha256_finish_hex(&hash, digest);
+    }
+    else if (digest) digest[0] = 0;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_oracle_authority_observations_match(
+    BqRetirementOracleAuthority const* authority)
+{
+    BqRetirementOracleLedger const* ledger = authority ? &authority->ledger : NULL;
+    char progress[65] = {0}, next[65] = {0}, template_sha256[65] = {0};
+    bool ok = ledger && authority->references && ledger->rows &&
+        authority->observed_rows == ledger->done &&
+        ledger->done == ledger->count &&
+        bq_retirement_oracle_template_hash(authority->template, template_sha256) &&
+        !strcmp(template_sha256, authority->template_sha256) &&
+        bq_oracle_authority_observation_seed(authority, progress);
+    for (uint32_t i = 0; ok && i < ledger->count; i += 1)
+    {
+        BqRetirementOracleReference const* reference = authority->references + i;
+        ok = bq_oracle_authority_reference_static(authority, i) &&
+            bq_oracle_authority_observation_step(progress, i, reference,
+                ledger->rows + reference->row, next);
+        if (ok) memcpy(progress, next, 65);
+    }
+    if (ok) ok = !memcmp(progress, authority->observed_sha256, 65);
     return ok;
 }
 
@@ -367,9 +455,15 @@ bool bq_retirement_oracle_authority_next(BqRetirementOracleAuthority* authority,
         authority->references + index : NULL;
     char source_sha256[65] = {0}, binary_sha256[65] = {0};
     char receipt_sha256[65] = {0}, logical_sha256[65] = {0};
-    char concrete_sha256[65] = {0}, executable[64] = {0};
+    char concrete_sha256[65] = {0}, template_sha256[65] = {0};
+    char next_observation_sha256[65] = {0};
+    char executable[64] = {0};
     bool ok = ledger && ledger->authority_bound && !ledger->failed &&
-        !ledger->finished && !authority->finished && reference && build &&
+        !ledger->finished && !authority->finished && !ledger->launch_armed &&
+        reference && build &&
+        authority->observed_rows == index &&
+        bq_retirement_oracle_template_hash(authority->template, template_sha256) &&
+        !strcmp(template_sha256, authority->template_sha256) &&
         bq_oracle_authority_reference_static(authority, index) &&
         command && command->arguments && command->argument_count &&
         output.name && !strcmp(output.name, reference->output_name) &&
@@ -388,6 +482,8 @@ bool bq_retirement_oracle_authority_next(BqRetirementOracleAuthority* authority,
             false, source_sha256) && !strcmp(source_sha256, build->source_sha256) &&
         bq_retirement_oracle_file_hash(build->binary, BQ_ORACLE_BINARY_CAP,
             true, binary_sha256) && !strcmp(binary_sha256, build->binary_sha256) &&
+        strcmp(binary_sha256, ledger->prepared.binary_sha256[0]) &&
+        strcmp(binary_sha256, ledger->prepared.binary_sha256[1]) &&
         bq_retirement_oracle_file_hash(build->receipt, BQ_ORACLE_RECEIPT_CAP,
             false, receipt_sha256) && !strcmp(receipt_sha256, build->receipt_sha256) &&
         bq_oracle_authority_workdir(output.directory, command) &&
@@ -403,8 +499,22 @@ bool bq_retirement_oracle_authority_next(BqRetirementOracleAuthority* authority,
         memcpy(reference->build_receipt_sha256, receipt_sha256, 65);
         memcpy(reference->binary_sha256, binary_sha256, 65);
         memcpy(reference->command_sha256, concrete_sha256, 65);
+        ledger->launch_armed = 1;
+        ledger->launch_row = index;
+        ledger->launch_count = ledger->count;
+        ledger->launch_job_id = ledger->job_id;
+        ledger->launch_attempt_token = ledger->attempt_token;
         ok = bq_retirement_oracle_produce_next(ledger, build->binary, build->receipt,
             command, output, cancellation_fd, absolute_deadline_ns);
+        if (ok) ok = ledger->done == index + 1 &&
+            bq_oracle_authority_observation_step(authority->observed_sha256,
+                index, reference, ledger->rows + reference->row,
+                next_observation_sha256);
+        if (ok)
+        {
+            memcpy(authority->observed_sha256, next_observation_sha256, 65);
+            authority->observed_rows += 1;
+        }
     }
     if (ledger && !ok) ledger->failed = 1;
     return ok;
@@ -445,6 +555,7 @@ BUSTER_GLOBAL_LOCAL bool bq_oracle_authority_attempt_hash(
 bool bq_retirement_oracle_authority_finish(BqRetirementOracleAuthority* authority)
 {
     bool ok = authority && authority->template && !authority->finished &&
+        bq_oracle_authority_observations_match(authority) &&
         bq_retirement_oracle_finish(&authority->ledger) &&
         bq_oracle_authority_attempt_hash(authority, authority->attempt_sha256);
     if (authority)
@@ -465,6 +576,7 @@ bool bq_retirement_oracle_authority_ready(BqRetirementOracleAuthority const* aut
         bq_retirement_oracle_population_hash(authority->ledger.rows,
             authority->ledger.prepared.rows, population_sha256) &&
         !strcmp(population_sha256, authority->template->population_sha256) &&
+        bq_oracle_authority_observations_match(authority) &&
         bq_oracle_authority_attempt_hash(authority, attempt_sha256) &&
         !strcmp(attempt_sha256, authority->attempt_sha256);
     for (uint32_t i = 0; ok && i < authority->ledger.count; i += 1)
