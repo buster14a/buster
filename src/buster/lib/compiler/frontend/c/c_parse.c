@@ -22614,7 +22614,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     // translation unit fills a handful of them or none at all.
     result.aggregate_attribute_capacity = open_brace_count + 1;
     result.entity_capacity = identifier_count + 1;
-    result.scope_capacity = open_brace_count + open_parenthesis_count + for_count + 1;
+    // The file scope, one scope per `{` (a block or a statement expression's
+    // body), one per `for` clause, and one per C_DECLARATION_FUNCTION row. A
+    // function need not bring a `(` of its own -- `typedef void H(int);
+    // H a, b, c;` declares three, at file or block scope -- but every function
+    // row occupies a declaration slot, so the declaration capacity bounds them.
+    result.scope_capacity = open_brace_count + for_count + result.declaration_capacity + 1;
     result.identifier_use_capacity = identifier_count + 1;
     result.identifier_use_by_token_capacity = token_count + 1;
     result.deferred_static_assert_capacity = token_count + 1;
