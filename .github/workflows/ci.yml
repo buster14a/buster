@@ -673,8 +673,6 @@ jobs:
         id: modes
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'unix' }}
         shell: bash
-        env:
-          CFLAGS: -Wno-invalid-feature-combination
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
@@ -697,7 +695,6 @@ jobs:
           VS_ARCH: ${{ matrix.vs_arch }}
           VS_COMPONENT: ${{ matrix.vs_component }}
           CLANG_ARCH: ${{ matrix.clang_arch }}
-          CFLAGS: -Wno-invalid-feature-combination
         run: |
           $ErrorActionPreference = 'Stop'
           $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
@@ -826,8 +823,6 @@ jobs:
         id: differential
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'unix' }}
         shell: bash
-        env:
-          CFLAGS: -Wno-invalid-feature-combination
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"

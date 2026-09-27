@@ -99,6 +99,14 @@ general scripting in the CMake language when `build.c` can do the work
 directly. Prefer one persistent native build-driver process over chains of
 shell, CMake, and utility subprocesses.
 
+Native GNU-family builds compile with `-march=native`
+(`GNU_FAMILY_NATIVE_TARGET` in `CMakeLists.txt`). For Clang and AppleClang,
+CMake also probes `-Wno-invalid-feature-combination` and appends it when
+accepted. Without it, Clang 18 on some AVX10 hosts fails `-Werror` with
+`+avx10.1-256; will be promoted to avx10.1-512`. Do not add that flag through
+`CFLAGS` in workflows or reproduction steps: every build path already inherits
+it, and artifact fan-out's provenance capture rejects a nonempty `CFLAGS`.
+
 ```sh
 ./build.sh generate                 # configure a fresh tree (Debug, clang)
 ./build.sh                          # build the configured tree (Debug by default)
