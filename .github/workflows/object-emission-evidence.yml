@@ -1,6 +1,7 @@
 # Temporary research workflow for audit 2026-09-27T021030Z. It repeats the
-# object-emission evidence on a GitHub-hosted runner and is removed before the
-# pull request leaves draft. Exact counts decide; nothing here is timed.
+# object-emission evidence on a GitHub-hosted runner for the branch head of
+# each push that changes this file, and is removed before the pull request
+# leaves draft. Exact counts decide; nothing here is timed.
 name: Object emission evidence (research)
 
 on:
