@@ -37,12 +37,14 @@ trap cleanup EXIT
   git status --porcelain
   clang --version
   uname -a
+  sha256sum tools/bench_service/broker_entry_gate.c tools/bench_service/broker_entry_gate_systemd_test.c src/buster/lib/hash.c
 } > "$proof/source-and-toolchain.txt"
 flags=(-std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char)
-clang "${flags[@]}" -static -no-pie -Wl,-z,noexecstack \
-  tools/bench_service/broker_entry_gate.c -o "$payload/buster-bench-broker-entry-gate"
-clang "${flags[@]}" -Wl,-z,noexecstack \
-  tools/bench_service/broker_entry_gate_systemd_test.c -o "$payload/broker-entry-gate-systemd-test"
+clang "${flags[@]}" -Isrc -static -no-pie -Wl,-z,noexecstack \
+  tools/bench_service/broker_entry_gate.c src/buster/lib/hash.c -o "$payload/buster-bench-broker-entry-gate"
+clang "${flags[@]}" -Isrc -Wl,-z,noexecstack \
+  tools/bench_service/broker_entry_gate_systemd_test.c src/buster/lib/hash.c \
+  -o "$payload/broker-entry-gate-systemd-test"
 readelf -W -l "$payload/buster-bench-broker-entry-gate" > "$proof/gate-elf.txt"
 readelf -W -l "$payload/broker-entry-gate-systemd-test" > "$proof/fixture-elf.txt"
 if grep -Eq 'INTERP|DYNAMIC|GNU_STACK.*RWE' "$proof/gate-elf.txt"; then exit 1; fi
@@ -99,5 +101,7 @@ sudo docker exec "$guest" /usr/bin/stat -Lc '%n uid=%u gid=%g mode=%a links=%h d
   /usr/local/libexec/buster-bench-broker-entry-gate /usr/local/libexec/buster-bench-systemd-broker \
   > "$proof/isolation-and-installation.txt"
 sudo docker exec "$guest" /usr/bin/cat /etc/nsswitch.conf /etc/passwd /etc/group > "$proof/account-inventory.txt"
+sudo docker exec "$guest" /usr/bin/test ! -e /run/nscd/socket
+sudo docker exec "$guest" /usr/bin/test "$(sudo docker exec "$guest" /usr/bin/readlink -f /var/run)" = /run
 sudo timeout 900 docker exec --env BUSTER_BROKER_ENTRY_DISPOSABLE_SYSTEMD=isolated-docker-systemd-test \
   "$guest" /root/broker-entry-gate-systemd-test --run 2>&1 | tee "$proof/fixture.log"
