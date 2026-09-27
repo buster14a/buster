@@ -10,9 +10,12 @@
 #include "retirement_measurement.h"
 
 #ifdef __linux__
+#include "retirement_store.h"
 #define TP_RETIREMENT_CAMPAIGN_STAGES 2u
 #define TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_ROW 4u
 #define TP_RETIREMENT_CAMPAIGN_WHOLE_JOB_BUDGET_NS UINT64_C(3600000000000)
+/* tp_retirement_store_plan currently requires at least three external entries. */
+#define TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES 3u
 
 typedef enum TpRetirementCampaignPhase
 {
@@ -123,7 +126,9 @@ static uint64_t tp_retirement_campaign_ceil_div(uint64_t value, uint64_t divisor
 /* Rows and runtime_rows must come from the authenticated correctness/oracle
  * gate. The report includes both fixed stages and a worst-case transcript
  * byte bound (every line at its current 8 KiB validator limit); it does not
- * predict host speed or establish that the whole-job deadline can be met. */
+ * predict host speed or establish that the whole-job deadline can be met.
+ * The aggregate shard check is only a necessary lower bound: other inventory,
+ * byte and time qualification remains the service's responsibility. */
 static int tp_retirement_campaign_capacity(unsigned rows, unsigned runtime_rows, unsigned pairs,
     TpRetirementCampaignCapacity* capacity)
 {
@@ -136,6 +141,7 @@ static int tp_retirement_campaign_capacity(unsigned rows, unsigned runtime_rows,
     uint64_t total_invocations = 0, total_samples = 0, total_spool_bytes = 0;
     uint64_t total_transcript_bytes = 0;
     uint64_t total_transcript_shards = 0, total_sample_shards = 0, total_sample_partitions = 0;
+    uint64_t total_shard_files = 0;
     int ok = capacity && rows && runtime_rows <= rows && samples &&
         tp_retirement_campaign_u64_mul(TP_RETIREMENT_ROUNDS, pairs, &per_variant) &&
         tp_retirement_campaign_u64_add(per_variant, TP_RETIREMENT_WARMUPS, &per_variant) &&
@@ -174,6 +180,11 @@ static int tp_retirement_campaign_capacity(unsigned rows, unsigned runtime_rows,
             tp_retirement_campaign_u64_mul(tp_retirement_campaign_ceil_div(samples,
                 TP_RETIREMENT_SAMPLE_PARTITION_RECORDS), TP_RETIREMENT_CAMPAIGN_STAGES,
                 &total_sample_partitions);
+        ok = ok &&
+            tp_retirement_campaign_u64_add(total_transcript_shards, total_sample_shards,
+                &total_shard_files) &&
+            total_shard_files <= TP_RETIREMENT_STORE_FILES -
+                TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES;
     }
     if (capacity)
     {

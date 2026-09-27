@@ -10,6 +10,20 @@
 #include "../bench_service/retirement_campaign_binding.h"
 
 #ifdef __linux__
+static int test_retirement_campaign_capacity_is_zero(TpRetirementCampaignCapacity const* capacity)
+{
+    int zero = capacity && !capacity->compiler_invocations_per_stage &&
+        !capacity->runtime_invocations_per_stage && !capacity->invocations_per_stage &&
+        !capacity->samples_per_stage && !capacity->spool_bytes_per_stage &&
+        !capacity->transcript_bytes_per_stage_upper_bound && !capacity->transcript_shards_per_stage &&
+        !capacity->sample_shards_per_stage && !capacity->sample_partitions_per_stage &&
+        !capacity->total_compiler_invocations && !capacity->total_runtime_invocations &&
+        !capacity->total_invocations && !capacity->total_samples && !capacity->total_spool_bytes &&
+        !capacity->total_transcript_bytes_upper_bound && !capacity->total_transcript_shards &&
+        !capacity->total_sample_shards && !capacity->total_sample_partitions;
+    return zero;
+}
+
 static void test_retirement_campaign(char const* executable_path, char const* root)
 {
     char directory[TP_PATH_CAP], binary_path[TP_PATH_CAP], candidate_path[TP_PATH_CAP];
@@ -216,9 +230,21 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
           large.runtime_invocations_per_stage == UINT64_C(17731968) &&
           large.invocations_per_stage == UINT64_C(35463936) &&
           large.total_invocations == UINT64_C(70927872));
-    CHECK(tp_retirement_campaign_capacity(77762, 0, 254, &large) &&
-          large.samples_per_stage == UINT64_C(39503096) &&
-          large.sample_partitions_per_stage == 3);
+    CHECK(tp_retirement_campaign_capacity(77762, 0, 60, &large) &&
+          large.total_transcript_shards == 1160 && large.total_sample_shards == 570 &&
+          large.total_transcript_shards + large.total_sample_shards == 1730);
+    CHECK(tp_retirement_campaign_capacity(77762, 77762, 60, &large) &&
+          large.total_transcript_shards == 2318 && large.total_sample_shards == 570 &&
+          large.total_transcript_shards + large.total_sample_shards == 2888);
+    CHECK(!tp_retirement_campaign_capacity(77762, 0, 254, &large) &&
+          test_retirement_campaign_capacity_is_zero(&large));
+    CHECK(tp_retirement_campaign_capacity(43862, 0, 254, &large) &&
+          large.total_transcript_shards == 2732 && large.total_sample_shards == 1360 &&
+          large.total_transcript_shards + large.total_sample_shards == 4092 &&
+          large.total_transcript_shards + large.total_sample_shards <=
+              TP_RETIREMENT_STORE_FILES - TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES);
+    CHECK(!tp_retirement_campaign_capacity(43863, 0, 254, &large) &&
+          test_retirement_campaign_capacity_is_zero(&large));
     CHECK(!tp_retirement_campaign_capacity(77792, 0, 254, &large));
     CHECK(!tp_retirement_campaign_capacity(72672, 72672, 254, &large));
     CHECK(!tp_retirement_campaign_capacity(0, 0, 60, &large));
