@@ -3,7 +3,9 @@
  * join one observed attempt to an opaque independently issued build token.
  * This file intentionally has no production token issuer or policy pin.
  */
+#ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include "retirement_oracle_authority.h"
 #include "../throughput/retirement_command.h"
 #include <errno.h>

@@ -8,7 +8,9 @@
  * and runtime launch/poll bind plans to actual child waits; the runner still
  * owns job deadlines, verified output production and the independent oracle.
  */
+#ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include "retirement_artifact_service.h"
 #include "../throughput/retirement_artifact.h"
 #include "../throughput/retirement_command.h"
