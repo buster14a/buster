@@ -130,22 +130,46 @@ receipt bytes/digest against a separate authority. A digest obtained from the
 candidate or downloaded result is not a trusted receipt. Any required host
 unavailable at qualification leaves the campaign blocked.
 
-`retirement_correctness_oracle.{h,c}` now provides a private reference-output
-producer for eligible native runtime rows. A separately admitted ledger pin
-covers the complete applicable row set, each row's preparation, source,
-configuration, independent build receipt, frozen reference-program digest,
-exact argv/cwd/environment digest, and frozen output name. The service
-must verify that pin against installed policy and authenticate the independent
-build receipt before calling `bq_retirement_oracle_begin`. It runs each held
-reference program through the ordinary service-owned runtime start, launch,
-poll, and finish path under the worker's deadline. `observe` checks the
-read-only program descriptor and the actual frozen output descriptor, then
-sets the row's expected output digest from observed bytes. Missing, duplicate,
-out-of-order, substituted, or candidate-filled expectations fail closed;
-`finish` seals every reference result. The service has no production caller for
-this seam yet, and the blocked profile has no oracle ledger pin or admitted
-independent build receipts. The new two-row executable fixture proves the
-mechanics, not a full-corpus oracle run.
+`retirement_oracle_authority.{h,c}` separates the private reference-output
+producer's immutable policy from same-attempt observations. The installed
+template must authorize source commits/trees/manifests, support and census,
+the complete ordered row projection, independent toolchain, fixed build
+commands, typed logical runtime argv/cwd/environment, and output names.
+Fresh build receipts, executable bytes, job/token/preparation identities and
+concrete `/proc/self/fd/N` commands cannot define that static authority.
+The caller must authenticate the installed template independently and join
+its commit/tree identities to durable A preparation before calling
+`bq_retirement_oracle_authority_begin`; comparing caller-supplied hashes is
+not producer provenance.
+
+For each applicable native runtime row, `authority_next` requires an opaque
+`BqRetirementOracleVerifiedBuild` from an independently authenticated reference
+builder. It rechecks the template and row, same-attempt build identity, held
+source/binary/receipt files and logical command before arming one bounded
+reference launch. The lower-level producer runs the held program through
+the service runtime start/launch/poll/finish path under the deadline. It
+observes the actual frozen output, and the adapter immediately commits the
+observed binary, receipt, concrete command and output digest. `authority_finish`
+and `authority_ready` replay the complete observation chain and counts, static
+row joins and template pin before accepting an attempt seal. The original
+`bq_retirement_oracle_begin`/`ready` ledger is structural only and cannot replace
+this adapter or authorize a timed launch.
+
+The private launcher guard is a trusted-caller misuse check, not a security
+boundary against arbitrary writes inside the process. Mutating an earlier
+observed row can permit a later untimed reference child, but prevents final
+authority readiness. The production caller must check final authority readiness
+before any timed child. Rehashing the whole template before every reference
+child also gives quadratic work in the number of reference rows; full-population
+time/capacity has not been qualified.
+
+There is no production verified-build issuer or service caller yet. The issuer
+used by the miniature fixture is compiled only under
+`BQ_RETIREMENT_ORACLE_AUTHORITY_TEST_ONLY`; the blocked profile contains no
+admitted installed template or authenticated independent build receipts.
+Existing private test registration compiles the adapter through the correctness
+test translation unit. The real-child fixtures prove bounded mechanics and
+mutation rejection, not a full-corpus oracle run, #509 proof or recipe admission.
 
 Before `row`, the service derives exact compiler and applicable runtime command
 hashes (argv, cwd and environment) independently from the admitted oracle
