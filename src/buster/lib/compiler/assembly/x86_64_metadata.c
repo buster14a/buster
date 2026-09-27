@@ -924,18 +924,30 @@ BUSTER_GLOBAL_LOCAL char8 buster_x86_metadata_test_nul_pool[BUSTER_X86_METADATA_
 BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_test_nul_kernel[BUSTER_X86_METADATA_TEST_NUL_CAPACITY];
 BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_test_nul_reference[BUSTER_X86_METADATA_TEST_NUL_CAPACITY];
 
+// A first-read scan costs the distance it finds, so scanning from every
+// offset is quadratic in the body: the walked-terminator cases check it only
+// while the body is this short, and the long run checks chosen offsets.
+#define BUSTER_X86_METADATA_TEST_NUL_SCAN_EVERY_OFFSET_LIMIT 257u
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_test_nul_scan_matches(u64 size, u64 offset)
+{
+    return buster_x86_metadata_nul_distance_at(buster_x86_metadata_test_nul_pool, size, offset) == buster_x86_metadata_test_nul_reference[offset];
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_test_nul_case(u64 size)
 {
     memset(buster_x86_metadata_test_nul_kernel, 0xa5, size * sizeof(u16));
     memset(buster_x86_metadata_test_nul_reference, 0x5a, size * sizeof(u16));
     buster_x86_metadata_fill_nul_distances(buster_x86_metadata_test_nul_pool, buster_x86_metadata_test_nul_kernel, size);
     buster_x86_metadata_test_nul_distances_reference(buster_x86_metadata_test_nul_pool, buster_x86_metadata_test_nul_reference, size);
+    bool scan = size <= BUSTER_X86_METADATA_TEST_NUL_SCAN_EVERY_OFFSET_LIMIT;
     bool ok = true;
     for (u64 index = 0; ok && index < size; index += 1)
     {
-        // The whole-table kernel and the first-read scan of this one offset.
+        // The whole-table kernel and, in a short body, the first-read scan of
+        // this one offset.
         ok = buster_x86_metadata_test_nul_kernel[index] == buster_x86_metadata_test_nul_reference[index] &&
-             buster_x86_metadata_nul_distance_at(buster_x86_metadata_test_nul_pool, size, index) == buster_x86_metadata_test_nul_reference[index];
+             (!scan || buster_x86_metadata_test_nul_scan_matches(size, index));
     }
     return ok;
 }
@@ -981,11 +993,25 @@ bool buster_x86_metadata_test_nul_distances_match_reference(void)
         }
     }
     // One run longer than the sentinel: the head saturates and the tail ramps.
+    // The first-read scan stops at the sentinel limit, so it is checked at
+    // the head, on both sides of the first offset whose distance fits, and
+    // over the tail.
     if (ok)
     {
-        memset(buster_x86_metadata_test_nul_pool, 'a', BUSTER_X86_METADATA_TEST_NUL_CAPACITY);
-        buster_x86_metadata_test_nul_pool[BUSTER_X86_METADATA_TEST_NUL_CAPACITY - 1] = 0;
-        ok = buster_x86_metadata_test_nul_case(BUSTER_X86_METADATA_TEST_NUL_CAPACITY);
+        u64 size = BUSTER_X86_METADATA_TEST_NUL_CAPACITY;
+        memset(buster_x86_metadata_test_nul_pool, 'a', size);
+        buster_x86_metadata_test_nul_pool[size - 1] = 0;
+        ok = buster_x86_metadata_test_nul_case(size);
+        u64 first_fitting = size - BUSTER_X86_METADATA_NUL_DISTANCE_NONE;
+        u64 const offsets[] = {0, 1, first_fitting - 2, first_fitting - 1, first_fitting, first_fitting + 1};
+        for (u64 offset_index = 0; ok && offset_index < BUSTER_ARRAY_LENGTH(offsets); offset_index += 1)
+        {
+            ok = buster_x86_metadata_test_nul_scan_matches(size, offsets[offset_index]);
+        }
+        for (u64 offset = size - 64; ok && offset < size; offset += 1)
+        {
+            ok = buster_x86_metadata_test_nul_scan_matches(size, offset);
+        }
     }
     // And the decoded pool itself, against the same reference: every offset's
     // first-read scan, every entry the table already holds, and -- once the
