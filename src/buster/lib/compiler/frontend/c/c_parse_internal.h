@@ -1,6 +1,7 @@
 #pragma once
 
-// Private test seams for production constexpr, call arity, expression typing, binding, aggregate-tag and label-provenance gate queries.
+// Private test seams for production constexpr, call arity, expression typing, binding, aggregate-tag, label-provenance gate and
+// validation-candidate queries.
 // Tests own their storage and observe production behavior, not a duplicate
 // implementation. No declarations enter production builds.
 #include <buster/lib/compiler/frontend/c/c.h>
@@ -20,4 +21,9 @@ BUSTER_F_DECL bool c_test_parse_direct_expression_type(Arena* scratch, CPreproce
 // Whether c_parse_validate_label_values would walk this function body's
 // values; the analysis must already have built the scope index.
 BUSTER_F_DECL bool c_test_parse_label_values_needed(CParseResult* result, CPreprocessResult preprocess, CDeclaration const* declaration);
+// Disagreements of the validation-candidate sources with their scalar
+// definitions: the call-shape scan over every [from, end) of shapes, and the
+// two-population cursor over every [start, end) up to limit.
+BUSTER_F_DECL u32 c_test_parse_call_shape_mismatches(CTokenShape const* shapes, u32 count);
+BUSTER_F_DECL u32 c_test_parse_candidate_merge_mismatches(u32* first, u32 first_count, u32* second, u32 second_count, u32 limit);
 #endif
