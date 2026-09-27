@@ -61,11 +61,11 @@ instructions, and not recompiling or relinking what did not change.
 
 | # | Leap | Evidence | Plausible size | Existing owner | Gap |
 |---|---|---|---|---|---|
-| 1 | **Project-scale compilation**: one warm process compiles many TUs, schedules them dynamically across lanes and shares header state | Measured 2.7x from batching alone; floor 57% and headers 21% of per-file Lua; header-heavy TU ~97% overhead | **Model:** ~3-4x over `make -j4` on Lua; ~10x on header-heavy TUs | Floor: [#1295](https://github.com/buster14a/buster/issues/1295), [#1125](https://github.com/buster14a/buster/issues/1125). TU lanes: [#53](https://github.com/buster14a/buster/issues/53), [#424](https://github.com/buster14a/buster/issues/424), [#1265](https://github.com/buster14a/buster/issues/1265) | No issue owns a resident compiler, a batch/`compile_commands.json` mode, or header-state reuse |
+| 1 | **Project-scale compilation**: one warm process compiles many TUs, schedules them dynamically across lanes and shares header state | Measured 2.7x from batching alone; floor 57% and headers 21% of per-file Lua; header-heavy TU ~97% overhead | **Model:** ~3-4x over `make -j4` on Lua; ~10x on header-heavy TUs | Floor: [#1295](https://github.com/buster14a/buster/issues/1295), [#1125](https://github.com/buster14a/buster/issues/1125). TU lanes: [#53](https://github.com/buster14a/buster/issues/53), [#424](https://github.com/buster14a/buster/issues/424), [#1265](https://github.com/buster14a/buster/issues/1265) | No issue owns a resident compiler or a batch/`compile_commands.json` mode. Header reuse has only a preprocessing-replay study on #53, whose economics were unmeasured (population since posted there) |
 | 2 | **Incremental and live**: result cache, then function cache, in-place relink and hot reload | Lua one-file edit: ~45 ms compile + 36-49 ms link today | **Model:** edit-to-executable from ~90 ms to ~10 ms; edit-to-running-code without restart | Function cache: [#1470](https://github.com/buster14a/buster/issues/1470) (blocked) | No owner for a TU result cache, incremental linking, hot reload or `ide run` |
-| 3 | **Emit less machine code**: register-resident values, operand folding at selection, per-function FAST decline | 2.6x Clang -O0's instructions; 40% frame-slot traffic ([#1473](https://github.com/buster14a/buster/issues/1473)); one prototype shape disables FAST for all of SQLite | **Model:** code near Clang -O0 speed (TinyCC's single pass is within ~15-20% of it here) and backend stages that shrink with row count | [#49](https://github.com/buster14a/buster/issues/49), [#56](https://github.com/buster14a/buster/issues/56), [#1385](https://github.com/buster14a/buster/issues/1385), [#1386](https://github.com/buster14a/buster/issues/1386), #1473 leads | The whole-module FAST decline is untracked |
+| 3 | **Emit less machine code**: register-resident values, operand folding at selection, per-function FAST decline | 2.6x Clang -O0's instructions; 40% frame-slot traffic ([#1473](https://github.com/buster14a/buster/issues/1473)); one prototype shape disables FAST for all of SQLite | **Model:** code near Clang -O0 speed (TinyCC's single pass is within ~15-20% of it here) and backend stages that shrink with row count | [#49](https://github.com/buster14a/buster/issues/49), [#56](https://github.com/buster14a/buster/issues/56), [#1385](https://github.com/buster14a/buster/issues/1385), [#1386](https://github.com/buster14a/buster/issues/1386), #1473 leads | Whole-module FAST decline filed as [#1602](https://github.com/buster14a/buster/issues/1602), its trigger as [#1601](https://github.com/buster14a/buster/issues/1601) |
 | 4 | **Fewer walks, less memory, per function**: one semantic walk per body, streaming function-at-a-time back half | Bodies are walked by binding, validation and lowering, the last two re-deriving types; peak RSS 388 MB after analysis, 1.1 GB after codegen | **Model:** ~2x single-TU if validation folds into lowering and the backend halves | [#1028](https://github.com/buster14a/buster/issues/1028), [#1551](https://github.com/buster14a/buster/issues/1551), [#1544](https://github.com/buster14a/buster/issues/1544), [#54](https://github.com/buster14a/buster/issues/54), [#546](https://github.com/buster14a/buster/issues/546) | No owner for fusing validation into lowering |
-| 5 | **Drop-in adoption**: depfiles, shared libraries, PIE, flag tolerance, a build-system corpus, LSP | Unknown flags are hard errors; no `-M*`, no `-shared`; `-fPIE` rejected on x86-64 ELF | Unlocks real build systems and a far larger regression corpus | [#1232](https://github.com/buster14a/buster/issues/1232), [#1418](https://github.com/buster14a/buster/issues/1418), [#1398](https://github.com/buster14a/buster/issues/1398), [#423](https://github.com/buster14a/buster/issues/423) | No owner for `-shared` output, an LSP, or a sole-compiler project ladder |
+| 5 | **Drop-in adoption**: depfiles, shared libraries, PIE, flag tolerance, a build-system corpus, LSP | Unknown flags are hard errors; no `-M*`, no `-shared`; `-fPIE` rejected on x86-64 ELF | Unlocks real build systems and a far larger regression corpus | [#1232](https://github.com/buster14a/buster/issues/1232), [#1418](https://github.com/buster14a/buster/issues/1418), [#1398](https://github.com/buster14a/buster/issues/1398), [#423](https://github.com/buster14a/buster/issues/423) | `-shared`/PIE output filed as [#1604](https://github.com/buster14a/buster/issues/1604); no owner for an LSP or a sole-compiler project ladder |
 | 6 | **Velocity multipliers**: a workload-shape benchmark, a built-in reducer, differential fuzzing, dogfooding | 243 of 361 open issues are unlabeled, mostly single-cause correctness bugs filed 2026-09-25..27; three reductions here were manual | Makes every later fix and measurement cheaper | `ide metamorphic`, [#1583](https://github.com/buster14a/buster/issues/1583) | No reducer; the per-file build shape is not a gate |
 
 The order reflects size of measured waste, independence from unfinished
@@ -208,7 +208,8 @@ slots, and a leaf function builds a frame with a stack probe. #1473's census
 reaches the same picture from the encoder side: frame-slot loads and stores
 are ~40% of self-host instructions and aggregate copies 37% of its bytes.
 
-1. **Fix the whole-module FAST decline now.** When any function fails the
+1. **Fix the whole-module FAST decline now** ([#1602](https://github.com/buster14a/buster/issues/1602),
+   [#1601](https://github.com/buster14a/buster/issues/1601)). When any function fails the
    stricter canonical validator, `ir_prepare_canonical_module` skips FAST for
    the entire module. A function returning a function pointer that also has
    a prior prototype (`static int (*pick(int))(int);` followed by its
@@ -276,7 +277,7 @@ type-compatibility engines.
 `ide cc` rejects unknown options. It has no `-M`, `-MD`, `-MMD` or `-MF`
 (and ignores `-Wp,-MMD`, so `make` reuses stale objects — #1232), no
 `-shared` output, and rejects `-fPIE` for x86-64 ELF, which CMake passes for
-position-independent executables. These stop configure scripts, CMake and
+position-independent executables ([#1604](https://github.com/buster14a/buster/issues/1604)). These stop configure scripts, CMake and
 Meson before a single file compiles. Other C compilers grew adoption this way:
 Kefir keeps a suite of about 100 real projects (bash, curl, git, OpenSSL,
 PostgreSQL, Python, SQLite and others), and slimcc's CI builds projects such
@@ -348,7 +349,8 @@ Each is bounded and falsifiable, and each names its stop rule.
 ## Sources
 
 Measurements: audit [`2026-09-27T155317Z`](performance-audits/2026-09-27T155317Z.md)
-and its [evidence](performance-audits/evidence/2026-09-27T155317Z/).
+and its [evidence](performance-audits/evidence/2026-09-27T155317Z/). The TinyCC
+calibration is tracked in [#1605](https://github.com/buster14a/buster/issues/1605).
 
 External (*summary* marks a source read through a search summary):
 
