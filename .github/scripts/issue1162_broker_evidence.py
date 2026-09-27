@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from collections import deque
 import hashlib
 import json
 import os
@@ -32,6 +33,13 @@ MAX_OBSERVER_EVENTS = 16 * 1024 * 1024
 MAX_OBSERVER_SUMMARY = 4 * 1024 * 1024
 MAX_OVERLAP = 16 * 1024 * 1024
 MAX_INSTANCES = 128
+MAX_RUN_NS = 4_000_000_000_000
+MAX_DISPATCHES_PER_SECOND = 512
+DISPATCH_WINDOW_SECONDS = 10
+MAX_DISPATCHES_PER_WINDOW = 2560
+MAX_DISPATCH_BUCKETS = 4001
+MAX_BUS_DISPATCHES = (4000 // DISPATCH_WINDOW_SECONDS *
+                      MAX_DISPATCHES_PER_WINDOW + MAX_DISPATCHES_PER_SECOND)
 MAX_DIAG_BYTES = 512 * 1024
 MAX_DIAG_LINE = 1200
 TEMPLATE_METADATA_UNIT = "buster-bench-systemd-broker@internal.service"
@@ -39,7 +47,8 @@ TEMPLATE_METADATA_PATH = ("/org/freedesktop/systemd1/unit/"
                           "buster_2dbench_2dsystemd_2dbroker_40internal_2eservice")
 TEMPLATE_METADATA_FIELDS = frozenset((
     "boot_id", "boot_id_raw", "unit", "object_path", "sender", "member",
-    "interface", "path", "signature", "bus_dispatch_ordinal", "monotonic_ns"))
+    "interface", "path", "signature", "bus_dispatch_ordinal",
+    "bus_dispatch_monotonic_ns", "monotonic_ns"))
 JOURNAL_UNIT_FIELDS = ("UNIT", "_SYSTEMD_UNIT", "OBJECT_SYSTEMD_UNIT", "COREDUMP_UNIT")
 DATA_FIELDS = ("stat", "status", "mountinfo", "cgroup", "exe", "socket")
 DATA_LIMITS = {"stat": 4096, "status": 16384, "mountinfo": 131072,
@@ -375,8 +384,9 @@ def _parse_stat(raw: bytes, expected_pid: int, expected_ticks: int) -> dict[str,
     tail = text[close + 2:].split()
     require(len(tail) >= 20 and len(tail[0]) == 1, "truncated proc stat fields")
     ticks = canonical_uint(tail[19], "stat starttime", (1 << 64) - 1, False)
+    group = canonical_uint(tail[2], "stat process group", (1 << 31) - 1, False)
     require(pid == expected_pid and ticks == expected_ticks, "proc stat PID/starttime mismatch")
-    return {"pid": pid, "state": tail[0], "start_ticks": ticks}
+    return {"pid": pid, "state": tail[0], "process_group": group, "start_ticks": ticks}
 
 
 def _parse_status(raw: bytes) -> dict[str, str]:
@@ -991,7 +1001,8 @@ def _validate_snapshot_capture(snapshot: dict[str, Any], unit_row: dict[str, Any
     proc: dict[str, Any] | None = None
     socket_identity = snapshot.get("socket_fd0")
     if proc_refs:
-        allowed_proc_refs = {"proc-status", "proc-mountinfo", "proc-cgroup", "fd0_link", "fd0_info"}
+        allowed_proc_refs = {"proc-status", "proc-mountinfo", "proc-cgroup", "fd0_link", "fd0_info",
+                             "proc-cgroup-signal", "proc-stat-before", "proc-stat-after"}
         require(started and type(start_ticks) is int and set(proc_refs) <= allowed_proc_refs and
                 ("fd0_link" in proc_refs) == ("fd0_info" in proc_refs),
                 f"partial process capture references have invalid names or identity for {unit}")
@@ -1001,6 +1012,29 @@ def _validate_snapshot_capture(snapshot: dict[str, Any], unit_row: dict[str, Any
                      if "proc-mountinfo" in proc_refs else None)
         cgroup_raw = (_safe_ref(observer_fd, proc_refs["proc-cgroup"], f"{unit} proc cgroup", 1024 * 1024)
                       if "proc-cgroup" in proc_refs else None)
+        signal_cgroup_raw = (_safe_ref(observer_fd, proc_refs["proc-cgroup-signal"],
+                                        f"{unit} signal proc cgroup", 1024 * 1024)
+                             if "proc-cgroup-signal" in proc_refs else None)
+        if signal_cgroup_raw is not None:
+            require(signal_cgroup_raw == f"0::{snapshot['cgroup']}\n".encode(),
+                    f"{unit} signal cgroup differs from manager/process identity")
+        stat_before = (_safe_ref(observer_fd, proc_refs["proc-stat-before"],
+                                 f"{unit} stat before", 1024 * 1024)
+                       if "proc-stat-before" in proc_refs else None)
+        stat_after = (_safe_ref(observer_fd, proc_refs["proc-stat-after"],
+                                f"{unit} stat after", 1024 * 1024)
+                      if "proc-stat-after" in proc_refs else None)
+        require(stat_after is None or stat_before is not None,
+                f"{unit} process stat after lacks its before identity")
+        first_stat = _parse_stat(stat_before, main_pid, start_ticks) if stat_before is not None else None
+        last_stat = _parse_stat(stat_after, main_pid, start_ticks) if stat_after is not None else None
+        if first_stat is not None:
+            require(first_stat["state"] not in ("Z", "X", "x"),
+                    f"{unit} process stat before is dead")
+        if last_stat is not None:
+            require(last_stat["state"] not in ("Z", "X", "x") and
+                    last_stat["process_group"] == first_stat["process_group"],
+                    f"{unit} process stat after is dead")
         status = (_check_profile_status(status_raw, main_pid, expected["profile"], f"{unit} external")
                   if status_raw is not None else None)
         cgroup_path = (_parse_cgroup(cgroup_raw, expected["profile"]["cgroup_prefix"], f"{unit} external")
@@ -1030,6 +1064,7 @@ def _validate_snapshot_capture(snapshot: dict[str, Any], unit_row: dict[str, Any
                 properties is not None and proc is not None and
                 proc["status"] is not None and proc["mountinfo_raw"] is not None and
                 proc["cgroup_path"] is not None and proc["ro_mounts"] is not None and
+                stat_before is not None and stat_after is not None and
                 socket_identity is not None and
                 snapshot.get("exe") == expected["broker_executable_path"] and
                 snapshot.get("exe_sha256") == expected["broker_binary_sha256"],
@@ -1038,6 +1073,87 @@ def _validate_snapshot_capture(snapshot: dict[str, Any], unit_row: dict[str, Any
             "main_pid": main_pid, "start_ticks": start_ticks,
             "process_identity": _snapshot_process_identity(snapshot),
             "proc": proc, "socket": socket_identity, "stderr": stderr_raw}
+
+
+def _validate_provisional_capture(record: dict[str, Any], row: dict[str, Any],
+                                  expected: dict[str, Any], observer_fd: int) -> dict[str, Any] | None:
+    """Check every retained signal artifact without treating it as manager proof."""
+    refs = record["proc_capture"]
+    allowed = {"proc-cgroup-signal", "proc-stat-before", "proc-stat-after",
+               "proc-status", "proc-mountinfo", "proc-cgroup", "fd0_link", "fd0_info"}
+    require(isinstance(refs, dict) and set(refs) <= allowed and
+            ("fd0_link" in refs) == ("fd0_info" in refs),
+            "provisional process references have invalid shape")
+    for key, ref in refs.items():
+        maximum = 16 * 1024 * 1024 if key == "proc-mountinfo" else 1024 * 1024
+        if key == "fd0_link":
+            maximum = 4096
+        elif key == "fd0_info":
+            maximum = 65536
+        _safe_ref(observer_fd, ref, f"provisional {row['unit']} {key}", maximum)
+    pid, ticks, cgroup = record["main_pid"], record["start_ticks"], record["cgroup"]
+    if "proc-cgroup-signal" in refs:
+        raw = _safe_ref(observer_fd, refs["proc-cgroup-signal"], "signal cgroup", 1024 * 1024)
+        require(isinstance(cgroup, str) and raw == f"0::{cgroup}\n".encode(),
+                "provisional signal cgroup artifact changed")
+    stats = []
+    for key in ("proc-stat-before", "proc-stat-after"):
+        if key in refs:
+            require(type(ticks) is int and ticks > 0,
+                    "provisional stat has no PID/start tick identity")
+            stat_row = _parse_stat(_safe_ref(observer_fd, refs[key], key, 1024 * 1024), pid, ticks)
+            require(stat_row["state"] not in ("Z", "X", "x"),
+                    "provisional stat identity is dead or changed")
+            stats.append(stat_row)
+    require(len(stats) < 2 or stats[0]["process_group"] == stats[1]["process_group"],
+            "provisional process group changed around capture")
+    checked = None
+    if type(ticks) is int and ticks > 0 and isinstance(cgroup, str):
+        pseudo = {**record, "boot_id": row["boot_id"], "boot_id_raw": row["boot_id_raw"],
+                  "unit": row["unit"], "object_path": row["object_path"],
+                  "generation": row["generation"], "process_started": True,
+                  "invocation_id": None, "exec_main_start_timestamp_monotonic": None,
+                  "manager_properties_complete": False, "process_capture_complete": False,
+                  "complete": False, "systemctl_exit": None, "systemctl_timed_out": False,
+                  "systemctl_cancelled": None, "raw_show": None, "raw_stderr": None}
+        checked = _validate_snapshot_capture(pseudo, row, expected, observer_fd)
+    if record["capture_complete"]:
+        required = {"proc-cgroup-signal", "proc-stat-before", "proc-stat-after",
+                    "proc-status", "proc-mountinfo", "proc-cgroup", "fd0_link", "fd0_info"}
+        require(set(refs) == required and record["capture_state"] == "full_process_witness" and
+                record["capture_error"] is None and
+                record["exe"] == expected["broker_executable_path"] and
+                record["exe_sha256"] == expected["broker_binary_sha256"],
+                "provisional full process lacks its exact artifacts or executable")
+        require(checked is not None and checked["proc"] is not None and
+                checked["proc"]["status"] is not None and
+                checked["proc"]["ro_mounts"] is not None and
+                checked["proc"]["cgroup_path"] == cgroup and checked["socket"] is not None,
+                "provisional full process is missing a verified security or socket artifact")
+        return checked
+    require(record["capture_state"] in SUPERSEDABLE_CAPTURE_STATES |
+            {"identity_contradiction_or_capture_error"} and
+            isinstance(record["capture_error"], str) and record["capture_error"] and
+            record["bound_snapshot_index"] is None,
+            "failed provisional capture falsely became process proof")
+    state, error = record["capture_state"], record["capture_error"]
+    if state == "known_preexec_executable_transition":
+        label_error = rf"signal-[0-9]{{6}}"
+        require(record.get("initial_exe_observed") in PREEXEC_EXECUTABLES and
+                (re.fullmatch(r"ProbeError:process cgroup mismatch for " + label_error, error) is not None or
+                 re.fullmatch(r"ProbeError:process executable path mismatch for " + label_error +
+                              r": " + re.escape(record["initial_exe_observed"]), error) is not None),
+                "provisional pre-exec failure lacks its exact executor evidence")
+    elif state == "transient_capture_deadline":
+        require(error == "ProbeError:submit-relative live-probe deadline exhausted",
+                "provisional deadline failure has another cause")
+    elif state in ("transient_proc_disappeared", "transient_proc_interrupted"):
+        code = "4" if state == "transient_proc_interrupted" else "(?:2|3|20)"
+        require(re.fullmatch(r"(?:OSError|FileNotFoundError|ProcessLookupError|"
+                             r"NotADirectoryError|InterruptedError):\[Errno " + code +
+                             r"\].*?/proc/" + str(pid) + r"/[^']+'", error) is not None,
+                "provisional transient process failure has another cause")
+    return None
 
 
 def _check_profile_status(raw: bytes, pid: int, profile: dict[str, Any], label: str) -> dict[str, str]:
@@ -1080,6 +1196,114 @@ def _validate_fd0(snapshot: dict[str, Any], proc_refs: dict[str, Any], root_fd: 
                                         "ino": socket_identity["inode"],
                                         "mode": socket_identity["mode"]},
                 f"{label} C-reported accepted socket differs from external fd0")
+
+
+def _validate_dispatch_accounting(ready: dict[str, Any], events: list[dict[str, Any]],
+                                  summary: dict[str, Any]) -> None:
+    """Replay the bounded ledger for every sd_bus_process result, including ignored traffic."""
+    limits = summary.get("limits")
+    fixed = {"max_bus_dispatches": MAX_BUS_DISPATCHES,
+             "max_dispatches_per_second": MAX_DISPATCHES_PER_SECOND,
+             "dispatch_window_seconds": DISPATCH_WINDOW_SECONDS,
+             "max_dispatches_per_window": MAX_DISPATCHES_PER_WINDOW,
+             "max_dispatch_buckets": MAX_DISPATCH_BUCKETS,
+             "max_dispatches_per_drain": 64, "max_events": 512,
+             "max_run_seconds": 4000.0, "max_evidence_bytes": 16 * 1024 * 1024,
+             "max_ready_bytes": 64 * 1024, "max_summary_bytes": 4 * 1024 * 1024,
+             "summary_reserve_bytes": 64 * 1024 + 4 * 1024 * 1024,
+             "max_snapshots_per_generation": 6,
+             "max_prestop_snapshots_per_generation": 5,
+             "max_provisional_captures_per_generation": 2,
+             "show_timeout_seconds": 2.0, "terminal_phase_seconds": 30.0}
+    require(isinstance(limits, dict) and all(limits.get(key) == value and
+            type(limits.get(key)) is type(value) for key, value in fixed.items()),
+            "observer rate and preserved resource limits disagree")
+    ready_ns, ended_ns = ready["ready_monotonic_ns"], summary["ended_monotonic_ns"]
+    require(0 <= ended_ns - ready_ns <= MAX_RUN_NS,
+            "observer dispatch interval exceeds the fixed run deadline")
+    count = summary.get("bus_dispatch_count")
+    buckets = summary.get("dispatch_buckets")
+    require(type(count) is int and 0 <= count <= MAX_BUS_DISPATCHES and
+            isinstance(buckets, list) and len(buckets) <= MAX_DISPATCH_BUCKETS,
+            "observer dispatch count or bucket population exceeds bound")
+    previous_second, previous_ns, total = -1, ready_ns, 0
+    rolling: deque[tuple[int, int]] = deque()
+    rolling_total = 0
+    ordinal_buckets: list[tuple[int, int, int, int]] = []
+    for bucket in buckets:
+        require(isinstance(bucket, dict) and set(bucket) ==
+                {"second", "count", "first_monotonic_ns", "last_monotonic_ns"},
+                "observer dispatch bucket shape is malformed")
+        second, amount = bucket["second"], bucket["count"]
+        first, last = bucket["first_monotonic_ns"], bucket["last_monotonic_ns"]
+        require(all(type(value) is int for value in (second, amount, first, last)) and
+                previous_second < second < MAX_DISPATCH_BUCKETS and
+                0 < amount <= MAX_DISPATCHES_PER_SECOND and
+                previous_ns <= first <= last <= ended_ns and
+                ready_ns + second * 1_000_000_000 <= first <= last <
+                    ready_ns + (second + 1) * 1_000_000_000,
+                "observer dispatch bucket ordering, time or one-second rate is invalid")
+        # Any real ten-second interval intersects at most eleven aligned
+        # second buckets. Conservatively charging all eleven proves the
+        # sliding bound from this compact, independently replayable ledger.
+        while rolling and second - rolling[0][0] > DISPATCH_WINDOW_SECONDS:
+            rolling_total -= rolling.popleft()[1]
+        rolling.append((second, amount))
+        rolling_total += amount
+        require(rolling_total <= MAX_DISPATCHES_PER_WINDOW,
+                "observer rolling ten-second dispatch rate exceeds bound")
+        ordinal_buckets.append((total + 1, total + amount, first, last))
+        total += amount
+        previous_second, previous_ns = second, last
+    require(total == count, "observer dispatch buckets do not conserve all bus traffic")
+    diagnostic = summary.get("dispatch_diagnostics")
+    kinds = ("positive_with_message", "positive_null", "ignored_unrelated_properties",
+             "observer_control", "unclassified_without_message")
+    subsets = ("ignored_unrelated_unit_new", "ignored_unrelated_unit_removed",
+               "noncanonical_broker_unit_signals")
+    require(isinstance(diagnostic, dict) and set(diagnostic) ==
+            {*kinds, "subsets", "noncanonical_samples", "noncanonical_samples_omitted"} and
+            all(type(diagnostic[key]) is int and 0 <= diagnostic[key] <= count for key in kinds) and
+            sum(diagnostic[key] for key in kinds) == count and
+            isinstance(diagnostic["subsets"], dict) and set(diagnostic["subsets"]) == set(subsets) and
+            all(type(diagnostic["subsets"][key]) is int and
+                0 <= diagnostic["subsets"][key] <= count for key in subsets) and
+            sum(diagnostic["subsets"].values()) <= diagnostic["positive_with_message"] and
+            isinstance(diagnostic["noncanonical_samples"], list) and
+            len(diagnostic["noncanonical_samples"]) <= 4 and
+            type(diagnostic["noncanonical_samples_omitted"]) is int and
+            diagnostic["noncanonical_samples_omitted"] >= 0 and
+            len(diagnostic["noncanonical_samples"]) +
+            diagnostic["noncanonical_samples_omitted"] ==
+            diagnostic["subsets"]["noncanonical_broker_unit_signals"],
+            "observer dispatch diagnostics do not conserve the bus traffic")
+    require(len(json.dumps(diagnostic, ensure_ascii=True, separators=(",", ":")).encode()) <=
+            32 * 1024,
+            "observer dispatch diagnostics exceed their retained byte bound")
+    metadata = summary.get("template_metadata_events")
+    require(isinstance(metadata, list) and len(metadata) in (0, 2),
+            "observer template dispatch accounting is malformed")
+    stamped = [*events, *metadata]
+    require(all(isinstance(row, dict) and type(row.get("bus_dispatch_ordinal")) is int
+                for row in stamped), "observer dispatch ordinals are malformed")
+    require(all(events[index]["bus_dispatch_ordinal"] < events[index + 1]["bus_dispatch_ordinal"]
+                for index in range(len(events) - 1)),
+            "observer canonical event dispatch order regressed")
+    stamped.sort(key=lambda row: row["bus_dispatch_ordinal"])
+    last_ordinal, last_dispatch_ns = 0, ready_ns
+    for record in stamped:
+        ordinal, when = record.get("bus_dispatch_ordinal"), record.get("monotonic_ns")
+        dispatch_ns = record.get("bus_dispatch_monotonic_ns")
+        require(type(ordinal) is int and last_ordinal < ordinal <= count and
+                type(when) is int and type(dispatch_ns) is int and
+                last_dispatch_ns <= dispatch_ns <= when <= ended_ns,
+                "observer event or template dispatch ordinal/time is invalid")
+        matching = [bucket for bucket in ordinal_buckets if bucket[0] <= ordinal <= bucket[1]]
+        require(len(matching) == 1 and matching[0][2] <= dispatch_ns <= matching[0][3],
+                "observer event precedes its charged bus dispatch")
+        last_ordinal, last_dispatch_ns = ordinal, dispatch_ns
+    require(diagnostic["positive_with_message"] >= len(stamped),
+            "observer canonical messages exceed positive bus dispatches")
 
 
 def _observer_documents(observer_fd: int, expected: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
@@ -1133,7 +1357,7 @@ def _observer_documents(observer_fd: int, expected: dict[str, Any]) -> tuple[dic
             0 <= summary["capture_bytes"] <= MAX_OBSERVER_EVENTS,
             "observer summary counters or stop/identity fields disagree")
     require(len(events) <= 512 and type(summary.get("bus_dispatch_count")) is int and
-            0 <= summary["bus_dispatch_count"] <= 4096,
+            0 <= summary["bus_dispatch_count"] <= MAX_BUS_DISPATCHES,
             "observer event or dispatch count exceeds bound")
     for number, event in enumerate(events, 1):
         require(event.get("schema") == OBS_SCHEMA and event.get("boot_id") == expected["boot_id"] and
@@ -1141,6 +1365,7 @@ def _observer_documents(observer_fd: int, expected: dict[str, Any]) -> tuple[dic
                 type(event.get("seq")) is int and event.get("seq") == number and
                 type(event.get("monotonic_ns")) is int and event["monotonic_ns"] > 0,
                 f"observer event {number} has a sequence or boot gap")
+    _validate_dispatch_accounting(ready, events, summary)
     return ready, events, summary
 
 
@@ -1299,7 +1524,7 @@ def _validate_template_metadata(ready: dict[str, Any], events: list[dict[str, An
         dispatches = summary.get("bus_dispatch_count")
         require(type(ready_ns) is int and ready_ns > 0 and
                 type(ended_ns) is int and ended_ns >= ready_ns and
-                type(dispatches) is int and 2 <= dispatches <= 4096,
+                type(dispatches) is int and 2 <= dispatches <= MAX_BUS_DISPATCHES,
                 "template metadata lacks bounded observer clock/dispatch counters")
         first_new_ns = None
         for event in events:
@@ -1324,8 +1549,10 @@ def _validate_template_metadata(ready: dict[str, Any], events: list[dict[str, An
                     row["path"] == "/org/freedesktop/systemd1" and row["signature"] == "so",
                     "template metadata identity/header/order mismatch")
             ns, ordinal = row["monotonic_ns"], row["bus_dispatch_ordinal"]
+            dispatch_ns = row["bus_dispatch_monotonic_ns"]
             require(type(ns) is int and ready_ns <= ns <= ended_ns and
                     last_ns < ns < first_new_ns and
+                    type(dispatch_ns) is int and ready_ns <= dispatch_ns <= ns and
                     type(ordinal) is int and last_ordinal < ordinal <= dispatches,
                     "template metadata clock or dispatch order is invalid")
             last_ns, last_ordinal = ns, ordinal
@@ -1354,8 +1581,10 @@ def _validate_event_rows(ready: dict[str, Any], events: list[dict[str, Any]],
         kind = event.get("event")
         if kind == "Reloading":
             expected_fields = {"schema", "boot_id", "boot_id_raw", "seq", "monotonic_ns",
-                               "observer_show_query_inflight", "event", "member", "interface",
+                               "bus_dispatch_monotonic_ns", "observer_show_query_inflight",
+                               "event", "member", "interface",
                                "path", "sender", "reloading"}
+            expected_fields.add("bus_dispatch_ordinal")
             require(set(event) == expected_fields,
                     "manager Reloading event has unknown or missing fields")
             require(event.get("member") == "Reloading" and
@@ -1369,15 +1598,18 @@ def _validate_event_rows(ready: dict[str, Any], events: list[dict[str, Any]],
             continue
         if kind in ("UnitNew", "UnitRemoved"):
             expected_fields = {"schema", "boot_id", "boot_id_raw", "seq", "monotonic_ns",
-                               "observer_show_query_inflight", "event", "member", "interface",
+                               "bus_dispatch_monotonic_ns", "observer_show_query_inflight",
+                               "event", "member", "interface",
                                "sender", "unit", "object_path", "generation"}
         elif kind == "PropertiesChanged":
             expected_fields = {"schema", "boot_id", "boot_id_raw", "seq", "monotonic_ns",
-                               "observer_show_query_inflight", "event", "member", "interface",
+                               "bus_dispatch_monotonic_ns", "observer_show_query_inflight",
+                               "event", "member", "interface",
                                "unit_interface", "sender", "unit", "object_path", "generation",
                                "changed_properties", "invalidated_properties", "main_pids"}
         else:
             raise EvidenceError("observer has an unknown lifecycle event")
+        expected_fields.add("bus_dispatch_ordinal")
         require(set(event) == expected_fields,
                 "observer lifecycle event has unknown or missing fields")
         query_context = event.get("observer_show_query_inflight")
@@ -1481,6 +1713,97 @@ def _validate_event_rows(ready: dict[str, Any], events: list[dict[str, Any]],
         row_snaps = unit_row.get("snapshots")
         require(isinstance(row_snaps, list) and 1 <= len(row_snaps) <= 6,
                 f"observer unit snapshot list missing or out of bounds for {key[1]}")
+        provisional = unit_row.get("provisional_captures")
+        require(isinstance(provisional, list) and len(provisional) <= 2,
+                f"observer provisional signal captures exceed bound for {key[1]}")
+        prior_signal_seq = 0
+        for index, capture in enumerate(provisional):
+            fields = {"trigger_event_seq", "signal_monotonic_ns", "started_monotonic_ns",
+                      "finished_monotonic_ns", "main_pid", "start_ticks", "cgroup",
+                      "proc_cgroup_raw", "initial_exe_observed", "exe", "exe_sha256",
+                      "proc_capture", "socket_fd0", "capture_complete", "capture_state",
+                      "capture_error", "bound_snapshot_index"}
+            require(isinstance(capture, dict) and set(capture) == fields and
+                    type(capture["main_pid"]) is int and 0 < capture["main_pid"] <= (1 << 31) - 1 and
+                    type(capture["trigger_event_seq"]) is int and
+                    capture["trigger_event_seq"] > prior_signal_seq and
+                    type(capture["signal_monotonic_ns"]) is int and
+                    type(capture["started_monotonic_ns"]) is int and
+                    type(capture["finished_monotonic_ns"]) is int and
+                    ready_ns <= capture["signal_monotonic_ns"] <=
+                    capture["started_monotonic_ns"] <= capture["finished_monotonic_ns"] <=
+                    summary["ended_monotonic_ns"] and
+                    type(capture["capture_complete"]) is bool and
+                    isinstance(capture["proc_capture"], dict) and
+                    (capture["start_ticks"] is None or
+                     (type(capture["start_ticks"]) is int and capture["start_ticks"] > 0)) and
+                    (capture["cgroup"] is None or
+                     (isinstance(capture["cgroup"], str) and capture["cgroup"].startswith("/") and
+                      ".." not in capture["cgroup"].split("/"))) and
+                    (capture["proc_cgroup_raw"] is None or
+                     (isinstance(capture["proc_cgroup_raw"], str) and
+                      len(capture["proc_cgroup_raw"]) <= 4096)) and
+                    (capture["initial_exe_observed"] is None or
+                     (isinstance(capture["initial_exe_observed"], str) and
+                      len(capture["initial_exe_observed"]) <= 4096 and
+                      capture["initial_exe_observed"].startswith("/"))) and
+                    (capture["exe"] is None or
+                     (isinstance(capture["exe"], str) and len(capture["exe"]) <= 4096)) and
+                    (capture["exe_sha256"] is None or
+                     (isinstance(capture["exe_sha256"], str) and
+                      HEX64.fullmatch(capture["exe_sha256"]) is not None)),
+                    f"provisional signal identity or time is malformed for {key[1]}")
+            source = next((event for event in life["properties"] if
+                           event["seq"] == capture["trigger_event_seq"]), None)
+            require(source is not None and source["monotonic_ns"] ==
+                    capture["signal_monotonic_ns"] and
+                    source["unit_interface"] == "org.freedesktop.systemd1.Service" and
+                    "MainPID" in source["changed_properties"] and
+                    source["main_pids"] == [capture["main_pid"]],
+                    f"provisional capture lacks its authenticated positive PID signal for {key[1]}")
+            if index:
+                previous = provisional[index - 1]
+                require(previous["main_pid"] == capture["main_pid"] and
+                        previous["capture_state"] in SUPERSEDABLE_CAPTURE_STATES and
+                        not any(event["seq"] > previous["trigger_event_seq"] and
+                                event["seq"] < capture["trigger_event_seq"] and
+                                0 in event["main_pids"] for event in life["properties"]),
+                        f"provisional retry is not a distinct same-PID live signal for {key[1]}")
+            bound = capture["bound_snapshot_index"]
+            require(bound is None or
+                    (type(bound) is int and 0 <= bound < len(row_snaps) and
+                     capture["capture_complete"] is True and
+                     row_snaps[bound].get("provisional_event_seq") ==
+                        capture["trigger_event_seq"] and
+                     row_snaps[bound].get("main_pid") == capture["main_pid"] and
+                     row_snaps[bound].get("cgroup") == capture["cgroup"] and
+                     row_snaps[bound].get("start_ticks") == capture["start_ticks"] and
+                     row_snaps[bound].get("exe") == capture["exe"] and
+                     row_snaps[bound].get("exe_sha256") == capture["exe_sha256"] and
+                     row_snaps[bound].get("proc_capture") == capture["proc_capture"] and
+                     row_snaps[bound].get("socket_fd0") == capture["socket_fd0"] and
+                     row_snaps[bound].get("manager_properties_complete") is True and
+                     row_snaps[bound].get("process_capture_complete") is True and
+                     type(row_snaps[bound].get("finished_monotonic_ns")) is int and
+                     capture["finished_monotonic_ns"] <= row_snaps[bound]["finished_monotonic_ns"] and
+                     type(row_snaps[bound].get("exec_main_start_timestamp_monotonic")) is int and
+                     0 < row_snaps[bound]["exec_main_start_timestamp_monotonic"] * 1000 <=
+                         capture["signal_monotonic_ns"]),
+                    f"provisional capture was bound without exact successful show for {key[1]}")
+            require(capture["capture_complete"] or bound is None,
+                    f"failed provisional capture was promoted for {key[1]}")
+            if capture["capture_state"] == "identity_contradiction_or_capture_error":
+                require("signal_process_identity_contradiction_or_capture_error" in
+                        unit_row["process_incomplete_reasons"],
+                        f"hard provisional contradiction was omitted for {key[1]}")
+            prior_signal_seq = capture["trigger_event_seq"]
+        bound_seqs = {capture["trigger_event_seq"] for capture in provisional
+                      if capture["bound_snapshot_index"] is not None}
+        require(len(bound_seqs) == sum(capture["bound_snapshot_index"] is not None
+                                       for capture in provisional) and
+                {snap["provisional_event_seq"] for snap in row_snaps
+                 if "provisional_event_seq" in snap} == bound_seqs,
+                f"provisional snapshot binding is missing or duplicated for {key[1]}")
         has_terminal = unit_row.get("retained_failed_terminal") is not None
         require(len(row_snaps) + int(has_terminal) <= 6,
                 f"observer terminal query exceeds the shared six-query bound for {key[1]}")
@@ -1974,6 +2297,22 @@ def _validate_external_population(
                 f"C diagnostic start ticks differ from observer for {key[1]}")
         _check_complete_capture_conservation(
             full_captures, diagnostic_profile, identity[8], key[1])
+        for provisional in unit_row["provisional_captures"]:
+            checked = _validate_provisional_capture(provisional, unit_row, expected, observer_fd)
+            require(provisional["main_pid"] == identity[5] and
+                    (provisional["cgroup"] is None or provisional["cgroup"] == identity[7]) and
+                    (provisional["start_ticks"] is None or provisional["start_ticks"] == identity[8]) and
+                    (provisional["exe"] is None or provisional["exe"] == expected["broker_executable_path"]) and
+                    (provisional["exe_sha256"] is None or
+                     provisional["exe_sha256"] == expected["broker_binary_sha256"]) and
+                    (provisional["proc_cgroup_raw"] is None or
+                     provisional["proc_cgroup_raw"] == f"0::{provisional['cgroup']}") and
+                    (provisional["socket_fd0"] is None or
+                     provisional["socket_fd0"] == full_captures[0]["socket"]),
+                    f"partial provisional identity conflicts with full witness for {key[1]}")
+            if checked is not None:
+                _check_complete_capture_conservation(
+                    [checked], diagnostic_profile, identity[8], key[1])
         full = full_captures[0]
         full_witnesses[key] = {"process_identity": identity, "socket": full["socket"],
                                "status": full["proc"]["status"], "proc": full["proc"]}
@@ -2315,7 +2654,8 @@ def self_test() -> int:
              "sender": ":1.0", "member": member,
              "interface": "org.freedesktop.systemd1.Manager",
              "path": "/org/freedesktop/systemd1", "signature": "so",
-             "bus_dispatch_ordinal": ordinal, "monotonic_ns": ns}
+             "bus_dispatch_ordinal": ordinal,
+             "bus_dispatch_monotonic_ns": ns - 1, "monotonic_ns": ns}
             for member, ordinal, ns in (("UnitNew", 1, 200), ("UnitRemoved", 2, 300))]
     metadata_summary = {"template_metadata_events": pair, "bus_dispatch_count": 3,
                         "ended_monotonic_ns": 500, "stop_seen": True,
@@ -2333,6 +2673,7 @@ def self_test() -> int:
                        ("sender", ":1.2"), ("member", "PropertiesChanged"),
                        ("interface", "org.freedesktop.DBus.Properties"), ("path", "/wrong"),
                        ("signature", "s"), ("event", "UnitNew"),
+                       ("bus_dispatch_monotonic_ns", 400),
                        ("bus_dispatch_ordinal", True), ("bus_dispatch_ordinal", 0),
                        ("bus_dispatch_ordinal", 3), ("bus_dispatch_ordinal", 4097),
                        ("monotonic_ns", True), ("monotonic_ns", 0),
@@ -2347,7 +2688,7 @@ def self_test() -> int:
         rejects(_validate_template_metadata, metadata_ready, metadata_events, changed)
     for key, value in (("event_stream_complete", False), ("event_loss_detected", True),
                        ("global_incomplete_reasons", ["missing_event"]), ("stop_seen", False),
-                       ("bus_dispatch_count", 1), ("bus_dispatch_count", 4097),
+                       ("bus_dispatch_count", 1), ("bus_dispatch_count", MAX_BUS_DISPATCHES + 1),
                        ("bus_dispatch_count", True), ("ended_monotonic_ns", 299)):
         rejects(_validate_template_metadata, metadata_ready, metadata_events,
                 {**metadata_summary, key: value})
@@ -2356,6 +2697,240 @@ def self_test() -> int:
             [{**metadata_events[0], "unit": TEMPLATE_METADATA_UNIT}], metadata_summary)
     rejects(_validate_template_metadata, metadata_ready,
             [{**metadata_events[0], "monotonic_ns": 300}], metadata_summary)
+    # Replay a 300-second stream with 46 ignored manager messages and one
+    # canonical message each second. Counts far exceed the former 4096 cap.
+    ledger_ready = {"ready_monotonic_ns": 10_000_000_000}
+    ledger_buckets = [{"second": second, "count": 47,
+                       "first_monotonic_ns": 10_000_000_000 + second * 1_000_000_000 + 100,
+                       "last_monotonic_ns": 10_000_000_000 + second * 1_000_000_000 + 200}
+                      for second in range(300)]
+    ledger_diag = {"positive_with_message": 300, "positive_null": 0,
+                   "ignored_unrelated_properties": 300 * 46, "observer_control": 0,
+                   "unclassified_without_message": 0,
+                   "subsets": {"ignored_unrelated_unit_new": 0,
+                               "ignored_unrelated_unit_removed": 0,
+                               "noncanonical_broker_unit_signals": 0},
+                   "noncanonical_samples": [], "noncanonical_samples_omitted": 0}
+    ledger_limits = {"max_bus_dispatches": MAX_BUS_DISPATCHES,
+                     "max_dispatches_per_second": MAX_DISPATCHES_PER_SECOND,
+                     "dispatch_window_seconds": DISPATCH_WINDOW_SECONDS,
+                     "max_dispatches_per_window": MAX_DISPATCHES_PER_WINDOW,
+                     "max_dispatch_buckets": MAX_DISPATCH_BUCKETS,
+                     "max_dispatches_per_drain": 64, "max_events": 512,
+                     "max_run_seconds": 4000.0, "max_evidence_bytes": 16 * 1024 * 1024,
+                     "max_ready_bytes": 64 * 1024, "max_summary_bytes": 4 * 1024 * 1024,
+                     "summary_reserve_bytes": 64 * 1024 + 4 * 1024 * 1024,
+                     "max_snapshots_per_generation": 6,
+                     "max_prestop_snapshots_per_generation": 5,
+                     "max_provisional_captures_per_generation": 2,
+                     "show_timeout_seconds": 2.0, "terminal_phase_seconds": 30.0}
+    ledger_summary = {"ended_monotonic_ns": 10_000_000_000 + 300 * 1_000_000_000,
+                      "bus_dispatch_count": 300 * 47, "dispatch_buckets": ledger_buckets,
+                      "dispatch_diagnostics": ledger_diag, "limits": ledger_limits,
+                      "template_metadata_events": []}
+    ledger_events = [{"bus_dispatch_ordinal": 47,
+                      "bus_dispatch_monotonic_ns": ledger_buckets[0]["last_monotonic_ns"],
+                      "monotonic_ns": ledger_buckets[0]["last_monotonic_ns"] + 1}]
+    _validate_dispatch_accounting(ledger_ready, ledger_events, ledger_summary)
+    checks += 1
+    for mutation in (lambda item: item.update(bus_dispatch_count=14101),
+                     lambda item: item["dispatch_buckets"].pop(),
+                     lambda item: item["dispatch_buckets"][1].update(second=0),
+                     lambda item: item["dispatch_buckets"][0].update(count=513),
+                     lambda item: item["dispatch_buckets"][0].update(first_monotonic_ns=1),
+                     lambda item: item["dispatch_diagnostics"].update(
+                         ignored_unrelated_properties=13799),
+                     lambda item: item["limits"].update(max_dispatches_per_drain=65)):
+        changed = json.loads(json.dumps(ledger_summary))
+        mutation(changed)
+        rejects(_validate_dispatch_accounting, ledger_ready, ledger_events, changed)
+    for changed_events in ([{**ledger_events[0], "bus_dispatch_ordinal": 14101}],
+                           ledger_events * 2,
+                           [{**ledger_events[0], "monotonic_ns": 10_000_000_000 + 99}]):
+        rejects(_validate_dispatch_accounting, ledger_ready, changed_events, ledger_summary)
+    burst_buckets = [{"second": second, "count": 512,
+                      "first_monotonic_ns": 10_000_000_000 + second * 1_000_000_000 + 100,
+                      "last_monotonic_ns": 10_000_000_000 + second * 1_000_000_000 + 200}
+                     for second in range(6)]
+    burst = json.loads(json.dumps(ledger_summary))
+    burst["bus_dispatch_count"] = 6 * 512
+    burst["dispatch_buckets"] = burst_buckets
+    burst["dispatch_diagnostics"]["positive_with_message"] = 0
+    burst["dispatch_diagnostics"]["ignored_unrelated_properties"] = 6 * 512
+    rejects(_validate_dispatch_accounting, ledger_ready, [], burst)
+    # A window straddling the one-second boundary may touch eleven buckets;
+    # a ten-bucket-only replay would miss this overload.
+    edge_burst = json.loads(json.dumps(burst))
+    edge_burst["dispatch_buckets"] = [
+        {"second": second, "count": 512 if second < 5 else 1,
+         "first_monotonic_ns": 10_000_000_000 + second * 1_000_000_000 + 100,
+         "last_monotonic_ns": 10_000_000_000 + second * 1_000_000_000 + 200}
+        for second in (0, 1, 2, 3, 4, 10)]
+    edge_burst["bus_dispatch_count"] = 2561
+    edge_burst["dispatch_diagnostics"]["ignored_unrelated_properties"] = 2561
+    rejects(_validate_dispatch_accounting, ledger_ready, [], edge_burst)
+    life_ready = {"boot_id": expected["boot_id"], "boot_id_raw": boot_raw,
+                  "manager_sender": ":1.0", "ready_monotonic_ns": 100}
+    unit = metadata_events[0]["unit"]
+    life_event = {"schema": OBS_SCHEMA, "boot_id": expected["boot_id"],
+                  "boot_id_raw": boot_raw, "seq": 1, "monotonic_ns": 200,
+                  "bus_dispatch_ordinal": 1, "bus_dispatch_monotonic_ns": 199,
+                  "observer_show_query_inflight": None, "event": "UnitNew",
+                  "member": "UnitNew", "interface": "org.freedesktop.systemd1.Manager",
+                  "sender": ":1.0", "unit": unit, "object_path": _unit_object_path(unit),
+                  "generation": 1}
+    life_summary = {"template_metadata_events": [], "global_incomplete_reasons": [],
+                    "units": [], "event_loss_detected": False, "stop_seen": True,
+                    "manager_observation_complete": False, "process_complete": False,
+                    "observer_complete": False}
+    rejects(_validate_event_rows, life_ready,
+            [{**life_event, "event": "UnitRemoved", "member": "UnitRemoved"}], life_summary)
+    rejects(_validate_event_rows, life_ready,
+            [life_event, {**life_event, "seq": 2, "monotonic_ns": 201,
+                          "bus_dispatch_ordinal": 2, "bus_dispatch_monotonic_ns": 200}],
+            life_summary)
+    reloading = {"schema": OBS_SCHEMA, "boot_id": expected["boot_id"],
+                 "boot_id_raw": boot_raw, "seq": 1, "monotonic_ns": 200,
+                 "bus_dispatch_ordinal": 1, "bus_dispatch_monotonic_ns": 199,
+                 "observer_show_query_inflight": None, "event": "Reloading",
+                 "member": "Reloading", "interface": "org.freedesktop.systemd1.Manager",
+                 "path": "/org/freedesktop/systemd1", "sender": ":1.0", "reloading": True}
+    rejects(_validate_event_rows, life_ready, [reloading], life_summary)
+    rejects(_validate_event_rows, life_ready, [],
+            {**life_summary, "global_incomplete_reasons":
+                ["manager_final_drain_slice_exceeded"], "event_loss_detected": True,
+             "observer_complete": True, "process_complete": True})
+    # The actual static generation verifier binds a signal capture to exactly
+    # one completed same-generation show, even when the query started first.
+    from issue1162_broker_observer import Lifecycle
+    property_event = {"schema": OBS_SCHEMA, "boot_id": expected["boot_id"],
+        "boot_id_raw": boot_raw, "seq": 2, "monotonic_ns": 3000,
+        "bus_dispatch_ordinal": 2, "bus_dispatch_monotonic_ns": 2999,
+        "observer_show_query_inflight": {"unit": unit, "generation": 1,
+                                           "started_monotonic_ns": 2500},
+        "event": "PropertiesChanged", "member": "PropertiesChanged",
+        "interface": "org.freedesktop.DBus.Properties",
+        "unit_interface": "org.freedesktop.systemd1.Service", "sender": ":1.0",
+        "unit": unit, "object_path": _unit_object_path(unit), "generation": 1,
+        "changed_properties": ["MainPID"], "invalidated_properties": [], "main_pids": [741]}
+    removed_event = {**life_event, "seq": 3, "monotonic_ns": 9000,
+                     "bus_dispatch_ordinal": 3, "bus_dispatch_monotonic_ns": 8999,
+                     "event": "UnitRemoved", "member": "UnitRemoved"}
+    provisional_refs = {"proc-status": {"bytes": 1}}
+    socket = {"inode": 123, "target": "socket:[123]", "stable": True,
+              "start_ticks_before": 5812, "start_ticks_after": 5812}
+    full_signal = {"trigger_event_seq": 2, "signal_monotonic_ns": 3000,
+                   "started_monotonic_ns": 3100, "finished_monotonic_ns": 4000,
+                   "main_pid": 741, "start_ticks": 5812, "cgroup": "/system.slice/broker.instance",
+                   "proc_cgroup_raw": "0::/system.slice/broker.instance",
+                   "initial_exe_observed": expected["broker_executable_path"],
+                   "exe": expected["broker_executable_path"],
+                   "exe_sha256": expected["broker_binary_sha256"],
+                   "proc_capture": provisional_refs, "socket_fd0": socket,
+                   "capture_complete": True, "capture_state": "full_process_witness",
+                   "capture_error": None, "bound_snapshot_index": 0}
+    full_snapshot = {"boot_id": expected["boot_id"], "boot_id_raw": boot_raw,
+        "unit": unit, "object_path": _unit_object_path(unit), "generation": 1,
+        "manager_object_reload_possible": True, "trigger_event_seq": 2,
+        "trigger": "mainpid:741", "started_monotonic_ns": 2500,
+        "finished_monotonic_ns": 5000, "complete": True, "incomplete_reasons": [],
+        "manager_properties_complete": True, "process_capture_complete": True,
+        "main_pid": 741, "process_started": True, "start_ticks": 5812,
+        "invocation_id": "a" * 32, "exec_main_start_timestamp_monotonic": 1,
+        "cgroup": full_signal["cgroup"], "exe": full_signal["exe"],
+        "exe_sha256": full_signal["exe_sha256"], "proc_capture": provisional_refs,
+        "socket_fd0": socket, "provisional_event_seq": 2}
+    full_life = Lifecycle(unit, _unit_object_path(unit), 1, 1, 2000)
+    full_life.last_event_seq = 3
+    full_life.last_monotonic_ns = 9000
+    full_life.removed = True
+    full_life.removed_event_seq = 3
+    full_life.removed_monotonic_ns = 9000
+    full_life.process_started = True
+    full_life.main_pid = 741
+    full_life.main_pid_values = {741}
+    full_life.invocation_id = "a" * 32
+    full_life.start_ticks = 5812
+    full_life.cgroup = full_signal["cgroup"]
+    full_life.exe = full_signal["exe"]
+    full_life.exe_sha256 = full_signal["exe_sha256"]
+    full_life.snapshots = [full_snapshot]
+    full_life.provisional_captures = [full_signal]
+    full_life.last_snapshot_finished_monotonic_ns = 5000
+    full_summary = {**life_summary, "units": [full_life.as_json(expected["boot_id"], boot_raw)],
+                    "ended_monotonic_ns": 10000, "manager_observation_complete": True,
+                    "process_complete": True, "observer_complete": True}
+    full_events = [{**life_event, "monotonic_ns": 2000,
+                    "bus_dispatch_monotonic_ns": 1999}, property_event, removed_event]
+    _validate_event_rows(life_ready, full_events, full_summary)
+    checks += 1
+    for capture_field, changed_value in (("cgroup", "/system.slice/other"),
+                                         ("main_pid", 742), ("start_ticks", 5813),
+                                         ("exe", "/usr/local/bin/other"),
+                                         ("socket_fd0", {"inode": 456}),
+                                         ("signal_monotonic_ns", 251),
+                                         ("bound_snapshot_index", None)):
+        changed = json.loads(json.dumps(full_summary))
+        changed["units"][0]["provisional_captures"][0][capture_field] = changed_value
+        try:
+            _validate_event_rows(life_ready, full_events, changed)
+        except EvidenceError:
+            checks += 1
+        else:
+            raise AssertionError(f"provisional {capture_field} tamper unexpectedly passed")
+    changed = json.loads(json.dumps(full_summary))
+    changed["units"][0]["snapshots"][0]["exec_main_start_timestamp_monotonic"] = 4
+    rejects(_validate_event_rows, life_ready, full_events, changed)
+    # Preserve every failed signal artifact and reject a changed PID, process
+    # group, cgroup or dead pre-exec sample even without a manager binding.
+    cgroup = expected["profile"]["cgroup_prefix"] + "instance.service"
+    stat_tail = ["S", "1", "741"] + ["0"] * 16 + ["5812", "0"]
+    stat_raw = ("741 (broker) " + " ".join(stat_tail) + "\n").encode()
+    with tempfile.TemporaryDirectory() as provisional_dir:
+        dir_fd = os.open(provisional_dir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            refs = {}
+            for name, content in (("proc-cgroup-signal", f"0::{cgroup}\n".encode()),
+                                  ("proc-stat-before", stat_raw),
+                                  ("proc-stat-after", stat_raw)):
+                filename = name + ".raw"
+                with open(os.path.join(provisional_dir, filename), "wb") as stream:
+                    stream.write(content)
+                refs[name] = {"path": filename, "sha256": hashlib.sha256(content).hexdigest(),
+                              "bytes": len(content), "exit": 0, "timed_out": False}
+            record = {"main_pid": 741, "start_ticks": 5812, "cgroup": cgroup,
+                      "proc_capture": refs, "socket_fd0": None, "capture_complete": False,
+                      "capture_state": "known_preexec_executable_transition",
+                      "initial_exe_observed": "/usr/lib/systemd/systemd-executor",
+                      "capture_error": "ProbeError:process cgroup mismatch for signal-000001",
+                      "bound_snapshot_index": None}
+            row = {"unit": metadata_events[0]["unit"], "boot_id": expected["boot_id"],
+                   "boot_id_raw": expected["boot_id_raw"],
+                   "object_path": _unit_object_path(metadata_events[0]["unit"]),
+                   "generation": 1}
+            require(_validate_provisional_capture(record, row, expected, dir_fd) is None,
+                    "failed provisional fixture became authoritative")
+            checks += 1
+            for changed_key, value in (("start_ticks", 5813), ("cgroup", cgroup + "-other"),
+                                       ("capture_complete", True), ("bound_snapshot_index", 0),
+                                       ("capture_state", "transient_capture_deadline"),
+                                       ("initial_exe_observed", "/usr/local/bin/other")):
+                changed = {**record, changed_key: value}
+                rejects(_validate_provisional_capture, changed, row, expected, dir_fd)
+            for position, value in ((0, "Z"), (2, "742")):
+                changed_tail = list(stat_tail)
+                changed_tail[position] = value
+                changed_raw = ("741 (broker) " + " ".join(changed_tail) + "\n").encode()
+                filename = "changed-" + str(position)
+                with open(os.path.join(provisional_dir, filename), "wb") as stream:
+                    stream.write(changed_raw)
+                changed_refs = {**refs, "proc-stat-after": {
+                    "path": filename, "sha256": hashlib.sha256(changed_raw).hexdigest(),
+                    "bytes": len(changed_raw), "exit": 0, "timed_out": False}}
+                rejects(_validate_provisional_capture,
+                        {**record, "proc_capture": changed_refs}, row, expected, dir_fd)
+        finally:
+            os.close(dir_fd)
     def journal_fixture(records: list[dict[str, Any]]) -> tuple[bytes, dict[str, Any]]:
         raw = b"".join(json.dumps(record).encode() + b"\n" for record in records)
         return raw, {"journal_capture": {"bytes": len(raw), "records": len(records),
