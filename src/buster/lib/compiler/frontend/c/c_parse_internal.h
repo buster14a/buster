@@ -15,6 +15,8 @@ BUSTER_F_DECL void c_test_parse_binding_unwind(CParseResult* result, u32 mark);
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType type);
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope);
 BUSTER_F_DECL void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpoint);
+// Promoted-member searches on this thread, and how many needed a per-type table.
+BUSTER_F_DECL void c_test_member_search_counts(u64* searches, u64* tables);
 BUSTER_F_DECL bool c_test_parse_direct_expression_type(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                      u32 start, u32 end, CTypeId* type_out);
 // Whether c_parse_validate_label_values would walk this function body's
