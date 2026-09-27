@@ -2171,7 +2171,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer_limits(UnitTes
         {
             kinds[section] = (ObjectSection){.name = S8(".s"), .kind = (ObjectSectionKind)section, .alignment = 8};
         }
-        ObjectFile grouped = {.sections = kinds, .section_count = OBJECT_SECTION_COUNT, .target = target};
+        // No relocations, but an array for them: the frozen writer copies the
+        // relocation array whenever a group exists, and memcpy may not be
+        // handed a null source even for zero bytes.
+        ObjectFile grouped = {.sections = kinds, .section_count = OBJECT_SECTION_COUNT, .relocations = &relocation, .target = target};
         grouped.initializer_priorities[0] = priorities;
         kinds[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice){.pointer = array, .length = array_size};
         ObjectArtifact refused = object_write(temporary.arena, &grouped, OBJECT_FORMAT_ELF64);
