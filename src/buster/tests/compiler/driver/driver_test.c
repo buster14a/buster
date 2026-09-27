@@ -2307,7 +2307,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_object_write_limits(Unit
         BUSTER_TEST(arguments, rejected.object_error == OBJECT_ERROR_CAPACITY && !rejected.object_write_statistics.output_bytes &&
                                    !rejected.object_write_statistics.image_bytes_reserved);
         BUSTER_STRING_TEST(arguments, rejected.diagnostic,
-                           S8("native elf64 object exceeds a format limit (section count, string-table offsets or file size)"));
+                           S8("native elf64 object exceeds the object writer's limits (section count, string-table offsets or size)"));
         ByteSlice after = file_read(limit_arena, output, (FileReadOptions){0});
         BUSTER_TEST(arguments, after.pointer && after.length == sentinel.length && memcmp(after.pointer, sentinel.pointer, sentinel.length) == 0);
         BUSTER_TEST(arguments, arena_destroy(limit_arena, 1));

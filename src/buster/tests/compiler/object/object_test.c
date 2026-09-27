@@ -1901,10 +1901,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_test_elf_shape_object(Arena* arena, u64 se
 
 // The priority groups the split will create: runs of equal priority from the
 // front of each initializer array until the first entry that named none.
-BUSTER_GLOBAL_LOCAL u32 object_test_priority_groups(ObjectFile const* object, bool* grouped)
+BUSTER_GLOBAL_LOCAL u32 object_test_priority_groups(ObjectFile const* object)
 {
     u32 result = 0;
-    *grouped = false;
     for (u32 slot = 0; slot < 2; slot += 1)
     {
         ObjectSectionKind kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
@@ -1913,7 +1912,6 @@ BUSTER_GLOBAL_LOCAL u32 object_test_priority_groups(ObjectFile const* object, bo
         for (u32 entry = 0; entry < entries && priorities[entry] != IR_INITIALIZER_PRIORITY_NONE; entry += 1)
         {
             result += !entry || priorities[entry] != priorities[entry - 1] ? 1 : 0;
-            *grouped = true;
         }
     }
     return result;
@@ -1953,8 +1951,7 @@ BUSTER_GLOBAL_LOCAL bool object_test_elf_writers_agree(Arena* arena, ObjectFile*
     bool result = candidate.error == original.error;
     if (result && candidate.error == OBJECT_ERROR_NONE)
     {
-        bool grouped = false;
-        u32 groups = object_test_priority_groups(object, &grouped);
+        u32 groups = object_test_priority_groups(object);
         u64 split_sections = (u64)object->section_count + groups;
         u64 relocation_tables = object_test_elf_section_type_count(candidate_bytes, 4);
         u64 payload = 0;
@@ -1967,7 +1964,7 @@ BUSTER_GLOBAL_LOCAL bool object_test_elf_writers_agree(Arena* arena, ObjectFile*
                  memcmp(candidate_bytes.pointer, original.bytes.pointer, candidate_bytes.length) == 0 && counted.output_bytes == candidate_bytes.length &&
                  counted.image_bytes_stored == counted.output_bytes && counted.image_bytes_patched == 0 &&
                  counted.image_bytes_reserved == counted.output_bytes && counted.retained_bytes == counted.output_bytes &&
-                 counted.payload_bytes_copied == payload && counted.relocation_visits == (u64)object->relocation_count * (grouped ? 4 : 3) &&
+                 counted.payload_bytes_copied == payload && counted.relocation_visits == (u64)object->relocation_count * 3 &&
                  counted.symbol_visits == (u64)object->symbol_count * 3 &&
                  counted.section_visits == object->section_count + split_sections * 4 + relocation_tables * 2 &&
                  original.statistics.output_bytes == counted.output_bytes && original.statistics.image_bytes_patched > 0;
@@ -1982,6 +1979,9 @@ BUSTER_GLOBAL_LOCAL bool object_test_elf_writers_agree(Arena* arena, ObjectFile*
     return result;
 }
 
+// The ledger test below reads the statistics as an array of u64 fields.
+BUSTER_CT_CHECK(sizeof(ObjectWriteStatistics) % sizeof(u64) == 0);
+
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1993,6 +1993,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer(UnitTestArgume
     // and a relocation ELF cannot express.
     bool agree = true;
     u64 failing_seed = 0;
+    // Agreement on a refusal compares no bytes, so the seeds that must
+    // succeed are required to, and enough of them to mean something.
+    u32 compared = 0;
+    bool unexpected_refusal = false;
     for (u64 seed = 0; seed < 256; seed += 1)
     {
         u64 state = seed * UINT64_C(0x632be59bd9b4e019);
@@ -2014,12 +2018,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer(UnitTestArgume
         bool case_agrees = object_test_elf_writers_agree(temporary.arena, &object, &planned, &reference);
         failing_seed = agree && !case_agrees ? seed : failing_seed;
         agree = agree && case_agrees;
+        compared += planned.output_bytes ? 1 : 0;
+        unexpected_refusal = unexpected_refusal || (!planned.output_bytes && !shape.unsupported_relocation);
     }
     if (!agree)
     {
         arguments->show(arguments, S8("ELF planned/reference writers disagree at seed {u64}\n"), failing_seed);
     }
     BUSTER_TEST(arguments, agree);
+    // Fifteen of the 256 seeds carry a relocation ELF cannot express.
+    BUSTER_TEST(arguments, !unexpected_refusal && compared >= 256 - 15);
 
     // Adversarial scale: many symbols with long and duplicate names, many
     // relocations across many sections, alignment-heavy layouts and a large
@@ -2046,6 +2054,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer(UnitTestArgume
         BUSTER_TEST(arguments, object_test_elf_writers_agree(temporary.arena, &object, &planned, &reference));
         BUSTER_TEST(arguments, planned.relocation_visits < reference.relocation_visits && planned.image_bytes_stored < reference.image_bytes_stored &&
                                    planned.image_bytes_reserved < reference.image_bytes_reserved && planned.retained_bytes < reference.retained_bytes);
+        arena_set_position(temporary.arena, scope.position);
+    }
+
+    // `ide cc -v -c` with several inputs reports one ledger for all their
+    // objects: every field the sum of the objects' own.
+    {
+        TemporalArena scope = arena_begin_temporal(temporary.arena);
+        ObjectWriteStatistics units[2] = {0};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(units); index += 1)
+        {
+            ObjectTestElfShape shape = {.payload_limit = 64, .symbol_count = 8 + index, .relocation_count = 16 + index, .name_limit = 24};
+            ObjectFile object = object_test_elf_shape_object(temporary.arena, 0x5eed1000u + index, shape);
+            units[index] = object_write(temporary.arena, &object, OBJECT_FORMAT_ELF64).statistics;
+        }
+        ObjectWriteStatistics total = units[0];
+        object_write_statistics_add(&total, &units[1]);
+        u64 fields[3][sizeof(ObjectWriteStatistics) / sizeof(u64)];
+        memcpy(fields[0], &units[0], sizeof(fields[0]));
+        memcpy(fields[1], &units[1], sizeof(fields[1]));
+        memcpy(fields[2], &total, sizeof(fields[2]));
+        bool summed = units[0].output_bytes && units[1].output_bytes;
+        for (u32 field = 0; field < BUSTER_ARRAY_LENGTH(fields[0]); field += 1)
+        {
+            summed = summed && fields[2][field] == fields[0][field] + fields[1][field];
+        }
+        BUSTER_TEST(arguments, summed);
         arena_set_position(temporary.arena, scope.position);
     }
     scratch_end(temporary);
@@ -2116,6 +2150,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer_limits(UnitTes
     BUSTER_TEST(arguments, object_test_elf64_plan(temporary.arena, &many, &size) == OBJECT_ERROR_NONE);
     many.section_count = limit_inputs - 1;
     BUSTER_TEST(arguments, object_test_elf64_plan(temporary.arena, &many, &size) == OBJECT_ERROR_CAPACITY);
+
+    // Priority groups count against the same limit, and the split refuses
+    // them before it takes any scratch or formats a group's name. With one
+    // group per entry (alternating priorities) and no relocations, the file
+    // has the inputs, one section per group and the four fixed headers.
+    {
+        TemporalArena scope = arena_begin_temporal(temporary.arena);
+        u32 group_limit = 0xff00 - 4 - OBJECT_SECTION_COUNT;
+        u64 array_size = ((u64)group_limit + 1) * OBJECT_INITIALIZER_ENTRY_SIZE;
+        u8* array = arena_allocate(temporary.arena, u8, array_size);
+        memset(array, 0, array_size);
+        u32* priorities = arena_allocate(temporary.arena, u32, group_limit + 1);
+        ObjectSection* kinds = arena_allocate(temporary.arena, ObjectSection, OBJECT_SECTION_COUNT);
+        for (u32 entry = 0; entry <= group_limit; entry += 1)
+        {
+            priorities[entry] = 101 + (entry & 1);
+        }
+        for (u32 section = 0; section < OBJECT_SECTION_COUNT; section += 1)
+        {
+            kinds[section] = (ObjectSection){.name = S8(".s"), .kind = (ObjectSectionKind)section, .alignment = 8};
+        }
+        ObjectFile grouped = {.sections = kinds, .section_count = OBJECT_SECTION_COUNT, .target = target};
+        grouped.initializer_priorities[0] = priorities;
+        kinds[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice){.pointer = array, .length = array_size};
+        ObjectArtifact refused = object_write(temporary.arena, &grouped, OBJECT_FORMAT_ELF64);
+        BUSTER_TEST(arguments, refused.error == OBJECT_ERROR_CAPACITY && !refused.bytes.pointer && !refused.statistics.scratch_bytes &&
+                                   !refused.statistics.retained_bytes);
+        // One group fewer passes the split and fills the last section index,
+        // which the plan refuses; two fewer is written as the reference
+        // writes it, with the largest e_shnum ELF can state.
+        kinds[OBJECT_SECTION_INIT_ARRAY].data.length -= OBJECT_INITIALIZER_ENTRY_SIZE;
+        refused = object_write(temporary.arena, &grouped, OBJECT_FORMAT_ELF64);
+        BUSTER_TEST(arguments, refused.error == OBJECT_ERROR_CAPACITY && refused.statistics.scratch_bytes && !refused.statistics.retained_bytes);
+        kinds[OBJECT_SECTION_INIT_ARRAY].data.length -= OBJECT_INITIALIZER_ENTRY_SIZE;
+        ObjectWriteStatistics planned = {0};
+        ObjectWriteStatistics reference = {0};
+        BUSTER_TEST(arguments, object_test_elf_writers_agree(temporary.arena, &grouped, &planned, &reference));
+        ObjectArtifact written = object_write(temporary.arena, &grouped, OBJECT_FORMAT_ELF64);
+        u16 header_count = 0;
+        if (BUSTER_REQUIRE(arguments, written.error == OBJECT_ERROR_NONE && written.bytes.length >= 64))
+        {
+            memcpy(&header_count, written.bytes.pointer + 60, sizeof(header_count));
+            BUSTER_TEST(arguments, header_count == 0xfeff);
+        }
+        arena_set_position(temporary.arena, scope.position);
+    }
 
     // String tables: the plan never reads a name's bytes, so lengths no test
     // could allocate stand in for them. .strtab is a NUL plus name and NUL;

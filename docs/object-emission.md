@@ -11,7 +11,12 @@ writer.
 ## ELF64: plan every range, then store each byte once
 
 `object_write_elf64` runs in two phases over the object after the priority
-split (`object_split_initializer_priorities`).
+split (`object_split_initializer_priorities`). The split appends one section
+per constructor/destructor priority group and records where each grouped
+initializer entry went; it does not copy the relocations. Both phases place
+each relocation through `object_initializer_relocation_place` as they reach
+it. The split's tables are sized by sections and entries, and a split past the
+section limit or the arena is refused like the plan's own limits.
 
 1. **Plan** (`object_elf64_plan`). One pass over the relocations counts each
    section's and the number of RELA tables; one pass over the symbols counts
@@ -67,10 +72,11 @@ happens rather than estimated:
 For the planned ELF writer, `image_bytes_reserved`, `image_bytes_stored`,
 `retained_bytes` and `output_bytes` are equal, `image_bytes_patched` is zero,
 and each relocation and symbol is visited three times (validation, plan,
-emission), plus once more per relocation when a priority split happens. The
-registered tests hold the writer to those equalities.
+emission), priority split or not. The registered tests hold the writer to
+those equalities.
 
-`ide cc -v -c` prints the ledger as one `OBJECT_WRITE` record:
+`ide cc -v -c` prints the ledger as one `OBJECT_WRITE` record, summed over the
+objects when there are several inputs (`object_write_statistics_add`):
 
 ```text
 OBJECT_WRITE format=elf64 section_visits=126 symbol_visits=61944 relocation_visits=187695 image_reserved=38057760 image_stored=38057760 image_zeroed=113 image_patched=0 payload_copied=35589769 scratch=84280 retained=38057760 output=38057760

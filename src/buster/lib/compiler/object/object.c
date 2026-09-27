@@ -189,10 +189,12 @@ BUSTER_GLOBAL_LOCAL void object_write_u8_at(ObjectBuffer* buffer, u64 offset, u8
     if (offset >= buffer->capacity)
     {
         buffer->error = OBJECT_ERROR_CAPACITY;
-        return;
     }
-    buffer->bytes[offset] = value;
-    object_buffer_count(buffer, sizeof(value), false, true);
+    else
+    {
+        buffer->bytes[offset] = value;
+        object_buffer_count(buffer, sizeof(value), false, true);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void object_write_bytes_at(ObjectBuffer* buffer, u64 offset, void const* source, u64 size)
@@ -200,9 +202,8 @@ BUSTER_GLOBAL_LOCAL void object_write_bytes_at(ObjectBuffer* buffer, u64 offset,
     if (offset > buffer->capacity || size > buffer->capacity - offset)
     {
         buffer->error = OBJECT_ERROR_CAPACITY;
-        return;
     }
-    if (size)
+    else if (size)
     {
         memcpy(buffer->bytes + offset, source, size);
         object_buffer_count(buffer, size, false, true);
@@ -669,6 +670,21 @@ String8 object_format_name(ObjectFormat format)
         break; case OBJECT_FORMAT_COUNT: break;
     }
     return result;
+}
+
+void object_write_statistics_add(ObjectWriteStatistics* total, ObjectWriteStatistics const* unit)
+{
+    total->section_visits += unit->section_visits;
+    total->symbol_visits += unit->symbol_visits;
+    total->relocation_visits += unit->relocation_visits;
+    total->image_bytes_reserved += unit->image_bytes_reserved;
+    total->image_bytes_stored += unit->image_bytes_stored;
+    total->image_bytes_zeroed += unit->image_bytes_zeroed;
+    total->image_bytes_patched += unit->image_bytes_patched;
+    total->payload_bytes_copied += unit->payload_bytes_copied;
+    total->scratch_bytes += unit->scratch_bytes;
+    total->retained_bytes += unit->retained_bytes;
+    total->output_bytes += unit->output_bytes;
 }
 
 ObjectFormat object_format_for_target(Target target)
@@ -11133,6 +11149,20 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
                                                                     : 0;
 }
 
+// A writer's table, or null when the arena cannot hold it: counts that
+// reach this far are hostile, and refusing them must not abort the process.
+BUSTER_GLOBAL_LOCAL void* object_writer_table_allocate_bytes(Arena* arena, u64 count, u64 element_size, u64 alignment)
+{
+    void* result = 0;
+    if (object_reader_arena_can_allocate_count(arena, count ? count : 1, element_size, alignment))
+    {
+        result = arena_allocate_bytes(arena, (count ? count : 1) * element_size, alignment);
+    }
+    return result;
+}
+
+#define object_writer_table_allocate(arena, T, count) ((T*)object_writer_table_allocate_bytes((arena), (count), sizeof(T), BUSTER_ALIGN_OF(T)))
+
 // A linker gets GNU's cross-translation-unit initializer order off the
 // *section name* -- `ld` places every `.init_array.NNNNN` ahead of the
 // unsuffixed `.init_array`, ascending, and the MSVC linker concatenates the
@@ -11151,21 +11181,45 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
 // The split is deliberately confined to the two writers: the returned
 // ObjectFile is a private copy whose extra sections are *appended* past
 // OBJECT_SECTION_COUNT, so every symbol's section index still means what it
-// meant and only the initializer relocations are rewritten.  Nothing else --
-// the readers, link_objects, the JIT, the disassembly printer, the Mach-O
-// writer -- ever sees a section count other than OBJECT_SECTION_COUNT.
-BUSTER_GLOBAL_LOCAL ObjectFile object_split_initializer_priorities(Arena* arena, ObjectFile* object, ObjectFormat format, ObjectWriteStatistics* statistics)
+// meant and only the initializer relocations move.  Nothing else -- the
+// readers, link_objects, the JIT, the disassembly printer, the Mach-O writer
+// -- ever sees a section count other than OBJECT_SECTION_COUNT.
+//
+// The split does not copy the relocations: `moves` records where each
+// grouped entry went, and object_initializer_relocation_place gives a
+// relocation's new section and offset from it. The ELF writer places each
+// relocation as it reaches it; the COFF writer takes one placed copy. Every
+// table here is sized by sections or entries, never by relocations, and each
+// is checked before it is taken. A split past `section_limit` sections, or
+// one the arena cannot hold, answers false; the limit also bounds the one
+// formatted name each group takes.
+BUSTER_GLOBAL_LOCAL ObjectSectionKind const object_initializer_kinds[2] = {OBJECT_SECTION_INIT_ARRAY, OBJECT_SECTION_FINI_ARRAY};
+
+typedef struct ObjectInitializerSplit ObjectInitializerSplit;
+struct ObjectInitializerSplit
 {
-    ObjectFile result = *object;
-    ObjectSectionKind initializer_kinds[2] = {OBJECT_SECTION_INIT_ARRAY, OBJECT_SECTION_FINI_ARRAY};
+    // Per array: each grouped entry's group, as an index into
+    // group_sections and group_starts, and how many leading entries the
+    // groups took. The entries past them stay in the unprioritized section.
+    u32* entry_groups[2];
+    u32 grouped_entries[2];
+    u32* group_sections;
+    u64* group_starts;
+};
+
+BUSTER_GLOBAL_LOCAL bool object_split_initializer_priorities(Arena* arena, ObjectFile* object, ObjectFormat format, u64 section_limit, ObjectFile* split,
+                                                             ObjectInitializerSplit* moves)
+{
+    *split = *object;
+    *moves = (ObjectInitializerSplit){0};
     u32 initializer_entries[2] = {0};
     u32 group_count = 0;
     for (u32 slot = 0; slot < 2; slot += 1)
     {
         u32* priorities = object->initializer_priorities[slot];
-        if (priorities && (u32)initializer_kinds[slot] < object->section_count)
+        if (priorities && (u32)object_initializer_kinds[slot] < object->section_count)
         {
-            initializer_entries[slot] = (u32)(object->sections[initializer_kinds[slot]].data.length / OBJECT_INITIALIZER_ENTRY_SIZE);
+            initializer_entries[slot] = (u32)(object->sections[object_initializer_kinds[slot]].data.length / OBJECT_INITIALIZER_ENTRY_SIZE);
         }
         for (u32 entry = 0; entry < initializer_entries[slot]; entry += 1)
         {
@@ -11177,32 +11231,30 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_split_initializer_priorities(Arena* arena,
         }
     }
     // Renaming the unprioritized section is COFF's alone, and it is why that
-    // format takes the copy whether or not a group came out of the array; the
-    // relocations are copied only when there is a group to move one into.
+    // format takes the copy whether or not a group came out of the array.
     bool rename_unprioritized = format == OBJECT_FORMAT_COFF;
-    if (group_count || rename_unprioritized)
+    bool result = (u64)object->section_count + group_count <= section_limit;
+    ObjectSection* sections = 0;
+    if (result && (group_count || rename_unprioritized))
     {
-        ObjectSection* sections = arena_allocate(arena, ObjectSection, object->section_count + group_count);
-        memcpy(sections, object->sections, (u64)object->section_count * sizeof(ObjectSection));
-        ObjectRelocation* relocations = result.relocations;
-        result.sections = sections;
-        if (group_count)
+        sections = object_writer_table_allocate(arena, ObjectSection, (u64)object->section_count + group_count);
+        moves->group_sections = group_count ? object_writer_table_allocate(arena, u32, group_count) : 0;
+        moves->group_starts = group_count ? object_writer_table_allocate(arena, u64, group_count) : 0;
+        for (u32 slot = 0; slot < 2; slot += 1)
         {
-            relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count ? object->relocation_count : 1);
-            memcpy(relocations, object->relocations, (u64)object->relocation_count * sizeof(ObjectRelocation));
-            result.relocations = relocations;
+            moves->entry_groups[slot] = initializer_entries[slot] ? object_writer_table_allocate(arena, u32, initializer_entries[slot]) : 0;
+            result = result && (moves->entry_groups[slot] || !initializer_entries[slot]);
         }
-        // Each grouped entry's group, as an index into group_sections and
-        // group_starts, so one pass over the relocations below can move each
-        // initializer relocation into its group instead of one pass per group.
-        u32* entry_groups[2] = {0};
-        u32* group_sections = group_count ? arena_allocate(arena, u32, group_count) : 0;
-        u64* group_starts = group_count ? arena_allocate(arena, u64, group_count) : 0;
-        u32 grouped_entries[2] = {0};
+        result = result && sections && (!group_count || (moves->group_sections && moves->group_starts));
+    }
+    if (sections && result)
+    {
+        memcpy(sections, object->sections, (u64)object->section_count * sizeof(ObjectSection));
+        split->sections = sections;
         u32 created_groups = 0;
         for (u32 slot = 0; slot < 2; slot += 1)
         {
-            ObjectSectionKind kind = initializer_kinds[slot];
+            ObjectSectionKind kind = object_initializer_kinds[slot];
             if (rename_unprioritized && (u32)kind < object->section_count)
             {
                 sections[kind].name = object_initializer_section_name(arena, format, kind, IR_INITIALIZER_PRIORITY_NONE);
@@ -11210,13 +11262,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_split_initializer_priorities(Arena* arena,
             // Zero entries is also the shape an ObjectFile that carries no
             // priorities at all takes, and the one where the section the rest
             // of this reads may not exist.
-            if (!initializer_entries[slot])
-            {
-                continue;
-            }
             u32* priorities = object->initializer_priorities[slot];
-            ByteSlice array = object->sections[kind].data;
-            entry_groups[slot] = arena_allocate(arena, u32, initializer_entries[slot]);
+            ByteSlice array = initializer_entries[slot] ? object->sections[kind].data : (ByteSlice){0};
             u32 entry = 0;
             while (entry < initializer_entries[slot] && priorities[entry] != IR_INITIALIZER_PRIORITY_NONE)
             {
@@ -11227,7 +11274,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_split_initializer_priorities(Arena* arena,
                 }
                 u64 group_start = (u64)entry * OBJECT_INITIALIZER_ENTRY_SIZE;
                 u64 group_end = (u64)end * OBJECT_INITIALIZER_ENTRY_SIZE;
-                u32 group = result.section_count++;
+                u32 group = split->section_count++;
                 sections[group] = (ObjectSection){
                     .name = object_initializer_section_name(arena, format, kind, priorities[entry]),
                     .data =
@@ -11238,16 +11285,16 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_split_initializer_priorities(Arena* arena,
                     .kind = kind,
                     .alignment = object->sections[kind].alignment,
                 };
-                group_sections[created_groups] = group;
-                group_starts[created_groups] = group_start;
+                moves->group_sections[created_groups] = group;
+                moves->group_starts[created_groups] = group_start;
                 for (u32 member = entry; member < end; member += 1)
                 {
-                    entry_groups[slot][member] = created_groups;
+                    moves->entry_groups[slot][member] = created_groups;
                 }
                 created_groups += 1;
                 entry = end;
             }
-            grouped_entries[slot] = entry;
+            moves->grouped_entries[slot] = entry;
             // What is left in the unprioritized section is the run that named
             // no priority, which now starts at the array's front rather than
             // after the groups that moved out.
@@ -11258,32 +11305,54 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_split_initializer_priorities(Arena* arena,
                 sections[kind].data.length = array.length - remainder_start;
             }
         }
-        // A relocation inside a group moves to that group at its offset from
-        // the group's start; one past the groups stays with the unprioritized
-        // run, which now starts `grouped_entries` entries earlier.
-        for (u32 index = 0; (grouped_entries[0] || grouped_entries[1]) && index < result.relocation_count; index += 1)
+    }
+    return result;
+}
+
+// A relocation inside a group moves to that group at its offset from the
+// group's start; one past the groups stays with the unprioritized run, which
+// now starts `grouped_entries` entries earlier. Every other relocation is
+// returned as it is.
+BUSTER_GLOBAL_LOCAL ObjectRelocation object_initializer_relocation_place(ObjectInitializerSplit const* moves, ObjectRelocation const* relocation)
+{
+    ObjectRelocation result = *relocation;
+    for (u32 slot = 0; slot < 2; slot += 1)
+    {
+        if (moves->grouped_entries[slot] && relocation->section == (u32)object_initializer_kinds[slot])
         {
-            ObjectRelocation* relocation = relocations + index;
-            statistics->relocation_visits += 1;
-            for (u32 slot = 0; slot < 2; slot += 1)
+            u64 entry = relocation->offset / OBJECT_INITIALIZER_ENTRY_SIZE;
+            if (entry < moves->grouped_entries[slot])
             {
-                if (grouped_entries[slot] && relocation->section == (u32)initializer_kinds[slot])
-                {
-                    u64 entry = relocation->offset / OBJECT_INITIALIZER_ENTRY_SIZE;
-                    if (entry < grouped_entries[slot])
-                    {
-                        u32 group = entry_groups[slot][entry];
-                        relocation->section = group_sections[group];
-                        relocation->offset -= group_starts[group];
-                    }
-                    else
-                    {
-                        relocation->offset -= (u64)grouped_entries[slot] * OBJECT_INITIALIZER_ENTRY_SIZE;
-                    }
-                    break;
-                }
+                u32 group = moves->entry_groups[slot][entry];
+                result.section = moves->group_sections[group];
+                result.offset = relocation->offset - moves->group_starts[group];
+            }
+            else
+            {
+                result.offset = relocation->offset - (u64)moves->grouped_entries[slot] * OBJECT_INITIALIZER_ENTRY_SIZE;
             }
         }
+    }
+    return result;
+}
+
+// The COFF writer reads each relocation's section and offset in several
+// places, so it takes the placed relocations as one copy, made only when a
+// group moved something.
+BUSTER_GLOBAL_LOCAL bool object_initializer_relocations_place(Arena* arena, ObjectFile* split, ObjectInitializerSplit const* moves,
+                                                              ObjectWriteStatistics* statistics)
+{
+    bool result = true;
+    if (moves->grouped_entries[0] || moves->grouped_entries[1])
+    {
+        ObjectRelocation* relocations = object_writer_table_allocate(arena, ObjectRelocation, split->relocation_count);
+        result = relocations != 0;
+        for (u32 index = 0; result && index < split->relocation_count; index += 1)
+        {
+            statistics->relocation_visits += 1;
+            relocations[index] = object_initializer_relocation_place(moves, split->relocations + index);
+        }
+        split->relocations = result ? relocations : split->relocations;
     }
     return result;
 }
@@ -11420,7 +11489,7 @@ enum
     OBJECT_ELF_SECTION_INDEX_LIMIT = 0xff00,
 };
 
-BUSTER_GLOBAL_LOCAL String8 object_elf_generated_section_names[] = {
+BUSTER_GLOBAL_LOCAL String8 const object_elf_generated_section_names[] = {
     S8_INITIALIZER(".symtab"),
     S8_INITIALIZER(".strtab"),
     S8_INITIALIZER(".shstrtab"),
@@ -11454,26 +11523,13 @@ struct ObjectElfPlan
     u64 size;
 };
 
-// A plan-sized table, or null when the arena cannot hold it: counts that
-// reach this far are hostile, and refusing them must not abort the process.
-BUSTER_GLOBAL_LOCAL void* object_writer_table_allocate_bytes(Arena* arena, u64 count, u64 element_size, u64 alignment)
-{
-    void* result = 0;
-    if (object_reader_arena_can_allocate_count(arena, count ? count : 1, element_size, alignment))
-    {
-        result = arena_allocate_bytes(arena, (count ? count : 1) * element_size, alignment);
-    }
-    return result;
-}
-
-#define object_writer_table_allocate(arena, T, count) ((T*)object_writer_table_allocate_bytes((arena), (count), sizeof(T), BUSTER_ALIGN_OF(T)))
-
 BUSTER_GLOBAL_LOCAL bool object_elf64_section_is_thread_local(ObjectSection const* section)
 {
     return section->kind == OBJECT_SECTION_THREAD_LOCAL_DATA || section->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
 }
 
-BUSTER_GLOBAL_LOCAL ObjectError object_elf64_plan(Arena* scratch, ObjectFile* object, ObjectElfPlan* plan, ObjectWriteStatistics* statistics)
+BUSTER_GLOBAL_LOCAL ObjectError object_elf64_plan(Arena* scratch, ObjectFile* object, ObjectInitializerSplit const* moves, ObjectElfPlan* plan,
+                                                  ObjectWriteStatistics* statistics)
 {
     ObjectError result = OBJECT_ERROR_NONE;
     u32 input_count = object->section_count;
@@ -11501,20 +11557,20 @@ BUSTER_GLOBAL_LOCAL ObjectError object_elf64_plan(Arena* scratch, ObjectFile* ob
     // a RELA table -- a section's first relocation opens one.
     for (u32 index = 0; result == OBJECT_ERROR_NONE && index < object->relocation_count; index += 1)
     {
-        ObjectRelocation const* relocation = object->relocations + index;
+        ObjectRelocation relocation = object_initializer_relocation_place(moves, object->relocations + index);
         statistics->relocation_visits += 1;
-        if ((u32)relocation->kind >= OBJECT_RELOCATION_COUNT || relocation->section >= input_count)
+        if ((u32)relocation.kind >= OBJECT_RELOCATION_COUNT || relocation.section >= input_count)
         {
             result = OBJECT_ERROR_INVALID_INPUT;
         }
-        else if (!plan->relocation_types[relocation->kind])
+        else if (!plan->relocation_types[relocation.kind])
         {
             result = OBJECT_ERROR_UNSUPPORTED_TARGET;
         }
         else
         {
-            plan->relocation_section_count += plan->relocation_counts[relocation->section] ? 0 : 1;
-            plan->relocation_counts[relocation->section] += 1;
+            plan->relocation_section_count += plan->relocation_counts[relocation.section] ? 0 : 1;
+            plan->relocation_counts[relocation.section] += 1;
         }
     }
     u64 header_count = (u64)input_count + plan->relocation_section_count + OBJECT_ELF_FIXED_SECTION_COUNT;
@@ -11650,9 +11706,10 @@ BUSTER_GLOBAL_LOCAL void object_elf64_section_header(ObjectImageRange* range, u3
 
 // Writes the planned image. `symbol_indices` receives each input symbol's
 // ELF index for the relocations, and `relocation_ranges` holds one cursor per
-// input section; both are scratch sized by the plan.
-BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectElfPlan const* plan, u8* image, u32* symbol_indices, ObjectImageRange* relocation_ranges,
-                                           ObjectWriteStatistics* statistics)
+// input section; both are scratch sized by the plan. Each relocation is
+// placed by `moves` as it is written, as the plan placed it when counting.
+BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializerSplit const* moves, ObjectElfPlan const* plan, u8* image,
+                                           u32* symbol_indices, ObjectImageRange* relocation_ranges, ObjectWriteStatistics* statistics)
 {
     u32 input_count = object->section_count;
     u64 symbol_table = plan->offsets[plan->symbol_section];
@@ -11749,12 +11806,12 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectElfPlan con
     }
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
-        ObjectRelocation const* relocation = object->relocations + index;
-        ObjectImageRange* table = relocation_ranges + relocation->section;
+        ObjectRelocation relocation = object_initializer_relocation_place(moves, object->relocations + index);
+        ObjectImageRange* table = relocation_ranges + relocation.section;
         statistics->relocation_visits += 1;
-        object_image_u64(table, relocation->offset);
-        object_image_u64(table, ((u64)symbol_indices[relocation->symbol] << 32) | plan->relocation_types[relocation->kind]);
-        object_image_u64(table, (u64)relocation->addend);
+        object_image_u64(table, relocation.offset);
+        object_image_u64(table, ((u64)symbol_indices[relocation.symbol] << 32) | plan->relocation_types[relocation.kind]);
+        object_image_u64(table, (u64)relocation.addend);
     }
 
     ObjectImageRange tail =
@@ -11848,9 +11905,17 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
         arena,
     };
     TemporalArena scratch = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-    ObjectFile split_object = object_split_initializer_priorities(scratch.arena, object, OBJECT_FORMAT_ELF64, statistics);
+    ObjectFile split_object = {0};
+    ObjectInitializerSplit moves = {0};
     ObjectElfPlan plan = {0};
-    result.error = object_elf64_plan(scratch.arena, &split_object, &plan, statistics);
+    result.error = object_split_initializer_priorities(scratch.arena, object, OBJECT_FORMAT_ELF64,
+                                                       OBJECT_ELF_SECTION_INDEX_LIMIT - OBJECT_ELF_FIXED_SECTION_COUNT, &split_object, &moves)
+                       ? OBJECT_ERROR_NONE
+                       : OBJECT_ERROR_CAPACITY;
+    if (result.error == OBJECT_ERROR_NONE)
+    {
+        result.error = object_elf64_plan(scratch.arena, &split_object, &moves, &plan, statistics);
+    }
     u32* symbol_indices = 0;
     ObjectImageRange* relocation_ranges = 0;
     if (result.error == OBJECT_ERROR_NONE)
@@ -11863,9 +11928,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
     }
     if (result.error == OBJECT_ERROR_NONE)
     {
+        u64 image_position = arena->position;
         u8* image = arena_allocate(arena, u8, plan.size);
         statistics->image_bytes_reserved += plan.size;
-        if (object_elf64_emit(&split_object, &plan, image, symbol_indices, relocation_ranges, statistics))
+        if (object_elf64_emit(&split_object, &moves, &plan, image, symbol_indices, relocation_ranges, statistics))
         {
             result.bytes = (ByteSlice){
                 .pointer = image,
@@ -11874,8 +11940,11 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
         }
         else
         {
-            // Unreachable while the plan and the emitter agree; a disagreement
-            // publishes nothing rather than an image with unwritten bytes.
+            // Unreachable while the plan and the emitter agree. A disagreement
+            // returns nothing and gives the image back rather than returning
+            // one with unwritten bytes; there is no error for a writer fault,
+            // so it reports the input the writer could not serialize.
+            arena_set_position(arena, image_position);
             result.error = OBJECT_ERROR_INVALID_INPUT;
         }
     }
@@ -11885,10 +11954,13 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
 }
 
 #if BUSTER_INCLUDE_TESTS
-// The ELF64 writer and priority split exactly as they stood before planned
-// emission, kept as a differential oracle for object_write. The only edits
-// are the names and the counters, which count what this code did the way
-// ObjectWriteStatistics counts it for the writer that replaced it.
+// The ELF64 writer and priority split as they stood before planned emission,
+// kept as a differential oracle for object_write. The edits are the names,
+// the counters -- which count what this code did the way
+// ObjectWriteStatistics counts it for the writer that replaced it -- and
+// raw stores routed through object_write_u8_at and object_write_bytes_at,
+// which count them and store the same bytes on every input the old writer
+// accepted without writing past its buffer.
 BUSTER_GLOBAL_LOCAL ObjectFile object_reference_split_initializer_priorities(Arena* arena, ObjectFile* object, ObjectFormat format,
                                                                              ObjectWriteStatistics* statistics)
 {
@@ -12437,11 +12509,14 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
     // OBJECT_SECTION_COUNT.  Everything below is already generic over
     // section_count and reads each section's own name, so the split costs the
     // writer's body nothing.
-    ObjectFile split_object = object_split_initializer_priorities(arena, object, OBJECT_FORMAT_COFF, statistics);
+    ObjectFile split_object = {0};
+    ObjectInitializerSplit moves = {0};
+    bool split = object_split_initializer_priorities(arena, object, OBJECT_FORMAT_COFF, UINT32_MAX, &split_object, &moves) &&
+                 object_initializer_relocations_place(arena, &split_object, &moves, statistics);
     object = &split_object;
-    if (object->target.cpu_arch == CPU_ARCH_AARCH64 && !object_coff_bind_aarch64_tls_index(arena, object, statistics))
+    if (!split || (object->target.cpu_arch == CPU_ARCH_AARCH64 && !object_coff_bind_aarch64_tls_index(arena, object, statistics)))
     {
-        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+        result.error = split ? OBJECT_ERROR_UNSUPPORTED_TARGET : OBJECT_ERROR_CAPACITY;
         return result;
     }
     u64 capacity = object_writer_capacity(object, statistics);
@@ -13333,8 +13408,9 @@ ObjectArtifact object_test_write_elf64_reference(Arena* arena, ObjectFile* objec
 ObjectError object_test_elf64_plan(Arena* arena, ObjectFile* object, u64* size)
 {
     ObjectWriteStatistics statistics = {0};
+    ObjectInitializerSplit moves = {0};
     ObjectElfPlan plan = {0};
-    ObjectError result = object_elf64_plan(arena, object, &plan, &statistics);
+    ObjectError result = object_elf64_plan(arena, object, &moves, &plan, &statistics);
     *size = result == OBJECT_ERROR_NONE ? plan.size : 0;
     return result;
 }

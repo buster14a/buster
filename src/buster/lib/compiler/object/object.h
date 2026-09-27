@@ -328,7 +328,8 @@ struct ObjectFile
 // as `output_bytes` wrote every byte of the file once. `scratch_bytes` is
 // every other arena byte the writer requested, released or not: tables,
 // copies, formatted names. `retained_bytes` is what the call left allocated
-// in the caller's arena, image included.
+// in the caller's arena, image included. object_write_statistics_add sums
+// them over the translation units of one invocation.
 typedef struct ObjectWriteStatistics ObjectWriteStatistics;
 struct ObjectWriteStatistics
 {
@@ -374,6 +375,7 @@ struct ObjectExecutable
 
 BUSTER_F_DECL ObjectFormat object_format_for_target(Target target);
 BUSTER_F_DECL String8 object_format_name(ObjectFormat format);
+BUSTER_F_DECL void object_write_statistics_add(ObjectWriteStatistics* total, ObjectWriteStatistics const* unit);
 BUSTER_F_DECL ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program, CodegenModule* module, Target target);
 BUSTER_F_DECL String8 object_print_assembly(Arena* arena, ObjectFile* object);
 BUSTER_F_DECL ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat format);

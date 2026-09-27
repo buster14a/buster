@@ -7045,10 +7045,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_constant_short_circuit(UnitTestA
 }
 
 // A machine encoder given the caller's buffer writes there exactly what it
-// writes into its own: the same bytes, sites, offsets and validity, bounded
-// by the same budget. A buffer smaller than the budget is not used at all.
-// Module generation relies on this to encode straight into the code buffer
-// instead of copying each function in.
+// writes into its own: the same bytes, sites, block, row and epilogue offsets
+// and validity, bounded by the same budget, under every register allocator's
+// placement. A buffer smaller than the budget is not used at all. Module
+// generation relies on this to encode straight into the code buffer instead
+// of copying each function in.
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_encode_into_caller_buffer(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7086,58 +7087,76 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_encode_into_caller_buffer(UnitTe
             continue;
         }
         IrModule* module = program->modules;
-        u32 compared = 0;
+        // Per placement: stack, fast, quality.
+        u32 compared[3] = {0};
         u32 defined = 0;
         for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
         {
             IrFunction* function = module->functions + function_index;
             defined += function->block_count ? 1 : 0;
-            // Three independent selections, so no encoding can observe another's.
-            MachineEncodeResult encoded[3] = {0};
-            for (u32 variant = 0; variant < 3; variant += 1)
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(compared); allocator += 1)
             {
-                MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
-                if (!selected.supported || machine_verify_function(&selected.function).error != MACHINE_VERIFY_NONE)
+                // Three independent selections, so no encoding can observe
+                // another's.
+                MachineEncodeResult encoded[3] = {0};
+                u32 row_count = 0;
+                u32 block_count = 0;
+                for (u32 variant = 0; variant < 3; variant += 1)
+                {
+                    MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                    if (!selected.supported || machine_verify_function(&selected.function).error != MACHINE_VERIFY_NONE)
+                    {
+                        continue;
+                    }
+                    MachineStackPlacement placement = allocator == 0 ? machine_stack_placement_build(temporary.arena, &selected.function)
+                                                      : allocator == 1 ? machine_fast_placement_build(temporary.arena, &selected.function)
+                                                                       : machine_quality_placement_build(temporary.arena, &selected.function);
+                    row_count = selected.function.instruction_count;
+                    block_count = selected.function.block_count;
+                    memset(caller_bytes, 0xa5, caller_capacity);
+                    u64 capacity = variant == 0 ? 0 : variant == 1 ? caller_capacity : 1;
+                    u8* destination = variant == 0 ? 0 : caller_bytes;
+                    encoded[variant] = target.cpu_arch == CPU_ARCH_AARCH64
+                                           ? machine_encode_aarch64_into(temporary.arena, &selected.function, &placement, destination, capacity)
+                                           : machine_encode_x86_64_into(temporary.arena, &selected.function, &placement, destination, capacity);
+                    if (variant == 1 && encoded[1].valid)
+                    {
+                        // Snapshot the in-place bytes before the next variant
+                        // refills the caller buffer.
+                        u8* copy = arena_allocate(temporary.arena, u8, encoded[1].byte_count ? encoded[1].byte_count : 1);
+                        memcpy(copy, encoded[1].bytes, encoded[1].byte_count);
+                        BUSTER_TEST(arguments, encoded[1].bytes == caller_bytes);
+                        encoded[1].bytes = copy;
+                    }
+                }
+                if (!encoded[0].valid)
                 {
                     continue;
                 }
-                MachineStackPlacement placement = machine_stack_placement_build(temporary.arena, &selected.function);
-                memset(caller_bytes, 0xa5, caller_capacity);
-                u64 capacity = variant == 0 ? 0 : variant == 1 ? caller_capacity : 1;
-                u8* destination = variant == 0 ? 0 : caller_bytes;
-                encoded[variant] = target.cpu_arch == CPU_ARCH_AARCH64
-                                       ? machine_encode_aarch64_into(temporary.arena, &selected.function, &placement, destination, capacity)
-                                       : machine_encode_x86_64_into(temporary.arena, &selected.function, &placement, destination, capacity);
-                if (variant == 1 && encoded[1].valid)
+                compared[allocator] += 1;
+                BUSTER_TEST(arguments, encoded[2].valid && encoded[2].bytes != caller_bytes);
+                for (u32 variant = 1; variant < 3; variant += 1)
                 {
-                    // Snapshot the in-place bytes before the next variant
-                    // refills the caller buffer.
-                    u8* copy = arena_allocate(temporary.arena, u8, encoded[1].byte_count ? encoded[1].byte_count : 1);
-                    memcpy(copy, encoded[1].bytes, encoded[1].byte_count);
-                    BUSTER_TEST(arguments, encoded[1].bytes == caller_bytes);
-                    encoded[1].bytes = copy;
+                    MachineEncodeResult* candidate = encoded + variant;
+                    bool same = candidate->valid && candidate->byte_count == encoded[0].byte_count &&
+                                memcmp(candidate->bytes, encoded[0].bytes, encoded[0].byte_count) == 0 &&
+                                candidate->call_site_count == encoded[0].call_site_count &&
+                                (!encoded[0].call_site_count ||
+                                 memcmp(candidate->call_sites, encoded[0].call_sites, sizeof(MachineCallSite) * encoded[0].call_site_count) == 0) &&
+                                (!block_count || memcmp(candidate->block_offsets, encoded[0].block_offsets, sizeof(u32) * block_count) == 0) &&
+                                (!row_count || memcmp(candidate->row_offsets, encoded[0].row_offsets, sizeof(u32) * row_count) == 0) &&
+                                candidate->epilog_count == encoded[0].epilog_count &&
+                                (!encoded[0].epilog_count ||
+                                 memcmp(candidate->epilog_offsets, encoded[0].epilog_offsets, sizeof(u32) * encoded[0].epilog_count) == 0) &&
+                                candidate->inline_assembly_relocation_count == encoded[0].inline_assembly_relocation_count &&
+                                candidate->frame_allocation_offset == encoded[0].frame_allocation_offset &&
+                                candidate->frame_pointer_offset == encoded[0].frame_pointer_offset;
+                    String8 description = string_format(temporary.arena, S8("{S8} allocator={u32} variant={u32}"), function->name, allocator, variant);
+                    BUSTER_TEST_RAW(arguments, same, description);
                 }
             }
-            if (!encoded[0].valid)
-            {
-                continue;
-            }
-            compared += 1;
-            BUSTER_TEST(arguments, encoded[2].valid && encoded[2].bytes != caller_bytes);
-            for (u32 variant = 1; variant < 3; variant += 1)
-            {
-                MachineEncodeResult* candidate = encoded + variant;
-                bool same = candidate->valid && candidate->byte_count == encoded[0].byte_count &&
-                            memcmp(candidate->bytes, encoded[0].bytes, encoded[0].byte_count) == 0 &&
-                            candidate->call_site_count == encoded[0].call_site_count &&
-                            (!encoded[0].call_site_count ||
-                             memcmp(candidate->call_sites, encoded[0].call_sites, sizeof(MachineCallSite) * encoded[0].call_site_count) == 0) &&
-                            candidate->epilog_count == encoded[0].epilog_count && candidate->frame_allocation_offset == encoded[0].frame_allocation_offset &&
-                            candidate->frame_pointer_offset == encoded[0].frame_pointer_offset;
-                BUSTER_TEST_RAW(arguments, same, function->name);
-            }
         }
-        BUSTER_TEST(arguments, compared == defined && defined == 2);
+        BUSTER_TEST(arguments, defined == 2 && compared[0] == defined && compared[1] == defined && compared[2] == defined);
         // Module generation encodes every machine function in place: the
         // code buffer is reserved far above any single function's budget.
         CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,

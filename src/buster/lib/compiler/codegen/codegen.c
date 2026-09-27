@@ -12477,14 +12477,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (machine_unwind_valid)
                         {
-                            if (encoded.bytes == code_destination)
-                            {
-                                result.statistics.machine_code_bytes_in_place += encoded.byte_count;
-                            }
-                            else
+                            bool machine_code_in_place = encoded.bytes == code_destination;
+                            if (!machine_code_in_place)
                             {
                                 memcpy(code_destination, encoded.bytes, encoded.byte_count);
-                                result.statistics.machine_code_bytes_copied += encoded.byte_count;
                             }
                             codegen_record_machine_line_marks(program, function, &result, line_entry_capacity, line_source_limit, &selected.function,
                                                               encoded.row_offsets, (u32)buffer.count);
@@ -12566,6 +12562,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                                 buffer.count += encoded.byte_count;
+                                result.statistics.machine_code_bytes_in_place += machine_code_in_place ? encoded.byte_count : 0;
+                                result.statistics.machine_code_bytes_copied += machine_code_in_place ? 0 : encoded.byte_count;
                                 descriptor->prolog_size = machine_prologue_cursor;
                                 descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
                                 machine_function_emitted = true;
@@ -12664,14 +12662,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (machine_unwind_valid)
                         {
-                            if (encoded.bytes == code_destination)
-                            {
-                                result.statistics.machine_code_bytes_in_place += encoded.byte_count;
-                            }
-                            else
+                            bool machine_code_in_place = encoded.bytes == code_destination;
+                            if (!machine_code_in_place)
                             {
                                 memcpy(code_destination, encoded.bytes, encoded.byte_count);
-                                result.statistics.machine_code_bytes_copied += encoded.byte_count;
                             }
                             codegen_record_machine_line_marks(program, function, &result, line_entry_capacity, line_source_limit, &selected.function,
                                                               encoded.row_offsets, (u32)buffer.count);
@@ -12763,6 +12757,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                                 buffer.count += encoded.byte_count;
+                                result.statistics.machine_code_bytes_in_place += machine_code_in_place ? encoded.byte_count : 0;
+                                result.statistics.machine_code_bytes_copied += machine_code_in_place ? 0 : encoded.byte_count;
                                 descriptor->prolog_size = machine_prologue_cursor;
                                 descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
                                 machine_function_emitted = true;
