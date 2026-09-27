@@ -329,7 +329,7 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   qualification, or a performance verdict.
   Keep `BENCH_SERVICE_DISPATCH_ENABLED=false` until the protected-main
   ruleset, protected environment, host authorization, installed identities,
-  clean queue, and independent `buster14a14a` reviewer with self-review prevention are
+  clean queue, and administrator reviewer with self-review prevention are
   verified as described in
   [`tools/bench_service/deploy/GITHUB_ADMISSION.md`](../../tools/bench_service/deploy/GITHUB_ADMISSION.md).
   `native-retirement-performance-v1` remains blocked. Use the local trusted

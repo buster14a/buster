@@ -117,11 +117,10 @@ def main() -> int:
                 errors.append(f"admission installer is missing control: {marker}")
         policy_readback = installer.find('"repos/$repo/actions/policies/$policy_id"')
         permission_readback = installer.find('"repos/$repo/collaborators/davidgmbb/permission"')
-        reviewer_readback = installer.find('"repos/$repo/collaborators/buster14a14a/permission"')
         environment_readback = installer.find('"repos/$repo/environments/benchmark-9700x"')
-        if not (0 <= policy_readback < permission_readback < reviewer_readback < environment_readback <
+        if not (0 <= policy_readback < permission_readback < environment_readback <
                 installer.find("verify_github_admission.py")):
-            errors.append("requester, administrator and reviewer identities must precede environment readback")
+            errors.append("requester policy and administrator permission must precede environment readback")
         if "--input \"$policy\"" in installer:
             errors.append("admission installer must never replace the existing Actions policy")
         if ACTOR_POLICY.is_file():
