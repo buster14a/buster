@@ -23,6 +23,10 @@ PRODUCER_TREE = "2b26253cd1849a8bb50687ede056f3f9d764837b"
 PRODUCER_BUILD_BLOB = "1ea24b90629a2c771c3d0e7d3d517b042ddb4c35"
 PRODUCER_REVIEW = "https://github.com/buster14a/buster/pull/1481#issuecomment-5847791034"
 COMPOSITE_REVIEW = "https://github.com/buster14a/buster/pull/1482#issuecomment-5847817058"
+INTEGRATED_HEAD = "1a4fcc20cfd020ac1e67a495cdfaf481f68bc2fc"
+INTEGRATED_TREE = "7caddac6e6cf0a580a835f6215cc1e553924ad06"
+INTEGRATED_BUILD_BLOB = "9825adbe2a3f488fcea55a6cd533be6193030d9b"
+INTEGRATED_REVIEW = "https://github.com/buster14a/buster/issues/1596#issuecomment-5857819738"
 WORKSPACES = "/var/lib/buster-bench/workspaces"
 STAGES = ("base-generate", "base-build", "candidate-generate", "candidate-build", "throughput")
 BUILD_STAGES = ("base-build", "candidate-build")
@@ -351,12 +355,26 @@ def compare_maps(source: dict[bytes, dict], independent: dict[bytes, dict]) -> N
                 f"source/external metadata or executable digest mismatch at {path[:64]!r}")
 
 
-def stage_context(observation: dict, source_commit: str, source_tree: str,
-                  build_blob: str) -> dict:
+def source_review(source_commit: str, source_tree: str, build_blob: str) -> str:
+    """Retain the original blob binding; the changed producer needs an exact tuple.
+
+    The integrated review establishes receipt/graph equivalence, not service
+    acceptance. The caller still verifies Git membership and artifact origin.
+    """
     require(type(source_commit) is str and type(source_tree) is str and
             type(build_blob) is str and HEX40.fullmatch(source_commit) is not None and
-            HEX40.fullmatch(source_tree) is not None and build_blob == PRODUCER_BUILD_BLOB,
+            HEX40.fullmatch(source_tree) is not None and
+            (build_blob == PRODUCER_BUILD_BLOB or
+             (source_commit, source_tree, build_blob) ==
+             (INTEGRATED_HEAD, INTEGRATED_TREE, INTEGRATED_BUILD_BLOB)),
             "integrated source identity or reviewed build.c blob mismatch")
+    review = PRODUCER_REVIEW if build_blob == PRODUCER_BUILD_BLOB else INTEGRATED_REVIEW
+    return review
+
+
+def stage_context(observation: dict, source_commit: str, source_tree: str,
+                  build_blob: str) -> dict:
+    source_review(source_commit, source_tree, build_blob)
     identity = observation.get("identity")
     require(type(identity) is dict and identity.keys() == IDENTITY_KEYS and
             type(observation.get("job")) is int and
@@ -540,6 +558,7 @@ def verify_artifacts(directory: Path, receipts: dict[str, Path], source_commit: 
                                    "reviewed_producer_build_blob": PRODUCER_BUILD_BLOB,
                                    "producer_source_review": PRODUCER_REVIEW or None,
                                    "reviewed_composite_source": COMPOSITE_REVIEW,
+                                   "selected_source_order_review": None,
                                    "integrated_source_commit_caller_verified": source_commit,
                                    "integrated_source_tree_caller_verified": source_tree,
                                    "integrated_build_blob_caller_verified": build_blob,
@@ -550,11 +569,14 @@ def verify_artifacts(directory: Path, receipts: dict[str, Path], source_commit: 
                                                     "are caller-verified, not independently queried here"},
                     "components": {"structural_live_observation": False,
                                    "independent_timing_consistency": False,
-                                   "producer_graph_order_reviewed": bool(PRODUCER_REVIEW),
+                                   "producer_graph_order_reviewed": False,
                                    "stages": {}}, "independent_inventory_before_throughput": None,
                     "original_timing_causes": [], "original_observation_causes": [],
                     "original_observation_verdict": None}
     try:
+        review = source_review(source_commit, source_tree, build_blob)
+        result["provenance"]["selected_source_order_review"] = review or None
+        result["components"]["producer_graph_order_reviewed"] = bool(review)
         require(workspace_root.startswith("/") and not workspace_root.endswith("/") and
                 ".." not in workspace_root.split("/") and len(os.fsencode(workspace_root)) <= MAX_PATH,
                 "invalid canonical workspace root")
@@ -597,14 +619,14 @@ def verify_artifacts(directory: Path, receipts: dict[str, Path], source_commit: 
                 result["causes"].append("preserved independent inventory timing flag or cause differs from timestamps")
                 all_stages = False
         result["components"]["publication_ordering"] = {
-            "passed": all_stages and bool(PRODUCER_REVIEW),
+            "passed": all_stages and bool(review),
             "basis": "reviewed build.c no-replace/fsync receipt before durable successful stage manifest; "
                      "exact source scan before throughput start and matched independent tree maps",
-            "source_review": PRODUCER_REVIEW or None,
-            "reason": None if PRODUCER_REVIEW else "independent producer graph review pending"}
-        if all_stages and PRODUCER_REVIEW:
+            "source_review": review or None,
+            "reason": None if review else "independent producer graph review pending"}
+        if all_stages and review:
             result["verdict"] = "OFFLINE_EVIDENCE_RECONCILED"
-        elif all_stages and not PRODUCER_REVIEW:
+        elif all_stages and not review:
             result["causes"].append("independent producer graph review pending")
     except (OSError, ValueError, UnicodeError, TypeError, RecursionError) as exc:
         result["components"]["structural_live_observation_reason"] = str(exc)[:500]
@@ -627,16 +649,31 @@ def write_private(path: Path, value: dict) -> None:
         os.close(descriptor)
 
 
-def self_test() -> None:
+def self_test(source_commit: str = "2" * 40, source_tree: str = "3" * 40,
+              build_blob: str = PRODUCER_BUILD_BLOB) -> None:
     """Exercise the production verifier, including independent-map and bound failures."""
     checks = 0
+    for commit, tree, blob in (
+            ("4" * 40, INTEGRATED_TREE, INTEGRATED_BUILD_BLOB),
+            (INTEGRATED_HEAD, "4" * 40, INTEGRATED_BUILD_BLOB),
+            (INTEGRATED_HEAD, INTEGRATED_TREE, "4" * 40),
+            (INTEGRATED_HEAD.upper(), INTEGRATED_TREE, INTEGRATED_BUILD_BLOB),
+            (None, INTEGRATED_TREE, INTEGRATED_BUILD_BLOB),
+            (INTEGRATED_HEAD, None, INTEGRATED_BUILD_BLOB),
+            (INTEGRATED_HEAD, INTEGRATED_TREE, None)):
+        try:
+            source_review(commit, tree, blob)
+        except EvidenceError:
+            checks += 1
+        else:
+            raise AssertionError("unreviewed source binding accepted")
     with tempfile.TemporaryDirectory(prefix="frozen-tree-evidence-") as temporary:
         root = Path(temporary)
         observer = root / "observer"
         observer.mkdir()
         workspace = str(root / "workspaces")
         job, attempt = 1, 2
-        baseline, subject, boot = "1" * 40, "2" * 40, "a" * 8 + "-" + "a" * 4 + "-" + "a" * 4 + "-" + "a" * 4 + "-" + "a" * 12
+        baseline, subject, boot = "1" * 40, source_commit, "a" * 8 + "-" + "a" * 4 + "-" + "a" * 4 + "-" + "a" * 4 + "-" + "a" * 12
         binary = b"fixture executable"
         digest = hashlib.sha256(binary).hexdigest()
         receipts = {}
@@ -735,9 +772,15 @@ def self_test() -> None:
         observation_path = observer / "stage-observation.json"
         observation_path.write_text(json.dumps(observation, sort_keys=True, indent=2) + "\n")
         def run() -> dict:
-            return verify_artifacts(observer, receipts, subject, "3" * 40,
-                                    PRODUCER_BUILD_BLOB, workspace)
+            return verify_artifacts(observer, receipts, subject, source_tree,
+                                    build_blob, workspace)
         positive = run()
+        expected_review = PRODUCER_REVIEW if build_blob == PRODUCER_BUILD_BLOB else INTEGRATED_REVIEW
+        assert positive["verdict"] == "OFFLINE_EVIDENCE_RECONCILED" and \
+            positive["provenance"]["selected_source_order_review"] == expected_review and \
+            positive["provenance"]["reviewed_producer_build_blob"] == PRODUCER_BUILD_BLOB and \
+            positive["components"]["publication_ordering"]["source_review"] == expected_review
+        checks += 1
         assert len(positive.get("stage_evidence", {})) == 2 and all(
             positive["components"]["stages"][stage]["source_scan_before_throughput"]
             for stage in BUILD_STAGES) and not positive["independent_inventory_before_throughput"] and \
@@ -939,7 +982,8 @@ def self_test() -> None:
             checks += 1
         finally:
             MAX_NODES, MAX_RECEIPT, MAX_DEPTH = old_nodes, old_receipt, old_depth
-    print(f"FROZEN_TREE_EVIDENCE_SELF_TEST checks={checks} failures=0 fixtures-only-not-hosted-proof")
+    print(f"FROZEN_TREE_EVIDENCE_SELF_TEST build_blob={build_blob} checks={checks} "
+          "failures=0 fixtures-only-not-hosted-proof")
 
 
 def integration_fixture(fixture: Path) -> None:
@@ -1073,6 +1117,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "self-test":
         self_test()
+        self_test(INTEGRATED_HEAD, INTEGRATED_TREE, INTEGRATED_BUILD_BLOB)
         if args.integration_fixture is not None:
             integration_fixture(args.integration_fixture)
         return 0
