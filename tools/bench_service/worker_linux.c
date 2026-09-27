@@ -3659,7 +3659,9 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
                           !strcmp(lease_path, "/var/lib/buster-bench/lease/host.lock"));
         if (!canonical || job_length <= 0 || (size_t)job_length >= sizeof(job_id) ||
             token_length <= 0 || (size_t)token_length >= sizeof(attempt_token) ||
-            strcmp(finalization.recipe.name, "validate-buster-v1") ||
+            !bq_recipe_service(bq_request_recipe(&job->request)) ||
+            !string_equal(string_from_pointer(finalization.recipe.name),
+                          bq_recipe_name(bq_request_recipe(&job->request))) ||
             !bq_worker_text(base_revision, base_revision_text, sizeof(base_revision_text)) ||
             !bq_worker_text(candidate_revision, candidate_revision_text, sizeof(candidate_revision_text)))
         {
@@ -3672,7 +3674,7 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     if (error == BQ_OK && !recovering)
     {
         char const* arguments[] = {BQ_SYSTEMD_BROKER, "start-outer", job_id, attempt_token,
-                                   base_revision_text, candidate_revision_text, NULL};
+                                   finalization.recipe.name, base_revision_text, candidate_revision_text, NULL};
         error = backend->start(backend, arguments, BUSTER_ARRAY_LENGTH(arguments) - 1);
         launched = error == BQ_OK;
     }

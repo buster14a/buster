@@ -1,0 +1,10 @@
+schema=1
+recipe=compiler-throughput-pr-v1
+status=blocked-pending-provenance-and-qualification
+repository=buster14a/buster
+source-manifest=BQ-SOURCE-V1
+layout=separate-source-build-v1
+build=Release-clang-uninstrumented-serial-v1
+workload=default-six-and-frozen-baseline-self-host-v1
+sampling=profile-ci-modes-all-pairs20-warmups2-rounds2
+guard=ordinary-throughput-v1

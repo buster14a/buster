@@ -327,6 +327,9 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   Its admitted path is the one-pair `validate-buster-v1`
   smoke recipe; it is not the former stage-1 diagnostic, an A/A
   qualification, or a performance verdict.
+  The proposed `compiler-throughput-pr-v1` ordinary recipe is registered for
+  disposable fixtures but remains blocked in the production service until
+  matched-build provenance and host qualification are complete.
   Keep `BENCH_SERVICE_DISPATCH_ENABLED=false` until the protected-main
   ruleset, protected environment, host authorization, installed identities,
   clean queue, and administrator reviewer with self-review prevention are

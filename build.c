@@ -82,6 +82,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_BENCH_SERVICE,
     BUILD_COMMAND_BENCH_SERVICE_BROKER,
     BUILD_COMMAND_BENCH_SERVICE_RECIPE,
+    BUILD_COMMAND_BENCH_SERVICE_THROUGHPUT_RECIPE,
     BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST,
     BUILD_COMMAND_BENCH_THROUGHPUT,
     BUILD_COMMAND_BENCH_THROUGHPUT_CI,
@@ -36345,6 +36346,7 @@ BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 argumen
 #define BENCH_SERVICE_RECIPE_RUNTIME "3600000000us"
 #define BENCH_SERVICE_RECIPE_MANIFEST_NAME "validate-buster-v1.manifest"
 #define BENCH_SERVICE_RECIPE_BUNDLE_NAME "validate-buster-v1.bundle"
+#define BENCH_SERVICE_THROUGHPUT_RECIPE_NAME "compiler-throughput-pr-v1"
 #ifndef BENCH_SERVICE_RECIPE_DRIVER
 #define BENCH_SERVICE_RECIPE_DRIVER "/usr/local/libexec/buster-bench-build"
 #endif
@@ -36422,6 +36424,11 @@ typedef struct BenchServiceRecipeStage BenchServiceRecipeStage;
 
 struct BenchServiceRecipeManifest
 {
+    String8 recipe_name;
+    String8 manifest_name;
+    String8 bundle_name;
+    String8 outcome_name;
+    bool ordinary_throughput;
     String8 path;
     String8 job_id;
     String8 attempt_token;
@@ -36464,7 +36471,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_tree(Arena* arena, String8 workspa
                                                     String8 result_root, String8 base_source, String8 base_build,
                                                     String8 candidate_source, String8 candidate_build,
                                                     String8 job_id, String8 attempt_token, String8 base_revision,
-                                                    String8 candidate_revision);
+                                                    String8 candidate_revision, String8 recipe_name);
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_binary_digest(int build_directory, char output[SHA256_HEX_CAPACITY]);
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_digest_equal(char const left[SHA256_HEX_CAPACITY],
                                                             char const right[SHA256_HEX_CAPACITY]);
@@ -36504,14 +36511,21 @@ BUSTER_GLOBAL_LOCAL char const* bench_service_recipe_process_name(ProcessResult 
     return result_name;
 }
 
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_manifest_names(String8 stage, bool final,
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_manifest_names(BenchServiceRecipeManifest* manifest,
+                                                              String8 stage, bool final,
                                                               char target[96], char temporary[128])
 {
     bool known = string_equal(stage, S8("prepare")) || string_equal(stage, S8("base-generate")) ||
                  string_equal(stage, S8("base-build")) || string_equal(stage, S8("candidate-generate")) ||
                  string_equal(stage, S8("candidate-build")) || string_equal(stage, S8("throughput"));
-    int target_length = known ? snprintf(target, 96, final ? BENCH_SERVICE_RECIPE_MANIFEST_NAME :
-                                         "validate-buster-v1.%.*s.manifest", (int)stage.length, stage.pointer) : -1;
+    int target_length = -1;
+    if (known && manifest)
+    {
+        target_length = final ? snprintf(target, 96, "%.*s", (int)manifest->manifest_name.length,
+                                         manifest->manifest_name.pointer) :
+                                snprintf(target, 96, "%.*s.%.*s.manifest", (int)manifest->recipe_name.length,
+                                         manifest->recipe_name.pointer, (int)stage.length, stage.pointer);
+    }
     int temporary_length = target_length > 0 ? snprintf(temporary, 128, "%s.tmp", target) : -1;
     return known && target_length > 0 && (u32)target_length < 96 && temporary_length > 0 && (u32)temporary_length < 128;
 }
@@ -36525,8 +36539,8 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_atomic_manifest(BenchServiceRecipe
     int descriptor = -1;
     char target[96] = {0}, temporary[128] = {0};
     struct stat temporary_info = {0}, published_info = {0};
-    ok = ok && bench_service_recipe_manifest_names(stage, final, target, temporary);
-    ok = ok && bench_service_recipe_temp_name(final ? BENCH_SERVICE_RECIPE_MANIFEST_NAME : target, temporary);
+    ok = ok && bench_service_recipe_manifest_names(manifest, stage, final, target, temporary);
+    ok = ok && bench_service_recipe_temp_name(target, temporary);
     if (ok)
     {
         struct stat info = {0};
@@ -36590,19 +36604,22 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_manifest_write(Arena* arena, Bench
     String8 candidate_digest = manifest->candidate_digest[0] ? string_from_pointer(manifest->candidate_digest) : S8("");
     String8 bundle_digest = manifest->bundle_digest[0] ? string_from_pointer(manifest->bundle_digest) : S8("");
     String8 body = string_format(arena,
-        S8("schema=1\nrecipe=validate-buster-v1\nstatus={S8}\nstage={S8}\nprocess-result={S8}\n"
+        S8("schema=1\nrecipe={S8}\nstatus={S8}\nstage={S8}\nprocess-result={S8}\n"
            "job-id={S8}\nattempt-token={S8}\nworkspace-root={S8}\nresult-root={S8}\n"
            "base-revision={S8}\ncandidate-revision={S8}\ndriver={S8}\nthroughput={S8}\n"
            "trusted-source-scope=operator-installed-read-only\n"
            "namespace-policy=private-workspace-post-run-identity\n"
            "generate-policy=Release clang no-include-tests no-developer-targets no-check-optional-warnings no-fuzz no-sanitize no-time-trace no-instrument no-lto\n"
-           "build-policy=Release target=ide jobs=1\nthroughput-policy=profile=smoke mode=all pairs=1 warmups=1 guard=off\n"
+           "build-policy=Release target=ide jobs=1\nthroughput-policy={S8}\n"
            "base-source={S8}\nbase-build={S8}\ncandidate-source={S8}\ncandidate-stage-build={S8}\n"
            "throughput-output={S8}\ncandidate-build={S8}\n"
            "base-binary={S8}\ncandidate-binary={S8}\nbase-binary-sha256={S8}\ncandidate-binary-sha256={S8}\n"
            "bundle-sha256={S8}\n"),
-        string_from_pointer(status), stage, string_from_pointer(process), manifest->job_id, manifest->attempt_token, manifest->workspace_root, manifest->result_root,
-        manifest->base_revision, manifest->candidate_revision, manifest->driver, manifest->throughput, manifest->base_source,
+        manifest->recipe_name, string_from_pointer(status), stage, string_from_pointer(process), manifest->job_id, manifest->attempt_token, manifest->workspace_root, manifest->result_root,
+        manifest->base_revision, manifest->candidate_revision, manifest->driver, manifest->throughput,
+        manifest->ordinary_throughput ? S8("profile=ci mode=all pairs=20 warmups=2 rounds=2 guard=ordinary frozen-self-host=baseline-source") :
+                                        S8("profile=smoke mode=all pairs=1 warmups=1 guard=off"),
+        manifest->base_source,
         manifest->base_build, manifest->candidate_source, manifest->candidate_stage_build, manifest->throughput_output,
         manifest->candidate_build,
         manifest->base_binary, manifest->candidate_binary,
@@ -36644,7 +36661,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_stage_cleanup(Arena* aren
                                               stage->manifest->base_build, stage->manifest->candidate_source,
                                               stage->manifest->candidate_build, stage->manifest->job_id,
                                               stage->manifest->attempt_token, stage->manifest->base_revision,
-                                              stage->manifest->candidate_revision);
+                                              stage->manifest->candidate_revision, stage->manifest->recipe_name);
         bool digests = bench_service_recipe_binary_digest(stage->manifest->base_build_directory, base_digest) &&
                        bench_service_recipe_binary_digest(stage->manifest->candidate_build_directory, candidate_digest) &&
                        bench_service_recipe_digest_equal(stage->manifest->base_digest, base_digest) &&
@@ -36884,14 +36901,14 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_source_manifest(Arena* arena, Stri
 
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_workspace_identity(Arena* arena, String8 path, String8 job_id,
                                                                   String8 attempt_token, String8 base_revision,
-                                                                  String8 candidate_revision)
+                                                                  String8 candidate_revision, String8 recipe_name)
 {
     u8 bytes[4096] = {0};
     char resolved[BENCH_SERVICE_RECIPE_PATH_CAP];
     u32 size = 0;
     String8 job_line = string_format(arena, S8("job={S8}"), job_id);
     String8 token_line = string_format(arena, S8("token={S8}"), attempt_token);
-    String8 recipe_line = S8("recipe=validate-buster-v1");
+    String8 recipe_line = string_format(arena, S8("recipe={S8}"), recipe_name);
     String8 base_line = string_format(arena, S8("base={S8}"), base_revision);
     String8 candidate_line = string_format(arena, S8("candidate={S8}"), candidate_revision);
     bool ok = bench_service_recipe_prefix(path, resolved, bytes, &size) && size >= 16 &&
@@ -36905,7 +36922,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_tree(Arena* arena, String8 workspa
                                                     String8 result_root, String8 base_source, String8 base_build,
                                                     String8 candidate_source, String8 candidate_build,
                                                     String8 job_id, String8 attempt_token, String8 base_revision,
-                                                    String8 candidate_revision)
+                                                    String8 candidate_revision, String8 recipe_name)
 {
     char workspace_real[BENCH_SERVICE_RECIPE_PATH_CAP], actual[BENCH_SERVICE_RECIPE_PATH_CAP];
     bool ok = bench_service_recipe_realpath(workspace_root, workspace_real);
@@ -36946,7 +36963,8 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_tree(Arena* arena, String8 workspa
          bench_service_recipe_trusted_source(base_source) && bench_service_recipe_trusted_source(candidate_source) &&
          bench_service_recipe_source_manifest(arena, base_manifest, base_revision) &&
          bench_service_recipe_source_manifest(arena, candidate_manifest, candidate_revision) &&
-         bench_service_recipe_workspace_identity(arena, identity, job_id, attempt_token, base_revision, candidate_revision);
+         bench_service_recipe_workspace_identity(arena, identity, job_id, attempt_token, base_revision,
+                                                 candidate_revision, recipe_name);
     if (workspace_descriptor >= 0) close(workspace_descriptor);
     if (attempt_descriptor >= 0) close(attempt_descriptor);
     if (result_descriptor >= 0) close(result_descriptor);
@@ -37639,10 +37657,9 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_path(String8 path)
     return ok;
 }
 
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_reserved(String8 path)
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_reserved(BenchServiceRecipeManifest* manifest, String8 path)
 {
-    String8 names[] = {S8(BENCH_SERVICE_RECIPE_MANIFEST_NAME), S8(BENCH_SERVICE_RECIPE_BUNDLE_NAME),
-                       S8("validate-buster-v1.outcome")};
+    String8 names[] = {manifest->manifest_name, manifest->bundle_name, manifest->outcome_name};
     bool reserved = false;
     for (u32 index = 0; !reserved && index < BUSTER_ARRAY_LENGTH(names); index += 1)
     {
@@ -37714,7 +37731,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_atomic(BenchServiceRecipeMa
     }
     if (ok)
     {
-        ok = bench_service_recipe_temp_name(BENCH_SERVICE_RECIPE_BUNDLE_NAME, temporary);
+        ok = bench_service_recipe_temp_name((char const*)manifest->bundle_name.pointer, temporary);
         descriptor = ok ? openat(parent, temporary,
                                  O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
         ok = descriptor >= 0;
@@ -37735,8 +37752,8 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_atomic(BenchServiceRecipeMa
                        bench_service_recipe_entry_matches(parent, temporary, &temporary_info);
     }
     if (ok && linkat(parent, temporary, parent,
-                     BENCH_SERVICE_RECIPE_BUNDLE_NAME, 0) != 0) ok = false;
-    if (ok && fstatat(parent, BENCH_SERVICE_RECIPE_BUNDLE_NAME, &published_info, AT_SYMLINK_NOFOLLOW) != 0) ok = false;
+                     (char const*)manifest->bundle_name.pointer, 0) != 0) ok = false;
+    if (ok && fstatat(parent, (char const*)manifest->bundle_name.pointer, &published_info, AT_SYMLINK_NOFOLLOW) != 0) ok = false;
     if (ok) ok = published_info.st_dev == temporary_info.st_dev && published_info.st_ino == temporary_info.st_ino &&
                        S_ISREG(published_info.st_mode);
     if (ok && !bench_service_recipe_unlink_if_same(parent, temporary, &temporary_info)) ok = false;
@@ -37824,7 +37841,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_index(Arena* arena, BenchSe
             else if (ok && S_ISREG(info.st_mode))
             {
                 String8 path = string_from_pointer(relative);
-                if (!bench_service_recipe_bundle_reserved(path))
+                if (!bench_service_recipe_bundle_reserved(manifest, path))
                 {
                     u64 file_size = 0;
                     char digest[SHA256_HEX_CAPACITY] = {0};
@@ -37885,7 +37902,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_index(Arena* arena, BenchSe
         {
             u64 index_size = 0;
             ok = bench_service_recipe_bundle_digest(manifest->result_directory,
-                                                    BENCH_SERVICE_RECIPE_BUNDLE_NAME, &index_size,
+                                                    (char const*)manifest->bundle_name.pointer, &index_size,
                                                     manifest->bundle_digest);
             ok = ok && index_size == body.length;
         }
@@ -37903,7 +37920,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_recover_published(Arena* arena,
     if (ok)
     {
         errno = 0;
-        no_final_manifest = fstatat(manifest->result_directory, BENCH_SERVICE_RECIPE_MANIFEST_NAME,
+        no_final_manifest = fstatat(manifest->result_directory, (char const*)manifest->manifest_name.pointer,
                                     &final_manifest, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
         throughput = no_final_manifest ? openat(manifest->result_directory, "throughput",
                                                 O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
@@ -37997,7 +38014,8 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_identity_test(Arena* arena)
     BuildGraph saved_graph = program.build_graph;
     program.build_graph = (BuildGraph){0};
     String8 production_arguments[] = {S8(BENCH_SERVICE_RECIPE_DRIVER), S8("generate")};
-    BenchServiceRecipeManifest test_manifest = {.job_id = S8("1"), .attempt_token = S8("2"),
+    BenchServiceRecipeManifest test_manifest = {.recipe_name = S8("validate-buster-v1"),
+        .job_id = S8("1"), .attempt_token = S8("2"),
         .base_revision = S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
         .candidate_revision = S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")};
     BenchServiceRecipeStage base_stage = {.manifest = &test_manifest, .name = S8("base-generate")};
@@ -38014,16 +38032,17 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_identity_test(Arena* arena)
     SliceString8 base_arguments = base ? base->arguments : (SliceString8){0};
     SliceString8 candidate_arguments = candidate_run ? candidate_run->arguments : (SliceString8){0};
     SliceString8 invalid_arguments = invalid_run ? invalid_run->arguments : (SliceString8){0};
-    ok = ok && base_arguments.length == 7 && candidate_arguments.length == 7 &&
+    ok = ok && base_arguments.length == 8 && candidate_arguments.length == 8 &&
          string_equal(base_arguments.pointer[0], S8("/usr/local/libexec/buster-bench-systemd-broker")) &&
          string_equal(candidate_arguments.pointer[0], base_arguments.pointer[0]) &&
          string_equal(base_arguments.pointer[1], S8("start-stage")) &&
          string_equal(base_arguments.pointer[2], S8("1")) &&
          string_equal(base_arguments.pointer[3], S8("2")) &&
-         string_equal(base_arguments.pointer[4], S8("base-generate")) &&
-         string_equal(candidate_arguments.pointer[4], S8("throughput")) &&
-         string_equal(base_arguments.pointer[5], test_manifest.base_revision) &&
-         string_equal(candidate_arguments.pointer[6], test_manifest.candidate_revision) &&
+        string_equal(base_arguments.pointer[4], S8("base-generate")) &&
+        string_equal(candidate_arguments.pointer[4], S8("throughput")) &&
+        string_equal(base_arguments.pointer[5], test_manifest.recipe_name) &&
+        string_equal(base_arguments.pointer[6], test_manifest.base_revision) &&
+        string_equal(candidate_arguments.pointer[7], test_manifest.candidate_revision) &&
          invalid_arguments.length == 1 && string_equal(invalid_arguments.pointer[0], S8("/usr/bin/false"));
     String8 additional_names[] = {S8("base-build"), S8("candidate-generate"), S8("candidate-build")};
     for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(additional_names); index += 1)
@@ -38034,7 +38053,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_identity_test(Arena* arena)
         ProcessRun* run = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
             (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments), S8("/"), S8("/installed /source"),
             S8("/workspace"), S8("/result"), additional_identity, &additional);
-        ok = run && run->arguments.length == 7 &&
+        ok = run && run->arguments.length == 8 &&
              string_equal(run->arguments.pointer[4], additional_names[index]);
     }
     BenchServiceRecipeStage unknown_stage = {.manifest = &test_manifest, .name = S8("shell")};
@@ -38074,6 +38093,7 @@ BUSTER_GLOBAL_LOCAL ProcessRun* bench_service_recipe_sandbox_process_add(Arena* 
         string8_list_push(arena, &wrapped, stage->manifest->job_id);
         string8_list_push(arena, &wrapped, stage->manifest->attempt_token);
         string8_list_push(arena, &wrapped, stage->name);
+        string8_list_push(arena, &wrapped, stage->manifest->recipe_name);
         string8_list_push(arena, &wrapped, stage->manifest->base_revision);
         string8_list_push(arena, &wrapped, stage->manifest->candidate_revision);
     }
@@ -38116,9 +38136,17 @@ BUSTER_GLOBAL_LOCAL ProcessRun* bench_service_recipe_candidate_process_add(Arena
                                                     BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE, stage);
 }
 
-BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceString8 arguments)
+BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceString8 arguments,
+                                                           bool ordinary_throughput)
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
+    String8 recipe_name = ordinary_throughput ? S8(BENCH_SERVICE_THROUGHPUT_RECIPE_NAME) : S8("validate-buster-v1");
+    String8 manifest_name = ordinary_throughput ? S8("compiler-throughput-pr-v1.manifest") :
+                                                   S8(BENCH_SERVICE_RECIPE_MANIFEST_NAME);
+    String8 bundle_name = ordinary_throughput ? S8("compiler-throughput-pr-v1.bundle") :
+                                                 S8(BENCH_SERVICE_RECIPE_BUNDLE_NAME);
+    String8 outcome_name = ordinary_throughput ? S8("compiler-throughput-pr-v1.outcome") :
+                                                  S8("validate-buster-v1.outcome");
     if (arguments.length != BENCH_SERVICE_RECIPE_ARGUMENT_COUNT)
     {
         string_print(S8("error: bench_service_recipe requires JOB_ID ATTEMPT_TOKEN WORKSPACE_ROOT BASE_REVISION CANDIDATE_REVISION RESULT_ROOT\n"));
@@ -38140,7 +38168,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceSt
                      string_equal(result_root, expected_result);
         if (!valid)
         {
-            string_print(S8("error: invalid fixed validate-buster-v1 recipe identity or path\n"));
+            string_print(S8("error: invalid fixed service recipe identity or path\n"));
         }
         else
         {
@@ -38158,7 +38186,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceSt
             String8 throughput = bench_service_recipe_throughput_override.length ? bench_service_recipe_throughput_override : S8(BENCH_SERVICE_RECIPE_THROUGHPUT);
             BenchServiceRecipeManifest* manifest = arena_allocate(arena, BenchServiceRecipeManifest, 1);
             *manifest = (BenchServiceRecipeManifest){
-                .path = path_join(arena, result_root, S8("validate-buster-v1.manifest")), .job_id = job_id,
+                .recipe_name = recipe_name, .manifest_name = manifest_name, .bundle_name = bundle_name,
+                .outcome_name = outcome_name, .ordinary_throughput = ordinary_throughput,
+                .path = path_join(arena, result_root, manifest_name), .job_id = job_id,
                 .attempt_token = attempt_token, .workspace_root = workspace_root, .base_revision = base_revision,
                 .candidate_revision = candidate_revision, .result_root = result_root, .driver = driver,
                 .throughput = throughput, .base_source = base_source, .base_build = base_build,
@@ -38175,7 +38205,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceSt
                                                                                           throughput_output);
             bool tree_ok = output_ok && bench_service_recipe_tree(arena, workspace_root, attempt_root, result_root, base_source, base_build,
                                                            candidate_source, candidate_build, job_id, attempt_token, base_revision,
-                                                           candidate_revision);
+                                                           candidate_revision, recipe_name);
             sources = sources && stage_ok && output_ok && tree_ok;
             if (sources)
             {
@@ -38310,6 +38340,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceSt
                                                            candidate_source, base_source, base_build, candidate_source,
                                                            candidate_stage_build, result_root, candidate_build_stage);
 
+                String8 self_host_generated = ordinary_throughput ? path_join(arena, base_build, S8("generated")) : (String8){0};
                 builder = os_argument_builder_start(arena);
                 os_argument_builder_append(&builder, bench_service_recipe_throughput_override.length ?
                                                      bench_service_recipe_throughput_override : S8(BENCH_SERVICE_RECIPE_THROUGHPUT));
@@ -38325,14 +38356,23 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceSt
                 os_argument_builder_append(&builder, S8("--candidate-id"));
                 os_argument_builder_append(&builder, candidate_revision);
                 os_argument_builder_append(&builder, S8("--profile"));
-                os_argument_builder_append(&builder, S8("smoke"));
+                os_argument_builder_append(&builder, ordinary_throughput ? S8("ci") : S8("smoke"));
                 os_argument_builder_append(&builder, S8("--mode"));
                 os_argument_builder_append(&builder, S8("all"));
                 os_argument_builder_append(&builder, S8("--pairs"));
-                os_argument_builder_append(&builder, S8("1"));
+                os_argument_builder_append(&builder, ordinary_throughput ? S8("20") : S8("1"));
                 os_argument_builder_append(&builder, S8("--warmups"));
-                os_argument_builder_append(&builder, S8("1"));
-                os_argument_builder_append(&builder, S8("--no-guard"));
+                os_argument_builder_append(&builder, ordinary_throughput ? S8("2") : S8("1"));
+                if (ordinary_throughput)
+                {
+                    os_argument_builder_append(&builder, S8("--self-host-root"));
+                    os_argument_builder_append(&builder, base_source);
+                    os_argument_builder_append(&builder, S8("--self-host-generated"));
+                    os_argument_builder_append(&builder, self_host_generated);
+                    os_argument_builder_append(&builder, S8("--cpu"));
+                    os_argument_builder_append(&builder, S8(BENCH_SERVICE_RECIPE_CPU));
+                }
+                else os_argument_builder_append(&builder, S8("--no-guard"));
                 SliceString8 throughput_arguments = os_argument_builder_flush(&builder);
                 BenchServiceRecipeStage* throughput_stage = arena_allocate(arena, BenchServiceRecipeStage, 1);
                 *throughput_stage = (BenchServiceRecipeStage){.manifest = manifest, .name = S8("throughput")};
@@ -38511,14 +38551,31 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_fixture_make(BenchServiceReci
     return ok;
 }
 
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_fixture_ordinary(BenchServiceRecipeTestFixture* fixture)
+{
+    bool ok = chmod(fixture->identity, 0600) == 0;
+    if (ok)
+        ok = bench_service_recipe_test_write(fixture->identity,
+            "BQ-WORKSPACE-V1\njob=1\ntoken=2\nrecipe=compiler-throughput-pr-v1\n"
+            "base=1111111111111111111111111111111111111111\n"
+            "candidate=2222222222222222222222222222222222222222\n", 0400);
+    int length = ok ? snprintf(fixture->manifest, sizeof(fixture->manifest),
+                               "%s/compiler-throughput-pr-v1.manifest", fixture->result) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->manifest);
+    length = ok ? snprintf(fixture->temporary, sizeof(fixture->temporary),
+                           "%s/compiler-throughput-pr-v1.manifest.tmp", fixture->result) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->temporary);
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_test_run(Arena* arena, BenchServiceRecipeTestFixture const* fixture,
-                                                                String8 result_root)
+                                                                String8 result_root, bool ordinary_throughput)
 {
     String8 arguments[] = {S8("1"), S8("2"), string_from_pointer(fixture->workspace),
                            S8("1111111111111111111111111111111111111111"),
                            S8("2222222222222222222222222222222222222222"), result_root};
     program.build_graph = (BuildGraph){0};
-    ProcessResult added = bench_service_recipe_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments));
+    ProcessResult added = bench_service_recipe_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), ordinary_throughput);
     ProcessResult result = added == PROCESS_RESULT_SUCCESS ? entry_point() : added;
     program.build_graph = (BuildGraph){0};
     return result;
@@ -38572,6 +38629,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_script_setup(Arena* arena, ch
     int throughput_script_length = snprintf(throughput_script, sizeof(throughput_script),
         "#!/bin/sh\n"
         "set -eu\n"
+        "arguments=\"$*\"\n"
         "baseline=\"\"\n"
         "candidate=\"\"\n"
         "output=\"\"\n"
@@ -38579,6 +38637,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_script_setup(Arena* arena, ch
         "  if [ \"$1\" = \"--baseline\" ]; then baseline=\"$2\"; shift 2; elif [ \"$1\" = \"--candidate\" ]; then candidate=\"$2\"; shift 2; elif [ \"$1\" = \"--output\" ]; then output=\"$2\"; shift 2; else shift; fi\n"
         "done\n"
         "[ -n \"$output\" ] && mkdir -p \"$output/nested\" && printf 'synthetic-throughput\\n' > \"$output/result.txt\" && printf 'synthetic-nested-throughput\\n' > \"$output/nested/result.txt\"\n"
+        "printf '%%s\\n' \"$arguments\" > \"$output/arguments.txt\"\n"
         "if [ -e \"%s/invalid-output\" ]; then printf 'invalid\\n' > \"$output/bad name\"; fi\n"
         "if [ -e \"%s/tamper\" ]; then printf 'tampered\\n' > \"$baseline\"; chmod 0555 \"$baseline\"; fi\n"
         "if [ -e \"%s/candidate-tamper\" ]; then printf 'tampered\\n' > \"$candidate\"; chmod 0555 \"$candidate\"; fi\n"
@@ -38637,7 +38696,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
     {
         BenchServiceRecipeTestFixture fixture;
         ok = bench_service_recipe_test_fixture_make(&fixture, 1, base_revision, candidate_revision);
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result), false) : PROCESS_RESULT_FAILED;
         bool positive_status = bench_service_recipe_test_contains(fixture.manifest, "status=succeeded");
         bool positive_stage = bench_service_recipe_test_contains(fixture.manifest, "stage=throughput");
         bool positive_namespace = bench_service_recipe_test_contains(fixture.manifest, "namespace-policy=private-workspace-post-run-identity");
@@ -38712,7 +38771,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
         BenchServiceRecipeTestFixture fixture;
         ok = bench_service_recipe_test_fixture_make(&fixture, 2, base_revision, candidate_revision) &&
              bench_service_recipe_test_write(fail_marker, "fail\n", 0600);
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result), false) : PROCESS_RESULT_FAILED;
         bool failed_status = bench_service_recipe_test_contains(fixture.manifest, "status=failed");
         bool failed_stage = bench_service_recipe_test_contains(fixture.manifest, "stage=candidate-build");
         bool failed_process = bench_service_recipe_test_contains(fixture.manifest, "process-result=failed");
@@ -38727,7 +38786,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
         BenchServiceRecipeTestFixture fixture;
         ok = bench_service_recipe_test_fixture_make(&fixture, 4, base_revision, candidate_revision) &&
              bench_service_recipe_test_write(candidate_tamper_marker, "tamper\n", 0600);
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result), false) : PROCESS_RESULT_FAILED;
         bool tamper_status = bench_service_recipe_test_contains(fixture.manifest, "status=failed");
         bool tamper_stage = bench_service_recipe_test_contains(fixture.manifest, "stage=throughput");
         bool tamper_manifest = access(fixture.manifest, F_OK) == 0;
@@ -38742,7 +38801,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
         BenchServiceRecipeTestFixture fixture;
         ok = bench_service_recipe_test_fixture_make(&fixture, 3, base_revision, candidate_revision) &&
              bench_service_recipe_test_write(tamper_marker, "tamper\n", 0600);
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result), false) : PROCESS_RESULT_FAILED;
         bool tamper_status = bench_service_recipe_test_contains(fixture.manifest, "status=failed");
         bool tamper_stage = bench_service_recipe_test_contains(fixture.manifest, "stage=throughput");
         bool tamper_manifest = access(fixture.manifest, F_OK) == 0;
@@ -38763,7 +38822,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
              chmod(fixture.candidate_manifest, 0600) == 0 &&
              bench_service_recipe_test_write(fixture.candidate_manifest, wrong_source_manifest, 0600) &&
              chmod(fixture.candidate_manifest, 0400) == 0;
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result), false) : PROCESS_RESULT_FAILED;
         ok = ok && result == PROCESS_RESULT_FAILED && access(fixture.manifest, F_OK) != 0;
         cases += 1;
         bench_service_recipe_test_fixture_cleanup(arena, &fixture);
@@ -38772,7 +38831,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
     {
         BenchServiceRecipeTestFixture fixture;
         ok = bench_service_recipe_test_fixture_make(&fixture, 6, base_revision, candidate_revision);
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.wrong_result)) : PROCESS_RESULT_FAILED;
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.wrong_result), false) : PROCESS_RESULT_FAILED;
         ok = ok && result == PROCESS_RESULT_FAILED && access(fixture.manifest, F_OK) != 0 && access(fixture.wrong_result, F_OK) != 0;
         cases += 1;
         bench_service_recipe_test_fixture_cleanup(arena, &fixture);
@@ -38782,7 +38841,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
         BenchServiceRecipeTestFixture fixture;
         ok = bench_service_recipe_test_fixture_make(&fixture, 7, base_revision, candidate_revision) &&
              bench_service_recipe_test_write(fixture.sentinel, "sentinel\n", 0600) && symlink(fixture.sentinel, fixture.temporary) == 0;
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result), false) : PROCESS_RESULT_FAILED;
         struct stat temporary_info = {0};
         ok = ok && result == PROCESS_RESULT_FAILED && lstat(fixture.temporary, &temporary_info) == 0 && S_ISLNK(temporary_info.st_mode) &&
              bench_service_recipe_test_contains(fixture.sentinel, "sentinel") && access(fixture.manifest, F_OK) == 0 &&
@@ -38797,7 +38856,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
         ok = bench_service_recipe_test_fixture_make(&fixture, 8, base_revision, candidate_revision) &&
              bench_service_recipe_test_write(invalid_output_marker, "invalid\n", 0600) &&
              bench_service_recipe_test_child_path(throughput_path, fixture.result, "throughput") == true;
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result), false) : PROCESS_RESULT_FAILED;
         struct stat throughput_info = {0};
         bool no_final_tree = lstat(throughput_path, &throughput_info) != 0;
         bool invalid_status = bench_service_recipe_test_contains(fixture.manifest, "status=failed");
@@ -38815,7 +38874,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
              mkdir(throughput_path, 0700) == 0 &&
              bench_service_recipe_test_child_path(sentinel_path, throughput_path, "restart-sentinel") &&
              bench_service_recipe_test_write(sentinel_path, "durable\n", 0400);
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result), false) : PROCESS_RESULT_FAILED;
         bool preserved = bench_service_recipe_test_contains(sentinel_path, "durable") &&
                          bench_service_recipe_test_contains(fixture.manifest, "status=failed");
         ok = ok && result == PROCESS_RESULT_FAILED && preserved;
@@ -38831,7 +38890,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
              mkdir(staging_path, 02770) == 0 && fchmodat(AT_FDCWD, staging_path, 02770, 0) == 0 &&
              bench_service_recipe_test_child_path(throughput_path, staging_path, "throughput-results") &&
              symlink(fixture.sentinel, throughput_path) == 0;
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result), false) : PROCESS_RESULT_FAILED;
         struct stat throughput_info = {0};
         bool retained_link = lstat(throughput_path, &throughput_info) == 0 && S_ISLNK(throughput_info.st_mode);
         ok = ok && result == PROCESS_RESULT_FAILED && retained_link && access(fixture.manifest, F_OK) != 0;
@@ -38848,7 +38907,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
              mkdir(temporary_path, 0700) == 0 &&
              bench_service_recipe_test_child_path(temporary_file, temporary_path, "partial.txt") &&
              bench_service_recipe_test_write(temporary_file, "partial\n", 0400);
-        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        ProcessResult result = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result), false) : PROCESS_RESULT_FAILED;
         bool recovered = result == PROCESS_RESULT_SUCCESS && access(temporary_path, F_OK) != 0 &&
                          bench_service_recipe_test_contains(fixture.manifest, "status=succeeded");
         ok = ok && recovered;
@@ -38867,13 +38926,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
              bench_service_recipe_test_child_path(throughput_file, throughput_path, "result.txt") &&
              bench_service_recipe_test_child_path(bundle_path, fixture.result, BENCH_SERVICE_RECIPE_BUNDLE_NAME);
         bench_service_recipe_test_cancel_after_publish = ok;
-        ProcessResult interrupted = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        ProcessResult interrupted = ok ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result), false) : PROCESS_RESULT_FAILED;
         bool interrupted_prefix = interrupted == PROCESS_RESULT_FAILED && access(throughput_path, F_OK) == 0 &&
                                   access(prepare_manifest, F_OK) == 0 && access(bundle_path, F_OK) != 0 &&
                                   access(fixture.manifest, F_OK) != 0 &&
                                   bench_service_recipe_test_contains(prepare_manifest, "process-result=running");
         if (interrupted_prefix) unlink(prepare_manifest);
-        ProcessResult restarted = interrupted_prefix ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result)) : PROCESS_RESULT_FAILED;
+        ProcessResult restarted = interrupted_prefix ? bench_service_recipe_test_run(arena, &fixture, string_from_pointer(fixture.result), false) : PROCESS_RESULT_FAILED;
         bool recovered = restarted == PROCESS_RESULT_FAILED && access(throughput_path, F_OK) == 0 &&
                          bench_service_recipe_test_contains(throughput_file, "synthetic-throughput") &&
                          bench_service_recipe_test_contains(fixture.manifest, "status=failed") &&
@@ -38884,6 +38943,42 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
         cases += 1;
         bench_service_recipe_test_fixture_cleanup(arena, &fixture);
     }
+    Arena* ordinary_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
+    if (ok && ordinary_arena)
+    {
+        BenchServiceRecipeTestFixture fixture;
+        char bundle[BENCH_SERVICE_RECIPE_PATH_CAP], arguments[BENCH_SERVICE_RECIPE_PATH_CAP];
+        char throughput_root[BENCH_SERVICE_RECIPE_PATH_CAP];
+        ok = bench_service_recipe_test_fixture_make(&fixture, 13, base_revision, candidate_revision) &&
+             bench_service_recipe_test_fixture_ordinary(&fixture) &&
+             bench_service_recipe_test_child_path(bundle, fixture.result, "compiler-throughput-pr-v1.bundle") &&
+             bench_service_recipe_test_child_path(throughput_root, fixture.result, "throughput") &&
+             bench_service_recipe_test_child_path(arguments, throughput_root, "arguments.txt");
+        ProcessResult result = ok ? bench_service_recipe_test_run(ordinary_arena, &fixture,
+                                      string_from_pointer(fixture.result), true) : PROCESS_RESULT_FAILED;
+        ok = ok && result == PROCESS_RESULT_SUCCESS &&
+             bench_service_recipe_test_contains(fixture.manifest, "recipe=compiler-throughput-pr-v1\n") &&
+             bench_service_recipe_test_contains(fixture.manifest, "status=succeeded\n") &&
+             bench_service_recipe_test_contains(fixture.manifest, "profile=ci mode=all pairs=20 warmups=2 rounds=2 guard=ordinary") &&
+             bench_service_recipe_test_contains(bundle, "throughput/arguments.txt") &&
+             bench_service_recipe_test_contains(arguments, "--profile ci --mode all --pairs 20 --warmups 2") &&
+             bench_service_recipe_test_contains(arguments, "--self-host-root") &&
+             bench_service_recipe_test_contains(arguments, "--self-host-generated") &&
+             !bench_service_recipe_test_contains(arguments, "--no-guard");
+        cases += 1;
+        bench_service_recipe_test_fixture_cleanup(ordinary_arena, &fixture);
+    }
+    if (ok && ordinary_arena)
+    {
+        BenchServiceRecipeTestFixture fixture;
+        ok = bench_service_recipe_test_fixture_make(&fixture, 14, base_revision, candidate_revision);
+        ProcessResult result = ok ? bench_service_recipe_test_run(ordinary_arena, &fixture,
+                                      string_from_pointer(fixture.result), true) : PROCESS_RESULT_SUCCESS;
+        ok = ok && result == PROCESS_RESULT_FAILED && access(fixture.manifest, F_OK) != 0;
+        cases += 1;
+        bench_service_recipe_test_fixture_cleanup(ordinary_arena, &fixture);
+    }
+    if (ordinary_arena) arena_destroy(ordinary_arena, 1);
     unlink(fail_marker);
     unlink(tamper_marker);
     unlink(candidate_tamper_marker);
@@ -38898,22 +38993,28 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Arena* arena, SliceString8 arguments)
 {
     char script_root[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+    bool ordinary_throughput = arguments.length > 0 && string_equal(arguments.pointer[0], S8("--ordinary"));
+    if (ordinary_throughput)
+    {
+        arguments.pointer += 1;
+        arguments.length -= 1;
+    }
     bool ok = arguments.length == BENCH_SERVICE_RECIPE_ARGUMENT_COUNT &&
               bench_service_recipe_test_script_setup(arena, script_root);
     ProcessResult result = PROCESS_RESULT_FAILED;
     if (ok)
     {
         program.build_graph = (BuildGraph){0};
-        ProcessResult added = bench_service_recipe_add(arena, arguments);
+        ProcessResult added = bench_service_recipe_add(arena, arguments, ordinary_throughput);
         result = added == PROCESS_RESULT_SUCCESS ? entry_point() : added;
         program.build_graph = (BuildGraph){0};
     }
     if (ok)
     {
         String8 manifest = string_duplicate_arena(arena, path_join(arena, arguments.pointer[5],
-                                                                   S8("validate-buster-v1.manifest")), true);
+            ordinary_throughput ? S8("compiler-throughput-pr-v1.manifest") : S8("validate-buster-v1.manifest")), true);
         String8 bundle = string_duplicate_arena(arena, path_join(arena, arguments.pointer[5],
-                                                                 S8(BENCH_SERVICE_RECIPE_BUNDLE_NAME)), true);
+            ordinary_throughput ? S8("compiler-throughput-pr-v1.bundle") : S8(BENCH_SERVICE_RECIPE_BUNDLE_NAME)), true);
         ok = result == PROCESS_RESULT_SUCCESS &&
              bench_service_recipe_test_contains((char const*)manifest.pointer, "status=succeeded") &&
              access((char const*)bundle.pointer, F_OK) == 0;
@@ -39085,6 +39186,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_BENCH_SERVICE] = S8_INITIALIZER("bench_service"),
         [BUILD_COMMAND_BENCH_SERVICE_BROKER] = S8_INITIALIZER("bench_service_broker"),
         [BUILD_COMMAND_BENCH_SERVICE_RECIPE] = S8_INITIALIZER("bench_service_recipe"),
+        [BUILD_COMMAND_BENCH_SERVICE_THROUGHPUT_RECIPE] = S8_INITIALIZER("bench_service_throughput_recipe"),
         [BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST] = S8_INITIALIZER("bench_service_recipe_self_test"),
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
         [BUILD_COMMAND_BENCH_THROUGHPUT_CI] = S8_INITIALIZER("bench_throughput_ci"),
@@ -39261,6 +39363,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         String8 argument = arguments.pointer[argument_i];
         if (command == BUILD_COMMAND_BENCH_SERVICE || command == BUILD_COMMAND_BENCH_SERVICE_BROKER ||
             command == BUILD_COMMAND_BENCH_SERVICE_RECIPE ||
+            command == BUILD_COMMAND_BENCH_SERVICE_THROUGHPUT_RECIPE ||
             command == BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST || command == BUILD_COMMAND_BENCH_THROUGHPUT ||
             command == BUILD_COMMAND_BENCH_THROUGHPUT_CI)
         {
@@ -40209,7 +40312,12 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         break;
         case BUILD_COMMAND_BENCH_SERVICE_RECIPE:
         {
-            result = bench_service_recipe_add(arena, string8_list_to_slice(arena, throughput_arguments));
+            result = bench_service_recipe_add(arena, string8_list_to_slice(arena, throughput_arguments), false);
+        }
+        break;
+        case BUILD_COMMAND_BENCH_SERVICE_THROUGHPUT_RECIPE:
+        {
+            result = bench_service_recipe_add(arena, string8_list_to_slice(arena, throughput_arguments), true);
         }
         break;
         case BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST:

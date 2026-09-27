@@ -90,6 +90,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_typed_client(void)
              fixed.size == typed.size && !memcmp(fixed.bytes, typed.bytes, fixed.size));
     client[3] = "native-retirement-performance-v1";
     BQ_CHECK(!bq_client_arguments(6, client, false, &typed, &operation) && !typed.size);
+    client[3] = "compiler-throughput-pr-v1";
+    BQ_CHECK(bq_client_arguments(6, client, false, &typed, &operation) && typed.size);
     client[3] = "fake-success-v1";
     BQ_CHECK(!bq_client_arguments(6, client, false, &typed, &operation));
     char const* invalid_ids[] = {"main", "HEAD", "1111111", "../installed", "--help", "$(id)",
@@ -275,6 +277,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
     }
     char const* rules[] = {
         "tools/bench_service/profiles/validate-buster-v1.recipe text eol=lf",
+        "tools/bench_service/profiles/compiler-throughput-pr-v1.recipe text eol=lf",
         "tools/bench_service/profiles/native-retirement-performance-v1.blocked text eol=lf",
     };
     bool rules_found[BUSTER_ARRAY_LENGTH(rules)] = {0};
@@ -294,8 +297,9 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
         }
         start = end < attributes_size ? end + 1 : end;
     }
-    BQ_CHECK(attributes_complete && rules_found[0] && rules_found[1]);
-    BqRecipe recipes[] = {BQ_RECIPE_VALIDATE_BUSTER, BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED};
+    BQ_CHECK(attributes_complete && rules_found[0] && rules_found[1] && rules_found[2]);
+    BqRecipe recipes[] = {BQ_RECIPE_VALIDATE_BUSTER, BQ_RECIPE_COMPILER_THROUGHPUT,
+                          BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(recipes); index += 1)
     {
         BqRecipeFiles files;
@@ -309,7 +313,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
         BQ_CHECK(described && expected.length > 0 && profile && bytes && count == expected.length &&
                  !memcmp(bytes, expected.pointer, expected.length) &&
                  (recipes[index] == BQ_RECIPE_VALIDATE_BUSTER ? !strcmp(files.command, "bench_service_recipe") :
-                                                               !files.command[0]));
+                  recipes[index] == BQ_RECIPE_COMPILER_THROUGHPUT ?
+                      !strcmp(files.command, "bench_service_throughput_recipe") : !files.command[0]));
         free(bytes);
         if (profile) fclose(profile);
     }
@@ -616,12 +621,14 @@ BUSTER_GLOBAL_LOCAL bool bq_material_test_begin(BqMaterialFixture* fixture, u32 
     ok = ok && chmod(fixture->workspaces, 02710) == 0;
     if (ok)
     {
-        char recipes[512], recipe[1024];
+        char recipes[512], recipe[1024], ordinary_recipe[1024];
         snprintf(recipes, sizeof(recipes), "%s/recipes", fixture->installed);
         snprintf(recipe, sizeof(recipe), "%s/validate-buster-v1.recipe", recipes);
+        snprintf(ordinary_recipe, sizeof(ordinary_recipe), "%s/compiler-throughput-pr-v1.recipe", recipes);
         ok = mkdir(recipes, 0700) == 0 &&
              (defect == 6 ? mkfifo(recipe, 0400) == 0 :
               bq_test_write_path(recipe, defect == 4 ? "bad-recipe\n" : bq_validate_buster_profile, 0400)) &&
+             bq_test_write_path(ordinary_recipe, bq_compiler_throughput_profile, 0400) &&
              bq_test_source(fixture->installed, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base-source\n", defect) &&
              bq_test_source(fixture->installed, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "candidate-source\n", 0) &&
              chmod(recipes, 0500) == 0;
@@ -1952,7 +1959,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
     BQ_CHECK(bq_transport_queue_admissible(&incompatible));
 #ifdef __linux__
     BQ_CHECK(strstr(bq_capabilities_v2, "local-recipes=fake-success-v1,fake-failure-v1") != NULL);
-    BQ_CHECK(strstr(bq_capabilities_v2, "service-recipes=validate-buster-v1 blocked-recipes=native-retirement-performance-v1") != NULL);
+    BQ_CHECK(strstr(bq_capabilities_v2, "service-recipes=validate-buster-v1,compiler-throughput-pr-v1 ") != NULL &&
+             strstr(bq_capabilities_v2, "blocked-recipes=native-retirement-performance-v1") != NULL);
     BQ_CHECK(strstr(bq_capabilities_v2, "retirement=blocked") != NULL);
     char close_root[BQ_PATH_CAP + 1] = "/tmp/buster-transport-close-XXXXXX";
     bool close_root_ok = bq_test_mkdtemp_physical(close_root, sizeof(close_root));
@@ -2486,9 +2494,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_start(BqWorkerBackend* backend, char 
     BqWorkerFixture* fixture = (BqWorkerFixture*)((char*)fake - offsetof(BqWorkerFixture, fake));
     BqError error = BQ_OK;
     fake->starts += 1;
-    fake->argv_valid = count == 6 && !strcmp(argv[0], BQ_SYSTEMD_BROKER) &&
+    fake->argv_valid = count == 7 && !strcmp(argv[0], BQ_SYSTEMD_BROKER) &&
         !strcmp(argv[1], "start-outer") && !strcmp(argv[2], "1") && argv[3][0] &&
-        strlen(argv[4]) == 64 && strlen(argv[5]) == 64 &&
+        !strcmp(argv[4], "validate-buster-v1") && strlen(argv[5]) == 64 && strlen(argv[6]) == 64 &&
         bq_test_worker_probe_locked(fixture->lease);
     fake->inherited_lease = -1;
     snprintf(fake->observed.unit, sizeof(fake->observed.unit), "buster-bench-%s-%s.service", argv[2], argv[3]);
@@ -2525,8 +2533,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_start(BqWorkerBackend* backend, char 
                                          fixture->material.workspaces, argv[2], argv[3]);
             if (result_length > 0 && (u32)result_length < sizeof(result))
                 execl(bq_test_executable, bq_test_executable, "fixed-recipe-helper", marker,
-                      argv[2], argv[3], "validate-buster-v1", fixture->material.workspaces,
-                      argv[4], argv[5], result, NULL);
+                      argv[2], argv[3], argv[4], fixture->material.workspaces,
+                      argv[5], argv[6], result, NULL);
             _exit(127);
         }
         if (fake->detached < 0) error = BQ_IO;
@@ -4414,7 +4422,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_recipe_driver_run(char const* driver, char* con
     return child > 0 && reaped && exited;
 }
 
-BUSTER_GLOBAL_LOCAL void bq_test_recipe_materialized_bridge(char const* driver)
+BUSTER_GLOBAL_LOCAL void bq_test_recipe_materialized_bridge(char const* driver, bool ordinary_throughput)
 {
     bool ok = driver != NULL;
     if (!ok)
@@ -4428,9 +4436,15 @@ BUSTER_GLOBAL_LOCAL void bq_test_recipe_materialized_bridge(char const* driver)
     char workspace[BQ_PATH_CAP + 1] = {0}, result_root[BQ_PATH_CAP + 1] = {0};
     if (ok)
     {
-        BqRequest request = bq_test_real_request(93);
+        String8 fields[BQ_FIELD_COUNT] = {
+            S8("test-principal"), S8("real-request-93"),
+            ordinary_throughput ? S8("compiler-throughput-pr-v1") : S8("validate-buster-v1"),
+            S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")};
+        BqRequest request;
+        ok = bq_request_make(fields, &request) == BQ_OK;
         u64 id = 0, token = 0;
-        ok = bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK &&
+        ok = ok && bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK &&
              bq_materialize(&fixture.queue.queue, string_from_pointer(fixture.installed),
                             string_from_pointer(fixture.workspaces), &id, &token) == BQ_OK;
         BqJob* job = ok ? bq_job(&fixture.queue.queue.state, id) : NULL;
@@ -4468,18 +4482,24 @@ BUSTER_GLOBAL_LOCAL void bq_test_recipe_materialized_bridge(char const* driver)
     }
     if (ok)
     {
-        char* arguments[] = {(char*)driver, (char*)"bench_service_recipe_self_test", id_text, token_text,
-                             fixture.workspaces,
-                             (char*)"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                             (char*)"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                             result_root, NULL};
+        char* arguments[10] = {(char*)driver, (char*)"bench_service_recipe_self_test"};
+        u32 next = 2;
+        if (ordinary_throughput) arguments[next++] = (char*)"--ordinary";
+        arguments[next++] = id_text;
+        arguments[next++] = token_text;
+        arguments[next++] = fixture.workspaces;
+        arguments[next++] = (char*)"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        arguments[next++] = (char*)"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        arguments[next++] = result_root;
+        arguments[next] = NULL;
         ok = bq_test_recipe_driver_run(driver, arguments);
         BQ_CHECK(ok);
     }
     if (ok)
     {
         int result_directory = open(result_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-        int bundle = result_directory >= 0 ? openat(result_directory, "validate-buster-v1.bundle",
+        int bundle = result_directory >= 0 ? openat(result_directory,
+                                                  ordinary_throughput ? "compiler-throughput-pr-v1.bundle" : "validate-buster-v1.bundle",
                                                   O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
         struct stat bundle_info = {0};
         ok = bundle >= 0 && fstat(bundle, &bundle_info) == 0 && bundle_info.st_size > 0 &&
@@ -4497,7 +4517,10 @@ BUSTER_GLOBAL_LOCAL void bq_test_recipe_materialized_bridge(char const* driver)
         }
         char bundle_digest[SHA256_HEX_CAPACITY];
         if (ok) bq_digest(body, (u32)used, bundle_digest);
-        ok = ok && bq_worker_bundle_validate_full(result_directory, bundle_digest, NULL) == BQ_OK;
+        BqRecipeFiles recipe;
+        ok = ok && bq_recipe_files(ordinary_throughput ? BQ_RECIPE_COMPILER_THROUGHPUT : BQ_RECIPE_VALIDATE_BUSTER,
+                                  &recipe) &&
+             bq_worker_bundle_validate_recipe(result_directory, &recipe, bundle_digest, NULL) == BQ_OK;
         if (body && body != MAP_FAILED) munmap(body, (size_t)bundle_info.st_size);
         if (bundle >= 0) close(bundle);
         if (result_directory >= 0) close(result_directory);
@@ -4626,7 +4649,8 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_preparing_recovery(0);
     bq_test_worker_preparing_recovery(1);
     bq_test_large_source_manifest();
-    bq_test_recipe_materialized_bridge(argc > 2 ? argv[2] : NULL);
+    bq_test_recipe_materialized_bridge(argc > 2 ? argv[2] : NULL, false);
+    bq_test_recipe_materialized_bridge(argc > 2 ? argv[2] : NULL, true);
 #endif
     char const* storage = "posix-real-journal";
 #else

@@ -16,6 +16,18 @@ BUSTER_GLOBAL_LOCAL char const bq_validate_buster_profile[] =
     "source-manifest=BQ-SOURCE-V1\n"
     "layout=separate-source-build-v1\n";
 
+BUSTER_GLOBAL_LOCAL char const bq_compiler_throughput_profile[] =
+    "schema=1\n"
+    "recipe=compiler-throughput-pr-v1\n"
+    "status=blocked-pending-provenance-and-qualification\n"
+    "repository=buster14a/buster\n"
+    "source-manifest=BQ-SOURCE-V1\n"
+    "layout=separate-source-build-v1\n"
+    "build=Release-clang-uninstrumented-serial-v1\n"
+    "workload=default-six-and-frozen-baseline-self-host-v1\n"
+    "sampling=profile-ci-modes-all-pairs20-warmups2-rounds2\n"
+    "guard=ordinary-throughput-v1\n";
+
 BUSTER_GLOBAL_LOCAL char const bq_native_retirement_blocked_profile[] =
     "schema=1\n"
     "recipe=native-retirement-performance-v1\n"
@@ -132,6 +144,7 @@ BqRecipe bq_recipe_from_name(String8 name)
     BqRecipe result = string_equal(name, S8("fake-success-v1")) ? BQ_RECIPE_FAKE_SUCCESS :
                       string_equal(name, S8("fake-failure-v1")) ? BQ_RECIPE_FAKE_FAILURE :
                       string_equal(name, S8("validate-buster-v1")) ? BQ_RECIPE_VALIDATE_BUSTER :
+                      string_equal(name, S8("compiler-throughput-pr-v1")) ? BQ_RECIPE_COMPILER_THROUGHPUT :
                       string_equal(name, S8("native-retirement-performance-v1")) ?
                       BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED : BQ_RECIPE_UNKNOWN;
     return result;
@@ -149,6 +162,7 @@ String8 bq_recipe_name(BqRecipe recipe)
     if (recipe == BQ_RECIPE_FAKE_SUCCESS) result = S8("fake-success-v1");
     else if (recipe == BQ_RECIPE_FAKE_FAILURE) result = S8("fake-failure-v1");
     else if (recipe == BQ_RECIPE_VALIDATE_BUSTER) result = S8("validate-buster-v1");
+    else if (recipe == BQ_RECIPE_COMPILER_THROUGHPUT) result = S8("compiler-throughput-pr-v1");
     else if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)
         result = S8("native-retirement-performance-v1");
     return result;
@@ -159,6 +173,8 @@ String8 bq_recipe_profile(BqRecipe recipe)
     String8 result = {0};
     if (recipe == BQ_RECIPE_VALIDATE_BUSTER)
         result = (String8){(char8*)bq_validate_buster_profile, sizeof(bq_validate_buster_profile) - 1};
+    else if (recipe == BQ_RECIPE_COMPILER_THROUGHPUT)
+        result = (String8){(char8*)bq_compiler_throughput_profile, sizeof(bq_compiler_throughput_profile) - 1};
     else if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)
         result = (String8){(char8*)bq_native_retirement_blocked_profile,
                            sizeof(bq_native_retirement_blocked_profile) - 1};
@@ -169,8 +185,10 @@ bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files)
 {
     String8 name = bq_recipe_name(recipe);
     char const* profile_suffix = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? ".blocked" : ".recipe";
-    char const* command = recipe == BQ_RECIPE_VALIDATE_BUSTER ? "bench_service_recipe" : "";
+    char const* command = recipe == BQ_RECIPE_VALIDATE_BUSTER ? "bench_service_recipe" :
+                          recipe == BQ_RECIPE_COMPILER_THROUGHPUT ? "bench_service_throughput_recipe" : "";
     bool described = files && (recipe == BQ_RECIPE_VALIDATE_BUSTER ||
+                               recipe == BQ_RECIPE_COMPILER_THROUGHPUT ||
                                recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
     if (files) *files = (BqRecipeFiles){0};
     int name_length = described && name.length <= BQ_RECIPE_NAME_CAP ?
@@ -198,18 +216,27 @@ bool bq_recipe_admitted(BqRecipe recipe)
 {
     bool result = recipe == BQ_RECIPE_FAKE_SUCCESS || recipe == BQ_RECIPE_FAKE_FAILURE ||
                   recipe == BQ_RECIPE_VALIDATE_BUSTER;
+#ifdef BUSTER_BENCH_SERVICE_TEST
+    result = result || recipe == BQ_RECIPE_COMPILER_THROUGHPUT;
+#endif
     return result;
 }
 
 bool bq_recipe_service(BqRecipe recipe)
 {
     bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER;
+#ifdef BUSTER_BENCH_SERVICE_TEST
+    result = result || recipe == BQ_RECIPE_COMPILER_THROUGHPUT;
+#endif
     return result;
 }
 
 bool bq_recipe_blocked(BqRecipe recipe)
 {
     bool result = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
+#ifndef BUSTER_BENCH_SERVICE_TEST
+    result = result || recipe == BQ_RECIPE_COMPILER_THROUGHPUT;
+#endif
     return result;
 }
 
