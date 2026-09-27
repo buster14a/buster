@@ -12,8 +12,9 @@
 // vector semantic classes and exact target/predicate contracts
 // (ir_vector_operation_semantics, ir_simd_operation_shape/supported),
 // shared local promotion (ir_promote_function in ir_promote.c), bounded FAST
-// preparation (ir_prepare_canonical_module in ir_fast.c), immutable CFG
-// publication (ir_function_publish_cfg in
+// preparation (ir_prepare_canonical_module in ir_fast.c), the fixed-width
+// integer semantics every compile-time evaluator shares (ir_integer_* in
+// ir_integer.c), immutable CFG publication (ir_function_publish_cfg in
 // ir_cfg.c), and the module validator
 // (ir_validate_canonical_module) that every producer runs before machine
 // selection or Wasm emission so a diagnosed frontend failure cannot leak a
@@ -5794,3 +5795,4 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
 #include <buster/lib/compiler/ir/ir_cfg.c>
 #include <buster/lib/compiler/ir/ir_promote.c>
 #include <buster/lib/compiler/ir/ir_fast.c>
+#include <buster/lib/compiler/ir/ir_integer.c>
