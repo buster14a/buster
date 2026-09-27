@@ -1348,7 +1348,9 @@ static void test_oracle_authority_adapter(char const* executable)
             CHECK(bq_retirement_oracle_template_hash(&template, template_sha256));
             BqRetirementOracleVerifiedBuild build = {0};
             CHECK(bq_oracle_authority_fixture_build(&build, 7, 11,
-                fixture.prepared.preparation_sha256, source, binary, receipt,
+                fixture.prepared.preparation_sha256,
+                approved.row, approved.census_row, approved.target,
+                approved.configuration_sha256, source, binary, receipt,
                 template.toolchain_identity_sha256, approved.build_command_sha256));
             BqRetirementOracleReference references[1] = {0};
             BqRetirementOracleAuthority authority = {0};
@@ -1420,6 +1422,24 @@ static void test_oracle_authority_adapter(char const* executable)
                 faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
             changed = build;
             changed.source_sha256[0] ^= 1;
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11) &&
+                !bq_retirement_oracle_authority_next(&authority, &changed,
+                    &command, output, cancellation[0], deadline) &&
+                faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
+            changed = build;
+            changed.row += 1;
+            authority = (BqRetirementOracleAuthority){0};
+            CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
+                template_sha256, &fixture.prepared, fixture.trusted,
+                references, 1, 7, 11) &&
+                !bq_retirement_oracle_authority_next(&authority, &changed,
+                    &command, output, cancellation[0], deadline) &&
+                faccessat(directory, "authority-output", F_OK, 0) < 0 && errno == ENOENT);
+            changed = build;
+            changed.configuration_sha256[0] ^= 1;
             authority = (BqRetirementOracleAuthority){0};
             CHECK(bq_retirement_oracle_authority_begin(&authority, &template,
                 template_sha256, &fixture.prepared, fixture.trusted,
@@ -1528,7 +1548,9 @@ static void test_oracle_authority_adapter(char const* executable)
             {
                 BqRetirementOracleVerifiedBuild second = {0};
                 CHECK(bq_oracle_authority_fixture_build(&second, 7, 11,
-                    fixture.prepared.preparation_sha256, source, other_binary, receipt,
+                    fixture.prepared.preparation_sha256,
+                    approved.row, approved.census_row, approved.target,
+                    approved.configuration_sha256, source, other_binary, receipt,
                     template.toolchain_identity_sha256, approved.build_command_sha256));
                 char second_executable_path[64] = {0};
                 CHECK(snprintf(second_executable_path, sizeof(second_executable_path),

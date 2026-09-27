@@ -22,8 +22,10 @@
 struct BqRetirementOracleVerifiedBuild
 {
     uint64_t job_id, attempt_token;
+    uint32_t row, census_row, target;
     int source, binary, receipt;
     char preparation_sha256[65], source_sha256[65];
+    char configuration_sha256[65];
     char toolchain_identity_sha256[65], build_command_sha256[65];
     char binary_sha256[65], receipt_sha256[65];
 };
@@ -324,8 +326,12 @@ bool bq_retirement_oracle_authority_next(BqRetirementOracleAuthority* authority,
         output.name && !strcmp(output.name, reference->output_name) &&
         build->job_id == authority->job_id &&
         build->attempt_token == authority->attempt_token &&
+        build->row == reference->row &&
+        build->census_row == reference->census_row &&
+        build->target == reference->target &&
         !strcmp(build->preparation_sha256, ledger->prepared.preparation_sha256) &&
         !strcmp(build->source_sha256, reference->source_sha256) &&
+        !strcmp(build->configuration_sha256, reference->configuration_sha256) &&
         !strcmp(build->toolchain_identity_sha256,
             authority->toolchain_identity_sha256) &&
         !strcmp(build->build_command_sha256, reference->build_command_sha256) &&
@@ -419,20 +425,27 @@ bool bq_retirement_oracle_authority_ready(BqRetirementOracleAuthority const* aut
 /* Miniature fixture issuer. Deliberately absent from production builds. */
 static bool bq_oracle_authority_fixture_build(BqRetirementOracleVerifiedBuild* build,
     uint64_t job_id, uint64_t attempt_token, char const preparation_sha256[65],
+    uint32_t row, uint32_t census_row, uint32_t target,
+    char const configuration_sha256[65],
     int source, int binary, int receipt, char const toolchain_identity_sha256[65],
     char const build_command_sha256[65])
 {
-    bool ok = build && preparation_sha256 && toolchain_identity_sha256 &&
-        build_command_sha256 && job_id && attempt_token;
+    bool ok = build && preparation_sha256 && configuration_sha256 &&
+        toolchain_identity_sha256 && build_command_sha256 &&
+        job_id && attempt_token;
     if (ok)
     {
         *build = (BqRetirementOracleVerifiedBuild){0};
         build->job_id = job_id;
         build->attempt_token = attempt_token;
+        build->row = row;
+        build->census_row = census_row;
+        build->target = target;
         build->source = source;
         build->binary = binary;
         build->receipt = receipt;
         memcpy(build->preparation_sha256, preparation_sha256, 65);
+        memcpy(build->configuration_sha256, configuration_sha256, 65);
         memcpy(build->toolchain_identity_sha256, toolchain_identity_sha256, 65);
         memcpy(build->build_command_sha256, build_command_sha256, 65);
         ok = bq_retirement_oracle_file_hash(source, BQ_ORACLE_SOURCE_CAP,
