@@ -1503,7 +1503,8 @@ class BrokerObserver:
     def _stable_exe_identity(before: tuple[str, int, int], first_exe: str,
                              after: tuple[str, int, int], second_exe: str,
                              expected_ticks: int) -> bool:
-        return (before[1:] == after[1:] and before[2] == expected_ticks and
+        return (before[0] not in ("Z", "X", "x") and after[0] not in ("Z", "X", "x") and
+                before[1:] == after[1:] and before[2] == expected_ticks and
                 expected_ticks > 0 and first_exe == second_exe and
                 0 < len(first_exe) <= 4096)
 
@@ -1523,7 +1524,8 @@ class BrokerObserver:
         # Type=exec can transition from systemd-executor to the pinned broker
         # between the two readlinks without changing PID/start ticks. Retry
         # exactly once and accept only a now-stable broker image.
-        require(before[1:] == after[1:] and before[2] == expected_ticks and
+        require(before[0] not in ("Z", "X", "x") and after[0] not in ("Z", "X", "x") and
+                before[1:] == after[1:] and before[2] == expected_ticks and expected_ticks > 0 and
                 first_exe in PREEXEC_EXECUTABLES and second_exe == BROKER_EXECUTABLE,
                 "process executable or start ticks changed around read")
         retry_before = live_probe._proc_stat_identity(
@@ -1783,7 +1785,8 @@ class BrokerObserver:
         proc = Path(f"/proc/{pid}")
         before = live_probe._proc_stat_identity(
             live_probe._bounded_file(proc / "stat", MAX_PROC_STAT_BYTES, self.deadline), label)
-        require(before[2] == expected_ticks, "FD-0 readback PID startticks changed before capture")
+        require(before[0] not in ("Z", "X", "x") and before[2] == expected_ticks and expected_ticks > 0,
+                "FD-0 readback process is not live or startticks changed before capture")
         link_before = os.readlink(proc / "fd/0")
         target_stat = os.stat(proc / "fd/0", follow_symlinks=True)
         fdinfo = live_probe._bounded_file(proc / "fdinfo/0", MAX_FDINFO_BYTES, self.deadline)
@@ -1796,7 +1799,8 @@ class BrokerObserver:
             live_probe._bounded_file(proc / "stat", MAX_PROC_STAT_BYTES, self.deadline), label)
         link_after = os.readlink(proc / "fd/0")
         target_after = os.stat(proc / "fd/0", follow_symlinks=True)
-        require(after == before and link_after == link_before and
+        require(after[0] not in ("Z", "X", "x") and after[1:] == before[1:] and
+                link_after == link_before and
                 (target_stat.st_dev, target_stat.st_ino, target_stat.st_mode) ==
                 (target_after.st_dev, target_after.st_ino, target_after.st_mode),
                 "accepted socket FD 0 changed during capture")
@@ -3330,6 +3334,27 @@ def _self_test() -> None:
         assert final_observer.event_loss_detected == expected_loss
         assert final_observer.bus_dispatch_count == queued
         checks += 1
+    import issue1162_live_probe as state_probe
+    def fd0_state_fixture(pid, ticks, _cgroup, _executable, output, deadline):
+        writer = EvidenceWriter(str(output))
+        reader = object.__new__(BrokerObserver)
+        reader.writer, reader.deadline = writer, deadline
+        try:
+            result = reader._capture_fd0(pid, ticks, "state-fixture", 1)
+            assert result["identity"]["stable"] and result["identity"]["start_ticks_after"] == ticks
+        finally:
+            writer.close()
+    checks += state_probe._self_test_live_state_capture(fd0_state_fixture)
+    for before_state, after_state in (("S", "R"), ("R", "S")):
+        assert BrokerObserver._stable_exe_identity((before_state, 123, 456), BROKER_EXECUTABLE,
+            (after_state, 123, 456), BROKER_EXECUTABLE, 456)
+        checks += 1
+    for state in ("Z", "X", "x"):
+        assert not BrokerObserver._stable_exe_identity((state, 123, 456), BROKER_EXECUTABLE,
+            ("R", 123, 456), BROKER_EXECUTABLE, 456)
+        assert not BrokerObserver._stable_exe_identity(("S", 123, 456), BROKER_EXECUTABLE,
+            (state, 123, 456), BROKER_EXECUTABLE, 456)
+        checks += 2
     print(f"BROKER_OBSERVER_SELF_TEST checks={checks} failures=0 fixtures-only-no-live-bus")
 
 

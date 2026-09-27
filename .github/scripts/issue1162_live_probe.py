@@ -369,6 +369,8 @@ def _capture_process(pid: int, name: str, output: Path, deadline: float,
                      reserve: float = 0.0) -> dict[str, object]:
     proc = Path(f"/proc/{pid}")
     stat_before = _proc_stat_identity(_bounded_file(proc / "stat", 1024 * 1024, deadline, reserve), name)
+    _fail(stat_before[0] not in ("Z", "X", "x") and stat_before[2] > 0,
+          f"process is not live before capture for {name}")
     status = _bounded_file(proc / "status", 1024 * 1024, deadline, reserve)
     mountinfo = _bounded_file(proc / "mountinfo", 16 * 1024 * 1024, deadline, reserve)
     cgroup = _bounded_file(proc / "cgroup", 1024 * 1024, deadline, reserve)
@@ -394,7 +396,10 @@ def _capture_process(pid: int, name: str, output: Path, deadline: float,
     finally:
         os.close(exe_fd)
     stat_after = _proc_stat_identity(_bounded_file(proc / "stat", 1024 * 1024, deadline, reserve), name)
-    _fail(stat_before == stat_after, f"PID or process identity changed during capture for {name}")
+    # Scheduling state may change during a read; group/start ticks identify
+    # this live process. Dead samples cannot supply a full witness.
+    _fail(stat_after[0] not in ("Z", "X", "x") and stat_before[1:] == stat_after[1:],
+          f"PID or process identity changed during capture for {name}")
     disk_sha = _hash_path(expected_executable, deadline, reserve)
     _fail(digest.hexdigest() == disk_sha, f"running and installed executable hashes differ for {name}")
     stem = re.sub(r"[^a-zA-Z0-9_.-]", "_", name)
@@ -1566,6 +1571,102 @@ def _run_probe(job: int, request_sha: str, baseline: str, subject: str,
             "broker_capture_coverage": broker_coverage, "full_acceptance": "pending"}
 
 
+def _self_test_live_state_capture(capture) -> int:
+    """Drive the real capture adapter around a bounded, ordinary local child.
+
+    Only the fixture schedules the second read; both stat samples and all
+    process/socket readbacks come from the real child. No systemd is used.
+    """
+    import select
+    child_code = ("import os,pathlib,time\n"
+                  "print(pathlib.Path('/proc/self/stat').read_text().split()[0],flush=True)\n"
+                  "os.read(0,1)\n"
+                  "end=time.monotonic()+3\n"
+                  "while time.monotonic()<end: pass\n"
+                  "os.read(0,1)\n")
+    cases = ("steady", "transition", "group", "ticks", "zero-ticks",
+             "before-Z", "before-X", "before-x", "after-Z", "after-X", "after-x")
+    for case in cases:
+        transition = case == "transition"
+        negative = case not in ("steady", "transition")
+        child_socket, control = socket.socketpair()
+        child = None
+        try:
+            child = subprocess.Popen(["/usr/bin/python3", "-c", child_code], stdin=child_socket,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            child_socket.close()
+            assert child.stdout is not None
+            assert select.select([child.stdout], [], [], 2.0)[0], "fixture child readiness timeout"
+            pid = int(child.stdout.readline().strip())
+            proc = Path(f"/proc/{pid}")
+            deadline = time.monotonic() + 5.0
+            def await_state(state: str) -> None:
+                until = min(deadline, time.monotonic() + 1.5)
+                while time.monotonic() < until:
+                    if _proc_stat_identity((proc / "stat").read_bytes(), "state fixture")[0] == state:
+                        break
+                    time.sleep(0.0005)
+                else:
+                    raise AssertionError("fixture child did not enter " + state)
+            await_state("S")
+            initial = _proc_stat_identity((proc / "stat").read_bytes(), "state fixture")
+            cgroup = (proc / "cgroup").read_text().strip().split(":", 2)[2]
+            executable = os.readlink(proc / "exe")
+            original_reader = _bounded_file
+            samples = []
+            def scheduled_reader(path, limit, end, reserve=0.0):
+                if path == proc / "stat" and len(samples) == 1 and transition:
+                    await_state("R")
+                raw = original_reader(path, limit, end, reserve)
+                if path == proc / "stat":
+                    # Only negative controls mutate a sample; positive S/R
+                    # samples above are unmodified real kernel readbacks.
+                    if negative:
+                        boundary = raw.rfind(b")") + 2
+                        fields = raw[boundary:].split()
+                        if case == "zero-ticks":
+                            fields[19] = b"0"
+                        elif len(samples) == 0 and case.startswith("before-"):
+                            fields[0] = case[-1:].encode()
+                        elif len(samples) == 1:
+                            if case.startswith("after-"):
+                                fields[0] = case[-1:].encode()
+                            elif case in ("group", "ticks"):
+                                index = 2 if case == "group" else 19
+                                fields[index] = str(int(fields[index]) + 1).encode()
+                        raw = raw[:boundary] + b" ".join(fields) + b"\n"
+                    samples.append(_proc_stat_identity(raw, "state fixture"))
+                    if len(samples) == 1 and transition:
+                        control.sendall(b"G")
+                return raw
+            with tempfile.TemporaryDirectory(prefix="issue1515-state-") as temporary:
+                with patch(__name__ + "._bounded_file", side_effect=scheduled_reader):
+                    rejected = False
+                    try:
+                        capture(pid, initial[2], cgroup, executable, Path(temporary), deadline)
+                    except RuntimeError as error:
+                        assert negative, (case, str(error))
+                        assert any(text in str(error) for text in
+                                   ("not live", "identity changed", "FD 0 changed", "startticks"))
+                        rejected = True
+                    assert rejected == negative, (case, "incorrect capture disposition")
+            if not negative:
+                assert len(samples) == 2 and samples[0][0] == "S"
+                assert samples[1][0] == ("R" if transition else "S")
+                assert samples[0][1:] == samples[1][1:] == initial[1:] and initial[2] > 0
+        finally:
+            child_socket.close()
+            control.close()
+            if child is not None:
+                if child.poll() is None:
+                    child.terminate()
+                child.wait(timeout=2.0)
+                for stream in (child.stdout, child.stderr):
+                    if stream is not None:
+                        stream.close()
+    return len(cases)
+
+
 def self_test() -> None:
     boot = "12345678-1234-1234-1234-123456789abc"
     digest = "a" * 64
@@ -2180,6 +2281,11 @@ def self_test() -> None:
             assert "result_leaf_lease_handoff is present" in reason
         elif fault == "live-descendant":
             assert "expected job cgroup leaf remains" in reason
+    def capture_state_fixture(pid, ticks, cgroup, executable, output, deadline):
+        result = _capture_process(pid, "state-fixture", output, deadline, cgroup, executable)
+        assert result["starttime_ticks"] == ticks and result["exe_hash_matches_installed"]
+        assert len(list(output.iterdir())) == 3
+    checks += _self_test_live_state_capture(capture_state_fixture)
     print(f"LIVE_PROBE_SELF_TEST checks={checks} failures=0 orchestration=temporary-fixture-not-live-proof")
 
 
