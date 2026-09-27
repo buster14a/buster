@@ -69,6 +69,7 @@ cat > "$payload/Dockerfile" <<'DOCKERFILE'
 FROM ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv dbus passwd && rm -rf /var/lib/apt/lists/*
 RUN groupadd -g 65000 buster-bench && groupadd -g 65001 buster-bench-candidate && groupadd -g 65002 buster-github-runner && groupadd -g 65003 bqeg-extra && useradd -u 65000 -g buster-bench -G buster-bench-candidate -M -s /usr/sbin/nologin buster-bench && useradd -u 65001 -g buster-bench-candidate -M -s /usr/sbin/nologin buster-bench-candidate && useradd -u 65002 -g buster-github-runner -M -s /usr/sbin/nologin buster-github-runner
+RUN cp /etc/nsswitch.conf /root/nsswitch-stock && sed -i -E 's/^(passwd|group):.*/\1: files/; s/^initgroups:.*/initgroups: files/' /etc/nsswitch.conf
 RUN install -d -o root -g root -m 0755 /etc/buster-bench /opt/buster-bench/installed /var/lib/buster-bench /var/lib/buster-bench/sub
 COPY opt-in /root/broker-entry-gate-test.opt-in
 COPY buster-bench-broker-entry-gate /usr/local/libexec/buster-bench-broker-entry-gate
@@ -101,6 +102,9 @@ sudo docker exec "$guest" /usr/bin/stat -Lc '%n uid=%u gid=%g mode=%a links=%h d
   /usr/local/libexec/buster-bench-broker-entry-gate /usr/local/libexec/buster-bench-systemd-broker \
   > "$proof/isolation-and-installation.txt"
 sudo docker exec "$guest" /usr/bin/cat /etc/nsswitch.conf /etc/passwd /etc/group > "$proof/account-inventory.txt"
+sudo docker exec "$guest" /usr/bin/cat /root/nsswitch-stock > "$proof/nsswitch-stock.txt"
+sudo docker exec "$guest" /usr/bin/sha256sum /root/nsswitch-stock /etc/nsswitch.conf /etc/passwd /etc/group \
+  > "$proof/account-file-sha256.txt"
 sudo docker exec "$guest" /usr/bin/test ! -e /run/nscd/socket
 sudo docker exec "$guest" /usr/bin/test "$(sudo docker exec "$guest" /usr/bin/readlink -f /var/run)" = /run
 sudo timeout 900 docker exec --env BUSTER_BROKER_ENTRY_DISPOSABLE_SYSTEMD=isolated-docker-systemd-test \
