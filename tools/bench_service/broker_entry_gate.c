@@ -341,7 +341,13 @@ static bool bq_entry_mountinfo(char const* bytes, size_t size)
 
 static bool bq_entry_mounts(void)
 {
-    bool ok = true;
+    /* ProtectSystem=strict also makes the root mount read-only. Its explicit
+     * writable exceptions (/dev and the private temporary directories) must
+     * not be confused with writable descendants of the protected subtrees. */
+    int root = open("/", O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    struct statvfs root_info = {0};
+    bool ok = root >= 0 && fstatvfs(root, &root_info) == 0 && (root_info.f_flag & ST_RDONLY);
+    if (root >= 0) close(root);
     for (unsigned index = 0; ok && index < sizeof(bq_entry_readonly_paths) / sizeof(bq_entry_readonly_paths[0]); index += 1)
     {
         int descriptor = bq_entry_open(bq_entry_readonly_paths[index], O_PATH | O_DIRECTORY, false);

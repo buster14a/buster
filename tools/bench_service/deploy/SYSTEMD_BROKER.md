@@ -64,7 +64,7 @@ installation procedure and a new authenticated inventory.
 
 Before executing the broker, the gate requires empty effective, permitted,
 inheritable, bounding and ambient capabilities, NNP=1 and seccomp mode 2.
-It checks read-only mounts at `/usr`, `/etc/buster-bench`,
+It checks the read-only root mount and read-only mounts at `/usr`, `/etc/buster-bench`,
 `/opt/buster-bench/installed` and `/var/lib/buster-bench`, including every
 descendant mount listed in the bounded kernel mount inventory. It requires
 FD0 to be a connected, non-listening AF_UNIX SOCK_SEQPACKET socket at the
