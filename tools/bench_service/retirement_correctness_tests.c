@@ -1014,6 +1014,150 @@ static void test_independent_oracle(char const* executable)
     if (created) CHECK(rmdir(root) == 0);
 }
 
+/* This private production step must launch an actual independent reference
+ * child on a valid frozen plan, and none when a required input is absent. */
+static void test_oracle_producer(char const* executable)
+{
+    char root[] = "/tmp/bq-retirement-producer-XXXXXX";
+    bool created = mkdtemp(root) != NULL;
+    int directory = created ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    CHECK(directory >= 3);
+    if (directory >= 3)
+    {
+        char path[4096] = {0};
+        char const* input = executable;
+        if (executable[0] != '/')
+        {
+            CHECK(getcwd(path, sizeof(path)) != NULL &&
+                  strlen(path) + strlen(executable) + 2 < sizeof(path));
+            size_t length = strlen(path);
+            path[length] = '/';
+            memcpy(path + length + 1, executable, strlen(executable) + 1);
+            input = path;
+        }
+        CHECK(copy_frozen_artifact(directory, input, "reference") &&
+              fchmodat(directory, "reference", 0500, 0) == 0);
+        int binary = openat(directory, "reference", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        int writer = openat(directory, "independent-build-receipt",
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        static char const receipt_bytes[] = "independent build fixture\n";
+        CHECK(binary >= 3 && writer >= 3 &&
+              write(writer, receipt_bytes, sizeof(receipt_bytes) - 1) ==
+                  (ssize_t)(sizeof(receipt_bytes) - 1) && fsync(writer) == 0 &&
+              fchmod(writer, 0400) == 0);
+        if (writer >= 0) CHECK(close(writer) == 0);
+        int receipt = openat(directory, "independent-build-receipt",
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        int cancellation[2] = {-1, -1};
+        CHECK(receipt >= 3 && pipe(cancellation) == 0 &&
+              fcntl(cancellation[0], F_SETFD, FD_CLOEXEC) == 0 &&
+              fcntl(cancellation[1], F_SETFD, FD_CLOEXEC) == 0);
+        if (binary >= 3 && receipt >= 3 && cancellation[0] >= 3)
+        {
+            BqCorrectnessFixture fixture;
+            fixture_init(&fixture);
+            memset(fixture.trusted[1].independent_oracle_sha256, 0, 65);
+            memset(fixture.trusted[5].independent_oracle_sha256, 0, 65);
+            fixture.trusted[5].compiler_eligible = 0;
+            fixture.trusted[5].execution_obligation = 0;
+            char binary_hash[65] = {0}, receipt_hash[65] = {0}, command_hash[65] = {0};
+            CHECK(bq_retirement_oracle_file_hash(binary,
+                BQ_RETIREMENT_ORACLE_BINARY_CAP, true, binary_hash) &&
+                  bq_retirement_oracle_file_hash(receipt,
+                BQ_RETIREMENT_ORACLE_RECEIPT_CAP, false, receipt_hash));
+            char fd_path[64] = {0};
+            CHECK(snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", binary) > 0);
+            char* const argv[] = {fd_path, "--retirement-oracle-output", NULL};
+            char* const environment[] = {"ASAN_OPTIONS=detect_leaks=0",
+                "HOME=/nonexistent", "LC_ALL=C", NULL};
+            BqRetirementProcessCommand command = {argv, environment, root, 2, 3};
+            CHECK(tp_retirement_command_fields_hash(argv, 2, root, environment, 3, command_hash));
+            BqRetirementOracleReference reference = {0};
+            reference.row = fixture.trusted[1].row;
+            reference.census_row = fixture.trusted[1].census_row;
+            reference.target = fixture.trusted[1].target;
+            memcpy(reference.preparation_sha256, fixture.prepared.preparation_sha256, 65);
+            memcpy(reference.source_sha256, fixture.trusted[1].source_sha256, 65);
+            memcpy(reference.configuration_sha256, fixture.trusted[1].configuration_sha256, 65);
+            memcpy(reference.build_receipt_sha256, receipt_hash, 65);
+            memcpy(reference.binary_sha256, binary_hash, 65);
+            memcpy(reference.command_sha256, command_hash, 65);
+            strcpy(reference.output_name, "observed");
+            char pin[65] = {0};
+            CHECK(bq_retirement_oracle_spec_hash(&fixture.prepared, &reference, 1, pin));
+            uint64_t now = 0;
+            CHECK(bq_retirement_oracle_clock(&now));
+            uint64_t deadline = now + UINT64_C(30000000000);
+            BqRetirementArtifactLocation output = {directory, "observed"};
+            BqRetirementOracleLedger gate = {0};
+            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin));
+            CHECK(!bq_retirement_oracle_produce_next(&gate, binary, -1, &command,
+                output, cancellation[0], deadline) && gate.failed && gate.done == 0 &&
+                faccessat(directory, "observed", F_OK, 0) < 0 && errno == ENOENT);
+            gate = (BqRetirementOracleLedger){0};
+            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin));
+            reference.build_receipt_sha256[0] ^= 1;
+            CHECK(!bq_retirement_oracle_produce_next(&gate, binary, receipt, &command,
+                output, cancellation[0], deadline) && gate.failed && gate.done == 0 &&
+                faccessat(directory, "observed", F_OK, 0) < 0 && errno == ENOENT);
+            reference.build_receipt_sha256[0] ^= 1;
+            gate = (BqRetirementOracleLedger){0};
+            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin));
+            CHECK(!bq_retirement_oracle_produce_next(&gate, binary, receipt, &command,
+                output, cancellation[0], now) && gate.failed && gate.done == 0 &&
+                faccessat(directory, "observed", F_OK, 0) < 0 && errno == ENOENT);
+            gate = (BqRetirementOracleLedger){0};
+            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin));
+            CHECK(write(cancellation[1], "x", 1) == 1 &&
+                  !bq_retirement_oracle_produce_next(&gate, binary, receipt, &command,
+                    output, cancellation[0], deadline) && gate.failed && gate.done == 0 &&
+                  faccessat(directory, "observed", F_OK, 0) < 0 && errno == ENOENT);
+            char signal_byte = 0;
+            CHECK(read(cancellation[0], &signal_byte, 1) == 1);
+            gate = (BqRetirementOracleLedger){0};
+            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin));
+            char* const bad_args[] = {fd_path, "--retirement-oracle-fail", NULL};
+            BqRetirementProcessCommand bad_command = {bad_args, environment, root, 2, 3};
+            CHECK(!bq_retirement_oracle_produce_next(&gate, binary, receipt, &bad_command,
+                output, cancellation[0], deadline) && gate.failed && gate.done == 0 &&
+                faccessat(directory, "observed", F_OK, 0) < 0 && errno == ENOENT);
+            CHECK(tp_retirement_command_fields_hash(bad_args, 2, root, environment, 3,
+                reference.command_sha256) &&
+                bq_retirement_oracle_spec_hash(&fixture.prepared, &reference, 1, pin));
+            gate = (BqRetirementOracleLedger){0};
+            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin));
+            CHECK(!bq_retirement_oracle_produce_next(&gate, binary, receipt, &bad_command,
+                output, cancellation[0], deadline) && gate.failed && gate.done == 0 &&
+                !bq_retirement_oracle_ready(&gate) &&
+                faccessat(directory, "observed", F_OK, 0) == 0);
+            CHECK(unlinkat(directory, "observed", 0) == 0);
+            memcpy(reference.command_sha256, command_hash, 65);
+            CHECK(bq_retirement_oracle_spec_hash(&fixture.prepared, &reference, 1, pin));
+            gate = (BqRetirementOracleLedger){0};
+            CHECK(bq_retirement_oracle_begin(&gate, &fixture.prepared,
+                fixture.trusted, &reference, 1, pin) &&
+                  bq_retirement_oracle_produce_next(&gate, binary, receipt, &command,
+                    output, cancellation[0], deadline) && gate.done == 1 &&
+                  bq_retirement_oracle_finish(&gate) && bq_retirement_oracle_ready(&gate) &&
+                  faccessat(directory, "observed", F_OK, 0) == 0);
+            CHECK(unlinkat(directory, "observed", 0) == 0 &&
+                  close(cancellation[0]) == 0 && close(cancellation[1]) == 0);
+        }
+        if (receipt >= 0) CHECK(close(receipt) == 0);
+        if (binary >= 0) CHECK(close(binary) == 0);
+        CHECK(unlinkat(directory, "reference", 0) == 0 &&
+              unlinkat(directory, "independent-build-receipt", 0) == 0 &&
+              close(directory) == 0);
+    }
+    if (created) CHECK(rmdir(root) == 0);
+}
+
 int main(int argc, char** argv)
 {
     int result = 0;
@@ -1036,6 +1180,7 @@ int main(int argc, char** argv)
         test_partial_and_sealed();
         test_large_population();
         if (argc > 0) test_independent_oracle(argv[0]);
+        if (argc > 0) test_oracle_producer(argv[0]);
         if (argc > 0) test_frozen_artifact_readback(argv[0]);
         printf("RETIREMENT_CORRECTNESS_TEST assertions=%u failures=%u launches=%u\n",
                assertions, failures, launches);

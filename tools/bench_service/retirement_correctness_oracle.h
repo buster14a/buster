@@ -42,6 +42,16 @@ BUSTER_F_DECL bool bq_retirement_oracle_begin(BqRetirementOracleLedger* ledger,
 BUSTER_F_DECL bool bq_retirement_oracle_observe(BqRetirementOracleLedger* ledger,
     int reference_binary, BqRetirementProcessCommand const* command,
     BqRetirementRuntimeStart const* start, int output);
+/* Run the next independently pinned native reference through the actual
+ * service child boundary. The caller supplies a dedicated cancellation pipe
+ * (read end, CLOEXEC), the worker's absolute monotonic deadline, and a held
+ * build receipt from its independently authorized producer. It must verify
+ * lease/job/attempt continuity before and after each call; the receipt's
+ * digest alone does not establish its independent build provenance. */
+BUSTER_F_DECL bool bq_retirement_oracle_produce_next(BqRetirementOracleLedger* ledger,
+    int reference_binary, int independent_build_receipt,
+    BqRetirementProcessCommand const* command, BqRetirementArtifactLocation output,
+    int cancellation_fd, uint64_t absolute_deadline_ns);
 BUSTER_F_DECL bool bq_retirement_oracle_finish(BqRetirementOracleLedger* ledger);
 BUSTER_F_DECL bool bq_retirement_oracle_ready(BqRetirementOracleLedger const* ledger);
 #endif

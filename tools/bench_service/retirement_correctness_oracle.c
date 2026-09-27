@@ -11,13 +11,19 @@
 #include "../throughput/retirement_command.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define BQ_RETIREMENT_ORACLE_BINARY_CAP (512u * 1024u * 1024u)
 #define BQ_RETIREMENT_ORACLE_OUTPUT_CAP (16u * 1024u * 1024u)
+#define BQ_RETIREMENT_ORACLE_RECEIPT_CAP (1024u * 1024u)
+#define BQ_RETIREMENT_ORACLE_MAX_DEADLINE_NS UINT64_C(3600000000000)
 
 BUSTER_GLOBAL_LOCAL bool bq_retirement_oracle_hex(char const value[65])
 {
@@ -284,6 +290,98 @@ bool bq_retirement_oracle_observe(BqRetirementOracleLedger* ledger,
             ledger->done += 1;
         }
     }
+    if (ledger && !ok) ledger->failed = 1;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_oracle_clock(uint64_t* now)
+{
+    struct timespec time = {0};
+    bool ok = now && clock_gettime(CLOCK_MONOTONIC, &time) == 0 &&
+        time.tv_sec >= 0 && time.tv_nsec >= 0 && time.tv_nsec < 1000000000L &&
+        (uint64_t)time.tv_sec <= (UINT64_MAX - (uint64_t)time.tv_nsec) / UINT64_C(1000000000);
+    if (ok) *now = (uint64_t)time.tv_sec * UINT64_C(1000000000) + (uint64_t)time.tv_nsec;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_oracle_cancellation(int descriptor)
+{
+    int flags = descriptor >= 3 ? fcntl(descriptor, F_GETFD) : -1;
+    int mode = flags >= 0 ? fcntl(descriptor, F_GETFL) : -1;
+    struct stat info = {0};
+    struct pollfd input = {.fd = descriptor, .events = POLLIN};
+    bool ok = flags >= 0 && (flags & FD_CLOEXEC) && mode >= 0 &&
+        (mode & O_ACCMODE) == O_RDONLY && fstat(descriptor, &info) == 0 &&
+        (S_ISFIFO(info.st_mode) || S_ISSOCK(info.st_mode)) &&
+        poll(&input, 1, 0) == 0;
+    return ok;
+}
+
+/* No output child is launched until its ledger row, held independent build
+ * receipt, exact command and cancellation/deadline boundary are checked.
+ * The worker retains whole-job process-group/cgroup cleanup responsibility. */
+bool bq_retirement_oracle_produce_next(BqRetirementOracleLedger* ledger,
+    int reference_binary, int independent_build_receipt,
+    BqRetirementProcessCommand const* command, BqRetirementArtifactLocation output,
+    int cancellation_fd, uint64_t absolute_deadline_ns)
+{
+    BqRetirementOracleReference const* reference = ledger && !ledger->failed &&
+        !ledger->finished && ledger->done < ledger->count ? ledger->references + ledger->done : NULL;
+    uint64_t now = 0;
+    char binary_sha256[65] = {0}, receipt_sha256[65] = {0}, command_sha256[65] = {0};
+    char executable[64] = {0};
+    struct stat receipt = {0};
+    bool ok = reference && command && output.name &&
+        bq_retirement_oracle_name(output.name) &&
+        !strcmp(output.name, reference->output_name) &&
+        bq_retirement_oracle_cancellation(cancellation_fd) &&
+        bq_retirement_oracle_clock(&now) && absolute_deadline_ns > now &&
+        absolute_deadline_ns - now <= BQ_RETIREMENT_ORACLE_MAX_DEADLINE_NS &&
+        snprintf(executable, sizeof(executable), "/proc/self/fd/%d", reference_binary) > 0 &&
+        command->arguments && command->argument_count && command->arguments[0] &&
+        !strcmp(command->arguments[0], executable) &&
+        tp_retirement_command_fields_hash(command->arguments, command->argument_count,
+            command->directory, command->environment, command->environment_count,
+            command_sha256) && !strcmp(command_sha256, reference->command_sha256) &&
+        bq_retirement_oracle_file_hash(reference_binary,
+            BQ_RETIREMENT_ORACLE_BINARY_CAP, true, binary_sha256) &&
+        !strcmp(binary_sha256, reference->binary_sha256) &&
+        fstat(independent_build_receipt, &receipt) == 0 && receipt.st_size > 0 &&
+        bq_retirement_oracle_file_hash(independent_build_receipt,
+            BQ_RETIREMENT_ORACLE_RECEIPT_CAP, false, receipt_sha256) &&
+        !strcmp(receipt_sha256, reference->build_receipt_sha256);
+    BqRetirementRuntimeStart start = {0};
+    int frozen = -1;
+    if (ok) ok = bq_retirement_runtime_start(output, &start) &&
+                 bq_retirement_oracle_cancellation(cancellation_fd) &&
+                 bq_retirement_oracle_clock(&now) && now < absolute_deadline_ns &&
+                 bq_retirement_runtime_launch(&start, command);
+    int status = 0;
+    while (ok && !status)
+    {
+        status = bq_retirement_runtime_poll(&start);
+        ok = status >= 0 && bq_retirement_oracle_clock(&now) &&
+             now < absolute_deadline_ns && bq_retirement_oracle_cancellation(cancellation_fd);
+        if (ok && !status)
+        {
+            struct pollfd input = {.fd = cancellation_fd, .events = POLLIN};
+            int waited = poll(&input, 1, 10);
+            ok = waited == 0 || (waited < 0 && errno == EINTR);
+        }
+    }
+    if (ok) ok = status == 1 && bq_retirement_runtime_finish(&start, &frozen) &&
+                 bq_retirement_oracle_observe(ledger, reference_binary, command, &start, frozen);
+    if (!ok && start.state == BQ_RETIREMENT_RUNTIME_RUNNING && start.process > 0)
+    {
+        pid_t child = start.process;
+        int waited = 0;
+        kill(child, SIGKILL);
+        while (waitpid(child, &waited, 0) < 0 && errno == EINTR) {}
+        start.process = 0;
+        start.state = BQ_RETIREMENT_RUNTIME_FAILED;
+    }
+    if (frozen >= 0 && close(frozen) != 0) ok = false;
+    bq_retirement_runtime_abort(&start);
     if (ledger && !ok) ledger->failed = 1;
     return ok;
 }
