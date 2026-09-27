@@ -34,6 +34,13 @@ MAX_OVERLAP = 16 * 1024 * 1024
 MAX_INSTANCES = 128
 MAX_DIAG_BYTES = 512 * 1024
 MAX_DIAG_LINE = 1200
+TEMPLATE_METADATA_UNIT = "buster-bench-systemd-broker@internal.service"
+TEMPLATE_METADATA_PATH = ("/org/freedesktop/systemd1/unit/"
+                          "buster_2dbench_2dsystemd_2dbroker_40internal_2eservice")
+TEMPLATE_METADATA_FIELDS = frozenset((
+    "boot_id", "boot_id_raw", "unit", "object_path", "sender", "member",
+    "interface", "path", "signature", "bus_dispatch_ordinal", "monotonic_ns"))
+JOURNAL_UNIT_FIELDS = ("UNIT", "_SYSTEMD_UNIT", "OBJECT_SYSTEMD_UNIT", "COREDUMP_UNIT")
 DATA_FIELDS = ("stat", "status", "mountinfo", "cgroup", "exe", "socket")
 DATA_LIMITS = {"stat": 4096, "status": 16384, "mountinfo": 131072,
                "cgroup": 4096, "exe": 767, "socket": 255}
@@ -1276,9 +1283,58 @@ def _retained_terminal_shape(row: dict[str, Any], summary: dict[str, Any],
     return True
 
 
+def _validate_template_metadata(ready: dict[str, Any], events: list[dict[str, Any]],
+                                summary: dict[str, Any]) -> None:
+    """Admit only the frozen pre-peer pair; journal exclusion is also mandatory."""
+    rows = summary.get("template_metadata_events", [])
+    require(isinstance(rows, list) and len(rows) in (0, 2),
+            "template metadata must be absent or one complete pair")
+    if rows:
+        require(summary.get("event_stream_complete") is True and
+                summary.get("event_loss_detected") is False and
+                summary.get("global_incomplete_reasons") == [] and
+                summary.get("stop_seen") is True,
+                "template metadata lacks a complete continuous observer stream")
+        ready_ns, ended_ns = ready.get("ready_monotonic_ns"), summary.get("ended_monotonic_ns")
+        dispatches = summary.get("bus_dispatch_count")
+        require(type(ready_ns) is int and ready_ns > 0 and
+                type(ended_ns) is int and ended_ns >= ready_ns and
+                type(dispatches) is int and 2 <= dispatches <= 4096,
+                "template metadata lacks bounded observer clock/dispatch counters")
+        first_new_ns = None
+        for event in events:
+            if event.get("event") == "UnitNew":
+                parse_broker_unit(event.get("unit"), "first canonical broker event")
+                first_new_ns = event.get("monotonic_ns")
+                break
+        require(type(first_new_ns) is int and ready_ns < first_new_ns <= ended_ns,
+                "template metadata lacks a subsequent canonical broker UnitNew")
+        last_ns, last_ordinal = ready_ns - 1, 0
+        for row, member in zip(rows, ("UnitNew", "UnitRemoved")):
+            require(isinstance(row, dict) and set(row) == TEMPLATE_METADATA_FIELDS,
+                    "template metadata has unknown or missing fields")
+            require(row["boot_id"] == ready.get("boot_id") and
+                    row["boot_id_raw"] == ready.get("boot_id_raw") and
+                    boot_uuid(row["boot_id_raw"], "template metadata boot") == row["boot_id"] and
+                    row["unit"] == TEMPLATE_METADATA_UNIT and
+                    row["object_path"] == TEMPLATE_METADATA_PATH and
+                    row["sender"] == ready.get("manager_sender") and
+                    row["member"] == member and
+                    row["interface"] == "org.freedesktop.systemd1.Manager" and
+                    row["path"] == "/org/freedesktop/systemd1" and row["signature"] == "so",
+                    "template metadata identity/header/order mismatch")
+            ns, ordinal = row["monotonic_ns"], row["bus_dispatch_ordinal"]
+            require(type(ns) is int and ready_ns <= ns <= ended_ns and
+                    last_ns < ns < first_new_ns and
+                    type(ordinal) is int and last_ordinal < ordinal <= dispatches,
+                    "template metadata clock or dispatch order is invalid")
+            last_ns, last_ordinal = ns, ordinal
+
+
 def _validate_event_rows(ready: dict[str, Any], events: list[dict[str, Any]],
                          summary: dict[str, Any]) -> tuple[dict[tuple[str, str, str, int], dict[str, Any]],
                                                           list[dict[str, Any]]]:
+    _validate_template_metadata(ready, events, summary)
     ready_ns = ready["ready_monotonic_ns"]
     global_reasons = summary.get("global_incomplete_reasons")
     require(isinstance(global_reasons, list) and
@@ -1693,6 +1749,15 @@ def _validate_journal_capture(raw: bytes, expected: dict[str, Any]) -> list[dict
     records = parse_jsonl(raw, "journal JSONL")
     require(len(records) == capture["records"],
             "journal capture record count differs from expectation")
+    # Inspect every identifying field before the manager/diagnostic collectors
+    # filter records. Absence cannot be established from a binary/array value.
+    for record in records:
+        for field in JOURNAL_UNIT_FIELDS:
+            if field in record:
+                require(isinstance(record[field], str),
+                        f"journal {field} is not a scalar unit name")
+                require(record[field] != TEMPLATE_METADATA_UNIT,
+                        f"journal {field} identifies internal template activity")
     return records
 
 
@@ -2096,6 +2161,9 @@ def main() -> int:
         try:
             observer_fd = open_absolute_directory(args.observer_dir)
             ready, events, summary = _observer_documents(observer_fd, expected)
+            if summary.get("template_metadata_events"):
+                require(result["journal_capture_complete"] and records is not None,
+                        "template metadata lacks a complete original broker journal")
             unit_rows, snapshots = _validate_event_rows(ready, events, summary)
             result["observer_capture_complete"] = True
         except (EvidenceError, OSError, ValueError) as exc:
@@ -2234,6 +2302,77 @@ def self_test() -> int:
     expected_bad_uid = json.loads(json.dumps(expected))
     expected_bad_uid["profile"]["client_uids"] = [0, 65000]
     rejects(parse_expected, json.dumps(expected_bad_uid).encode())
+
+    # The metadata pair cannot hide execution, dropped events, or unbounded
+    # observations. These fixtures exercise the production shape and raw
+    # journal adapters; full CLI producer/consumer fixtures cover their join.
+    metadata_ready = {"boot_id": expected["boot_id"], "boot_id_raw": boot_raw,
+                      "manager_sender": ":1.0", "ready_monotonic_ns": 100}
+    metadata_events = [{"event": "UnitNew", "monotonic_ns": 400,
+                        "unit": "buster-bench-systemd-broker@0-789-65000.service"}]
+    pair = [{"boot_id": expected["boot_id"], "boot_id_raw": boot_raw,
+             "unit": TEMPLATE_METADATA_UNIT, "object_path": TEMPLATE_METADATA_PATH,
+             "sender": ":1.0", "member": member,
+             "interface": "org.freedesktop.systemd1.Manager",
+             "path": "/org/freedesktop/systemd1", "signature": "so",
+             "bus_dispatch_ordinal": ordinal, "monotonic_ns": ns}
+            for member, ordinal, ns in (("UnitNew", 1, 200), ("UnitRemoved", 2, 300))]
+    metadata_summary = {"template_metadata_events": pair, "bus_dispatch_count": 3,
+                        "ended_monotonic_ns": 500, "stop_seen": True,
+                        "event_stream_complete": True, "event_loss_detected": False,
+                        "global_incomplete_reasons": []}
+    _validate_template_metadata(metadata_ready, metadata_events, metadata_summary)
+    _validate_template_metadata(metadata_ready, metadata_events, {})
+    _validate_template_metadata(metadata_ready, metadata_events, {"template_metadata_events": []})
+    checks += 3
+    for invalid_pair in (None, {}, pair[:1], pair + pair, list(reversed(pair))):
+        rejects(_validate_template_metadata, metadata_ready, metadata_events,
+                {**metadata_summary, "template_metadata_events": invalid_pair})
+    for key, value in (("boot_id", "b" * 32), ("boot_id_raw", "bad-uuid"),
+                       ("unit", TEMPLATE_METADATA_UNIT + "x"), ("object_path", "/unrelated"),
+                       ("sender", ":1.2"), ("member", "PropertiesChanged"),
+                       ("interface", "org.freedesktop.DBus.Properties"), ("path", "/wrong"),
+                       ("signature", "s"), ("event", "UnitNew"),
+                       ("bus_dispatch_ordinal", True), ("bus_dispatch_ordinal", 0),
+                       ("bus_dispatch_ordinal", 3), ("bus_dispatch_ordinal", 4097),
+                       ("monotonic_ns", True), ("monotonic_ns", 0),
+                       ("monotonic_ns", 99), ("monotonic_ns", 300),
+                       ("monotonic_ns", 400), ("monotonic_ns", 501)):
+        changed = json.loads(json.dumps(metadata_summary))
+        changed["template_metadata_events"][0][key] = value
+        rejects(_validate_template_metadata, metadata_ready, metadata_events, changed)
+    for key in TEMPLATE_METADATA_FIELDS:
+        changed = json.loads(json.dumps(metadata_summary))
+        del changed["template_metadata_events"][1][key]
+        rejects(_validate_template_metadata, metadata_ready, metadata_events, changed)
+    for key, value in (("event_stream_complete", False), ("event_loss_detected", True),
+                       ("global_incomplete_reasons", ["missing_event"]), ("stop_seen", False),
+                       ("bus_dispatch_count", 1), ("bus_dispatch_count", 4097),
+                       ("bus_dispatch_count", True), ("ended_monotonic_ns", 299)):
+        rejects(_validate_template_metadata, metadata_ready, metadata_events,
+                {**metadata_summary, key: value})
+    rejects(_validate_template_metadata, metadata_ready, [], metadata_summary)
+    rejects(_validate_template_metadata, metadata_ready,
+            [{**metadata_events[0], "unit": TEMPLATE_METADATA_UNIT}], metadata_summary)
+    rejects(_validate_template_metadata, metadata_ready,
+            [{**metadata_events[0], "monotonic_ns": 300}], metadata_summary)
+    def journal_fixture(records: list[dict[str, Any]]) -> tuple[bytes, dict[str, Any]]:
+        raw = b"".join(json.dumps(record).encode() + b"\n" for record in records)
+        return raw, {"journal_capture": {"bytes": len(raw), "records": len(records),
+                                          "sha256": hashlib.sha256(raw).hexdigest()}}
+    canonical_record = {"UNIT": metadata_events[0]["unit"], "MESSAGE": "synthetic fixture"}
+    journal_raw, journal_expected = journal_fixture([canonical_record])
+    require(_validate_journal_capture(journal_raw, journal_expected) == [canonical_record],
+            "canonical journal fixture failed")
+    checks += 1
+    for field in JOURNAL_UNIT_FIELDS:
+        for value in (TEMPLATE_METADATA_UNIT, [TEMPLATE_METADATA_UNIT], None, 1, {},
+                      list(TEMPLATE_METADATA_UNIT.encode())):
+            raw, expectation = journal_fixture([canonical_record, {field: value}])
+            rejects(_validate_journal_capture, raw, expectation)
+    rejects(_validate_journal_capture, journal_raw + b" ", journal_expected)
+    rejects(_validate_journal_capture, journal_raw,
+            {"journal_capture": {**journal_expected["journal_capture"], "records": 2}})
 
     # Two retained full witnesses must both agree; a valid first one cannot
     # erase a later contradictory socket or security observation.
