@@ -346,8 +346,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_work_ledger(UnitTestArgu
         delta[counter] = after.values[counter] - before.values[counter];
     }
     BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_ROOTS] != 0);
-    BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_CACHE_HITS] + delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_UNCACHED] ==
-                               delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_ROOTS]);
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_CACHE_HITS] + delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_UNCACHED] +
+                               delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_LITERAL_ANSWERS] == delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_ROOTS]);
     BUSTER_TEST(arguments, delta[WORK_LEDGER_SNAPSHOT_QUERY_CHECKPOINTS] == 2 * delta[WORK_LEDGER_REDERIVE_TYPE_QUERY_UNCACHED]);
     BUSTER_TEST(arguments, delta[WORK_LEDGER_SNAPSHOT_FRAME_PUSHES] != 0 &&
                                delta[WORK_LEDGER_SNAPSHOT_FRAME_BYTES] % delta[WORK_LEDGER_SNAPSHOT_FRAME_PUSHES] == 0);
