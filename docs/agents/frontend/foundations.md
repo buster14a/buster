@@ -770,6 +770,20 @@ enumerators defer to typed semantic evaluation instead of replacing names with
 untyped decimal spellings. Full-width runtime constants use ordinary canonical
 shift/or operations; the one-immediate integer-constant contract is unchanged.
 
+A selection or iteration statement is a block (C17 6.8.4p3, 6.8.5p5). When an
+`if`, `switch` or `while` controlling expression defines a tag, as in
+`if (sizeof(enum { Q = 8 })) v = Q;`, `c_parse_bind_block_statements` opens a
+statement scope. That scope spans the rest of the expression and every
+substatement, including the else branch and the switch body, and ends with the
+statement. A `for` header uses its loop scope. The walk registers each tag
+defined directly in the header when it reaches the definition, so an earlier
+use still binds the outer name. `c_parse_publish_enum_members` then publishes
+an enum's constants, the same helper local declarations use. The walk steps
+over the enum's body; it still walks a struct or union body so the names in its
+member bounds keep their bindings. A header that defines no tag opens no scope.
+`c_test_controlling_expression_scope` and
+`compiler_driver_test_scoped_constant_execution` cover this (#1304).
+
 `c_test_enumerator_types` pins both contracts across Linux x86-64/AArch64 and
 Windows x86-64, and validates canonical IR in both frontend SSA forms.
 `c_test_fixed_and_wide_enumerator_types` covers narrow fixed bases, preserved

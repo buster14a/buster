@@ -2136,6 +2136,123 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_hexadecimal_output(
     return result;
 }
 
+// Runtime values of enumeration constants declared in selection and iteration
+// controlling expressions, in every allocator. The expected text is what
+// Clang 18 and GCC 13 print for the same sources with -std=c17
+// -pedantic-errors. The frontend half is c_test_controlling_expression_scope;
+// tools/scope_oracle found it (#1304).
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_scoped_constant_execution(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    String8 input = buster_test_temporary_path(arena, S8("buster-scoped-constant"), S8(".c"));
+#if BUSTER_WINDOWS
+    String8 output = buster_test_temporary_path(arena, S8("buster-scoped-constant"), S8(".exe"));
+#else
+    String8 output = buster_test_temporary_path(arena, S8("buster-scoped-constant"), S8(""));
+#endif
+    u64 attempt_position = arena->position;
+#define BUSTER_SCOPED_CONSTANT_ALLOCATOR(name, mode) S8("-fregister-allocator=" name),
+    String8 allocators[] = {BUSTER_CODEGEN_ALLOCATORS(BUSTER_SCOPED_CONSTANT_ALLOCATOR)};
+#undef BUSTER_SCOPED_CONSTANT_ALLOCATOR
+    String8 sources[] = {
+        S8("#include <stdio.h>\n"
+           "enum { Q = 1 };\n"
+           "int main(void)\n"
+           "{\n"
+           "    int if_value = 0;\n"
+           "    int switch_value = 0;\n"
+           "    if (sizeof(enum { Q = 8 }))\n"
+           "        if_value = Q;\n"
+           "    switch (sizeof(enum { Q = 3 }))\n"
+           "    {\n"
+           "    default:\n"
+           "        switch_value = Q;\n"
+           "    }\n"
+           "    printf(\"if_substatement=%d switch_body=%d after=%d\\n\", if_value, switch_value, Q);\n"
+           "    return 0;\n"
+           "}\n"),
+        S8("#include <stdio.h>\n"
+           "enum { Q = 1 };\n"
+           "int main(void)\n"
+           "{\n"
+           "    int a = 0, b = 0, c = 0, d = 0, e = 0, f = 0;\n"
+           "    if (!sizeof(enum { Q = 8 }))\n"
+           "        a = Q;\n"
+           "    else\n"
+           "        b = Q;\n"
+           "    if (sizeof(enum { Q = 5, P = Q + 1 }) && Q == 5)\n"
+           "        c = P;\n"
+           "    else if (sizeof(enum { Q = Q * 3 }))\n"
+           "        c = Q;\n"
+           "    while (d < 1 && sizeof(enum { Q = 4 }))\n"
+           "        d += Q;\n"
+           "    if (sizeof(enum { Q = Q + 6 }))\n"
+           "    {\n"
+           "        if (sizeof(enum { Q = Q + 10 }))\n"
+           "            e = Q;\n"
+           "    }\n"
+           "    switch (sizeof(enum { W = 2 }))\n"
+           "    {\n"
+           "    case sizeof(char):\n"
+           "        f = -1;\n"
+           "        break;\n"
+           "    default:\n"
+           "        f = W;\n"
+           "    }\n"
+           "    printf(\"a=%d b=%d c=%d d=%d e=%d f=%d after=%d\\n\", a, b, c, d, e, f, Q);\n"
+           "    return 0;\n"
+           "}\n"),
+    };
+    String8 expected[] = {
+        S8("if_substatement=8 switch_body=3 after=1\n"),
+        S8("a=0 b=8 c=6 d=4 e=17 f=2 after=1\n"),
+    };
+    for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(allocators); mode += 1)
+        {
+            String8 command[] = {allocators[mode], S8("-o"), output, input};
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(sources[source]))))
+            {
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                if (BUSTER_REQUIRE(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run_arguments[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                    (ProcessSpawnOptions){
+                                                                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                                        .use_process_environment = 1,
+                                                                        .search_path = 1,
+                                                                    });
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult waited = os_process_wait_deadline(arena, child, 30000000);
+                            String8 observed = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]);
+                            BUSTER_TEST(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS);
+                            BUSTER_TEST_RAW(arguments, string_equal(observed, expected[source]), observed);
+                        }
+                        BUSTER_TEST(arguments, os_file_delete(output));
+                    }
+                }
+            }
+            arena_set_position(arena, attempt_position);
+        }
+    }
+    BUSTER_TEST(arguments, os_file_delete(input));
+    arena_set_position(arena, position);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // An aligned C global must survive the frontend/codegen/object boundary into
 // the COFF section flags. An unrepresentable request must fail before the
 // production driver publishes over an existing output file.
@@ -9112,6 +9229,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_specifiers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unknown_type_names);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_hexadecimal_output);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_scoped_constant_execution);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_coff_section_alignment);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);

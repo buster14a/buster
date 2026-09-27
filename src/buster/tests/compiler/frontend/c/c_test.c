@@ -2950,6 +2950,81 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tag_scope_typedef_identity(UnitTestArg
     return result;
 }
 
+// Each source is valid C17 that Clang 18 and GCC 13 accept with
+// -std=c17 -pedantic-errors; every assertion holds there. The sources are
+// analyzed one at a time so each failing binding is reported on its own.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_sources_accepted(UnitTestArguments* arguments, String8 const* sources, u32 source_count,
+                                                                    String8 source_path)
+{
+    UnitTestResult result = {0};
+    for (u32 index = 0; index < source_count; index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens;
+        CParseResult parse;
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, sources[index], source_path, target_native, &tokens, &parse);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// C17 6.8.4p3 and 6.8.5p5: a selection or iteration statement is a block whose
+// scope includes its controlling expression, so the substatements see the
+// tags and enumeration constants declared there, and nothing after the
+// statement does. Found by tools/scope_oracle (#1304).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_controlling_expression_scope(UnitTestArguments* arguments)
+{
+    String8 sources[] = {
+        S8("enum { Q = 1 }; int main(void) { int v = 0; if (sizeof(enum { Q = 8 })) { "
+           "_Static_assert(Q == 8, \"if substatement sees the controlling-expression Q\"); v = Q; } return v - 8; }"),
+        S8("enum { Q = 1 }; int main(void) { int v = 0; switch (sizeof(enum { Q = 3 })) { default: { "
+           "_Static_assert(Q == 3, \"switch body sees the controlling-expression Q\"); v = Q; } } return v - 3; }"),
+        S8("int main(void) { int v = 0; if (sizeof(enum { Q = 8 })) v = Q; return v - 8; }"),
+        S8("enum { Q = 1 }; int main(void) { int v = 0; if (!sizeof(enum { Q = 8 })) v = Q; else { "
+           "_Static_assert(Q == 8, \"else branch\"); v = Q; } _Static_assert(Q == 1, \"the outer Q after the statement\"); return v - 8; }"),
+        S8("enum { Q = 1 }; int main(void) { int v = 0; if (Q == 1 && sizeof(enum { Q = Q + 4, P = Q * 2 }) && Q == 5) { "
+           "_Static_assert(Q == 5 && P == 10, \"enumerator scopes begin after each enumerator\"); v = P; } return v - 10; }"),
+        S8("int main(void) { int v = 0; while (!v && sizeof(enum { W = 3 })) { _Static_assert(W == 3, \"while body\"); v = W; } "
+           "do v += 1; while (v < 5 && sizeof(enum { D = 1 }) && D); "
+           "for (int i = 0; i < 1 && sizeof(enum { F = 2 }); i += 1) v += F; return v - 7; }"),
+        S8("int main(void) { int v = 0; if (sizeof(struct T { int a; char b[3]; })) { struct T t = {5, {0}}; "
+           "_Static_assert(sizeof(t.b) == 3, \"the tag is in scope\"); v = t.a; } return v - 5; }"),
+        S8("enum { Q = 1 }; int main(void) { int v = 0; if (!sizeof(enum { Q = 2 })) v = Q; else if (sizeof(enum { Q = Q * 3 })) { "
+           "_Static_assert(Q == 6, \"else-if header sees the outer statement's Q\"); v = Q; } return v - 6; }"),
+    };
+    UnitTestResult result = c_test_constant_sources_accepted(arguments, sources, BUSTER_ARRAY_LENGTH(sources), S8("controlling-expression-scope.c"));
+    // The scope ends with the statement, and an enumerator the controlling
+    // expression cannot evaluate is diagnosed once, as itself.
+    String8 rejected[] = {
+        S8("int main(void) { if (sizeof(enum { Q = 8 })) ; return Q; }"),
+        S8("int main(void) { int x = 1; if (sizeof(enum { A = x })) return 1; return 0; }"),
+    };
+    String8 messages[] = {
+        S8("use of undeclared identifier 'Q'"),
+        S8("enumerator 'A' is not an integer constant expression"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, rejected[index],
+                                                (CPreprocessOptions){
+                                                    .target = target_native,
+                                                    .data_layout = target_data_layout(target_native),
+                                                });
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, parse.diagnostic_count == 1))
+        {
+            BUSTER_TEST_RAW(arguments, string_equal(parse.diagnostics[0].message, messages[index]), parse.diagnostics[0].message);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_frontend(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23291,6 +23366,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_growth);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_tag_scope_typedef_identity);
+    BUSTER_TEST_FIXTURE(arguments, c_test_controlling_expression_scope);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
 
