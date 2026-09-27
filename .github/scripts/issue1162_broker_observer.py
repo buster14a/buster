@@ -1351,6 +1351,46 @@ class BrokerObserver:
             if message is not None:
                 self.handle_message(message)
 
+    def _same_event_full_witness(self, lifecycle: Lifecycle, seq: int) -> bool:
+        # The first property event queues both a generic show and, for a
+        # positive MainPID, a prioritized show. Once the latter fully proves
+        # that same event, launching the older queued generic show adds no
+        # identity coverage and can race UnitRemoved. A different event or
+        # partial witness still gets its own query and fail-closed result.
+        if (lifecycle.removed or lifecycle.manager_incomplete_reasons or
+                lifecycle.process_incomplete_reasons):
+            return False
+        for snapshot in lifecycle.snapshots:
+            identity = Lifecycle.positive_pid_identity(snapshot)
+            if (snapshot.get("trigger_event_seq") == seq and
+                    identity is not None and
+                    snapshot.get("trigger") == f"mainpid:{identity[5]}" and
+                    snapshot.get("complete") is True and
+                    snapshot.get("manager_properties_complete") is True and
+                    snapshot.get("process_capture_complete") is True and
+                    snapshot.get("incomplete_reasons") == [] and
+                    type(snapshot.get("systemctl_exit")) is int and
+                    snapshot["systemctl_exit"] == 0 and
+                    snapshot.get("systemctl_timed_out") is False and
+                    snapshot.get("systemctl_cancelled") is None and
+                    isinstance(snapshot.get("raw_show"), dict) and
+                    isinstance(snapshot.get("raw_stderr"), dict) and
+                    identity[:4] == (self.boot_id, lifecycle.unit,
+                                     lifecycle.object_path, lifecycle.generation) and
+                    (lifecycle.invocation_id, lifecycle.main_pid, lifecycle.cgroup,
+                     lifecycle.start_ticks) == (identity[4], identity[5], identity[7], identity[8]) and
+                    snapshot.get("exe") == lifecycle.exe == BROKER_EXECUTABLE and
+                    snapshot.get("exe_sha256") == lifecycle.exe_sha256 and
+                    isinstance(lifecycle.exe_sha256, str) and
+                    re.fullmatch(r"[0-9a-f]{64}", lifecycle.exe_sha256) is not None and
+                    isinstance(snapshot.get("socket_fd0"), dict) and
+                    snapshot["socket_fd0"].get("stable") is True and
+                    identity[5] in lifecycle.main_pid_values and
+                    not any(pid > 0 and pid != identity[5]
+                            for pid in lifecycle.main_pid_values)):
+                return True
+        return False
+
     def _start_next_query(self) -> None:
         if self.current_query is not None:
             return
@@ -1363,6 +1403,8 @@ class BrokerObserver:
                 break
         while self.queue:
             lifecycle, trigger, seq = self.queue.popleft()
+            if trigger == "properties-first" and self._same_event_full_witness(lifecycle, seq):
+                continue
             snapshot: dict[str, object] = {"boot_id": self.boot_id,
                 "boot_id_raw": self.boot_id_raw, "unit": lifecycle.unit,
                 "object_path": lifecycle.object_path, "generation": lifecycle.generation,
@@ -1648,13 +1690,14 @@ class BrokerObserver:
         return BROKER_EXECUTABLE
 
     def _recheck_known_preexec(self, pid: int, snapshot: dict[str, object],
-                               label: str) -> bool:
+                               label: str, allow_broker_transition: bool = False) -> bool:
         try:
             current_exe = self._read_stable_process_exe(pid, int(snapshot["start_ticks"]), label)
         except (OSError, ObserverError, ValueError, RuntimeError):
             return False
-        return current_exe == snapshot.get("initial_exe_observed") and \
-               current_exe in PREEXEC_EXECUTABLES
+        return ((current_exe == snapshot.get("initial_exe_observed") and
+                 current_exe in PREEXEC_EXECUTABLES) or
+                (allow_broker_transition and current_exe == BROKER_EXECUTABLE))
 
     def _capture_failure_state(self, exc: Exception, snapshot: dict[str, object],
                                pid: int, capture_number: int, label: str | None = None,
@@ -1666,14 +1709,18 @@ class BrokerObserver:
         # hash, socket FD, or process identity is a hard contradiction.
         label = label or f"broker-{capture_number:06d}"
         expected_preexec = f"process executable path mismatch for {label}: "
-        preexec_error = (str(exc) == expected_preexec + str(snapshot.get("initial_exe_observed")) or
-                         str(exc) == f"process cgroup mismatch for {label}")
+        executable_error = str(exc) == expected_preexec + str(snapshot.get("initial_exe_observed"))
+        preexec_error = executable_error or str(exc) == f"process cgroup mismatch for {label}"
         if (type(exc).__name__ == "ProbeError" and
                 (signal_phase or (snapshot.get("active_state") == "activating" and
                                   snapshot.get("substate") == "start")) and
                 isinstance(snapshot.get("start_ticks"), int) and
                 snapshot.get("initial_exe_observed") in PREEXEC_EXECUTABLES and
-                preexec_error and self._recheck_known_preexec(pid, snapshot, label)):
+                preexec_error and self._recheck_known_preexec(pid, snapshot, label,
+                    allow_broker_transition=signal_phase and executable_error)):
+            # A signal can begin in systemd-executor and finish after its exec
+            # into the broker. The stable same-ticks reread is preliminary;
+            # only a later exact full manager/proc/FD0 witness completes it.
             return "known_preexec_executable_transition"
         if type(exc).__name__ == "ProbeError" and str(exc) == \
                 "submit-relative live-probe deadline exhausted":
@@ -2891,6 +2938,83 @@ def _self_test() -> None:
         assert case_lifecycle.as_json(boot, raw)["process_complete"] == supersedable
         assert (snap["process_capture_state"] in SUPERSEDABLE_CAPTURE_STATES) == supersedable
         checks += 1
+    # The signal probe can start in executor and finish after the same PID
+    # execs the broker. Its failed capture remains preliminary; only a later
+    # complete, exact manager/proc/FD0 snapshot can close the generation.
+    class RaceProbe:
+        @staticmethod
+        def _bounded_file(path: Path, _maximum: int, _deadline: float,
+                          reserve: float = 0.0) -> bytes:
+            assert str(path) == "/proc/741/cgroup" and reserve == 0.0
+            return b"0::/system.slice/broker.instance\n"
+
+    race_reader = object.__new__(BrokerObserver)
+    race_reader.writer = FixtureWriter()
+    race_reader.deadline = time.monotonic() + 5.0
+    race_reader.stop_seen = False
+    race_reader.provisional_number = 0
+    race_lifecycle = Lifecycle(lifecycle.unit, lifecycle.object_path, 4, 1,
+                               time.monotonic_ns() - 1_000_000)
+    race_lifecycle.main_pid_values = {741}
+    def executor_then_broker(_row: Lifecycle, record: dict[str, object], pid: int,
+                             _number: int, label: str, bind_lifecycle: bool) -> None:
+        assert pid == 741 and label == "signal-000001" and not bind_lifecycle
+        record["start_ticks"] = 5812
+        record["initial_exe_observed"] = executor
+        raise ProbeError(f"process executable path mismatch for {label}: {executor}")
+
+    race_reader._capture_process = executor_then_broker
+    race_reader._read_stable_process_exe = lambda pid, ticks, label: (
+        BROKER_EXECUTABLE if (pid, ticks, label) == (741, 5812, "signal-000001")
+        else "/usr/local/bin/other")
+    saved_race_probe = sys.modules.get("issue1162_live_probe")
+    try:
+        sys.modules["issue1162_live_probe"] = RaceProbe()
+        race_reader._capture_positive_signal(race_lifecycle, 741, 2, time.monotonic_ns())
+    finally:
+        if saved_race_probe is None:
+            sys.modules.pop("issue1162_live_probe", None)
+        else:
+            sys.modules["issue1162_live_probe"] = saved_race_probe
+    race_capture = race_lifecycle.provisional_captures[0]
+    assert race_capture["capture_state"] == "known_preexec_executable_transition"
+    assert not race_capture["capture_complete"] and race_capture["bound_snapshot_index"] is None
+    assert race_capture["start_ticks"] == 5812 and not race_lifecycle.process_incomplete_reasons
+    checks += 1
+    race_lifecycle.snapshots = [{**partial, "generation": 4},
+                                {**witness, "generation": 4}]
+    race_lifecycle.invocation_id = "b" * 32
+    race_lifecycle.main_pid = 741
+    race_lifecycle.start_ticks = 5812
+    race_lifecycle.cgroup = "/system.slice/broker.instance"
+    race_lifecycle.process_started = True
+    race_lifecycle.removed = True
+    race_lifecycle.removed_event_seq = 3
+    race_lifecycle.removed_monotonic_ns = time.monotonic_ns()
+    assert race_lifecycle.as_json(boot, raw)["process_complete"]
+    checks += 1
+    for changed in ({"complete": False, "process_capture_complete": False},
+                    {"main_pid": 742}, {"start_ticks": 5813},
+                    {"invocation_id": "c" * 32}):
+        race_lifecycle.snapshots = [{**partial, "generation": 4},
+                                    {**witness, "generation": 4, **changed}]
+        assert not race_lifecycle.as_json(boot, raw)["process_complete"], changed
+        checks += 1
+    race_lifecycle.snapshots = []
+    assert not race_lifecycle.as_json(boot, raw)["process_complete"]
+    checks += 1
+    for failure in (ProbeError("process cgroup mismatch for signal-000001"),
+                    ProbeError("running and installed executable hashes differ for signal-000001")):
+        assert race_reader._capture_failure_state(failure, race_capture, 741, 1,
+            label="signal-000001", signal_phase=True) == "identity_contradiction_or_capture_error"
+        checks += 1
+    race_reader._read_stable_process_exe = lambda *_args: (_ for _ in ()).throw(
+        ObserverError("PID/start ticks changed"))
+    assert race_reader._capture_failure_state(
+        ProbeError(f"process executable path mismatch for signal-000001: {executor}"),
+        race_capture, 741, 1, label="signal-000001", signal_phase=True) == \
+        "identity_contradiction_or_capture_error"
+    checks += 1
     class FixtureProcReader:
         @staticmethod
         def _bounded_file(path: Path, maximum: int, deadline: float,
@@ -3483,6 +3607,112 @@ def _self_test() -> None:
         globals()["systemctl_show_argv"] = original_show_argv
         os.close(terminal_bus_read)
         os.close(terminal_bus_write)
+    # A prioritized positive-PID show can fully account for the same first
+    # property event. The queued generic show must not be launched only to be
+    # canceled by the exact UnitRemoved milliseconds later. Later events and
+    # missing/partial/different identities still require their own evidence.
+    class LifecycleWriter(FixtureEventWriter, FixtureWriter):
+        pass
+
+    def same_event_cycle() -> tuple[BrokerObserver, Lifecycle, dict[str, object]]:
+        observed = BrokerObserver(FixtureMetadataBus([]), LifecycleWriter(),
+                                  boot, raw, time.monotonic() + 5.0, "1", 1)
+        observed.ready_ns = time.monotonic_ns() - 1_000_000
+        observed.bus_dispatch_count = 1
+        observed.handle_message(canonical_new)
+        observed._capture_positive_signal = lambda *_args: None
+        observed.bus_dispatch_count = 2
+        observed.handle_message({"member": "PropertiesChanged",
+            "unit_interface": "org.freedesktop.systemd1.Service", "sender": ":1.4",
+            "path": lifecycle.object_path, "changed_properties": ["MainPID"],
+            "invalidated_properties": [], "main_pids": [741]})
+        observed_row = observed.units[0]
+        started_ns = time.monotonic_ns()
+        full = {**terminal_witness, "generation": 1, "trigger": "mainpid:741",
+            "trigger_event_seq": 2, "started_monotonic_ns": started_ns,
+            "finished_monotonic_ns": time.monotonic_ns(), "incomplete_reasons": [],
+            "exe": BROKER_EXECUTABLE, "exe_sha256": "f" * 64,
+            "socket_fd0": {"stable": True}, "systemctl_exit": 0,
+            "systemctl_timed_out": False, "systemctl_cancelled": None,
+            "raw_show": {}, "raw_stderr": {}}
+        prior_partial = {**full, "trigger": "unit-new", "trigger_event_seq": 1,
+            "finished_monotonic_ns": started_ns - 1, "complete": False,
+            "process_capture_complete": False,
+            "process_capture_state": "known_preexec_executable_transition",
+            "initial_exe_observed": executor, "active_state": "activating",
+            "substate": "start", "socket_fd0": None,
+            "incomplete_reasons": ["process_capture_failed:ProbeError:process executable "
+                                   f"path mismatch for broker-000001: {executor}"]}
+        observed_row.snapshots = [prior_partial, full]
+        observed_row.invocation_id = "b" * 32
+        observed_row.main_pid = 741
+        observed_row.start_ticks = 5812
+        observed_row.cgroup = "/system.slice/broker.instance"
+        observed_row.exe = BROKER_EXECUTABLE
+        observed_row.exe_sha256 = "f" * 64
+        observed_row.process_started = True
+        observed.queue = deque([(observed_row, "properties-first", 2)])
+        observed.snapshot_number = 2
+        return observed, observed_row, full
+
+    redundant, redundant_row, _full = same_event_cycle()
+    assert redundant._same_event_full_witness(redundant_row, 2)
+    redundant._start_next_query()
+    assert redundant.current_query is None and not redundant.queue
+    assert redundant.snapshot_number == 2 and len(redundant_row.snapshots) == 2
+    redundant.bus_dispatch_count = 3
+    redundant.handle_message({**manager_record, "member": "UnitRemoved",
+        "unit": lifecycle.unit, "object_path": lifecycle.object_path})
+    assert redundant_row.removed_event_seq == 3
+    assert redundant_row.as_json(boot, raw)["process_complete"]
+    checks += 1
+    for changed in ("missing", "partial", "generation", "pid", "later-event",
+                    "other-query", "cancelled", "raw-missing", "no-signal", "hard"):
+        later, later_row, full = same_event_cycle()
+        if changed == "missing":
+            later_row.snapshots = []
+        elif changed == "partial":
+            later_row.snapshots = [{**full, "complete": False,
+                                    "process_capture_complete": False}]
+        elif changed == "generation":
+            later_row.snapshots = [{**full, "generation": 2}]
+        elif changed == "pid":
+            later_row.snapshots = [{**full, "main_pid": 742}]
+        elif changed == "later-event":
+            later_row.snapshots = [{**full, "trigger_event_seq": 1}]
+        elif changed == "other-query":
+            later_row.snapshots = [{**full, "trigger": "properties-first"}]
+        elif changed == "cancelled":
+            later_row.snapshots = [{**full, "systemctl_cancelled": "unit_removed_during_snapshot"}]
+        elif changed == "raw-missing":
+            later_row.snapshots = [{**full, "raw_show": None}]
+        elif changed == "no-signal":
+            later_row.main_pid_values.clear()
+        else:
+            later_row.mark_process_incomplete("identity_contradiction")
+        assert not later._same_event_full_witness(later_row, 2), changed
+        checks += 1
+    # The missing-witness case really launches its queued query and records
+    # the cancellation as incomplete, rather than hiding the missing read.
+    missing, missing_row, _full = same_event_cycle()
+    missing_row.snapshots.clear()
+    saved_show_argv = systemctl_show_argv
+    try:
+        globals()["systemctl_show_argv"] = lambda _unit: ["/usr/bin/true"]
+        missing._start_next_query()
+        cancelled_query = missing.current_query
+        assert cancelled_query is not None and len(missing_row.snapshots) == 1
+        missing.bus_dispatch_count = 3
+        missing.handle_message({**manager_record, "member": "UnitRemoved",
+            "unit": lifecycle.unit, "object_path": lifecycle.object_path})
+        assert cancelled_query["cancel_reason"] == "unit_removed_during_snapshot"
+        missing._stop_query(cancelled_query, "unit_removed_during_snapshot")
+        missing._finish_query(cancelled_query)
+        assert not missing_row.as_json(boot, raw)["process_complete"]
+        assert "unit_removed_during_snapshot" in missing_row.manager_incomplete_reasons
+        checks += 1
+    finally:
+        globals()["systemctl_show_argv"] = saved_show_argv
     class FixtureFinalBus:
         def __init__(self, messages: int):
             self.remaining = messages
