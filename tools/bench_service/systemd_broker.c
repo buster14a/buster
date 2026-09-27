@@ -116,6 +116,16 @@ typedef struct BqBrokerPaths
     char throughput_output[512];
 } BqBrokerPaths;
 
+typedef struct BqBrokerAccounts
+{
+    uid_t service_uid;
+    gid_t service_gid;
+    uid_t candidate_uid;
+    gid_t candidate_gid;
+    uid_t runner_uid;
+    gid_t runner_gid;
+} BqBrokerAccounts;
+
 static char const* const bq_broker_stages[] = {
     "", "base-generate", "base-build", "candidate-generate", "candidate-build", "throughput"
 };
@@ -1251,18 +1261,50 @@ static int bq_broker_execute(BqBrokerCommand const* command, int connection, boo
     return result == 126 ? 1 : 0;
 }
 
-static bool bq_broker_groups_valid(gid_t service_gid, gid_t candidate_gid)
+static bool bq_broker_accounts_valid(BqBrokerAccounts const* accounts)
 {
-    gid_t groups[8];
-    int count = getgroups((int)(sizeof(groups) / sizeof(groups[0])), groups);
+    /* Root belongs only to this constrained broker process.  The names sent
+     * to systemd-run must resolve to distinct non-root primary identities. */
+    bool ok = accounts &&
+              accounts->service_uid != (uid_t)-1 && accounts->service_uid != 0 &&
+              accounts->service_gid != (gid_t)-1 && accounts->service_gid != 0 &&
+              accounts->candidate_uid != (uid_t)-1 && accounts->candidate_uid != 0 &&
+              accounts->candidate_gid != (gid_t)-1 && accounts->candidate_gid != 0 &&
+              accounts->runner_uid != (uid_t)-1 && accounts->runner_uid != 0 &&
+              accounts->runner_gid != (gid_t)-1 && accounts->runner_gid != 0 &&
+              accounts->service_gid != accounts->candidate_gid &&
+              accounts->candidate_uid != accounts->service_uid &&
+              accounts->runner_uid != accounts->service_uid &&
+              accounts->runner_uid != accounts->candidate_uid &&
+              accounts->runner_gid != accounts->service_gid &&
+              accounts->runner_gid != accounts->candidate_gid;
+    return ok;
+}
+
+static bool bq_broker_group_set_valid(gid_t const* groups, int count, gid_t service_gid, gid_t candidate_gid)
+{
     bool candidate = false;
-    bool ok = count >= 0;
+    bool ok = groups && count >= 0 && count <= 8;
     for (int index = 0; ok && index < count; index += 1)
     {
         candidate |= groups[index] == candidate_gid;
         ok = groups[index] == 0 || groups[index] == service_gid || groups[index] == candidate_gid;
     }
     return ok && candidate;
+}
+
+static bool bq_broker_groups_valid(gid_t service_gid, gid_t candidate_gid)
+{
+    gid_t groups[8];
+    int count = getgroups((int)(sizeof(groups) / sizeof(groups[0])), groups);
+    bool ok = bq_broker_group_set_valid(groups, count, service_gid, candidate_gid);
+    return ok;
+}
+
+static bool bq_broker_peer_valid(bool known, uid_t peer_uid, uid_t service_uid)
+{
+    bool ok = known && peer_uid == service_uid;
+    return ok;
 }
 
 static int bq_broker_server(void)
@@ -1273,23 +1315,22 @@ static int bq_broker_server(void)
     errno = diagnostic_errno;
     struct ucred peer = {0};
     socklen_t peer_size = sizeof(peer);
+    BqBrokerAccounts accounts = {.service_uid = (uid_t)-1, .service_gid = (gid_t)-1,
+                                 .candidate_uid = (uid_t)-1, .candidate_gid = (gid_t)-1,
+                                 .runner_uid = (uid_t)-1, .runner_gid = (gid_t)-1};
     struct passwd* account = getpwnam("buster-bench");
-    uid_t service_uid = account ? account->pw_uid : (uid_t)-1;
-    gid_t service_gid = account ? account->pw_gid : (gid_t)-1;
+    if (account) { accounts.service_uid = account->pw_uid; accounts.service_gid = account->pw_gid; }
     account = getpwnam("buster-bench-candidate");
-    uid_t candidate_uid = account ? account->pw_uid : (uid_t)-1;
-    gid_t candidate_gid = account ? account->pw_gid : (gid_t)-1;
+    if (account) { accounts.candidate_uid = account->pw_uid; accounts.candidate_gid = account->pw_gid; }
     account = getpwnam("buster-github-runner");
-    uid_t runner_uid = account ? account->pw_uid : (uid_t)-1;
-    bool credentials = geteuid() == 0 && service_uid != (uid_t)-1 && service_uid != 0 &&
-              service_gid != (gid_t)-1 && candidate_gid != (gid_t)-1 && service_gid != candidate_gid &&
-              getegid() == service_gid && bq_broker_groups_valid(service_gid, candidate_gid) &&
-              candidate_uid != (uid_t)-1 && candidate_uid != service_uid &&
-              runner_uid != (uid_t)-1 && runner_uid != service_uid && runner_uid != candidate_uid;
+    if (account) { accounts.runner_uid = account->pw_uid; accounts.runner_gid = account->pw_gid; }
+    bool credentials = geteuid() == 0 && getegid() == accounts.service_gid &&
+                       bq_broker_accounts_valid(&accounts) &&
+                       bq_broker_groups_valid(accounts.service_gid, accounts.candidate_gid);
     bool peer_known = credentials &&
                       getsockopt(STDIN_FILENO, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) == 0 &&
                       peer_size == sizeof(peer);
-    bool ok = peer_known && peer.uid == service_uid;
+    bool ok = bq_broker_peer_valid(peer_known, peer.uid, accounts.service_uid);
     BqBrokerRequest request = {0};
     bool poll_called = ok;
     if (ok)
@@ -1305,7 +1346,7 @@ static int bq_broker_server(void)
                   bq_broker_request_valid(&request);
     ok = parsed;
     bool state_checked = ok;
-    if (ok) ok = bq_broker_state(&request, service_uid, service_gid, candidate_gid);
+    if (ok) ok = bq_broker_state(&request, accounts.service_uid, accounts.service_gid, accounts.candidate_gid);
     bool state_valid = state_checked && ok;
     bool signal_checked = ok && request.operation == BQ_BROKER_SIGNAL;
     if (signal_checked) ok = bq_broker_signal_identity(&request);
@@ -1466,6 +1507,64 @@ static int bq_broker_self_test(void)
     unsigned checks = 0;
     bool ok = true;
 #define BQ_BROKER_CHECK(condition) do { checks += 1; if (!(condition)) ok = false; } while (0)
+    BqBrokerAccounts accounts = {.service_uid = 65000, .service_gid = 65000,
+                                 .candidate_uid = 65001, .candidate_gid = 65001,
+                                 .runner_uid = 65002, .runner_gid = 65002};
+    gid_t permitted_groups[] = {0, 65000, 65001};
+    gid_t foreign_groups[] = {65000, 65001, 65002};
+    BQ_BROKER_CHECK(bq_broker_accounts_valid(&accounts) &&
+                    bq_broker_group_set_valid(permitted_groups, 3, accounts.service_gid, accounts.candidate_gid) &&
+                    bq_broker_peer_valid(true, accounts.service_uid, accounts.service_uid));
+    BQ_BROKER_CHECK(!bq_broker_peer_valid(true, 0, accounts.service_uid) &&
+                    !bq_broker_peer_valid(true, accounts.candidate_uid, accounts.service_uid) &&
+                    !bq_broker_peer_valid(false, accounts.service_uid, accounts.service_uid));
+    BQ_BROKER_CHECK(!bq_broker_group_set_valid(foreign_groups, 3, accounts.service_gid, accounts.candidate_gid) &&
+                    !bq_broker_group_set_valid(permitted_groups, 2, accounts.service_gid, accounts.candidate_gid) &&
+                    !bq_broker_group_set_valid(NULL, -1, accounts.service_gid, accounts.candidate_gid));
+    accounts.service_uid = 0;
+    BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
+    accounts.service_uid = 65000;
+    accounts.service_gid = 0;
+    BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
+    accounts.service_gid = 65000;
+    accounts.candidate_uid = 0;
+    BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
+    accounts.candidate_uid = 65001;
+    accounts.candidate_gid = 0;
+    BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
+    accounts.candidate_gid = 65001;
+    accounts.runner_uid = 0;
+    BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
+    accounts.runner_uid = 65002;
+    accounts.runner_gid = 0;
+    BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
+    accounts.runner_gid = 65002;
+    accounts.candidate_uid = accounts.service_uid;
+    BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
+    accounts.candidate_uid = 65001;
+    accounts.candidate_gid = accounts.service_gid;
+    BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
+    accounts.candidate_gid = 65001;
+    accounts.runner_uid = accounts.service_uid;
+    BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
+    accounts.runner_uid = 65002;
+    accounts.runner_uid = accounts.candidate_uid;
+    BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
+    accounts.runner_uid = 65002;
+    accounts.runner_gid = accounts.candidate_gid;
+    BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
+    accounts.runner_gid = 65002;
+    accounts.runner_gid = accounts.service_gid;
+    BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
+    accounts.runner_gid = 65002;
+    accounts.service_gid = (gid_t)-1;
+    BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
+    accounts.service_gid = 65000;
+    accounts.candidate_uid = (uid_t)-1;
+    BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
+    accounts.candidate_uid = 65001;
+    accounts.runner_gid = (gid_t)-1;
+    BQ_BROKER_CHECK(!bq_broker_accounts_valid(&accounts));
     for (uint32_t stage = 0; stage <= BQ_BROKER_THROUGHPUT_STAGE; stage += 1)
     {
         request.stage = stage;
