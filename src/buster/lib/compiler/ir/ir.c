@@ -4958,7 +4958,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     else if (instruction->opcode == IR_OPCODE_LOCAL)
     {
         IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
-        if (!type || type->kind == IR_TYPE_FUNCTION || instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID ||
+        if (!type || instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID ||
             function->values[instruction->result.value].category != IR_VALUE_PLACE || instruction->canonical_local.value >= function->local_count)
         {
             error = IR_VALIDATION_OPERATION;
