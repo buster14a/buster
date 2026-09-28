@@ -1,10 +1,11 @@
 /* Static first executable for the fixed root broker, prospective #1162 gate.
- * main owns the fail-closed order and same-PID descriptor exec. accounts and
- * identity check the numeric installation authority; privileges, mounts and
- * connection check inherited confinement; evidence binds the pre-exec state.
- * No NSS, request parsing, manager command, privilege transition or path/argv
- * selection is exposed here. Installation and complete evidence reconciliation
- * are separate mandatory authorities; see deploy/SYSTEMD_BROKER.md.
+ * main owns the fail-closed order and same-PID descriptor exec. accounts,
+ * account_sources and identity bind the named local accounts and receipt;
+ * privileges, mounts and connection check inherited confinement; evidence
+ * binds the pre-exec state. No NSS calls, request parsing, manager command,
+ * privilege transition or path/argv selection is exposed here. Installation
+ * and complete evidence reconciliation remain separate mandatory authorities;
+ * see deploy/SYSTEMD_BROKER.md.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -30,13 +31,19 @@
 #include <sys/un.h>
 #include <sys/xattr.h>
 #include <unistd.h>
+#include <buster/lib/hash.h>
 
 #define BQ_ENTRY_BROKER "/usr/local/libexec/buster-bench-systemd-broker"
 #define BQ_ENTRY_ACCOUNTS "/etc/buster-bench/systemd-broker-accounts.identity"
+#define BQ_ENTRY_PASSWD "/etc/passwd"
+#define BQ_ENTRY_GROUP "/etc/group"
+#define BQ_ENTRY_NSSWITCH "/etc/nsswitch.conf"
 #define BQ_ENTRY_SOCKET "/run/buster-bench-systemd-broker/control.sock"
 #define BQ_ENTRY_GROUP_LIMIT 32
 #define BQ_ENTRY_PATH_LIMIT 512
 #define BQ_ENTRY_MOUNT_LIMIT (128 * 1024)
+#define BQ_ENTRY_SOURCE_LIMIT (64 * 1024)
+#define BQ_ENTRY_SOURCE_COUNT 3
 
 typedef struct BqEntryAccounts
 {
@@ -50,6 +57,13 @@ typedef struct BqEntryIdentity
     gid_t groups[BQ_ENTRY_GROUP_LIMIT];
     int group_count;
 } BqEntryIdentity;
+
+typedef struct BqEntrySource
+{
+    int descriptor;
+    struct stat identity;
+    char sha256[SHA256_HEX_CAPACITY];
+} BqEntrySource;
 
 static bool bq_entry_number(char const* text, size_t size, uint64_t* output)
 {
@@ -199,6 +213,240 @@ static bool bq_entry_accounts(BqEntryAccounts* accounts, struct stat* identity)
               bq_entry_same_file(&before, &after) && bq_entry_accounts_parse(bytes, size, accounts);
     if (ok) *identity = before;
     if (descriptor >= 0) close(descriptor);
+    return ok;
+}
+
+static char const* const bq_entry_account_names[3] =
+{
+    "buster-bench", "buster-bench-candidate", "buster-github-runner"
+};
+
+static char const* const bq_entry_source_paths[BQ_ENTRY_SOURCE_COUNT] =
+{
+    BQ_ENTRY_PASSWD, BQ_ENTRY_GROUP, BQ_ENTRY_NSSWITCH
+};
+
+static bool bq_entry_field_is(char const* bytes, size_t size, char const* expected)
+{
+    size_t length = strlen(expected);
+    return size == length && !memcmp(bytes, expected, length);
+}
+
+/* Glibc's files parser cannot be made to select a second dedicated record or
+ * numeric alias: every local row is well formed, and the three roles occur
+ * once each under both their dedicated name and dedicated numeric identity. */
+static bool bq_entry_local_records(char const* bytes, size_t size, BqEntryAccounts const* accounts, bool passwd)
+{
+    bool seen[3] = {false, false, false};
+    bool ok = size > 0 && bytes[size - 1] == '\n';
+    size_t at = 0;
+    while (ok && at < size)
+    {
+        size_t end = at;
+        while (end < size && bytes[end] != '\n') end += 1;
+        ok = end < size;
+        if (ok && end != at && bytes[at] != '#')
+        {
+            size_t starts[7] = {at}, lengths[7] = {0};
+            unsigned fields = 1;
+            for (size_t index = at; ok && index < end; index += 1)
+            {
+                unsigned char value = (unsigned char)bytes[index];
+                ok = value >= ' ' && value <= '~';
+                if (ok && value == ':')
+                {
+                    ok = fields < (passwd ? 7u : 4u);
+                    if (ok)
+                    {
+                        lengths[fields - 1] = index - starts[fields - 1];
+                        starts[fields++] = index + 1;
+                    }
+                }
+            }
+            ok = ok && fields == (passwd ? 7u : 4u) && starts[0] < end &&
+                 bytes[at] != '+' && bytes[at] != '-';
+            if (ok) lengths[fields - 1] = end - starts[fields - 1];
+            uint64_t id = 0, primary = 0;
+            unsigned id_field = 2;
+            ok = ok && bq_entry_number(bytes + starts[id_field], lengths[id_field], &id) && id <= UINT32_MAX;
+            if (ok && passwd)
+                ok = bq_entry_number(bytes + starts[3], lengths[3], &primary) && primary <= UINT32_MAX;
+            for (unsigned role = 0; ok && role < 3; role += 1)
+            {
+                bool named = bq_entry_field_is(bytes + starts[0], lengths[0], bq_entry_account_names[role]);
+                uint32_t expected = accounts->ids[2 * role + (passwd ? 0 : 1)];
+                /* Any other name resolving the same numeric ID is ambiguous,
+                 * including a duplicate row after the expected one. */
+                ok = !(id == expected && !named);
+                if (named)
+                {
+                    ok = ok && !seen[role] && id == expected &&
+                         (!passwd || primary == accounts->ids[2 * role + 1]);
+                    if (ok) seen[role] = true;
+                }
+            }
+        }
+        at = end + 1;
+    }
+    for (unsigned role = 0; ok && role < 3; role += 1) ok = seen[role];
+    return ok;
+}
+
+static bool bq_entry_space(unsigned char value)
+{
+    return value == ' ' || value == '\t';
+}
+
+/* Exact NSS source lists and default action semantics: a successful local
+ * files result returns before systemd. Bracketed actions, merge, caches and
+ * alternate sources cannot silently change the dedicated name lookup. */
+static bool bq_entry_nss_policy(char const* bytes, size_t size)
+{
+    bool seen[3] = {false, false, false};
+    bool ok = size > 0 && bytes[size - 1] == '\n';
+    size_t at = 0;
+    while (ok && at < size)
+    {
+        size_t end = at;
+        while (end < size && bytes[end] != '\n') end += 1;
+        ok = end < size;
+        size_t first = at;
+        while (first < end && bq_entry_space((unsigned char)bytes[first])) first += 1;
+        if (ok && first < end && bytes[first] != '#')
+        {
+            size_t colon = first;
+            while (colon < end && bytes[colon] != ':') colon += 1;
+            ok = colon < end && colon > first;
+            for (size_t index = first; ok && index < colon; index += 1)
+            {
+                unsigned char value = (unsigned char)bytes[index];
+                ok = (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') ||
+                     value == '-' || value == '_';
+            }
+            unsigned database = 3;
+            if (ok)
+            {
+                if (bq_entry_field_is(bytes + first, colon - first, "passwd")) database = 0;
+                if (bq_entry_field_is(bytes + first, colon - first, "group")) database = 1;
+                if (bq_entry_field_is(bytes + first, colon - first, "initgroups")) database = 2;
+            }
+            size_t value = colon + 1;
+            while (value < end && bq_entry_space((unsigned char)bytes[value])) value += 1;
+            size_t limit = value;
+            while (limit < end && bytes[limit] != '#') limit += 1;
+            bool inline_comment = limit < end;
+            while (limit > value && bq_entry_space((unsigned char)bytes[limit - 1])) limit -= 1;
+            for (size_t index = value; ok && index < limit; index += 1)
+            {
+                unsigned char c = (unsigned char)bytes[index];
+                ok = (c >= ' ' && c <= '~') || c == '\t';
+            }
+            if (ok && database < 3)
+            {
+                /* A `#` inside the source list has libc-dependent parsing;
+                 * require the protected directives to have no inline comment. */
+                ok = !inline_comment && !seen[database] &&
+                     (bq_entry_field_is(bytes + value, limit - value, "files") ||
+                      (database != 2 && bq_entry_field_is(bytes + value, limit - value, "files systemd")));
+                if (ok) seen[database] = true;
+            }
+        }
+        at = end + 1;
+    }
+    return ok && seen[0] && seen[1];
+}
+
+/* A fresh exec has no nscd mapping. These checked paths are its glibc socket
+ * entry point; the operator must keep nscd absent/disabled through the lease.
+ * /var/run must be the expected alias, and an untrusted user cannot create
+ * the missing socket inside an existing nscd directory. */
+static bool bq_entry_no_nscd(void)
+{
+    struct stat link = {0}, run = {0}, var = {0}, alias = {0}, parent = {0}, socket = {0};
+    struct statvfs var_mount = {0};
+    int var_descriptor = bq_entry_open("/var", O_PATH | O_DIRECTORY, true);
+    bool ok = var_descriptor >= 0 && fstat(var_descriptor, &var) == 0 &&
+              S_ISDIR(var.st_mode) && var.st_uid == 0 && !(var.st_mode & 0022) &&
+              fstatvfs(var_descriptor, &var_mount) == 0 && (var_mount.f_flag & ST_RDONLY);
+    if (var_descriptor >= 0) close(var_descriptor);
+    char target[16];
+    ssize_t length = readlink("/var/run", target, sizeof(target));
+    ok = ok && lstat("/var/run", &link) == 0 && S_ISLNK(link.st_mode) && link.st_uid == 0 &&
+              length > 0 && length < (ssize_t)sizeof(target) &&
+              ((length == 6 && !memcmp(target, "../run", 6)) ||
+               (length == 4 && !memcmp(target, "/run", 4))) &&
+              stat("/run", &run) == 0 && stat("/var/run", &alias) == 0 &&
+              run.st_dev == alias.st_dev && run.st_ino == alias.st_ino &&
+              S_ISDIR(run.st_mode) && run.st_uid == 0 && !(run.st_mode & 0022);
+    if (ok)
+    {
+        int result = lstat("/run/nscd", &parent);
+        ok = (result < 0 && errno == ENOENT) ||
+             (result == 0 && S_ISDIR(parent.st_mode) && parent.st_uid == 0 && !(parent.st_mode & 0022));
+    }
+    if (ok)
+    {
+        int result = lstat("/run/nscd/socket", &socket);
+        ok = result < 0 && errno == ENOENT;
+    }
+    if (ok)
+    {
+        int result = lstat("/var/run/nscd/socket", &socket);
+        ok = result < 0 && errno == ENOENT;
+    }
+    return ok;
+}
+
+static bool bq_entry_source_metadata(struct stat const* file, struct statvfs const* mount)
+{
+    bool ok = S_ISREG(file->st_mode) && file->st_uid == 0 && file->st_nlink == 1 &&
+              !(file->st_mode & 0022) && file->st_size > 0 &&
+              file->st_size <= BQ_ENTRY_SOURCE_LIMIT && (mount->f_flag & ST_RDONLY);
+    return ok;
+}
+
+static bool bq_entry_account_sources(BqEntryAccounts const* accounts,
+                                     BqEntrySource sources[BQ_ENTRY_SOURCE_COUNT])
+{
+    char bytes[BQ_ENTRY_SOURCE_LIMIT + 1];
+    bool ok = bq_entry_no_nscd();
+    for (unsigned index = 0; ok && index < BQ_ENTRY_SOURCE_COUNT; index += 1)
+    {
+        BqEntrySource* source = &sources[index];
+        source->descriptor = bq_entry_open(bq_entry_source_paths[index], O_RDONLY | O_NONBLOCK, true);
+        struct stat after = {0};
+        struct statvfs mount = {0};
+        size_t size = 0;
+        ok = source->descriptor >= 0 && fstat(source->descriptor, &source->identity) == 0 &&
+             fstatvfs(source->descriptor, &mount) == 0 && bq_entry_source_metadata(&source->identity, &mount) &&
+             bq_entry_read(source->descriptor, bytes, sizeof(bytes), &size) &&
+             size == (size_t)source->identity.st_size &&
+             fstat(source->descriptor, &after) == 0 && bq_entry_same_file(&source->identity, &after);
+        if (ok)
+        {
+            if (index < 2) ok = bq_entry_local_records(bytes, size, accounts, index == 0);
+            else ok = bq_entry_nss_policy(bytes, size);
+        }
+        if (ok)
+        {
+            Sha256 hash;
+            sha256_init(&hash);
+            sha256_add(&hash, bytes, size);
+            sha256_finish_hex(&hash, (char8*)source->sha256);
+        }
+    }
+    return ok;
+}
+
+static bool bq_entry_account_sources_stable(BqEntrySource const sources[BQ_ENTRY_SOURCE_COUNT])
+{
+    bool ok = bq_entry_no_nscd();
+    for (unsigned index = 0; ok && index < BQ_ENTRY_SOURCE_COUNT; index += 1)
+    {
+        struct stat after = {0};
+        ok = sources[index].descriptor >= 0 && fstat(sources[index].descriptor, &after) == 0 &&
+             bq_entry_same_file(&sources[index].identity, &after);
+    }
     return ok;
 }
 
@@ -496,9 +744,49 @@ static bool bq_entry_cgroup(char* bytes, size_t size, char** path)
     return ok;
 }
 
+static int bq_entry_evidence_line(char* line, size_t capacity, BqEntryAccounts const* accounts,
+                                  struct stat const* account_file, BqEntrySource const sources[BQ_ENTRY_SOURCE_COUNT],
+                                  struct stat const* gate, struct stat const* broker, struct stat const* socket,
+                                  char const* boot, uint64_t ticks, char const* path, char const* invocation)
+{
+    struct stat const* passwd = &sources[0].identity;
+    struct stat const* group = &sources[1].identity;
+    struct stat const* nsswitch = &sources[2].identity;
+    int size = snprintf(line, capacity,
+        "BQ-BROKER-ENTRY-V1 PASS boot=%s pid=%ld ticks=%" PRIu64 " invocation=%s cgroup=%s "
+        "socket=%ju:%ju gate=%ju:%ju:%jd:%jd:%ld:%jd:%ld broker=%ju:%ju:%jd:%jd:%ld:%jd:%ld "
+        "receipt=%ju:%ju:%jd:%jd:%ld:%jd:%ld accounts=%u,%u,%u,%u,%u,%u "
+        "passwd=%ju:%ju:%jd:%jd:%ld:%jd:%ld group=%ju:%ju:%jd:%jd:%ld:%jd:%ld "
+        "nsswitch=%ju:%ju:%jd:%jd:%ld:%jd:%ld "
+        "passwd-sha256=%s group-sha256=%s nsswitch-sha256=%s "
+        "uid=0 gid=%u groups=0,%u,%u caps=0 nnp=1 seccomp=2 mounts=ro fd0=seqpacket\n",
+        boot, (long)getpid(), ticks, invocation, path,
+        (uintmax_t)socket->st_dev, (uintmax_t)socket->st_ino,
+        (uintmax_t)gate->st_dev, (uintmax_t)gate->st_ino, (intmax_t)gate->st_size,
+        (intmax_t)gate->st_mtim.tv_sec, gate->st_mtim.tv_nsec, (intmax_t)gate->st_ctim.tv_sec, gate->st_ctim.tv_nsec,
+        (uintmax_t)broker->st_dev, (uintmax_t)broker->st_ino, (intmax_t)broker->st_size,
+        (intmax_t)broker->st_mtim.tv_sec, broker->st_mtim.tv_nsec, (intmax_t)broker->st_ctim.tv_sec, broker->st_ctim.tv_nsec,
+        (uintmax_t)account_file->st_dev, (uintmax_t)account_file->st_ino, (intmax_t)account_file->st_size,
+        (intmax_t)account_file->st_mtim.tv_sec, account_file->st_mtim.tv_nsec,
+        (intmax_t)account_file->st_ctim.tv_sec, account_file->st_ctim.tv_nsec,
+        accounts->ids[0], accounts->ids[1], accounts->ids[2], accounts->ids[3], accounts->ids[4], accounts->ids[5],
+        (uintmax_t)passwd->st_dev, (uintmax_t)passwd->st_ino, (intmax_t)passwd->st_size,
+        (intmax_t)passwd->st_mtim.tv_sec, passwd->st_mtim.tv_nsec,
+        (intmax_t)passwd->st_ctim.tv_sec, passwd->st_ctim.tv_nsec,
+        (uintmax_t)group->st_dev, (uintmax_t)group->st_ino, (intmax_t)group->st_size,
+        (intmax_t)group->st_mtim.tv_sec, group->st_mtim.tv_nsec,
+        (intmax_t)group->st_ctim.tv_sec, group->st_ctim.tv_nsec,
+        (uintmax_t)nsswitch->st_dev, (uintmax_t)nsswitch->st_ino, (intmax_t)nsswitch->st_size,
+        (intmax_t)nsswitch->st_mtim.tv_sec, nsswitch->st_mtim.tv_nsec,
+        (intmax_t)nsswitch->st_ctim.tv_sec, nsswitch->st_ctim.tv_nsec,
+        sources[0].sha256, sources[1].sha256, sources[2].sha256,
+        accounts->ids[1], accounts->ids[1], accounts->ids[3]);
+    return size;
+}
+
 static bool bq_entry_evidence(BqEntryAccounts const* accounts, struct stat const* account_file,
-                              struct stat const* gate, struct stat const* broker, struct stat const* socket,
-                              char const* invocation)
+                              BqEntrySource const sources[BQ_ENTRY_SOURCE_COUNT], struct stat const* gate,
+                              struct stat const* broker, struct stat const* socket, char const* invocation)
 {
     char boot[40], process[4096], cgroup[BQ_ENTRY_PATH_LIMIT];
     size_t boot_size = 0, process_size = 0, cgroup_size = 0;
@@ -514,22 +802,8 @@ static bool bq_entry_evidence(BqEntryAccounts const* accounts, struct stat const
     {
         boot[36] = 0;
         char line[2048];
-        int size = snprintf(line, sizeof(line),
-            "BQ-BROKER-ENTRY-V1 PASS boot=%s pid=%ld ticks=%" PRIu64 " invocation=%s cgroup=%s "
-            "socket=%ju:%ju gate=%ju:%ju:%jd:%jd:%ld:%jd:%ld broker=%ju:%ju:%jd:%jd:%ld:%jd:%ld "
-            "receipt=%ju:%ju:%jd:%jd:%ld:%jd:%ld accounts=%u,%u,%u,%u,%u,%u "
-            "uid=0 gid=%u groups=0,%u,%u caps=0 nnp=1 seccomp=2 mounts=ro fd0=seqpacket\n",
-            boot, (long)getpid(), ticks, invocation, path,
-            (uintmax_t)socket->st_dev, (uintmax_t)socket->st_ino,
-            (uintmax_t)gate->st_dev, (uintmax_t)gate->st_ino, (intmax_t)gate->st_size,
-            (intmax_t)gate->st_mtim.tv_sec, gate->st_mtim.tv_nsec, (intmax_t)gate->st_ctim.tv_sec, gate->st_ctim.tv_nsec,
-            (uintmax_t)broker->st_dev, (uintmax_t)broker->st_ino, (intmax_t)broker->st_size,
-            (intmax_t)broker->st_mtim.tv_sec, broker->st_mtim.tv_nsec, (intmax_t)broker->st_ctim.tv_sec, broker->st_ctim.tv_nsec,
-            (uintmax_t)account_file->st_dev, (uintmax_t)account_file->st_ino, (intmax_t)account_file->st_size,
-            (intmax_t)account_file->st_mtim.tv_sec, account_file->st_mtim.tv_nsec,
-            (intmax_t)account_file->st_ctim.tv_sec, account_file->st_ctim.tv_nsec,
-            accounts->ids[0], accounts->ids[1], accounts->ids[2], accounts->ids[3], accounts->ids[4], accounts->ids[5],
-            accounts->ids[1], accounts->ids[1], accounts->ids[3]);
+        int size = bq_entry_evidence_line(line, sizeof(line), accounts, account_file, sources,
+                                          gate, broker, socket, boot, ticks, path, invocation);
         ok = size > 0 && (size_t)size < sizeof(line) &&
              send(STDERR_FILENO, line, (size_t)size, MSG_DONTWAIT | MSG_NOSIGNAL) == size;
     }
@@ -541,10 +815,12 @@ int main(int argc, char** argv)
     (void)argv;
     BqEntryAccounts accounts = {0};
     struct stat account_file = {0}, gate_file = {0}, broker_file = {0}, socket_file = {0};
+    BqEntrySource sources[BQ_ENTRY_SOURCE_COUNT] = {{.descriptor = -1}, {.descriptor = -1}, {.descriptor = -1}};
     char const* invocation = getenv("INVOCATION_ID");
     char invocation_env[sizeof("INVOCATION_ID=") + 32];
     bool ok = argc == 1 && invocation && bq_entry_hex(invocation, strnlen(invocation, 33), false) &&
-              bq_entry_accounts(&accounts, &account_file) && bq_entry_identity(&accounts) &&
+              bq_entry_accounts(&accounts, &account_file) && bq_entry_account_sources(&accounts, sources) &&
+              bq_entry_identity(&accounts) &&
               bq_entry_privileges() && bq_entry_mounts() && bq_entry_connection(STDIN_FILENO, &socket_file);
     int gate = ok ? open("/proc/self/exe", O_RDONLY | O_CLOEXEC) : -1;
     int broker = ok ? bq_entry_open(BQ_ENTRY_BROKER, O_RDONLY | O_NONBLOCK, true) : -1;
@@ -552,8 +828,8 @@ int main(int argc, char** argv)
     if (ok)
     {
         int size = snprintf(invocation_env, sizeof(invocation_env), "INVOCATION_ID=%s", invocation);
-        ok = size == (int)sizeof(invocation_env) - 1 &&
-             bq_entry_evidence(&accounts, &account_file, &gate_file, &broker_file, &socket_file, invocation);
+        ok = size == (int)sizeof(invocation_env) - 1 && bq_entry_account_sources_stable(sources) &&
+             bq_entry_evidence(&accounts, &account_file, sources, &gate_file, &broker_file, &socket_file, invocation);
     }
     if (ok)
     {
@@ -563,5 +839,7 @@ int main(int argc, char** argv)
     }
     if (broker >= 0) close(broker);
     if (gate >= 0) close(gate);
+    for (unsigned index = 0; index < BQ_ENTRY_SOURCE_COUNT; index += 1)
+        if (sources[index].descriptor >= 0) close(sources[index].descriptor);
     return 126;
 }
