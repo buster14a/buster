@@ -8,7 +8,10 @@
  * copies against that same pin, and removes the temporary copy by inode.
  * bq_retirement_preparation_record retains the verified identities for the
  * later correctness producer. bq_retirement_preparation_ready rereads them
- * under the service lease before unit launch. No executable is selected here.
+ * under the service lease before unit launch. The record functions take a
+ * BqRetirementStore directory (bq_retirement_queue_store for the queue);
+ * bq_retirement_preparation_export copies the verified record and request into
+ * the attempt workspace for retirement_unit.c. No executable is selected here.
  * Included from workspace.c after its descriptor and cleanup helpers.
  */
 #include "retirement_prepare.h"
@@ -607,7 +610,13 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_preparation_format(char body[BQ_RETIREMENT
     return length;
 }
 
-bool bq_retirement_preparation_record(BqQueue* queue, BqJob const* job,
+BqRetirementStore bq_retirement_queue_store(BqQueue const* queue)
+{
+    BqRetirementStore store = {queue ? queue->directory_fd : -1};
+    return store;
+}
+
+bool bq_retirement_preparation_record(BqRetirementStore store, BqJob const* job,
                                       BqRetirementPreparation const* preparation, BqError outcome, u32 completed_subjects)
 {
     char name[48], body[BQ_RETIREMENT_PREPARATION_RECORD_CAP];
@@ -619,7 +628,8 @@ bool bq_retirement_preparation_record(BqQueue* queue, BqJob const* job,
                                  bq_retirement_hex(string_from_pointer(preparation->subjects[1].materialized_identity_sha256), 64));
     bool ok = identities && length > 0 && (u32)length < sizeof(body) &&
               bq_record_name(name, "preparation", job->id) &&
-              bq_record_write(queue, name, (u8 const*)body, (u32)length, false) == BQ_OK;
+              store.directory >= 0 &&
+              bq_record_write_mode_at(store.directory, name, (u8 const*)body, (u32)length, false, 0400) == BQ_OK;
     return ok;
 }
 
@@ -627,7 +637,7 @@ bool bq_retirement_preparation_record(BqQueue* queue, BqJob const* job,
  * matching inventory alone is insufficient: the already-copied source trees
  * must still be the ones the preparation producer verified. This readback is
  * the service-owned A handoff, not a correctness or build-provenance verdict. */
-BUSTER_GLOBAL_LOCAL BqError bq_retirement_preparation_ready_pinned(BqQueue* queue, BqJob const* job,
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_preparation_ready_pinned(BqRetirementStore store, BqJob const* job,
     int installed, int workspaces, String8 profile, char record_sha256[SHA256_HEX_CAPACITY],
     BqRetirementPreparation* verified)
 {
@@ -638,7 +648,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_preparation_ready_pinned(BqQueue* queu
     char8 request_digest[SHA256_HEX_CAPACITY];
     if (record_sha256) record_sha256[0] = 0;
     if (verified) *verified = (BqRetirementPreparation){0};
-    bool valid = queue && job && record_sha256 && job->id && job->token &&
+    bool valid = store.directory >= 0 && job && record_sha256 && job->id && job->token &&
                  string_equal(bq_field(&job->request, 2), S8("native-retirement-performance-v1"));
     if (valid) bq_request_digest(&job->request, request_digest);
     valid = valid && !memcmp(job->digest, request_digest, 64);
@@ -648,7 +658,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_preparation_ready_pinned(BqQueue* queu
     if (result == BQ_OK)
     {
         result = bq_record_name(name, "preparation", job->id) ?
-                 bq_record_read(queue, name, actual, sizeof(actual), &size) : BQ_CORRUPT;
+                 bq_record_read_at(store.directory, name, actual, sizeof(actual), &size) : BQ_CORRUPT;
         if (result == BQ_OK)
         {
             String8 text = {(char8*)actual, size};
@@ -705,7 +715,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_preparation_ready_pinned(BqQueue* queu
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_retirement_preparation_import_pinned(BqQueue* queue, BqJob const* job,
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_preparation_import_pinned(BqRetirementStore store, BqJob const* job,
     int installed, int workspaces, String8 profile, char const record_sha256[SHA256_HEX_CAPACITY],
     BqRetirementPreparation* verified)
 {
@@ -714,7 +724,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_preparation_import_pinned(BqQueue* que
                  bq_retirement_hex((String8){(char8*)record_sha256, 64}, 64);
     char current_sha256[SHA256_HEX_CAPACITY] = {0};
     BqRetirementPreparation current = {0};
-    BqError result = valid ? bq_retirement_preparation_ready_pinned(queue, job, installed, workspaces,
+    BqError result = valid ? bq_retirement_preparation_ready_pinned(store, job, installed, workspaces,
                                                                       profile, current_sha256, &current) :
                              BQ_RECIPE_MISMATCH;
     if (result == BQ_OK && memcmp(record_sha256, current_sha256, SHA256_HEX_CAPACITY))
@@ -723,21 +733,69 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_preparation_import_pinned(BqQueue* que
     return result;
 }
 
-BqError bq_retirement_preparation_ready(BqQueue* queue, BqJob const* job, int installed, int workspaces,
+BqError bq_retirement_preparation_ready(BqRetirementStore store, BqJob const* job, int installed, int workspaces,
                                         char record_sha256[SHA256_HEX_CAPACITY])
 {
     String8 profile = job ? bq_recipe_profile(bq_request_recipe(&job->request)) : (String8){0};
-    BqError result = bq_retirement_preparation_ready_pinned(queue, job, installed, workspaces,
+    BqError result = bq_retirement_preparation_ready_pinned(store, job, installed, workspaces,
                                                               profile, record_sha256, NULL);
     return result;
 }
 
-BqError bq_retirement_preparation_import(BqQueue* queue, BqJob const* job, int installed, int workspaces,
+BqError bq_retirement_preparation_import(BqRetirementStore store, BqJob const* job, int installed, int workspaces,
                                           char const record_sha256[SHA256_HEX_CAPACITY],
                                           BqRetirementPreparation* verified)
 {
     String8 profile = job ? bq_recipe_profile(bq_request_recipe(&job->request)) : (String8){0};
-    BqError result = bq_retirement_preparation_import_pinned(queue, job, installed, workspaces,
+    BqError result = bq_retirement_preparation_import_pinned(store, job, installed, workspaces,
                                                                profile, record_sha256, verified);
+    return result;
+}
+
+/* Worker-unit handoff (#1020). The unit runs with the queue inaccessible, so
+ * the coordinator copies the exact record it just verified, plus the canonical
+ * request bytes the record's request= digest names, into a private directory
+ * of the sealed attempt workspace. The copy carries no authority of its own:
+ * the unit re-imports it against the lease-authenticated digest and rechecks
+ * the installed inventory and both materialized trees. Nothing is replaced;
+ * a partial export fails the attempt before launch and is removed with the
+ * workspace. */
+BqError bq_retirement_preparation_export(BqRetirementStore queue_store, BqJob const* job, int workspaces,
+                                         char const preparation_sha256[SHA256_HEX_CAPACITY])
+{
+    char record_name[48], request_name[48], attempt[64];
+    char actual[SHA256_HEX_CAPACITY] = {0};
+    u8 record[BQ_RETIREMENT_PREPARATION_RECORD_CAP];
+    u32 size = 0;
+    bool valid = queue_store.directory >= 0 && workspaces >= 0 && job && job->id && job->token &&
+                 job->request.size > 0 && job->request.size <= BQ_REQUEST_CAP && preparation_sha256 &&
+                 strnlen(preparation_sha256, SHA256_HEX_CAPACITY) == 64 &&
+                 bq_retirement_hex((String8){(char8*)preparation_sha256, 64}, 64) &&
+                 bq_record_name(record_name, "preparation", job->id) &&
+                 bq_record_name(request_name, "request", job->id) && bq_workspace_name(attempt, job->id, job->token);
+    BqError result = valid ? bq_record_read_at(queue_store.directory, record_name, record, sizeof(record), &size) :
+                             BQ_BAD_REQUEST;
+    if (result == BQ_OK)
+    {
+        bq_digest(record, size, (char8*)actual);
+        if (memcmp(actual, preparation_sha256, 64)) result = BQ_CORRUPT;
+    }
+    int workspace = result == BQ_OK ? openat(workspaces, attempt, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    if (result == BQ_OK && (workspace < 0 || !bq_workspace_seal(workspace, job, false))) result = BQ_WORKSPACE_MISMATCH;
+    bool created = false;
+    int directory = result == BQ_OK ?
+                    bq_create_inherited_group_directory(workspace, BQ_RETIREMENT_EXPORT_DIRECTORY,
+                                                        BQ_WORKSPACE_PRIVATE_BUILD_MODE, &created) : -1;
+    if (result == BQ_OK && directory < 0) result = BQ_WORKSPACE_MISMATCH;
+    if (result == BQ_OK)
+    {
+        result = bq_record_write_mode_at(directory, record_name, record, size, false, 0400) == BQ_OK &&
+                 bq_record_write_mode_at(directory, request_name, job->request.bytes, job->request.size,
+                                         false, 0400) == BQ_OK &&
+                 fchmod(directory, BQ_RETIREMENT_EXPORT_MODE) == 0 && fsync(directory) == 0 &&
+                 fsync(workspace) == 0 ? BQ_OK : BQ_IO;
+    }
+    if (directory >= 0 && close(directory) != 0 && result == BQ_OK) result = BQ_IO;
+    if (workspace >= 0 && close(workspace) != 0 && result == BQ_OK) result = BQ_IO;
     return result;
 }

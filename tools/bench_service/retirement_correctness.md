@@ -202,11 +202,14 @@ and `reference-inventory-sha256=`. It decodes both through bounded canonical
 round-trip decoders and joins the template to A's imported subjects and to
 the support, census-row and toolchain-manifest pins. It also checks the
 inventory's `clang_sha256` against a freshly held, bundle-rechecked
-`bin/clang` descriptor. A future worker caller must pass the importer's
-digests, decoded plan and held Clang to `producer_begin` instead of computing
-its own. The
-checked-in blocked profile lacks both reference pins, so the public importer
-fails closed and no worker path calls it. Real reviewed pin values and a
+`bin/clang` descriptor, and it keeps the decoded inventory file's descriptor
+held. A future worker caller must pass the importer's digests, decoded plan,
+held inventory and held Clang to `producer_begin` instead of computing its
+own. `retirement_unit.c` gathers these inputs inside `worker-unit` from the
+coordinator's export of A
+([worker-unit handoff](RETIREMENT_PREPARATION.md#worker-unit-handoff-1020)).
+The checked-in blocked profile lacks both reference pins, so the public
+importer fails closed and no worker path calls it. Real reviewed pin values and a
 producer caller in the worker remain open. The importer holds no `rows.tsv`
 or validator projection, so it does not compare template configuration
 digests with the derived #1020 value directly. `begin_service` binds B's rows

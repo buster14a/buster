@@ -298,9 +298,10 @@ static bool bq_retirement_campaign_service_test(int installed, int workspaces,
         if (source >= 3) close(source);
         if (subject >= 3) close(subject);
     }
-    if (ok) ok = bq_retirement_preparation_record(&queue, active, &preparation, BQ_OK, 2);
+    BqRetirementStore store = bq_retirement_queue_store(&queue);
+    if (ok) ok = bq_retirement_preparation_record(store, active, &preparation, BQ_OK, 2);
     char preparation_sha256[SHA256_HEX_CAPACITY] = {0};
-    if (ok) ok = bq_retirement_preparation_ready_pinned(&queue, active, installed, service_workspaces,
+    if (ok) ok = bq_retirement_preparation_ready_pinned(store, active, installed, service_workspaces,
         string_from_pointer(profile), preparation_sha256, NULL) == BQ_OK;
     char binary_sha256[SHA256_HEX_CAPACITY] = {0};
     if (ok) bq_prep_test_binary_handoff(&queue, active, installed, service_workspaces, root, profile,

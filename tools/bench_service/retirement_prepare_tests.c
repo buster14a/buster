@@ -1600,10 +1600,11 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
             if (source >= 0) close(source);
             if (subject >= 0) close(subject);
         }
-        BQ_PREP_CHECK(ok && bq_retirement_preparation_record(queue, &job, &prepared, BQ_OK, 2));
+        BqRetirementStore store = bq_retirement_queue_store(queue);
+        BQ_PREP_CHECK(ok && bq_retirement_preparation_record(store, &job, &prepared, BQ_OK, 2));
         char preparation_digest[SHA256_HEX_CAPACITY] = {0};
         String8 pinned = string_from_pointer(profile);
-        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(queue, &job, installed, workspaces,
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(store, &job, installed, workspaces,
                       pinned, preparation_digest, NULL) == BQ_OK);
         BqRetirementMatchedBuild build = {0};
         BQ_PREP_CHECK(bq_retirement_matched_build_begin_pinned(queue, &job, installed, workspaces,
@@ -1894,6 +1895,295 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
     }
 }
 
+/* Installed #1020 reference template and inventory for the real A fixture's
+ * subjects and toolchain bundle, plus a synthetic profile carrying their pins. */
+typedef struct BqPrepReferenceFixture
+{
+    char recipes[512], template_path[576], inventory_path[576];
+    char toolchain_root[BQ_RETIREMENT_TOOLCHAIN_PATH_CAP];
+    char template_sha256[SHA256_HEX_CAPACITY], inventory_sha256[SHA256_HEX_CAPACITY];
+    char clang_sha256[SHA256_HEX_CAPACITY], build_command_sha256[SHA256_HEX_CAPACITY];
+    char pinned[1024];
+    BqRetirementToolchain checked;
+} BqPrepReferenceFixture;
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_reference_install(int installed, char const* installed_path,
+    BqRetirementPreparation const* preparation, char const* profile, BqPrepReferenceFixture* fixture)
+{
+    char* recipes = fixture->recipes;
+    char* template_path = fixture->template_path;
+    char* inventory_path = fixture->inventory_path;
+    char* toolchain_root = fixture->toolchain_root;
+    int length = snprintf(recipes, sizeof(fixture->recipes), "%s/recipes", installed_path);
+    bool ok = length > 0 && (size_t)length < sizeof(fixture->recipes);
+    length = snprintf(template_path, sizeof(fixture->template_path),
+                      "%s/native-retirement-performance-v1.reference-template", recipes);
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->template_path);
+    length = snprintf(inventory_path, sizeof(fixture->inventory_path),
+                      "%s/native-retirement-performance-v1.reference-inventory", recipes);
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->inventory_path);
+    length = snprintf(toolchain_root, sizeof(fixture->toolchain_root),
+                      "%s/toolchain/native-retirement-performance-v1", installed_path);
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->toolchain_root);
+    ok = ok && bq_retirement_toolchain_verify(installed, string_from_pointer(profile), toolchain_root,
+                                              &fixture->checked) == BQ_OK;
+    bq_digest("fixture only\n", 13, (char8*)fixture->clang_sha256);
+
+    BqRetirementOracleTemplateRow approved = {.row = 1, .census_row = 0, .target = 1};
+    bq_digest("int a;\n", 7, (char8*)approved.source_sha256);
+    memset(approved.configuration_sha256, '5', 64);
+    strcpy(approved.output_name, "oracle-output");
+    BqRetirementOracleTemplate template = {.population_rows = 2, .object_rows = 1, .native_target = 1,
+                                           .reference_count = 1, .references = &approved};
+    BqRetirementReferenceSourceIdentity source[2] = {0};
+    for (u32 side = 0; side < 2; side += 1)
+    {
+        memcpy(source[side].commit, preparation->subjects[side].commit, 40);
+        memcpy(source[side].tree, preparation->subjects[side].tree, 40);
+        memcpy(source[side].manifest_sha256, preparation->subjects[side].manifest_sha256, 64);
+        memcpy(template.source_commit[side], source[side].commit, 41);
+        memcpy(template.source_tree[side], source[side].tree, 41);
+        memcpy(template.source_sha256[side], source[side].manifest_sha256, 65);
+    }
+    memset(template.census_sha256, '3', 64);
+    memset(template.population_sha256, '4', 64);
+    ok = ok && bq_retirement_profile_sha(string_from_pointer(profile), S8("support-declaration-sha256="),
+                                         template.support_sha256) &&
+         bq_retirement_profile_sha(string_from_pointer(profile), S8("toolchain-manifest-sha256="),
+                                   template.toolchain_identity_sha256);
+    BqRetirementReferencePlanRow row = {.row = 1, .source_side = 0, .flag_count = 1,
+                                        .build_environment_count = 1, .runtime_argument_count = 1,
+                                        .runtime_environment_count = 1};
+    strcpy(row.source_path, "src/main.c");
+    memcpy(row.source_sha256, approved.source_sha256, 65);
+    row.flags[0] = "-std=c11";
+    row.build_environment[0] = "LC_ALL=C";
+    row.runtime_environment[0] = "LC_ALL=C";
+    BqRetirementReferencePlan plan = {.template = &template, .rows = &row, .count = 1};
+    memcpy(plan.clang_sha256, fixture->clang_sha256, 65);
+    u8 template_bytes[2048];
+    u64 template_length = 0;
+    ok = ok && bq_ref_plan_row(&row, &approved, approved.build_command_sha256) &&
+         bq_ref_runtime_command(&row, approved.logical_command_sha256) &&
+         bq_retirement_oracle_template_hash(&template, fixture->template_sha256) &&
+         bq_retirement_reference_template_write(&template, template_bytes, sizeof(template_bytes),
+                                                &template_length) &&
+         chmod(recipes, 0700) == 0 &&
+         bq_prep_test_write_bytes(template_path, (char const*)template_bytes, (u32)template_length);
+    int writer = ok ? open(inventory_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    ok = ok && writer >= 3 && bq_retirement_reference_inventory_encode(&plan, source,
+             template.toolchain_identity_sha256, writer, fixture->inventory_sha256) && fchmod(writer, 0400) == 0;
+    if (writer >= 0 && close(writer) != 0) ok = false;
+    ok = ok && chmod(recipes, 0500) == 0;
+    memcpy(fixture->build_command_sha256, approved.build_command_sha256, SHA256_HEX_CAPACITY);
+    length = ok ? snprintf(fixture->pinned, sizeof(fixture->pinned),
+                           "%sreference-template-sha256=%s\nreference-inventory-sha256=%s\n"
+                           "census-rows-sha256=%.64s\n", profile, fixture->template_sha256,
+                           fixture->inventory_sha256, template.census_sha256) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(fixture->pinned);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_reference_remove(BqPrepReferenceFixture const* fixture)
+{
+    bool ok = chmod(fixture->recipes, 0700) == 0 && unlink(fixture->template_path) == 0 &&
+              unlink(fixture->inventory_path) == 0 && chmod(fixture->recipes, 0500) == 0;
+    return ok;
+}
+
+/* Open descriptors, counted through /proc; the listing's own is excluded by
+ * counting the same way before and after. */
+BUSTER_GLOBAL_LOCAL u32 bq_prep_test_open_descriptors(void)
+{
+    DIR* listing = opendir("/proc/self/fd");
+    u32 count = 0;
+    for (struct dirent* entry = listing ? readdir(listing) : NULL; entry; entry = readdir(listing))
+    {
+        if (entry->d_name[0] != '.') count += 1;
+    }
+    if (listing) closedir(listing);
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_export_file(int attempt, char const* name, mode_t mode)
+{
+    int directory = openat(attempt, BQ_RETIREMENT_EXPORT_DIRECTORY, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool ok = directory >= 0 && fchmod(directory, 0700) == 0 && fchmodat(directory, name, mode, 0) == 0 &&
+              fchmod(directory, BQ_RETIREMENT_EXPORT_MODE) == 0;
+    if (directory >= 0 && close(directory) != 0) ok = false;
+    return ok;
+}
+
+/* Flip, or restore, one byte of an exported file in place. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_export_byte(int attempt, char const* name, off_t offset, char* byte)
+{
+    int directory = openat(attempt, BQ_RETIREMENT_EXPORT_DIRECTORY, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool ok = directory >= 0 && fchmod(directory, 0700) == 0 && fchmodat(directory, name, 0600, 0) == 0;
+    int file = ok ? openat(directory, name, O_RDWR | O_CLOEXEC | O_NOFOLLOW) : -1;
+    char previous = 0;
+    ok = ok && file >= 0 && pread(file, &previous, 1, offset) == 1 && pwrite(file, byte, 1, offset) == 1;
+    if (ok) *byte = previous;
+    if (file >= 0 && close(file) != 0) ok = false;
+    if (directory >= 0)
+    {
+        if (fchmodat(directory, name, 0400, 0) != 0 || fchmod(directory, BQ_RETIREMENT_EXPORT_MODE) != 0) ok = false;
+        if (close(directory) != 0) ok = false;
+    }
+    return ok;
+}
+
+/* #1020 worker-unit handoff on the real A fixture: the coordinator export
+ * and the unit-side prepare through its profile seam. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_prepare(BqQueue* queue, BqJob const* job, int installed,
+    int workspaces, int attempt, char const* installed_path, BqRetirementPreparation const* prepared,
+    char const* profile, char const* digest)
+{
+    u32 descriptors = bq_prep_test_open_descriptors();
+    BqPrepReferenceFixture fixture = {0};
+    struct stat attempt_info = {0};
+    bool ok = bq_prep_test_reference_install(installed, installed_path, prepared, profile, &fixture) &&
+              bq_workspace_seal(attempt, job, true) && fstat(attempt, &attempt_info) == 0 &&
+              (attempt_info.st_mode & S_ISGID);
+    BQ_PREP_CHECK(ok);
+    String8 pinned = string_from_pointer(fixture.pinned);
+    char record_name[48], request_name[48];
+    ok = ok && bq_record_name(record_name, "preparation", job->id) && bq_record_name(request_name, "request", job->id);
+
+    /* Export: only the verified digest, only once, into a sealed directory. */
+    char altered[SHA256_HEX_CAPACITY];
+    memcpy(altered, digest, sizeof(altered));
+    altered[0] = altered[0] == 'a' ? 'b' : 'a';
+    struct stat info = {0};
+    BQ_PREP_CHECK(ok && bq_retirement_preparation_export(bq_retirement_queue_store(queue), job, workspaces,
+                  altered) == BQ_CORRUPT &&
+                  fstatat(attempt, BQ_RETIREMENT_EXPORT_DIRECTORY, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT);
+    BQ_PREP_CHECK(bq_retirement_preparation_export(bq_retirement_queue_store(queue), job, workspaces,
+                  digest) == BQ_OK);
+    BQ_PREP_CHECK(bq_retirement_preparation_export(bq_retirement_queue_store(queue), job, workspaces,
+                  digest) == BQ_WORKSPACE_MISMATCH);
+    BQ_PREP_CHECK(fstatat(attempt, BQ_RETIREMENT_EXPORT_DIRECTORY, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+                  S_ISDIR(info.st_mode) && (info.st_mode & 07777) == BQ_RETIREMENT_EXPORT_MODE &&
+                  info.st_gid == attempt_info.st_gid);
+    BqRetirementStore store = {-1};
+    BQ_PREP_CHECK(bq_retirement_unit_store_open(workspaces, job->id, job->token, &store) == BQ_OK &&
+                  store.directory >= 0);
+    u8 exported[2048], original[2048];
+    u32 exported_size = 0, original_size = 0;
+    char exported_sha256[SHA256_HEX_CAPACITY] = {0};
+    BQ_PREP_CHECK(bq_record_read_at(store.directory, record_name, exported, sizeof(exported), &exported_size) ==
+                  BQ_OK && bq_record_read(queue, record_name, original, sizeof(original), &original_size) == BQ_OK &&
+                  exported_size == original_size && !memcmp(exported, original, exported_size));
+    bq_digest(exported, exported_size, (char8*)exported_sha256);
+    BQ_PREP_CHECK(!strcmp(exported_sha256, digest));
+    BQ_PREP_CHECK(bq_record_read_at(store.directory, request_name, exported, sizeof(exported), &exported_size) ==
+                  BQ_OK && exported_size == job->request.size && !memcmp(exported, job->request.bytes, exported_size));
+    BQ_PREP_CHECK(fstatat(store.directory, record_name, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+                  S_ISREG(info.st_mode) && info.st_nlink == 1 && (info.st_mode & 07777) == 0400);
+
+    /* Unit side: A re-import, toolchain and pinned reference policy. */
+    BqRetirementUnitPrepared unit = {0};
+    BQ_PREP_CHECK(bq_retirement_unit_prepare_pinned(store, workspaces, installed, job->id, job->token, pinned,
+                  fixture.toolchain_root, digest, &unit) == BQ_OK && unit.owned &&
+                  !strcmp(unit.preparation_sha256, digest) &&
+                  !memcmp(unit.job.digest, job->digest, SHA256_HEX_CAPACITY) &&
+                  unit.job.id == job->id && unit.job.token == job->token &&
+                  !strcmp(unit.preparation.inventory_sha256, prepared->inventory_sha256) &&
+                  !strcmp(unit.preparation.subjects[0].materialized_identity_sha256,
+                          prepared->subjects[0].materialized_identity_sha256) &&
+                  !strcmp(unit.preparation.subjects[1].materialized_identity_sha256,
+                          prepared->subjects[1].materialized_identity_sha256) &&
+                  !strcmp(unit.toolchain.manifest_sha256, fixture.checked.manifest_sha256) &&
+                  !strcmp(unit.policy.inventory_sha256, fixture.inventory_sha256) &&
+                  !strcmp(unit.policy.template_sha256, fixture.template_sha256) &&
+                  unit.policy.plan.template == &unit.policy.template && unit.policy.clang >= 3);
+    /* The held inventory is the exact installed file a producer_begin rehashes. */
+    char held_sha256[SHA256_HEX_CAPACITY] = {0};
+    int flags = unit.policy.inventory >= 3 ? fcntl(unit.policy.inventory, F_GETFL) : -1;
+    BQ_PREP_CHECK(unit.policy.inventory >= 3 && (fcntl(unit.policy.inventory, F_GETFD) & FD_CLOEXEC) &&
+                  flags >= 0 && (flags & O_ACCMODE) == O_RDONLY &&
+                  bq_retirement_oracle_file_hash(unit.policy.inventory, BQ_RETIREMENT_REFERENCE_INVENTORY_CAP,
+                                                 false, held_sha256) &&
+                  !strcmp(held_sha256, fixture.inventory_sha256));
+    BqRetirementUnitPrepared live = unit;
+    BQ_PREP_CHECK(bq_retirement_unit_prepare_pinned(store, workspaces, installed, job->id, job->token, pinned,
+                  fixture.toolchain_root, digest, &unit) == BQ_BAD_REQUEST && unit.owned &&
+                  unit.policy.inventory == live.policy.inventory && unit.policy.clang == live.policy.clang);
+    BQ_PREP_CHECK(bq_retirement_unit_release(&unit) && !unit.owned && unit.policy.clang == -1 &&
+                  unit.policy.inventory == -1);
+
+    /* Fail closed: blocked profile, missing reference pins, stale handoff
+     * digest and another attempt's identity. */
+    BQ_PREP_CHECK(bq_retirement_unit_prepare(store, workspaces, installed, job->id, job->token, digest, &unit) ==
+                  BQ_RECIPE_MISMATCH && !unit.owned && unit.policy.inventory == -1);
+    BQ_PREP_CHECK(bq_retirement_unit_prepare_pinned(store, workspaces, installed, job->id, job->token,
+                  string_from_pointer(profile), fixture.toolchain_root, digest, &unit) == BQ_RECIPE_MISMATCH &&
+                  !unit.owned && unit.policy.inventory == -1);
+    BQ_PREP_CHECK(bq_retirement_unit_prepare_pinned(store, workspaces, installed, job->id, job->token, pinned,
+                  fixture.toolchain_root, altered, &unit) == BQ_RECIPE_MISMATCH && !unit.owned &&
+                  !unit.preparation.inventory_sha256[0]);
+    BQ_PREP_CHECK(bq_retirement_unit_prepare_pinned(store, workspaces, installed, job->id, job->token + 1,
+                  pinned, fixture.toolchain_root, digest, &unit) != BQ_OK && !unit.owned);
+
+    /* Tampered exported bytes: the record and the request it names. */
+    char byte = 'X';
+    BQ_PREP_CHECK(bq_prep_test_export_byte(attempt, record_name, 0, &byte) &&
+                  bq_retirement_unit_prepare_pinned(store, workspaces, installed, job->id, job->token, pinned,
+                      fixture.toolchain_root, digest, &unit) == BQ_CORRUPT && !unit.owned &&
+                  bq_prep_test_export_byte(attempt, record_name, 0, &byte) && byte == 'X');
+    byte = 'g';
+    BQ_PREP_CHECK(bq_prep_test_export_byte(attempt, request_name, 4, &byte) &&
+                  bq_retirement_unit_prepare_pinned(store, workspaces, installed, job->id, job->token, pinned,
+                      fixture.toolchain_root, digest, &unit) != BQ_OK && !unit.owned &&
+                  bq_prep_test_export_byte(attempt, request_name, 4, &byte) && byte == 'g');
+    BQ_PREP_CHECK(bq_retirement_unit_prepare_pinned(store, workspaces, installed, job->id, job->token, pinned,
+                  fixture.toolchain_root, digest, &unit) == BQ_OK && bq_retirement_unit_release(&unit));
+
+    /* Directory closure: writable file or directory, extra file, extra link,
+     * symlink in place of the record, and a replaced directory. */
+    BQ_PREP_CHECK(bq_prep_test_export_file(attempt, request_name, 0600) &&
+                  bq_retirement_unit_prepare_pinned(store, workspaces, installed, job->id, job->token, pinned,
+                      fixture.toolchain_root, digest, &unit) == BQ_CORRUPT && !unit.owned &&
+                  bq_prep_test_export_file(attempt, request_name, 0400));
+    BQ_PREP_CHECK(fchmod(store.directory, 0700) == 0 &&
+                  bq_retirement_unit_prepare_pinned(store, workspaces, installed, job->id, job->token, pinned,
+                      fixture.toolchain_root, digest, &unit) == BQ_WORKSPACE_MISMATCH && !unit.owned);
+    int extra = openat(store.directory, "extra", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400);
+    BQ_PREP_CHECK(extra >= 0 && close(extra) == 0 && fchmod(store.directory, BQ_RETIREMENT_EXPORT_MODE) == 0 &&
+                  bq_retirement_unit_prepare_pinned(store, workspaces, installed, job->id, job->token, pinned,
+                      fixture.toolchain_root, digest, &unit) == BQ_WORKSPACE_MISMATCH && !unit.owned);
+    BQ_PREP_CHECK(fchmod(store.directory, 0700) == 0 && unlinkat(store.directory, "extra", 0) == 0 &&
+                  linkat(store.directory, record_name, store.directory, "linked", 0) == 0 &&
+                  fchmod(store.directory, BQ_RETIREMENT_EXPORT_MODE) == 0 &&
+                  bq_retirement_unit_prepare_pinned(store, workspaces, installed, job->id, job->token, pinned,
+                      fixture.toolchain_root, digest, &unit) == BQ_WORKSPACE_MISMATCH && !unit.owned);
+    BQ_PREP_CHECK(fchmod(store.directory, 0700) == 0 && unlinkat(store.directory, "linked", 0) == 0 &&
+                  renameat(store.directory, record_name, store.directory, "moved") == 0 &&
+                  symlinkat("moved", store.directory, record_name) == 0 &&
+                  fchmod(store.directory, BQ_RETIREMENT_EXPORT_MODE) == 0 &&
+                  bq_retirement_unit_prepare_pinned(store, workspaces, installed, job->id, job->token, pinned,
+                      fixture.toolchain_root, digest, &unit) != BQ_OK && !unit.owned);
+    BQ_PREP_CHECK(fchmod(store.directory, 0700) == 0 && unlinkat(store.directory, record_name, 0) == 0 &&
+                  renameat(store.directory, "moved", store.directory, record_name) == 0 &&
+                  fchmod(store.directory, BQ_RETIREMENT_EXPORT_MODE) == 0 &&
+                  bq_retirement_unit_prepare_pinned(store, workspaces, installed, job->id, job->token, pinned,
+                      fixture.toolchain_root, digest, &unit) == BQ_OK && bq_retirement_unit_release(&unit));
+    BQ_PREP_CHECK(renameat(attempt, BQ_RETIREMENT_EXPORT_DIRECTORY, attempt, "retirement-moved") == 0 &&
+                  mkdirat(attempt, BQ_RETIREMENT_EXPORT_DIRECTORY, BQ_RETIREMENT_EXPORT_MODE) == 0 &&
+                  bq_retirement_unit_prepare_pinned(store, workspaces, installed, job->id, job->token, pinned,
+                      fixture.toolchain_root, digest, &unit) == BQ_WORKSPACE_MISMATCH && !unit.owned &&
+                  unlinkat(attempt, BQ_RETIREMENT_EXPORT_DIRECTORY, AT_REMOVEDIR) == 0 &&
+                  renameat(attempt, "retirement-moved", attempt, BQ_RETIREMENT_EXPORT_DIRECTORY) == 0);
+    BQ_PREP_CHECK(bq_retirement_unit_release(&unit));
+
+    /* Remove the export and seal so the later A fixtures see the attempt as before. */
+    BQ_PREP_CHECK(store.directory >= 0 && fchmod(store.directory, 0700) == 0 &&
+                  unlinkat(store.directory, record_name, 0) == 0 && unlinkat(store.directory, request_name, 0) == 0 &&
+                  close(store.directory) == 0 && unlinkat(attempt, BQ_RETIREMENT_EXPORT_DIRECTORY, AT_REMOVEDIR) == 0 &&
+                  unlinkat(attempt, ".identity", 0) == 0);
+    BQ_PREP_CHECK(bq_prep_test_reference_remove(&fixture));
+    BQ_PREP_CHECK(bq_prep_test_open_descriptors() == descriptors);
+}
+
 /* Exercise the service's durable producer/readback boundary through the real
  * source copier. This internal test request cannot be submitted: the public
  * registry still rejects the blocked retirement descriptor. */
@@ -1906,6 +2196,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
     BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
     if (ok) ok = bq_open(&queue, queue_path) == BQ_OK;
     BQ_PREP_CHECK(ok);
+    BqRetirementStore store = bq_retirement_queue_store(&queue);
     BqJob job = {.id = 1, .token = 2};
     String8 fields[BQ_FIELD_COUNT] = {S8("fixture"), S8("handoff"),
         S8("native-retirement-performance-v1"),
@@ -1949,13 +2240,13 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
     if (ok)
     {
         char digest[SHA256_HEX_CAPACITY];
-        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(store, &job, installed, workspaces,
                       string_from_pointer(profile), digest, NULL) == BQ_NOT_FOUND && !digest[0]);
-        BQ_PREP_CHECK(bq_retirement_preparation_record(&queue, &job, prepared, BQ_OK, 2) &&
-                      bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+        BQ_PREP_CHECK(bq_retirement_preparation_record(store, &job, prepared, BQ_OK, 2) &&
+                      bq_retirement_preparation_ready_pinned(store, &job, installed, workspaces,
                           string_from_pointer(profile), digest, NULL) == BQ_OK && strlen(digest) == 64);
         BqRetirementPreparation imported = {0};
-        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(store, &job, installed, workspaces,
                       string_from_pointer(profile), digest, &imported) == BQ_OK &&
                       !strcmp(imported.inventory_sha256, prepared->inventory_sha256) &&
                       !strcmp(imported.subjects[0].installed_identity_sha256,
@@ -1968,6 +2259,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
                               prepared->subjects[1].materialized_identity_sha256) &&
                       !strcmp(imported.subjects[0].manifest_sha256, prepared->subjects[0].manifest_sha256) &&
                       imported.source_reservation_bytes == prepared->source_reservation_bytes);
+        bq_prep_test_unit_prepare(&queue, &job, installed, workspaces, root, installed_path, prepared,
+                                  profile, digest);
         bq_prep_test_matched_build(&queue, &job, installed, workspaces, installed_path,
                                    workspaces_path,
                                    profile, prepared);
@@ -1977,26 +2270,26 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
         char altered_digest[SHA256_HEX_CAPACITY];
         memcpy(altered_digest, digest, sizeof(altered_digest));
         altered_digest[0] = altered_digest[0] == 'a' ? 'b' : 'a';
-        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(store, &job, installed, workspaces,
                       string_from_pointer(profile), altered_digest, &imported) == BQ_RECIPE_MISMATCH &&
                       !imported.inventory_sha256[0]);
         char invalid_digest[SHA256_HEX_CAPACITY] = "invalid";
-        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(store, &job, installed, workspaces,
                       string_from_pointer(profile), invalid_digest, &imported) == BQ_RECIPE_MISMATCH &&
                       !imported.inventory_sha256[0]);
         BqJob other = job;
         other.token += 1;
-        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &other, installed, workspaces,
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(store, &other, installed, workspaces,
                       string_from_pointer(profile), digest, NULL) == BQ_CORRUPT && !digest[0]);
         other = job;
         other.digest[0] = other.digest[0] == 'a' ? 'b' : 'a';
-        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &other, installed, workspaces,
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(store, &other, installed, workspaces,
                       string_from_pointer(profile), digest, NULL) == BQ_RECIPE_MISMATCH && !digest[0]);
         char wrong_profile[512];
         memcpy(wrong_profile, profile, strlen(profile) + 1);
         char* pin = strstr(wrong_profile, "inventory-sha256=");
         if (pin) pin[17] = pin[17] == 'a' ? 'b' : 'a';
-        BQ_PREP_CHECK(pin && bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+        BQ_PREP_CHECK(pin && bq_retirement_preparation_ready_pinned(store, &job, installed, workspaces,
                       string_from_pointer(wrong_profile), digest, NULL) == BQ_RECIPE_MISMATCH && !digest[0]);
         char copied_path[128];
         int length = snprintf(copied_path, sizeof(copied_path), "%s/base/source/src", attempt);
@@ -2005,7 +2298,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
         /* Exercise directory closure at the durable consumer, not only at
          * preflight. Failure must not damage the immutable preparation record. */
         char original_digest[SHA256_HEX_CAPACITY];
-        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(store, &job, installed, workspaces,
                       string_from_pointer(profile), original_digest, NULL) == BQ_OK);
         char installed_path[128];
         int installed_length = snprintf(installed_path, sizeof(installed_path), "sources/%s/src",
@@ -2031,9 +2324,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
                                   prepared->subjects[0].manifest_sha256) &&
                           strcmp(rescanned.subjects[0].installed_identity_sha256,
                                  prepared->subjects[0].installed_identity_sha256));
-            BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+            BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(store, &job, installed, workspaces,
                           string_from_pointer(profile), digest, NULL) == BQ_CORRUPT && !digest[0]);
-            BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+            BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(store, &job, installed, workspaces,
                           string_from_pointer(profile), original_digest, &imported) == BQ_CORRUPT &&
                           !imported.inventory_sha256[0]);
             BqRetirementBinaries binaries = {0};
@@ -2049,19 +2342,19 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
         if (installed_source >= 0 && fchmod(installed_source, 0500) != 0) restored = false;
         BQ_PREP_CHECK(restored);
         if (installed_source >= 0) close(installed_source);
-        BQ_PREP_CHECK(restored && bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+        BQ_PREP_CHECK(restored && bq_retirement_preparation_ready_pinned(store, &job, installed, workspaces,
                       string_from_pointer(profile), digest, NULL) == BQ_OK &&
                       !strcmp(digest, original_digest));
         BQ_PREP_CHECK(copied >= 0 && fchmod(copied, 0700) == 0 && mkdirat(copied, "unlisted", 0500) == 0 &&
                       fchmod(copied, 0500) == 0);
-        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(store, &job, installed, workspaces,
                       string_from_pointer(profile), digest, NULL) == BQ_SOURCE_MISMATCH && !digest[0]);
-        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(store, &job, installed, workspaces,
                       string_from_pointer(profile), original_digest, &imported) == BQ_SOURCE_MISMATCH &&
                       !imported.inventory_sha256[0]);
         BQ_PREP_CHECK(copied >= 0 && fchmod(copied, 0700) == 0 &&
                       unlinkat(copied, "unlisted", AT_REMOVEDIR) == 0 && fchmod(copied, 0500) == 0);
-        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(store, &job, installed, workspaces,
                       string_from_pointer(profile), digest, NULL) == BQ_OK && !strcmp(digest, original_digest));
         BQ_PREP_CHECK(copied >= 0 && fchmod(copied, 0700) == 0 &&
                       renameat(copied, "main.c", copied, "old.c") == 0);
@@ -2072,9 +2365,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
                           fchmod(replacement, 0400) == 0 && unlinkat(copied, "old.c", 0) == 0 &&
                           fchmod(copied, 0500) == 0);
             if (replacement >= 0) close(replacement);
-            BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+            BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(store, &job, installed, workspaces,
                           string_from_pointer(profile), digest, NULL) == BQ_SOURCE_MISMATCH && !digest[0]);
-            BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+            BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(store, &job, installed, workspaces,
                           string_from_pointer(profile), original_digest, &imported) == BQ_SOURCE_MISMATCH &&
                           !imported.inventory_sha256[0]);
             close(copied);
@@ -2085,9 +2378,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
         record = openat(queue.directory_fd, "preparation-1", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
         BQ_PREP_CHECK(record >= 0 && pwrite(record, "X", 1, 0) == 1 && fchmod(record, 0400) == 0);
         if (record >= 0) close(record);
-        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(store, &job, installed, workspaces,
                       string_from_pointer(profile), digest, NULL) == BQ_CORRUPT && !digest[0]);
-        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(store, &job, installed, workspaces,
                       string_from_pointer(profile), original_digest, &imported) == BQ_CORRUPT &&
                       !imported.inventory_sha256[0]);
     }
@@ -2114,83 +2407,20 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_flip_pin(char* profile, char const* key)
 BUSTER_GLOBAL_LOCAL void bq_prep_test_reference_policy(int installed, char const* installed_path,
     char const* workspaces_path, BqRetirementPreparation const* preparation, char const* profile)
 {
-    char recipes[512], template_path[576], inventory_path[576], toolchain_root[BQ_RETIREMENT_TOOLCHAIN_PATH_CAP];
-    int length = snprintf(recipes, sizeof(recipes), "%s/recipes", installed_path);
-    bool ok = length > 0 && (size_t)length < sizeof(recipes);
-    length = snprintf(template_path, sizeof(template_path),
-                      "%s/native-retirement-performance-v1.reference-template", recipes);
-    ok = ok && length > 0 && (size_t)length < sizeof(template_path);
-    length = snprintf(inventory_path, sizeof(inventory_path),
-                      "%s/native-retirement-performance-v1.reference-inventory", recipes);
-    ok = ok && length > 0 && (size_t)length < sizeof(inventory_path);
-    length = snprintf(toolchain_root, sizeof(toolchain_root),
-                      "%s/toolchain/native-retirement-performance-v1", installed_path);
-    ok = ok && length > 0 && (size_t)length < sizeof(toolchain_root);
-    BqRetirementToolchain checked = {0};
-    ok = ok && bq_retirement_toolchain_verify(installed, string_from_pointer(profile), toolchain_root,
-                                              &checked) == BQ_OK;
-    BQ_PREP_CHECK(ok);
-    char clang_sha256[SHA256_HEX_CAPACITY] = {0}, held_sha256[SHA256_HEX_CAPACITY] = {0};
-    bq_digest("fixture only\n", 13, (char8*)clang_sha256);
+    BqPrepReferenceFixture fixture = {0};
+    bool ok = bq_prep_test_reference_install(installed, installed_path, preparation, profile, &fixture);
+    BqRetirementToolchain checked = fixture.checked;
+    char const* toolchain_root = fixture.toolchain_root;
+    char const* template_path = fixture.template_path;
+    char const* template_sha256 = fixture.template_sha256;
+    char const* inventory_sha256 = fixture.inventory_sha256;
+    char const* clang_sha256 = fixture.clang_sha256;
+    char const* pinned = fixture.pinned;
+    char held_sha256[SHA256_HEX_CAPACITY] = {0};
     int held = -1;
-    BQ_PREP_CHECK(bq_retirement_toolchain_hold_clang(&checked, &held, held_sha256) && held >= 3 &&
+    BQ_PREP_CHECK(ok && bq_retirement_toolchain_hold_clang(&checked, &held, held_sha256) && held >= 3 &&
                   !strcmp(held_sha256, clang_sha256) && (fcntl(held, F_GETFD) & FD_CLOEXEC));
     if (held >= 0) close(held);
-
-    BqRetirementOracleTemplateRow approved = {.row = 1, .census_row = 0, .target = 1};
-    bq_digest("int a;\n", 7, (char8*)approved.source_sha256);
-    memset(approved.configuration_sha256, '5', 64);
-    strcpy(approved.output_name, "oracle-output");
-    BqRetirementOracleTemplate template = {.population_rows = 2, .object_rows = 1, .native_target = 1,
-                                           .reference_count = 1, .references = &approved};
-    BqRetirementReferenceSourceIdentity source[2] = {0};
-    for (u32 side = 0; side < 2; side += 1)
-    {
-        memcpy(source[side].commit, preparation->subjects[side].commit, 40);
-        memcpy(source[side].tree, preparation->subjects[side].tree, 40);
-        memcpy(source[side].manifest_sha256, preparation->subjects[side].manifest_sha256, 64);
-        memcpy(template.source_commit[side], source[side].commit, 41);
-        memcpy(template.source_tree[side], source[side].tree, 41);
-        memcpy(template.source_sha256[side], source[side].manifest_sha256, 65);
-    }
-    memset(template.census_sha256, '3', 64);
-    memset(template.population_sha256, '4', 64);
-    ok = ok && bq_retirement_profile_sha(string_from_pointer(profile), S8("support-declaration-sha256="),
-                                         template.support_sha256) &&
-         bq_retirement_profile_sha(string_from_pointer(profile), S8("toolchain-manifest-sha256="),
-                                   template.toolchain_identity_sha256);
-    BqRetirementReferencePlanRow row = {.row = 1, .source_side = 0, .flag_count = 1,
-                                        .build_environment_count = 1, .runtime_argument_count = 1,
-                                        .runtime_environment_count = 1};
-    strcpy(row.source_path, "src/main.c");
-    memcpy(row.source_sha256, approved.source_sha256, 65);
-    row.flags[0] = "-std=c11";
-    row.build_environment[0] = "LC_ALL=C";
-    row.runtime_environment[0] = "LC_ALL=C";
-    BqRetirementReferencePlan plan = {.template = &template, .rows = &row, .count = 1};
-    memcpy(plan.clang_sha256, clang_sha256, 65);
-    u8 template_bytes[2048];
-    u64 template_length = 0;
-    char template_sha256[SHA256_HEX_CAPACITY] = {0}, inventory_sha256[SHA256_HEX_CAPACITY] = {0};
-    ok = ok && bq_ref_plan_row(&row, &approved, approved.build_command_sha256) &&
-         bq_ref_runtime_command(&row, approved.logical_command_sha256) &&
-         bq_retirement_oracle_template_hash(&template, template_sha256) &&
-         bq_retirement_reference_template_write(&template, template_bytes, sizeof(template_bytes),
-                                                &template_length) &&
-         chmod(recipes, 0700) == 0 &&
-         bq_prep_test_write_bytes(template_path, (char const*)template_bytes, (u32)template_length);
-    int writer = ok ? open(inventory_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
-    ok = ok && writer >= 3 && bq_retirement_reference_inventory_encode(&plan, source,
-             template.toolchain_identity_sha256, writer, inventory_sha256) && fchmod(writer, 0400) == 0;
-    if (writer >= 0 && close(writer) != 0) ok = false;
-    ok = ok && chmod(recipes, 0500) == 0;
-    char pinned[1024];
-    length = ok ? snprintf(pinned, sizeof(pinned),
-                           "%sreference-template-sha256=%s\nreference-inventory-sha256=%s\n"
-                           "census-rows-sha256=%.64s\n", profile, template_sha256, inventory_sha256,
-                           template.census_sha256) : -1;
-    ok = ok && length > 0 && (size_t)length < sizeof(pinned);
-    BQ_PREP_CHECK(ok);
 
     BqRetirementReferencePolicy policy = {0};
     BQ_PREP_CHECK(ok && bq_retirement_reference_policy_import_pinned(installed, string_from_pointer(pinned),
@@ -2202,13 +2432,15 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_reference_policy(int installed, char const
                   policy.plan.template == &policy.template && policy.plan.rows == policy.plan_rows &&
                   policy.plan.count == 1 && !strcmp(policy.plan_rows[0].source_path, "src/main.c") &&
                   !strcmp(policy.plan_rows[0].flags[0], "-std=c11") &&
-                  !strcmp(policy.template_rows[0].build_command_sha256, approved.build_command_sha256) &&
+                  !strcmp(policy.template_rows[0].build_command_sha256, fixture.build_command_sha256) &&
                   !strcmp(policy.source[1].commit, preparation->subjects[1].commit) &&
                   !strcmp(policy.plan.clang_sha256, clang_sha256));
     BqRetirementReferencePolicy live = policy;
     BQ_PREP_CHECK(bq_retirement_reference_policy_import_pinned(installed, string_from_pointer(pinned),
-                  preparation, &checked, &policy) == BQ_RECIPE_MISMATCH && policy.clang == live.clang);
-    BQ_PREP_CHECK(bq_retirement_reference_policy_release(&policy) && !policy.owned && policy.clang == -1);
+                  preparation, &checked, &policy) == BQ_RECIPE_MISMATCH && policy.clang == live.clang &&
+                  policy.inventory == live.inventory);
+    BQ_PREP_CHECK(bq_retirement_reference_policy_release(&policy) && !policy.owned && policy.clang == -1 &&
+                  policy.inventory == -1);
 
     /* The checked-in blocked profile has no reference pins. */
     char absent[SHA256_HEX_CAPACITY] = {0};
@@ -2216,7 +2448,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_reference_policy(int installed, char const
     BQ_PREP_CHECK(!bq_retirement_profile_sha(blocked, S8("reference-template-sha256="), absent) &&
                   !bq_retirement_profile_sha(blocked, S8("reference-inventory-sha256="), absent));
     BQ_PREP_CHECK(bq_retirement_reference_policy_import(installed, preparation, &checked, &policy) ==
-                  BQ_RECIPE_MISMATCH && !policy.owned && policy.clang == -1);
+                  BQ_RECIPE_MISMATCH && !policy.owned && policy.clang == -1 && policy.inventory == -1);
 
     char variant[1024];
     char const* missing[] = {"reference-template-sha256=", "reference-inventory-sha256=",
@@ -2279,8 +2511,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_reference_policy(int installed, char const
                   bq_retirement_reference_policy_import_pinned(installed, string_from_pointer(pinned),
                       preparation, &checked, &policy) == BQ_OK &&
                   bq_retirement_reference_policy_release(&policy));
-    BQ_PREP_CHECK(chmod(recipes, 0700) == 0 && unlink(template_path) == 0 && unlink(inventory_path) == 0 &&
-                  chmod(recipes, 0500) == 0);
+    BQ_PREP_CHECK(bq_prep_test_reference_remove(&fixture));
 }
 
 #include "retirement_campaign_service_tests.h"
