@@ -13354,6 +13354,7 @@ struct CIrLowerBodyState
     CIrLabel* labels;
     IrSourceRange declaration_source;
     IrSourceRange child_source;
+    IrSourceRange statement_unreachable_source;
     IrValueId result;
     CIrVlaLayout* vla_layout;
     CIntegerIrLocal* child_local;
@@ -13378,7 +13379,8 @@ struct CIrLowerBodyState
     bool initialized;
     bool yielded;
     bool has_current_task;
-    u8 reserved[4];
+    bool statement_unreachable;
+    u8 reserved[3];
 };
 
 typedef struct CIrLowerAutomaticDeclarationState CIrLowerAutomaticDeclarationState;
@@ -14924,10 +14926,14 @@ BUSTER_C_INTERNAL bool c_ir_signature_call_supported(CIntegerIrBuilder* builder,
    created a merge block its arm is expected to reach. Buster's own
    BUSTER_CHECK puts a noreturn call in a conditional operand, so this is not
    a hypothetical shape. A body statement that consumes the value -- a return,
-   an initializer, a switch controller -- emits its rows after the call too. */
-BUSTER_C_INTERNAL bool c_ir_lowering_resumes_after_call(CIntegerIrBuilder* builder)
+   an initializer, a switch controller -- emits its rows after the call too.
+   So does an expression statement, whose call may be an operand of a cast,
+   an assignment, another call or a comma: that statement is returned through
+   `statement`, and it ends its block once its own rows are emitted. */
+BUSTER_C_INTERNAL bool c_ir_lowering_branch_resumes_after_call(CIntegerIrBuilder* builder, CIrLowerBodyState** statement)
 {
     bool result = false;
+    *statement = 0;
     for (u32 index = 0; index < builder->lower_machine.frame_count && !result; index += 1)
     {
         CIrLowerFrame* frame = &builder->lower_machine.frames[index];
@@ -14958,14 +14964,36 @@ BUSTER_C_INTERNAL bool c_ir_lowering_resumes_after_call(CIntegerIrBuilder* build
                 result = frame->as.body.state->statement_expression_mode ||
                          (continuation != C_IR_LOWER_BODY_CONTINUE_NONE && continuation != C_IR_LOWER_BODY_CONTINUE_STATEMENT &&
                           continuation != C_IR_LOWER_BODY_CONTINUE_CONDITION_TASK);
+                *statement = continuation == C_IR_LOWER_BODY_CONTINUE_STATEMENT ? frame->as.body.state : 0;
             }
             break;
         default:
             break;
         }
     }
+    if (result)
+    {
+        *statement = 0;
+    }
 
     return result;
+}
+
+BUSTER_C_INTERNAL bool c_ir_lowering_resumes_after_call(CIntegerIrBuilder* builder)
+{
+    CIrLowerBodyState* statement;
+    bool result = c_ir_lowering_branch_resumes_after_call(builder, &statement) || statement;
+    return result;
+}
+
+BUSTER_C_INTERNAL void c_ir_end_block_unreachable(CIntegerIrBuilder* builder, IrSourceRange source)
+{
+    IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type);
+    c_ir_append_instruction(builder, unreachable, source);
+    if (builder->current_block.value < builder->function->block_count)
+    {
+        builder->function->blocks[builder->current_block.value].terminated = true;
+    }
 }
 
 /* Close the block after a call the callee cannot return from.  Both call
@@ -14973,16 +15001,24 @@ BUSTER_C_INTERNAL bool c_ir_lowering_resumes_after_call(CIntegerIrBuilder* build
    through a pointer, which has no declaration to read -- a noreturn function
    type.  GNU statement expressions and branching operands are the exception,
    because their nested body is resumed by the enclosing expression frame,
-   which emits the proper continuation after this call. */
+   which emits the proper continuation after this call.  An expression
+   statement is closed by its body once the whole statement is lowered. */
 BUSTER_C_INTERNAL void c_ir_end_control_flow_after_call(CIntegerIrBuilder* builder, bool noreturn, IrSourceRange source)
 {
-    if (noreturn && !c_ir_lowering_resumes_after_call(builder))
+    if (noreturn)
     {
-        IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type);
-        c_ir_append_instruction(builder, unreachable, source);
-        if (builder->current_block.value < builder->function->block_count)
+        CIrLowerBodyState* statement;
+        if (!c_ir_lowering_branch_resumes_after_call(builder, &statement))
         {
-            builder->function->blocks[builder->current_block.value].terminated = true;
+            if (statement)
+            {
+                statement->statement_unreachable = true;
+                statement->statement_unreachable_source = source;
+            }
+            else
+            {
+                c_ir_end_block_unreachable(builder, source);
+            }
         }
     }
 }
@@ -37565,7 +37601,14 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
     {
         arena_set_position(builder->temporary_arena, state->temporary_mark);
         CIrLowerBodyContinuation continuation = state->continuation;
+        bool statement_unreachable = state->statement_unreachable;
         state->continuation = C_IR_LOWER_BODY_CONTINUE_NONE;
+        state->statement_unreachable = false;
+        if (statement_unreachable && builder->lower_machine.child_result.success &&
+            !builder->function->blocks[builder->current_block.value].terminated)
+        {
+            c_ir_end_block_unreachable(builder, state->statement_unreachable_source);
+        }
         if (!builder->lower_machine.child_result.success)
         {
             if (continuation == C_IR_LOWER_BODY_CONTINUE_RETURN && !builder->failure_message.length)
@@ -50362,6 +50405,17 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             .location = deferred.location,
         };
         u32 declaration_end = deferred.token_start + deferred.token_count;
+        // A name the parse left unbound -- one in a member assertion --
+        // resolves in the innermost scope enclosing it, not at file scope.
+        CScopeId assertion_scope = c_parse_scope_for_token(&parse, deferred.scope, deferred.token_start);
+        for (u32 token_index = deferred.token_start; token_index < declaration_end && token_index < preprocess.token_count; token_index += 1)
+        {
+            if (preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && !token_entities_plus_one[token_index])
+            {
+                CEntityId entity = c_parse_lookup_entity_token(&parse, preprocess.spelling_base, assertion_scope, &preprocess.tokens[token_index]);
+                token_entities_plus_one[token_index] = entity.value + 1;
+            }
+        }
         u32 expression_start = 0;
         u32 expression_end = 0;
         CIrConstantValue assertion = {0};
