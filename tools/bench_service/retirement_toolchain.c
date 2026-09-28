@@ -218,9 +218,11 @@ bool bq_retirement_toolchain_recheck(BqRetirementToolchain const* expected)
 }
 
 /* #1020 reference producer input: hold the exact verified bin/clang inode.
- * The held descriptor is hashed first; the complete bundle recheck then
- * proves that inode is still the manifest's bin/clang (the identity binds
- * every file inode), and the name must still resolve to the held file. */
+ * The held descriptor is hashed first; the complete bundle is then rescanned
+ * through the same held root descriptor (not reopened by path, so a swapped
+ * ancestor cannot substitute another directory) and must reproduce the
+ * verified identity, which binds every file inode. Finally the name must
+ * still resolve to the held file. */
 bool bq_retirement_toolchain_hold_clang(BqRetirementToolchain const* verified,
     int* held, char digest[SHA256_HEX_CAPACITY])
 {
@@ -232,13 +234,16 @@ bool bq_retirement_toolchain_hold_clang(BqRetirementToolchain const* verified,
         bq_open_source_file(root, S8("bin/clang")) : -1;
     struct stat first = {0}, named = {0};
     char actual[SHA256_HEX_CAPACITY] = {0};
+    BqRetirementToolchain current = {0};
     bool ok = file >= 0 && fstat(file, &first) == 0 && S_ISREG(first.st_mode) &&
               first.st_nlink == 1 && (first.st_uid == 0 || first.st_uid == geteuid()) &&
               !(first.st_mode & 0222) && (first.st_mode & S_IROTH) &&
               (first.st_mode & (S_IXUSR | S_IXOTH)) == (S_IXUSR | S_IXOTH) &&
               first.st_size > 0 && (u64)first.st_size <= BQ_RETIREMENT_TOOLCHAIN_FILE_CAP &&
               bq_retirement_toolchain_file_sha(file, &first, actual) &&
-              bq_retirement_toolchain_recheck(verified);
+              bq_retirement_toolchain_scan(root, string_from_pointer(verified->manifest_sha256), &current) &&
+              !memcmp(verified->identity_sha256, current.identity_sha256, SHA256_HEX_CAPACITY) &&
+              verified->entries == current.entries && verified->bytes == current.bytes;
     int reopened = ok ? bq_open_source_file(root, S8("bin/clang")) : -1;
     ok = ok && reopened >= 0 && fstat(reopened, &named) == 0 &&
          named.st_dev == first.st_dev && named.st_ino == first.st_ino;
