@@ -1605,6 +1605,87 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_volatile_split_bit_fields(UnitTestArgu
     return result;
 }
 
+// A bit-field width written as one literal token that is not all decimal
+// digits, or a bit-field whose declarator is parenthesized, used to fail the
+// member segment and drop the whole aggregate. The static assertions check the
+// parse-time layout and the program checks the lowered one; the values match
+// clang 18.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_spellings(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("struct spelled_bits { int a : 0x3; unsigned b : 3u; int c : 0b11; unsigned d : 1'0;\n"
+                        "    int (x) : 3U; unsigned (y) : 0x20; unsigned w : 010; };\n"
+                        "_Static_assert(sizeof(struct spelled_bits) == 12, \"size\");\n"
+                        "_Static_assert(_Alignof(struct spelled_bits) == 4, \"alignment\");\n"
+                        "static struct spelled_bits object;\n"
+                        "int main(void) {\n"
+                        "    object.a = -2; object.b = 7; object.c = 3; object.d = 1023;\n"
+                        "    object.x = -4; object.y = 0xffffffffu; object.w = 0x3ff;\n"
+                        "    if (object.a != -2 || object.b != 7 || object.c != 3 || object.d != 1023) return 1;\n"
+                        "    if (object.x != -4 || object.y != 0xffffffffu || object.w != 255) return 2;\n"
+                        "    return 0;\n"
+                        "}\n");
+    CPreprocessOptions options = {
+        .target = target_native,
+        .data_layout = target_data_layout(target_native),
+        .dialect = C_PREPROCESS_DIALECT_GNU23,
+    };
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, options);
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+        {
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("bit-field-width-spellings.c"), tokens, parse, target_native);
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program);
+        }
+        scratch_end(temporary);
+    }
+    String8 non_integer_sources[] = {S8("struct s { int a : 1.0; };\n"), S8("struct s { int : 1.0; };\n"), S8("struct s { int (a) : 2.0 + 1; };\n")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(non_integer_sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, non_integer_sources[index], options);
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, analysis.diagnostic_count == 1))
+        {
+            BUSTER_TEST(arguments, analysis.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH);
+            BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, S8("bit-field width is not an integer constant expression"));
+        }
+        scratch_end(temporary);
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("bit-field-width-spellings"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 output = buster_test_temporary_path(temporary.arena, S8("bit-field-width-spellings-run"), S8(".exe"));
+        String8 command[] = {S8("-nostdinc"), S8("-std=gnu23"), S8("-fverify-codegen"), S8("-o"), output, source_path};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("bit-field width spellings: {S8}"), compiled.diagnostic));
+        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 run[] = {output};
+            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                       (ProcessSpawnOptions){.use_process_environment = true});
+            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+            {
+                ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("bit-field width spellings runtime status={u32} timed_out={u32}"),
+                                              execution.platform_status, (u32)execution.timed_out));
+            }
+        }
+        scratch_end(temporary);
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23997,6 +24078,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_enum_range_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
     BUSTER_TEST_FIXTURE(arguments, c_test_volatile_split_bit_fields);
+    BUSTER_TEST_FIXTURE(arguments, c_test_bit_field_width_spellings);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
