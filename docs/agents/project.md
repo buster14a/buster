@@ -2,10 +2,19 @@
 
 [Agent instructions](../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
-## Project
+## Monorepo
 
-**buster** is a from-scratch C compiler and toolchain written in C. The C
-frontend is the sole source-language frontend. The `ide` executable is a
+**Buster** is a personal monorepo for applications, shared C components, tools
+and experiments. [PROJECTS.md](../../PROJECTS.md) is the project/component index;
+[project tracking](../project-tracking.md) describes feature ownership and work
+coordination. Shared foundation/platform and retained graphics/UI code have
+their own homes even when the compiler is their current consumer. This source
+map is not a roadmap or a blanket support claim.
+
+## Compiler project
+
+The from-scratch C compiler and toolchain is one project within Buster. C is
+its sole active source-language frontend. The `ide` executable is a
 headless compiler, test runner, benchmark driver, fuzz entrypoint, and metadata
 tool; the target name is retained for build-script compatibility. The `ide cc`
 driver also orchestrates optional external shader toolchains for SPIR-V,
@@ -45,8 +54,8 @@ Top level:
 | `src/buster/lib/` | Runtime, platform, compiler, assembler, linker, JIT, and retained UI/rendering libraries. |
 | `src/buster/tests/` | In-process unit/module tests. |
 | `tests/` | C frontend, driver, object/archive, fuzz, and CI-script fixtures. |
-| `tools/` | Python generators, scanners, and measurement scripts run by hand; outside the build graph. |
-| `.forgejo/` | Forgejo CI workflows/scripts and the source-free GitHub broker workflow template. |
+| `tools/` | Native service/harness tools, generators, scanners and measurement utilities; consult each tool's entry point and build contract. |
+| `.github/` | Repository CI workflows, policies, and issue/PR templates. |
 | `PERFORMANCE_AUDITS.md` | Guide to the append-only measurement history and its closed index; `tools/new_audit.py --list` lists every audit. |
 | `docs/performance-audits/` | One file per audit, named for its id; older entries may describe components that no longer exist. |
 | `WASM64.md` | Direct core Wasm64 target contract and usage. |
