@@ -73,9 +73,9 @@ existing queue or replace the lease inode. Record and sign off:
 
 | Receipt | Required observation |
 | --- | --- |
-| Software | Main commit/tree, exact service, build driver, harness, gateway/export, systemd broker and helper SHA-256; bootstrap and dependency identities; installed recipes/profiles and blocked retirement descriptor |
+| Software | Main commit/tree, exact service, build driver, harness, gateway/export, systemd broker, static credential gate, static broker entry gate and helper SHA-256; both gates have no ELF INTERP/DYNAMIC and no executable stack; root-owned `0444` numeric account receipt and its SHA-256; bootstrap and dependency identities; installed recipes/profiles and blocked retirement descriptor |
 | Sources | Immutable reviewed commit-to-tree-to-manifest mapping; full closure, sorted inventory, file counts/bytes/hashes; source manifest over 4 KiB for the normal attempt |
-| Principals | Numeric service, candidate, runner and operator UID/GID/supplementary groups; runner can invoke only the fixed installed gateway, candidate cannot mutate queue, lease, policy or results |
+| Principals | Authenticated numeric service, candidate, runner and operator UID/GID/supplementary inventory; actual service/runner process real/effective/saved/filesystem UID/GID, Groups, Cap* and NoNewPrivs; account and authorization sources stable for the whole lease; runner can invoke only the fixed installed gateway, candidate cannot mutate queue, lease, policy or results |
 | State | Canonical queue/workspace/result/source/runtime paths, symlink/hard-link checks and permissions, filesystem identity and space; stable lease device/inode observed before and after each attempt |
 | Supervisor | Host/boot/kernel/microcode, systemd version, exact service/broker/socket/unit files, root-owned stable-lease identity, fixed system-bus authority, cgroup v2 ancestry and effective CPU/memory/swap/tasks/runtime; real UID/GID and process absence |
 | Exclusivity | Drained GitHub and Forgejo jobs, timers, cron, agents, profilers, backups, indexers and manual work from preparation through cleanup; recorded negative audit and no unresolved queue job |

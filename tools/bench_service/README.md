@@ -61,6 +61,16 @@ final manifest, bundle and outcome evidence with no-replace links; the result
 tree is never writable by the candidate identity and is replayed before success
 is acknowledged.
 
+On Linux, `RestrictSUIDSGID` rejects `mkdir` and `chmod` requests that include
+SGID, even when the target directory already has it. The trusted materializer
+and recipe driver create their shared directories with a short-lived `0007`
+umask, inherit SGID and group from a validated parent, then verify the exact
+resulting owner, group and mode before use. The base and candidate subject
+directories both start at `02710`; copied source directories become `0550`
+after materialization. Once builds are complete, the driver clears special bits
+while making their trees read-only. The service and transient sandbox settings
+remain unchanged.
+
 Each fixed recipe stage helper uses a deterministic unit name linked with
 `PartOf=`, `BindsTo=` and `After=` to its owning worker unit and uses
 `CollectMode=inactive-or-failed`. Every nested
@@ -70,26 +80,29 @@ coordinator observes the same properties on the outer unit before continuing.
 
 For a fresh real job the server acquires the cooperative host lease before FIFO
 reservation and materialization. It transfers the descriptor over a private,
-peer-credential-checked result-root `SOCK_SEQPACKET` handoff and closes its own
-copy only after the worker acknowledges receipt. The `.lease-handoff` socket is
+peer-credential-checked result-root `SOCK_SEQPACKET` handoff and retains its own
+copy after the worker acknowledges receipt. The `.lease-handoff` socket is
 unlinked by device/inode identity and the result directory is fsynced before
 the helper is continued; a handoff cleanup failure fails the launch rather
-than signalling CONT over a stale socket. The worker then owns that
-descriptor while result or failure evidence becomes durable, while TERM/KILL
-escalation runs, until `cgroup.events` is unpopulated and workspace
-reconciliation durably releases the queue job. No later queue job can reserve
-while any of those steps is uncertain.
+than signalling CONT over a stale socket. The worker receives a reference to
+the same locked open-file description; closing that reference does not release
+the coordinator's reference. The coordinator retains the lease while result or
+failure evidence becomes durable, while TERM/KILL escalation runs, until
+`cgroup.events` is unpopulated and workspace reconciliation durably releases
+the queue job. Uncertain cleanup transfers its reference to quarantine. No
+later queue job can reserve while any of those steps is uncertain.
 
 Cleanup sends TERM, polls descriptor-validated recursive population every
 100 ms for the configured 10-second grace, then sends KILL and polls for at
 most another 10 seconds. Once the outer unit can no longer launch work, the
-coordinator reacquires and retains the host lease, enumerates every deterministic
-stage name, validates any surviving stage's boot, invocation, relationship and
+coordinator retains the host lease (or reacquires it when recovering without
+an existing descriptor), enumerates every deterministic stage name, validates
+any surviving stage's boot, invocation, relationship and
 cgroup identity, directly applies the same TERM/KILL escalation, and proves all
 five stage units and cgroups absent. It reaps the service helper only after
-those absence proofs. A start/observation failure that cannot prove physical ownership
-retains the active queue admission and the live helper's inherited host lock;
-it does not guess that a transient service disappeared.
+those absence proofs. A start/observation failure that cannot prove physical
+ownership retains active queue admission and the coordinator's lease reference
+in quarantine; it does not guess that a transient service disappeared.
 
 All manager subprocess pipe reads and child waits use monotonic deadlines;
 signal interruption cannot restart an unbounded relative wait. Fixed manager
@@ -154,8 +167,9 @@ identity and an empty recursive cgroup are required.
 Lease parents and the cgroup root are parsed as strict absolute paths and
 opened one component at a time from `/` with `O_NOFOLLOW`. Every ancestor must
 be root/service-owned and not group/world writable, except a root-owned sticky
-handoff directory such as `/tmp`; the final lease parent must be private to the
-service account. The configured cgroup root must remain root/service-owned and
+handoff directory such as `/tmp`; the fixed broker lease parent permits
+traversal by the service group only and the lease is `0640`. The configured
+cgroup root must remain root/service-owned and
 non-writable by other users. Dot components and symlink aliases fail closed.
 
 The durable `worker-JOB` intent binds `{job, token, request digest, boot_id,
@@ -199,6 +213,19 @@ The existing native `build.c` driver owns compilation and execution:
 ./build.sh bench_service self-test --sanitize
 ./build.sh bench_service_recipe_self_test
 ```
+
+On Linux x86-64 and AArch64, both self-tests fork a disposable child with a
+native-architecture syscall filter that denies explicit SUID/SGID `mkdirat`,
+`fchmod` and `fchmodat` requests. Negative controls require `EPERM` even when
+reasserting an existing SGID bit. They exercise the production directory
+helpers, materializer/reconciliation and recipe tree-locking traversal. The
+filter never affects the parent test process. The Ubuntu 24.04 TCC bootstrap
+lane sets `BQ_REQUIRE_DISTINCT_GROUP=1` to require a fixture group different
+from the effective primary group; other Linux environments print
+`unsupported-different-primary` if their credentials cannot set up that case.
+Other architectures print `unsupported-architecture` and do not count as
+sandbox coverage. These tests do not reproduce the full systemd sandbox or
+qualify a dedicated host.
 
 `test_all_combinations` runs the normal service self-test beside the existing
 throughput self-test on each desktop lane, and also runs its AddressSanitizer
@@ -252,8 +279,10 @@ against an owning UID. The fixed systemd service supplies the actual queue,
 lease, installed-tree and workspace path policy; the trusted driver additionally
 locks built baseline/candidate trees before throughput. The recipe accepts only
 operator-installed source directories and manifests owned by root or the
-service UID, with no group/other access or write bits. It never treats a
-submitted source tree as a source-free broker command. Before publication it
+service UID, with no group/other write bits. Materialized source files and
+manifest copies are `0440` so the candidate can read its fixed source. It
+never treats a submitted source tree as a source-free broker command. Before
+publication it
 reopens every source and workspace identity, rechecks the baseline/candidate
 tree roots, and compares the baseline and candidate executable digests captured
 after their builds with the digests after throughput. Any mismatch fails closed
