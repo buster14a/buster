@@ -24,7 +24,7 @@ for arg; do
             if [ "$BUSTER_TEST_CLANG_RUNTIME" = missing ]; then
                 printf '%s\n' "${arg#*=}"
             else
-                printf '%s\n' "$BUSTER_TEST_CLANG_RUNTIME"
+                printf '%s\n' "$BUSTER_TEST_CLANG_RUNTIME_DIR/${arg#*=}"
             fi
             exit 0
             ;;
@@ -48,9 +48,15 @@ class LinuxAsanFullConfigureTests(unittest.TestCase):
             wrapper.write_text(WRAPPER, encoding="utf-8")
             wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
 
-            clang_runtime_path = work / "libclang_rt.asan-x86_64.so"
+            clang_runtime_dir = work / "clang-runtime"
+            clang_runtime_dir.mkdir()
+            for runtime_name in (
+                "libclang_rt.asan-x86_64.so",
+                "libclang_rt.asan-aarch64.so",
+                "libclang_rt.asan.so",
+            ):
+                (clang_runtime_dir / runtime_name).touch()
             gcc_runtime_path = work / "libasan.so"
-            clang_runtime_path.touch()
             gcc_runtime_path.touch()
             query_log = work / "queries.log"
 
@@ -59,9 +65,8 @@ class LinuxAsanFullConfigureTests(unittest.TestCase):
                 env.pop(name, None)
             env.update(
                 BUSTER_TEST_REAL_CC=compiler,
-                BUSTER_TEST_CLANG_RUNTIME=(
-                    "missing" if clang_runtime == "missing" else str(clang_runtime_path.resolve())
-                ),
+                BUSTER_TEST_CLANG_RUNTIME=clang_runtime,
+                BUSTER_TEST_CLANG_RUNTIME_DIR=str(clang_runtime_dir.resolve()),
                 BUSTER_TEST_GCC_RUNTIME=str(gcc_runtime_path.resolve()),
                 BUSTER_TEST_QUERY_LOG=str(query_log),
             )
@@ -89,10 +94,14 @@ class LinuxAsanFullConfigureTests(unittest.TestCase):
                 timeout=180,
             )
             queries = query_log.read_text(encoding="utf-8").splitlines() if query_log.exists() else []
+            selected_clang_runtime = None
+            if clang_runtime != "missing" and queries:
+                runtime_name = queries[0].partition("=")[2]
+                selected_clang_runtime = str((clang_runtime_dir / runtime_name).resolve())
             return (
                 result,
                 queries,
-                str(clang_runtime_path.resolve()),
+                selected_clang_runtime,
                 str(gcc_runtime_path.resolve()),
             )
 
