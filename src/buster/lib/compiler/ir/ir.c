@@ -3721,11 +3721,15 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                 if (!(convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument) && ir_homogeneous_float_abi(program, type_id, &element, &count))
                 {
                     IrType* element_type = ir_type_from_id(&program->types, element);
+                    // A binary128 member takes a whole Q register, the same
+                    // sixteen-byte vector-file part a scalar binary128 uses.
+                    bool vector_part = element_type->kind == IR_TYPE_VECTOR ||
+                                       (element_type->kind == IR_TYPE_FLOAT && element_type->bit_width == 128);
                     value.part_count = count;
                     for (u32 part = 0; part < count; part += 1)
                     {
                         value.parts[part] = (IrAbiPart){
-                            .abi_class = element_type->kind == IR_TYPE_VECTOR ? IR_ABI_CLASS_VECTOR : IR_ABI_CLASS_FLOAT,
+                            .abi_class = vector_part ? IR_ABI_CLASS_VECTOR : IR_ABI_CLASS_FLOAT,
                             .value_offset = part * (u32)element_type->layout.size,
                             .size = (u32)element_type->layout.size,
                         };

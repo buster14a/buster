@@ -499,7 +499,8 @@
   original created-NaN fixture and tests independent binary128 byte cases.
   Native Linux AArch64 exchanges producer/consumer roles with the configured
   host compiler and checks all rounding modes, FPCR/FPSR and sentinels.
-  Binary128 scalar signatures, arithmetic and truncation are separate gaps.
+  Binary128 arithmetic and rounding conversions are frontend runtime calls;
+  see the wide-float frontend guide.
 - AArch64 128-bit multiplication combines the low-limb product, its generated
   UMULH high half, and the two cross products. Negation propagates the low
   limb's borrow. Variable shifts use masks at the 64-bit boundary and suppress

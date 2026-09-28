@@ -17934,7 +17934,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
         bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
         bool f80_sysv = c_test_target_uses_x86_f80_abi(target) && wide_long_double;
         bool f128_aapcs64 = c_test_target_uses_aapcs64_f128_transport(target) && wide_long_double;
-        u32 rejected_signature_count = f80_sysv || !wide_long_double ? 0 : f128_aapcs64 ? 5 : 6;
+        u32 rejected_signature_count = f80_sysv || f128_aapcs64 || !wide_long_double ? 0 : 6;
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
                                                     (CPreprocessOptions){
@@ -17975,7 +17975,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
                 // because they are larger than two eightbytes -- so they
                 // travel as ordinary memory-class aggregates.  Clang compiles
                 // all five to byval/sret against the same declarations.
-                bool expected_rejected = !f80_sysv && wide_long_double && function_index < 6 && !(f128_aapcs64 && function_index == 0);
+                // AAPCS64 places every binary128 aggregate by its ordinary
+                // classification: an HFA in Q registers, the union in X
+                // registers and the large array through a caller copy.
+                bool expected_rejected = !f80_sysv && !f128_aapcs64 && wide_long_double && function_index < 6;
                 BUSTER_TEST(arguments, function->state == (expected_rejected ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
             }
             if (wide_long_double)
@@ -17994,6 +17997,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
                                                           ir_abi_convention_for_target(target), IR_ABI_USE_RESULT);
                 BUSTER_TEST(arguments, struct_abi.part_count != 0);
                 BUSTER_TEST(arguments, large_abi.part_count != 0 && large_abi.indirect);
+                if (f128_aapcs64)
+                {
+                    // A one-member binary128 HFA takes one whole Q register,
+                    // the same sixteen-byte vector part as the scalar.
+                    BUSTER_TEST(arguments, !struct_abi.memory && !struct_abi.indirect && struct_abi.part_count == 1 &&
+                                           struct_abi.parts[0].abi_class == IR_ABI_CLASS_VECTOR && struct_abi.parts[0].size == 16);
+                }
                 if (f80_sysv)
                 {
                     IrFunction* union_function = c_test_find_ir_function(module, S8("union_round_trip"));
@@ -18095,7 +18105,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
         bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
         bool f80_sysv = c_test_target_uses_x86_f80_abi(target) && wide_long_double;
         bool f128_aapcs64 = c_test_target_uses_aapcs64_f128_transport(target) && wide_long_double;
-        u32 rejected_call_count = f80_sysv || !wide_long_double ? 0 : f128_aapcs64 ? 5 : BUSTER_ARRAY_LENGTH(rejected_names);
+        u32 rejected_call_count = f80_sysv || f128_aapcs64 || !wide_long_double ? 0 : BUSTER_ARRAY_LENGTH(rejected_names);
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = {0};
         CParseResult parse = {0};
@@ -18126,8 +18136,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
                 // single-member wrapper classifies identically, so both
                 // variadic calls lower.  The union's classification carries no
                 // x87 class at all, so it lowers as a memory-class aggregate.
-                bool scalar_transport = f128_aapcs64 && (function_index == 0 || function_index == 4);
-                bool expected_rejected = !f80_sysv && wide_long_double && !scalar_transport;
+                // AAPCS64 places a variadic binary128 scalar or aggregate
+                // exactly as a named one, so every call lowers there too.
+                bool expected_rejected = !f80_sysv && !f128_aapcs64 && wide_long_double;
                 BUSTER_TEST(arguments, function->state == (expected_rejected ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
                 if (expected_rejected)
                 {
@@ -18766,8 +18777,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_android_boundaries(UnitTest
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
         bool x86_f80 = c_test_target_uses_x86_f80_abi(target);
-        BUSTER_TEST(arguments, x86_f80 ? lowered.diagnostic_count == 0 : lowered.diagnostic_count > 0);
-        if (x86_f80)
+        bool binary128 = c_test_target_uses_aapcs64_f128_transport(target);
+        BUSTER_TEST(arguments, x86_f80 || binary128 ? lowered.diagnostic_count == 0 : lowered.diagnostic_count > 0);
+        if (binary128)
+        {
+            // AArch64 Android's binary128 addition is a compiler-runtime call
+            // and its static 1.0L is the exact IEEE image.
+            IrGlobal* global = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("android_value")) : 0;
+            u8 expected[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0x3f};
+            BUSTER_TEST(arguments, global && global->bytes.length == sizeof(expected) &&
+                                   memcmp(global->bytes.pointer, expected, sizeof(expected)) == 0);
+            BUSTER_TEST(arguments, lowered.program && lowered.program->modules->rejected_function_count == 0);
+            BUSTER_TEST(arguments, lowered.program &&
+                                   ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+        }
+        else if (x86_f80)
         {
             BUSTER_TEST(arguments, lowered.program != 0);
             if (lowered.program)

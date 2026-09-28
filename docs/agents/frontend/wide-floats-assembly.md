@@ -10,8 +10,8 @@ floating exception state. `basic_c_signbit_images.c` and its independent host
 observer cover those images across the native target/mode/frontend/PIC matrix.
 AArch64 binary128 widening and scalar transport use ordinary MIR frame
 images; see the machine guide for their exact conversion and ABI-boundary
-checks. Arithmetic, comparison, truth conversion and general narrowing remain
-separately unsupported.
+checks. Binary128 arithmetic, comparison, truth conversion and rounding
+conversions lower to compiler-runtime calls; see the AAPCS64 bullet below.
 The host FENV fixture in `tests/host_aarch64_float_to_f128.c` uses ordinary
 GNU inline asm for `mrs`/`msr` reads and writes of `fpsr`/`fpcr`; the baseline
 AArch64 inline-assembly vocabulary selects these checked system-register rows
@@ -95,19 +95,54 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   native intrinsic lowering. `c_test_bfloat16_semantic_acceptance` covers
   source-format rounding on six layouts in both frontend forms, mixed-format
   identity, positive/negative builtin operands, and deep nested calls.
-- **Base AAPCS64 `long double` is IEEE binary128 and supports scalar
-  transport.** A scalar argument or result is one complete sixteen-byte image
-  in a Q register; after V0-V7 are exhausted, named arguments occupy their
-  sixteen-byte-aligned stack slot. Canonical and MIR backends keep the value
-  slot-backed internally and bridge only at the ABI edges, so assignment,
-  literal return, direct/indirect calls and mixed Clang/Buster linkage preserve
-  every payload bit, including negative zero. `c_ir_signature_type_supported`
-  admits only the exact scalar shape proven by `ir_type_abi_value`; aggregates,
-  variadic wide parameters, arithmetic, comparisons, truth conversion and
-  general conversions remain behind their existing structured rejections.
-  `compiler_driver_test_aarch64_binary128_transport` covers Q0/Q1, ninth-argument stack
-  spill and both mixed-compiler directions on native Linux AArch64, with strict
-  no-fallback compilation across the AAPCS64 target/mode/frontend/PIC matrix.
+- **Base AAPCS64 `long double` is IEEE binary128.** A scalar argument or
+  result is one complete sixteen-byte image in a Q register; after V0-V7 are
+  exhausted, named arguments occupy their sixteen-byte-aligned stack slot.
+  Canonical and MIR backends keep the value slot-backed internally and bridge
+  only at the ABI edges, so assignment, literal return, direct/indirect calls
+  and mixed Clang/Buster linkage preserve every payload bit, including negative
+  zero. `c_ir_target_supports_f128_transport` in `c_internal.h` is the one
+  target fact lowering and the parser's lowering-constraint mirror share.
+
+  There is no binary128 instruction vocabulary, so lowering calls the
+  libgcc/compiler-rt soft-float entry points with `long double` operands and
+  results, exactly as Clang does: `__addtf3`/`__subtf3`/`__multf3`/`__divtf3`;
+  `__eqtf2`/`__netf2`/`__lttf2`/`__letf2`/`__gttf2`/`__getf2`, whose int
+  result is compared with zero so a NaN operand gives C's answer; truth
+  conversion as `__netf2(x, +0.0)`; `__trunctf{hf,sf,df}2` for narrowing; and
+  `__fix[uns]tf{si,di,ti}` / `__float[un]{si,di,ti}tf` for integers, where an
+  integer narrower than `int` converts through the `int` entry point.
+  `c_ir_type_is_binary128_runtime` gates these in `c_ir_emit_binary_value`,
+  `c_ir_emit_cast` (`c_ir_emit_binary128_conversion`) and `c_ir_truth_value`.
+  Exact binary16/32/64 widening remains the native MIR image, and negation
+  flips the high limb's sign bit through a slot (`c_ir_emit_float_image_negate`)
+  so NaN payloads survive. An invalid operation on constant operands folds to
+  the positive quiet NaN, as for the narrower formats. Hosted links therefore
+  need libgcc or compiler-rt, as x86-64 binary16 and complex links already do.
+
+  Static initializers store the constant evaluator's exact two-limb image
+  (`c_ir_binary128_static_target`), for scalar globals and aggregate elements
+  alike. A variadic binary128 argument, and `va_arg(ap, long double)`, travel
+  as a sixteen-byte two-lane vector image (`c_ir_binary128_variadic_carrier_type`),
+  which AAPCS64 places identically, so the backends need no separate reader; a
+  named binary128 parameter before `...` is admitted for the same reason.
+  `ir_type_abi_value` gives an HFA of binary128 members one sixteen-byte
+  VECTOR part per member, so `struct { long double a, b; }` and
+  `long double _Complex` use Q registers; other aggregates holding binary128
+  are ordinary bytes. AAPCS64 places those aggregates identically when they
+  are variadic, so variadic calls and `va_arg` admit them through
+  `c_ir_type_is_binary128_aggregate` with no carrier. Complex arithmetic uses
+  the element operations above, including Smith's division with a high-limb
+  magnitude.
+
+  `compiler_driver_test_aarch64_binary128_transport` covers Q0/Q1, ninth-argument
+  stack spill and both mixed-compiler directions on native Linux AArch64.
+  `compiler_driver_test_aarch64_binary128_runtime` compiles a Clang-oracled
+  fixture strictly across the Linux/Android/UEFI mode/frontend/PIC matrix,
+  requires its soft-float imports, and on native Linux AArch64 links it with
+  the host runtime and executes it. The canonical `none` emitter still refuses
+  binary128 widening and loads through pointers; those functions need a MIR
+  allocator.
 - **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
   Transport, the four arithmetic operators, negation, the six comparisons,
   truth conversion, and the conversions to and from the narrower floats and
