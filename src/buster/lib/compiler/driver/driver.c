@@ -102,7 +102,11 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_option_value(String8 argument, Strin
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_set_dialect(CompilerDriverInvocation* invocation, String8 dialect)
 {
-    if (string_equal(dialect, S8("gnu99")) || string_equal(dialect, S8("gnu9x")))
+    if (string_equal(dialect, S8("gnu89")) || string_equal(dialect, S8("gnu90")))
+    {
+        invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_GNU89;
+    }
+    else if (string_equal(dialect, S8("gnu99")) || string_equal(dialect, S8("gnu9x")))
     {
         invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_GNU99;
     }
@@ -161,6 +165,8 @@ BUSTER_GLOBAL_LOCAL CPreprocessDialect compiler_driver_preprocess_dialect(Compil
         return C_PREPROCESS_DIALECT_C17;
     case COMPILER_DRIVER_C_DIALECT_C23:
         return C_PREPROCESS_DIALECT_C23;
+    case COMPILER_DRIVER_C_DIALECT_GNU89:
+        return C_PREPROCESS_DIALECT_GNU89;
     case COMPILER_DRIVER_C_DIALECT_COUNT:
         return C_PREPROCESS_DIALECT_COUNT;
     }
@@ -2633,91 +2639,12 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
 // conditional's size is not information), and adjacency is the previous
 // token's column plus its emitted width reaching the next token's column.
 // Respelling and replacement can make those different coordinate systems
-// coincide accidentally, so compiler_driver_preprocess_requires_separator
-// protects every apparent adjacency. Tokens a macro expansion synthesized
-// share the use site's location, where the column arithmetic does not hold;
-// they keep the single space, which is also what a hand-built result with no
-// recovery map degrades to for every token.
-BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocess_literal_has_prefix(String8 spelling)
-{
-    bool result = spelling.length && spelling.pointer[0] != '\'' && spelling.pointer[0] != '"';
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocess_identifier_is_literal_prefix(String8 spelling)
-{
-    bool result = (spelling.length == 1 &&
-                   (spelling.pointer[0] == 'u' || spelling.pointer[0] == 'U' || spelling.pointer[0] == 'L')) ||
-                  (spelling.length == 2 && spelling.pointer[0] == 'u' && spelling.pointer[1] == '8');
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocess_punctuators_join(CToken previous, String8 current)
-{
-    char8 first = current.length ? current.pointer[0] : 0;
-    bool result = false;
-    switch ((CPunctuator)previous.punctuator)
-    {
-    case C_PUNCTUATOR_PERCENT: result = first == ':' || first == '>'; break;
-    case C_PUNCTUATOR_HASH_DIGRAPH: result = first == '%'; break;
-    case C_PUNCTUATOR_LESS: result = first == '<' || first == '=' || first == ':' || first == '%'; break;
-    case C_PUNCTUATOR_GREATER: result = first == '>' || first == '='; break;
-    case C_PUNCTUATOR_EQUAL:
-    case C_PUNCTUATOR_EXCLAMATION:
-    case C_PUNCTUATOR_STAR:
-    case C_PUNCTUATOR_CARET: result = first == '='; break;
-    case C_PUNCTUATOR_AMPERSAND: result = first == '&' || first == '='; break;
-    case C_PUNCTUATOR_PIPE: result = first == '|' || first == '='; break;
-    case C_PUNCTUATOR_SLASH: result = first == '/' || first == '*' || first == '='; break;
-    case C_PUNCTUATOR_PLUS: result = first == '+' || first == '='; break;
-    case C_PUNCTUATOR_MINUS: result = first == '-' || first == '>' || first == '='; break;
-    case C_PUNCTUATOR_HASH: result = first == '#'; break;
-    case C_PUNCTUATOR_COLON: result = first == '>'; break;
-    case C_PUNCTUATOR_DOT: result = first == '.'; break;
-    case C_PUNCTUATOR_SHIFT_LEFT:
-    case C_PUNCTUATOR_SHIFT_RIGHT: result = first == '='; break;
-    default: break;
-    }
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocess_requires_separator(CToken previous, String8 previous_spelling, CToken current,
-                                                                         String8 current_spelling)
-{
-    bool result = false;
-    if (previous.kind == C_TOKEN_IDENTIFIER)
-    {
-        result = current.kind == C_TOKEN_IDENTIFIER ||
-                 (current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length && current_spelling.pointer[0] != '.');
-        if (!result && (current.kind == C_TOKEN_CHARACTER_LITERAL || current.kind == C_TOKEN_STRING_LITERAL))
-        {
-            result = compiler_driver_preprocess_literal_has_prefix(current_spelling) ||
-                     compiler_driver_preprocess_identifier_is_literal_prefix(previous_spelling);
-        }
-    }
-    else if (previous.kind == C_TOKEN_PREPROCESSING_NUMBER)
-    {
-        result = current.kind == C_TOKEN_IDENTIFIER || current.kind == C_TOKEN_PREPROCESSING_NUMBER ||
-                 current.kind == C_TOKEN_CHARACTER_LITERAL ||
-                 (current.kind == C_TOKEN_STRING_LITERAL && compiler_driver_preprocess_literal_has_prefix(current_spelling));
-        if (!result && current.kind == C_TOKEN_PUNCTUATOR && previous_spelling.length)
-        {
-            char8 last = previous_spelling.pointer[previous_spelling.length - 1];
-            char8 first = current_spelling.length ? current_spelling.pointer[0] : 0;
-            result = first == '.' ||
-                     ((first == '+' || first == '-') &&
-                      (last == 'e' || last == 'E' || last == 'p' || last == 'P'));
-        }
-    }
-    else if (previous.kind == C_TOKEN_PUNCTUATOR)
-    {
-        result = (previous.punctuator == C_PUNCTUATOR_DOT && current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length &&
-                  current_spelling.pointer[0] != '.') ||
-                 (current.kind == C_TOKEN_PUNCTUATOR && compiler_driver_preprocess_punctuators_join(previous, current_spelling));
-    }
-    return result;
-}
-
+// coincide accidentally, so c_token_requires_separator (shared with the
+// frontend's source-quoting diagnostics) protects every apparent adjacency.
+// Tokens a macro expansion synthesized share the use site's location, where
+// the column arithmetic does not hold; they keep the single space, which is
+// also what a hand-built result with no recovery map degrades to for every
+// token.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPreprocessResult preprocess, u64 lookup_offset, CSourceLocation* lookup)
 {
     enum { compiler_driver_preprocess_line_gap_cap = 8 };
@@ -2769,7 +2696,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
                 }
             }
             else if (location.column != previous_end_column ||
-                     compiler_driver_preprocess_requires_separator(previous_token, previous_spelling, token, spelling))
+                     c_token_requires_separator(previous_token, previous_spelling, token, spelling))
             {
                 text[length++] = ' ';
             }
@@ -3006,8 +2933,8 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_llvm_bitcode_path(Arena* are
                                                     });
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_write_llvm_bitcode(Arena* arena, CompilerDriverInvocation invocation, LlvmBitcodeArtifact artifact,
-                                                              CompilerDriverResult* result)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_write_llvm_bitcode(Arena* arena, CompilerDriverInvocation invocation, IrProgram* program, IrModule* module,
+                                                            LlvmBitcodeArtifact artifact, CompilerDriverResult* result)
 {
     if (!result)
     {
@@ -3017,9 +2944,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_llvm_bitcode(Arena* arena, Compil
     if (!llvm_bitcode_artifact_is_valid(artifact))
     {
         result->error = COMPILER_DRIVER_ERROR_LLVM_BITCODE;
-        result->diagnostic = artifact.error.diagnostic.length ? artifact.error.diagnostic
-                             : artifact.error.message.length  ? artifact.error.message
-                                                               : S8("LLVM bitcode emission failed");
+        String8 message = artifact.error.diagnostic.length ? artifact.error.diagnostic
+                          : artifact.error.message.length  ? artifact.error.message
+                                                           : S8("LLVM bitcode emission failed");
+        result->diagnostic = compiler_driver_emitter_diagnostic(arena, program, module, artifact.error.function, artifact.error.instruction, message);
         return false;
     }
     result->has_llvm_bitcode = true;
@@ -3055,8 +2983,8 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_wasm_path(Arena* arena, Stri
                                                       });
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriverInvocation invocation, WasmArtifact artifact,
-                                                     CompilerDriverResult* result)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriverInvocation invocation, IrProgram* program, IrModule* module,
+                                                    WasmArtifact artifact, CompilerDriverResult* result)
 {
     if (!result)
     {
@@ -3067,9 +2995,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriver
     if (artifact.error.code != WASM64_ERROR_NONE)
     {
         result->error = COMPILER_DRIVER_ERROR_WASM;
-        result->diagnostic = artifact.error.diagnostic.length ? artifact.error.diagnostic
-                             : artifact.error.message.length  ? artifact.error.message
-                                                               : S8("WebAssembly code generation failed");
+        String8 message = artifact.error.diagnostic.length ? artifact.error.diagnostic
+                          : artifact.error.message.length  ? artifact.error.message
+                                                           : S8("WebAssembly code generation failed");
+        result->diagnostic = compiler_driver_emitter_diagnostic(arena, program, module, artifact.error.function, artifact.error.instruction, message);
         return false;
     }
     result->has_wasm = true;
@@ -3087,8 +3016,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriver
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriverInvocation invocation, EbpfArtifact artifact,
-                                                     CompilerDriverResult* result)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriverInvocation invocation, IrProgram* program, IrModule* module,
+                                                    EbpfArtifact artifact, CompilerDriverResult* result)
 {
     if (!result)
     {
@@ -3098,9 +3027,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
     if (artifact.error.code != EBPF_ERROR_NONE)
     {
         result->error = COMPILER_DRIVER_ERROR_EBPF;
-        result->diagnostic = artifact.error.diagnostic.length ? artifact.error.diagnostic
-                             : artifact.error.message.length  ? artifact.error.message
-                                                               : S8("eBPF code generation failed");
+        String8 message = artifact.error.diagnostic.length ? artifact.error.diagnostic
+                          : artifact.error.message.length  ? artifact.error.message
+                                                           : S8("eBPF code generation failed");
+        result->diagnostic = compiler_driver_emitter_diagnostic(arena, program, module, artifact.error.function, artifact.error.instruction, message);
         return false;
     }
     result->has_ebpf = true;
@@ -3694,19 +3624,19 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         LlvmBitcodeArtifact artifact =
             llvm_bitcode_emit_with_options(arena, lowered.program, module, 1,
                                            compiler_driver_llvm_bitcode_options(invocation.target, invocation.input_paths[0]));
-        compiler_driver_write_llvm_bitcode(arena, invocation, artifact, &result);
+        compiler_driver_write_llvm_bitcode(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }
     if (compiler_driver_target_is_wasm(invocation.target))
     {
         WasmArtifact artifact = wasm_emit(arena, lowered.program, module, 1, compiler_driver_wasm_options(invocation.target));
-        compiler_driver_write_wasm(arena, invocation, artifact, &result);
+        compiler_driver_write_wasm(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }
     if (invocation.target.cpu_arch == CPU_ARCH_BPFEL)
     {
         EbpfArtifact artifact = ebpf_emit(arena, lowered.program, module, 1);
-        compiler_driver_write_ebpf(arena, invocation, artifact, &result);
+        compiler_driver_write_ebpf(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }
     BootstrapTrace mir_trace = {0};
