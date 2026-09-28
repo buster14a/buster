@@ -15139,7 +15139,14 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
                                         string_equal(spelling, S8("__PRETTY_FUNCTION__")) || string_equal(spelling, S8("__builtin_va_start")) ||
                                         string_equal(spelling, S8("__va_start")) || string_equal(spelling, S8("__builtin_va_arg")) ||
                                         string_equal(spelling, S8("__builtin_va_copy")) || string_equal(spelling, S8("__builtin_va_end"));
-        predefined_function_name |= string_starts_with_sequence(spelling, S8("__builtin_"));
+        // An unresolved __builtin_ name is a builtin function only when it is
+        // called; anywhere else (`__builtin_ms_va_list *p;`, casts, sizeof)
+        // it names a builtin type this frontend does not model.
+        bool builtin_prefix = string_starts_with_sequence(spelling, S8("__builtin_"));
+        bool builtin_called = token_index + 1 < preprocess.token_count &&
+                              c_token_is_punctuator(&preprocess.tokens[token_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        bool unmodeled_builtin_type = builtin_prefix && !builtin_called;
+        predefined_function_name |= builtin_prefix && !unmodeled_builtin_type;
         predefined_function_name |= string_starts_with_sequence(spelling, S8("__c11_atomic_"));
         // The GNU spelling of the same family, which takes ordinary pointers.
         // CPython's configure probes it for HAVE_BUILTIN_ATOMIC and most Linux
@@ -15155,7 +15162,12 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
                                     string_equal(spelling, S8("__imag__")) || string_equal(spelling, S8("__imag"));
         predefined_function_name |= c_preprocess_dialect_is_c23(preprocess.dialect) &&
                                     (string_equal(spelling, S8("true")) || string_equal(spelling, S8("false")) || string_equal(spelling, S8("nullptr")));
-        if (!predefined_function_name)
+        if (unmodeled_builtin_type)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
+                               string_format(arena, S8("unknown type name '{S8}'"), spelling));
+        }
+        else if (!predefined_function_name)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
                                string_format(arena, S8("use of undeclared identifier '{S8}'"), spelling));
