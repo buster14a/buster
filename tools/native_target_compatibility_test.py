@@ -10,6 +10,8 @@ import tempfile
 import textwrap
 import unittest
 
+from linux_asan_runtime_test import LinuxAsanFullConfigureTests
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "cmake/NativeTargetCompatibility.cmake"
