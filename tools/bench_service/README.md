@@ -101,7 +101,8 @@ any surviving stage's boot, invocation, relationship and
 cgroup identity, directly applies the same TERM/KILL escalation, and proves all
 five stage units and cgroups absent. It reaps the service helper only after
 those absence proofs; that bounded reap is not abandoned for a pending
-cancellation, including the one the cleanup is serving. A start/observation failure that cannot prove physical
+cancellation, including the one the cleanup is serving. A start/observation
+failure that cannot prove physical
 ownership retains active queue admission and the coordinator's lease reference
 in quarantine; it does not guess that a transient service disappeared.
 
@@ -142,11 +143,14 @@ non-control files), plus the terminal manifest, before workspace cleanup.
 Unsafe evidence such as symlinks, FIFOs, foreign-owned or other-writable
 objects fails closed instead of being silently skipped. A bundle-only crash
 prefix is completed idempotently: the byte-identical existing bundle is
-accepted and the manifest is generated against its digest. Recovery of a job
-without a durable outcome converges on an outcome record a failure path
-already published, adopting exactly those bytes within the outcomes the queue
-accepts (a durable cancellation only finishes `cancelled`); without such a
-record it finishes `cancelled` or `interrupted`. Invalid published
+accepted and the manifest is generated against its digest. Recovery
+converges on an outcome record a failure path already published, adopting
+exactly those bytes: within the outcomes the queue accepts when no outcome is
+durable (a durable cancellation only finishes `cancelled`), or only the durable
+outcome while its result is unbound. Without such a record it finishes
+`cancelled` or `interrupted`. The failure record keeps its original reason, so
+a recovered cancellation can still report `cleanup-failed`. A failure path
+publishes `cancelled` only when the CANCEL itself is durable. Invalid published
 controls are never repaired, rewritten or replaced. Restart replay therefore
 exposes the same artifact root and digests for every terminal outcome, not
 only successful measurements.

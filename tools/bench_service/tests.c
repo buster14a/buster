@@ -2730,6 +2730,7 @@ typedef struct BqWorkerFake
     u32 cancel_after_observe;
     u64 elapsed;
     bool cancel_on_join;
+    bool honor_cancel_signal;
     bool mismatch_unit;
     bool mismatch_resources;
     bool hide_unit;
@@ -2972,7 +2973,6 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_signal(BqWorkerBackend* backend, char
 
 BUSTER_GLOBAL_LOCAL BqError bq_test_worker_join(BqWorkerBackend* backend, int* status, u64 deadline, bool cancellable)
 {
-    (void)cancellable;
     BqWorkerFake* fake = backend->context;
     BqWorkerFixture* fixture = (BqWorkerFixture*)((char*)fake - offsetof(BqWorkerFixture, fake));
     BQ_CHECK(bq_test_worker_probe_locked(fixture->lease));
@@ -3003,6 +3003,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_join(BqWorkerBackend* backend, int* s
         fake->cancel_on_join = false;
         error = BQ_WORKER_CANCEL_SIGNAL;
     }
+    /* Mirror bq_systemd_join: a pending cancellation interrupts only a
+     * cancellable join. */
+    if (fake->honor_cancel_signal && cancellable && bq_worker_cancel_signal) error = BQ_WORKER_CANCEL_SIGNAL;
     fake->observed.active = false;
     fake->observed.populated = fake->detached > 0;
     fake->observed.result = fake->completion;
@@ -3525,6 +3528,39 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_late_cancel(void)
                  bq_failure_evidence(&fixture.material.queue.queue, job) == BQ_NOT_FOUND &&
                  !fixture.material.queue.queue.state.active_id && fixture.fake.observes >= 4 &&
                  bq_worker_cancel_signal == 0 && !bq_test_worker_probe_locked(fixture.lease));
+        bq_test_worker_end(&fixture);
+    }
+    if (installed) BQ_CHECK(sigaction(SIGTERM, &prior, NULL) == 0);
+}
+
+/* #880 attempt P: a SIGTERM while the worker waits for the outer unit. The
+ * fake join mirrors bq_systemd_join, so the main wait is interrupted, while
+ * the cleanup join inside bq_worker_stop (still serving that cancellation)
+ * must reap and let the job finish cancelled instead of cleanup-failed. */
+BUSTER_GLOBAL_LOCAL void bq_test_worker_signal_cancel_cleanup(void)
+{
+    struct sigaction action = {0}, prior = {0};
+    action.sa_handler = bq_worker_cancel_handler;
+    sigemptyset(&action.sa_mask);
+    bool installed = sigaction(SIGTERM, &action, &prior) == 0;
+    BQ_CHECK(installed);
+    BqWorkerFixture fixture;
+    if (installed && bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+    {
+        BqRequest request = bq_test_real_request(47);
+        u64 id = 0;
+        fixture.fake.honor_cancel_signal = true;
+        fixture.fake.cancel_after_observe = 2;
+        BQ_CHECK(bq_submit(&fixture.material.queue.queue, &request, &id) == BQ_OK &&
+                 bq_worker_run(&fixture.material.queue.queue, &fixture.config, &id) == BQ_OK);
+        BqJob* job = bq_job(&fixture.material.queue.queue.state, id);
+        BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_CANCELLED && job->cancel_requested &&
+                 bq_failure_evidence(&fixture.material.queue.queue, job) == BQ_NOT_FOUND &&
+                 !fixture.material.queue.queue.state.active_id &&
+                 !fixture.material.queue.queue.needs_reconciliation && fixture.fake.joins >= 2 &&
+                 bq_worker_cancel_signal == 0 && !bq_test_worker_probe_locked(fixture.lease));
+        bq_worker_cancel_signal = 0;
+        bq_worker_shutdown_signal = 0;
         bq_test_worker_end(&fixture);
     }
     if (installed) BQ_CHECK(sigaction(SIGTERM, &prior, NULL) == 0);
@@ -4901,12 +4937,16 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_preparing_recovery(u32 new_boot)
     }
 }
 
-/* #880 attempt P: a signal cancellation whose cleanup failed left a durable
- * CANCEL, published cancelled evidence and a cleanup-failed failure record.
- * Recovery must finish that job cancelled against the published record
- * (mode 0), and must fail closed without replacing foreign outcome bytes
- * (mode 1). Before the fix, recovery chose interrupted, which the queue
- * rejects for a cancelled job and the published record contradicts. */
+/* #880 attempt P: a failure path that could not finish left published
+ * evidence and a failure record. Recovery must converge on the published
+ * outcome or fail closed without replacing it:
+ *   0 durable CANCEL + published cancelled/worker-cancel-signal -> cancelled;
+ *   1 durable CANCEL + foreign outcome bytes -> BQ_CORRUPT, bytes kept;
+ *   2 durable CANCEL + correctly bound status=failed record -> BQ_CORRUPT;
+ *   3 no CANCEL + published failed/cleanup-failed -> failed;
+ *   4 durable CANCEL + no outcome record -> cancelled.
+ * Before the fix, recovery chose interrupted, which the queue rejects for a
+ * cancelled job and which contradicts any published record. */
 BUSTER_GLOBAL_LOCAL void bq_test_worker_cancelled_recovery(u32 mode)
 {
     BqWorkerFixture fixture;
@@ -4934,25 +4974,32 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_cancelled_recovery(u32 mode)
         snprintf(prepare, sizeof(prepare), "%.200s/validate-buster-v1.prepare.manifest", finalization.result_root);
         snprintf(outcome_path, sizeof(outcome_path), "%.200s/validate-buster-v1.outcome", finalization.result_root);
         BQ_CHECK(bq_test_write_path(prepare, "schema=1\nstage=prepare\nprocess-result=running\n", 0400));
-        BQ_CHECK(job && bq_cancel(queue, id) == BQ_OK);
+        bool cancelled = mode != 3;
+        if (cancelled) BQ_CHECK(job && bq_cancel(queue, id) == BQ_OK);
         job = bq_job(&queue->state, id);
-        BQ_CHECK(job && job->cancel_requested && job->phase == BQ_PREPARING);
-        if (mode == 0)
+        BQ_CHECK(job && job->cancel_requested == cancelled && job->phase == BQ_PREPARING);
+        if (mode == 0 || mode == 3)
         {
-            BQ_CHECK(job && bq_worker_result_evidence(job, BQ_CANCELLED, BQ_WORKER_CANCEL_SIGNAL, &finalization) == BQ_OK &&
-                     bq_worker_result_failure_artifacts(job, BQ_CANCELLED, BQ_WORKER_CANCEL_SIGNAL,
-                                                        &finalization) == BQ_OK);
+            BqOutcome published = mode == 0 ? BQ_CANCELLED : BQ_FAILED;
+            BqError published_reason = mode == 0 ? BQ_WORKER_CANCEL_SIGNAL : BQ_CLEANUP_FAILED;
+            BQ_CHECK(job && bq_worker_result_evidence(job, published, published_reason, &finalization) == BQ_OK &&
+                     bq_worker_result_failure_artifacts(job, published, published_reason, &finalization) == BQ_OK);
         }
-        else
+        else if (mode == 1)
         {
             BQ_CHECK(bq_test_write_path(outcome_path, "schema=1\nrecipe=validate-buster-v1\nstatus=cancelled\n"
                                                       "error=planted\njob-id=0\nattempt-token=0\n", 0400));
         }
-        BQ_CHECK(job && bq_failure_write(queue, job, BQ_CLEANUP_FAILED) == BQ_OK);
+        else if (mode == 2)
+        {
+            BQ_CHECK(job && bq_worker_result_evidence(job, BQ_FAILED, BQ_CLEANUP_FAILED, &finalization) == BQ_OK);
+        }
+        if (mode != 4) BQ_CHECK(job && bq_failure_write(queue, job, BQ_CLEANUP_FAILED) == BQ_OK);
         char before[256] = {0};
         int outcome_fd = open(outcome_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
         ssize_t before_size = outcome_fd >= 0 ? read(outcome_fd, before, sizeof(before) - 1) : -1;
         if (outcome_fd >= 0) close(outcome_fd);
+        BQ_CHECK((mode == 4) == (before_size < 0));
         if (finalization.result_directory >= 0)
         {
             close(finalization.result_directory);
@@ -4962,23 +5009,32 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_cancelled_recovery(u32 mode)
         BQ_CHECK(bq_open(queue, fixture.material.queue.path) == BQ_OK && queue->needs_reconciliation);
         BqError recovered = bq_worker_run(queue, &fixture.config, &id);
         job = bq_job(&queue->state, id);
-        if (mode == 0)
+        if (mode == 1 || mode == 2)
         {
-            BQ_CHECK(recovered == BQ_OK && job && job->phase == BQ_FINISHED && job->outcome == BQ_CANCELLED &&
-                     job->result_bound && bq_worker_result_binding_validate(job) == BQ_OK &&
-                     !queue->state.active_id && !queue->needs_reconciliation &&
-                     !bq_test_worker_probe_locked(fixture.lease));
+            BQ_CHECK(recovered == BQ_CORRUPT && job && job->phase == BQ_PREPARING && queue->state.active_id == id &&
+                     queue->needs_reconciliation);
         }
         else
         {
-            BQ_CHECK(recovered != BQ_OK && job && job->phase == BQ_PREPARING && queue->state.active_id == id &&
-                     queue->needs_reconciliation);
+            BQ_CHECK(recovered == BQ_OK && job && job->phase == BQ_FINISHED &&
+                     job->outcome == (mode == 3 ? BQ_FAILED : BQ_CANCELLED) &&
+                     job->result_bound && bq_worker_result_binding_validate(job) == BQ_OK &&
+                     !queue->state.active_id && !queue->needs_reconciliation &&
+                     !bq_test_worker_probe_locked(fixture.lease));
+            BQ_CHECK(mode != 3 || bq_failure_evidence(queue, job) == BQ_CLEANUP_FAILED);
         }
         char after[256] = {0};
         outcome_fd = open(outcome_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
         ssize_t after_size = outcome_fd >= 0 ? read(outcome_fd, after, sizeof(after) - 1) : -1;
         if (outcome_fd >= 0) close(outcome_fd);
-        BQ_CHECK(before_size > 0 && before_size == after_size && !memcmp(before, after, (size_t)before_size));
+        if (mode == 4)
+        {
+            BQ_CHECK(after_size > 0 && strstr(after, "status=cancelled\nerror=worker-interrupted\n"));
+        }
+        else
+        {
+            BQ_CHECK(before_size > 0 && before_size == after_size && !memcmp(before, after, (size_t)before_size));
+        }
         bq_test_worker_end(&fixture);
     }
 }
@@ -5219,6 +5275,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_term_grace();
     bq_test_worker_child_survives_parent_kill();
     bq_test_worker_late_cancel();
+    bq_test_worker_signal_cancel_cleanup();
     bq_test_worker_cancel_during_finalization();
     bq_test_worker_post_publication_cancel();
     bq_test_worker_prelaunch_cancel();
@@ -5245,8 +5302,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_failure_bundle_coverage();
     bq_test_worker_preparing_recovery(0);
     bq_test_worker_preparing_recovery(1);
-    bq_test_worker_cancelled_recovery(0);
-    bq_test_worker_cancelled_recovery(1);
+    for (u32 mode = 0; mode < 5; mode += 1) bq_test_worker_cancelled_recovery(mode);
     bq_test_large_source_manifest();
     bq_test_recipe_materialized_bridge(argc > 2 ? argv[2] : NULL);
 #endif

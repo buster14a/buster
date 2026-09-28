@@ -332,6 +332,11 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_deadlines(void)
         BQ_CHECK(backend.cleanup_launcher(&backend,
                  bq_worker_deadline(bq_worker_monotonic_milliseconds(), BQ_TEST_WORKER_BOUND_MILLISECONDS)) == BQ_OK && context.pid < 0);
     }
+    if (context.pid > 0)
+    {
+        kill(context.pid, SIGKILL);
+        waitpid(context.pid, NULL, 0);
+    }
     context.pid = fork();
     if (!context.pid)
     {
