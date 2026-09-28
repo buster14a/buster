@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
-"""Read-only comparison of the protected benchmark environment and switch.
+"""Read-only comparison of the main-only benchmark environment and switch.
 
 The administrator captures three GET responses during preflight. The caller
 also checks the existing main ruleset, requester policy, administrator
-permission and restricted runner group. This check does not authorize host
-provisioning or workflow dispatch.
+permission and restricted runner group. The environment must add no manual
+approval or delay: the dispatch workflow's authorize and submit jobs restrict
+execution to the maintainer. This check does not authorize host provisioning
+or workflow dispatch.
 """
 
 import argparse
 import json
 import sys
 from pathlib import Path
+
+# The only protection rule GitHub reports for a custom deployment-branch
+# restriction. Required reviewers, wait timers and any other rule would add a
+# manual or external release step that the reviewed contract excludes.
+ALLOWED_PROTECTION_RULES = {"branch_policy"}
 
 
 def require(condition, description):
@@ -38,12 +45,14 @@ def verify(environment, branches, variable):
              environment.get("deployment_branch_policy"), "deployment policy")
     rules = environment.get("protection_rules")
     require(isinstance(rules, list), "environment protection rules missing")
-    reviewers = [rule for rule in rules if rule.get("type") == "required_reviewers"]
-    require(len(reviewers) == 1, "environment must require one administrator reviewer")
-    require(reviewers[0].get("prevent_self_review") is True,
-            "environment must prevent self-review")
-    matching([{"type": "User", "reviewer": {"login": "davidgmbb", "id": 39247043}}],
-             reviewers[0].get("reviewers"), "environment reviewers")
+    for rule in rules:
+        require(isinstance(rule, dict), "environment protection rule differs")
+        kind = rule.get("type")
+        require(kind != "required_reviewers",
+                "environment must not require a reviewer; the workflow gates the actor")
+        require(kind != "wait_timer", "environment must not delay deployment")
+        require(kind in ALLOWED_PROTECTION_RULES,
+                f"environment has unexpected protection rule: {kind}")
     require(branches.get("total_count") == 1 and
             len(branches.get("branch_policies", [])) == 1,
             "environment must have exactly one deployment branch")
