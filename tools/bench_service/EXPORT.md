@@ -260,10 +260,11 @@ fewer than three other store entries or whose worst-case shard payload exceeds
 128 GiB. For the 77,762-row compiler-eligible envelope this admits at most 198
 pairs with no runtime rows and 108 pairs when every row is runtime eligible;
 254 pairs needs 175,875,870,640 and 318,964,171,600 bytes respectively.
-`tp_retirement_campaign_store_preflight` then adds the caller's exact
-external entries and byte reservation before any timing, and
-`tp_retirement_store_plan` enforces the same owned-file and owned-byte budget
-at publication. The actual producer must still inventory **every** retained
+`tp_retirement_campaign_store_preflight` then adds, before any timing, the
+store-owned control files (at least the execution receipt at its 1 MiB bound,
+plus any manifest the store publishes) and the caller's exact external entries
+and byte reservation; `tp_retirement_store_plan` enforces the resulting
+owned-file and owned-byte budget, shards plus controls, at publication. The actual producer must still inventory **every** retained
 file and directory and respect the 64 MiB per-file, 192-byte path, 8 MiB index
 and 1 MiB execution-receipt bounds. These arithmetic figures cannot establish
 that real logs and binaries fit. The existing service tests transfer small

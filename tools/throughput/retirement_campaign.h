@@ -257,25 +257,32 @@ static int tp_retirement_campaign_capacity(unsigned rows, unsigned runtime_rows,
     return ok;
 }
 
-/* Exact store preflight, called before any timing. external_entries must
- * cover every inventoried entry that is not a campaign shard (the execution
- * receipt, manifests, controls, binaries, logs and directories), and
- * external_bytes is the caller's conservative byte reservation for them.
- * An inconsistent capacity record, overflow or either store ceiling rejects
- * with a zeroed plan. owned_files/owned_bytes are the reservation for
- * tp_retirement_store_plan. */
+/* Exact store preflight, called before any timing. The store itself must
+ * own the execution receipt and any manifest it publishes (receipt_authority
+ * looks the receipt up among the store's files), so owned_control_files and
+ * owned_control_bytes reserve those non-shard store files; they must cover at
+ * least one receipt at its TP_RETIREMENT_RECEIPT_BYTES bound. external_entries
+ * must cover every other inventoried entry (controls, binaries, logs and
+ * directories), and external_bytes is the caller's conservative byte
+ * reservation for them. An inconsistent capacity record, overflow or either
+ * store ceiling rejects with a zeroed plan. owned_files/owned_bytes (shards
+ * plus owned controls) are the reservation for tp_retirement_store_plan. */
 static inline int tp_retirement_campaign_store_preflight(TpRetirementCampaignCapacity const* capacity,
+    uint64_t owned_control_files, uint64_t owned_control_bytes,
     uint64_t external_entries, uint64_t external_bytes, TpRetirementCampaignStorePlan* plan)
 {
-    uint64_t files = 0, payload = 0, entries = 0, bytes = 0;
-    int ok = capacity && plan &&
+    uint64_t shards = 0, payload = 0, files = 0, owned = 0, entries = 0, bytes = 0;
+    int ok = capacity && plan && owned_control_files &&
+        owned_control_bytes >= TP_RETIREMENT_RECEIPT_BYTES &&
         tp_retirement_campaign_u64_add(capacity->total_transcript_shards,
-            capacity->total_sample_shards, &files) &&
-        files == capacity->total_shard_files &&
+            capacity->total_sample_shards, &shards) &&
+        shards && shards == capacity->total_shard_files &&
         tp_retirement_campaign_u64_add(capacity->total_transcript_bytes_upper_bound,
             capacity->total_sample_bytes_upper_bound, &payload) &&
-        payload == capacity->total_payload_bytes_upper_bound &&
-        tp_retirement_campaign_store_fits(files, payload, external_entries, external_bytes,
+        payload && payload == capacity->total_payload_bytes_upper_bound &&
+        tp_retirement_campaign_u64_add(shards, owned_control_files, &files) &&
+        tp_retirement_campaign_u64_add(payload, owned_control_bytes, &owned) &&
+        tp_retirement_campaign_store_fits(files, owned, external_entries, external_bytes,
             &entries, &bytes);
     if (plan)
     {
@@ -283,7 +290,7 @@ static inline int tp_retirement_campaign_store_preflight(TpRetirementCampaignCap
         if (ok)
         {
             plan->owned_files = files;
-            plan->owned_bytes = payload;
+            plan->owned_bytes = owned;
             plan->external_entries = external_entries;
             plan->external_bytes = external_bytes;
             plan->entries = entries;

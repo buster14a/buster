@@ -300,38 +300,46 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     CHECK(!tp_retirement_campaign_u64_add(UINT64_MAX, 1, &capacity_value) && !capacity_value);
     /* The exact store preflight adds the caller's external reservation. */
     TpRetirementCampaignStorePlan store_plan;
-    uint64_t spare_bytes = TP_RETIREMENT_STORE_TOTAL_BYTES - UINT64_C(135843370944);
+    uint64_t receipt = TP_RETIREMENT_RECEIPT_BYTES;
+    uint64_t spare_bytes = TP_RETIREMENT_STORE_TOTAL_BYTES - UINT64_C(135843370944) - receipt;
     CHECK(tp_retirement_campaign_capacity(77762, 0, 196, &large));
-    CHECK(tp_retirement_campaign_store_preflight(&large, 3, 1024, &store_plan) &&
-          store_plan.owned_files == 2338 && store_plan.owned_bytes == UINT64_C(135843370944) &&
+    /* The store owns the shards plus the receipt; both are in its plan. */
+    CHECK(tp_retirement_campaign_store_preflight(&large, 1, receipt, 3, 1024, &store_plan) &&
+          store_plan.owned_files == 2339 && store_plan.owned_bytes == UINT64_C(135843370944) + receipt &&
           store_plan.external_entries == 3 && store_plan.external_bytes == 1024 &&
-          store_plan.entries == 2341 && store_plan.bytes == UINT64_C(135843371968) &&
-          store_plan.remaining_entries == TP_RETIREMENT_STORE_FILES - 2341 &&
+          store_plan.entries == 2342 && store_plan.bytes == UINT64_C(135843370944) + receipt + 1024 &&
+          store_plan.remaining_entries == TP_RETIREMENT_STORE_FILES - 2342 &&
           store_plan.remaining_bytes == spare_bytes - 1024);
-    CHECK(tp_retirement_campaign_store_preflight(&large, TP_RETIREMENT_STORE_FILES - 2338, spare_bytes,
-              &store_plan) &&
+    CHECK(tp_retirement_campaign_store_preflight(&large, 1, receipt, TP_RETIREMENT_STORE_FILES - 2339,
+              spare_bytes, &store_plan) &&
           store_plan.entries == TP_RETIREMENT_STORE_FILES && !store_plan.remaining_entries &&
           store_plan.bytes == TP_RETIREMENT_STORE_TOTAL_BYTES && !store_plan.remaining_bytes);
-    CHECK(!tp_retirement_campaign_store_preflight(&large, TP_RETIREMENT_STORE_FILES - 2337, 0, &store_plan) &&
+    CHECK(!tp_retirement_campaign_store_preflight(&large, 1, receipt, TP_RETIREMENT_STORE_FILES - 2338, 0,
+              &store_plan) && test_retirement_campaign_store_plan_is_zero(&store_plan));
+    CHECK(!tp_retirement_campaign_store_preflight(&large, 1, receipt, 3, spare_bytes + 1, &store_plan) &&
           test_retirement_campaign_store_plan_is_zero(&store_plan));
-    CHECK(!tp_retirement_campaign_store_preflight(&large, 3, spare_bytes + 1, &store_plan) &&
+    CHECK(!tp_retirement_campaign_store_preflight(&large, 0, receipt, 3, 0, &store_plan) &&
           test_retirement_campaign_store_plan_is_zero(&store_plan));
-    CHECK(!tp_retirement_campaign_store_preflight(&large,
+    CHECK(!tp_retirement_campaign_store_preflight(&large, 1, receipt - 1, 3, 0, &store_plan) &&
+          test_retirement_campaign_store_plan_is_zero(&store_plan));
+    CHECK(!tp_retirement_campaign_store_preflight(&large, UINT64_MAX, receipt, 3, 0, &store_plan));
+    CHECK(!tp_retirement_campaign_store_preflight(&large, 1, UINT64_MAX, 3, 0, &store_plan));
+    CHECK(!tp_retirement_campaign_store_preflight(&large, 1, receipt,
               TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES - 1, 0, &store_plan) &&
           test_retirement_campaign_store_plan_is_zero(&store_plan));
-    CHECK(!tp_retirement_campaign_store_preflight(&large, UINT64_MAX, 0, &store_plan));
-    CHECK(!tp_retirement_campaign_store_preflight(&large, 3, UINT64_MAX, &store_plan));
-    CHECK(!tp_retirement_campaign_store_preflight(NULL, 3, 0, &store_plan) &&
+    CHECK(!tp_retirement_campaign_store_preflight(&large, 1, receipt, UINT64_MAX, 0, &store_plan));
+    CHECK(!tp_retirement_campaign_store_preflight(&large, 1, receipt, 3, UINT64_MAX, &store_plan));
+    CHECK(!tp_retirement_campaign_store_preflight(NULL, 1, receipt, 3, 0, &store_plan) &&
           test_retirement_campaign_store_plan_is_zero(&store_plan));
-    CHECK(!tp_retirement_campaign_store_preflight(&large, 3, 0, NULL));
+    CHECK(!tp_retirement_campaign_store_preflight(&large, 1, receipt, 3, 0, NULL));
     TpRetirementCampaignCapacity mismatched = large;
     ++mismatched.total_shard_files;
-    CHECK(!tp_retirement_campaign_store_preflight(&mismatched, 3, 0, &store_plan));
+    CHECK(!tp_retirement_campaign_store_preflight(&mismatched, 1, receipt, 3, 0, &store_plan));
     mismatched = large;
     --mismatched.total_payload_bytes_upper_bound;
-    CHECK(!tp_retirement_campaign_store_preflight(&mismatched, 3, 0, &store_plan));
+    CHECK(!tp_retirement_campaign_store_preflight(&mismatched, 1, receipt, 3, 0, &store_plan));
     mismatched = (TpRetirementCampaignCapacity){0};
-    CHECK(!tp_retirement_campaign_store_preflight(&mismatched, 3, 0, &store_plan));
+    CHECK(!tp_retirement_campaign_store_preflight(&mismatched, 1, receipt, 3, 0, &store_plan));
     CHECK(tp_retirement_campaign_capacity(1, 1, 60, &large));
     TpRetirementCampaignDurationBounds bounds = {
         .reservation_ns = 1000000, .materialization_ns = 1000000,
