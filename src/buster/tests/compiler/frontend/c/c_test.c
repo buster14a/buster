@@ -12778,6 +12778,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_statement_expression_operand(Un
         {S8("sizeof({ int a[n][4]; a[0]; })"), {0}, sizeof(void*), true, true},
         {S8("sizeof({ double a[n]; a[0]; })"), {0}, 8, true, true},
         {S8("sizeof({ int a[4][n]; a[0]; })"), S8("variably modified array"), 0, false, true},
+        // An incomplete array object with a sized element decays in the tail.
+        {S8("sizeof({ ext[0]; })"), {0}, 4, true, true},
+        {S8("sizeof(({ ext[0]; }))"), {0}, 4, true, true},
+        {S8("sizeof({ ext; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof(({ ext; }))"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ (void)f(); ext; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ *ext; })"), {0}, 4, true, true},
+        {S8("sizeof({ ext + 1; })"), {0}, sizeof(void*), true, true},
         {S8("sizeof({1})"), S8("invalid sizeof operand"), 0, false, false},
         {S8("_Alignof({1})"), S8("invalid sizeof operand"), 0, false, false},
     };
@@ -12787,7 +12795,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_statement_expression_operand(Un
         {
             TemporalArena temporary = scratch_begin(0, 0);
             String8 source = string_format(temporary.arena,
-                S8("int f(void); struct Wide {{ double x; double y; }};"
+                S8("int f(void); extern int ext[]; struct Wide {{ double x; double y; }};"
                    " long probe(int n) {{ (void)n; return (long)({S8}); }}"), cases[case_index].expression);
             CPreprocessResult tokens = c_preprocess(temporary.arena, source,
                 (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),

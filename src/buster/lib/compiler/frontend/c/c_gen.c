@@ -2657,6 +2657,9 @@ struct CIntegerIrBuilder
     // sizeof/_Alignof lowering clears both fields before each operand.
     String8 sizeof_operand_constraint;
     u32 sizeof_operand_constraint_token;
+    // Nonzero while a sizeof operand resolves a statement-expression tail,
+    // where every array operand is evaluated and so decays.
+    u32 sizeof_statement_expression_tail_depth;
     u32 declaration_index;
     CIntegerIrLocal* locals;
     // The entity of `locals[i]`, kept beside the table rather than read out of
@@ -26226,7 +26229,13 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
         if (c_type.value < builder->parse.type_count)
         {
             type = builder->c_type_ir_map[c_type.value];
-            if (type.value == IR_ID_UNDERLYING_INVALID && builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL)
+            // An array object whose type never mapped -- `extern int v[];` --
+            // decays the same way under a postfix operator or anywhere in a
+            // statement-expression tail; as a bare operand it is the unsized
+            // array the callers diagnose.
+            if (type.value == IR_ID_UNDERLYING_INVALID &&
+                (builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL || chain_start < end ||
+                 builder->sizeof_statement_expression_tail_depth))
             {
                 type = c_ir_sizeof_unlowered_array_decay(builder, c_type);
             }
@@ -26769,7 +26778,10 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
             IrTypeId tail_type = builder->void_type;
             if (c_ir_statement_expression_tail(builder, start + 1, close - 1, &tail_start, &tail_end))
             {
-                if (!c_ir_sizeof_operand_type_attempt_depth(builder, tail_start, tail_end, &tail_type, remaining_depth, true))
+                builder->sizeof_statement_expression_tail_depth += 1;
+                bool tail_resolved = c_ir_sizeof_operand_type_attempt_depth(builder, tail_start, tail_end, &tail_type, remaining_depth, true);
+                builder->sizeof_statement_expression_tail_depth -= 1;
+                if (!tail_resolved)
                 {
                     return false;
                 }
@@ -27063,8 +27075,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_is_unmapped_array_object(CIntegerIrBu
 }
 
 // Whether a statement-expression operand's tail names an unlowered array
-// object or local with no IR type -- a variable-length array declared in the
-// body, say. The resolvers above could not type the tail, and the prediction
+// object or local with no IR type whose element has none either -- a
+// variably modified element, say. The resolvers above could not type the tail, and the prediction
 // would guess int for it, so such an operand is diagnosed instead.
 BUSTER_C_INTERNAL bool c_ir_sizeof_statement_expression_names_unmapped_array(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
@@ -27087,7 +27099,9 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_statement_expression_names_unmapped_array(CIn
     {
         for (u32 index = tail_start; index < tail_end && !result; index += 1)
         {
-            result = c_ir_sizeof_token_is_unmapped_array(builder, index, true);
+            result = c_ir_sizeof_token_is_unmapped_array(builder, index, true) &&
+                     c_ir_sizeof_unlowered_array_decay(builder, builder->parse.entities[c_ir_identifier_entity_or_lookup(builder, index).value].type).value ==
+                         IR_ID_UNDERLYING_INVALID;
         }
     }
     return result;
