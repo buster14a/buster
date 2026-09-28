@@ -24,7 +24,6 @@ jobs:
           set -euo pipefail
           git fetch origin main
           python3 - <<'PY'
-          from pathlib import Path
           import re
           import subprocess
 
@@ -61,11 +60,10 @@ jobs:
               subprocess.run(command, check=True)
           PY
           git diff --check
-          changed=$(git diff --name-only)
-          expected=$(printf '%s\n%s' \
-            src/buster/lib/compiler/frontend/c/c_gen.c \
-            src/buster/tests/compiler/diagnostic_test.c)
-          test -z "$changed" || test "$changed" = "$expected"
+          unexpected=$(git diff --name-only | grep -Fvx \
+            -e src/buster/lib/compiler/frontend/c/c_gen.c \
+            -e src/buster/tests/compiler/diagnostic_test.c || true)
+          test -z "$unexpected"
 
           driver="$RUNNER_TEMP/buster-build"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
