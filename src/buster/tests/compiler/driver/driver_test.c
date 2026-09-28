@@ -8674,6 +8674,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unneeded_prototyped_defi
     return result;
 }
 
+// Issue 1613: an unreferenced declaration or unneeded definition still
+// reached non-native output. LLVM bitcode carried `declare internal`, which
+// the verifier rejects, and the eBPF object wrote an undefined symbol for it.
+// Declarations a data relocation names must remain in both outputs.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unreferenced_declarations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("static int unused_proto(void);\n"
+                        "static int unused_definition(void) { return 1; }\n"
+                        "extern int unused_extern_data;\n"
+                        "static int referenced_static(void);\n"
+                        "extern int referenced_extern(void);\n"
+                        "int (*referenced_pointers[])(void) = {referenced_static, referenced_extern};\n"
+                        "int main(void) { return 0; }\n");
+    String8 absent[] = {S8("unused_proto"), S8("unused_definition"), S8("unused_extern_data")};
+    String8 present[] = {S8("referenced_static"), S8("referenced_extern")};
+    // The first target is compiled with -emit-llvm; the other selects the
+    // eBPF emitter by target alone.
+    String8 target_names[] = {S8("x86_64-unknown-linux-gnu"), S8("bpfel-unknown-linux")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_names); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-unreferenced-declarations"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-unreferenced-declarations"), S8(".out"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 command[] = {S8("-emit-llvm"), S8("-c"), S8("-nostdinc"), S8("-target"), target_names[target_index], S8("-o"), output, input};
+            u32 skipped = target_index != 0;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command + skipped, .length = BUSTER_ARRAY_LENGTH(command) - skipped}));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+            {
+                if (target_index == 0)
+                {
+                    // Bitcode spells names as 6-bit fields, so count the
+                    // module's entities instead: main, both referenced
+                    // declarations, and the pointer table.
+                    LlvmBitcodeStats stats = compiled.llvm_bitcode.stats;
+                    BUSTER_TEST(arguments, compiled.has_llvm_bitcode && compiled.llvm_bitcode.success);
+                    BUSTER_TEST(arguments, stats.function_count == 3 && stats.defined_function_count == 1 && stats.global_count == 1);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, compiled.has_ebpf);
+                    ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+                    String8 contents = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
+                    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(absent); name_index += 1)
+                    {
+                        BUSTER_TEST_RAW(arguments, string_first_sequence(contents, absent[name_index]) == BUSTER_STRING_NO_MATCH, absent[name_index]);
+                    }
+                    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(present); name_index += 1)
+                    {
+                        BUSTER_TEST_RAW(arguments, string_first_sequence(contents, present[name_index]) != BUSTER_STRING_NO_MATCH, present[name_index]);
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // #666: inspect the bytes the selected object writer actually emitted, not
 // just IrSymbol.is_weak (which COFF accepts but cannot serialize). The same
 // guarded fixture must also survive native source/object linking and exit.
@@ -9204,6 +9268,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unneeded_prototyped_definitions);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unreferenced_declarations);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_common_storage_option);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
