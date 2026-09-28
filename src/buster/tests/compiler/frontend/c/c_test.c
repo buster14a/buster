@@ -4553,6 +4553,153 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_expression_statements(Un
     return result;
 }
 
+// #1325: casts whose operand is itself a parenthesized cast, and operands
+// that call a noreturn callee or __builtin_unreachable before a comma --
+// among them the optimized BUSTER_CHECK. Each unit is one function, because
+// the expression-type task budget is the unit's token count and the nested
+// cast shapes only exhausted it in a unit this small.  Every shape must lower
+// to canonical IR in both frontend forms; a call that ends its expression
+// statement still ends the block, and one inside a larger expression leaves
+// it open for the rest of that expression.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_and_noreturn_operands(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("int f(int b) { return (int)((int)(b)); }\n"),
+        S8("#define TO_INT(x) ((int)(x))\nint f(long b) { return (int)TO_INT(b); }\n"),
+        S8("int f(int b) { return (int)((int)(b) + 0); }\n"),
+        S8("int f(int b) { return (int)((int)((int)((int)(b)))); }\n"),
+        S8("int f(int x) { return (int)(x ? (__builtin_trap(), 0) : 0); }\n"),
+        S8("int f(int x) { (void)(x ? (__builtin_unreachable(), 0) : 0); return x; }\n"),
+        S8("int f(int x) { return (int)((__builtin_unreachable(), 0)); }\n"),
+        S8("void f(int c) { ((void)(__builtin_expect(!!(!(c)), 0) ? (__builtin_unreachable(), 0) : 0)); }\n"),
+        S8("void f(void) { (void)(__builtin_unreachable(), 0); }\n"),
+        S8("_Noreturn void g(void);\nint f(int x) { return (g(), 0); }\n"),
+        S8("_Noreturn void g(void);\nint f(int x) { x = (g(), 0); return x; }\n"),
+        S8("_Noreturn void g(void);\nint f(int x) { g(), x = 1; return x; }\n"),
+        S8("_Noreturn int h(void);\nint f(int x) { return x + h(); }\n"),
+        S8("_Noreturn void g(void);\nint k(int, int);\nint f(int x) { return k((g(), 0), x); }\n"),
+        S8("_Noreturn void g(void);\nint f(int x) { if (x) return 1; (void)g(); }\n"),
+        // The statement forms that end with the call keep ending the block.
+        S8("_Noreturn void g(void);\nint f(int x) { if (x) return 1; g(); }\n"),
+        S8("_Noreturn void g(void);\nint f(int x) { if (x) return 1; (x = 2, g()); }\n"),
+        S8("int f(int x) { if (x) return 1; __builtin_unreachable(); }\n"),
+    };
+    // Whether f's last statement is the call that must end the block.
+    bool ends[] = {false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, true, true, true};
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(sources) == BUSTER_ARRAY_LENGTH(ends));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, sources[index], (CPreprocessOptions){
+                .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17,
+            });
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0,
+                string_format(temporary.arena, S8("cast/noreturn operand {u32} parse: {S8}"), index,
+                              parse.diagnostic_count ? parse.diagnostics[0].message : S8("")));
+            if (tokens.diagnostic_count == 0 && parse.diagnostic_count == 0)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("cast-noreturn-operand.c"), tokens, parse, target_native,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count,
+                    string_format(temporary.arena, S8("cast/noreturn operand {u32} form {u32} lower: {S8}"), index, form,
+                                  lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("")));
+                if (lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count)
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST_RAW(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE,
+                        string_format(temporary.arena, S8("cast/noreturn operand {u32} form {u32}: invalid canonical IR"), index, form));
+                    IrFunction* function = c_test_find_ir_function(module, S8("f"));
+                    u32 unreachable = 0;
+                    for (u32 instruction_index = 0; function && instruction_index < function->instruction_count; instruction_index += 1)
+                    {
+                        unreachable += function->instructions[instruction_index].opcode == IR_OPCODE_UNREACHABLE;
+                    }
+                    BUSTER_TEST_RAW(arguments, function && (!ends[index] || unreachable),
+                        string_format(temporary.arena, S8("cast/noreturn operand {u32} form {u32}: unreachable={u32}"), index, form, unreachable));
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+// The runtime check below is the only reader of this program; it is compiled
+// only where the check runs, so other targets do not see an unused constant.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+// The same shapes as a program: none of the unreachable arms runs, so every
+// function returns what Clang's build of it returns, under each allocator
+// and frontend form with canonical IR and machine code verified.
+BUSTER_GLOBAL_LOCAL String8 const c_test_cast_and_noreturn_operand_program = S8_INITIALIZER(
+    "#define TO_INT(x) ((int)(x))\n"
+    "#define CHECK(ok) ((void)(__builtin_expect(!!(!(ok)), 0) ? (__builtin_unreachable(), 0) : 0))\n"
+    "static _Noreturn void stop(void) { for (;;) { } }\n"
+    "static int nested(int b) { return (int)((int)(b)); }\n"
+    "static int nested_macro(long b) { return (int)TO_INT(b); }\n"
+    "static int nested_sum(int b) { return (int)((int)(b) + 0); }\n"
+    "static int trap_arm(int x) { return (int)(x ? (__builtin_trap(), 0) : 0); }\n"
+    "static int unreachable_arm(int x) { (void)(x ? (__builtin_unreachable(), 0) : 0); return x; }\n"
+    "static int unreachable_comma(int x) { if (x) return x + 1; return (int)((__builtin_unreachable(), 0)); }\n"
+    "static int checked(int c) { CHECK(c > 0); return c; }\n"
+    "static int noreturn_comma(int x) { if (x) return x; return (stop(), 0); }\n"
+    "static int noreturn_store(int x) { if (!x) x = (stop(), 0); return x; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    return nested(7) != 7 || nested_macro(8) != 8 || nested_sum(9) != 9 || trap_arm(0) != 0 || unreachable_arm(0) != 0 ||\n"
+    "           unreachable_comma(4) != 5 || checked(3) != 3 || noreturn_comma(6) != 6 || noreturn_store(5) != 5;\n"
+    "}\n");
+
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_and_noreturn_operand_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("cast-noreturn-operand"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_cast_and_noreturn_operand_program))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("cast-noreturn-operand-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("cast/noreturn operands {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("cast/noreturn operands runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_empty_initializers(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -25854,6 +26001,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_attribute_positions);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_attribute_noreturn);
+    BUSTER_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operands);
+    BUSTER_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operand_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_noreturn_call_value_operands);
     BUSTER_TEST_FIXTURE(arguments, c_test_noreturn_call_expression_statements);
     BUSTER_TEST_FIXTURE(arguments, c_test_gnu_attribute_queries);

@@ -440,6 +440,16 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   ran correctly to their last statement before dying on the brace with SIGILL.
   `tests/basic_c_main_implicit_return.c` pins it under every allocator, and
   exit zero is reachable there only through the closing brace.
+- A noreturn call and `__builtin_unreachable()` share one rule,
+  `c_ir_end_control_flow_after_call`. Inside a branching operand (`? :`, `&&`,
+  `||`, a lowered branch condition) or a consumer that emits rows after the
+  value -- a return, an initializer, a switch controller -- the block stays
+  open, so `return (abort(), 0)` and the optimized `BUSTER_CHECK`'s
+  `(__builtin_unreachable(), 0)` arm reach their consumer or merge. An
+  expression statement ends its block with `IR_OPCODE_UNREACHABLE` after its
+  own rows. `c_test_cast_and_noreturn_operands` pins the shapes with canonical
+  validation, and `c_test_cast_and_noreturn_operand_runtime` runs them under
+  every allocator.
 - `builder->size_type` and `builder->ptrdiff_type` are chosen against the width
   of the scalar type the lowering built, not against `program->data_layout`'s
   own `unsigned long` entry. The two can disagree: the layout comes from the

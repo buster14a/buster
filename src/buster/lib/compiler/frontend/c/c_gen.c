@@ -20658,6 +20658,12 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             {
                 return false;
             }
+            // The builtin ends control flow exactly as a noreturn callee
+            // does, so it shares that callee's rule
+            // (c_ir_end_control_flow_after_call): a branch arm reaches its
+            // merge -- the optimized BUSTER_CHECK's
+            // `c ? (__builtin_unreachable(), 0) : 0` -- and an expression
+            // statement closes its block only after its own rows.
             selected->result = c_ir_emit_integer_value(builder, 0, false, token);
             c_ir_end_control_flow_after_call(builder, true, c_ir_token_source_range(builder, token));
             selected->emitted = true;
