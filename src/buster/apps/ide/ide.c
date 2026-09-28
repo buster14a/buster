@@ -154,6 +154,7 @@ struct CompilerProgram
     String8 selection_benchmark_path;
 #if BUSTER_INCLUDE_TESTS
     String8 coff_relocation_fixture_path;
+    String8 test_module_selection;
 #endif
     CompilerCommand command;
 };
@@ -165,7 +166,7 @@ BUSTER_GLOBAL_LOCAL void compiler_print_usage(void)
 {
     string_print(S8("usage:\n"
                     "  ide cc <C compiler options and inputs>\n"
-                    "  ide test [--verbose=0|1] [--ci=0|1] [--coff-relocation-fixture=<path>]\n"
+                    "  ide test [--verbose=0|1] [--ci=0|1] [--module=<name>[,<name>...]] [--coff-relocation-fixture=<path>]\n"
                     "  ide metamorphic (configure through BUSTER_METAMORPHIC_* environment variables)\n"
                     "  ide bench\n"
                     "  ide bench-select <self-contained-source.c>\n"
@@ -206,23 +207,48 @@ ProcessResult process_arguments(void)
     if (string_equal(command, S8("test")) || string_equal(command, S8("metamorphic")))
     {
         compiler_state.command = string_equal(command, S8("metamorphic")) ? COMPILER_COMMAND_METAMORPHIC : COMPILER_COMMAND_TEST;
-        for (u64 index = 2; index < arguments.length; index += 1)
+        ProcessResult result = PROCESS_RESULT_SUCCESS;
+        for (u64 index = 2; result == PROCESS_RESULT_SUCCESS && index < arguments.length; index += 1)
         {
             String8 argument = arguments.pointer[index];
 #if BUSTER_INCLUDE_TESTS
-            if (string_starts_with_sequence(argument, S8("--coff-relocation-fixture=")))
+            if (compiler_state.command == COMPILER_COMMAND_TEST && string_starts_with_sequence(argument, S8("--module=")))
+            {
+                if (compiler_state.test_module_selection.length)
+                {
+                    string_print(S8("test: --module may only be specified once\n"));
+                    result = PROCESS_RESULT_FAILED;
+                }
+                else
+                {
+                    compiler_state.test_module_selection = string_slice(argument, S8("--module=").length, argument.length);
+                    if (!compiler_state.test_module_selection.length)
+                    {
+                        string_print(S8("test: expected a module name after --module=\n"));
+                        result = PROCESS_RESULT_FAILED;
+                    }
+                    else if (!buster_test_module_selection_check(compiler_state.test_module_selection))
+                    {
+                        result = PROCESS_RESULT_FAILED;
+                    }
+                }
+            }
+            else if (string_starts_with_sequence(argument, S8("--coff-relocation-fixture=")))
             {
                 if (compiler_state.coff_relocation_fixture_path.length)
                 {
                     string_print(S8("test: --coff-relocation-fixture may only be specified once\n"));
-                    return PROCESS_RESULT_FAILED;
+                    result = PROCESS_RESULT_FAILED;
                 }
-                compiler_state.coff_relocation_fixture_path =
-                    string_slice(argument, S8("--coff-relocation-fixture=").length, argument.length);
-                if (!compiler_state.coff_relocation_fixture_path.length)
+                else
                 {
-                    string_print(S8("test: expected a path after --coff-relocation-fixture=\n"));
-                    return PROCESS_RESULT_FAILED;
+                    compiler_state.coff_relocation_fixture_path =
+                        string_slice(argument, S8("--coff-relocation-fixture=").length, argument.length);
+                    if (!compiler_state.coff_relocation_fixture_path.length)
+                    {
+                        string_print(S8("test: expected a path after --coff-relocation-fixture=\n"));
+                        result = PROCESS_RESULT_FAILED;
+                    }
                 }
             }
             else
@@ -230,10 +256,10 @@ ProcessResult process_arguments(void)
             if (!compiler_process_common_argument(index))
             {
                 string_print(S8("test: unsupported option: {S8}\n"), argument);
-                return PROCESS_RESULT_FAILED;
+                result = PROCESS_RESULT_FAILED;
             }
         }
-        return PROCESS_RESULT_SUCCESS;
+        return result;
     }
     if (string_equal(command, S8("bench-select")))
     {
@@ -331,6 +357,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_run_tests(void)
                 .show = &default_show,
 #if BUSTER_INCLUDE_TESTS
                 .coff_relocation_fixture_path = compiler_state.coff_relocation_fixture_path,
+                .module_selection = compiler_state.test_module_selection,
 #endif
             };
 
