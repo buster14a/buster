@@ -14259,12 +14259,13 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
                                         string_equal(spelling, S8("__PRETTY_FUNCTION__")) || string_equal(spelling, S8("__builtin_va_start")) ||
                                         string_equal(spelling, S8("__va_start")) || string_equal(spelling, S8("__builtin_va_arg")) ||
                                         string_equal(spelling, S8("__builtin_va_copy")) || string_equal(spelling, S8("__builtin_va_end"));
-        // A builtin name directly followed by an identifier is in type
-        // position (`__builtin_ms_va_list cursor;`), which no expression
-        // admits, so it names a builtin type this frontend does not model.
+        // An unresolved __builtin_ name is a builtin function only when it is
+        // called; anywhere else (`__builtin_ms_va_list *p;`, casts, sizeof)
+        // it names a builtin type this frontend does not model.
         bool builtin_prefix = string_starts_with_sequence(spelling, S8("__builtin_"));
-        bool unmodeled_builtin_type = builtin_prefix && token_index + 1 < preprocess.token_count &&
-                                      preprocess.tokens[token_index + 1].kind == C_TOKEN_IDENTIFIER;
+        bool builtin_called = token_index + 1 < preprocess.token_count &&
+                              c_token_is_punctuator(&preprocess.tokens[token_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        bool unmodeled_builtin_type = builtin_prefix && !builtin_called;
         predefined_function_name |= builtin_prefix && !unmodeled_builtin_type;
         predefined_function_name |= string_starts_with_sequence(spelling, S8("__c11_atomic_"));
         // The GNU spelling of the same family, which takes ordinary pointers.
