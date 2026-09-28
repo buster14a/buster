@@ -795,15 +795,18 @@ static Wasm64DataRecord* wasm64_data_record_for_symbol(Wasm64Context* context, I
 
 static bool wasm64_add_function_record(Wasm64Context* context, IrFunction* function, IrSymbol* symbol, bool imported)
 {
-    if (context->function_count >= UINT32_MAX - 1)
+    // Table slot zero is null and every handle is its function index plus one,
+    // so the last index must still fit a 32-bit table size.
+    bool within_table = context->function_count < UINT32_MAX - 1;
+    if (!within_table)
     {
         wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("Wasm64 function table exceeds 32-bit indices"), function, 0, 0,
                     symbol ? symbol->id : IR_SYMBOL_ID_INVALID);
-        return false;
     }
     Wasm64Signature signature = {0};
     IrTypeId type_id = function ? function->canonical_type : wasm64_function_type_from_symbol(context, symbol);
-    if (type_id.value == IR_ID_UNDERLYING_INVALID || !wasm64_function_signature(context, type_id, &signature, function, symbol ? symbol->id : IR_SYMBOL_ID_INVALID))
+    if (!within_table || type_id.value == IR_ID_UNDERLYING_INVALID ||
+        !wasm64_function_signature(context, type_id, &signature, function, symbol ? symbol->id : IR_SYMBOL_ID_INVALID))
     {
         return false;
     }
@@ -1503,14 +1506,16 @@ static bool wasm64_apply_data_relocation(Wasm64Context* context, Wasm64DataRecor
         {
             wasm64_fail(context, WASM64_ERROR_UNRESOLVED_SYMBOL, wasm64_s8("unresolved WebAssembly data relocation"), 0, 0, 0, symbol);
         }
-        if (wasm64_failed(context) || !function_target)
-        {
-            return false;
-        }
     }
-    if (!record->bytes || offset > record->size || pointer_size > record->size - offset)
+    // A data target, or a function handle that raised no diagnostic above.
+    bool resolved = target || (function_target && !wasm64_failed(context));
+    bool offset_valid = record->bytes && offset <= record->size && pointer_size <= record->size - offset;
+    if (resolved && !offset_valid)
     {
         wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("invalid WebAssembly data relocation offset"), 0, 0, 0, record->symbol->id);
+    }
+    if (!resolved || !offset_valid)
+    {
         return false;
     }
     u64 value = function_target ? (u64)function_target->function_index + 1 : target->offset;
@@ -2772,87 +2777,101 @@ static void wasm64_fe_emit_return(Wasm64FunctionEmitter* emitter, IrInstruction*
 
 static void wasm64_fe_emit_call(Wasm64FunctionEmitter* emitter, IrInstruction* instruction)
 {
-    if (!instruction->operand_count)
+    Wasm64Context* context = emitter->context;
+    bool valid = instruction->operand_count != 0;
+    if (!valid)
     {
-        wasm64_fail(emitter->context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("WebAssembly call has no callee"), emitter->function, 0, instruction,
+        wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("WebAssembly call has no callee"), emitter->function, 0, instruction,
                     instruction->symbol);
-        return;
     }
-    IrValue* callee_value = emitter->function->values + instruction->operands[0].value;
-    IrType* callee_type = wasm64_type(emitter->context, callee_value->canonical_type);
-    bool indirect = callee_type && callee_type->kind == IR_TYPE_POINTER;
+    bool indirect = false;
     Wasm64Signature signature = {0};
-    if (indirect)
+    Wasm64FunctionRecord* record = 0;
+    if (valid)
     {
-        if (!wasm64_is_memory64(emitter->context))
+        IrValue* callee_value = emitter->function->values + instruction->operands[0].value;
+        IrType* callee_type = wasm64_type(context, callee_value->canonical_type);
+        indirect = callee_type && callee_type->kind == IR_TYPE_POINTER;
+        if (indirect && !wasm64_is_memory64(context))
         {
-            wasm64_fail(emitter->context, WASM64_ERROR_INDIRECT_CALL, wasm64_s8("indirect calls are unsupported by Wasm32"), emitter->function, 0,
-                        instruction, instruction->symbol);
-            return;
+            wasm64_fail(context, WASM64_ERROR_INDIRECT_CALL, wasm64_s8("indirect calls are unsupported by Wasm32"), emitter->function, 0, instruction,
+                        instruction->symbol);
+            valid = false;
         }
-        IrType* function_type = wasm64_type(emitter->context, callee_type->element_type);
-        if (!function_type || function_type->kind != IR_TYPE_FUNCTION || function_type->is_unprototyped ||
-            !wasm64_function_signature(emitter->context, function_type->id, &signature, emitter->function, instruction->symbol))
+        else if (indirect)
         {
-            wasm64_fail(emitter->context, WASM64_ERROR_INDIRECT_CALL, wasm64_s8("Wasm64 indirect call requires a prototyped function pointer"),
-                        emitter->function, 0, instruction, instruction->symbol);
-            return;
+            IrType* function_type = wasm64_type(context, callee_type->element_type);
+            valid = function_type && function_type->kind == IR_TYPE_FUNCTION && !function_type->is_unprototyped &&
+                    wasm64_function_signature(context, function_type->id, &signature, emitter->function, instruction->symbol);
+            if (!valid)
+            {
+                wasm64_fail(context, WASM64_ERROR_INDIRECT_CALL, wasm64_s8("Wasm64 indirect call requires a prototyped function pointer"),
+                            emitter->function, 0, instruction, instruction->symbol);
+            }
+            else
+            {
+                signature.type_index = wasm64_signature_add(context, signature);
+                valid = signature.type_index < context->stats.type_count;
+                if (!valid)
+                {
+                    wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("missing Wasm64 indirect call type"), emitter->function, 0, instruction,
+                                instruction->symbol);
+                }
+            }
         }
-        signature.type_index = wasm64_signature_add(emitter->context, signature);
-        if (signature.type_index >= emitter->context->stats.type_count)
+        else
         {
-            wasm64_fail(emitter->context, WASM64_ERROR_ENCODING, wasm64_s8("missing Wasm64 indirect call type"), emitter->function, 0,
-                        instruction, instruction->symbol);
-            return;
+            record = wasm64_function_record_for_symbol(context, instruction->symbol);
+            valid = record != 0;
+            if (valid)
+            {
+                signature = record->signature;
+            }
+            else
+            {
+                wasm64_fail(context, WASM64_ERROR_UNRESOLVED_SYMBOL, wasm64_s8("unresolved direct Wasm64 call"), emitter->function, 0, instruction,
+                            instruction->symbol);
+            }
         }
-    }
-    else
-    {
-        Wasm64FunctionRecord* record = wasm64_function_record_for_symbol(emitter->context, instruction->symbol);
-        if (!record)
-        {
-            wasm64_fail(emitter->context, WASM64_ERROR_UNRESOLVED_SYMBOL, wasm64_s8("unresolved direct Wasm64 call"), emitter->function, 0,
-                        instruction, instruction->symbol);
-            return;
-        }
-        signature = record->signature;
     }
     // Wasm types every call by the callee's own declared signature, so a call
     // that carries a signature of its own cannot be encoded: that is what a
     // pre-C23 `()` declaration produces, since it names no parameters and each
     // call site supplies them (see IrType.is_unprototyped).
-    if (instruction->operand_count - 1 != signature.param_count)
+    if (valid && instruction->operand_count - 1 != signature.param_count)
     {
-        wasm64_fail(emitter->context, WASM64_ERROR_VARIADIC,
+        wasm64_fail(context, WASM64_ERROR_VARIADIC,
                     wasm64_s8("a call whose arguments the callee's declaration does not describe is unsupported by Wasm64"), emitter->function, 0,
                     instruction, instruction->symbol);
-        return;
+        valid = false;
     }
-    for (u32 argument_index = 1; argument_index < instruction->operand_count; argument_index += 1)
+    if (valid)
     {
-        wasm64_fe_emit_value(emitter, instruction->operands[argument_index]);
-    }
-    if (indirect)
-    {
-        wasm64_fe_emit_value(emitter, instruction->operands[0]);
-        wasm64_fe_i64_const(emitter, UINT32_MAX);
-        wasm64_fe_u8(emitter, 0x56); // i64.gt_u: reject before narrowing
-        wasm64_fe_emit_stack_trap_if(emitter);
-        wasm64_fe_emit_value(emitter, instruction->operands[0]);
-        wasm64_fe_u8(emitter, 0xa7); // i32.wrap_i64
-        wasm64_fe_u8(emitter, 0x11); // call_indirect
-        wasm64_fe_u32(emitter, signature.type_index);
-        wasm64_fe_u32(emitter, 0); // private table
-    }
-    else
-    {
-        Wasm64FunctionRecord* record = wasm64_function_record_for_symbol(emitter->context, instruction->symbol);
-        wasm64_fe_u8(emitter, 0x10);
-        wasm64_fe_u32(emitter, record->function_index);
-    }
-    if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
-    {
-        wasm64_fe_local_set(emitter, emitter->value_locals[instruction->result.value]);
+        for (u32 argument_index = 1; argument_index < instruction->operand_count; argument_index += 1)
+        {
+            wasm64_fe_emit_value(emitter, instruction->operands[argument_index]);
+        }
+        if (indirect)
+        {
+            wasm64_fe_emit_value(emitter, instruction->operands[0]);
+            wasm64_fe_i64_const(emitter, UINT32_MAX);
+            wasm64_fe_u8(emitter, 0x56); // i64.gt_u: reject before narrowing
+            wasm64_fe_emit_stack_trap_if(emitter);
+            wasm64_fe_emit_value(emitter, instruction->operands[0]);
+            wasm64_fe_u8(emitter, 0xa7); // i32.wrap_i64
+            wasm64_fe_u8(emitter, 0x11); // call_indirect
+            wasm64_fe_u32(emitter, signature.type_index);
+            wasm64_fe_u32(emitter, 0); // private table
+        }
+        else
+        {
+            wasm64_fe_u8(emitter, 0x10);
+            wasm64_fe_u32(emitter, record->function_index);
+        }
+        if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
+        {
+            wasm64_fe_local_set(emitter, emitter->value_locals[instruction->result.value]);
+        }
     }
 }
 
