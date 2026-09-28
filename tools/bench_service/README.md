@@ -478,9 +478,12 @@ smoke recipe from being relabelled as a retirement result while preserving a
 machine-visible identity for the future admitted implementation. Because the
 unit cannot reach the queue, the supervisor exports the verified preparation
 record and the request into a sealed `retirement/` directory of the attempt
-workspace. The unit-side importer in `retirement_unit.c` is compiled but not
-yet called; see
-[RETIREMENT_PREPARATION.md](RETIREMENT_PREPARATION.md#worker-unit-handoff-1020).
+workspace. The unit-side importer and matched-build runner in
+`retirement_unit.c` are compiled but not yet called. The runner sends both
+subjects' build stages through typed broker `start-stage` requests, which the
+installed broker does not yet accept; see
+[RETIREMENT_PREPARATION.md](RETIREMENT_PREPARATION.md#worker-unit-handoff-1020)
+and [unit-side matched builds](RETIREMENT_PREPARATION.md#unit-side-matched-builds-1020).
 
 The request digest is SHA-256 of `BQ-request-v1` followed by the canonical
 request bytes, not an in-memory C structure with padding.

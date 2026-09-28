@@ -1,6 +1,12 @@
 /* Private #1018 matched-build handoff. The stage launcher binds the exact
  * fixed plan to a child wait and service-owned log. The worker still owns
- * isolation, deadlines and cancellation through the whole attempt. */
+ * isolation, deadlines and cancellation through the whole attempt.
+ *
+ * Launch seam (#1020): a DIRECT sequence forks the verified driver itself
+ * (fixture and legacy queue API). A BROKER sequence forks only the fixed
+ * systemd broker CLI with a typed start-stage request, so each subject runs
+ * in its own broker stage unit as its stage user; the retirement-* stage
+ * names are not yet accepted by the installed broker, which fails closed. */
 #ifndef BUSTER_BENCH_RETIREMENT_MATCHED_BUILD_H
 #define BUSTER_BENCH_RETIREMENT_MATCHED_BUILD_H
 
@@ -18,9 +24,19 @@ typedef struct BqRetirementBuildStage
     char const* argv[20];
     char const* env[5];
     char const* cwd;
+    /* BROKER sequences: the fixed broker and typed stage name bound into the
+     * command digest; the broker, not this process, executes the stage. */
+    char const* broker;
+    char const* broker_stage;
     u32 argc;
     mode_t file_umask;
 } BqRetirementBuildStage;
+
+enum
+{
+    BQ_RETIREMENT_LAUNCH_DIRECT = 0,
+    BQ_RETIREMENT_LAUNCH_BROKER = 1
+};
 
 typedef struct BqRetirementMatchedBuild
 {
@@ -31,6 +47,7 @@ typedef struct BqRetirementMatchedBuild
     /* Imported A facts rechecked through the cwd descriptor at every launch. */
     BqRetirementSource prepared_source[2];
     char driver[BQ_RETIREMENT_BUILD_PATH_CAP];
+    char broker[BQ_RETIREMENT_BUILD_PATH_CAP];
     BqRetirementToolchain toolchain;
     char preparation_sha256[SHA256_HEX_CAPACITY];
     char driver_sha256[SHA256_HEX_CAPACITY];
@@ -42,7 +59,9 @@ typedef struct BqRetirementMatchedBuild
     /* Held between a successful generate and its matching build launch. */
     int generated_root;
     u64 generated_device, generated_inode;
+    u64 job_id, attempt_token;
     u32 next;
+    u32 launcher;
     bool failed;
 } BqRetirementMatchedBuild;
 
@@ -57,14 +76,16 @@ enum
 typedef struct BqRetirementBuildProcess
 {
     int directory, writer, reader, build_root;
-    pid_t process;
+    /* The child leads its own process group so cancellation reaches, and
+     * proves absent, every descendant that did not leave it. */
+    pid_t process, group;
     u64 directory_device, directory_inode, log_device, log_inode;
     /* Build stages hold their generated root; generate stages retain any old
      * root until completion so a no-op cannot claim a fresh configuration. */
     u64 build_device, build_inode;
     u64 log_bytes;
     char name[32], command_sha256[SHA256_HEX_CAPACITY];
-    u32 stage, state;
+    u32 stage, state, launcher;
     int exit_code;
     bool log_overflow, capture_failed, log_eof;
 } BqRetirementBuildProcess;
@@ -88,6 +109,11 @@ BUSTER_F_DECL bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* 
     BqRetirementBuildProcess* process);
 BUSTER_F_DECL int bq_retirement_matched_build_poll(BqRetirementBuildProcess* process);
 BUSTER_F_DECL void bq_retirement_matched_build_abort(BqRetirementBuildProcess* process);
+/* SIGKILL the stage's process group, reap the child and prove the group
+ * absent before deadline_ns (CLOCK_MONOTONIC). A BROKER stage also asks the
+ * broker to KILL its stage unit. The process is then settled for abort. */
+BUSTER_F_DECL bool bq_retirement_matched_build_cancel(BqRetirementMatchedBuild const* build,
+    BqRetirementBuildProcess* process, u64 deadline_ns);
 BUSTER_F_DECL BqError bq_retirement_matched_build_complete(BqQueue* queue, BqJob const* job,
     int installed, int workspaces, BqRetirementBuildProcess* process,
     BqRetirementMatchedBuild* build);

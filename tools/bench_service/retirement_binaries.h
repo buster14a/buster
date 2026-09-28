@@ -16,6 +16,16 @@ typedef struct BqRetirementBinaries
     char binary_identity_sha256[2][SHA256_HEX_CAPACITY];
 } BqRetirementBinaries;
 
+/* Where a build sequence reads A and writes its evidence (binaries, stage
+ * logs and receipts, final build record). The queue API uses the queue for
+ * both. The worker unit, which cannot reach the queue, reads A from its sealed
+ * export and writes into the attempt's retirement-build directory. Borrowed. */
+typedef struct BqRetirementBuildStores
+{
+    BqRetirementStore preparation;
+    BqRetirementStore evidence;
+} BqRetirementBuildStores;
+
 typedef struct BqRetirementHeldBinaries
 {
     BqRetirementBinaries verified;

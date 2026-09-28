@@ -4,6 +4,17 @@
  * A, holds a fresh configured root from generate through its matching build,
  * and freezes each successful output. A failed stage poisons the sequence.
  * The worker still owns isolation and cancellation.
+ *
+ * Stores (#1020): the *_stores functions read A from
+ * BqRetirementBuildStores.preparation and write logs, receipts, the binaries
+ * record and the final record into .evidence; the queue API (*_pinned and the
+ * public wrappers) passes the queue for both. retirement_unit.c passes its
+ * sealed export and the attempt's retirement-build directory.
+ * Launch seam: bq_retirement_build_exec_fd (DIRECT, fexecve of the held
+ * driver in the held source cwd) or bq_retirement_build_exec_broker (BROKER,
+ * fexecve of the fixed broker CLI with a typed start-stage request). Both
+ * children lead their own process group; bq_retirement_matched_build_cancel
+ * kills, reaps and proves that group absent.
  */
 #include "retirement_matched_build.h"
 #include <pwd.h>
@@ -18,6 +29,28 @@
 #define BQ_RETIREMENT_BUILD_DRIVER_CAP (64u * 1024u * 1024u)
 #define BQ_RETIREMENT_BUILD_BINARY_CAP (512u * 1024u * 1024u)
 #define BQ_RETIREMENT_BUILD_DRIVER "/usr/local/libexec/buster-bench-build"
+
+/* Typed broker stage names for the four matched-build stages. The installed
+ * broker's fixed table does not contain them yet, so a BROKER launch fails
+ * closed until that reviewed contract adds their fixed commands. */
+BUSTER_GLOBAL_LOCAL char const* const bq_retirement_broker_stages[BQ_RETIREMENT_BUILD_STAGES] = {
+    "retirement-base-generate", "retirement-base-build",
+    "retirement-candidate-generate", "retirement-candidate-build"};
+
+BUSTER_GLOBAL_LOCAL u64 bq_retirement_build_clock_ns(void)
+{
+    struct timespec now = {0};
+    bool ok = clock_gettime(CLOCK_MONOTONIC, &now) == 0 && now.tv_sec >= 0 &&
+              (u64)now.tv_sec <= (UINT64_MAX - (u64)now.tv_nsec) / 1000000000u;
+    u64 result = ok ? (u64)now.tv_sec * 1000000000u + (u64)now.tv_nsec : 0;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_retirement_build_pause(void)
+{
+    struct timespec pause = {0, 5000000};
+    nanosleep(&pause, NULL);
+}
 
 BUSTER_GLOBAL_LOCAL bool bq_retirement_build_path(char* output, size_t capacity,
     char const* parent, char const* suffix)
@@ -75,19 +108,21 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_build_driver_sha(char const* path,
     return ok;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_begin_pinned(BqQueue* queue,
+/* broker is NULL for a DIRECT sequence, else the fixed broker executable. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_begin_stores(BqRetirementBuildStores stores,
     BqJob const* job, int installed, int workspaces, String8 workspace_root, String8 profile,
-    char const* fixed_driver, char const* fixed_toolchain,
+    char const* fixed_driver, char const* fixed_toolchain, char const* broker,
     char const preparation_sha256[SHA256_HEX_CAPACITY],
     bool require_new, BqRetirementMatchedBuild* build)
 {
-    BqError result = build && fixed_driver ? BQ_OK : BQ_RECIPE_MISMATCH;
+    BqError result = build && fixed_driver && (!broker || (broker[0] == '/' &&
+                     strlen(broker) < sizeof(build->broker))) ? BQ_OK : BQ_RECIPE_MISMATCH;
     if (build) *build = (BqRetirementMatchedBuild){.generated_root = -1};
     char expected[SHA256_HEX_CAPACITY] = {0}, observed[SHA256_HEX_CAPACITY] = {0};
     BqRetirementPreparation prepared = {0};
     if (result == BQ_OK)
         result = bq_retirement_profile_sha(profile, S8("build-driver-sha256="), expected) ?
-                 bq_retirement_preparation_import_pinned(bq_retirement_queue_store(queue), job, installed,
+                 bq_retirement_preparation_import_pinned(stores.preparation, job, installed,
                      workspaces, profile, preparation_sha256, &prepared) : BQ_RECIPE_MISMATCH;
     if (result == BQ_OK)
     {
@@ -125,9 +160,25 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_begin_pinned(BqQueue* qu
             memcpy(build->preparation_sha256, preparation_sha256, SHA256_HEX_CAPACITY);
             memcpy(build->driver_sha256, observed, SHA256_HEX_CAPACITY);
             memcpy(build->prepared_source, prepared.subjects, sizeof(build->prepared_source));
+            build->job_id = job->id;
+            build->attempt_token = job->token;
+            build->launcher = broker ? BQ_RETIREMENT_LAUNCH_BROKER : BQ_RETIREMENT_LAUNCH_DIRECT;
+            if (broker) memcpy(build->broker, broker, strlen(broker) + 1);
         }
     }
     if (result != BQ_OK && build) *build = (BqRetirementMatchedBuild){.generated_root = -1};
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_begin_pinned(BqQueue* queue,
+    BqJob const* job, int installed, int workspaces, String8 workspace_root, String8 profile,
+    char const* fixed_driver, char const* fixed_toolchain,
+    char const preparation_sha256[SHA256_HEX_CAPACITY],
+    bool require_new, BqRetirementMatchedBuild* build)
+{
+    BqError result = bq_retirement_matched_build_begin_stores(bq_retirement_build_queue_stores(queue), job,
+        installed, workspaces, workspace_root, profile, fixed_driver, fixed_toolchain, NULL,
+        preparation_sha256, require_new, build);
     return result;
 }
 
@@ -164,6 +215,11 @@ bool bq_retirement_matched_build_stage(BqRetirementMatchedBuild* build, BqRetire
         stage->env[1] = "LC_ALL=C";
         stage->env[2] = "TZ=UTC";
         stage->env[3] = "HOME=/nonexistent";
+        if (build->launcher == BQ_RETIREMENT_LAUNCH_BROKER)
+        {
+            stage->broker = build->broker;
+            stage->broker_stage = bq_retirement_broker_stages[build->next];
+        }
         stage->argv[0] = build->driver;
         stage->argv[1] = generate ? "generate" : "build";
         stage->argv[2] = "--build-directory";
@@ -219,6 +275,13 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_build_command_sha(BqRetirementBuildStage 
     char file_umask[5];
     snprintf(file_umask, sizeof(file_umask), "%04o", (unsigned)stage->file_umask);
     sha256_add(&hash, file_umask, sizeof(file_umask));
+    /* A DIRECT digest is unchanged; a BROKER digest also names who launched. */
+    if (stage->broker && stage->broker_stage)
+    {
+        sha256_add(&hash, "launcher=broker", sizeof("launcher=broker"));
+        sha256_add(&hash, stage->broker, strlen(stage->broker) + 1);
+        sha256_add(&hash, stage->broker_stage, strlen(stage->broker_stage) + 1);
+    }
     sha256_finish_hex(&hash, (char8*)digest);
 }
 
@@ -267,18 +330,21 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_build_output_absent(BqRetirementMatchedBui
     return root;
 }
 
-/* The child keeps verified executable and source descriptors through setup;
- * replacement of either pathname cannot select different bytes or a cwd. The
- * worker still owns the separate candidate UID and sandbox around this stage. */
-BUSTER_GLOBAL_LOCAL void bq_retirement_build_exec_fd(int executable, int writer, int directory, int source,
-    BqRetirementBuildStage const* stage)
+/* Shared child setup: its own process group, the bounded log pipe as
+ * stdout/stderr, /dev/null stdin, the fixed signal and umask policy, and
+ * close-on-exec for every inherited descriptor above stderr. A DIRECT child
+ * enters the held source; a BROKER child starts at / because the broker fixes
+ * each stage unit's working directory itself. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_build_child(int writer, int directory, int source, bool enter_source,
+    mode_t file_umask)
 {
+    bool ok = false;
 #if defined(__linux__) && defined(SYS_close_range)
-    bool ok = dup2(writer, STDOUT_FILENO) == STDOUT_FILENO &&
+    ok = setpgid(0, 0) == 0 && dup2(writer, STDOUT_FILENO) == STDOUT_FILENO &&
         dup2(writer, STDERR_FILENO) == STDERR_FILENO;
     if (writer >= 3) close(writer);
     if (directory >= 3) close(directory);
-    if (ok) ok = fchdir(source) == 0;
+    if (ok) ok = enter_source ? fchdir(source) == 0 : chdir("/") == 0;
     if (source >= 3) close(source);
     int input = ok ? open("/dev/null", O_RDONLY | O_CLOEXEC) : -1;
     if (ok) ok = input >= 3 && dup2(input, STDIN_FILENO) == STDIN_FILENO;
@@ -291,16 +357,46 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_build_exec_fd(int executable, int writer,
                  sigaction(SIGPIPE, &defaults, NULL) == 0 &&
                  sigaction(SIGCHLD, &defaults, NULL) == 0 &&
                  sigprocmask(SIG_SETMASK, &empty, NULL) == 0;
-    if (ok) umask(stage->file_umask);
+    if (ok) umask(file_umask);
     if (ok) ok = syscall(SYS_close_range, 3u, ~0u, CLOSE_RANGE_CLOEXEC) == 0;
-    if (ok) fexecve(executable, (char* const*)stage->argv, (char* const*)stage->env);
 #else
-    (void)executable;
     (void)writer;
     (void)directory;
     (void)source;
-    (void)stage;
+    (void)enter_source;
+    (void)file_umask;
 #endif
+    return ok;
+}
+
+/* The child keeps verified executable and source descriptors through setup;
+ * replacement of either pathname cannot select different bytes or a cwd. The
+ * worker still owns the separate candidate UID and sandbox around this stage. */
+BUSTER_GLOBAL_LOCAL void bq_retirement_build_exec_fd(int executable, int writer, int directory, int source,
+    BqRetirementBuildStage const* stage)
+{
+    if (bq_retirement_build_child(writer, directory, source, true, stage->file_umask))
+        fexecve(executable, (char* const*)stage->argv, (char* const*)stage->env);
+    _exit(126);
+}
+
+/* BROKER: the child is only the fixed broker CLI. Its typed request carries
+ * the job, attempt, stage name and the two A commits; the root broker
+ * constructs the stage unit, its identity, umask, sandbox, cwd and argv from
+ * constants and relays output and exit status through this pipe. */
+BUSTER_GLOBAL_LOCAL void bq_retirement_build_exec_broker(int broker, int writer, int directory, int source,
+    BqRetirementMatchedBuild const* build, BqRetirementBuildStage const* stage)
+{
+    char job[24], attempt[24];
+    int job_length = snprintf(job, sizeof(job), "%" PRIu64, (uint64_t)build->job_id);
+    int attempt_length = snprintf(attempt, sizeof(attempt), "%" PRIu64, (uint64_t)build->attempt_token);
+    char const* argv[] = {build->broker, "start-stage", job, attempt, stage->broker_stage,
+        build->prepared_source[0].commit, build->prepared_source[1].commit, NULL};
+    char const* env[] = {"PATH=/usr/bin:/bin", "LC_ALL=C", NULL};
+    bool ok = job_length > 0 && (size_t)job_length < sizeof(job) &&
+              attempt_length > 0 && (size_t)attempt_length < sizeof(attempt) && stage->broker_stage &&
+              bq_retirement_build_child(writer, directory, source, false, 0077);
+    if (ok) fexecve(broker, (char* const*)argv, (char* const*)env);
     _exit(126);
 }
 
@@ -323,6 +419,11 @@ bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
     int source = ok ? bq_retirement_build_source_fd(build) : -1;
     if (ok && source < 3) build->failed = true;
     ok = ok && source >= 3;
+    /* The broker executable passes the same held-file checks as the driver. */
+    bool brokered = ok && build->launcher == BQ_RETIREMENT_LAUNCH_BROKER;
+    int broker = brokered ? open(build->broker, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    char broker_sha256[SHA256_HEX_CAPACITY] = {0};
+    if (brokered) ok = bq_retirement_build_driver_fd_sha(broker, broker_sha256) && stage.broker_stage;
     struct stat build_stat = {0}, generated_stat = {0};
     int build_root = -1;
     if (ok && (build->next & 1u))
@@ -365,10 +466,14 @@ bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
     {
         close(capture[0]);
         close(writer);
-        bq_retirement_build_exec_fd(executable, capture[1], directory, source, &stage);
+        if (brokered) bq_retirement_build_exec_broker(broker, capture[1], directory, source, build, &stage);
+        else bq_retirement_build_exec_fd(executable, capture[1], directory, source, &stage);
     }
+    /* Both sides set the group so a signal cannot race the child's own call. */
+    if (child > 0) setpgid(child, child);
     if (capture[1] >= 0) close(capture[1]);
     if (executable >= 0) close(executable);
+    if (broker >= 0) close(broker);
     if (source >= 0) close(source);
     ok = ok && child > 0;
     if (ok)
@@ -379,6 +484,8 @@ bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
         process->reader = capture[0];
         process->build_root = build_root;
         process->process = child;
+        process->group = child;
+        process->launcher = build->launcher;
         process->directory_device = (u64)directory_stat.st_dev;
         process->directory_inode = (u64)directory_stat.st_ino;
         process->log_device = (u64)log_stat.st_dev;
@@ -476,6 +583,89 @@ void bq_retirement_matched_build_abort(BqRetirementBuildProcess* process)
     }
 }
 
+/* Ask the fixed broker to KILL a stage unit it may have started for this
+ * sequence. The request is the broker's typed signal operation with a unit
+ * name derived from constants, bounded by deadline_ns and reaped here. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_build_broker_signal(BqRetirementMatchedBuild const* build, u32 stage,
+    u64 deadline_ns)
+{
+    char unit[160];
+    int length = stage < BQ_RETIREMENT_BUILD_STAGES ? snprintf(unit, sizeof(unit),
+        "buster-bench-%" PRIu64 "-%" PRIu64 "-%s.service", (uint64_t)build->job_id,
+        (uint64_t)build->attempt_token, bq_retirement_broker_stages[stage]) : -1;
+    int broker = length > 0 && (size_t)length < sizeof(unit) ?
+                 open(build->broker, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    char digest[SHA256_HEX_CAPACITY] = {0};
+    int null = broker >= 0 ? open("/dev/null", O_WRONLY | O_CLOEXEC) : -1;
+    bool ok = null >= 3 && bq_retirement_build_driver_fd_sha(broker, digest);
+    pid_t child = ok ? fork() : -1;
+    if (child == 0)
+    {
+        char const* argv[] = {build->broker, "signal", unit, "KILL", NULL};
+        char const* env[] = {"PATH=/usr/bin:/bin", "LC_ALL=C", NULL};
+        if (bq_retirement_build_child(null, -1, -1, false, 0077)) fexecve(broker, (char* const*)argv, (char* const*)env);
+        _exit(126);
+    }
+    if (child > 0) setpgid(child, child);
+    if (null >= 0) close(null);
+    if (broker >= 0) close(broker);
+    int status = 0;
+    bool reaped = false;
+    while (child > 0 && !reaped && bq_retirement_build_clock_ns() < deadline_ns)
+    {
+        pid_t waited = waitpid(child, &status, WNOHANG);
+        if (waited == child) reaped = true;
+        else if (waited < 0 && errno != EINTR) child = -1;
+        else bq_retirement_build_pause();
+    }
+    if (child > 0 && !reaped)
+    {
+        kill(-child, SIGKILL);
+        kill(child, SIGKILL);
+        while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    }
+    ok = ok && reaped && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    return ok;
+}
+
+bool bq_retirement_matched_build_cancel(BqRetirementMatchedBuild const* build, BqRetirementBuildProcess* process,
+    u64 deadline_ns)
+{
+    bool live = process && (process->state == BQ_RETIREMENT_BUILD_RUNNING ||
+                            process->state == BQ_RETIREMENT_BUILD_DRAINING);
+    bool ok = process != NULL;
+    if (live && process->group > 0)
+    {
+        kill(-process->group, SIGKILL);
+        if (process->process > 0) kill(process->process, SIGKILL);
+    }
+    while (live && process->process > 0 && bq_retirement_build_clock_ns() < deadline_ns)
+    {
+        int status = 0;
+        pid_t waited = waitpid(process->process, &status, WNOHANG);
+        if (waited == process->process || (waited < 0 && errno != EINTR)) process->process = 0;
+        else bq_retirement_build_pause();
+    }
+    ok = ok && (!live || process->process == 0);
+    bool absent = !live || process->group <= 0;
+    while (!absent && bq_retirement_build_clock_ns() < deadline_ns)
+    {
+        errno = 0;
+        absent = kill(-process->group, 0) != 0 && errno == ESRCH;
+        if (!absent) bq_retirement_build_pause();
+    }
+    ok = ok && absent;
+    if (live && process->launcher == BQ_RETIREMENT_LAUNCH_BROKER)
+        ok = build && bq_retirement_build_broker_signal(build, process->stage, deadline_ns) && ok;
+    /* Settled either way; an unproven cleanup is reported, never retried here. */
+    if (live)
+    {
+        process->state = BQ_RETIREMENT_BUILD_WAIT_FAILED;
+        process->exit_code = -1;
+    }
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_retirement_build_log_sha(int file, char digest[SHA256_HEX_CAPACITY])
 {
     struct stat before = {0}, after = {0};
@@ -508,7 +698,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_build_log_sha(int file, char digest[SHA25
     return ok;
 }
 
-/* The stage runner's service-owned log becomes immutable queue evidence before
+/* The stage runner's service-owned log becomes immutable evidence before
  * a failed stage is reported. Incomplete writes remain attributable but can
  * never satisfy the matching receipt or the eventual binary readback. */
 BUSTER_GLOBAL_LOCAL int bq_retirement_build_stage_format(char body[1024],
@@ -525,15 +715,15 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_build_stage_format(char body[1024],
     return count;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_retirement_build_stage_evidence(BqQueue* queue,
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_build_stage_evidence(BqRetirementStore evidence,
     BqJob const* job, int log, int exit_code, BqRetirementMatchedBuild* build)
 {
     u32 stage = build->next;
     char prefix[32], name[48], receipt_name[48], body[1024];
     int count = snprintf(prefix, sizeof(prefix), "matched-log-%u", stage);
-    bool ok = queue && count > 0 && (u32)count < sizeof(prefix) &&
+    bool ok = evidence.directory >= 0 && count > 0 && (u32)count < sizeof(prefix) &&
               bq_record_name(name, prefix, job->id);
-    int output = ok ? openat(queue->directory_fd, name,
+    int output = ok ? openat(evidence.directory, name,
                              O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400) : -1;
     ok = ok && output >= 0;
     struct stat before = {0}, after = {0};
@@ -561,7 +751,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_build_stage_evidence(BqQueue* queue,
     ok = ok && fstat(log, &after) == 0 && before.st_dev == after.st_dev &&
          before.st_ino == after.st_ino && before.st_size == after.st_size &&
          before.st_mode == after.st_mode && before.st_nlink == after.st_nlink &&
-         fsync(output) == 0 && fsync(queue->directory_fd) == 0;
+         fsync(output) == 0 && fsync(evidence.directory) == 0;
     if (output >= 0 && close(output) != 0) ok = false;
     char copied[SHA256_HEX_CAPACITY] = {0};
     if (ok) sha256_finish_hex(&hash, (char8*)copied);
@@ -571,7 +761,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_build_stage_evidence(BqQueue* queue,
          bq_record_name(receipt_name, prefix, job->id);
     count = ok ? bq_retirement_build_stage_format(body, job, build, stage, exit_code) : -1;
     BqError result = ok && count > 0 && (u32)count < sizeof(body) ?
-        bq_record_write(queue, receipt_name, (u8 const*)body, (u32)count, false) : BQ_IO;
+        bq_record_write_mode_at(evidence.directory, receipt_name, (u8 const*)body, (u32)count, false, 0400) : BQ_IO;
     if (result == BQ_OK)
         bq_digest(body, (u32)count, (char8*)build->stage_receipt_sha256[stage]);
     return result;
@@ -720,20 +910,20 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_build_final_format(char body[2048],
     return count;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_retirement_build_final_record(BqQueue* queue,
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_build_final_record(BqRetirementStore evidence,
     BqJob const* job, BqRetirementMatchedBuild* build)
 {
     char name[48], body[2048];
     int length = bq_retirement_build_final_format(body, job, build);
     BqError result = length > 0 && (u32)length < sizeof(body) &&
         bq_record_name(name, "matched-builds", job->id) ?
-        bq_record_write(queue, name, (u8 const*)body, (u32)length, false) : BQ_IO;
+        bq_record_write_mode_at(evidence.directory, name, (u8 const*)body, (u32)length, false, 0400) : BQ_IO;
     if (result == BQ_OK)
         bq_digest(body, (u32)length, (char8*)build->build_record_sha256);
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_retirement_build_stage_import(BqQueue* queue,
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_build_stage_import(BqRetirementStore evidence,
     BqJob const* job, BqRetirementMatchedBuild* build, u32 stage)
 {
     build->next = stage;
@@ -744,7 +934,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_build_stage_import(BqQueue* queue,
     int count = ok ? snprintf(prefix, sizeof(prefix), "matched-log-%u", stage) : -1;
     ok = ok && count > 0 && (u32)count < sizeof(prefix) &&
          bq_record_name(name, prefix, job->id);
-    int log = ok ? openat(queue->directory_fd, name,
+    int log = ok ? openat(evidence.directory, name,
                           O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
     ok = ok && log >= 0 && bq_retirement_build_log_sha(log, build->log_sha256[stage]);
     if (log >= 0 && close(log) != 0) ok = false;
@@ -756,7 +946,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_build_stage_import(BqQueue* queue,
     ok = ok && length > 0 && (u32)length < sizeof(expected) &&
          prefix_length > 0 && (u32)prefix_length < sizeof(prefix) &&
          bq_record_name(name, prefix, job->id);
-    BqError result = ok ? bq_record_read(queue, name, (u8*)actual, sizeof(actual), &size) : BQ_CORRUPT;
+    BqError result = ok ? bq_record_read_at(evidence.directory, name, (u8*)actual, sizeof(actual), &size) :
+                     BQ_CORRUPT;
     if (result == BQ_OK)
         result = size == (u32)length && !memcmp(actual, expected, size) ? BQ_OK : BQ_CORRUPT;
     if (result == BQ_OK)
@@ -764,9 +955,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_build_stage_import(BqQueue* queue,
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_import_pinned(BqQueue* queue,
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_import_stores(BqRetirementBuildStores stores,
     BqJob const* job, int installed, int workspaces, String8 workspace_root,
-    String8 profile, char const* fixed_driver, char const* fixed_toolchain,
+    String8 profile, char const* fixed_driver, char const* fixed_toolchain, char const* broker,
     char const preparation_sha256[SHA256_HEX_CAPACITY],
     char const binary_record_sha256[SHA256_HEX_CAPACITY],
     char const build_record_sha256[SHA256_HEX_CAPACITY], BqRetirementMatchedBuild* verified)
@@ -776,18 +967,18 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_import_pinned(BqQueue* q
         bq_retirement_hex(string_from_pointer(binary_record_sha256), 64) &&
         bq_retirement_hex(string_from_pointer(build_record_sha256), 64);
     BqRetirementMatchedBuild current = {0};
-    BqError result = valid ? bq_retirement_matched_build_begin_pinned(queue, job, installed,
-        workspaces, workspace_root, profile, fixed_driver, fixed_toolchain,
+    BqError result = valid ? bq_retirement_matched_build_begin_stores(stores, job, installed,
+        workspaces, workspace_root, profile, fixed_driver, fixed_toolchain, broker,
         preparation_sha256, false, &current) :
         BQ_RECIPE_MISMATCH;
     BqRetirementBinaries binaries = {0};
     if (result == BQ_OK)
-        result = bq_retirement_binaries_import_pinned(queue, job, installed, workspaces,
+        result = bq_retirement_binaries_import_stores(stores, job, installed, workspaces,
             profile, preparation_sha256, binary_record_sha256, &binaries);
     if (result == BQ_OK)
         memcpy(current.binary_record_sha256, binary_record_sha256, SHA256_HEX_CAPACITY);
     for (u32 stage = 0; result == BQ_OK && stage < BQ_RETIREMENT_BUILD_STAGES; stage += 1)
-        result = bq_retirement_build_stage_import(queue, job, &current, stage);
+        result = bq_retirement_build_stage_import(stores.evidence, job, &current, stage);
     if (result == BQ_OK)
     {
         char name[48], expected[2048], actual[2048], digest[SHA256_HEX_CAPACITY];
@@ -795,7 +986,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_import_pinned(BqQueue* q
         int length = bq_retirement_build_final_format(expected, job, &current);
         result = length > 0 && (u32)length < sizeof(expected) &&
             bq_record_name(name, "matched-builds", job->id) ?
-            bq_record_read(queue, name, (u8*)actual, sizeof(actual), &size) : BQ_CORRUPT;
+            bq_record_read_at(stores.evidence.directory, name, (u8*)actual, sizeof(actual), &size) : BQ_CORRUPT;
         if (result == BQ_OK)
         {
             bq_digest(actual, size, (char8*)digest);
@@ -809,6 +1000,19 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_import_pinned(BqQueue* q
         memcpy(current.build_record_sha256, build_record_sha256, SHA256_HEX_CAPACITY);
         *verified = current;
     }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_import_pinned(BqQueue* queue,
+    BqJob const* job, int installed, int workspaces, String8 workspace_root,
+    String8 profile, char const* fixed_driver, char const* fixed_toolchain,
+    char const preparation_sha256[SHA256_HEX_CAPACITY],
+    char const binary_record_sha256[SHA256_HEX_CAPACITY],
+    char const build_record_sha256[SHA256_HEX_CAPACITY], BqRetirementMatchedBuild* verified)
+{
+    BqError result = bq_retirement_matched_build_import_stores(bq_retirement_build_queue_stores(queue), job,
+        installed, workspaces, workspace_root, profile, fixed_driver, fixed_toolchain, NULL,
+        preparation_sha256, binary_record_sha256, build_record_sha256, verified);
     return result;
 }
 
@@ -826,7 +1030,7 @@ BqError bq_retirement_matched_build_import(BqQueue* queue, BqJob const* job,
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_observed_pinned(BqQueue* queue,
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_observed(BqRetirementBuildStores stores,
     BqJob const* job, int installed, int workspaces, String8 profile, int stage_log,
     uid_t candidate_uid, BqRetirementBuildProcess const* process,
     BqRetirementMatchedBuild* build)
@@ -840,14 +1044,14 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_observed_pinned
         result = bq_retirement_build_log_sha(stage_log, build->log_sha256[current]) ? BQ_OK : BQ_IO;
     }
     if (result == BQ_OK)
-        result = bq_retirement_build_stage_evidence(queue, job, stage_log, process->exit_code, build);
+        result = bq_retirement_build_stage_evidence(stores.evidence, job, stage_log, process->exit_code, build);
     if (result == BQ_OK && process->exit_code != 0) result = BQ_WORKER_FAILED;
     if (result == BQ_OK && !bq_retirement_toolchain_recheck(&build->toolchain))
         result = BQ_CONFIGURATION_MISMATCH;
     if (result == BQ_OK)
     {
         BqRetirementPreparation reread = {0};
-        result = bq_retirement_preparation_import_pinned(bq_retirement_queue_store(queue), job, installed,
+        result = bq_retirement_preparation_import_pinned(stores.preparation, job, installed,
                    workspaces, profile, build->preparation_sha256, &reread);
     }
     if (result == BQ_OK && !(current & 1u))
@@ -858,16 +1062,16 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_observed_pinned
                                             candidate_uid, process) ?
                  BQ_OK : BQ_SOURCE_MISMATCH;
     if (result == BQ_OK && current == BQ_RETIREMENT_BUILD_STAGES - 1u)
-        result = bq_retirement_binaries_record_pinned(queue, job, installed, workspaces,
+        result = bq_retirement_binaries_record_stores(stores, job, installed, workspaces,
                    profile, build->preparation_sha256, build->binary_record_sha256);
     if (result == BQ_OK && current == BQ_RETIREMENT_BUILD_STAGES - 1u)
-        result = bq_retirement_build_final_record(queue, job, build);
+        result = bq_retirement_build_final_record(stores.evidence, job, build);
     if (result == BQ_OK) build->next += 1;
     else if (build) build->failed = true;
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_pinned(BqQueue* queue,
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_stores(BqRetirementBuildStores stores,
     BqJob const* job, int installed, int workspaces, String8 profile,
     BqRetirementBuildProcess* process, uid_t candidate_uid, BqRetirementMatchedBuild* build)
 {
@@ -929,7 +1133,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_pinned(BqQueue*
         process->log_inode == (u64)reader_stat.st_ino &&
         reader_stat.st_dev == named.st_dev && reader_stat.st_ino == named.st_ino &&
         reader_stat.st_size == named.st_size && reader_stat.st_mode == named.st_mode;
-    BqError result = ok ? bq_retirement_matched_build_complete_observed_pinned(queue, job,
+    BqError result = ok ? bq_retirement_matched_build_complete_observed(stores, job,
         installed, workspaces, profile, log, candidate_uid, process, build) : BQ_WORKER_FAILED;
     if (log >= 0 && close(log) != 0) result = BQ_IO;
     bool settled = process && process->state != BQ_RETIREMENT_BUILD_RUNNING &&
@@ -939,6 +1143,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_pinned(BqQueue*
     if (settled)
         bq_retirement_matched_build_abort(process);
     if (result != BQ_OK && build) build->failed = true;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_pinned(BqQueue* queue,
+    BqJob const* job, int installed, int workspaces, String8 profile,
+    BqRetirementBuildProcess* process, uid_t candidate_uid, BqRetirementMatchedBuild* build)
+{
+    BqError result = bq_retirement_matched_build_complete_stores(bq_retirement_build_queue_stores(queue), job,
+        installed, workspaces, profile, process, candidate_uid, build);
     return result;
 }
 

@@ -218,6 +218,113 @@ file contents, not the inodes the coordinator wrote. A byte-identical
 replacement by the same service identity carries the same lease-authenticated
 digest, so the unit does not treat it differently.
 
+## Unit-side matched builds (#1020)
+
+`bq_retirement_unit_build` runs the four matched-build stages inside
+`worker-unit` after `bq_retirement_unit_prepare`. It takes the prepared
+object, the export store, the phase channel, the read end of the SIGTERM
+self-pipe and the absolute `CLOCK_MONOTONIC` execution deadline from the lease
+handoff. It performs these steps in order:
+
+1. It requires the profile's `build-driver-sha256` pin before it touches the
+   channel. It then exchanges PREPARING with the supervisor, or accepts a
+   channel that already holds that acknowledgement. No child exists before
+   the acknowledgement. A refused or late acknowledgement returns
+   `BQ_WORKER_MISMATCH` without a launch or an evidence directory.
+2. It creates `job-<id>-attempt-<token>/retirement-build/` with the
+   inherited-group helper (mode `02700`). The directory must be new, so a
+   second build into the same attempt is refused. The coordinator's sealed
+   `retirement/` export is never written and still holds exactly two files.
+3. `bq_retirement_matched_build_begin_stores` re-imports A from the export,
+   checks the driver pin and the toolchain, and binds the broker launcher.
+   The toolchain manifest must equal the one prepare verified.
+4. It runs baseline generate and build, then candidate generate and build.
+   Before candidate generate it renames the baseline configured root to
+   `matched-build-baseline` with `RENAME_NOREPLACE`, so the candidate must
+   create a fresh root. Each stage polls the log pipe and the cancellation
+   descriptor under the deadline.
+5. Each completed stage writes `matched-log-<n>-<id>` and
+   `matched-stage-<n>-<id>` into `retirement-build/`. The last stage also
+   writes `binaries-<id>` and `matched-builds-<id>` there. Every record is
+   created with `O_EXCL`, mode `0400` and a single link, and is fsynced.
+   After the fourth stage the unit requires exactly those ten files, seals
+   the directory `0500` and fsyncs it and the attempt.
+6. `bq_retirement_unit_build_import_pinned` re-imports the sequence from the
+   sealed directory and the export. It checks the directory's closure and
+   identity, rederives every command (including the broker binding), rereads
+   logs and receipts, compares the binaries and final record digests, and
+   rechecks A, the toolchain and both frozen executables. The unit then
+   acquires both executables as held, close-on-exec descriptors.
+
+`BqRetirementUnitBuilt` returns the verified sequence, the held binaries and
+both record digests. Release it with `bq_retirement_unit_built_release` on
+every path. The coordinator's later replay reads the same files through the
+same importer.
+
+A readable cancellation descriptor or an expired deadline stops the running
+stage. The unit sends `SIGKILL` to the stage's process group, reaps the
+child and waits until `kill(-group, 0)` reports `ESRCH`, within the worker's
+10-second stop budget. It then asks the broker to KILL the stage unit and
+returns `BQ_WORKER_CANCEL_SIGNAL` or `BQ_WORKER_TIMEOUT`. If absence is not
+proven it returns `BQ_CLEANUP_FAILED`. The self-pipe byte is not consumed.
+A failed or cancelled build leaves its partial evidence unsealed in the
+attempt for the coordinator's failure path. Descendants that leave the
+process group are outside this proof; for broker stages, the stage unit's
+cgroup and the coordinator's recursive stop proof remain authoritative.
+
+### Isolation: both subjects through the broker
+
+The smoke recipe sends all four build stages through
+`buster-bench-systemd-broker start-stage`. Baseline stages run as
+`buster-bench` and candidate stages as `buster-bench-candidate`, each in its
+own sandboxed transient unit whose command the root broker constructs from
+constants. The unit keeps that model for both subjects rather than forking
+the driver as `buster-bench`, so the candidate keeps the #880 candidate-user
+isolation and the baseline gets its own stage sandbox.
+
+A `BQ_RETIREMENT_LAUNCH_BROKER` sequence forks only the fixed broker CLI,
+executed from a held and verified descriptor. Its only arguments are
+`start-stage <job> <attempt> retirement-<base|candidate>-<generate|build>
+<base commit> <candidate commit>`. The CLI's stdout and stderr go to the
+bounded log pipe and its exit status is the stage's. Before each request the
+unit still checks the driver pin, the source tree through a held descriptor,
+the configured root, the absence of `Release/ide` and the toolchain. It
+freezes and records the outputs itself. A broker stage's command digest also
+binds the broker path and the stage name, so receipts from a direct fork
+cannot satisfy a broker sequence. The direct launcher (fork and `fexecve` of
+the held driver in the held source) remains for the fixture and the queue
+API.
+
+**The installed broker does not accept the `retirement-*` stage names**, so
+every production broker launch fails closed today. `bq_worker_unit` does not
+call `bq_retirement_unit_build`, and the recipe gates still reject the job
+first.
+
+### Broker contract change needed before admission
+
+Running these stages for real needs a reviewed change to the broker's
+installed contract, which this change does not make:
+
+1. Four fixed stages in `systemd_broker.c` (`bq_broker_stages`,
+   `bq_broker_command`, `bq_broker_unit_from_text`,
+   `bq_broker_gate_exec_identity`) and in the credential gate. Each must run
+   `/usr/local/libexec/buster-bench-build` with the exact matched-build argv
+   from `bq_retirement_matched_build_stage`, working directory
+   `<attempt>/<subject>/source` and environment `PATH=<toolchain>/bin`,
+   `LC_ALL=C`, `TZ=UTC` and `HOME=/nonexistent`. Umasks are `0077` and
+   `0007` and identities `buster-bench` and `buster-bench-candidate`. Today the
+   broker and gate fix `PATH=/usr/bin:/bin` and the smoke build directories
+   `base/build` and `candidate/staging`.
+2. A workspace layout in which the shared `matched-build` pathname can be
+   created by the baseline stage user, moved aside by the unit and created
+   fresh by the candidate stage user. The attempt directory is `02710`, so
+   the candidate can only traverse it. This needs a reviewed service-owned
+   parent with matching `ReadWritePaths`, as `candidate/staging` has, or a
+   changed pathname policy.
+3. The matched-build helper requires a private attempt directory, while the
+   materializer creates `02710`; one of them must change.
+4. The broker's `signal` operation must accept the retirement stage units.
+
 ## Capacity derivation
 
 At the inspected #923 head `ffdc9213e74128df5e759c76d52897eddfe4cd7e`,
@@ -465,3 +572,19 @@ a mismatched handoff digest, another attempt token, a tampered record, a
 tampered request, a writable file or directory, an extra file, an extra hard
 link, a symlinked record and a replaced directory. The fixture counts
 `/proc/self/fd` entries before and after to show that no descriptor leaks.
+The unit-build fixture compiles the matched-build fixture a second time as
+`fixture-broker`. That stand-in records each typed request in
+`broker-launches` and runs the stage itself as the test user; it does not
+prove the broker's identity split or sandbox. On fresh real-A attempts it
+checks that the success path acknowledges PREPARING, issues the four
+`start-stage` requests in order, seals ten evidence files, re-imports cleanly
+and holds two different executables. It also checks that re-import rejects
+a direct-launch binding, a tampered `matched-builds` record, a byte-equal
+`bin/clang` inode replacement and a changed frozen executable. A live
+result, a second build into the same attempt, the blocked profile and a
+profile without the driver pin must all be refused. A corrupted
+acknowledgement must leave no launch, log or evidence directory. A SIGALRM
+self-pipe write and an expired deadline each stop a hanging generate: the
+build returns cancelled or timed out, the recorded driver pid no longer
+exists, the broker receives a `signal ... KILL` request and no receipt or
+`trusted-build` is written. Descriptor counts match before and after.

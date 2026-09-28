@@ -208,6 +208,13 @@ held inventory and held Clang to `producer_begin` instead of computing its
 own. `retirement_unit.c` gathers these inputs inside `worker-unit` from the
 coordinator's export of A
 ([worker-unit handoff](RETIREMENT_PREPARATION.md#worker-unit-handoff-1020)).
+`bq_retirement_unit_build` then produces the matched build record, binaries
+record and held executables, with the evidence sealed in the attempt's
+`retirement-build/` directory
+([unit-side matched builds](RETIREMENT_PREPARATION.md#unit-side-matched-builds-1020)).
+`begin_service` still imports those records from the queue, so the in-unit
+caller must pass it the unit's stores. The installed broker does not yet
+accept the unit's broker stages.
 The checked-in blocked profile lacks both reference pins, so the public
 importer fails closed and no worker path calls it. Real reviewed pin values and a
 producer caller in the worker remain open. The importer holds no `rows.tsv`
