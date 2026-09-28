@@ -148,6 +148,12 @@ result files are conserved by the existing BQ bundle index. A separate 64 MiB
 serialized-file limit applies in addition to node, depth, path and hashing
 limits; overflow fails the recipe. These are source-owned statements, while
 the external stage observer records its own inventory and timing independently.
+The build and result descriptors are pinned at preparation, before the stages
+create anything, so every tree walk (locking, receipts, temporary sweeps and
+syncs) reads a fresh open file of the same inode rather than a dup: btrfs
+(Linux 6.5+) never lists entries created after a directory's open file, and a
+consumed offset hides them everywhere (`BENCH_SERVICE_RECIPE_PINNED_WALK_TEST`).
+A failed post-stage check prints `error: STAGE post-stage check failed: CHECK`.
 
 ```sh
 ./build.sh generate                 # configure a fresh tree (Debug, clang)
