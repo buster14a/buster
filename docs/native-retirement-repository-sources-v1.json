@@ -2,7 +2,7 @@
   "schema": "buster-native-retirement-repository-sources-v1",
   "version": 1,
   "policy_path": "docs/native-retirement-dependencies-v1.json",
-  "policy_sha256": "54ab066851e2fe1161ef286fd15019bb6c113d50e6514cb743b40a84bca746ec",
+  "policy_sha256": "062e0fd67fd092aec41e5d86886176bb9384e2a8f391ab78871fa12cccce93e3",
   "records": [
     {
       "source": "src/buster/lib/aarch64.h",
@@ -71,8 +71,8 @@
     },
     {
       "source": "src/buster/lib/compiler/ir/ir_promote.c",
-      "bytes": 38472,
-      "sha256": "f1db1d52089b3c9edca13696aeecbebfaafa66e62becaed324fb02bb5da283e9"
+      "bytes": 38930,
+      "sha256": "8a02397d698438caab077b05c55c6b01c8ecdb66a365d37ad4235b12a63eb874"
     },
     {
       "source": "src/buster/lib/compiler/ir/model.h",
@@ -81,8 +81,8 @@
     },
     {
       "source": "src/buster/lib/compiler/wasm/wasm.c",
-      "bytes": 170831,
-      "sha256": "5240a34c3a569b3fbb65908bf89e0d70495e74b5ba2508278a57e031202cf2f0"
+      "bytes": 163072,
+      "sha256": "9425dda634bd68b46b918097cd6e07ddee2df92d10fee0b38f568dd54cd839e2"
     },
     {
       "source": "src/buster/lib/compiler/wasm/wasm.h",
@@ -188,6 +188,11 @@
       "source": "src/buster/lib/x86_64.h",
       "bytes": 1723,
       "sha256": "55d25c14542c8e4a436c9a7a2dd31fac5f4075747776c44917c714ff7e8adedf"
+    },
+    {
+      "source": "tools/native-retirement-darwin/Availability.h",
+      "bytes": 955,
+      "sha256": "76a86d2272872e16fbd5c9f18ea04585b447d7dd3657851ef17e10f83ecea1e3"
     },
     {
       "source": "tools/native-retirement-mingw/vadefs.h",
