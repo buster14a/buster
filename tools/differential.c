@@ -2040,15 +2040,21 @@ BUSTER_GLOBAL_LOCAL u32 d_sanitizer_runtime_self_test(Arena* arena, DSettings* p
     u32 errors = 0;
     DSettings settings = *parent;
     settings.timeout_seconds = 30;
-    if (available)
+    // LLVM linkers expand '%' in output paths as a unique-file model, so the
+    // control binaries live outside the '%'-quoting evidence root.
+    String8 binaries = available ?
+        string_format_z(arena, S8("build/differential sanitizer-control-{u64}"), os_now_microseconds()) : (String8){0};
+    bool binaries_ready = available && d_create_output(arena, binaries);
+    errors += available && !binaries_ready;
+    if (binaries_ready)
     {
-        String8 source = path_join(arena, root, S8("sanitizer-control.c"));
+        String8 source = path_join(arena, binaries, S8("sanitizer-control.c"));
 #if BUSTER_WINDOWS
-        String8 recover_path = path_join(arena, root, S8("sanitizer-recover.exe"));
-        String8 fatal_path = path_join(arena, root, S8("sanitizer-fatal.exe"));
+        String8 recover_path = path_join(arena, binaries, S8("sanitizer-recover.exe"));
+        String8 fatal_path = path_join(arena, binaries, S8("sanitizer-fatal.exe"));
 #else
-        String8 recover_path = path_join(arena, root, S8("sanitizer-recover"));
-        String8 fatal_path = path_join(arena, root, S8("sanitizer-fatal"));
+        String8 recover_path = path_join(arena, binaries, S8("sanitizer-recover"));
+        String8 fatal_path = path_join(arena, binaries, S8("sanitizer-fatal"));
 #endif
         d_write(&settings, source, S8("#include <limits.h>\nint main(void)\n{\n    volatile int value = INT_MAX;\n    value += 1;\n    (void)value;\n    return 0;\n}\n"));
         String8 recover_argv[] = {compiler, S8("-O0"), S8("-fsanitize=undefined"), S8("-fsanitize-recover=all"),
