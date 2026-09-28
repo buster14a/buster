@@ -327,9 +327,12 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   Its admitted path is the one-pair `validate-buster-v1`
   smoke recipe; it is not the former stage-1 diagnostic, an A/A
   qualification, or a performance verdict.
+  Only dispatches by `davidgmbb` (user 39247043) reach the runner, without a
+  manual approval step: a per-attempt `authorize` job and the `submit` job
+  condition skip every other requester and re-run.
   Keep `BENCH_SERVICE_DISPATCH_ENABLED=false` until the protected-main
-  ruleset, protected environment, host authorization, installed identities,
-  clean queue, and administrator reviewer with self-review prevention are
+  ruleset, main-only environment without a required reviewer, workflow gate,
+  host authorization, installed identities, and clean queue are
   verified as described in
   [`tools/bench_service/deploy/GITHUB_ADMISSION.md`](../../tools/bench_service/deploy/GITHUB_ADMISSION.md).
   `native-retirement-performance-v1` remains blocked. Use the local trusted

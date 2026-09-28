@@ -103,7 +103,11 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_option_value(String8 argument, Strin
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_set_dialect(CompilerDriverInvocation* invocation, String8 dialect)
 {
-    if (string_equal(dialect, S8("gnu99")) || string_equal(dialect, S8("gnu9x")))
+    if (string_equal(dialect, S8("gnu89")) || string_equal(dialect, S8("gnu90")))
+    {
+        invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_GNU89;
+    }
+    else if (string_equal(dialect, S8("gnu99")) || string_equal(dialect, S8("gnu9x")))
     {
         invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_GNU99;
     }
@@ -162,6 +166,8 @@ BUSTER_GLOBAL_LOCAL CPreprocessDialect compiler_driver_preprocess_dialect(Compil
         return C_PREPROCESS_DIALECT_C17;
     case COMPILER_DRIVER_C_DIALECT_C23:
         return C_PREPROCESS_DIALECT_C23;
+    case COMPILER_DRIVER_C_DIALECT_GNU89:
+        return C_PREPROCESS_DIALECT_GNU89;
     case COMPILER_DRIVER_C_DIALECT_COUNT:
         return C_PREPROCESS_DIALECT_COUNT;
     }
