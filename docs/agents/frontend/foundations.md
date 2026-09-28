@@ -654,7 +654,10 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   bit-field width likewise, and an unknown member type is
   `C_DIAGNOSTIC_UNKNOWN_TYPE_NAME`. A declaration that declares nothing
   (`int;`, `__attribute__((packed));`, `enum E { A };`) completes the segment
-  without a member row. Regression:
+  without a member row. A member `_Static_assert` (C23 `static_assert`) also
+  declares no member: the segment defers it to the translation unit's
+  deferred assertions, once per token range however often the definition is
+  parsed. Regression:
   `c_test_member_declaration_without_declarator_diagnostics` (GitHub #1661).
 
 ## Immutable aggregate and complex construction
