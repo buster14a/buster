@@ -1,0 +1,12 @@
+{
+  "attempts": 2,
+  "first_records_retained": false,
+  "first_snapshots": {},
+  "job": 1,
+  "last_reason": "[Errno 2] No such file or directory: 'worker-1'",
+  "other_reason_count": 0,
+  "reason_counts": {
+    "[Errno 2] No such file or directory: 'worker-1'": 2
+  },
+  "request_sha256": "03be7a2597308d6b629330f953c81d3dd9ddbe248e6011f0c7c55dbbe2084cc1"
+}

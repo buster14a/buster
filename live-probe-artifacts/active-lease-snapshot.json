@@ -1,0 +1,53 @@
+{
+  "boot_id": "403f04b9-f166-456c-9768-523219fd5539",
+  "descriptors_scanned": 10,
+  "disposition": "PASSIVE_ACTIVE_LEASE_SNAPSHOT",
+  "lease": {
+    "device": 49,
+    "gid": 65000,
+    "inode": 9453062,
+    "links": 1,
+    "mode": 416,
+    "uid": 65000
+  },
+  "lease_path": "/var/lib/buster-bench/lease/host.lock",
+  "limitation": "one bounded readback; matching inode and /proc/locks do not prove the same open-file description or continuous coordinator ownership",
+  "matching_proc_locks": [
+    {
+      "access": "WRITE",
+      "class": "ADVISORY",
+      "end": "EOF",
+      "raw": "7: FLOCK  ADVISORY  WRITE 711 00:31:9453062 0 EOF",
+      "reported_pid": 711,
+      "start": 0,
+      "type": "FLOCK",
+      "waiting": false
+    }
+  ],
+  "matching_service_descriptors": [
+    {
+      "device": 49,
+      "fd_number": 9,
+      "fdinfo_bytes": 103,
+      "gid": 65000,
+      "inode": 9453062,
+      "links": 1,
+      "mode": 416,
+      "readlink": "/var/lib/buster-bench/lease/host.lock",
+      "uid": 65000
+    }
+  ],
+  "root_receipt": {
+    "device": 49,
+    "gid": 0,
+    "inode": 9453063,
+    "links": 1,
+    "mode": 292,
+    "size": 24,
+    "uid": 0
+  },
+  "service_cgroup": "/system.slice/buster-bench.service",
+  "service_invocation": "43471029ce3f47af8d29b68d9a49bd93",
+  "service_main_pid": 711,
+  "service_starttime_ticks": 17598
+}

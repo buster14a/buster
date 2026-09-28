@@ -1,0 +1,11 @@
+{
+  "device": 49,
+  "gid": 65000,
+  "inode": 9453062,
+  "lease_continuity": "unproven; this is a terminal identity snapshot, no flock or /proc/locks inference",
+  "links": 1,
+  "mode": 416,
+  "root_receipt_device": 49,
+  "root_receipt_inode": 9453062,
+  "uid": 65000
+}

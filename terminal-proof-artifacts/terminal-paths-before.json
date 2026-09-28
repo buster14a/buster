@@ -1,0 +1,20 @@
+{
+  "checks": [
+    {
+      "absent": true,
+      "name": "attempt_workspace",
+      "path_component": "job-1-attempt-2"
+    },
+    {
+      "absent": true,
+      "name": "result_leaf_lease_handoff",
+      "path_component": ".lease-handoff"
+    },
+    {
+      "absent": true,
+      "name": "result_leaf_payload",
+      "path_component": "payload"
+    }
+  ],
+  "snapshot": "before"
+}

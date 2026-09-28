@@ -1,0 +1,37 @@
+commit bc77775dcd608a57429a0db907f122c2ba63eade
+tree 9e72264c2607cb2a9f826e71d3ade5924a503274
+parent 0bacbe94ae348bfbe2959994d5f911cb219df625
+author David <davidgmbb@gmail.com> 1790565376 +0000
+committer David <davidgmbb@gmail.com> 1790565376 +0000
+gpgsig -----BEGIN SSH SIGNATURE-----
+ U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrLzsfFISF4by8Q+FKz27YpkK1USsBB+m
+ amu1QkJnbDsAAAADZ2l0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQGW17siq
+ UASBp7ZXfx8EFdoFmmUaEGSSrvBcZv7fYX732tMtg2Lt2JEAhaxtiBiXda8NghVIRZhcBu+9tDzS
+ 1AE=
+ -----END SSH SIGNATURE-----
+
+    bench: enter the broker through the same-PID gate and reconcile every activation
+    
+    Implements the #1162 criterion selected in comment 5858483525:
+    
+    - the broker unit's only ExecStart is the static entry gate, which
+      fexecve()s the installed broker in the same PID after its checks;
+    - issue1162_broker_entry_evidence.py requires, for every activated
+      instance, one exact PID1 start/terminal, observer lifecycle and MainPID,
+      gate PASS (same PID, stream, start ticks, FD0, preceding the broker,
+      installed tuples/hashes/accounts equal to a before/after root readback)
+      and complete allowlisted broker diagnostic with a matching outcome;
+    - the slice installs the gate, takes the outside readbacks and uses the new
+      consumer for the broker verdict; the earlier every-broker external /proc
+      consumer still runs and is retained, and every complete external capture
+      must agree with the joined identity;
+    - observer and old consumer treat the gate as a known pre-exec image.
+    
+    Replaying the consumer on Attempt 23's real journal/observer data with a
+    synthetic PASS per instance joins all 11 activations (including the 1-3 ms
+    @5-@7); the real Attempt 23 journal has no PASS and stays failed.
+    
+    Refs #1162, #880, #36
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_019Fss1n4RSPJ4PcQxom5ZDx

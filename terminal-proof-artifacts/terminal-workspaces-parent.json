@@ -1,0 +1,10 @@
+{
+  "cleanup_record_parent_device": 49,
+  "cleanup_record_parent_inode": 9452198,
+  "device": 49,
+  "gid": 65001,
+  "inode": 9452198,
+  "mode": 1480,
+  "path": "/var/lib/buster-bench/workspaces",
+  "uid": 65000
+}

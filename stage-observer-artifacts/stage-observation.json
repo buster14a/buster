@@ -1,0 +1,172 @@
+{
+  "baseline": "ade6ac4b6ecb21f30b61b656439bac476c145e2f",
+  "causes": [
+    "candidate-build inventory not complete before exact throughput start"
+  ],
+  "identity": {
+    "attempt": 2,
+    "boot_id": "403f04b9-f166-456c-9768-523219fd5539",
+    "cgroup_root_device": 30,
+    "cgroup_root_inode": 7950,
+    "instance_sha256": "cd19765a26d462d6db4179fde44e6f4119342e3e97b927715612fad66f4c3e53",
+    "job": 1,
+    "outer_cgroup": "/buster.slice/buster-bench.slice/buster-bench-1-2.service",
+    "outer_cgroup_device": 30,
+    "outer_cgroup_inode": 9962,
+    "outer_invocation": "e0d05d17c2fa4032b2606289f3860782",
+    "outer_unit": "buster-bench-1-2.service",
+    "request_sha256": "03be7a2597308d6b629330f953c81d3dd9ddbe248e6011f0c7c55dbbe2084cc1",
+    "slice_device": 30,
+    "slice_inode": 9783,
+    "worker_sha256": "9a0b1714e52657a9333a7d7e88513d8326c3c4a8939bb60421b471701fa78307"
+  },
+  "inventories": {
+    "base-build": {
+      "artifact": "base-build-inventory.json",
+      "artifact_sha256": "db2f34f012bf6e6ee6332229251bbe9e6aa90ad9b9cc8c01bc1c7345d2a6fa45",
+      "binary_sha256": "4df893bcf1edb70101b48bbea116c6fd9d1afc8e3433cf26013035cb94f13dfb",
+      "boot_id": "403f04b9-f166-456c-9768-523219fd5539",
+      "complete_monotonic_us": 278297400,
+      "hashed_executable_bytes": 25819408,
+      "manifest_binary_sha256": "4df893bcf1edb70101b48bbea116c6fd9d1afc8e3433cf26013035cb94f13dfb",
+      "manifest_identity": {
+        "device": 49,
+        "gid": 65000,
+        "inode": 9454019,
+        "links": 1,
+        "mode": 256,
+        "size": 1610,
+        "uid": 65000
+      },
+      "manifest_sha256": "c40fc49def666faeec05ab8445532760008a984dea432ffd0fa445130ddc6a75",
+      "node_count": 84,
+      "partial_ledger_bytes": 19704,
+      "root": "/var/lib/buster-bench/workspaces/job-1-attempt-2/base/build",
+      "stage": "base-build"
+    },
+    "candidate-build": {
+      "artifact": "candidate-build-inventory.json",
+      "artifact_sha256": "dcce7101f10e24faad2d327983bcb5c7cec1a5968ea4591a9bb735d7a406c256",
+      "binary_sha256": "84d51ab9086dc210452d686aaeaac72dddc2bd8af12c2d9744c956a672e3e888",
+      "boot_id": "403f04b9-f166-456c-9768-523219fd5539",
+      "complete_monotonic_us": 384695164,
+      "hashed_executable_bytes": 25875016,
+      "manifest_binary_sha256": "84d51ab9086dc210452d686aaeaac72dddc2bd8af12c2d9744c956a672e3e888",
+      "manifest_identity": {
+        "device": 49,
+        "gid": 65000,
+        "inode": 9454447,
+        "links": 1,
+        "mode": 256,
+        "size": 1679,
+        "uid": 65000
+      },
+      "manifest_sha256": "134d23e03bd67e14a8ec3c98a8f8655604fdafbf07c75f69af9b772438670bfa",
+      "node_count": 3,
+      "partial_ledger_bytes": 681,
+      "root": "/var/lib/buster-bench/workspaces/job-1-attempt-2/candidate/build",
+      "stage": "candidate-build"
+    }
+  },
+  "inventory_before_throughput": false,
+  "job": 1,
+  "request_sha256": "03be7a2597308d6b629330f953c81d3dd9ddbe248e6011f0c7c55dbbe2084cc1",
+  "stages": {
+    "base-build": {
+      "boot_id": "403f04b9-f166-456c-9768-523219fd5539",
+      "exec_main_start_monotonic_us": 178254105,
+      "identity": {
+        "cgroup": "/buster.slice/buster-bench.slice/buster-bench-1-2-base-build.service",
+        "device": 30,
+        "inode": 10191,
+        "invocation": "ea03074cb4e4458ea14563144e751458",
+        "main_pid": 831,
+        "process_starttime_ticks": 17825
+      },
+      "record_instance_sha256": "cd19765a26d462d6db4179fde44e6f4119342e3e97b927715612fad66f4c3e53",
+      "record_worker_sha256": "9a0b1714e52657a9333a7d7e88513d8326c3c4a8939bb60421b471701fa78307",
+      "stage": "base-build",
+      "unit": "buster-bench-1-2-base-build.service",
+      "workspace_artifact": null,
+      "workspace_sha256": null
+    },
+    "base-generate": {
+      "boot_id": "403f04b9-f166-456c-9768-523219fd5539",
+      "exec_main_start_monotonic_us": 177837165,
+      "identity": {
+        "cgroup": "/buster.slice/buster-bench.slice/buster-bench-1-2-base-generate.service",
+        "device": 30,
+        "inode": 10098,
+        "invocation": "b9a8ca249c6040f2a13ad9e33133d710",
+        "main_pid": 785,
+        "process_starttime_ticks": 17781
+      },
+      "record_instance_sha256": "cd19765a26d462d6db4179fde44e6f4119342e3e97b927715612fad66f4c3e53",
+      "record_worker_sha256": "9a0b1714e52657a9333a7d7e88513d8326c3c4a8939bb60421b471701fa78307",
+      "stage": "base-generate",
+      "unit": "buster-bench-1-2-base-generate.service",
+      "workspace_artifact": null,
+      "workspace_sha256": null
+    },
+    "candidate-build": {
+      "boot_id": "403f04b9-f166-456c-9768-523219fd5539",
+      "exec_main_start_monotonic_us": 278703083,
+      "identity": {
+        "cgroup": "/buster.slice/buster-bench.slice/buster-bench-1-2-candidate-build.service",
+        "device": 30,
+        "inode": 10635,
+        "invocation": "295ff9f7e69f43b58bb8850741820891",
+        "main_pid": 1785,
+        "process_starttime_ticks": 27869
+      },
+      "record_instance_sha256": "cd19765a26d462d6db4179fde44e6f4119342e3e97b927715612fad66f4c3e53",
+      "record_worker_sha256": "9a0b1714e52657a9333a7d7e88513d8326c3c4a8939bb60421b471701fa78307",
+      "stage": "candidate-build",
+      "unit": "buster-bench-1-2-candidate-build.service",
+      "workspace_artifact": "candidate-build-workspace.json",
+      "workspace_sha256": "64fe654e82fed0b75da9eccef94b9ca9a1d308832db8866c7b01b4ed572dd2e4"
+    },
+    "candidate-generate": {
+      "boot_id": "403f04b9-f166-456c-9768-523219fd5539",
+      "exec_main_start_monotonic_us": 278273123,
+      "identity": {
+        "cgroup": "/buster.slice/buster-bench.slice/buster-bench-1-2-candidate-generate.service",
+        "device": 30,
+        "inode": 10542,
+        "invocation": "f5350f13426e4f4997768ac01b24f3a1",
+        "main_pid": 1738,
+        "process_starttime_ticks": 27827
+      },
+      "record_instance_sha256": "cd19765a26d462d6db4179fde44e6f4119342e3e97b927715612fad66f4c3e53",
+      "record_worker_sha256": "9a0b1714e52657a9333a7d7e88513d8326c3c4a8939bb60421b471701fa78307",
+      "stage": "candidate-generate",
+      "unit": "buster-bench-1-2-candidate-generate.service",
+      "workspace_artifact": null,
+      "workspace_sha256": null
+    },
+    "throughput": {
+      "boot_id": "403f04b9-f166-456c-9768-523219fd5539",
+      "exec_main_start_monotonic_us": 384607106,
+      "identity": {
+        "cgroup": "/buster.slice/buster-bench.slice/buster-bench-1-2-throughput.service",
+        "device": 30,
+        "inode": 10964,
+        "invocation": "77c5d0ed4e7d4f5ab71f69a2d7259666",
+        "main_pid": 2670,
+        "process_starttime_ticks": 38460
+      },
+      "record_instance_sha256": "cd19765a26d462d6db4179fde44e6f4119342e3e97b927715612fad66f4c3e53",
+      "record_worker_sha256": "9a0b1714e52657a9333a7d7e88513d8326c3c4a8939bb60421b471701fa78307",
+      "stage": "throughput",
+      "unit": "buster-bench-1-2-throughput.service",
+      "workspace_artifact": "throughput-workspace.json",
+      "workspace_sha256": "4ce63656f807f51f3c0007fe68aa9ac7fc2a4be54db903934f26e291823ff075"
+    }
+  },
+  "structural_capture_complete": true,
+  "subject": "bc77775dcd608a57429a0db907f122c2ba63eade",
+  "timing_causes": [
+    "candidate-build inventory not complete before exact throughput start"
+  ],
+  "verdict": "OBSERVATION_INCONCLUSIVE"
+}
