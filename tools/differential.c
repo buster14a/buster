@@ -35,6 +35,8 @@ BUSTER_GLOBAL_LOCAL DCase const d_builtin_cases[] = {
 #if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
     {S8("sysv-va-list"), S8("tests/differential/sysv_va_list.c"), S8("tests/differential/sysv_va_list_host.c"), false, {0}, true, true},
     {S8("sysv-sseup"), S8("tests/basic_c_sysv_sseup.c"), S8("tests/host_sysv_sseup.c"), false, {0}, true, true},
+    {S8("x64-i128-float"), S8("tools/fixtures/x64_i128_float_differential.c"),
+     S8("tools/fixtures/x64_i128_float_differential_host.c"), false, {0}, true, true},
 #endif
     {S8("reject-type"), S8("tests/differential/reject_type.c"), {0}, true},
     {S8("reject-syntax"), S8("tests/differential/reject_syntax.c"), {0}, true},
@@ -2038,15 +2040,21 @@ BUSTER_GLOBAL_LOCAL u32 d_sanitizer_runtime_self_test(Arena* arena, DSettings* p
     u32 errors = 0;
     DSettings settings = *parent;
     settings.timeout_seconds = 30;
-    if (available)
+    // LLVM linkers expand '%' in output paths as a unique-file model, so the
+    // control binaries live outside the '%'-quoting evidence root.
+    String8 binaries = available ?
+        string_format_z(arena, S8("build/differential sanitizer-control-{u64}"), os_now_microseconds()) : (String8){0};
+    bool binaries_ready = available && d_create_output(arena, binaries);
+    errors += available && !binaries_ready;
+    if (binaries_ready)
     {
-        String8 source = path_join(arena, root, S8("sanitizer-control.c"));
+        String8 source = path_join(arena, binaries, S8("sanitizer-control.c"));
 #if BUSTER_WINDOWS
-        String8 recover_path = path_join(arena, root, S8("sanitizer-recover.exe"));
-        String8 fatal_path = path_join(arena, root, S8("sanitizer-fatal.exe"));
+        String8 recover_path = path_join(arena, binaries, S8("sanitizer-recover.exe"));
+        String8 fatal_path = path_join(arena, binaries, S8("sanitizer-fatal.exe"));
 #else
-        String8 recover_path = path_join(arena, root, S8("sanitizer-recover"));
-        String8 fatal_path = path_join(arena, root, S8("sanitizer-fatal"));
+        String8 recover_path = path_join(arena, binaries, S8("sanitizer-recover"));
+        String8 fatal_path = path_join(arena, binaries, S8("sanitizer-fatal"));
 #endif
         d_write(&settings, source, S8("#include <limits.h>\nint main(void)\n{\n    volatile int value = INT_MAX;\n    value += 1;\n    (void)value;\n    return 0;\n}\n"));
         String8 recover_argv[] = {compiler, S8("-O0"), S8("-fsanitize=undefined"), S8("-fsanitize-recover=all"),
@@ -2059,6 +2067,16 @@ BUSTER_GLOBAL_LOCAL u32 d_sanitizer_runtime_self_test(Arena* arena, DSettings* p
             path_join(arena, root, S8("sanitizer-compile-fatal")));
         recover_built = d_success(recover_compile) && path_exists(arena, recover_path);
         fatal_built = d_success(fatal_compile) && path_exists(arena, fatal_path);
+        if (!recover_built)
+        {
+            string_print(S8("DIFFERENTIAL_SANITIZER_COMPILE_FAIL mode=recover kind={u32} status={u32}\n{S8}{S8}\n"),
+                (u32)recover_compile.kind, recover_compile.status, recover_compile.output, recover_compile.error);
+        }
+        if (!fatal_built)
+        {
+            string_print(S8("DIFFERENTIAL_SANITIZER_COMPILE_FAIL mode=fatal kind={u32} status={u32}\n{S8}{S8}\n"),
+                (u32)fatal_compile.kind, fatal_compile.status, fatal_compile.output, fatal_compile.error);
+        }
         if (recover_built && fatal_built && !settings.io_failed)
         {
             String8 recover_run_argv[] = {recover_path};

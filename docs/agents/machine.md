@@ -162,7 +162,9 @@
   path order, so the home analysis observes every reload before every spill at
   that point, conservatively lengthening rather than shortening a range. Dense
   home IDs keep the CFG bit planes proportional to actually spilled values, not
-  all virtual registers. Branches, joins, loops, indirect edges, and
+  all virtual registers; selector slots likewise close over a dense index of
+  only the touched, non-fixed slots the color scan can share, because a fixed
+  slot's range is never read. Branches, joins, loops, indirect edges, and
   inline-assembly landings retain the conservative per-home lifetime guard until
   their path-specific repairs have the same proof. Both object classes are
   assigned by one linear scan in start order with a free-color stack; no
@@ -248,8 +250,11 @@
   by the MIR verifier. Scalar loads/stores copy ten payload bytes, while
   constants and computed results clear private padding. Two-limb edge copies
   carry f80 joins; ABI transport includes single-f80 wrappers and complex
-  results. See [wide float boundaries](frontend/wide-floats-assembly.md) for
-  unsupported i128 casts. Unsigned-64 conversion now composes signed casts
+  results. The i128↔f32/f64/f80 selector converts two frame limbs through
+  closed x87 transactions. Controlled binary modes restore the complete
+  control word after an exact 64-bit scaled product or a final add rounded
+  to destination precision; the destination's f80 padding holds the control
+  words during that row. Unsigned-64 conversion composes signed casts
   with scalar masks and exact zero/2^63 f80 corrections, without new opcodes
   or CFG blocks. The extended-precision contract retains all 64 integer bits;
   arbitrary rounding-control modes and the complete control word are preserved.

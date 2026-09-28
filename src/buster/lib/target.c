@@ -220,17 +220,21 @@ TargetDataLayout target_data_layout(Target target)
     bool windows = target.os == OPERATING_SYSTEM_WINDOWS;
     bool llp64 = target_uses_llp64_data_model(target);
     bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+    bool wasm32 = target.cpu_arch == CPU_ARCH_WASM32;
     bool wasm64 = target.cpu_arch == CPU_ARCH_WASM64;
     bool bpfel = target.cpu_arch == CPU_ARCH_BPFEL;
+    bool wasm = wasm32 || wasm64;
     bool arm_plain_char_unsigned = target.cpu_arch == CPU_ARCH_AARCH64 && !apple && !windows;
-    u32 long_size = llp64 ? 4 : 8;
+    u32 pointer_size = wasm32 ? 4 : 8;
+    u32 long_size = llp64 || wasm32 ? 4 : 8;
     bool double_long_double = llp64 || wasm64 || bpfel || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
     u32 long_double_size = double_long_double ? 8 : 16;
     bool x87_long_double = target.cpu_arch == CPU_ARCH_X86_64 && target.os != OPERATING_SYSTEM_ANDROID;
     u32 long_double_bits = double_long_double ? 64 : x87_long_double ? 80 : 128;
     bool aarch64_pointer_list = target.cpu_arch == CPU_ARCH_AARCH64 && (apple || windows);
-    u32 va_list_size = llp64 || wasm64 || bpfel || aarch64_pointer_list ? 8 :
+    u32 va_list_size = wasm32 ? 4 : llp64 || wasm64 || bpfel || aarch64_pointer_list ? 8 :
                        target.cpu_arch == CPU_ARCH_X86_64 ? TARGET_X86_64_SYSV_VA_LIST_SIZE : 32;
+    u32 va_list_alignment = wasm32 ? 4 : 8;
 
     TargetDataLayout layout = {
         .boolean = {.size = 1, .alignment = 1, .bit_width = 1},
@@ -252,16 +256,16 @@ TargetDataLayout target_data_layout(Target target)
         .float_type = {.size = 4, .alignment = 4, .bit_width = 32},
         .double_type = {.size = 8, .alignment = 8, .bit_width = 64},
         .long_double_type = {.size = long_double_size, .alignment = long_double_size, .bit_width = long_double_bits},
-        .pointer = {.size = 8, .alignment = 8, .bit_width = 64},
-        .va_list = {.size = va_list_size, .alignment = 8, .bit_width = va_list_size * 8},
+        .pointer = {.size = pointer_size, .alignment = pointer_size, .bit_width = pointer_size * 8},
+        .va_list = {.size = va_list_size, .alignment = va_list_alignment, .bit_width = va_list_size * 8},
         .atomic_min_width = 8,
-        .atomic_max_width = wasm64 || bpfel ? 64 : 128,
-        .atomic_alignment = wasm64 || bpfel ? 8 : 16,
+        .atomic_max_width = wasm || bpfel ? 64 : 128,
+        .atomic_alignment = wasm || bpfel ? 8 : 16,
         .abi_stack_alignment = bpfel ? 8 : 16,
         .abi_max_alignment = bpfel ? 8 : 16,
         .endianness = TARGET_ENDIAN_LITTLE,
         .plain_char_is_signed = !arm_plain_char_unsigned,
-        .has_128_bit_integer = !wasm64 && !bpfel,
+        .has_128_bit_integer = !wasm && !bpfel,
     };
     return layout;
 }
@@ -305,7 +309,8 @@ bool target_data_layout_is_valid(TargetDataLayout layout)
             return false;
         }
     }
-    return layout.endianness < TARGET_ENDIAN_COUNT && layout.pointer.size == 8 && layout.pointer.alignment == 8 && layout.atomic_min_width &&
+    return layout.endianness < TARGET_ENDIAN_COUNT && (layout.pointer.size == 4 || layout.pointer.size == 8) &&
+           layout.pointer.alignment == layout.pointer.size && layout.atomic_min_width &&
            layout.atomic_min_width <= layout.atomic_max_width && layout.atomic_max_width <= 128 && target_layout_alignment_valid(layout.atomic_alignment) &&
            target_layout_alignment_valid(layout.abi_stack_alignment) && target_layout_alignment_valid(layout.abi_max_alignment) &&
            layout.abi_stack_alignment <= layout.abi_max_alignment;
@@ -426,6 +431,10 @@ TargetParseResult target_parse_triple(String8 triple)
             {
                 result.target.cpu_arch = CPU_ARCH_AARCH64;
             }
+            else if (target_component_equal(component, S8("wasm32")))
+            {
+                result.target.cpu_arch = CPU_ARCH_WASM32;
+            }
             else if (target_component_equal(component, S8("wasm64")))
             {
                 result.target.cpu_arch = CPU_ARCH_WASM64;
@@ -508,6 +517,10 @@ TargetParseResult target_parse_triple(String8 triple)
         {
             result.target.os = OPERATING_SYSTEM_UEFI;
         }
+        else if (target_component_equal(component, S8("wasip1")) || target_component_equal(component, S8("wasi")))
+        {
+            result.target.os = OPERATING_SYSTEM_WASI;
+        }
         else if (target_component_equal(component, S8("freestanding")) || target_component_equal(component, S8("elf")))
         {
             result.target.os = OPERATING_SYSTEM_FREESTANDING;
@@ -569,7 +582,8 @@ bool cpu_model_supports_arch(CpuModel model, CpuArch arch)
 {
     if (model == CPU_MODEL_BASELINE)
     {
-        return arch == CPU_ARCH_X86_64 || arch == CPU_ARCH_AARCH64 || arch == CPU_ARCH_WASM64 || arch == CPU_ARCH_BPFEL;
+        return arch == CPU_ARCH_X86_64 || arch == CPU_ARCH_AARCH64 || arch == CPU_ARCH_WASM32 || arch == CPU_ARCH_WASM64 ||
+               arch == CPU_ARCH_BPFEL;
     }
     if (model == CPU_MODEL_NATIVE)
     {
@@ -1204,7 +1218,7 @@ bool target_cpu_features_are_valid(Target target)
     if (target.cpu_features_explicit)
     {
         TargetCpuFeatures features = target.cpu_features;
-        if (target.cpu_arch == CPU_ARCH_WASM64 || target.cpu_arch == CPU_ARCH_BPFEL)
+        if (target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_WASM64 || target.cpu_arch == CPU_ARCH_BPFEL)
         {
             return !target_cpu_features_any(features);
         }
@@ -1836,6 +1850,10 @@ String8 cpu_arch_to_string_os(CpuArch arch)
     case CPU_ARCH_AARCH64:
         result = S8("aarch64");
         break;
+    case CPU_ARCH_WASM32:
+        result = S8("wasm32");
+        break;
+        break;
     case CPU_ARCH_WASM64:
         result = S8("wasm64");
         break;
@@ -1894,6 +1912,10 @@ String8 operating_system_to_string_os(OperatingSystem os)
         break;
     case OPERATING_SYSTEM_IOS:
         result = S8("ios");
+        break;
+    case OPERATING_SYSTEM_WASI:
+        result = S8("wasip1");
+        break;
         break;
     case OPERATING_SYSTEM_FREESTANDING:
         result = S8("freestanding");

@@ -465,6 +465,7 @@ typedef enum CPreprocessDialect
     C_PREPROCESS_DIALECT_C11,
     C_PREPROCESS_DIALECT_C17,
     C_PREPROCESS_DIALECT_C23,
+    C_PREPROCESS_DIALECT_GNU89,
     C_PREPROCESS_DIALECT_COUNT,
 } CPreprocessDialect;
 
@@ -747,7 +748,10 @@ struct CArrayBound
     bool is_static;
     bool is_star;
     bool has_inferred_count;
-    u8 reserved;
+    // A `const` written inside the brackets. A parameter declared with it is
+    // adjusted to a const pointer (C17 6.7.6.3p7), so `int a[const 2]` is
+    // not modifiable although its elements are.
+    bool is_const;
 };
 
 typedef struct CType CType;
@@ -998,6 +1002,9 @@ struct CEntity
     // Block-scope extern declarations are C_ENTITY_LOCAL for lexical lookup,
     // but they name external storage rather than an automatic local place.
     bool is_extern;
+    // The function's only definition so far is GNU inline-only, so the unit
+    // may still give its external definition.
+    bool definition_is_gnu_inline_only;
     CEntityId cleanup_function;
     u32 cleanup_attribute_token;
     u32 cleanup_attribute_end;
@@ -1073,6 +1080,9 @@ struct CDeclaration
     bool is_definition;
     bool is_variadic;
     bool is_constexpr;
+    // A GNU `extern inline` function definition: its body is only for
+    // inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
+    bool is_gnu_inline_only;
     // Set on the second and later declarators of a list: the specifiers were
     // already parsed for the first one, so base_type is supplied rather than
     // recomputed.
@@ -1165,6 +1175,36 @@ struct CParserResult
     u32 diagnostic_capacity;
 };
 
+// Definition token -> lowest type id ever given that definition_start.
+// c_parse_scalar_type_core_begin is the only writer of definition_start; a
+// row that holds a start later is that row, a younger copy of it, or one of
+// them restored by rollback, so no live row with the start is older than the
+// recorded id. A scan for rows defined at a token may therefore begin at that
+// id, and skip the table when the start was never assigned. Like the
+// aggregate lookup below, the header outlives rollback, recorded ids only
+// ever decrease, and at most half the slots are occupied; an exhausted arena
+// sets `incomplete` and sends every query back to a whole-table scan.
+typedef struct CDefinitionIndexSlot CDefinitionIndexSlot;
+struct CDefinitionIndexSlot
+{
+    u32 start_plus_one;
+    u32 lowest_type;
+};
+
+typedef struct CDefinitionIndex CDefinitionIndex;
+struct CDefinitionIndex
+{
+    CDefinitionIndexSlot* slots;
+    u32 slot_count;
+    u32 fill;
+    bool incomplete;
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+    u64 search_count;
+    u64 probe_count;
+    u64 scan_row_count;
+#endif
+};
+
 // (kind, tag) -> oldest matching aggregate type id. Speculative rollback
 // restores CParseResult wholesale, so this header and its geometrically grown
 // slot arrays live in the unrewound parse arena. Rehash preserves stale and
@@ -1198,6 +1238,9 @@ struct CAggregateLookup
     u64 probe_count;
     u64 rehash_slot_count;
     u64 fallback_type_count;
+    // Rows lowering's tag type-name search visited because the index could
+    // not name the one candidate.
+    u64 lowering_search_type_count;
 #endif
 };
 
@@ -1230,10 +1273,35 @@ struct CTokenPositionIndex
     // fresh arena page already holds, and every reader subtracts one, which
     // turns that zero back into the UINT32_MAX the range tests already reject.
     u32* matching_delimiters_plus_one;
+    // Ascending positions of the words and token pairs the semantic validation
+    // families of c_parse_validate_lowering_constraints look for, recorded by
+    // the same pass so each family visits its candidates (CParseCandidates)
+    // instead of re-testing every body token. Keyword populations are exact
+    // for interned identifiers; an identifier the intern pass never saw
+    // (symbol 0) is recorded in all of them, because only its spelling can
+    // say, and every family re-checks the exact word per candidate.
+    u32* control_keyword_positions; // for while do switch break continue case default
+    u32* switch_positions;
+    u32* return_positions;
+    u32* goto_positions;
+    u32* asm_positions;    // asm __asm __asm__
+    u32* sizeof_positions; // sizeof _Alignof __alignof __alignof__
+    u32* brace_identifier_positions;     // an identifier directly followed by '{'
+    u32* statement_expression_positions; // a '{' directly preceded by '('
+    u32* label_address_positions;        // a '&&' directly followed by an identifier
     u32 vector_size_count;
     u32 alignas_count;
     u32 label_candidate_count;
     u32 attribute_count;
+    u32 control_keyword_count;
+    u32 switch_count;
+    u32 return_count;
+    u32 goto_count;
+    u32 asm_count;
+    u32 sizeof_count;
+    u32 brace_identifier_count;
+    u32 statement_expression_count;
+    u32 label_address_count;
     // Delimiter scan verdicts that matching_delimiters_plus_one alone cannot carry:
     // closers that matched nothing (mismatched or excess) plus openers still
     // unmatched at the end of the stream. Zero means the whole stream is
@@ -1273,6 +1341,7 @@ struct CParseResult
     CEntityId* typedef_lookup_buckets;
     CEntityId* name_lookup_buckets;
     CAggregateLookup* aggregate_lookup;
+    CDefinitionIndex* definition_index;
     CTokenPositionIndex* position_index;
     CIdentifierUse* identifier_uses;
     // First recorded use of each token, plus one, so an unused token is the
@@ -1446,6 +1515,10 @@ BUSTER_F_DECL u32 c_preprocess_pack_alignment(CPreprocessResult const* preproces
 // of the final stream.
 BUSTER_F_DECL CSourceLocation c_lex_token_location(CLexResult* lex, CToken token);
 BUSTER_F_DECL CSourceLocation c_preprocess_token_location(CPreprocessResult const* preprocess, CToken token);
+// Whether printing `current` straight after `previous` would lex as different
+// tokens, so a printer that reproduces source adjacency must still separate
+// them. The -E printer and diagnostics quoting source text share this rule.
+BUSTER_F_DECL bool c_token_requires_separator(CToken previous, String8 previous_spelling, CToken current, String8 current_spelling);
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTokenShape const* c_preprocess_token_shapes(CPreprocessResult const* preprocess)
 {
     CTokenShape const* result = preprocess && preprocess->recovery ? preprocess->recovery->token_shapes : 0;

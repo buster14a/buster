@@ -615,6 +615,7 @@ ObjectFormat object_format_for_target(Target target)
     case OPERATING_SYSTEM_FREESTANDING:
         result = OBJECT_FORMAT_ELF64;
         break;
+    case OPERATING_SYSTEM_WASI:
     default:
         result = OBJECT_FORMAT_COUNT;
         break;

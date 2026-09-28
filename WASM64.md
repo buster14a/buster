@@ -6,6 +6,8 @@ Buster emits direct core WebAssembly for the target:
 wasm64-unknown-freestanding
 ```
 
+For the wasm32 WASI command target, see [`WASI.md`](WASI.md).
+
 This is a Memory64-only target. It does not emit wasm32 modules and does not
 silently narrow pointers. C pointers, Buster pointers, linear-memory
 addresses, stack addresses, data relocations, and active data-segment offset

@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 import unittest
@@ -44,6 +47,41 @@ def merge_with_tree(repository: Path, first_parent: str, second_parent: str,
         "commit-tree", tree, "-p", first_parent, "-p", second_parent, "-m", message,
     ])
     return result.stdout.decode("utf-8").strip()
+
+
+def write_event(repository: Path, base: str, head: str | None, base_ref: str | None = "main") -> str:
+    path = repository.parent / "event.json"
+    path.write_text(json.dumps({"pull_request": {
+        "base": {"sha": base, "ref": base_ref}, "head": {"sha": head},
+    }}), encoding="utf-8")
+    return str(path)
+
+
+def pr_fixture(root: Path) -> tuple[Path, str, str, str, str]:
+    repository = new_repository(root)
+    event_base = commit_file(repository, "base.c", "int base_value;\n", "event base")
+    guard.run_git(repository, ["checkout", "-b", "feature", event_base])
+    source_head = commit_file(repository, "feature.c", "int feature_value;\n", "PR source")
+    guard.run_git(repository, ["checkout", "main"])
+    actual_base = commit_file(repository, "main.c", "int main_value;\n", "main advanced")
+    tree = git(repository, "merge-tree", "--write-tree", actual_base, source_head).splitlines()[0]
+    candidate = merge_with_tree(repository, actual_base, source_head, tree)
+    guard.run_git(repository, ["update-ref", "refs/remotes/origin/main", actual_base])
+    guard.run_git(repository, ["checkout", "--detach", candidate])
+    return repository, event_base, actual_base, source_head, candidate
+
+
+def run_cli(repository: Path, candidate: str, base: str, event_path: str,
+            event_name: str = "pull_request") -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment.update(GITHUB_EVENT_PATH=event_path, GITHUB_SHA=candidate,
+                       GITHUB_EVENT_NAME=event_name, MERGE_PARENT_BASE_SHA=base)
+    # Exactly the production workflow argv; the runner supplies the event path.
+    return subprocess.run([
+        sys.executable, "-B", str(ROOT / "tools/merge_parent_preservation.py"),
+        "--repository", str(repository), "--candidate", candidate,
+        "--base", base, "--event-name", event_name,
+    ], env=environment, capture_output=True, text=True, timeout=60, check=False)
 
 
 class MergeParentPreservationTests(unittest.TestCase):
@@ -165,10 +203,191 @@ class MergeParentPreservationTests(unittest.TestCase):
             candidate = merge_with_tree(repository, current_base, feature_head, candidate_tree,
                                         "GitHub PR candidate merge")
 
-            report = guard.check_history(repository, candidate, current_base, "pull_request")
+            guard.run_git(repository, ["update-ref", "refs/remotes/origin/main", current_base])
+            guard.run_git(repository, ["checkout", "--detach", candidate])
+            event_path = write_event(repository, current_base, feature_head)
+            report = guard.check_history(repository, candidate, current_base, "pull_request", event_path=event_path)
 
         self.assertEqual(report["base"], current_base)
         self.assertFalse(report["findings"])
+
+
+class PullRequestBindingTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.repository, self.event_base, self.actual_base, self.source_head, self.candidate = pr_fixture(Path(temporary.name))
+        self.event_path = write_event(self.repository, self.event_base, self.source_head)
+
+    def check(self):
+        return guard.check_history(self.repository, self.candidate, self.event_base,
+                                   "pull_request", event_path=self.event_path)
+
+    def test_issue_1189_stale_event_base_binds_actual_synthetic_parent(self):
+        self.assertNotEqual(self.event_base, self.actual_base)
+        self.assertFalse(guard.is_ancestor(self.repository, self.actual_base, self.source_head))
+        report = self.check()
+        self.assertEqual(report["base"], self.actual_base)
+        self.assertEqual(report["event_base"], self.event_base)
+        self.assertEqual(report["source_head"], self.source_head)
+        self.assertEqual(report["candidate_tree"], guard.commit_details(self.repository, self.candidate)[0])
+        self.assertFalse(report["findings"])
+        self.assertEqual(report["merge_count"], 1)
+        result = run_cli(self.repository, self.candidate, self.event_base, self.event_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"base={self.actual_base}", result.stdout)
+        self.assertIn(f"event-base={self.event_base}", result.stdout)
+        self.assertEqual(git(self.repository, "rev-parse", "feature"), self.source_head)
+        self.assertEqual(git(self.repository, "rev-parse", "HEAD"), self.candidate)
+
+    def test_main_advancing_after_candidate_keeps_immutable_range(self):
+        guard.run_git(self.repository, ["checkout", "main"])
+        newer = commit_file(self.repository, "later.c", "int later;\n", "later main")
+        guard.run_git(self.repository, ["update-ref", "refs/remotes/origin/main", newer])
+        guard.run_git(self.repository, ["checkout", "--detach", self.candidate])
+        report = self.check()
+        self.assertEqual(report["base"], self.actual_base)
+        self.assertEqual(report["base_tip"], newer)
+        self.assertFalse(report["findings"])
+
+    def test_wrong_source_head_fails_even_when_event_base_is_current(self):
+        self.event_base = self.actual_base
+        self.event_path = write_event(self.repository, self.event_base, self.event_base)
+        with self.assertRaisesRegex(guard.MergePreservationError, "second parent"):
+            self.check()
+
+    def test_wrong_first_parent_on_side_branch_fails(self):
+        guard.run_git(self.repository, ["checkout", "-b", "side", self.event_base])
+        side = commit_file(self.repository, "side.c", "int side;\n", "side branch")
+        tree = git(self.repository, "merge-tree", "--write-tree", side, self.source_head).splitlines()[0]
+        self.candidate = merge_with_tree(self.repository, side, self.source_head, tree)
+        guard.run_git(self.repository, ["checkout", "--detach", self.candidate])
+        with self.assertRaisesRegex(guard.MergePreservationError, "first-parent history"):
+            self.check()
+
+    def test_side_parent_reachable_from_main_is_not_a_main_parent(self):
+        tree = guard.commit_details(self.repository, self.candidate)[0]
+        main_merge = merge_with_tree(self.repository, self.actual_base, self.source_head, tree, "main merge")
+        guard.run_git(self.repository, ["update-ref", "refs/remotes/origin/main", main_merge])
+        self.candidate = merge_with_tree(self.repository, self.source_head, self.actual_base, tree, "wrong order")
+        self.event_path = write_event(self.repository, self.event_base, self.actual_base)
+        guard.run_git(self.repository, ["checkout", "--detach", self.candidate])
+        self.assertTrue(guard.is_ancestor(self.repository, self.source_head, main_merge))
+        with self.assertRaisesRegex(guard.MergePreservationError, "first-parent history"):
+            self.check()
+
+    def test_candidate_older_than_event_base_fails(self):
+        guard.run_git(self.repository, ["checkout", "main"])
+        newer = commit_file(self.repository, "later.c", "int later;\n", "new event base")
+        guard.run_git(self.repository, ["update-ref", "refs/remotes/origin/main", newer])
+        guard.run_git(self.repository, ["checkout", "--detach", self.candidate])
+        self.event_base = newer
+        self.event_path = write_event(self.repository, newer, self.source_head)
+        with self.assertRaisesRegex(guard.MergePreservationError, "not an ancestor"):
+            self.check()
+
+    def test_requested_base_must_match_event(self):
+        self.event_base = self.actual_base
+        with self.assertRaisesRegex(guard.MergePreservationError, "requested base"):
+            self.check()
+
+    def test_candidate_must_match_actual_checkout(self):
+        guard.run_git(self.repository, ["checkout", "--detach", self.source_head])
+        with self.assertRaisesRegex(guard.MergePreservationError, "checked-out HEAD"):
+            self.check()
+
+    def test_shallow_checkout_fails_closed(self):
+        (self.repository / ".git/shallow").write_text(self.event_base + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(guard.MergePreservationError, "full-history checkout"):
+            self.check()
+
+    def test_missing_base_branch_does_not_fall_back_to_candidate_parent(self):
+        guard.run_git(self.repository, ["update-ref", "-d", "refs/remotes/origin/main"])
+        with self.assertRaisesRegex(guard.MergePreservationError, "refs/remotes/origin/main"):
+            self.check()
+
+    def test_missing_or_malformed_event_fails_closed(self):
+        for contents in ("not json", "null", "[]", "{}", '{"pull_request": null}'):
+            with self.subTest(contents=contents):
+                Path(self.event_path).write_text(contents, encoding="utf-8")
+                with self.assertRaisesRegex(guard.MergePreservationError, "missing or malformed"):
+                    self.check()
+        Path(self.event_path).unlink()
+        with self.assertRaisesRegex(guard.MergePreservationError, "missing or malformed"):
+            self.check()
+        self.event_path = ""
+        with self.assertRaisesRegex(guard.MergePreservationError, "GITHUB_EVENT_PATH"):
+            self.check()
+
+    def test_invalid_event_identifiers_fail_closed(self):
+        for base, head, ref, diagnostic in (
+            ("main", self.source_head, "main", "full commit SHAs"),
+            (self.event_base, None, "main", "full commit SHAs"),
+            (self.event_base, self.source_head, "main~1", "base ref is invalid"),
+            (self.event_base, self.source_head, "", "base ref is invalid"),
+            (self.event_base, self.source_head, None, "base ref is invalid"),
+        ):
+            with self.subTest(base=base, head=head, ref=ref):
+                self.event_path = write_event(self.repository, base, head, ref)
+                with self.assertRaisesRegex(guard.MergePreservationError, diagnostic):
+                    self.check()
+
+    def test_stale_payload_merge_commit_field_is_not_candidate_authority(self):
+        path = Path(self.event_path)
+        event = json.loads(path.read_text(encoding="utf-8"))
+        event["pull_request"]["merge_commit_sha"] = self.event_base
+        path.write_text(json.dumps(event), encoding="utf-8")
+        self.assertEqual(self.check()["candidate"], self.candidate)
+
+    def test_single_parent_root_and_octopus_candidates_fail(self):
+        tree = guard.commit_details(self.repository, self.candidate)[0]
+        octopus = git(self.repository, "commit-tree", tree, "-p", self.actual_base,
+                      "-p", self.source_head, "-p", self.event_base, "-m", "octopus")
+        for candidate in (self.source_head, self.event_base, octopus):
+            with self.subTest(candidate=candidate):
+                self.candidate = candidate
+                guard.run_git(self.repository, ["checkout", "--detach", candidate])
+                with self.assertRaisesRegex(guard.MergePreservationError, "two-parent merge"):
+                    self.check()
+
+    def test_stale_event_does_not_hide_dropped_source_history(self):
+        dropped = merge_with_tree(self.repository, self.source_head, self.actual_base,
+                                  self.source_head, "discard main changes")
+        self.candidate = merge_with_tree(self.repository, self.actual_base, dropped, dropped)
+        self.event_path = write_event(self.repository, self.event_base, dropped)
+        guard.run_git(self.repository, ["checkout", "--detach", self.candidate])
+        report = self.check()
+        self.assertEqual(report["findings"][0]["merge"], dropped)
+        self.assertTrue(report["findings"][0]["missing"])
+        result = run_cli(self.repository, self.candidate, self.event_base, self.event_path)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Merge drops second-parent changes", result.stdout)
+
+    def test_synthetic_candidate_discarding_source_still_fails(self):
+        self.candidate = merge_with_tree(self.repository, self.actual_base, self.source_head, self.actual_base)
+        guard.run_git(self.repository, ["checkout", "--detach", self.candidate])
+        self.assertEqual(self.check()["findings"][0]["merge"], self.candidate)
+
+    def test_binding_errors_have_cli_exit_two(self):
+        self.event_path = write_event(self.repository, self.event_base, self.event_base)
+        result = run_cli(self.repository, self.candidate, self.event_base, self.event_path)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("second parent", result.stdout)
+        self.assertNotIn("No newly introduced merge", result.stdout)
+
+    def test_merge_group_exact_base_control_ignores_pr_event_path(self):
+        result = run_cli(self.repository, self.candidate, self.actual_base, "/missing-event.json", "merge_group")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_merge_group_wrong_base_and_malformed_candidate_still_fail(self):
+        for candidate, base, diagnostic in (
+            (self.candidate, self.event_base, "first parent does not equal"),
+            (self.source_head, self.event_base, "two-parent merge"),
+            (self.candidate, "", "missing its exact base"),
+        ):
+            with self.subTest(candidate=candidate, base=base):
+                with self.assertRaisesRegex(guard.MergePreservationError, diagnostic):
+                    guard.check_history(self.repository, candidate, base, "merge_group")
 
 
 if __name__ == "__main__":

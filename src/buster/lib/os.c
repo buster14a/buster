@@ -1937,7 +1937,6 @@ OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OsFileAccess acces
     return os_file_open_checked(path, flags, access, create_mode, share_flags).file;
 }
 
-
 // Neither platform's transfer primitive takes a u64 count: WriteFile/ReadFile
 // take a DWORD, and write(2)/read(2) are only defined up to SSIZE_MAX. The
 // recoverable helpers below clamp to that limit and let their transfer loops

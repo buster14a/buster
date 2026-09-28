@@ -2,7 +2,7 @@
   "schema": "buster-native-retirement-repository-sources-v1",
   "version": 1,
   "policy_path": "docs/native-retirement-dependencies-v1.json",
-  "policy_sha256": "54ab066851e2fe1161ef286fd15019bb6c113d50e6514cb743b40a84bca746ec",
+  "policy_sha256": "062e0fd67fd092aec41e5d86886176bb9384e2a8f391ab78871fa12cccce93e3",
   "records": [
     {
       "source": "src/buster/lib/aarch64.h",
@@ -71,8 +71,8 @@
     },
     {
       "source": "src/buster/lib/compiler/ir/ir_promote.c",
-      "bytes": 38472,
-      "sha256": "f1db1d52089b3c9edca13696aeecbebfaafa66e62becaed324fb02bb5da283e9"
+      "bytes": 38930,
+      "sha256": "8a02397d698438caab077b05c55c6b01c8ecdb66a365d37ad4235b12a63eb874"
     },
     {
       "source": "src/buster/lib/compiler/ir/model.h",
@@ -81,23 +81,23 @@
     },
     {
       "source": "src/buster/lib/compiler/wasm/wasm.c",
-      "bytes": 123051,
-      "sha256": "434f355d5df1725e00b5c88a6f41340968ffaeaeadc969145ea711a805c0d2b6"
+      "bytes": 163072,
+      "sha256": "9425dda634bd68b46b918097cd6e07ddee2df92d10fee0b38f568dd54cd839e2"
     },
     {
       "source": "src/buster/lib/compiler/wasm/wasm.h",
-      "bytes": 3318,
-      "sha256": "028735542bdabf679bc9a42e58feba04952af32b51205046fc6802e53d4a3d86"
+      "bytes": 5061,
+      "sha256": "7760422a790478468f3d38fb52d7618cc5ab1c7e51f4359c71b3527cadd691d8"
     },
     {
       "source": "src/buster/lib/file.c",
-      "bytes": 25682,
-      "sha256": "5047dc2bd23dbdd1569b2c2c63878f42957f426cb0f4da6754c773c62ddb603d"
+      "bytes": 24371,
+      "sha256": "7dc87af4ae316d46ab575e1fd3bc349754f4013419e5bea57008027fb28c46ce"
     },
     {
       "source": "src/buster/lib/file.h",
-      "bytes": 6842,
-      "sha256": "67bf25e6646096014a3c45186ecbc0ebb847fab7e212eca7d6f5b523c607762d"
+      "bytes": 6495,
+      "sha256": "bb6d5293c63dd97b89a08af02757819a014a0477e9989b905678055f91c6904d"
     },
     {
       "source": "src/buster/lib/float.c",
@@ -131,13 +131,13 @@
     },
     {
       "source": "src/buster/lib/os.c",
-      "bytes": 243199,
-      "sha256": "1dbbc06f4ac47b630741cfae32fea88645a600a9ed5375450e4814d91e70dbc2"
+      "bytes": 241317,
+      "sha256": "20f6ba962e862d88e4530a60222f7f0bf76a7cbb0eb4d8739c7a0fc3720d6671"
     },
     {
       "source": "src/buster/lib/os.h",
-      "bytes": 33104,
-      "sha256": "f5885e6630403d0f2011dbd256f02e6e5c23077101c0681e253e661b893c8ce1"
+      "bytes": 31720,
+      "sha256": "3fdbe86eb535eb496b8dd66cff5af02eadb26747e353d651351f4928cf1c17d1"
     },
     {
       "source": "src/buster/lib/os_internal.h",
@@ -166,8 +166,8 @@
     },
     {
       "source": "src/buster/lib/target.h",
-      "bytes": 20357,
-      "sha256": "845e2b13dc3b2bd46ee29d10ee59f3c0cb420071dd2d69ed3ada8344604554d3"
+      "bytes": 20694,
+      "sha256": "87d2646f42b749f2b09478e56718d3f8e20b363b5f7de7651d3dbd5174f4f1c2"
     },
     {
       "source": "src/buster/lib/time.c",
@@ -188,6 +188,11 @@
       "source": "src/buster/lib/x86_64.h",
       "bytes": 1723,
       "sha256": "55d25c14542c8e4a436c9a7a2dd31fac5f4075747776c44917c714ff7e8adedf"
+    },
+    {
+      "source": "tools/native-retirement-darwin/Availability.h",
+      "bytes": 955,
+      "sha256": "76a86d2272872e16fbd5c9f18ea04585b447d7dd3657851ef17e10f83ecea1e3"
     },
     {
       "source": "tools/native-retirement-mingw/vadefs.h",

@@ -33,6 +33,10 @@
 //                                              c_lex dispatches and
 //                                              c_lex_reference is the
 //                                              differential baseline
+//   c_token_preceded_by_space,                 source spacing: the `#` white-
+//   c_token_requires_separator                 space test and the lexical-
+//                                              join guard -E and quoting
+//                                              diagnostics print through
 //   CTokenStream, c_token_stream_reserve       final token rows plus the
 //                                              one-byte kind|punctuator
 //                                              sidecar consumed by parser
@@ -3004,10 +3008,9 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin___memmove_chk"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin___memset_chk"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin_clz"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
-    // The `l` spellings sit between the int and long long ones and lower the
-    // same way -- the operand's own width decides the operation -- so their
-    // absence only ever surfaces on an LP64 target where a caller reached
-    // for the `unsigned long` form (CPython's _Py_bit_length does).
+    // The `l` spellings take unsigned long, which is target-dependent (LP64
+    // versus LLP64). The shared signature policy below selects their operand
+    // width before the count operation; all these spellings return int.
     { S8_INITIALIZER("__builtin_clzl"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_clzll"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_ctz"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
@@ -3066,6 +3069,21 @@ BUSTER_C_SHARED CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling)
     }
 
     return C_SYMBOL_BUILTIN_NONE;
+}
+
+// Fixed GNU signatures for clz/ctz/popcount. The operation kind is shared by
+// three spellings; the suffix determines the parameter width, while the C
+// result type is always int. CTypeKind retains the target's long data model.
+CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String8 spelling)
+{
+    CTypeKind result = C_TYPE_INVALID;
+    if (builtin == C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS || builtin == C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS ||
+        builtin == C_SYMBOL_BUILTIN_POPULATION_COUNT)
+    {
+        result = string_ends_with_sequence(spelling, S8("ll")) ? C_TYPE_UNSIGNED_LONG_LONG :
+                 string_ends_with_sequence(spelling, S8("l")) ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_INT;
+    }
+    return result;
 }
 
 // One probe entry of the intern table. The identity of a name is its first
@@ -3552,6 +3570,89 @@ BUSTER_C_INTERNAL CSourceLocation c_pp_stamp_location(CPpStampTable const* stamp
 BUSTER_C_INTERNAL bool c_token_preceded_by_space(char8 const* spelling_base, CToken previous, CToken token)
 {
     return previous.kind == C_TOKEN_NEWLINE || previous.offset + c_token_length(spelling_base, previous) != token.offset;
+}
+
+// The converse question, asked by a printer rather than by `#`: would these
+// two spellings, written with nothing between them, lex back as these two
+// tokens? Identifiers, numbers and literal prefixes run into one another, and
+// a punctuator followed by a spelling that extends it (`-` `-`, `<` `:`)
+// maximal-munches into another; every other pair may touch.
+BUSTER_C_INTERNAL bool c_token_literal_has_prefix(String8 spelling)
+{
+    bool result = spelling.length && spelling.pointer[0] != '\'' && spelling.pointer[0] != '"';
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_token_identifier_is_literal_prefix(String8 spelling)
+{
+    bool result = (spelling.length == 1 &&
+                   (spelling.pointer[0] == 'u' || spelling.pointer[0] == 'U' || spelling.pointer[0] == 'L')) ||
+                  (spelling.length == 2 && spelling.pointer[0] == 'u' && spelling.pointer[1] == '8');
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_token_punctuators_join(CToken previous, String8 current)
+{
+    char8 first = current.length ? current.pointer[0] : 0;
+    bool result = false;
+    switch ((CPunctuator)previous.punctuator)
+    {
+    case C_PUNCTUATOR_PERCENT: result = first == ':' || first == '>'; break;
+    case C_PUNCTUATOR_HASH_DIGRAPH: result = first == '%'; break;
+    case C_PUNCTUATOR_LESS: result = first == '<' || first == '=' || first == ':' || first == '%'; break;
+    case C_PUNCTUATOR_GREATER: result = first == '>' || first == '='; break;
+    case C_PUNCTUATOR_EQUAL:
+    case C_PUNCTUATOR_EXCLAMATION:
+    case C_PUNCTUATOR_STAR:
+    case C_PUNCTUATOR_CARET: result = first == '='; break;
+    case C_PUNCTUATOR_AMPERSAND: result = first == '&' || first == '='; break;
+    case C_PUNCTUATOR_PIPE: result = first == '|' || first == '='; break;
+    case C_PUNCTUATOR_SLASH: result = first == '/' || first == '*' || first == '='; break;
+    case C_PUNCTUATOR_PLUS: result = first == '+' || first == '='; break;
+    case C_PUNCTUATOR_MINUS: result = first == '-' || first == '>' || first == '='; break;
+    case C_PUNCTUATOR_HASH: result = first == '#'; break;
+    case C_PUNCTUATOR_COLON: result = first == '>'; break;
+    case C_PUNCTUATOR_DOT: result = first == '.'; break;
+    case C_PUNCTUATOR_SHIFT_LEFT:
+    case C_PUNCTUATOR_SHIFT_RIGHT: result = first == '='; break;
+    default: break;
+    }
+    return result;
+}
+
+bool c_token_requires_separator(CToken previous, String8 previous_spelling, CToken current, String8 current_spelling)
+{
+    bool result = false;
+    if (previous.kind == C_TOKEN_IDENTIFIER)
+    {
+        result = current.kind == C_TOKEN_IDENTIFIER ||
+                 (current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length && current_spelling.pointer[0] != '.');
+        if (!result && (current.kind == C_TOKEN_CHARACTER_LITERAL || current.kind == C_TOKEN_STRING_LITERAL))
+        {
+            result = c_token_literal_has_prefix(current_spelling) || c_token_identifier_is_literal_prefix(previous_spelling);
+        }
+    }
+    else if (previous.kind == C_TOKEN_PREPROCESSING_NUMBER)
+    {
+        result = current.kind == C_TOKEN_IDENTIFIER || current.kind == C_TOKEN_PREPROCESSING_NUMBER ||
+                 current.kind == C_TOKEN_CHARACTER_LITERAL ||
+                 (current.kind == C_TOKEN_STRING_LITERAL && c_token_literal_has_prefix(current_spelling));
+        if (!result && current.kind == C_TOKEN_PUNCTUATOR && previous_spelling.length)
+        {
+            char8 last = previous_spelling.pointer[previous_spelling.length - 1];
+            char8 first = current_spelling.length ? current_spelling.pointer[0] : 0;
+            result = first == '.' ||
+                     ((first == '+' || first == '-') &&
+                      (last == 'e' || last == 'E' || last == 'p' || last == 'P'));
+        }
+    }
+    else if (previous.kind == C_TOKEN_PUNCTUATOR)
+    {
+        result = (previous.punctuator == C_PUNCTUATOR_DOT && current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length &&
+                  current_spelling.pointer[0] != '.') ||
+                 (current.kind == C_TOKEN_PUNCTUATOR && c_token_punctuators_join(previous, current_spelling));
+    }
+    return result;
 }
 
 typedef struct CPreprocessTokenNode CPreprocessTokenNode;
@@ -5446,6 +5547,9 @@ BUSTER_C_INTERNAL bool c_conditional_target_os_supported(OperatingSystem os, Str
     case OPERATING_SYSTEM_UEFI:
         result = string_equal(spelling, S8("uefi"));
         break;
+    case OPERATING_SYSTEM_WASI:
+        result = string_equal(spelling, S8("wasip1")) || string_equal(spelling, S8("wasi"));
+        break;
     case OPERATING_SYSTEM_FREESTANDING:
     case OPERATING_SYSTEM_COUNT:
     default:
@@ -5577,6 +5681,7 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
             String8 argument = c_token_spelling(base, arguments[0]);
             supported = is_target_arch        ? (options->target.cpu_arch == CPU_ARCH_AARCH64
                                                       ? string_equal(argument, S8("arm64")) || string_equal(argument, S8("aarch64"))
+                                                  : options->target.cpu_arch == CPU_ARCH_WASM32 ? string_equal(argument, S8("wasm32"))
                                                   : options->target.cpu_arch == CPU_ARCH_WASM64 ? string_equal(argument, S8("wasm64"))
                                                   : options->target.cpu_arch == CPU_ARCH_BPFEL
                                                       ? string_equal(argument, S8("bpfel")) || string_equal(argument, S8("bpf")) ||
@@ -7895,8 +8000,8 @@ BUSTER_C_INTERNAL void c_preprocess_undefine_directive(Arena* arena, CSymbolTabl
 
 bool c_preprocess_dialect_is_gnu(CPreprocessDialect dialect)
 {
-    return dialect == C_PREPROCESS_DIALECT_GNU99 || dialect == C_PREPROCESS_DIALECT_GNU11 || dialect == C_PREPROCESS_DIALECT_GNU17 ||
-           dialect == C_PREPROCESS_DIALECT_GNU23;
+    return dialect == C_PREPROCESS_DIALECT_GNU89 || dialect == C_PREPROCESS_DIALECT_GNU99 || dialect == C_PREPROCESS_DIALECT_GNU11 ||
+           dialect == C_PREPROCESS_DIALECT_GNU17 || dialect == C_PREPROCESS_DIALECT_GNU23;
 }
 
 BUSTER_C_INTERNAL String8 c_preprocess_standard_version(CPreprocessDialect dialect)
@@ -7915,6 +8020,7 @@ BUSTER_C_INTERNAL String8 c_preprocess_standard_version(CPreprocessDialect diale
     case C_PREPROCESS_DIALECT_GNU23:
     case C_PREPROCESS_DIALECT_C23:
         return S8("202311L");
+    case C_PREPROCESS_DIALECT_GNU89:
     case C_PREPROCESS_DIALECT_COUNT:
         return (String8){0};
     }
@@ -8135,7 +8241,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .length = 1,
         .kind = C_TOKEN_PREPROCESSING_NUMBER,
     };
-    standard_replacement[1] = c_space_token(space, c_preprocess_standard_version(options.dialect), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+    String8 standard_version = c_preprocess_standard_version(options.dialect);
+    standard_replacement[1] = standard_version.length ? c_space_token(space, standard_version, C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE) : (CToken){0};
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC__"), standard_replacement, 1, 0, 0, false, false);
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__BUSTER__"), standard_replacement, 1, 0, 0, false, false);
     // The GNU version macros are not a dialect switch.  Both reference
@@ -8259,25 +8366,26 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                        constant_parameters, 1, true, false);
     }
     bool windows_target = options.target.os == OPERATING_SYSTEM_WINDOWS;
-    bool llp64_target = target_uses_llp64_data_model(options.target);
     bool short_wchar_target = target_uses_16_bit_wchar(options.target);
     String8 signed_pointer_type = layout.long_integer.size == layout.pointer.size ? S8("long") : S8("long long");
     String8 unsigned_pointer_type = layout.unsigned_long_integer.size == layout.pointer.size ? S8("unsigned long") : S8("unsigned long long");
+    String8 signed_64_type = layout.long_integer.bit_width == 64 ? S8("long") : S8("long long");
+    String8 unsigned_64_type = layout.unsigned_long_integer.bit_width == 64 ? S8("unsigned long") : S8("unsigned long long");
 #define C_DEFINE_TYPE_MACRO(name, replacement) c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8(name), (replacement))
     C_DEFINE_TYPE_MACRO("__SIZE_TYPE__", unsigned_pointer_type);
     C_DEFINE_TYPE_MACRO("__PTRDIFF_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__INTPTR_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__UINTPTR_TYPE__", unsigned_pointer_type);
-    C_DEFINE_TYPE_MACRO("__INTMAX_TYPE__", signed_pointer_type);
-    C_DEFINE_TYPE_MACRO("__UINTMAX_TYPE__", unsigned_pointer_type);
+    C_DEFINE_TYPE_MACRO("__INTMAX_TYPE__", signed_64_type);
+    C_DEFINE_TYPE_MACRO("__UINTMAX_TYPE__", unsigned_64_type);
     C_DEFINE_TYPE_MACRO("__INT8_TYPE__", S8("signed char"));
     C_DEFINE_TYPE_MACRO("__UINT8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__INT16_TYPE__", S8("short"));
     C_DEFINE_TYPE_MACRO("__UINT16_TYPE__", S8("unsigned short"));
     C_DEFINE_TYPE_MACRO("__INT32_TYPE__", S8("int"));
     C_DEFINE_TYPE_MACRO("__UINT32_TYPE__", S8("unsigned int"));
-    C_DEFINE_TYPE_MACRO("__INT64_TYPE__", signed_pointer_type);
-    C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", unsigned_pointer_type);
+    C_DEFINE_TYPE_MACRO("__INT64_TYPE__", signed_64_type);
+    C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", unsigned_64_type);
     C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") :
                       target_uses_unsigned_wchar(options.target) ? S8("unsigned int") : S8("int"));
     C_DEFINE_TYPE_MACRO("__WINT_TYPE__", options.target.os == OPERATING_SYSTEM_UEFI ? S8("unsigned short") : S8("unsigned int"));
@@ -8504,10 +8612,15 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             C_DEFINE_TYPE_MACRO("_M_ARM64", S8("1"));
         }
     }
-    if (!llp64_target)
+    if (layout.pointer.size == 8 && layout.long_integer.size == 8)
     {
         C_DEFINE_TYPE_MACRO("__LP64__", S8("1"));
         C_DEFINE_TYPE_MACRO("_LP64", S8("1"));
+    }
+    else if (layout.pointer.size == 4 && layout.long_integer.size == 4)
+    {
+        C_DEFINE_TYPE_MACRO("__ILP32__", S8("1"));
+        C_DEFINE_TYPE_MACRO("_ILP32", S8("1"));
     }
     if (options.target.os == OPERATING_SYSTEM_ANDROID && options.target.os_version_major)
     {
@@ -8562,6 +8675,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         operating_system_macros[operating_system_macro_count++] = S8("__ELF__");
     }
     break;
+    case OPERATING_SYSTEM_WASI:
+    {
+        operating_system_macros[operating_system_macro_count++] = S8("__wasi__");
+        operating_system_macros[operating_system_macro_count++] = S8("__wasip1__");
+    }
+    break;
     case OPERATING_SYSTEM_FREESTANDING:
     case OPERATING_SYSTEM_COUNT:
     {
@@ -8577,13 +8696,22 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__APPLE_CC__"), S8("6000"));
     }
     String8 architecture_macro = options.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("__aarch64__")
+                               : options.target.cpu_arch == CPU_ARCH_WASM32  ? S8("__wasm32__")
                                : options.target.cpu_arch == CPU_ARCH_WASM64  ? S8("__wasm64__")
                                : options.target.cpu_arch == CPU_ARCH_BPFEL   ? S8("__bpfel__")
                                                                              : S8("__x86_64__");
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, architecture_macro, standard_replacement, 1, 0, 0, false, false);
-    if (options.target.cpu_arch == CPU_ARCH_WASM64)
+    if (options.target.cpu_arch == CPU_ARCH_WASM32 || options.target.cpu_arch == CPU_ARCH_WASM64)
     {
         c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__wasm__"), standard_replacement, 1, 0, 0, false, false);
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__wasm"), standard_replacement, 1, 0, 0, false, false);
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro,
+                       options.target.cpu_arch == CPU_ARCH_WASM32 ? S8("__wasm32") : S8("__wasm64"), standard_replacement, 1, 0, 0, false,
+                       false);
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__wasm_mutable_globals__"), standard_replacement, 1, 0, 0, false, false);
+    }
+    if (options.target.cpu_arch == CPU_ARCH_WASM64)
+    {
         c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__wasm_memory64__"), standard_replacement, 1, 0, 0, false, false);
     }
     if (options.target.cpu_arch == CPU_ARCH_BPFEL)
@@ -8616,7 +8744,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         hosted_replacement.offset = C_SPELLING_ZERO;
     }
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_HOSTED__"), &hosted_replacement, 1, 0, 0, false, false);
-    c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_VERSION__"), standard_replacement + 1, 1, 0, 0, false, false);
+    // C90 predates __STDC_VERSION__, so gnu89 leaves it undefined as gcc does.
+    if (standard_version.length)
+    {
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_VERSION__"), standard_replacement + 1, 1, 0, 0, false, false);
+    }
     CTokenStream token_stream = {
         .arena = token_arena,
         .shape_arena = token_shape_arena,

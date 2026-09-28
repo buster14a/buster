@@ -28,6 +28,7 @@ typedef enum CompilerDriverError
     COMPILER_DRIVER_ERROR_LLVM_BITCODE,
     COMPILER_DRIVER_ERROR_CODEGEN,
     COMPILER_DRIVER_ERROR_WASM64,
+    COMPILER_DRIVER_ERROR_WASM = COMPILER_DRIVER_ERROR_WASM64,
     COMPILER_DRIVER_ERROR_GPU,
     COMPILER_DRIVER_ERROR_EBPF,
     COMPILER_DRIVER_ERROR_OBJECT,
@@ -76,6 +77,7 @@ typedef enum CompilerDriverCDialect
     COMPILER_DRIVER_C_DIALECT_C11,
     COMPILER_DRIVER_C_DIALECT_C17,
     COMPILER_DRIVER_C_DIALECT_C23,
+    COMPILER_DRIVER_C_DIALECT_GNU89,
     COMPILER_DRIVER_C_DIALECT_COUNT,
 } CompilerDriverCDialect;
 
@@ -208,6 +210,9 @@ struct CompilerDriverResult
     u32 diagnostic_count;
     String8 output;
     NativeExecutableLinkResult native_link;
+    WasmArtifact wasm;
+    // Compatibility mirror; both artifacts reference the same arena-owned
+    // bytes when WebAssembly output is produced.
     Wasm64Artifact wasm64;
     GpuArtifact gpu;
     LlvmBitcodeArtifact llvm_bitcode;
@@ -238,6 +243,7 @@ struct CompilerDriverResult
     // one on serial/unsupported paths. This is not a physical-core count.
     u32 compilation_workers;
     bool has_object;
+    bool has_wasm;
     bool has_wasm64;
     bool has_gpu;
     bool has_llvm_bitcode;
