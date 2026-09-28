@@ -2422,16 +2422,37 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate(int result_directory,
 }
 #endif
 
-BUSTER_GLOBAL_LOCAL bool bq_worker_result_sync_tree(int result_directory)
+/* A long-lived result descriptor can predate the entries a walk must reach.
+ * btrfs (Linux 6.5+) fixes a directory's last readdir index when its open file
+ * is created, and a consumed offset hides entries everywhere, so walks read a
+ * fresh open file that must still be the pinned inode. */
+BUSTER_GLOBAL_LOCAL int bq_worker_reopen_directory(int directory)
+{
+    int result = directory >= 0 ? openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat pinned = {0}, fresh = {0};
+    bool same = result >= 0 && fstat(directory, &pinned) == 0 && fstat(result, &fresh) == 0 &&
+                pinned.st_dev == fresh.st_dev && pinned.st_ino == fresh.st_ino;
+    if (!same && result >= 0)
+    {
+        close(result);
+        result = -1;
+    }
+    return result;
+}
+
+/* Fsyncs the whole result tree. A foreign entry type or an entry replaced
+ * between listing and open is a configuration mismatch; a failed read or
+ * fsync leaves durability unknown. */
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_sync_tree(int result_directory)
 {
     BqWorkerBundleFrame* frames = mmap(NULL, sizeof(*frames) * BQ_WORKER_BUNDLE_DEPTH_CAP,
                                         PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    int root = result_directory >= 0 ? fcntl(result_directory, F_DUPFD_CLOEXEC, 3) : -1;
+    int root = bq_worker_reopen_directory(result_directory);
     DIR* stream = root >= 0 ? fdopendir(root) : NULL;
     if (stream) root = -1;
-    bool ok = frames != MAP_FAILED && stream != NULL;
-    u32 depth = ok ? 1 : 0;
-    if (ok)
+    BqError error = frames != MAP_FAILED && stream != NULL ? BQ_OK : BQ_IO;
+    u32 depth = error == BQ_OK ? 1 : 0;
+    if (error == BQ_OK)
     {
         memset(frames, 0, sizeof(*frames) * BQ_WORKER_BUNDLE_DEPTH_CAP);
         frames[0].stream = stream;
@@ -2442,18 +2463,18 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_result_sync_tree(int result_directory)
         else if (root >= 0) close(root);
         root = -1;
     }
-    while (ok && depth)
+    while (error == BQ_OK && depth)
     {
         BqWorkerBundleFrame* frame = frames + depth - 1;
         errno = 0;
         struct dirent* item = readdir(frame->stream);
         if (!item)
         {
-            if (errno) ok = false;
+            if (errno) error = BQ_IO;
             else
             {
                 int directory = dirfd(frame->stream);
-                ok = fsync(directory) == 0;
+                if (fsync(directory) != 0) error = BQ_IO;
                 closedir(frame->stream);
                 frame->stream = NULL;
                 depth -= 1;
@@ -2466,39 +2487,50 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_result_sync_tree(int result_directory)
         {
             int parent = dirfd(frame->stream);
             struct stat info = {0};
-            ok = parent >= 0 && fstatat(parent, item->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0;
-            if (ok && S_ISDIR(info.st_mode))
+            if (parent < 0 || fstatat(parent, item->d_name, &info, AT_SYMLINK_NOFOLLOW) != 0) error = BQ_IO;
+            else if (S_ISDIR(info.st_mode))
             {
                 int child = depth < BQ_WORKER_BUNDLE_DEPTH_CAP ?
                             openat(parent, item->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
                 DIR* child_stream = child >= 0 ? fdopendir(child) : NULL;
                 if (!child_stream && child >= 0) close(child);
                 struct stat opened = {0};
-                ok = child_stream != NULL && fstat(child, &opened) == 0 && opened.st_dev == info.st_dev &&
-                     opened.st_ino == info.st_ino;
-                if (ok)
+                if (!child_stream || fstat(child, &opened) != 0) error = BQ_IO;
+                else if (opened.st_dev != info.st_dev || opened.st_ino != info.st_ino) error = BQ_CONFIGURATION_MISMATCH;
+                if (error == BQ_OK)
                 {
                     frames[depth].stream = child_stream;
                     depth += 1;
                 }
+                else if (child_stream)
+                {
+                    closedir(child_stream);
+                }
             }
-            else if (ok && S_ISREG(info.st_mode))
+            else if (S_ISREG(info.st_mode))
             {
                 int descriptor = openat(parent, item->d_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
                 struct stat opened = {0};
-                ok = descriptor >= 0 && fstat(descriptor, &opened) == 0 && opened.st_dev == info.st_dev &&
-                     opened.st_ino == info.st_ino && opened.st_size == info.st_size && fsync(descriptor) == 0;
-                if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+                if (descriptor < 0 || fstat(descriptor, &opened) != 0) error = BQ_IO;
+                else if (opened.st_dev != info.st_dev || opened.st_ino != info.st_ino || opened.st_size != info.st_size)
+                    error = BQ_CONFIGURATION_MISMATCH;
+                else if (fsync(descriptor) != 0) error = BQ_IO;
+                if (descriptor >= 0 && close(descriptor) != 0 && error == BQ_OK) error = BQ_IO;
             }
-            else if (ok)
+            else
             {
-                ok = false;
+                error = BQ_CONFIGURATION_MISMATCH;
             }
         }
     }
-    if (root >= 0 && close(root) != 0) ok = false;
+    while (depth)
+    {
+        if (frames[depth - 1].stream) closedir(frames[depth - 1].stream);
+        depth -= 1;
+    }
+    if (root >= 0 && close(root) != 0 && error == BQ_OK) error = BQ_IO;
     if (frames != MAP_FAILED) munmap(frames, sizeof(*frames) * BQ_WORKER_BUNDLE_DEPTH_CAP);
-    return ok;
+    return error;
 }
 
 BUSTER_GLOBAL_LOCAL BqError bq_worker_result_binding_validate_at(BqJob const* job, int result_directory)
@@ -2618,7 +2650,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* conf
                     bq_worker_finalization_recipe(job, finalization) ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
     int job_length = 0, token_length = 0, workspace_length = 0, result_length = 0, base_length = 0, candidate_length = 0;
     int base_binary_length = 0, candidate_binary_length = 0;
-    if (error == BQ_OK && !bq_worker_result_sync_tree(finalization->result_directory)) error = BQ_IO;
+    if (error == BQ_OK) error = bq_worker_result_sync_tree(finalization->result_directory);
     if (error == BQ_OK)
     {
         String8 base = bq_field(&job->request, 3), candidate = bq_field(&job->request, 4);

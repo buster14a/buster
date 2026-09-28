@@ -119,6 +119,22 @@ general scripting in the CMake language when `build.c` can do the work
 directly. Prefer one persistent native build-driver process over chains of
 shell, CMake, and utility subprocesses.
 
+Native GNU-family builds compile with `-march=native`
+(`GNU_FAMILY_NATIVE_TARGET` in `CMakeLists.txt`). The only compatibility
+exception lives in `cmake/NativeTargetCompatibility.cmake`: upstream Clang
+before LLVM 22.1.0 misreads AVX10 CPUID leaf 0x24 (llvm/llvm-project#172350),
+so on some x86-64 AVX10 hosts `-march=native -Werror` fails with
+`+avx10.1-256; will be promoted to avx10.1-512`. For native x86-64 upstream
+Clang older than 22.1.0 only, CMake probes whether `-march=native` fails with
+`-Werror=invalid-feature-combination` and succeeds with
+`-Wno-error=invalid-feature-combination`; only then does it append the latter.
+The warning stays visible, unaffected hosts and compilers get no exception, and
+any other `-march=native` failure stays fatal. This is not a CPU-detection fix;
+retire it once no supported native producer uses upstream Clang older than
+22.1.0. `tools/native_target_compatibility_test.py` covers the policy. Do not
+add diagnostic flags for it through `CFLAGS` in workflows or reproduction
+steps: artifact fan-out's provenance capture rejects a nonempty `CFLAGS`.
+
 The Linux fixed `bench_service_recipe` publishes private frozen-tree receipts
 after each successful base-build and candidate-build cleanup. The files
 `validate-buster-v1.base-build.inventory` and
@@ -132,6 +148,12 @@ result files are conserved by the existing BQ bundle index. A separate 64 MiB
 serialized-file limit applies in addition to node, depth, path and hashing
 limits; overflow fails the recipe. These are source-owned statements, while
 the external stage observer records its own inventory and timing independently.
+The build and result descriptors are pinned at preparation, before the stages
+create anything, so every tree walk (locking, receipts, temporary sweeps and
+syncs) reads a fresh open file of the same inode rather than a dup: btrfs
+(Linux 6.5+) never lists entries created after a directory's open file, and a
+consumed offset hides them everywhere (`BENCH_SERVICE_RECIPE_PINNED_WALK_TEST`).
+A failed post-stage check prints `error: STAGE post-stage check failed: CHECK`.
 
 ```sh
 ./build.sh generate                 # configure a fresh tree (Debug, clang)
