@@ -15745,6 +15745,81 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vectors(UnitTestArguments* ar
     return result;
 }
 
+// GNU attributes written inside a type name -- the operand of sizeof or
+// _Alignof, or a cast -- belong to that type name: they bind no identifiers,
+// `vector_size` builds the vector both at compile time and in lowering, and
+// the ignored `aligned`/`packed` keep the scalar layout, as clang answers.
+BUSTER_GLOBAL_LOCAL String8 const c_test_type_name_attribute_source = S8_INITIALIZER(
+    "typedef int Int4 __attribute__((vector_size(16)));\n"
+    "enum { LANES = 16 };\n"
+    "_Static_assert(sizeof(int __attribute__((vector_size(16)))) == 16, \"vector size\");\n"
+    "_Static_assert(_Alignof(int __attribute__((vector_size(16)))) == 16, \"vector alignment\");\n"
+    "_Static_assert(sizeof(int __attribute__((aligned(16)))) == 4, \"aligned size\");\n"
+    "_Static_assert(_Alignof(int __attribute__((aligned(16)))) == 4, \"aligned alignment\");\n"
+    "_Static_assert(sizeof(int __attribute__((packed))) == 4, \"packed size\");\n"
+    "_Static_assert(sizeof(short __attribute__((vector_size(LANES / 2)))) == 8, \"constant vector size\");\n"
+    "enum { VECTOR_BYTES = sizeof(int __attribute__((vector_size(32)))) };\n"
+    "_Static_assert(VECTOR_BYTES == 32, \"enumerator vector size\");\n"
+    "static long long pair[2] = {5, 6};\n"
+    "int main(void)\n"
+    "{\n"
+    "    Int4 value = {1, 2, 3, 4};\n"
+    "    Int4 sum = value + (int __attribute__((vector_size(16))))value;\n"
+    "    Int4 bits = (int __attribute__((vector_size(LANES))))(*(long long __attribute__((vector_size(16))) *)pair);\n"
+    "    int failures = 0;\n"
+    "    failures |= sizeof(int __attribute__((vector_size(16)))) != 16;\n"
+    "    failures |= _Alignof(int __attribute__((vector_size(16)))) != 16;\n"
+    "    failures |= sizeof(int __attribute__((aligned(16)))) != 4;\n"
+    "    failures |= _Alignof(int __attribute__((aligned(16)))) != 4;\n"
+    "    failures |= sizeof(int __attribute__((packed))) != 4;\n"
+    "    failures |= sizeof(int __attribute__((vector_size(16))) *) != sizeof(void *);\n"
+    "    failures |= (int)(long __attribute__((aligned(16))))7 != 7;\n"
+    "    failures |= sum[3] != 8 || bits[0] != 5 || bits[2] != 6;\n"
+    "    return failures;\n"
+    "}\n"
+);
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_name_attributes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena, c_test_type_name_attribute_source, (CPreprocessOptions){0});
+    CParseResult parsed = c_parse(temporary.arena, tokens);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("type-name-attributes.c"), tokens, parsed, target_native);
+    BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
+    scratch_end(temporary);
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source = buster_test_temporary_path(arguments->arena, S8("type-name-attributes"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_type_name_attribute_source))))
+    {
+        TemporalArena run_temporary = scratch_begin(&arguments->arena, 1);
+        String8 output = buster_test_temporary_path(run_temporary.arena, S8("type-name-attributes-run"), S8(".exe"));
+        String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-o"), output, source};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(run_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(run_temporary.arena, invocation);
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(run_temporary.arena, S8("type name attributes: {S8}"), compiled.diagnostic));
+        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 run[] = {output};
+            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                        (ProcessSpawnOptions){.use_process_environment = true});
+            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+            {
+                ProcessWaitResult execution = os_process_wait_deadline(run_temporary.arena, child, 30000000);
+                BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(run_temporary.arena, S8("type name attributes runtime: status={u32} timed_out={u32}"),
+                                              execution.platform_status, (u32)execution.timed_out));
+            }
+        }
+        scratch_end(run_temporary);
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -24041,6 +24116,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_va_list_identity_and_places);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_vectors);
+    BUSTER_TEST_FIXTURE(arguments, c_test_type_name_attributes);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_scratch_and_hardening);
     BUSTER_TEST_FIXTURE(arguments, c_test_inline_assembly_volatile_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_pasted_keyword_body_walk);
