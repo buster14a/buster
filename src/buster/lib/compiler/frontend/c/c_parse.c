@@ -8122,6 +8122,33 @@ BUSTER_C_INTERNAL u32 c_parse_trailing_attribute_start(CPreprocessResult preproc
     return end;
 }
 
+// The `:` that opens a member declarator's bit-field width, or `end` when the
+// declarator has none. Only a colon outside every group counts, so a
+// parenthesized declarator such as `int (x) : 3` splits at the width while the
+// groups and attribute lists before it stay whole.
+BUSTER_C_INTERNAL u32 c_parse_bit_field_colon(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u32 colon = end;
+    u32 depth = 0;
+    for (u32 index = start; index < end && colon == end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            depth += 1;
+        }
+        else if ((c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET)) && depth)
+        {
+            depth -= 1;
+        }
+        else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+        {
+            colon = index;
+        }
+    }
+    return colon;
+}
+
 // The three aggregate introducers as one membership test, for the specifier
 // scans that ask "does an aggregate head start here" per identifier token.
 #define C_PARSE_AGGREGATE_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM))
@@ -9799,7 +9826,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
             return;
         }
         declarator_type = machine->result_type;
-        declarator = frame->declarator_end;
+        declarator = c_parse_bit_field_colon(preprocess, frame->declarator_start, frame->declarator_end);
         name = frame->name;
         frame->stage = C_TYPE_PARSE_STAGE_FINISH;
     }
@@ -9855,6 +9882,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                 // frame->declarator_end, which is where the trimmed tokens
                 // end, so the list needs no second pass.
                 u32 declarator_end = c_parse_trailing_attribute_start(preprocess, declarator, frame->declarator_end);
+                declarator_end = BUSTER_MIN(declarator_end, c_parse_bit_field_colon(preprocess, declarator, declarator_end));
                 u32 name_index = 0;
                 if (!c_parse_parenthesized_declarator_name(preprocess, declarator, declarator_end, &name_index))
                 {
@@ -9921,20 +9949,19 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         }
         if (bit_width_token_count == 1 && preprocess.tokens[declarator].kind == C_TOKEN_PREPROCESSING_NUMBER)
         {
-            String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[declarator]);
+            u64 mark = machine->scratch_arena->position;
+            CPreprocessResult evaluation = {
+                .diagnostics = arena_allocate(machine->scratch_arena, CDiagnostic, 2),
+                .target = preprocess.target,
+                .dialect = preprocess.dialect,
+            };
             u64 width = 0;
-            for (u64 index = 0; index < spelling.length; index += 1)
+            if (c_integer_expression_evaluate(machine->scratch_arena, preprocess.spelling_base, preprocess.tokens + declarator, 1, 65536, &evaluation, &width) &&
+                !evaluation.diagnostic_count && width <= UINT32_MAX)
             {
-                char8 digit = spelling.pointer[index];
-                if (digit < '0' || digit > '9' || width > (UINT32_MAX - (u32)(digit - '0')) / 10)
-                {
-                    c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
-                    c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
-                    return;
-                }
-                width = width * 10 + (u32)(digit - '0');
+                bit_width = (u32)width;
             }
-            bit_width = (u32)width;
+            arena_set_position(machine->scratch_arena, mark);
         }
         is_bit_field = true;
         declarator = frame->declarator_end;
@@ -21630,7 +21657,7 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_widths(CTypeParseMachine* mach
         {
             c_parse_diagnostic(result, member.location, C_DIAGNOSTIC_INVALID_ALIGNMENT, alignment_message);
         }
-        if (member.is_bit_field && member.name.length)
+        if (member.is_bit_field)
         {
             u64 mark = machine->scratch_arena->position;
             CParseConstant width = {.integer = member.bit_width, .valid = true};
@@ -21640,7 +21667,12 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_widths(CTypeParseMachine* mach
                 width = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope,
                                                member.bit_width_token_start, member.bit_width_token_start + member.bit_width_token_count);
             }
-            if (width.valid && !width.is_float && !width.integer)
+            if (width.valid && width.is_float)
+            {
+                c_parse_diagnostic(result, member.location, C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH,
+                                   S8("bit-field width is not an integer constant expression"));
+            }
+            else if (width.valid && !width.integer && member.name.length)
             {
                 c_parse_diagnostic(result, member.location, C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH,
                                    string_format(arena, S8("named bit-field '{S8}' has zero width"), member.name));
