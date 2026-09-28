@@ -4588,6 +4588,39 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ambiguous_promoted_parse(UnitTestArgum
     return result;
 }
 
+// A member declaration naming only a tag, or a typedef for an untagged
+// aggregate, declares nothing; only an untagged definition written in place
+// is an anonymous member (C11 6.7.2.1p13). The layouts are GCC's and Clang's
+// without -fms-extensions (#1706).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tagged_member_declares_nothing(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens;
+    CParseResult parse;
+    CIRLowerResult lowered = c_test_lower_source(temporary.arena,
+        S8("struct S { int a; }; union U { int a; double d; }; typedef struct { int z; } A;\n"
+           "struct T { struct S; int b; };\n"
+           "struct V { union U; int b; };\n"
+           "struct W { A; int b; };\n"
+           "struct Y { struct N { int n; }; int b; };\n"
+           "struct Z { struct Fwd; int b; };\n"
+           "struct X { struct { int p; }; const union { int q; char r[8]; }; int b; };\n"
+           "_Static_assert(sizeof(struct T) == 4 && __builtin_offsetof(struct T, b) == 0, \"tagged struct\");\n"
+           "_Static_assert(sizeof(struct V) == 4 && __builtin_offsetof(struct V, b) == 0, \"tagged union\");\n"
+           "_Static_assert(sizeof(struct W) == 4 && __builtin_offsetof(struct W, b) == 0, \"typedef name\");\n"
+           "_Static_assert(sizeof(struct Y) == 4 && sizeof(struct N) == 4, \"nested tagged definition\");\n"
+           "_Static_assert(sizeof(struct Z) == 4, \"forward tag\");\n"
+           "_Static_assert(sizeof(struct X) == 16 && __builtin_offsetof(struct X, b) == 12, \"anonymous members\");\n"
+           "int read(struct X *x) { return x->p + x->q + x->r[1]; }\n"),
+        S8("tagged-member-declares-nothing.c"), target_native, &tokens, &parse);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_union_initializer(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -24967,6 +25000,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_ir);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_parse);
+    BUSTER_TEST_FIXTURE(arguments, c_test_tagged_member_declares_nothing);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_invalid_union_initializer);
 
