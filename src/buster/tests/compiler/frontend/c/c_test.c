@@ -15530,28 +15530,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_malformed_operand_diagnostics(U
         S8("typedef __typeof__(int *) t; t v;\n"),
         S8("void f(void) { long object; typeof((object)) y; y = 0; }\n"),
     };
-    // Well-formed operands Buster cannot type, or malformed ones that could
-    // begin a type name, are reported at the operand without a syntax error.
-    struct
-    {
-        String8 source;
-        u32 column;
-    } untyped[] = {
-        {S8("typedef typeof(_BitInt(8) *) t;\n"), 16},
-        {S8("typedef typeof(__float128 *) t;\n"), 16},
-        {S8("typedef typeof(__fp16 *) t;\n"), 16},
-        {S8("typedef typeof(int x) t;\n"), 16},
+    // Valid type names Buster cannot type are not reported as syntax errors.
+    String8 untyped[] = {
+        S8("typedef typeof(_BitInt(8) *) t;\n"),
+        S8("typedef typeof(__float128 *) t;\n"),
+        S8("typedef typeof(__fp16 *) t;\n"),
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(untyped); case_index += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-        CPreprocessResult preprocess = c_preprocess(temporary.arena, untyped[case_index].source,
-                                                    (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, untyped[case_index], (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
         CParseResult parse = c_parse(temporary.arena, preprocess);
-        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, untyped[case_index].source);
-        bool diagnosed = parse.diagnostic_count > 0 && parse.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
-                         parse.diagnostics[0].location.line == 1 && parse.diagnostics[0].location.column == untyped[case_index].column;
-        BUSTER_TEST_RAW(arguments, diagnosed, untyped[case_index].source);
+        bool syntax_error = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+        {
+            syntax_error |= parse.diagnostics[diagnostic_index].kind == C_DIAGNOSTIC_EXPECTED_DECLARATION;
+        }
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && !syntax_error, untyped[case_index]);
+        scratch_end(temporary);
+    }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = S8("typedef typeof(int x) t;\n");
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        bool diagnosed = parse.diagnostic_count > 0 && string_equal(parse.diagnostics[0].message, S8("expected ')' after type name")) &&
+                         parse.diagnostics[0].location.line == 1 && parse.diagnostics[0].location.column == 20;
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && diagnosed, source);
         scratch_end(temporary);
     }
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
