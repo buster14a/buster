@@ -315,7 +315,16 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_deadlines(void)
                                bq_systemd_delay, bq_systemd_clock};
     before = bq_worker_monotonic_milliseconds();
     BQ_CHECK(context.pid > 0 && backend.join(&backend, &status,
-             bq_worker_deadline(before, BQ_TEST_WORKER_TIMEOUT_MILLISECONDS)) == BQ_WORKER_TIMEOUT);
+             bq_worker_deadline(before, BQ_TEST_WORKER_TIMEOUT_MILLISECONDS), true) == BQ_WORKER_TIMEOUT);
+    after = bq_worker_monotonic_milliseconds();
+    BQ_CHECK(after >= before && after - before < BQ_TEST_WORKER_BOUND_MILLISECONDS);
+    /* #880 attempt P: a pending cancellation interrupts only a cancellable
+     * join. The cleanup join must still reap a launcher that exits later. */
+    bq_worker_cancel_signal = 1;
+    before = bq_worker_monotonic_milliseconds();
+    BQ_CHECK(context.pid > 0 && backend.join(&backend, &status,
+             bq_worker_deadline(before, BQ_TEST_WORKER_TIMEOUT_MILLISECONDS), true) == BQ_WORKER_CANCEL_SIGNAL &&
+             context.pid > 0);
     after = bq_worker_monotonic_milliseconds();
     BQ_CHECK(after >= before && after - before < BQ_TEST_WORKER_BOUND_MILLISECONDS);
     if (context.pid > 0)
@@ -323,5 +332,22 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_deadlines(void)
         BQ_CHECK(backend.cleanup_launcher(&backend,
                  bq_worker_deadline(bq_worker_monotonic_milliseconds(), BQ_TEST_WORKER_BOUND_MILLISECONDS)) == BQ_OK && context.pid < 0);
     }
+    if (context.pid > 0)
+    {
+        kill(context.pid, SIGKILL);
+        waitpid(context.pid, NULL, 0);
+    }
+    context.pid = fork();
+    if (!context.pid)
+    {
+        struct timespec pause_before_exit = {0, 200 * 1000 * 1000};
+        nanosleep(&pause_before_exit, NULL);
+        _exit(7);
+    }
+    status = 0;
+    BQ_CHECK(context.pid > 0 && backend.join(&backend, &status,
+             bq_worker_deadline(bq_worker_monotonic_milliseconds(), BQ_TEST_WORKER_BOUND_MILLISECONDS), false) == BQ_OK &&
+             context.pid < 0 && WIFEXITED(status) && WEXITSTATUS(status) == 7);
+    bq_worker_cancel_signal = 0;
     bq_test_worker_group_reaping();
 }
