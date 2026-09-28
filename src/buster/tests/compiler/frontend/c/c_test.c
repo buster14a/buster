@@ -15763,6 +15763,97 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_expression_frames(UnitTestArgum
     return result;
 }
 
+// A typeof operand that is neither a type name nor an expression reports
+// `expected expression` at the operand's `)` instead of dropping the
+// declaration silently until a later use of its name fails.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_malformed_operand_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u32 column;
+    } invalid[] = {
+        {S8("long object; typedef typeof(1 +) t;\n"), 32},
+        {S8("long object; typedef typeof(object +) t;\n"), 37},
+        {S8("typedef typeof() t;\n"), 16},
+        {S8("long object; typedef typeof(1 +) t; t v;\n"), 32},
+        {S8("long object; typedef typeof_unqual(object *) t;\n"), 44},
+        {S8("typedef typeof_unqual() t;\n"), 23},
+        {S8("long object; typedef __typeof__(object <<) t;\n"), 42},
+        {S8("typedef __typeof__() t;\n"), 20},
+        {S8("void f(void) { typeof(1 +) y; }\n"), 26},
+        {S8("void f(void) { typeof() y; }\n"), 23},
+        {S8("void f(void) { long object; __typeof__(object ,) y; }\n"), 48},
+        {S8("void f(void) { __typeof__() y; }\n"), 27},
+        {S8("void f(void) { long object; typeof_unqual(object -) y; }\n"), 51},
+        {S8("void f(void) { typeof_unqual() y; }\n"), 30},
+        {S8("typedef typeof((1 +)) t;\n"), 20},
+        {S8("typedef typeof(typeof(1 +)) t;\n"), 26},
+        {S8("typedef __typeof__(typeof_unqual(())) t;\n"), 35},
+        {S8("long object; typedef typeof(object[object +]) t;\n"), 44},
+        {S8("void f(void) { long object; typeof((object *)) y; }\n"), 45},
+        {S8("void f(void) { __typeof__(typeof((1 -))) y; }\n"), 38},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[case_index].source,
+                                                    (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, invalid[case_index].source);
+        bool diagnosed = parse.diagnostic_count > 0 && string_equal(parse.diagnostics[0].message, S8("expected expression")) &&
+                         parse.diagnostics[0].location.line == 1 && parse.diagnostics[0].location.column == invalid[case_index].column;
+        BUSTER_TEST_RAW(arguments, diagnosed, invalid[case_index].source);
+        scratch_end(temporary);
+    }
+    String8 valid[] = {
+        S8("long object; typedef typeof(object + 1) t; t v;\n"),
+        S8("long object; typedef typeof(object++) t; t v;\n"),
+        S8("long object; typedef typeof_unqual(object) t; t v;\n"),
+        S8("typedef __typeof__(int *) t; t v;\n"),
+        S8("void f(void) { long object; typeof((object)) y; y = 0; }\n"),
+    };
+    // Valid type names Buster cannot type are not reported as syntax errors.
+    String8 untyped[] = {
+        S8("typedef typeof(_BitInt(8) *) t;\n"),
+        S8("typedef typeof(__float128 *) t;\n"),
+        S8("typedef typeof(__fp16 *) t;\n"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(untyped); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, untyped[case_index], (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        bool syntax_error = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+        {
+            syntax_error |= parse.diagnostics[diagnostic_index].kind == C_DIAGNOSTIC_EXPECTED_DECLARATION;
+        }
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && !syntax_error, untyped[case_index]);
+        scratch_end(temporary);
+    }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = S8("typedef typeof(int x) t;\n");
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        bool diagnosed = parse.diagnostic_count > 0 && string_equal(parse.diagnostics[0].message, S8("expected ')' after type name")) &&
+                         parse.diagnostics[0].location.line == 1 && parse.diagnostics[0].location.column == 20;
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && diagnosed, source);
+        scratch_end(temporary);
+    }
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, valid[case_index], (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, valid[case_index]);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // A conditional with void branches is common in Lua's GC-barrier macros:
 // `iscollectable(v) ? luaC_objbarrier(...) : ((void)(0))`.  It has side
 // effects but no result place; lowering must not cast/store a synthetic value
@@ -20613,6 +20704,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parameter_local_alignment(UnitTestArgu
     return result;
 }
 
+// #1660: an attribute list may follow any `*` of a pointer declarator, before
+// or after its qualifiers, and `aligned` there still aligns the declared object.
+// Block-scope objects and typedefs take the `[[...]]` spelling as well.
+// The initializer of `n` lowers its type name through c_ir_type_name_prefix.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_declarator_attributes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+    BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+    TemporalArena temporary = scratch_begin(0, 0);
+    String8 source = S8("struct Aligned { char c; int * __attribute__((aligned(16))) p; };\n"
+                        "struct Chained { int * __attribute__((unused)) * p; int * __attribute__((unused)) const q; int * [[gnu::aligned(16)]] r; };\n"
+                        "int * __attribute__((aligned(16))) g;\n"
+                        "int * __attribute__((unused)) * gg;\n"
+                        "int * __attribute__((unused)) const gc = 0;\n"
+                        "int (* __attribute__((unused)) gp);\n"
+                        "_Static_assert(sizeof(struct Aligned) == 32 && _Alignof(struct Aligned) == 16, \"member alignment\");\n"
+                        "_Static_assert(__builtin_offsetof(struct Aligned, p) == 16, \"member offset\");\n"
+                        "_Static_assert(sizeof(struct Chained) == 32 && __builtin_offsetof(struct Chained, r) == 16, \"chained members\");\n"
+                        "_Static_assert(sizeof(gg) == 8 && sizeof(gc) == 8 && sizeof(gp) == 8, \"file scope\");\n"
+                        "_Static_assert(sizeof(int * __attribute__((unused)) *) == 8, \"type name\");\n"
+                        "int n = sizeof(int * __attribute__((unused)) *);\n"
+                        "int local(void)\n"
+                        "{\n"
+                        "    int value = 1;\n"
+                        "    int * __attribute__((aligned(64))) p = &value;\n"
+                        "    int * __attribute__((unused)) * const __attribute__((unused)) pp = &p;\n"
+                        "    int * [[gnu::aligned(16)]] q = &value;\n"
+                        "    int * [[gnu::unused]] * [[gnu::unused]] const qq = &q;\n"
+                        "    typedef int * [[gnu::aligned(16)]] T;\n"
+                        "    typedef int * [[gnu::unused]] * [[gnu::unused]] const TT;\n"
+                        "    T t = &value;\n"
+                        "    TT tt = &t;\n"
+                        "    return **pp + **qq + **tt + n;\n"
+                        "}\n");
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){
+                                                    .target = target.target,
+                                                    .data_layout = target_data_layout(target.target),
+                                                    .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                });
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    CIRLowerResult lowered = {0};
+    if (!preprocess.diagnostic_count && !parse.diagnostic_count)
+    {
+        lowered = c_lower_to_ir(temporary.arena, S8("pointer-declarator-attributes.c"), preprocess, parse, target.target);
+    }
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program);
+    u32 aligned_locals = 0;
+    if (lowered.program && lowered.program->module_count)
+    {
+        IrModule* module = lowered.program->modules;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            for (u32 index = 0; index < function->instruction_count; index += 1)
+            {
+                IrInstruction* instruction = function->instructions + index;
+                if (instruction->opcode == IR_OPCODE_LOCAL && function->values[instruction->result.value].alignment == 64)
+                {
+                    aligned_locals += 1;
+                }
+            }
+        }
+    }
+    BUSTER_TEST(arguments, aligned_locals == 1);
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23746,7 +23909,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         {S8("struct S { int (*__attribute__((unused)) const)(void); };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 47},
         {S8("struct S { int (* _Nonnull)(void); };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 27},
         {S8("struct S { int (const); };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 17},
-        {S8("struct S { int (* __attribute__((unused)) p)(void); int a; };\n"), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, 1, 43},
         {S8("struct S { int [3]; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 16},
         {S8("struct S { int 3; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 16},
         {S8("struct S { int , a; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 16},
@@ -23784,6 +23946,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
 
     String8 valid[] = {
         S8("struct S { int; };\n"),
+        S8("struct S { int (* __attribute__((unused)) p)(void); int a; };\n_Static_assert(sizeof(struct S) == 16, \"members kept\");\n"),
         S8("struct S { int; int a; char c; };\n_Static_assert(sizeof(struct S) == 8, \"members kept\");\nint n = sizeof(struct S);\n"),
         S8("struct S { __attribute__((packed)); int a; };\n_Static_assert(sizeof(struct S) == 4, \"members kept\");\nint n = sizeof(struct S);\n"),
         S8("struct S { enum E { A, B }; int a; };\n_Static_assert(sizeof(struct S) == 4 && B == 1, \"members kept\");\n"),
@@ -25605,6 +25768,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_conditional_type);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_cast_prefix_operator);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
+    BUSTER_TEST_FIXTURE(arguments, c_test_typeof_malformed_operand_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
@@ -26275,6 +26439,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_repeated_incomplete_arrays);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_packed_and_aligned_layout);
+    BUSTER_TEST_FIXTURE(arguments, c_test_pointer_declarator_attributes);
     BUSTER_TEST_FIXTURE(arguments, c_test_parameter_local_alignment);
     BUSTER_TEST_FIXTURE(arguments, c_test_qualified_parameter_values);
     BUSTER_TEST_FIXTURE(arguments, c_test_qualified_compound_values);
