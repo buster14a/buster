@@ -9,7 +9,7 @@ permissions: {}
 
 jobs:
   validate:
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: write
