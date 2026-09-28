@@ -3331,6 +3331,10 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
             {
                 size = BUSTER_MAX(size, layout.copy_zero_size);
             }
+            if (!size)
+            {
+                continue;
+            }
             u64 offset = section_offsets[kind];
             bool thread_local_section = kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
             bool writable = kind == OBJECT_SECTION_DATA || kind == OBJECT_SECTION_ZERO || thread_local_section;
@@ -3339,8 +3343,8 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
                 .name = object_section_name_for_kind(kind),
                 .flags = (kind == OBJECT_SECTION_TEXT ? UINT64_C(0x6) : writable ? UINT64_C(0x3) : UINT64_C(0x2)) |
                          (thread_local_section ? UINT64_C(0x400) : 0),
-                .address = size ? image_base + offset : 0,
-                .offset = size ? offset : 0,
+                .address = image_base + offset,
+                .offset = offset,
                 .size = size,
                 .alignment = section->alignment,
                 .type = object_section_kind_is_zero_fill(kind) ? 8 : 1,
@@ -4614,7 +4618,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     NativeExecutableLinkResult result = {0};
     enum
     {
-        ELF_BASE_PROGRAM_HEADER_COUNT = 7,
+        ELF_BASE_PROGRAM_HEADER_COUNT = 6,
     };
     u32 entry_stub_size = 0;
     u32 entry_call_displacement_offset = 0;
@@ -4850,7 +4854,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         return result;
     }
     u64 eh_frame_header_size = eh_frame_table.count ? 12 + (u64)eh_frame_table.count * 8 : 0;
-    u32 program_header_count = ELF_BASE_PROGRAM_HEADER_COUNT + (eh_frame_header_size != 0);
+    has_thread_local_data =
+        object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length != 0 || object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size != 0;
+    u32 program_header_count = ELF_BASE_PROGRAM_HEADER_COUNT + has_thread_local_data + (eh_frame_header_size != 0);
     u64 header_end = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
     u64 image_base = ELF_IMAGE_BASE;
@@ -5671,19 +5677,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     BUSTER_LINK_PROGRAM_HEADER(1, 6, section_offsets[OBJECT_SECTION_DATA], image_base + section_offsets[OBJECT_SECTION_DATA],
                                file_size - section_offsets[OBJECT_SECTION_DATA], writable_memory_end - section_offsets[OBJECT_SECTION_DATA], ELF_PAGE_SIZE);
     BUSTER_LINK_PROGRAM_HEADER(2, 6, dynamic_offset, dynamic_address, dynamic_size, dynamic_size, 8);
-    u64 thread_local_file_size = object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length;
-    u64 thread_local_memory_size = align_forward(thread_local_file_size, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment) +
-                                   object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
-    link_write_u32(bytes, program_header, 7);
-    link_write_u32(bytes, program_header + 4, 4);
-    link_write_u64(bytes, program_header + 8, section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA]);
-    link_write_u64(bytes, program_header + 16, image_base + section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA]);
-    link_write_u64(bytes, program_header + 24, image_base + section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA]);
-    link_write_u64(bytes, program_header + 32, thread_local_file_size);
-    link_write_u64(bytes, program_header + 40, thread_local_memory_size);
-    link_write_u64(bytes, program_header + 48,
-                   BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment));
-    program_header += ELF_PROGRAM_HEADER_SIZE;
+    if (has_thread_local_data)
+    {
+        u64 thread_local_file_size = object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length;
+        u64 thread_local_memory_size = align_forward(thread_local_file_size, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment) +
+                                       object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
+        BUSTER_LINK_PROGRAM_HEADER(7, 4, section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA], image_base + section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA],
+                                   thread_local_file_size, thread_local_memory_size,
+                                   BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment,
+                                              object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment));
+    }
     if (eh_frame_header_size)
     {
         BUSTER_LINK_PROGRAM_HEADER(0x6474e550, 4, eh_frame_header_offset, image_base + eh_frame_header_offset, eh_frame_header_size, eh_frame_header_size, 4);
