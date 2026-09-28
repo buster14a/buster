@@ -9803,22 +9803,71 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                 // end, so the list needs no second pass.
                 u32 declarator_end = c_parse_trailing_attribute_start(preprocess, declarator, frame->declarator_end);
                 u32 name_index = 0;
-                if (!c_parse_parenthesized_declarator_name(preprocess, declarator, declarator_end, &name_index))
+                bool has_name = c_parse_parenthesized_declarator_name(preprocess, declarator, declarator_end, &name_index);
+                if (has_name)
                 {
+                    // The name scan takes the first identifier after the
+                    // pointers, which may be a qualifier or an attribute
+                    // rather than a name: `int (* __attribute__((unused)))(void);`.
+                    String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[name_index]);
+                    CType ignored = {0};
+                    has_name = !c_parse_type_qualifier_word(spelling, &ignored) && c_parse_skip_attributes(preprocess, name_index, declarator_end) == name_index;
+                }
+                if (!has_name)
+                {
+                    // Walk the prefix the name would follow -- groups,
+                    // pointers, their qualifiers and attributes -- so the
+                    // diagnostic lands where Clang reports the missing name:
+                    // `int (*const)(void);` points at the `)`.
                     u32 missing_name = declarator;
-                    while (missing_name < declarator_end && (c_token_is_punctuator(&preprocess.tokens[missing_name], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
-                                                             c_token_is_punctuator(&preprocess.tokens[missing_name], C_PUNCTUATOR_STAR)))
+                    bool pointer_qualifiers = false;
+                    for (;;)
                     {
-                        missing_name += 1;
+                        u32 after_attributes = c_parse_skip_attributes(preprocess, missing_name, declarator_end);
+                        if (after_attributes != missing_name)
+                        {
+                            missing_name = after_attributes;
+                            continue;
+                        }
+                        if (missing_name >= declarator_end)
+                        {
+                            break;
+                        }
+                        CToken token = preprocess.tokens[missing_name];
+                        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_STAR))
+                        {
+                            pointer_qualifiers = c_token_is_punctuator(&token, C_PUNCTUATOR_STAR);
+                            missing_name += 1;
+                            continue;
+                        }
+                        if (pointer_qualifiers && token.kind == C_TOKEN_IDENTIFIER)
+                        {
+                            String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+                            CType ignored = {0};
+                            if (c_parse_type_qualifier_word(spelling, &ignored) || string_equal(spelling, S8("_Nonnull")) ||
+                                string_equal(spelling, S8("_Nullable")) || string_equal(spelling, S8("_Null_unspecified")))
+                            {
+                                missing_name += 1;
+                                continue;
+                            }
+                        }
+                        break;
                     }
-                    if (missing_name < declarator_end && preprocess.tokens[missing_name].kind != C_TOKEN_IDENTIFIER)
+                    CType missing_qualifier = {0};
+                    if (missing_name < declarator_end && preprocess.tokens[missing_name].kind == C_TOKEN_IDENTIFIER &&
+                        !c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[missing_name]), &missing_qualifier))
                     {
-                        c_type_parse_aggregate_segment_expected_member_name(machine, frame, missing_name);
+                        // A name is there, but behind decorations the
+                        // parenthesized declarator parse does not take --
+                        // `int (* __attribute__((unused)) p)(void);`.
+                        u32 diagnostic_start = result->diagnostic_count;
+                        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[missing_name]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                           S8("unsupported attribute in a parenthesized member declarator"));
+                        c_type_parse_aggregate_segment_fail(machine, frame, diagnostic_start);
                     }
                     else
                     {
-                        c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
-                        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                        c_type_parse_aggregate_segment_expected_member_name(machine, frame, missing_name);
                     }
                     return;
                 }

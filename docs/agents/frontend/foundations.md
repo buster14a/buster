@@ -644,8 +644,13 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   definition through `c_type_parse_aggregate_segment_fail`, which carries the
   segment's diagnostics over the rollback and drops one repeating a standing
   report (each declarator of `} a, b;` parses the definition again). A missing
-  name (`int *;`, `int (*)(void);`, `int , a;`, `int a, ;`) is
-  `C_DIAGNOSTIC_EXPECTED_DECLARATION` at the token Clang names, an empty
+  name (`int *;`, `int (*)(void);`, `int (*const)(void);`,
+  `int (* __attribute__((unused)))(void);`, `int , a;`, `int a, ;`) is
+  `C_DIAGNOSTIC_EXPECTED_DECLARATION` at the token Clang names -- the scan
+  steps over groups, pointers, their qualifiers and attributes first -- and a
+  parenthesized name behind an attribute the declarator parse does not take
+  (`int (* __attribute__((unused)) p)(void);`) is
+  `C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS`; neither rolls back silently. An empty
   bit-field width likewise, and an unknown member type is
   `C_DIAGNOSTIC_UNKNOWN_TYPE_NAME`. A declaration that declares nothing
   (`int;`, `__attribute__((packed));`, `enum E { A };`) completes the segment
