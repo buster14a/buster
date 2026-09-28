@@ -4396,7 +4396,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_attribute_noreturn(UnitTestArgumen
 // A noreturn call whose value a return, initializer, or switch consumes
 // leaves its block open for the consumer's own rows (issue #1503): the
 // return continuation used to find the block already closed and the body
-// was rejected as unsupported.  A statement-level call still traps.
+// was rejected as unsupported.  `__builtin_unreachable()` behaves the same
+// (issue #1748).  A statement-level call still traps.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_value_operands(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4416,6 +4417,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_value_operands(UnitTestA
         C_TEST_NORETURN_VALUE_SOURCE("int y = die_value(); return y;"),
         C_TEST_NORETURN_VALUE_SOURCE("switch (die_value()) { case 1: return 2; } return 0;"),
         C_TEST_NORETURN_VALUE_SOURCE("return x ? 1 : die_value();"),
+        C_TEST_NORETURN_VALUE_SOURCE("return (__builtin_unreachable(), x);"),
+        C_TEST_NORETURN_VALUE_SOURCE("int y = (__builtin_unreachable(), x + 1); return y;"),
+        C_TEST_NORETURN_VALUE_SOURCE("return x ? 1 : (__builtin_unreachable(), 0);"),
     };
 #undef C_TEST_NORETURN_VALUE_SOURCE
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
@@ -4471,7 +4475,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_value_operands(UnitTestA
 // A noreturn call inside a larger expression statement -- a cast, an
 // argument, a compound literal, an assignment or a comma operand -- leaves its
 // block open for the rest of the statement, which then ends the block in the
-// trap (issue #1736). The statement's rows used to follow the UNREACHABLE.
+// trap (issues #1736 and #1748, the latter for `__builtin_unreachable()`).
+// The statement's rows used to follow the UNREACHABLE.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_expression_statements(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4493,6 +4498,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_expression_statements(Un
         C_TEST_NORETURN_STATEMENT_SOURCE("(void)exit(3);"),
         C_TEST_NORETURN_STATEMENT_SOURCE("x = g();"),
         C_TEST_NORETURN_STATEMENT_SOURCE("sink(g());"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("sink((__builtin_unreachable(), x));"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("x = (__builtin_unreachable(), 0);"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("__builtin_unreachable();"),
     };
 #undef C_TEST_NORETURN_STATEMENT_SOURCE
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
