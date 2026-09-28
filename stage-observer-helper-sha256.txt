@@ -1,0 +1,2 @@
+137e7ed14189e776e24e506f488e3733ea70961ad2a272f78fe3d65a50513da2  /home/runner/work/buster/buster/.github/scripts/issue1162_stage_observer.py
+137e7ed14189e776e24e506f488e3733ea70961ad2a272f78fe3d65a50513da2  /home/runner/work/_temp/issue1162-install/issue1162_stage_observer.py

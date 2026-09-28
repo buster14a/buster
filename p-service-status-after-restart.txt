@@ -1,0 +1,13 @@
+● buster-bench.service - Buster benchmark authenticated service (repository reference only)
+     Loaded: loaded (/etc/systemd/system/buster-bench.service; static)
+     Active: active (running) since Mon 2026-09-28 14:25:20 UTC; 10s ago
+       Docs: file:/usr/local/share/doc/buster/bench_service/README.md
+   Main PID: 940 (buster-bench-se)
+      Tasks: 1 (limit: 2873)
+     Memory: 1.3M (peak: 2.9M)
+        CPU: 2.015s
+     CGroup: /system.slice/buster-bench.service
+             └─940 /usr/local/libexec/buster-bench-service serve /var/lib/buster-bench/queue /run/buster-bench/control.sock /opt/buster-bench/installed /var/lib/buster-bench/workspaces /var/lib/buster-bench/lease/host.lock 2
+
+Sep 28 14:25:20 d615872e3e9b systemd[1]: Starting buster-bench.service - Buster benchmark authenticated service (repository reference only)...
+Sep 28 14:25:20 d615872e3e9b systemd[1]: Started buster-bench.service - Buster benchmark authenticated service (repository reference only).

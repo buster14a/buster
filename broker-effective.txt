@@ -1,0 +1,8 @@
+MainPID=0
+Result=exit-code
+ExecMainStatus=1
+User=root
+Group=buster-bench
+SupplementaryGroups=buster-bench-candidate
+Id=buster-bench-systemd-broker@2-790-65000.service
+InvocationID=9b8489d1f32249be92c5eeaa66d1af87

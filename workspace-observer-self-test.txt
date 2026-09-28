@@ -1,0 +1,1 @@
+WORKSPACE_OBSERVER_SELF_TEST checks=25 failures=0 fixtures-only-not-live-proof

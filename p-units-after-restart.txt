@@ -1,0 +1,12 @@
+  UNIT                                            LOAD   ACTIVE SUB       DESCRIPTION
+● buster-bench-systemd-broker@2-790-65000.service loaded failed failed    Buster benchmark constrained systemd broker connection (operator reference) (PID 790/UID 65000)
+  buster-bench.service                            loaded active running   Buster benchmark authenticated service (repository reference only)
+  buster-bench.slice                              loaded active active    Buster benchmark containment slice (reference values)
+  buster-bench-systemd-broker.socket              loaded active listening Buster benchmark constrained systemd broker socket (operator reference)
+
+Legend: LOAD   → Reflects whether the unit definition was properly loaded.
+        ACTIVE → The high-level unit activation state, i.e. generalization of SUB.
+        SUB    → The low-level unit activation state, values depend on unit type.
+
+4 loaded units listed.
+To show all installed unit files use 'systemctl list-unit-files'.
