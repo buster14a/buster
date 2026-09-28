@@ -5903,7 +5903,9 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                     // dead block. Counting it would keep a merge of every
                     // variable read after that label -- and of everything
                     // downstream -- alive. With no runnable edge carrying a
-                    // value, only the dead ones decide, as they always did.
+                    // value, only the dead ones decide, as they always did:
+                    // every dead root must agree, so the first mismatch is
+                    // final and a later repeat cannot restore triviality.
                     u32 same = UINT32_MAX;
                     bool trivial = true;
                     u32 dead_same = UINT32_MAX;
@@ -5920,7 +5922,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                         }
                         else if (value != parameter->value.value)
                         {
-                            dead_trivial = dead_same == UINT32_MAX || value == dead_same;
+                            dead_trivial = dead_trivial && (dead_same == UINT32_MAX || value == dead_same);
                             dead_same = value;
                         }
                     }
