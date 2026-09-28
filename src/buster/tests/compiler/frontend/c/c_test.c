@@ -1763,6 +1763,51 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vla_row_places(UnitTestArguments* argu
     return result;
 }
 
+// C17 6.2.2p5: a block-scope function declarator without a storage-class
+// specifier links like its `extern` form and declares no automatic object.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_scope_function_declaration(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("int test(void) { long add(long, long); return (int)add(2L, 3L) - 5; }\nlong add(long a, long b) { return a + b; }\n"),
+        S8("int test(void) { long add(); return (int)add(2L, 3L) - 5; }\nlong add(long a, long b) { return a + b; }\n"),
+        S8("int test(void) { long add(long, long); return 0; }\nlong add(long a, long b) { return a + b; }\n"),
+        S8("typedef long F(long, long);\nint test(void) { F add; return (int)add(2L, 3L) - 5; }\nlong add(long a, long b) { return a + b; }\n"),
+    };
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens =
+                c_preprocess(temporary.arena, sources[index], (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0, sources[index]);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("block-function.c"), tokens, parse, target_native,
+                                                                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, sources[index]);
+            if (lowered.program && !lowered.diagnostic_count)
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                IrFunction* function = c_test_find_ir_function(module, S8("test"));
+                BUSTER_TEST(arguments, function != 0);
+                if (function)
+                {
+                    u32 local_count = 0;
+                    for (u32 instruction = 0; instruction < function->instruction_count; instruction += 1)
+                    {
+                        local_count += function->instructions[instruction].opcode == IR_OPCODE_LOCAL;
+                    }
+                    BUSTER_TEST_RAW(arguments, function->local_count == 0 && local_count == 0, sources[index]);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lexer_rewind_zeroed(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23959,6 +24004,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_constexpr_leaf_storage);
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
     BUSTER_TEST_FIXTURE(arguments, c_test_vla_row_places);
+    BUSTER_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration);
     BUSTER_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
     BUSTER_TEST_FIXTURE(arguments, c_test_scope_interval_index);
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);

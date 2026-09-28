@@ -38750,7 +38750,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                                                         : 0;
                     return false;
                 }
-                bool local_extern = false;
+                bool local_extern = builder->parse.entities[entity.value].is_extern;
                 bool static_storage = builder->parse.entities[entity.value].is_static_storage;
                 bool local_thread_local = builder->parse.entities[entity.value].is_thread_local;
                 for (u32 specifier = name_index; specifier > builder->parse.declarations[builder->declaration_index].body_start; specifier -= 1)
