@@ -165,13 +165,17 @@ struct CompilerDriverInvocation
     // -fregister-allocator= selects another mode and
     // -fno-register-allocator selects NONE.
     u8 register_allocator;
-    // -fPIC/-fpic, cleared by -fno-pic. The code generator reads it as a code
-    // model: it picks the thread-local model, and a symbol another object
-    // could interpose is addressed through the GOT and called through the
-    // PLT, which are the references `ld -shared` will place. -fPIE/-fpie are
-    // rejected on x86-64 ELF because that reference model is not implemented;
-    // other targets preserve their prior accepted no-op behavior.
+    // -fPIC/-fpic/-fPIE/-fpie, cleared by -fno-pic (and -fno-pie after a PIE
+    // spelling), and implied by linking a position-independent image. The
+    // code generator reads it as a code model: it picks the thread-local
+    // model, and a symbol another object could interpose is addressed through
+    // the GOT and called through the PLT, which are the references `ld
+    // -shared` will place. A PIE takes the same model; the image writer
+    // relaxes the GOT loads of the definitions it binds.
     bool position_independent;
+    // -shared or -pie: the NativeImageKind a link produces. Accepted for a
+    // link only on x86-64 Linux, the one target with a writer for it.
+    NativeImageKind image_kind;
     u8 optimization_level;
     bool has_gpu_target;
     bool save_gpu_temporaries;
