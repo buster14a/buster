@@ -162,7 +162,9 @@
   path order, so the home analysis observes every reload before every spill at
   that point, conservatively lengthening rather than shortening a range. Dense
   home IDs keep the CFG bit planes proportional to actually spilled values, not
-  all virtual registers. Branches, joins, loops, indirect edges, and
+  all virtual registers; selector slots likewise close over a dense index of
+  only the touched, non-fixed slots the color scan can share, because a fixed
+  slot's range is never read. Branches, joins, loops, indirect edges, and
   inline-assembly landings retain the conservative per-home lifetime guard until
   their path-specific repairs have the same proof. Both object classes are
   assigned by one linear scan in start order with a free-color stack; no

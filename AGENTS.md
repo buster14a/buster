@@ -142,8 +142,21 @@ URL already identifies its issue and must not be remapped.
 
 Write issue/PR bodies using structured arguments or a body file. Do not interpolate
 Markdown into shell commands. Use `--force-with-lease`, never bare `--force`,
-when an authorized rebase requires a force-push. Record deferred work as an
-actionable issue with evidence, affected symbols, validation, and completion criteria.
+when an authorized rebase requires a force-push.
+
+Report every actionable problem discovered during a task on this repository's
+GitHub forge before ending the session or handing off. This includes defects, missing
+coverage, CI or infrastructure failures, and blockers, even when the assigned
+task is different. Search open and closed issues and PRs first; add new evidence
+to the relevant issue or PR instead of opening a duplicate. If no record exists,
+create an issue with the exact revision, observed versus expected behavior,
+reproduction or source evidence, affected symbols, validation already run,
+remaining uncertainty, and completion criteria. Mark hypotheses as unverified;
+do not present a failed experiment or an unrelated transient as a confirmed
+defect. Link the report from the active PR or handoff. If GitHub writing is
+unavailable, retain a ready-to-post report in the handoff and say explicitly
+that it has not been published. Do not silently drop a finding because it is
+outside the current task.
 
 ## Topic references
 

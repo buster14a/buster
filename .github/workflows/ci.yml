@@ -90,6 +90,15 @@ jobs:
           set -euo pipefail
           python3 tools/new_audit.py --self-test
           python3 tools/new_audit.py --check
+      - name: Compile the build driver with GCC
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Hosted jobs build build.c only with Clang; this keeps the POSIX
+          # driver clean under GCC's -Wall -Werror as well.
+          gcc --version
+          gcc -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            -fwrapv -fno-strict-aliasing -funsigned-char -fsyntax-only build.c
       - name: Validate every GitHub workflow
         id: lint
         shell: bash
