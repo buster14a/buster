@@ -10011,6 +10011,11 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
                 c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[specifier_index]), C_DIAGNOSTIC_INVALID_ATOMIC_TYPE,
                                    S8("_Atomic requires a type name"));
             }
+            else if (!depth)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[close - 1]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                                   S8("expected expression"));
+            }
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
             return;
         }
@@ -10103,6 +10108,15 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
         }
         if (type.value == C_ID_UNDERLYING_INVALID)
         {
+            // Neither a type name nor an expression. An operand whose last
+            // token cannot end an operand is malformed whatever its prefix;
+            // other typing failures stay with the declaration's later uses.
+            if (frame->stage == C_TYPE_PARSE_STAGE_FALLBACK && result->diagnostic_count == frame->checkpoint.diagnostic_count &&
+                !c_parse_expression_token_ends_operand(preprocess.tokens[operand_end - 1]))
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[operand_end]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                                   S8("expected expression"));
+            }
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->specifier_index, false);
             return;
         }
