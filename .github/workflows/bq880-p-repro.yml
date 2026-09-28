@@ -38,9 +38,7 @@ jobs:
       - name: Run pinned source in disposable real systemd guest
         shell: bash
         env:
-          BQ_P_REPRO: "1"
-          BQ_P_REPRO_UPGRADE: 57765f220fae6b4073aa3947b36b9fd605cf2a5b
-          BQ_P_REPRO_LOOP_SECONDS: "20"
+          BQ_L_REPRO: "1"
         run: bash .github/scripts/issue1162_exact_systemd_slice.sh
       - name: Retain all isolated diagnostics
         if: always()

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Temporary, isolated #1162 validation transport. Never install on a protected host.
 set -Eeuo pipefail
-subject=d0c8ce2c452623b79190da18a428842aab19ad7d
-subject_tree=5c479a7a741dd07f8a9fa8fc6ff3eac4df28635d
+subject=6a59bc4fc7e8ddf1bf5420e2f0ce3aca648a0a70
+subject_tree=fcd89098f5905e51023fd4ffee9c29ae737eaf6d
 subject_build_blob=a016a487b745357883a5cd76c9c2712485c01d7c
 baseline=ade6ac4b6ecb21f30b61b656439bac476c145e2f
 evidence="${RUNNER_TEMP:?}/issue1162-exact-slice-evidence"
@@ -179,7 +179,7 @@ for path in files:
 manifest = ("\n".join(lines) + "\n").encode()
 expected = {
     "ade6ac4b6ecb21f30b61b656439bac476c145e2f": (375, 42585, "ebf4a4b4e5943dc60dd9fd9d175af643fbe0d0eee72e70e245c688aaabcb3007"),
-    "d0c8ce2c452623b79190da18a428842aab19ad7d": (377, 42835, "16d4267e1b8821454236b2d2dfbadff755c6faa3fa6b3f04e04911ed2ccadf2e"),
+    "6a59bc4fc7e8ddf1bf5420e2f0ce3aca648a0a70": (377, 42835, "656e2d91af0ee66e1662efe4de0e361bf757d797ff7dc94d939e670e1bfcba63"),
 }[rev]
 actual = (len(files), len(manifest), hashlib.sha256(manifest).hexdigest())
 print("SOURCE_CLOSURE", rev, "files", actual[0], "bytes", actual[1], "sha256", actual[2], flush=True)
@@ -568,6 +568,36 @@ sudo docker exec "$guest" systemctl show buster-bench.service -p ActiveState -p 
 sudo docker exec "$guest" systemctl is-active --quiet buster-bench.service
 key="issue1162-${GITHUB_RUN_ID}"
 sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway capabilities | tee "$evidence/gateway-capabilities.txt"
+if [[ "${BQ_L_REPRO:-}" == 1 ]]; then
+  # Scratch #880 attempt-L reproduction: a buster-bench peer that connects to the
+  # first job's .lease-handoff, sends nothing, never reads, holds 6.5 s.
+  sudo docker exec -i "$guest" tee /root/l-peer.py >/dev/null <<'LPEER'
+import os, socket, sys, time
+path = "/var/lib/buster-bench/workspaces/results/job-1-attempt-2/.lease-handoff"
+log = open("/tmp/l-peer.log", "a", buffering=1)
+def emit(m): log.write("%d %s\n" % (time.time_ns(), m)); log.flush()
+emit("ARMED uid=%d gid=%d" % (os.geteuid(), os.getegid()))
+deadline = time.time() + 900
+while True:
+    try:
+        st = os.lstat(path); break
+    except FileNotFoundError:
+        pass
+    if time.time() > deadline:
+        emit("EXPIRED"); sys.exit(3)
+    time.sleep(0.001)
+s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+s.connect(path)
+emit("CONNECTED ctime_ns=%d" % st.st_ctime_ns)
+time.sleep(6.5)
+s.close()
+emit("CLOSED")
+LPEER
+  sudo docker exec "$guest" chmod 0444 /root/l-peer.py
+  sudo docker exec "$guest" install -m 0644 /root/l-peer.py /tmp/l-peer.py
+  sudo docker exec -d "$guest" runuser -u buster-bench -g buster-bench -- python3 /tmp/l-peer.py
+  sleep 1
+fi
 if [[ "${BQ_P_REPRO:-}" == 1 ]]; then
   # Scratch #880 attempt-P reproduction only: trace the service and its manager helpers.
   sudo docker exec "$guest" install -d -m 0700 /root/p-strace
@@ -589,6 +619,50 @@ request_sha="$(sed -nE 's/.*request-sha256=([a-f0-9]{64}).*/\1/p' "$evidence/sub
 test -n "$job"
 test -n "$request_sha"
 echo "JOB=$job"
+if [[ "${BQ_L_REPRO:-}" == 1 ]]; then
+  BQ=/usr/local/libexec/buster-bench-service
+  lcap() {
+    local tag=$1
+    sudo docker exec "$guest" sh -c 'cat /tmp/l-peer.log' >"$evidence/l-peer-$tag.txt" 2>&1 || true
+    sudo docker exec "$guest" systemctl list-units --all --no-pager 'buster-bench*' >"$evidence/l-units-$tag.txt" 2>&1 || true
+    sudo docker exec "$guest" journalctl --no-pager -b -o short-precise >"$evidence/l-journal-$tag.txt" 2>&1 || true
+    sudo docker exec "$guest" sh -c 'cd /var/lib/buster-bench/queue && ls -la && for f in *; do [ "$f" = journal ] && continue; echo "== $f"; head -c 2048 "$f"; echo; done; od -A d -t x1 journal | tail -n 30' >"$evidence/l-queue-$tag.txt" 2>&1 || true
+    sudo docker exec "$guest" sh -c 'find /var/lib/buster-bench/workspaces -maxdepth 3 -printf "%m %u:%g %s %p\n" | sort; for f in /var/lib/buster-bench/workspaces/results/job-1-attempt-2/validate-buster-v1.*; do echo "== $f"; head -c 2048 "$f"; echo; done' >"$evidence/l-state-$tag.txt" 2>&1 || true
+    sudo docker exec "$guest" cat /proc/locks >"$evidence/l-locks-$tag.txt" 2>&1 || true
+  }
+  sleep 25
+  sudo docker exec "$guest" runuser -u buster-bench -- $BQ gateway result "$job" 2>&1 | tee "$evidence/l-gateway-after.txt" || true
+  lcap after
+  cat "$evidence/l-peer-after.txt"
+  grep -E "handoff|lease|buster-bench-1-2|broker@" "$evidence/l-journal-after.txt" | tail -n 60 || true
+  if grep -q 'phase=finished' "$evidence/l-gateway-after.txt"; then
+    echo "L_REPRO outcome=a"
+  else
+    echo "L_REPRO outcome=b; stopping the service for the reconcile"
+    sudo docker exec "$guest" systemctl stop buster-bench.service buster-bench-systemd-broker.socket || true
+    sudo docker exec "$guest" systemctl show buster-bench.service -p Result -p ExecMainStatus -p MainPID || true
+    sudo docker exec "$guest" runuser -u buster-bench -g buster-bench -- $BQ result /var/lib/buster-bench/queue "$job" 2>&1 | tee "$evidence/l-local-result-before.txt" || true
+    lcap before-reconcile
+    set +e
+    sudo docker exec "$guest" runuser -u buster-bench -g buster-bench -- flock -n -E 75 /var/lib/buster-bench/lease/host.lock $BQ workspace-reconcile /var/lib/buster-bench/queue /var/lib/buster-bench/workspaces "$job" 2 >"$evidence/l-reconcile.txt" 2>&1
+    echo "L_REPRO reconcile_exit=$?" | tee -a "$evidence/l-reconcile.txt"
+    set -e
+    cat "$evidence/l-reconcile.txt"
+    sudo docker exec "$guest" runuser -u buster-bench -g buster-bench -- $BQ result /var/lib/buster-bench/queue "$job" 2>&1 | tee "$evidence/l-local-result-after.txt" || true
+    lcap after-reconcile
+    sudo docker exec "$guest" systemctl start buster-bench-systemd-broker.socket buster-bench.service || true
+    sleep 3
+    sudo docker exec "$guest" runuser -u buster-bench -- $BQ gateway result "$job" 2>&1 | tee "$evidence/l-gateway-restart.txt" || true
+    lcap after-restart
+  fi
+  full="$(sed -nE 's/^full-result-sha256=([a-f0-9]{64})$/\1/p' "$evidence/l-gateway-restart.txt" "$evidence/l-gateway-after.txt" 2>/dev/null | head -1)"
+  if [[ -n "$full" ]]; then
+    sudo docker exec "$guest" runuser -u buster-bench -- $BQ gateway export "$job" 2 "$full" >"$evidence/l-export.bin" 2>"$evidence/l-export-receipt.txt" || echo "L_REPRO export failed"
+    sha256sum "$evidence/l-export.bin"; cat "$evidence/l-export-receipt.txt"
+  fi
+  echo "BQ_L_REPRO_DONE job=$job"
+  exit 0
+fi
 if [[ "${BQ_P_REPRO:-}" == 1 ]]; then
   # Scratch #880 attempt-P reproduction: one SIGTERM to the service MainPID at the
   # first moment the prepare manifest exists, then capture, controlled restart and
