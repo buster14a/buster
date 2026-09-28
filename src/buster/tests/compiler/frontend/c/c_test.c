@@ -22404,6 +22404,80 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_metrics_path_identity(UnitTestA
     return result;
 }
 
+// A member declaration without a usable declarator or type abandons the whole
+// aggregate definition, and the segment's rollback used to take the only
+// report with it, so an unused definition compiled and a used one failed at
+// the use (#1661). Each invalid row is reported once, at the token clang
+// names, and leaves no member row behind. A declaration that declares nothing
+// is valid, only warned about by clang, and keeps the aggregate's members.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        CDiagnosticKind kind;
+        u32 line;
+        u32 column;
+    } invalid[] = {
+        {S8("struct S { int *; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 17},
+        {S8("struct S { int (*)(void); };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 18},
+        {S8("struct S { int [3]; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 16},
+        {S8("struct S { int 3; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 16},
+        {S8("struct S { int , a; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 16},
+        {S8("struct S { int a, ; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 19},
+        {S8("struct S { int a : ; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 20},
+        {S8("struct S { unknown_t v; };\n"), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME, 1, 12},
+        {S8("struct S { const unknown_t v; };\n"), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME, 1, 18},
+        {S8("struct S { int *; };\nint n = sizeof(struct S);\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 17},
+        {S8("struct S { int *; } a, b, c;\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 17},
+        {S8("union U { int a; int , b; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 22},
+        {S8("int f(void) { struct L { int a, ; } l; return 0; }\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 33},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[case_index].source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        u32 reported = 0;
+        bool located = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = parse.diagnostics[diagnostic_index];
+            if (diagnostic.kind == invalid[case_index].kind)
+            {
+                reported += 1;
+                located = diagnostic.location.line == invalid[case_index].line && diagnostic.location.column == invalid[case_index].column;
+            }
+        }
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, invalid[case_index].source);
+        BUSTER_TEST_RAW(arguments, reported == 1 && located, invalid[case_index].source);
+        BUSTER_TEST_RAW(arguments, parse.member_count == 0, invalid[case_index].source);
+        scratch_end(temporary);
+    }
+
+    String8 valid[] = {
+        S8("struct S { int; };\n"),
+        S8("struct S { int; int a; char c; };\n_Static_assert(sizeof(struct S) == 8, \"members kept\");\nint n = sizeof(struct S);\n"),
+        S8("struct S { __attribute__((packed)); int a; };\n_Static_assert(sizeof(struct S) == 4, \"members kept\");\nint n = sizeof(struct S);\n"),
+        S8("struct S { enum E { A, B }; int a; };\n_Static_assert(sizeof(struct S) == 4 && B == 1, \"members kept\");\n"),
+        S8("struct S { struct T { int x; }; int a; } s;\nint f(void) { return s.a; }\n"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, valid[case_index],
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-declaration.c"), preprocess, parse, target_native);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, valid[case_index]);
+        BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, valid[case_index]);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unknown_type_name_diagnostics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -24071,6 +24145,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_float_integer_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
     BUSTER_TEST_FIXTURE(arguments, c_test_unknown_type_name_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_member_declaration_without_declarator_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_trailing_token_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_post_tag_declaration_specifiers);
