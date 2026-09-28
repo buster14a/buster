@@ -452,11 +452,13 @@ static bool bq_entry_account_sources_stable(BqEntrySource const sources[BQ_ENTRY
 
 static bool bq_entry_identity_valid(BqEntryAccounts const* accounts, BqEntryIdentity const* actual)
 {
-    bool ok = actual->group_count == 3;
+    /* Exactly the service and candidate groups: root's group 0 is not part of
+     * the installed broker identity and a unit that adds it is rejected. */
+    bool ok = actual->group_count == 2;
     for (unsigned index = 0; ok && index < 4; index += 1)
         ok = actual->uids[index] == 0 && actual->gids[index] == accounts->ids[1];
-    gid_t expected[] = {0, (gid_t)accounts->ids[1], (gid_t)accounts->ids[3]};
-    for (unsigned index = 0; ok && index < 3; index += 1)
+    gid_t expected[] = {(gid_t)accounts->ids[1], (gid_t)accounts->ids[3]};
+    for (unsigned index = 0; ok && index < 2; index += 1)
     {
         unsigned matches = 0;
         for (int other = 0; other < actual->group_count; other += 1)
@@ -759,7 +761,7 @@ static int bq_entry_evidence_line(char* line, size_t capacity, BqEntryAccounts c
         "passwd=%ju:%ju:%jd:%jd:%ld:%jd:%ld group=%ju:%ju:%jd:%jd:%ld:%jd:%ld "
         "nsswitch=%ju:%ju:%jd:%jd:%ld:%jd:%ld "
         "passwd-sha256=%s group-sha256=%s nsswitch-sha256=%s "
-        "uid=0 gid=%u groups=0,%u,%u caps=0 nnp=1 seccomp=2 mounts=ro fd0=seqpacket\n",
+        "uid=0 gid=%u groups=%u,%u caps=0 nnp=1 seccomp=2 mounts=ro fd0=seqpacket\n",
         boot, (long)getpid(), ticks, invocation, path,
         (uintmax_t)socket->st_dev, (uintmax_t)socket->st_ino,
         (uintmax_t)gate->st_dev, (uintmax_t)gate->st_ino, (intmax_t)gate->st_size,

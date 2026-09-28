@@ -39807,6 +39807,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_broker_add(Arena* arena, SliceSt
             os_argument_builder_append(&builder, S8("-static"));
             os_argument_builder_append(&builder, S8("-Wl,-z,noexecstack"));
             os_argument_builder_append(&builder, gate_sources[gate]);
+            // The entry gate hashes the local account sources it binds.
+            if (gate == 1)
+            {
+                os_argument_builder_append(&builder, S8("-Isrc"));
+                os_argument_builder_append(&builder, S8("src/buster/lib/hash.c"));
+            }
             os_argument_builder_append(&builder, S8("-o"));
             os_argument_builder_append(&builder, gate_outputs[gate]);
             *gate_compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder), .working_directory = S8("."),
@@ -39854,6 +39860,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_broker_add(Arena* arena, SliceSt
                 os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
                 os_argument_builder_append(&builder, S8("-funsigned-char"));
                 os_argument_builder_append(&builder, fixture_sources[fixture]);
+                // broker_entry_gate_test.c includes the gate, which hashes.
+                if (fixture == 4)
+                {
+                    os_argument_builder_append(&builder, S8("-Isrc"));
+                    os_argument_builder_append(&builder, S8("src/buster/lib/hash.c"));
+                }
                 os_argument_builder_append(&builder, S8("-o"));
                 os_argument_builder_append(&builder, fixture_outputs[fixture]);
                 *fixture_compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder),

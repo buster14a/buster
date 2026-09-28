@@ -50,7 +50,7 @@
 #define BQEG_SOCKET_UNIT "buster-bench-systemd-broker.socket"
 #define BQEG_ENV "BUSTER_BROKER_ENTRY_DISPOSABLE_SYSTEMD"
 #define BQEG_ENV_TEXT "isolated-docker-systemd-test"
-#define BQEG_CASES 24
+#define BQEG_CASES 25
 
 typedef enum BqEgMutation
 {
@@ -60,7 +60,7 @@ typedef enum BqEgMutation
     BQEG_ROOT_RW, BQEG_SUBMOUNT_RW, BQEG_WRONG_FD0, BQEG_ABSENT_FD0,
     BQEG_CLOEXEC_FD0, BQEG_BROKER_MODE, BQEG_BROKER_ELF,
     BQEG_BROKER_STACK, BQEG_JOURNAL_FAIL, BQEG_NSSWITCH_MERGE, BQEG_NSCD_SOCKET,
-    BQEG_CANDIDATE_UID, BQEG_RUNNER_GID
+    BQEG_CANDIDATE_UID, BQEG_RUNNER_GID, BQEG_ROOT_GROUP
 } BqEgMutation;
 
 static char const* const bqeg_names[BQEG_CASES] = {
@@ -70,7 +70,7 @@ static char const* const bqeg_names[BQEG_CASES] = {
     "nnp-off", "seccomp-off", "root-rw", "protected-submount-rw",
     "wrong-fd0", "absent-fd0", "cloexec-fd0", "broker-mode",
     "broker-elf", "broker-exec-stack", "journal-send-fails", "nsswitch-merge", "nscd-socket",
-    "candidate-uid-rebound", "runner-gid-rebound"
+    "candidate-uid-rebound", "runner-gid-rebound", "root-group"
 };
 
 static char const bqeg_receipt[] = "BQ-ACCOUNTS-V1\nservice-uid=65000\nservice-gid=65000\n"
@@ -256,7 +256,7 @@ static bool bqeg_fixture(void)
             record.environment_count += 1;
         struct __user_cap_header_struct header = {.version = _LINUX_CAPABILITY_VERSION_3};
         struct __user_cap_data_struct caps[2] = {{0}, {0}};
-        ok = record.group_count == 3 && record.nnp == 1 && record.seccomp == 2 &&
+        ok = record.group_count == 2 && record.nnp == 1 && record.seccomp == 2 &&
             record.cloexec == 0 && record.environment_count == 3 &&
             syscall(SYS_capget, &header, caps) == 0;
         for (int index = 0; ok && index < 2; index += 1)
@@ -352,9 +352,12 @@ static bool bqeg_unit(BqEgMutation kind)
     bool ok = file != NULL;
     if (ok)
     {
-        char const* groups = kind == BQEG_MISSING_GROUP ? "root buster-bench" :
-            kind == BQEG_EXTRA_GROUP ? "root buster-bench buster-bench-candidate bqeg-extra" :
-            "root buster-bench buster-bench-candidate";
+        /* The installed unit grants exactly the service and candidate
+         * groups; adding root's group 0 is a rejected mutation. */
+        char const* groups = kind == BQEG_MISSING_GROUP ? "" :
+            kind == BQEG_EXTRA_GROUP ? "buster-bench-candidate bqeg-extra" :
+            kind == BQEG_ROOT_GROUP ? "root buster-bench-candidate" :
+            "buster-bench-candidate";
         char const* exec = kind == BQEG_ABSENT_FD0 ? BQEG_BRIDGE " bridge absent" :
             kind == BQEG_CLOEXEC_FD0 ? BQEG_BRIDGE " bridge cloexec" : BQEG_GATE;
         char const* probe = kind == BQEG_NNP_OFF || kind == BQEG_SECCOMP_OFF ||
@@ -580,18 +583,17 @@ static bool bqeg_positive(char const* journal, char const* reply, char const* sh
         device == marker.socket_device &&
         inode == marker.socket_inode && marker.type == SOCK_SEQPACKET && marker.cloexec == 0 &&
         marker.nnp == 1 && marker.seccomp == 2 && marker.environment_count == 3 &&
-        marker.group_count == 3;
+        marker.group_count == 2;
     for (int i = 0; ok && i < 4; i += 1)
         ok = marker.uids[i] == 0 && marker.gids[i] == 65000;
-    bool root = false, service = false, candidate = false;
-    for (int i = 0; ok && i < 3; i += 1)
+    bool service = false, candidate = false;
+    for (int i = 0; ok && i < 2; i += 1)
     {
-        root |= marker.groups[i] == 0;
         service |= marker.groups[i] == 65000;
         candidate |= marker.groups[i] == 65001;
-        ok = marker.groups[i] == 0 || marker.groups[i] == 65000 || marker.groups[i] == 65001;
+        ok = marker.groups[i] == 65000 || marker.groups[i] == 65001;
     }
-    ok = ok && root && service && candidate;
+    ok = ok && service && candidate;
     for (int i = 0; ok && i < 2; i += 1)
         ok = !marker.cap_effective[i] && !marker.cap_permitted[i] && !marker.cap_inheritable[i];
     if (ok)

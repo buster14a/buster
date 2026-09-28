@@ -108,7 +108,7 @@ static void entry_account_tests(void)
     ENTRY_CHECK(!bq_entry_number("18446744073709551616", 20, &number));
     ENTRY_CHECK(!bq_entry_number("-1", 2, &number) && !bq_entry_number("+1", 2, &number));
     BqEntryIdentity identity = {.uids = {0, 0, 0, 0}, .gids = {65000, 65000, 65000, 65000},
-        .groups = {65001, 0, 65000}, .group_count = 3};
+        .groups = {65001, 65000}, .group_count = 2};
     ENTRY_CHECK(bq_entry_identity_valid(&accounts, &identity));
     for (unsigned field = 0; field < 4; field += 1)
     {
@@ -123,16 +123,22 @@ static void entry_account_tests(void)
     {
         BqEntryIdentity bad = identity;
         bad.group_count = count;
-        ENTRY_CHECK(bq_entry_identity_valid(&accounts, &bad) == (count == 3));
+        ENTRY_CHECK(bq_entry_identity_valid(&accounts, &bad) == (count == 2));
     }
-    for (unsigned field = 0; field < 3; field += 1)
+    for (unsigned field = 0; field < 2; field += 1)
     {
         BqEntryIdentity bad = identity;
         bad.groups[field] = 65002;
         ENTRY_CHECK(!bq_entry_identity_valid(&accounts, &bad));
-        bad.groups[field] = identity.groups[(field + 1) % 3];
+        bad.groups[field] = 0;
+        ENTRY_CHECK(!bq_entry_identity_valid(&accounts, &bad));
+        bad.groups[field] = identity.groups[(field + 1) % 2];
         ENTRY_CHECK(!bq_entry_identity_valid(&accounts, &bad));
     }
+    BqEntryIdentity rooted = identity;
+    rooted.groups[2] = 0;
+    rooted.group_count = 3;
+    ENTRY_CHECK(!bq_entry_identity_valid(&accounts, &rooted));
     accounts.ids[1] += 10;
     ENTRY_CHECK(!bq_entry_identity_valid(&accounts, &identity));
 }
