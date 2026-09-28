@@ -24,8 +24,11 @@ jobs:
           clang --version
           cmake --version
           ninja --version
-          ./build.sh generate --cc clang --config Debug --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
-          ./build.sh build --config Debug -t ide
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$driver"
+          "$driver" generate --cc clang --config Debug --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$driver" build --config Debug -t ide
           ide=$(find build -type f -name ide -perm -111 -print -quit)
           test -n "$ide"
           printf 'IDE=%s\n' "$ide"
