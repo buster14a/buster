@@ -1,0 +1,19 @@
+{
+  "fd": {
+    "device": 48,
+    "gid": 65000,
+    "inode": 9199891,
+    "links": 1,
+    "mode": 416,
+    "uid": 65000
+  },
+  "path": {
+    "device": 48,
+    "gid": 65000,
+    "inode": 9199891,
+    "links": 1,
+    "mode": 416,
+    "symlink": false,
+    "uid": 65000
+  }
+}

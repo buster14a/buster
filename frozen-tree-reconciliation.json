@@ -1,0 +1,30 @@
+{
+  "causes": [
+    "integrated source identity or reviewed build.c blob mismatch"
+  ],
+  "components": {
+    "independent_timing_consistency": false,
+    "producer_graph_order_reviewed": true,
+    "stages": {},
+    "structural_live_observation": false,
+    "structural_live_observation_reason": "integrated source identity or reviewed build.c blob mismatch"
+  },
+  "independent_inventory_before_throughput": null,
+  "original_observation_causes": [],
+  "original_observation_verdict": null,
+  "original_timing_causes": [],
+  "provenance": {
+    "external_observer": "independent stage-observation.json and full inventory JSON",
+    "integrated_build_blob_caller_verified": "9825adbe2a3f488fcea55a6cd533be6193030d9b",
+    "integrated_source_commit_caller_verified": "1a4fcc20cfd020ac1e67a495cdfaf481f68bc2fc",
+    "integrated_source_tree_caller_verified": "7caddac6e6cf0a580a835f6215cc1e553924ad06",
+    "offline_limit": "Git commit/tree relationship and live-systemd provenance are caller-verified, not independently queried here",
+    "producer_child_head": "b65ce53e32cc921fdf68ad13e499417260d6f73a",
+    "producer_child_tree": "2b26253cd1849a8bb50687ede056f3f9d764837b",
+    "producer_source_review": "https://github.com/buster14a/buster/pull/1481#issuecomment-5847791034",
+    "reviewed_composite_source": "https://github.com/buster14a/buster/pull/1482#issuecomment-5847817058",
+    "reviewed_producer_build_blob": "1ea24b90629a2c771c3d0e7d3d517b042ddb4c35",
+    "source_receipts": "caller-provided private self-report paths; harness must bind them to the actual replay"
+  },
+  "verdict": "OFFLINE_EVIDENCE_INCOMPLETE"
+}

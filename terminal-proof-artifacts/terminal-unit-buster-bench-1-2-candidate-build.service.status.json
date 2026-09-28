@@ -1,0 +1,8 @@
+{
+  "exit": 0,
+  "output_oversized": false,
+  "stderr_bytes": 0,
+  "stdout_bytes": 159,
+  "timed_out": false,
+  "unit": "buster-bench-1-2-candidate-build.service"
+}

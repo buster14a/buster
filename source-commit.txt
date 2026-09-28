@@ -1,0 +1,9 @@
+commit 1a4fcc20cfd020ac1e67a495cdfaf481f68bc2fc
+tree 7caddac6e6cf0a580a835f6215cc1e553924ad06
+parent 254487555baf288572a994a43d1e24ee0ccaad7e
+author David <davidgmbb@gmail.com> 1790523888 -0500
+committer David <davidgmbb@gmail.com> 1790523888 -0500
+
+    test: prove selected admin admission and reject numeric identity drift
+    
+    Preserve the maintainer-selected davidgmbb reviewer and exercise the exact numeric identity check. Refs #36, #880, #881
