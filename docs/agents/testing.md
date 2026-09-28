@@ -419,8 +419,21 @@ serial run names its fixture (`body` is the module scope):
 TEST_FIXTURE_START_V1 kind=fixture module=c_frontend_tests fixture=c_test_enum_runtime index=17
 ```
 
-This line is a **format example**. Parallel lanes buffer their start records
-with the rest of their output, so only the watchdog can name a lane's hang.
+This line is a **format example**. Parallel lanes keep their fixture, arena,
+failure and timing rows buffered so successful replay remains deterministic.
+Verbose and CI runs bracket each non-empty parallel gang with live serial rows:
+
+```text
+TEST_PARALLEL_GANG_V1 status=started module_count=3 modules=aarch64_direct_simd_tests,aarch64_complex_simd_tests,aarch64_memory_semantics_tests
+TEST_PARALLEL_GANG_V1 status=completed module_count=3 modules=aarch64_direct_simd_tests,aarch64_complex_simd_tests,aarch64_memory_semantics_tests
+```
+
+The `started` row is complete before `lane_run` begins. The matching
+`completed` row appears only after every lane buffer has replayed in descriptor
+order. A crash in any lane therefore leaves a started row without its
+completion and names the exact eligible module set, while the buffered payload
+between the boundaries is unchanged. The watchdog below still names the exact
+lane and innermost scope when execution hangs instead of exiting.
 
 Every registered module also runs under a wall-clock watchdog on desktop
 Linux, macOS and Windows. Each scope begin or end publishes the module's
@@ -466,6 +479,15 @@ nested transitions, expiry and the record text without a thread or a sleep.
 under a one-second override. The child must exit with status 124, print the
 timeout record after the fixture's start record, write no stderr, and take at
 least the deadline. This check adds about one second to `os_tests`.
+
+`test_parallel_gang_report_self_test` verifies the exact boundary text, module
+order, quiet-mode suppression and an unchanged replay payload without adding
+registered assertions. Desktop `os_tests` also launches a selected parallel
+module through the private `BUSTER_TEST_PARALLEL_CRASH_CHILD_MODE` seam. The
+child opens its buffered module scope and exits with status 1. The parent
+requires the live started row, forbids the completed row, and checks the fatal
+stderr message. This harness regression changes neither assertion totals nor
+`TEST_MODULE_TIMING` rows.
 
 ## Node-backed Wasm oracle deadlines
 

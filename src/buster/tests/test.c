@@ -11,7 +11,10 @@
 // The same scopes print TEST_FIXTURE_START_V1 on entry and feed the fixture
 // watchdog (TestWatchSlot, test_watchdog_start, test_watchdog_thread), which
 // ends a run stuck in one scope past BUSTER_TEST_FIXTURE_TIMEOUT_SECONDS;
-// test_watchdog_child_run is its private hanging payload.
+// test_watchdog_child_run is its private hanging payload. Parallel gang
+// boundaries are written live around deterministic lane replay, and
+// test_parallel_crash_child_self_test covers abrupt lane exit without changing
+// registered assertion or TEST_MODULE_TIMING totals.
 // A descriptor marked table_audit runs only
 // on the canonical tree per platform (BUSTER_TEST_TABLE_AUDITS, default
 // on) — reserve that flag for results that are a pure function of the
@@ -660,6 +663,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult test_fixture_watchdog_child(UnitTestArguments
     return result;
 }
 
+// A private CI child enters one selected parallel module and fails immediately
+// after opening its buffered module scope. The live gang-start record must name
+// the module, while the post-replay completion record must be absent. This is a
+// harness check rather than a registered assertion, so aggregate totals stay
+// unchanged.
+BUSTER_GLOBAL_LOCAL bool test_parallel_crash_child_self_test(UnitTestArguments* arguments)
+{
+    bool result = true;
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 crash_mode = os_get_environment_variable(S8("BUSTER_TEST_PARALLEL_CRASH_CHILD_MODE"));
+    if (!crash_mode.length)
+    {
+        enum { TEST_PARALLEL_CRASH_CHILD_TIMEOUT_US = 30000000 };
+        Arena* arena = arguments->arena;
+        u64 position = arena->position;
+        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test"), S8("--ci=1"),
+                                     S8("--module=aarch64_complex_simd_tests")};
+        SliceString8 inherited_keys = program_state->input.environment_keys;
+        SliceString8 inherited_values = program_state->input.environment_values;
+        String8* keys = arena_allocate(arena, String8, inherited_keys.length + 3);
+        String8* values = arena_allocate(arena, String8, inherited_keys.length + 3);
+        keys[0] = S8("BUSTER_TEST_PARALLEL_CRASH_CHILD_MODE");
+        values[0] = S8("aarch64_complex_simd_tests");
+        keys[1] = S8("BUSTER_TEST_FIXTURE_TIMEOUT_SECONDS");
+        values[1] = S8("0");
+        keys[2] = S8("BUSTER_TEST_JOBS");
+        values[2] = S8("1");
+        u64 count = 3;
+        for (u64 inherited = 0; inherited < inherited_keys.length; inherited += 1)
+        {
+            bool overridden = string_equal(inherited_keys.pointer[inherited], keys[0]) ||
+                              string_equal(inherited_keys.pointer[inherited], keys[1]) ||
+                              string_equal(inherited_keys.pointer[inherited], keys[2]);
+            if (!overridden)
+            {
+                keys[count] = inherited_keys.pointer[inherited];
+                values[count] = inherited_values.pointer[inherited];
+                count += 1;
+            }
+        }
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+            (SliceString8){keys, count}, (SliceString8){values, count},
+            (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+        result = spawn.handle != 0;
+        if (result)
+        {
+            ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, TEST_PARALLEL_CRASH_CHILD_TIMEOUT_US);
+            result = !wait.timed_out && wait.result == PROCESS_RESULT_FAILED;
+#if BUSTER_WINDOWS
+            result = result && wait.platform_status == 1;
+#else
+            // Darwin's wait macros require an addressable native int.
+            int native_status = (int)wait.platform_status;
+            result = result && WIFEXITED(native_status) && WEXITSTATUS(native_status) == 1;
+#endif
+            String8 output = {(char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, wait.streams[STANDARD_STREAM_OUTPUT].length};
+            String8 error = {(char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, wait.streams[STANDARD_STREAM_ERROR].length};
+            u64 started = string_first_sequence(output,
+                S8("TEST_PARALLEL_GANG_V1 status=started module_count=1 modules=aarch64_complex_simd_tests\n"));
+            u64 completed = string_first_sequence(output,
+                S8("TEST_PARALLEL_GANG_V1 status=completed module_count=1 modules=aarch64_complex_simd_tests\n"));
+            result = result && started != BUSTER_STRING_NO_MATCH && completed == BUSTER_STRING_NO_MATCH &&
+                     string_first_sequence(error, S8("parallel lane crash self-test at ")) != BUSTER_STRING_NO_MATCH;
+        }
+        arena_set_position(arena, position);
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // Keep the original OS tests, including every closed/full-stream control. These
 // additional live probes make late child dispatch observable even on fast hosts:
 // verbose nested modules write stdout, whereas the fatal payload writes only stderr.
@@ -669,6 +744,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult test_os_with_fatal_child_isolation(UnitTestAr
     UnitTestResult watchdog = test_fixture_watchdog_child(arguments);
     result.succeeded_test_count += watchdog.succeeded_test_count;
     result.test_count += watchdog.test_count;
+    BUSTER_VALIDATE(test_parallel_crash_child_self_test(arguments));
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     enum { TEST_FATAL_CHILD_REPETITIONS = 3, TEST_FATAL_CHILD_TIMEOUT_US = 30000000 };
     Arena* arena = arguments->arena;
@@ -1091,6 +1167,57 @@ BUSTER_GLOBAL_LOCAL void test_parallel_show(UnitTestArguments* arguments, String
     BUSTER_UNUSED(text);
 }
 
+// Lane-owned rows remain buffered. The serial runner publishes this complete
+// deterministic set immediately before lane_run and only publishes its matching
+// completion after every buffer has replayed in descriptor order.
+BUSTER_GLOBAL_LOCAL void test_parallel_gang_report(UnitTestArguments* arguments, String8 status, TestDescriptor* descriptors,
+                                                   u64* eligible_indices, u64 eligible_count)
+{
+    if (arguments->memory_report && eligible_count)
+    {
+        arguments->show(arguments, S8("TEST_PARALLEL_GANG_V1 status={S8} module_count={u64} modules="), status, eligible_count);
+        for (u64 work_index = 0; work_index < eligible_count; work_index += 1)
+        {
+            String8 separator = work_index ? S8(",") : (String8){0};
+            arguments->show(arguments, S8("{S8}{S8}"), separator, descriptors[eligible_indices[work_index]].name);
+        }
+        arguments->show(arguments, S8("\n"));
+    }
+}
+
+// The boundary rows may bracket replay, but they must not alter a single byte
+// of the buffered payload between them. Keep this outside registered totals.
+BUSTER_GLOBAL_LOCAL bool test_parallel_gang_report_self_test(void)
+{
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
+    Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
+    BUSTER_CHECK(arena != 0 && output != 0);
+    TestParallelArguments arguments = {
+        .base = {.arena = arena, .show = &test_parallel_show, .memory_report = true},
+        .output_arena = output,
+    };
+    TestDescriptor descriptors[] = {
+        {.name = S8("self_test_first")},
+        {.name = S8("self_test_middle")},
+        {.name = S8("self_test_last")},
+    };
+    u64 eligible_indices[] = {2, 0};
+    test_parallel_gang_report(&arguments.base, S8("started"), descriptors, eligible_indices, BUSTER_ARRAY_LENGTH(eligible_indices));
+    arguments.base.show(&arguments.base, S8("replayed-lane-output\n"));
+    test_parallel_gang_report(&arguments.base, S8("completed"), descriptors, eligible_indices, BUSTER_ARRAY_LENGTH(eligible_indices));
+    String8 text = {(char8*)arena_buffer_start(output), arena_buffer_size(output)};
+    bool passed = string_equal(text,
+        S8("TEST_PARALLEL_GANG_V1 status=started module_count=2 modules=self_test_last,self_test_first\n"
+           "replayed-lane-output\n"
+           "TEST_PARALLEL_GANG_V1 status=completed module_count=2 modules=self_test_last,self_test_first\n"));
+    arguments.base.memory_report = false;
+    test_parallel_gang_report(&arguments.base, S8("started"), descriptors, eligible_indices, BUSTER_ARRAY_LENGTH(eligible_indices));
+    passed = passed && arena_buffer_size(output) == text.length;
+    passed = arena_destroy(arena, 1) && passed;
+    passed = arena_destroy(output, 1) && passed;
+    return passed;
+}
+
 // Harness regression: keep accounting out of the registered assertion totals.
 // Failure output is deliberately buffered, rewound, overwritten, then inspected.
 BUSTER_GLOBAL_LOCAL bool test_arena_self_test(void)
@@ -1336,6 +1463,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult test_parallel_call(TestDescriptorParallelKind
 BUSTER_GLOBAL_LOCAL ThreadReturnType test_parallel_lane(void* argument)
 {
     TestParallelState* state = (TestParallelState*)argument;
+    String8 crash_module = os_get_environment_variable(S8("BUSTER_TEST_PARALLEL_CRASH_CHILD_MODE"));
     LaneRange range = lane_range(state->eligible_count);
     for (u64 work_index = range.start; work_index < range.end; work_index += 1)
     {
@@ -1353,6 +1481,10 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType test_parallel_lane(void* argument)
             .output_arena = output_arena,
         };
         TestArenaScope module_scope = buster_test_arena_begin(&arguments.base, arena, S8("body"), true);
+        if (string_equal(crash_module, descriptor.name))
+        {
+            os_fail_message(S8("parallel lane crash self-test"));
+        }
         TimeDataType start = timestamp_take();
         UnitTestResult result = test_parallel_call(descriptor.parallel_kind, &arguments.base);
         TimeDataType end = timestamp_take();
@@ -1784,7 +1916,9 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
         group_or_suffix_runs = group_or_suffix_runs || runs;
     }
 
-    // Buffered lane output cannot name a hang in time; the watchdog's slots can.
+    // Lane rows stay buffered for deterministic replay. A live serial gang
+    // boundary names their exact set on a crash; watchdog slots name hangs down
+    // to the innermost open scope.
     TestParallelState state = {
         .descriptors = descriptors,
         .eligible_indices = eligible_indices,
@@ -1831,6 +1965,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
     if (eligible_count)
     {
         u64 requested_lanes = buster_test_worker_count(eligible_count);
+        test_parallel_gang_report(arguments, S8("started"), descriptors, eligible_indices, eligible_count);
         lane_run(BUSTER_MIN(requested_lanes, eligible_count), &test_parallel_lane, &state);
     }
 
@@ -1850,6 +1985,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
         }
         BUSTER_CHECK(arena_destroy(record->output_arena, 1));
     }
+    test_parallel_gang_report(arguments, S8("completed"), descriptors, eligible_indices, eligible_count);
 
     if (group_end < descriptor_count)
     {
@@ -2051,6 +2187,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     BUSTER_CHECK(test_fixture_timing_self_test());
     BUSTER_CHECK(test_fixture_watchdog_self_test());
     BUSTER_CHECK(test_module_selection_self_test());
+    BUSTER_VALIDATE(test_parallel_gang_report_self_test());
 
     bool timing_enabled = program_state != 0 && program_flag_get(PROGRAM_FLAG_VERBOSE);
     arguments->memory_report = program_state != 0 && (timing_enabled || program_flag_get(PROGRAM_FLAG_CI));
