@@ -4093,8 +4093,20 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
     {
         u32 task_range = end - start;
         u32 task_required = task_range + 1;
-        if (task_range == UINT32_MAX || machine->expression_task_count > machine->expression_task_capacity ||
-            task_required > machine->expression_task_capacity - machine->expression_task_count)
+        // A cast operand validated from inside an expression task is a
+        // subrange of the task its enclosing SIZEOF frame suspended on; it
+        // takes that frame's unused reservation, so nested ranges share one
+        // reservation instead of each reserving its own copy of the tokens.
+        CTypeParseFrame* enclosing = 0;
+        for (u32 frame_index = machine->frame_count - 1; !enclosing && frame_index; frame_index -= 1)
+        {
+            CTypeParseFrame* candidate = machine->frames + frame_index - 1;
+            enclosing = candidate->kind == C_TYPE_PARSE_FRAME_SIZEOF ? candidate : 0;
+        }
+        bool nested = enclosing && enclosing->stage == C_TYPE_PARSE_STAGE_CHILD && task_range != UINT32_MAX &&
+                      enclosing->task_count <= enclosing->task_capacity && task_required <= enclosing->task_capacity - enclosing->task_count;
+        if (!nested && (task_range == UINT32_MAX || machine->expression_task_count > machine->expression_task_capacity ||
+                        task_required > machine->expression_task_capacity - machine->expression_task_count))
         {
             machine->failed = true;
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
@@ -4103,8 +4115,15 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         frame->task_capacity = task_required;
         frame->task_mark = machine->expression_task_count;
         frame->arena_mark = machine->scratch_arena->position;
-        frame->expression_tasks = machine->expression_tasks + machine->expression_task_count;
-        machine->expression_task_count += frame->task_capacity;
+        if (nested)
+        {
+            frame->expression_tasks = enclosing->expression_tasks + enclosing->task_count;
+        }
+        else
+        {
+            frame->expression_tasks = machine->expression_tasks + machine->expression_task_count;
+            machine->expression_task_count += frame->task_capacity;
+        }
         frame->task_count = 1;
         frame->expression_tasks[0] = (CParseExpressionTypeTask){
             .start = start,

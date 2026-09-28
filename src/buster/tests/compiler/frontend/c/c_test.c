@@ -15792,6 +15792,20 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_type_name_attribute_source = S8_INITIAL
     "}\n"
 );
 
+// Casts of attributed type-name operands in a translation unit small enough
+// that the expression-task capacity, sized by its token count, cannot hold a
+// separate reservation for each nested operand range.
+BUSTER_GLOBAL_LOCAL String8 const c_test_type_name_attribute_cast_sources[] = {
+    S8_INITIALIZER("int main(void) { return (int)sizeof(int __attribute__((vector_size(16)))); }\n"),
+    S8_INITIALIZER("int main(void) { return (int)sizeof(int __attribute__((aligned(16)))); }\n"),
+    S8_INITIALIZER("int main(void) { return (int)_Alignof(int __attribute__((aligned(16)))); }\n"),
+    S8_INITIALIZER("int main(void) { return (long)sizeof(int __attribute__((vector_size(16)))); }\n"),
+    S8_INITIALIZER("int main(void) { return (short)sizeof(int __attribute__((vector_size(16)))); }\n"),
+    S8_INITIALIZER("int main(void) { return 0 + (int)sizeof(int __attribute__((vector_size(16)))); }\n"),
+    S8_INITIALIZER("int f(void) { return (int)(long)(short)sizeof(int __attribute__((vector_size(16)))); }\n"),
+    S8_INITIALIZER("int main(void) { return (int)sizeof(int[1 + 1 + 1 + 1 + 1 + 1 + 1 + 1]); }\n"),
+};
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_name_attributes(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -15803,6 +15817,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_name_attributes(UnitTestArguments
     CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("type-name-attributes.c"), tokens, parsed, target_native);
     BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
     scratch_end(temporary);
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(c_test_type_name_attribute_cast_sources); index += 1)
+    {
+        TemporalArena cast_temporary = scratch_begin(0, 0);
+        String8 cast_source = c_test_type_name_attribute_cast_sources[index];
+        CPreprocessResult cast_tokens = c_preprocess(cast_temporary.arena, cast_source,
+                                                     (CPreprocessOptions){
+                                                         .target = target_native,
+                                                         .data_layout = target_data_layout(target_native),
+                                                     });
+        CParserResult cast_syntax = c_parse_ast(cast_temporary.arena, cast_tokens);
+        CIRLowerResult cast_analysis = c_analyze(cast_temporary.arena, S8("type-name-attribute-cast.c"), cast_tokens, cast_syntax, target_native);
+        BUSTER_TEST(arguments, cast_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, cast_syntax.diagnostic_count == 0);
+        BUSTER_TEST_RAW(arguments, cast_analysis.program && cast_analysis.diagnostic_count == 0, cast_source);
+        scratch_end(cast_temporary);
+    }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 source = buster_test_temporary_path(arguments->arena, S8("type-name-attributes"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_type_name_attribute_source))))
