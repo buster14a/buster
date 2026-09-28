@@ -244,21 +244,31 @@ admission:
 
 | Component | Modeled two-stage maximum at 60 pairs | Relevant ceiling |
 |---|---:|---:|
-| Compiler invocations, including warmups | 35,463,936 (17,731,968 per stage) | Transcript: 32,768 records and 64 MiB per shard |
+| Compiler invocations, including warmups | 35,463,936 (17,731,968 per stage) | Transcript: 65,536 records and 64 MiB per shard; at most 902 bytes per line |
 | Additional runtime invocations if every compiler row is runtime eligible | 35,463,936 | Same transcript ceilings |
-| Transcript shards for compiler and runtime at that upper bound | 2,166 (1,083 per stage) | 4,096 transcript shards; 4,096 bundle entries shared with all files/directories |
+| Transcript shards for compiler and runtime at that upper bound | 1,084 (542 per stage) | 2,048 transcript shards per stage; 4,096 bundle entries shared with all files/directories |
 | Paired numeric records | 17,441,280 (8,720,640 per stage) | 16,777,216 records per partition; 16 GiB total #615 input per manifest |
-| Numeric shards at 32,768 records each | 534 (267 per stage) | 64 MiB per published file; 1,396 bundle entries remain for controls, binaries, logs and directories |
-| Transcript bytes if every shard reached 64 MiB | 145,357,799,424 bytes | Exceeds the 128 GiB indexed-payload ceiling even before numeric shards |
+| Numeric shards at 131,072 records each | 134 (67 per stage) | 64 MiB per published file; at most 415 bytes per line; 2,878 bundle entries remain for controls, binaries, logs and directories |
+| Worst-case transcript plus numeric shard bytes at the proven line widths | 71,215,071,744 bytes (63,976,940,544 transcript, 7,238,131,200 numeric) | Within the 128 GiB indexed-payload ceiling, leaving 66,223,881,728 bytes for all other files |
 
-This modeled worst case cannot establish whether actual compact transcript lines
-fit. The actual producer must inventory **every** retained file and directory
-and respect the 64 MiB per-file, 192-byte path,
-8 MiB index and 1 MiB execution-receipt bounds. A fixed transcript shard also
-fails before its 32,768th record if its JSONL lines exceed 64 MiB in total.
-These arithmetic figures cannot establish that real lines, logs and binaries
-fit. The existing service tests transfer small smoke archives; no full
-retirement export or clean replay has been completed at this point.
+The line widths are source-proven maxima of the two serializers, and the
+writers reject a wider line, so a full 65,536-record transcript shard is at
+most 59,113,472 bytes and a full 131,072-record numeric shard at most
+54,394,880 bytes, both below the 64 MiB file cap.
+`tp_retirement_campaign_capacity` rejects a campaign whose shard files leave
+fewer than three other store entries or whose worst-case shard payload exceeds
+128 GiB. For the 77,762-row compiler-eligible envelope this admits at most 198
+pairs with no runtime rows and 108 pairs when every row is runtime eligible;
+254 pairs needs 175,875,870,640 and 318,964,171,600 bytes respectively.
+`tp_retirement_campaign_store_preflight` then adds the caller's exact
+external entries and byte reservation before any timing, and
+`tp_retirement_store_plan` enforces the same owned-file and owned-byte budget
+at publication. The actual producer must still inventory **every** retained
+file and directory and respect the 64 MiB per-file, 192-byte path, 8 MiB index
+and 1 MiB execution-receipt bounds. These arithmetic figures cannot establish
+that real logs and binaries fit. The existing service tests transfer small
+smoke archives; no full retirement export or clean replay has been completed at
+this point.
 
 At maximum capacity, reserve six independent copies: retained service result,
 sealed service spool (including its chunk index), gateway download, immutable

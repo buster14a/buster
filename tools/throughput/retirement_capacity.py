@@ -43,7 +43,8 @@ def source_product(path, name):
     factors = [part.strip() for part in expression.split("*")]
     result = 1
     for factor in factors:
-        match = re.fullmatch(r"([0-9]+)(?:u|U|ull|ULL)?", factor)
+        match = (re.fullmatch(r"([0-9]+)(?:u|U|ull|ULL)?", factor) or
+                 re.fullmatch(r"UINT64_C\(([0-9]+)\)", factor))
         if not match:
             raise ValueError(f"unsupported integer expression for {name}: {expression}")
         result *= int(match.group(1))
@@ -120,6 +121,52 @@ def verify_committed_inputs(root, relative_paths):
     return verified
 
 
+def store_fit(eligible_rows, runtime_rows, pairs, source):
+    """Mirror tp_retirement_campaign_capacity's collector and store checks."""
+    rounds = source["rounds"]
+    stages = source["campaign_stages"]
+    per_row = checked_product(2, source["warmups"] + checked_product(rounds, pairs))
+    invocations_per_stage = checked_product(eligible_rows + runtime_rows, per_row)
+    samples_per_stage = checked_product(eligible_rows, rounds, pairs)
+    transcript_shards_per_stage = ceil_div(invocations_per_stage,
+                                           source["transcript_records_per_shard"])
+    sample_shards_per_stage = ceil_div(samples_per_stage, source["sample_records_per_shard"])
+    shard_files = checked_product(transcript_shards_per_stage + sample_shards_per_stage, stages)
+    transcript_bytes = checked_product(invocations_per_stage,
+                                       source["transcript_record_bytes_max"], stages)
+    sample_bytes = checked_product(samples_per_stage, source["sample_record_bytes_max"], stages)
+    payload_bytes = transcript_bytes + sample_bytes
+    entry_cap = source["store_files"] - source["min_external_store_entries"]
+    collector_fits = (
+        invocations_per_stage <= checked_product(source["transcript_shard_cap"],
+                                                 source["transcript_records_per_shard"]) and
+        transcript_shards_per_stage <= source["transcript_shard_cap"] and
+        samples_per_stage <= source["samples_per_stage_cap"])
+    entries_fit = shard_files <= entry_cap
+    bytes_fit = payload_bytes <= source["store_total_bytes"]
+    return {
+        "shard_files_both_stages": shard_files,
+        "shard_file_cap_after_minimum_external_entries": entry_cap,
+        "entries_fit": entries_fit,
+        "transcript_bytes_both_stages_at_proven_max_line": transcript_bytes,
+        "sample_bytes_both_stages_at_proven_max_line": sample_bytes,
+        "worst_case_payload_bytes_both_stages": payload_bytes,
+        "store_total_bytes": source["store_total_bytes"],
+        "bytes_fit": bytes_fit,
+        "collector_caps_fit": collector_fits,
+        "fits": collector_fits and entries_fit and bytes_fit,
+        "external_entries_and_bytes_excluded": True,
+    }
+
+
+def maximum_fitting_pairs(eligible_rows, runtime_rows, source):
+    best = None
+    for pairs in range(source["minimum_pairs"], source["maximum_pairs"] + 1, 2):
+        if store_fit(eligible_rows, runtime_rows, pairs, source)["fits"]:
+            best = pairs
+    return best
+
+
 def campaign_model(eligible_rows, runtime_rows, pairs, source):
     if eligible_rows <= 0 or runtime_rows < 0 or runtime_rows > eligible_rows:
         raise ValueError("runtime rows must be within a positive compiler-eligible population")
@@ -138,12 +185,14 @@ def campaign_model(eligible_rows, runtime_rows, pairs, source):
         raise ValueError("per-stage paired samples exceed the checked-in collector ceiling")
     transcript_shards_per_stage = ceil_div(invocations_per_stage,
                                            source["transcript_records_per_shard"])
-    sample_shards_per_stage = ceil_div(samples_per_stage,
-                                       source["transcript_records_per_shard"])
+    sample_shards_per_stage = ceil_div(samples_per_stage, source["sample_records_per_shard"])
     if transcript_shards_per_stage > source["transcript_shard_cap"]:
         raise ValueError("transcript shard count exceeds the checked-in collector ceiling")
     if sample_shards_per_stage > source["transcript_shard_cap"]:
         raise ValueError("sample shard count exceeds the checked-in collector ceiling")
+    store = store_fit(eligible_rows, runtime_rows, pairs, source)
+    store["maximum_fitting_pairs_for_these_rows"] = maximum_fitting_pairs(
+        eligible_rows, runtime_rows, source)
 
     total_invocations = checked_product(invocations_per_stage, stages)
     total_samples = checked_product(samples_per_stage, stages)
@@ -160,7 +209,11 @@ def campaign_model(eligible_rows, runtime_rows, pairs, source):
     sample_jsonl_bytes_both_stages_upper = checked_product(
         sample_jsonl_bytes_per_stage_upper, stages)
     sample_jsonl_full_shard_upper = checked_product(
-        source["transcript_records_per_shard"], source["sample_line_cap"])
+        source["sample_records_per_shard"], source["sample_line_cap"])
+    sample_full_shard_proven_upper = checked_product(
+        source["sample_records_per_shard"], source["sample_record_bytes_max"])
+    transcript_full_shard_proven_upper = checked_product(
+        source["transcript_records_per_shard"], source["transcript_record_bytes_max"])
     deadline_after_cleanup = source["worker_budget_seconds"] - source["cleanup_budget_seconds"]
     if deadline_after_cleanup <= 0:
         raise ValueError("cleanup reserve consumes the complete worker budget")
@@ -197,6 +250,11 @@ def campaign_model(eligible_rows, runtime_rows, pairs, source):
             "jsonl_full_shard_fits_source_byte_cap":
                 sample_jsonl_full_shard_upper <= source["transcript_bytes_per_shard"],
             "jsonl_line_cap_is_source_ceiling_not_observed_size": True,
+            "record_cap_per_shard": source["sample_records_per_shard"],
+            "proven_max_line_bytes": source["sample_record_bytes_max"],
+            "bytes_per_full_shard_at_proven_max_line": sample_full_shard_proven_upper,
+            "per_shard_byte_cap_proven":
+                sample_full_shard_proven_upper <= source["transcript_bytes_per_shard"],
             "typed_result_record_bytes_at_180_each_per_stage_model": typed_records_per_stage_model,
             "typed_result_record_bytes_at_180_each_both_stages_model": typed_records_total_model,
             "typed_result_record_size_is_a_model": True,
@@ -212,12 +270,16 @@ def campaign_model(eligible_rows, runtime_rows, pairs, source):
             "average_line_budget_at_full_record_cap_bytes":
                 source["transcript_bytes_per_shard"] // source["transcript_records_per_shard"],
             "actual_serialized_shard_sizes_available": False,
-            "per_shard_byte_cap_proven": False,
+            "proven_max_line_bytes": source["transcript_record_bytes_max"],
+            "bytes_per_full_shard_at_proven_max_line": transcript_full_shard_proven_upper,
+            "per_shard_byte_cap_proven":
+                transcript_full_shard_proven_upper <= source["transcript_bytes_per_shard"],
             "bytes_per_stage_if_every_line_hits_max": transcript_bytes_per_stage_upper,
             "bytes_both_stages_if_every_line_hits_max": total_transcript_bytes_upper,
             "actual_transcript_and_bundle_fit_proven": False,
             "upper_bound_is_not_observed_size": True,
         },
+        "store": store,
         "deadline": {
             "worker_budget_seconds": source["worker_budget_seconds"],
             "bounded_cleanup_reserve_seconds": source["cleanup_budget_seconds"],
@@ -254,6 +316,7 @@ def build_report(root):
         "tools/throughput/retirement_execution.h",
         "tools/throughput/retirement_samples.h",
         "tools/throughput/retirement_stats.h",
+        "tools/throughput/retirement_store.h",
     ]
     input_digests = verify_committed_inputs(root, source_paths)
     sys.path.insert(0, str(root / "tools"))
@@ -297,6 +360,8 @@ def build_report(root):
     exec_path = root / "tools/throughput/retirement_execution.h"
     samples_path = root / "tools/throughput/retirement_samples.h"
     stats_path = root / "tools/throughput/retirement_stats.h"
+    store_path = root / "tools/throughput/retirement_store.h"
+    campaign_path = root / "tools/throughput/retirement_campaign.h"
     worker_path = root / "tools/bench_service/worker_linux.h"
     broker_path = root / "tools/bench_service/systemd_broker.c"
     export_doc = (root / "tools/bench_service/EXPORT.md").read_text(encoding="utf-8")
@@ -321,12 +386,20 @@ def build_report(root):
         "warmups": source_define(exec_path, "TP_RETIREMENT_WARMUPS"),
         "campaign_stages": 2,
         "samples_per_stage_cap": source_product(samples_path, "TP_RETIREMENT_SAMPLE_TOTAL_RECORDS"),
+        "sample_partition_records": source_product(samples_path, "TP_RETIREMENT_SAMPLE_PARTITION_RECORDS"),
         "spool_record_bytes": source_define(samples_path, "TP_RETIREMENT_SAMPLE_RECORD_BYTES"),
         "transcript_records_per_shard": source_define(exec_path, "TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS"),
         "transcript_bytes_per_shard": source_product(exec_path, "TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES"),
         "transcript_shard_cap": source_define(exec_path, "TP_RETIREMENT_TRANSCRIPT_SHARDS"),
         "transcript_line_cap": source_define(exec_path, "TP_RETIREMENT_EXECUTION_LINE_CAP"),
+        "transcript_record_bytes_max": source_define(exec_path, "TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX"),
         "sample_line_cap": source_define(samples_path, "TP_RETIREMENT_SAMPLE_LINE_CAP"),
+        "sample_records_per_shard": source_product(samples_path, "TP_RETIREMENT_SAMPLE_SHARD_RECORDS"),
+        "sample_record_bytes_max": source_define(samples_path, "TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX"),
+        "store_files": source_define(store_path, "TP_RETIREMENT_STORE_FILES"),
+        "store_total_bytes": source_product(store_path, "TP_RETIREMENT_STORE_TOTAL_BYTES"),
+        "min_external_store_entries": source_define(
+            campaign_path, "TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES"),
         "typed_record_bytes_model": 180,
         "worker_budget_seconds": int(runtime_match.group(1)) // 1_000_000,
         "cleanup_budget_seconds": sum(int(value) for value in cleanup_match.groups()),
@@ -335,6 +408,8 @@ def build_report(root):
     }
     if source["campaign_stages"] != 2 or source["minimum_pairs"] % 2:
         raise ValueError("unexpected fixed campaign structure in source")
+    if source["sample_partition_records"] % source["sample_records_per_shard"]:
+        raise ValueError("numeric shards do not divide a full manifest partition")
 
     full_rows_min = object_rows + stage_rows
     max_eligible = supported_rows + stage_rows
@@ -435,6 +510,18 @@ def render_text(report):
             f"one_hour_mean_ns_if_every_non_invocation_cost_is_zero="
             f"{model['deadline']['mean_invocation_budget_ns_if_all_other_work_costs_zero']}"
         )
+        store = model["store"]
+        lines.append(
+            f"{label} STORE_FIT shard_files={store['shard_files_both_stages']} "
+            f"shard_file_cap={store['shard_file_cap_after_minimum_external_entries']} "
+            f"entries_fit={str(store['entries_fit']).lower()} "
+            f"worst_case_payload_bytes={store['worst_case_payload_bytes_both_stages']} "
+            f"store_total_bytes={store['store_total_bytes']} "
+            f"bytes_fit={str(store['bytes_fit']).lower()} "
+            f"verdict={'fits' if store['fits'] else 'rejected'} "
+            f"max_fitting_pairs={store['maximum_fitting_pairs_for_these_rows']} "
+            "external_entries_and_bytes=caller_reservation"
+        )
     samples = models["runtime_all_eligible"]["samples"]
     lines.append(
         f"sample_jsonl_line_cap={samples['jsonl_line_cap_bytes']} "
@@ -442,6 +529,10 @@ def render_text(report):
         f"full_shard_upper={samples['jsonl_bytes_per_full_shard_if_every_line_hits_cap']} "
         f"transcript_shard_byte_cap={models['runtime_all_eligible']['transcripts']['byte_cap_per_shard']} "
         f"full_sample_shard_fits_byte_cap={str(samples['jsonl_full_shard_fits_source_byte_cap']).lower()} "
+        f"sample_shard_record_cap={samples['record_cap_per_shard']} "
+        f"proven_max_line={samples['proven_max_line_bytes']} "
+        f"proven_full_shard={samples['bytes_per_full_shard_at_proven_max_line']} "
+        f"per_shard_fit={'PROVEN' if samples['per_shard_byte_cap_proven'] else 'UNPROVEN'} "
         "line_sizes=source_ceiling_not_observed spool=72B_per_numeric_record typed_record=180B_model_only"
     )
     transcript = models["runtime_all_eligible"]["transcripts"]
@@ -451,15 +542,19 @@ def render_text(report):
         f"line_cap={transcript['max_line_bytes']} "
         f"all_max_lines_per_full_shard={transcript['bytes_per_full_shard_if_every_line_hits_max']} "
         f"average_line_budget_at_full_record_cap={transcript['average_line_budget_at_full_record_cap_bytes']} "
-        "actual_shard_sizes=unavailable per_shard_fit=UNPROVEN total_128GiB_bundle_fit=UNPROVEN"
+        f"proven_max_line={transcript['proven_max_line_bytes']} "
+        f"proven_full_shard={transcript['bytes_per_full_shard_at_proven_max_line']} "
+        f"per_shard_fit={'PROVEN' if transcript['per_shard_byte_cap_proven'] else 'UNPROVEN'} "
+        "actual_shard_sizes=unavailable"
     )
     lines.extend([
         f"service_budget_seconds={report['policy_limits']['worker_budget_seconds']} "
         f"cleanup_reserve_seconds={report['policy_limits']['cleanup_budget_seconds']} "
         f"sealed_payload_ceiling_bytes={report['policy_limits']['bundle_payload_cap_bytes']} "
         f"six_copy_ceiling_reservation_bytes={models['runtime_all_eligible']['storage']['six_copy_ceiling_reservation_bytes']}",
-        "CONCLUSION modeled-only; build/correctness/quiet-phase/sealing/cleanup service costs lack current bounds; "
-        "no per-shard transcript-size proof, full one-hour fit, or production A/B authorization is established.",
+        "CONCLUSION modeled-only; shard payload bytes use the source-proven maximal line widths and exclude "
+        "the caller's external entries/bytes; build/correctness/quiet-phase/sealing/cleanup service costs lack "
+        "current bounds; no full one-hour fit or production A/B authorization is established.",
     ])
     return "\n".join(lines)
 
