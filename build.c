@@ -39064,15 +39064,19 @@ BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
     if (self_test)
     {
         /* The retirement recipe remains blocked. Register its private
-         * preparation, correctness, validator projection, store, and replay
-         * fixtures beside the ordinary service suite. */
+         * preparation, correctness, validator projection, store, reference
+         * issuer, and replay fixtures beside the ordinary service suite. The
+         * reference issuer fixture links its producer privately; the service
+         * binary keeps the unlinked fail-closed issuer. */
         String8 compiler = cmake_cc(arena, BUILD_COMPILER_CLANG);
         String8 sources[] = {S8("tools/bench_service/retirement_prepare_tests.c"),
                              S8("tools/bench_service/retirement_correctness_tests.c"),
                              S8("tools/bench_service/retirement_result_tests.c"),
-                             S8("tools/bench_service/retirement_validator_eligibility.c")};
+                             S8("tools/bench_service/retirement_validator_eligibility.c"),
+                             S8("tools/bench_service/retirement_reference_producer_tests.c")};
         String8 names[] = {S8("retirement-prepare-tests"), S8("retirement-correctness-tests"),
-                           S8("retirement-store-tests"), S8("retirement-validator-eligibility")};
+                           S8("retirement-store-tests"), S8("retirement-validator-eligibility"),
+                           S8("retirement-reference-producer-tests")};
         for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
         {
             String8 executable = string_format(arena, S8("build/bench-service-tools/{S8}{S8}"),

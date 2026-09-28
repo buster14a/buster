@@ -175,8 +175,14 @@ There is no production verified-build issuer or service caller yet. The issuer
 used by the miniature fixture is compiled only under
 `BQ_RETIREMENT_ORACLE_AUTHORITY_TEST_ONLY`; the blocked profile contains no
 admitted installed template or authenticated independent build receipts.
+`retirement_reference_producer.{h,c}` is the pinned independent reference build
+issuer. The adapter consults its one-use token only when a translation unit
+defines `BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED`; the service binary does not,
+so its compiled adapter keeps `issued = false` and launches no reference child.
 Existing private test registration compiles the adapter through the correctness
-test translation unit. The real-child fixtures prove bounded mechanics and
+test translation unit, and `retirement_reference_producer_tests.c` links the
+producer privately; `bench_service self-test` (and `--sanitize`) builds and runs
+both. The real-child fixtures prove bounded mechanics and
 mutation rejection, not a full-corpus oracle run, #509 proof or recipe admission.
 
 Before `row`, the service derives exact compiler and applicable runtime command

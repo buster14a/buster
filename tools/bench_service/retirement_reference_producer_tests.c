@@ -2,6 +2,12 @@
  * checks the installed-pin, held-source, live-token and oracle boundaries.
  * The host cc is a mechanical fixture, not production trusted-Clang evidence.
  */
+/* glibc declares realpath only for X/Open or default/misc feature sets; plain
+ * _POSIX_C_SOURCE hides it under -std=c11. Ubuntu GCC's default fortify
+ * wrapper masked the missing declaration while Clang rejected it. */
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
