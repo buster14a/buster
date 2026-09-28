@@ -3122,6 +3122,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_self_compatibility(UnitTestArgume
     return result;
 }
 
+// A function declared through a function typedef opens a function scope like
+// any prototype, but brings no `(` to the token census: `F f0, f1, f2;` is
+// three function scopes and no parenthesis. A unit of such declarations with
+// few parentheses outgrew the scope table and failed validation.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_typedef_scopes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    u32 generated_count = 64;
+    u64 source_capacity = BUSTER_KB(8);
+    char8* source_buffer = arena_allocate(temporary.arena, char8, source_capacity);
+    u64 source_length = 0;
+    // One file-scope declarator list, single file-scope declarations, and
+    // single block-scope declarations; only `F` and `main` bring a `(`.
+    c_test_append_source(source_buffer, source_capacity, &source_length, S8("typedef int F(void);\nF "));
+    for (u32 index = 0; index < generated_count; index += 1)
+    {
+        c_test_append_source(source_buffer, source_capacity, &source_length,
+                             string_format(temporary.arena, S8("{S8}list_{u32}"), index ? S8(", ") : S8(""), index));
+    }
+    c_test_append_source(source_buffer, source_capacity, &source_length, S8(";\n"));
+    for (u32 index = 0; index < generated_count; index += 1)
+    {
+        c_test_append_source(source_buffer, source_capacity, &source_length, string_format(temporary.arena, S8("F single_{u32};\n"), index));
+    }
+    c_test_append_source(source_buffer, source_capacity, &source_length, S8("int main(void)\n{\n"));
+    for (u32 index = 0; index < generated_count; index += 1)
+    {
+        c_test_append_source(source_buffer, source_capacity, &source_length, string_format(temporary.arena, S8("F local_{u32};\n"), index));
+    }
+    c_test_append_source(source_buffer, source_capacity, &source_length, S8("return 0;\n}\n"));
+    String8 sources[] = {
+        S8("typedef void Handler(int);\nHandler on_open, on_close, on_error;\nint main(void) { return 0; }\n"),
+        S8("typedef int F(void); F f0, f1, f2; int main(void) { return 0; }\n"),
+        S8("typedef void H(int);\nint main(void) { H a, b, c; return 0; }\n"),
+        {
+            .pointer = source_buffer,
+            .length = source_length,
+        },
+    };
+    u32 function_counts[] = {4, 4, 4, generated_count * 3 + 1};
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, sources[source_index], S8("function-typedef-scopes.c"), target_native, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.scope_count <= parse.scope_capacity);
+        u32 function_count = 0;
+        for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+        {
+            CDeclaration declaration = parse.declarations[declaration_index];
+            if (declaration.kind == C_DECLARATION_FUNCTION)
+            {
+                function_count += 1;
+                BUSTER_TEST(arguments, declaration.scope.value != 0 && declaration.scope.value < parse.scope_count);
+            }
+        }
+        BUSTER_TEST(arguments, function_count == function_counts[source_index]);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_growth(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -21534,6 +21601,68 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_sparse_finish(UnitTestArgum
     return result;
 }
 
+// Returns the parameters frontend SSA keeps, or UINT64_MAX when the source
+// does not lower to canonical IR that validates and prepares.
+BUSTER_GLOBAL_LOCAL u64 c_test_direct_ssa_retained_parameters(Arena* arena, u32 case_count, u32 shape)
+{
+    u64 capacity = (u64)case_count * 160 + 512;
+    char8* bytes = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length,
+        S8("long test(long* p,long n){long acc=n,mix=1,carry=2;while(p){switch(*p){"));
+    for (u32 index = 0; index < case_count; index += 1)
+    {
+        String8 body = shape == 0   ? S8("case {u32}:{{acc+=p[1]*{u32};mix^=acc;break;}}")
+                       : shape == 1 ? S8("case {u32}:acc+=p[1]*{u32};mix^=acc;break;")
+                       : shape == 2 ? S8("case {u32}:{{acc+=p[1]*{u32};mix^=acc;break;acc+=mix;}}")
+                                    : S8("case {u32}:{{acc+=p[1]*{u32};mix^=acc;}}");
+        c_test_append_source(bytes, capacity, &length, string_format(arena, body, index, index + 3));
+    }
+    c_test_append_source(bytes, capacity, &length, S8("default:return acc;}p=(long*)p[2];}return acc+mix+carry;}"));
+    CPreprocessResult tokens = c_preprocess(arena, (String8){bytes, length}, (CPreprocessOptions){0});
+    CParseResult parse = c_parse(arena, tokens);
+    u64 retained = UINT64_MAX;
+    if (!tokens.diagnostic_count && !parse.diagnostic_count)
+    {
+        CIRLowerResult direct = c_lower_to_ir(arena, S8("dead-continuation.c"), tokens, parse, target_native);
+        bool valid = direct.program && !direct.diagnostic_count &&
+                     ir_validate_canonical_module(direct.program, direct.program->modules).error == IR_VALIDATION_NONE &&
+                     ir_prepare_canonical_module(direct.program, direct.program->modules, false).error == IR_VALIDATION_NONE;
+        retained = valid ? direct.direct_ssa.parameters_created - direct.direct_ssa.parameters_removed : UINT64_MAX;
+    }
+    return retained;
+}
+
+// A braced case body that ends in `break` leaves the block after its closing
+// brace without a predecessor, and the next case label still receives an edge
+// from it. That edge never runs. Deciding a merge from it kept one block
+// parameter per case for every local read after the label, so a braced
+// interpreter carried a merge of its whole live state into every opcode and
+// the join after the switch. The braced form must now keep exactly as many
+// parameters as the unbraced one, independent of the case count, while a
+// genuine braced fallthrough still merges both of its paths.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_dead_continuation_edges(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    // Shapes: 0 braced `break`, 1 unbraced `break`, 2 braced `break` followed
+    // by dead code that reads the locals, 3 braced genuine fallthrough.
+    u64 small[4];
+    u64 large[4];
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(small); shape += 1)
+    {
+        small[shape] = c_test_direct_ssa_retained_parameters(temporary.arena, 4, shape);
+        large[shape] = c_test_direct_ssa_retained_parameters(temporary.arena, 64, shape);
+        BUSTER_TEST(arguments, small[shape] != UINT64_MAX && large[shape] != UINT64_MAX);
+    }
+    BUSTER_TEST(arguments, small[0] == small[1] && large[0] == large[1]);
+    BUSTER_TEST(arguments, large[0] == small[0] && large[2] == small[2]);
+    BUSTER_TEST(arguments, large[2] == large[0]);
+    BUSTER_TEST(arguments, large[3] > small[3] && large[3] > large[0]);
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -22112,6 +22241,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
         {S8("0b1111111111111111111111111111111111111111111111111111111111111111ULL"), UINT64_MAX},
         {S8("18'446'744'073'709'551'615ULL"), UINT64_MAX},
         {S8("0xFF'FFu"), 65535}, {S8("0'77"), 63}, {S8("0b10'10"), 10},
+        // Overflow depends on significant digits, not digit count, and runs
+        // cross every eight-byte boundary; a blocked conversion must agree.
+        {S8("000000000000000000000000000001"), 1},
+        {S8("0x0000000000000000FFFFFFFFFFFFFFFF"), UINT64_MAX},
+        {S8("18446744073709551614"), UINT64_MAX - 1},
+        {S8("12345678"), 12345678}, {S8("123456789"), 123456789},
+        {S8("0x12345678"), UINT64_C(0x12345678)}, {S8("0x123456789abcdef0"), UINT64_C(0x123456789abcdef0)},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(valid); index += 1)
     {
@@ -22145,6 +22281,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
         S8("0b10000000000000000000000000000000000000000000000000000000000000000ULL"),
         S8("99999999999999999999999999999999999999"),
         S8("'1"), S8("0x'1"), S8("1''0"), S8("1'"), S8("1'u"), S8("0b1'2"),
+        S8("99999999999999999999"), S8("0001844674407370955161"), S8("0x1'g"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
     {
@@ -23950,6 +24087,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_control_flow);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
+    BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_dead_continuation_edges);
     BUSTER_TEST_FIXTURE(arguments, c_test_for_declaration_scopes);
     BUSTER_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
@@ -24017,6 +24155,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_parse_storage_growth);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_fresh_binding_publication);
+    BUSTER_TEST_FIXTURE(arguments, c_test_function_typedef_scopes);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_growth);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_self_compatibility);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);

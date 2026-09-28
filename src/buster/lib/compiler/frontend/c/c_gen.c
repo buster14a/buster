@@ -5784,17 +5784,41 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                         ssa->statistics.parameters_removed += 1;
                         continue;
                     }
+                    // An edge out of an unreachable block never runs, so the
+                    // value it carries cannot reach the parameter: when every
+                    // edge that can run carries one value, the parameter is
+                    // that value. A compound statement that ends in `break`,
+                    // `goto` or `return` leaves its continuation block without
+                    // predecessors, and the next `case` or label still gets an
+                    // edge from it, whose value is an unfilled parameter of the
+                    // dead block. Counting it would keep a merge of every
+                    // variable read after that label -- and of everything
+                    // downstream -- alive. With no runnable edge carrying a
+                    // value, only the dead ones decide, as they always did.
                     u32 same = UINT32_MAX;
                     bool trivial = true;
+                    u32 dead_same = UINT32_MAX;
+                    bool dead_trivial = true;
                     for (IrIncoming* incoming = parameter->first_incoming; incoming && trivial; incoming = incoming->next)
                     {
                         IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_INCOMING_VISITS, 1);
                         u32 value = c_ir_ssa_root(replacements, incoming->value.value);
-                        if (value != parameter->value.value)
+                        bool runs = ssa->reachable[incoming->predecessor.value] != 0;
+                        if (value != parameter->value.value && runs)
                         {
                             trivial = same == UINT32_MAX || value == same;
                             same = value;
                         }
+                        else if (value != parameter->value.value)
+                        {
+                            dead_trivial = dead_same == UINT32_MAX || value == dead_same;
+                            dead_same = value;
+                        }
+                    }
+                    if (trivial && same == UINT32_MAX)
+                    {
+                        trivial = dead_trivial;
+                        same = dead_same;
                     }
                     if (trivial && same != UINT32_MAX)
                     {
@@ -6066,30 +6090,34 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
 
 BUSTER_C_INTERNAL void c_ir_mark_local_read_only(CIntegerIrBuilder* builder, CIntegerIrLocal* local)
 {
-    if (!local || local->place.value >= builder->function->value_count)
+    if (local && local->place.value < builder->function->value_count)
     {
-        return;
-    }
-    // A parameter written with an array type is adjusted to a pointer to the
-    // element type (C11 6.7.6.3p7), and a `const` in front of that element
-    // type qualifies what the pointer points to rather than the pointer
-    // itself. The walk in c_ir_c_type_is_read_only descends through an array
-    // into its element, which is right for an array object -- its elements
-    // are const, so it is not modifiable -- and wrong for the pointer a
-    // parameter became. musl's `utimensat` takes
-    // `const struct timespec times[2]` and assigns `times = 0`.
-    if (local->is_parameter && local->entity.value < builder->parse.entity_count)
-    {
-        CTypeId declared = builder->parse.entities[local->entity.value].type;
-        if (declared.value < builder->parse.type_count && builder->parse.types[declared.value].kind == C_TYPE_ARRAY &&
-            !builder->parse.types[declared.value].is_const)
+        // A parameter written with an array type is adjusted to a pointer to
+        // the element type (C11 6.7.6.3p7), and a `const` in front of that
+        // element type qualifies what the pointer points to rather than the
+        // pointer itself. The walk in c_ir_c_type_is_read_only descends
+        // through an array into its element, which is right for an array
+        // object -- its elements are const, so it is not modifiable -- and
+        // wrong for the pointer a parameter became. musl's `utimensat` takes
+        // `const struct timespec times[2]` and assigns `times = 0`. A `const`
+        // inside the brackets, `int a[const 2]`, is the one that does qualify
+        // the pointer.
+        bool adjusted_pointer = false;
+        bool const_pointer = false;
+        if (local->is_parameter && local->entity.value < builder->parse.entity_count)
         {
-            return;
+            CTypeId declared = builder->parse.entities[local->entity.value].type;
+            if (declared.value < builder->parse.type_count && builder->parse.types[declared.value].kind == C_TYPE_ARRAY)
+            {
+                CType array = builder->parse.types[declared.value];
+                adjusted_pointer = !array.is_const;
+                const_pointer = array.array_bound < builder->parse.array_bound_count && builder->parse.array_bounds[array.array_bound].is_const;
+            }
         }
-    }
-    if (c_ir_entity_is_read_only(builder, local->entity))
-    {
-        builder->function->values[local->place.value].is_read_only = true;
+        if (const_pointer || (!adjusted_pointer && c_ir_entity_is_read_only(builder, local->entity)))
+        {
+            builder->function->values[local->place.value].is_read_only = true;
+        }
     }
 }
 
