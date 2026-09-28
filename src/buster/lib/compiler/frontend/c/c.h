@@ -465,6 +465,7 @@ typedef enum CPreprocessDialect
     C_PREPROCESS_DIALECT_C11,
     C_PREPROCESS_DIALECT_C17,
     C_PREPROCESS_DIALECT_C23,
+    C_PREPROCESS_DIALECT_GNU89,
     C_PREPROCESS_DIALECT_COUNT,
 } CPreprocessDialect;
 
@@ -1001,6 +1002,9 @@ struct CEntity
     // Block-scope extern declarations are C_ENTITY_LOCAL for lexical lookup,
     // but they name external storage rather than an automatic local place.
     bool is_extern;
+    // The function's only definition so far is GNU inline-only, so the unit
+    // may still give its external definition.
+    bool definition_is_gnu_inline_only;
     CEntityId cleanup_function;
     u32 cleanup_attribute_token;
     u32 cleanup_attribute_end;
@@ -1076,6 +1080,9 @@ struct CDeclaration
     bool is_definition;
     bool is_variadic;
     bool is_constexpr;
+    // A GNU `extern inline` function definition: its body is only for
+    // inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
+    bool is_gnu_inline_only;
     // Set on the second and later declarators of a list: the specifiers were
     // already parsed for the first one, so base_type is supplied rather than
     // recomputed.
