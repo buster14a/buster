@@ -20,6 +20,16 @@
 #define TP_RETIREMENT_SAMPLE_PARTITION_RECORDS UINT64_C(16777216)
 #define TP_RETIREMENT_SAMPLE_TOTAL_RECORDS UINT64_C(39518208)
 #define TP_RETIREMENT_SAMPLE_PARTITION_BYTES UINT64_C(17179869184)
+/* Largest line tp_retirement_sample_record can emit, including LF; pinned by
+ * test_retirement_sample_max_record. write_shard rejects a wider line. */
+#define TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX 415u
+/* Numeric shards are independent of transcript shards. A whole number of
+ * them fills each full manifest partition. */
+#define TP_RETIREMENT_SAMPLE_SHARD_RECORDS UINT64_C(131072)
+BUSTER_CT_CHECK(TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX < TP_RETIREMENT_SAMPLE_LINE_CAP);
+BUSTER_CT_CHECK(TP_RETIREMENT_SAMPLE_PARTITION_RECORDS % TP_RETIREMENT_SAMPLE_SHARD_RECORDS == 0);
+BUSTER_CT_CHECK(TP_RETIREMENT_SAMPLE_SHARD_RECORDS * TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX <=
+                TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES);
 
 /* Values are serialized explicitly as little-endian u64s in a temporary spool,
  * never a second published evidence schema. Zero denotes an unwritten metric.
@@ -345,7 +355,7 @@ static int tp_retirement_samples_write_shard(TpRetirementSamples* samples, FILE*
     Sha256 hash;
     sha256_init(&hash);
     if (shard) *shard = (TpRetirementShard){0};
-    while (ok && samples->exported < samples->expected && next.records < TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS)
+    while (ok && samples->exported < samples->expected && next.records < TP_RETIREMENT_SAMPLE_SHARD_RECORDS)
     {
         unsigned pairs = samples->transcript->execution->pairs;
         unsigned dense = (unsigned)(samples->exported / (TP_RETIREMENT_ROUNDS * pairs));
@@ -378,7 +388,8 @@ static int tp_retirement_samples_write_shard(TpRetirementSamples* samples, FILE*
             ok = tp_retirement_samples_verify_row(samples, dense);
         size_t count = ok ? tp_retirement_sample_record(bytes, sizeof(bytes), row, round, pair,
             samples->rows[dense].metrics, values) : 0;
-        ok = ok && count && next.bytes <= TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES &&
+        ok = ok && count && count <= TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX &&
+            next.bytes <= TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES &&
             count <= TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES - next.bytes;
         if (ok) ok = fwrite(bytes, 1, count, stream) == count && !ferror(stream);
         if (ok)
@@ -422,15 +433,15 @@ static int tp_retirement_samples_finish(TpRetirementSamples* samples)
 static int tp_retirement_samples_manifest(TpRetirementSamples* samples, TpRetirementShard const* shards,
     unsigned shard_count, unsigned partition, FILE* stream, TpRetirementShard* descriptor)
 {
-    unsigned per_partition = (unsigned)(TP_RETIREMENT_SAMPLE_PARTITION_RECORDS / TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS);
+    unsigned per_partition = (unsigned)(TP_RETIREMENT_SAMPLE_PARTITION_RECORDS / TP_RETIREMENT_SAMPLE_SHARD_RECORDS);
     unsigned partitions = samples ? (unsigned)((samples->expected + TP_RETIREMENT_SAMPLE_PARTITION_RECORDS - 1) /
                                                TP_RETIREMENT_SAMPLE_PARTITION_RECORDS) : 0;
     int ok = samples && !samples->failed && samples->finished && samples->transcript &&
         !samples->transcript->failed && samples->transcript->finished &&
         tp_retirement_execution_complete(samples->transcript->execution) &&
         shards && shard_count == samples->shards &&
-        shard_count == (samples->expected + TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS - 1) /
-                       TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS && partition < partitions && stream && descriptor &&
+        shard_count == (samples->expected + TP_RETIREMENT_SAMPLE_SHARD_RECORDS - 1) /
+                       TP_RETIREMENT_SAMPLE_SHARD_RECORDS && partition < partitions && stream && descriptor &&
         stream != samples->spool && tp_retirement_sample_size(stream, 0) && tp_retirement_sample_seek(stream, 0, SEEK_SET);
     Sha256 descriptors_hash, hash;
     sha256_init(&descriptors_hash);
@@ -438,7 +449,7 @@ static int tp_retirement_samples_manifest(TpRetirementSamples* samples, TpRetire
     uint64_t remaining = samples ? samples->expected : 0, partition_bytes = 0;
     for (unsigned index = 0; ok && index < shard_count; ++index)
     {
-        uint64_t records = remaining < TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS ? remaining : TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS;
+        uint64_t records = remaining < TP_RETIREMENT_SAMPLE_SHARD_RECORDS ? remaining : TP_RETIREMENT_SAMPLE_SHARD_RECORDS;
         ok = shards[index].records == records && shards[index].bytes &&
             shards[index].bytes <= TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES && tp_retirement_digest(shards[index].sha256);
         if (ok)

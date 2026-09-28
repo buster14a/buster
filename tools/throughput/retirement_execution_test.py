@@ -213,12 +213,13 @@ class NativeExecutionTests(unittest.TestCase):
 
         # These are source-domain line upper bounds: each serializer fixture
         # sets all its independently bounded fields to their maximal width.
-        # A complete shard has at most 32768 records and the native cap is 64 MiB.
+        # A complete transcript shard has at most 65536 records and a numeric
+        # shard at most 131072; the native cap for either is 64 MiB.
         # Compiler warmups are one byte longer than the sampled record:
         # three null schedule fields outweigh their shorter sequence number.
-        transcript_upper = 902 * 32768
-        sample_upper = 415 * 32768
-        self.assertEqual((transcript_upper, sample_upper), (29556736, 13598720))
+        transcript_upper = 902 * 65536
+        sample_upper = 415 * 131072
+        self.assertEqual((transcript_upper, sample_upper), (59113472, 54394880))
         self.assertLessEqual(transcript_upper, 67108864)
         self.assertLessEqual(sample_upper, 67108864)
 
@@ -231,9 +232,9 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(receipt["execution_plan_sha256"], "a" * 64)
         self.assertEqual((receipt["job_id"], receipt["attempt"], receipt["boot_id"]),
                          ("job-1", 2, "boot-123"))
-        self.assertEqual(receipt["invocations"], 33184)
-        self.assertEqual([shard["records"] for shard in receipt["shards"]], [32768, 416])
-        records = binding._execution_trace_records(self.root, receipt["shards"], 33184)
+        self.assertEqual(receipt["invocations"], 66368)
+        self.assertEqual([shard["records"] for shard in receipt["shards"]], [65536, 832])
+        records = binding._execution_trace_records(self.root, receipt["shards"], 66368)
         try:
             for index, record in enumerate(records):
                 self.assertEqual(record["sequence"], index)
@@ -282,7 +283,7 @@ class NativeExecutionTests(unittest.TestCase):
         root = (self.root / "retirement-samples-boundary").resolve()
         rows = {row: {"row": row, "metrics": {"compiler_peak_rss": True,
             "compiler_wall_time": True, "generated_code_bytes": row % 3 != 2,
-            "generated_runtime": row % 3 != 1}} for row in range(274)}
+            "generated_runtime": row % 3 != 1}} for row in range(1093)}
         ordinal_map = {row: row for row in rows}
         digest, seen = hashlib.sha256(), [0]
 
@@ -290,9 +291,9 @@ class NativeExecutionTests(unittest.TestCase):
             binding._consume_result_record(value, ordinal_map, rows, 2, 60, 0, seen, digest)
 
         receipt = result_input.verify(root, "retirement-samples.manifest.json", record_consumer=consume)
-        self.assertEqual(receipt["records"], 32880)
-        self.assertEqual(seen[0], 32880)
-        self.assertEqual([shard["records"] for shard in receipt["shards"]], [32768, 112])
+        self.assertEqual(receipt["records"], 131160)
+        self.assertEqual(seen[0], 131160)
+        self.assertEqual([shard["records"] for shard in receipt["shards"]], [131072, 88])
         expected = hashlib.sha256()
         for shard in receipt["shards"]:
             with (root / shard["path"]).open("rb") as stream:
@@ -323,7 +324,7 @@ class NativeExecutionTests(unittest.TestCase):
                 number += 1
             counts.append(records)
         self.assertEqual(counts, [16777216, 16777216, 5963776])
-        self.assertEqual(number, 1206)
+        self.assertEqual(number, 302)
         self.assertEqual(sum(counts), 39518208)
 
     def test_full_invocation_replay_joins_native_observations(self):

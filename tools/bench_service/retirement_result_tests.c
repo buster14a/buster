@@ -173,7 +173,7 @@ static void fixture_queue_stop(QueueAuthorityFixture* queue)
 static int fixture_authority_ready(Fixture* fixture, TpRetirementReceiptAuthority* authority)
 {
     int valid = fixture_start(fixture, 4);
-    if (valid) valid = tp_retirement_store_plan(&fixture->store, 2, 3, 1024);
+    if (valid) valid = tp_retirement_store_plan(&fixture->store, 2, 2048, 3, 1024);
     if (valid) valid = fixture_publish(fixture, "shard.jsonl", "{}\n", 3, 3);
     if (valid) valid = fixture_receipt(fixture, "shard.jsonl", "{}\n", 3);
     if (valid) valid = tp_retirement_store_receipt_authority(&fixture->store, fixture->private_root,
@@ -301,7 +301,7 @@ static void test_publication_and_authority(void)
 {
     Fixture fixture;
     CHECK(fixture_start(&fixture, 4));
-    CHECK(tp_retirement_store_plan(&fixture.store, 2, 4, 1024));
+    CHECK(tp_retirement_store_plan(&fixture.store, 2, 2048, 4, 1024));
     CHECK(mkdirat(fixture.root, "evidence", 0700) == 0);
     CHECK(fixture_publish(&fixture, "evidence/invocations.jsonl", "first\n", 6, 6));
     CHECK(fixture_receipt(&fixture, "evidence/invocations.jsonl", "first\n", 6));
@@ -347,7 +347,7 @@ static void test_reopened_shard_inventory(void)
 {
     Fixture fixture;
     CHECK(fixture_start(&fixture, 4));
-    CHECK(tp_retirement_store_plan(&fixture.store, 2, 3, 1024));
+    CHECK(tp_retirement_store_plan(&fixture.store, 2, 2048, 3, 1024));
     CHECK(mkdirat(fixture.root, "evidence", 0700) == 0);
     CHECK(fixture_publish(&fixture, "evidence/shard.jsonl", "{}\n", 3, 3));
     CHECK(fixture_receipt(&fixture, "evidence/shard.jsonl", "{}\n", 3));
@@ -365,7 +365,7 @@ static void test_reopened_shard_inventory(void)
     fixture_stop(&fixture);
 
     CHECK(fixture_start(&fixture, 4));
-    CHECK(tp_retirement_store_plan(&fixture.store, 2, 3, 1024));
+    CHECK(tp_retirement_store_plan(&fixture.store, 2, 2048, 3, 1024));
     CHECK(mkdirat(fixture.root, "evidence", 0700) == 0);
     CHECK(fixture_publish(&fixture, "evidence/shard.jsonl", "{}\n", 3, 3));
     CHECK(fixture_receipt(&fixture, "evidence/shard.jsonl", "{}\n", 3));
@@ -384,7 +384,7 @@ static void test_reopened_shard_inventory(void)
     fixture_stop(&fixture);
 
     CHECK(fixture_start(&fixture, 4));
-    CHECK(tp_retirement_store_plan(&fixture.store, 2, 3, 1024));
+    CHECK(tp_retirement_store_plan(&fixture.store, 2, 2048, 3, 1024));
     CHECK(fixture_publish(&fixture, "shard.jsonl", "{}\n", 3, 3));
     CHECK(fixture_receipt(&fixture, "shard.jsonl", "{}\n", 3));
     CHECK(tp_retirement_store_receipt_authority(&fixture.store, fixture.private_root,
@@ -404,7 +404,7 @@ static void test_malformed_receipt_and_shard_inventory(void)
     Fixture fixture;
     TpRetirementReceiptAuthority authority;
     CHECK(fixture_start(&fixture, 4));
-    CHECK(tp_retirement_store_plan(&fixture.store, 2, 3, 1024));
+    CHECK(tp_retirement_store_plan(&fixture.store, 2, 2048, 3, 1024));
     CHECK(fixture_publish(&fixture, "shard.jsonl", "{}\n", 3, 3));
     CHECK(fixture_receipt_count(&fixture, "shard.jsonl", "{}\n", 3, 2));
     CHECK(!tp_retirement_store_receipt_authority(&fixture.store, fixture.private_root,
@@ -413,7 +413,7 @@ static void test_malformed_receipt_and_shard_inventory(void)
     fixture_stop(&fixture);
 
     CHECK(fixture_start(&fixture, 4));
-    CHECK(tp_retirement_store_plan(&fixture.store, 2, 3, 1024));
+    CHECK(tp_retirement_store_plan(&fixture.store, 2, 2048, 3, 1024));
     CHECK(fixture_publish(&fixture, "shard.jsonl", "{}\n", 3, 3));
     CHECK(fixture_receipt_count(&fixture, "missing.jsonl", "{}\n", 3, 1));
     CHECK(!tp_retirement_store_receipt_authority(&fixture.store, fixture.private_root,
@@ -422,7 +422,7 @@ static void test_malformed_receipt_and_shard_inventory(void)
     fixture_stop(&fixture);
 
     CHECK(fixture_start(&fixture, 4));
-    CHECK(tp_retirement_store_plan(&fixture.store, 2, 3, 1024));
+    CHECK(tp_retirement_store_plan(&fixture.store, 2, 2048, 3, 1024));
     CHECK(fixture_publish(&fixture, "shard.jsonl", "{}\n", 3, 3));
     CHECK(fixture_receipt(&fixture, "shard.jsonl", "{}\n", 3));
     CHECK(!tp_retirement_store_receipt_authority(&fixture.store, fixture.private_root,
@@ -435,7 +435,7 @@ static void test_private_authority_failure(void)
 {
     Fixture fixture;
     CHECK(fixture_start(&fixture, 4));
-    CHECK(tp_retirement_store_plan(&fixture.store, 2, 3, 1024));
+    CHECK(tp_retirement_store_plan(&fixture.store, 2, 2048, 3, 1024));
     CHECK(fixture_publish(&fixture, "shard.jsonl", "{}\n", 3, 3));
     CHECK(fixture_receipt(&fixture, "shard.jsonl", "{}\n", 3));
     TpRetirementReceiptAuthority authority;
@@ -445,7 +445,7 @@ static void test_private_authority_failure(void)
     fixture_stop(&fixture);
 
     CHECK(fixture_start(&fixture, 4));
-    CHECK(tp_retirement_store_plan(&fixture.store, 2, 3, 1024));
+    CHECK(tp_retirement_store_plan(&fixture.store, 2, 2048, 3, 1024));
     CHECK(fixture_publish(&fixture, "shard.jsonl", "{}\n", 3, 3));
     CHECK(fixture_receipt(&fixture, "shard.jsonl", "{}\n", 3));
     tp_retirement_store_test_sync_calls = 0;
@@ -459,7 +459,7 @@ static void test_private_authority_failure(void)
     fixture_stop(&fixture);
 
     CHECK(fixture_start(&fixture, 4));
-    CHECK(tp_retirement_store_plan(&fixture.store, 2, 3, 1024));
+    CHECK(tp_retirement_store_plan(&fixture.store, 2, 2048, 3, 1024));
     CHECK(fixture_publish(&fixture, "shard.jsonl", "{}\n", 3, 3));
     CHECK(fixture_receipt(&fixture, "shard.jsonl", "{}\n", 3));
     CHECK(tp_retirement_store_receipt_authority(&fixture.store, fixture.private_root,
@@ -602,12 +602,12 @@ static void test_inventory_bounds(void)
     fixture_stop(&fixture);
 
     CHECK(fixture_start(&fixture, 4));
-    CHECK(!tp_retirement_store_plan(&fixture.store, 4, 4093, 0));
+    CHECK(!tp_retirement_store_plan(&fixture.store, 4, 2048, 4093, 0));
     CHECK(fixture.store.failed);
     fixture_stop(&fixture);
 
     CHECK(fixture_start(&fixture, 4));
-    CHECK(tp_retirement_store_plan(&fixture.store, 2, 3, 0));
+    CHECK(tp_retirement_store_plan(&fixture.store, 2, 2048, 3, 0));
     CHECK(fixture_publish(&fixture, "shard", "a", 1, 1));
     CHECK(!tp_retirement_store_validate(&fixture.store) && fixture.store.failed);
     fixture_stop(&fixture);
@@ -617,6 +617,50 @@ static void test_inventory_bounds(void)
     CHECK(!fixture_publish(&fixture, "total", "a", 1, 1));
     CHECK(fixture.store.failed && fixture.store.count == 0);
     fixture_stop(&fixture);
+
+    /* The planned owned-byte budget is enforced at publish and validate. */
+    CHECK(fixture_start(&fixture, 4));
+    CHECK(tp_retirement_store_plan(&fixture.store, 2, 2, 3, 0));
+    CHECK(fixture_publish(&fixture, "first", "a", 1, 1));
+    CHECK(fixture_publish(&fixture, "second", "b", 1, 1));
+    CHECK(tp_retirement_store_validate(&fixture.store));
+    fixture_stop(&fixture);
+    CHECK(fixture_start(&fixture, 4));
+    CHECK(tp_retirement_store_plan(&fixture.store, 2, 2, 3, 0));
+    CHECK(fixture_publish(&fixture, "first", "a", 1, 1));
+    CHECK(!fixture_publish(&fixture, "second", "bc", 2, 2));
+    CHECK(fixture.store.failed && fixture.store.count == 1);
+    fixture_stop(&fixture);
+
+    /* Exact entry and byte ceilings for a full-capacity workspace: 4093 owned
+     * files plus 3 external entries fill all 4096 entries; one more owned
+     * file, one more planned byte or a zero byte budget fails closed. */
+    TpRetirementStoredFile* files = calloc(TP_RETIREMENT_STORE_FILES, sizeof(*files));
+    CHECK(files != NULL);
+    struct
+    {
+        unsigned owned_files;
+        uint64_t owned_bytes;
+        int accepted;
+    } const plans[] = {
+        {4093, TP_RETIREMENT_STORE_TOTAL_BYTES - 1024, 1},
+        {4094, 2048, 0},
+        {4093, TP_RETIREMENT_STORE_TOTAL_BYTES - 1023, 0},
+        {4093, 0, 0},
+    };
+    for (unsigned i = 0; files && i < sizeof(plans) / sizeof(plans[0]); ++i)
+    {
+        CHECK(fixture_start(&fixture, 4));
+        tp_retirement_store_close(&fixture.store);
+        CHECK(tp_retirement_store_open(&fixture.store, fixture.root, files, TP_RETIREMENT_STORE_FILES));
+        int planned = tp_retirement_store_plan(&fixture.store, plans[i].owned_files,
+                                               plans[i].owned_bytes, 3, 1024);
+        CHECK(planned == plans[i].accepted && fixture.store.failed == !plans[i].accepted);
+        CHECK(fixture.store.planned == plans[i].accepted &&
+              fixture.store.planned_files == (plans[i].accepted ? plans[i].owned_files : 0));
+        fixture_stop(&fixture);
+    }
+    free(files);
 }
 
 static int fixture_publish_file(Fixture* fixture, char const* source_root,
@@ -663,7 +707,7 @@ static void test_actual_encoder_fixture(char const* source_root)
 {
     Fixture fixture;
     CHECK(fixture_start(&fixture, 4));
-    CHECK(tp_retirement_store_plan(&fixture.store, 3, 3, 1024));
+    CHECK(tp_retirement_store_plan(&fixture.store, 3, 3 * TP_RETIREMENT_STORE_FILE_BYTES, 3, 1024));
     CHECK(fixture_publish_file(&fixture, source_root, "retirement-shard-0.jsonl",
                                "retirement-shard-0.jsonl"));
     CHECK(fixture_publish_file(&fixture, source_root, "retirement-shard-1.jsonl",

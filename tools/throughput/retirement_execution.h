@@ -376,9 +376,21 @@ static size_t tp_retirement_execution_record(char* bytes, size_t capacity,
     return result;
 }
 
-#define TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS 32768u
-#define TP_RETIREMENT_TRANSCRIPT_SHARDS 4096u
+/* Largest line tp_retirement_execution_record can emit for any legal
+ * schedule/token/digest domain, including LF. tests.c pins the maximal
+ * compiler warmup (902 bytes) and sampled record (901 bytes); the proof
+ * assumes at most nine sequence digits, which the total record cap below
+ * preserves. Append rejects a wider line rather than trusting the proof. */
+#define TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX 902u
+#define TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS 65536u
+#define TP_RETIREMENT_TRANSCRIPT_SHARDS 2048u
 #define TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES UINT64_C(67108864)
+/* 2048 * 65536 == 134217728 records: sequences stay below 2^27. */
+BUSTER_CT_CHECK((uint64_t)TP_RETIREMENT_TRANSCRIPT_SHARDS * TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS <=
+                UINT64_C(134217728));
+BUSTER_CT_CHECK(TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX < TP_RETIREMENT_EXECUTION_LINE_CAP);
+BUSTER_CT_CHECK((uint64_t)TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS * TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX <=
+                TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES);
 #define TP_RETIREMENT_RECEIPT_BYTES UINT64_C(1048576)
 #define TP_RETIREMENT_RECEIPT_PATH_BYTES 192u
 
@@ -466,7 +478,8 @@ static int tp_retirement_transcript_append(TpRetirementTranscript* transcript,
         tp_retirement_execution_peek(transcript->execution, &invocation) == TP_RETIREMENT_NEXT_READY;
     size_t count = ok ? tp_retirement_execution_record(bytes, sizeof(bytes), &invocation, observed,
         process, output, transcript->job, transcript->attempt, transcript->boot, transcript->cpu) : 0;
-    ok = ok && count && transcript->bytes <= TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES &&
+    ok = ok && count && count <= TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX &&
+        transcript->bytes <= TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES &&
         count <= TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES - transcript->bytes;
     if (ok) ok = fwrite(bytes, 1, count, transcript->stream) == count && !ferror(transcript->stream);
     if (ok)

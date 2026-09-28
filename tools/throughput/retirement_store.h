@@ -17,6 +17,9 @@
 #define TP_RETIREMENT_STORE_PATH_BYTES 192u
 #define TP_RETIREMENT_STORE_FILE_BYTES UINT64_C(67108864)
 #define TP_RETIREMENT_STORE_TOTAL_BYTES (UINT64_C(128) * 1024 * 1024 * 1024)
+/* Every receipt shard but the last holds exactly this many records. It must
+ * equal TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS (checked in retirement_campaign.h). */
+#define TP_RETIREMENT_STORE_RECEIPT_SHARD_RECORDS 65536u
 #define TP_RETIREMENT_EXECUTION_RECEIPT_PATH "retirement-execution-receipt.json"
 
 typedef struct TpRetirementStoredFile
@@ -38,7 +41,7 @@ typedef struct TpRetirementStore
     struct stat root_identity;
     TpRetirementStoredFile* files;
     unsigned count, capacity, planned_files, external_entries;
-    uint64_t total, external_bytes;
+    uint64_t total, planned_bytes, external_bytes;
     int active, failed, authority_issued, planned;
 } TpRetirementStore;
 
@@ -64,9 +67,12 @@ typedef struct TpRetirementReceiptAuthority
 int tp_retirement_store_open(TpRetirementStore* store, int root,
                              TpRetirementStoredFile* workspace, unsigned capacity);
 /* Account for every service-owned payload and all directory/control entries
- * the bundle validator will inventory outside this store. The caller supplies
- * a conservative byte reservation for those external files. */
-int tp_retirement_store_plan(TpRetirementStore* store, unsigned owned_files,
+ * the bundle validator will inventory outside this store. owned_bytes is the
+ * checked byte budget for the owned files; publish rejects a file that would
+ * exceed it. The caller supplies a conservative byte reservation for the
+ * external files; owned plus external entries and bytes must each fit the
+ * store ceilings (see tp_retirement_campaign_store_preflight). */
+int tp_retirement_store_plan(TpRetirementStore* store, unsigned owned_files, uint64_t owned_bytes,
                              unsigned external_entries, uint64_t external_bytes);
 int tp_retirement_store_begin(TpRetirementStore* store, char const* path,
                               uint64_t limit, TpRetirementPending* pending);

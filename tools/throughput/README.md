@@ -747,8 +747,10 @@ python3 -W error::ResourceWarning tools/throughput/retirement_execution_test.py 
 ```
 
 `TpRetirementTranscript` couples a successful checked write to advancement of
-that cursor. Shards contain 32,768 records, except for the last shard, and are
-bounded to 64 MiB each and 4,096 shards overall. A shortened intermediate shard,
+that cursor. Shards contain 65,536 records, except for the last shard, and are
+bounded to 64 MiB each and 2,048 shards overall; the 134,217,728-record total
+keeps the nine-digit sequence bound behind the 902-byte maximal line, and a
+wider line is rejected. A shortened intermediate shard,
 overlapping interval, duplicate observation, write/flush error, or premature
 completion permanently invalidates the transcript. A descriptor is returned
 only after the shard's stream flush succeeds. The caller owns file creation,
@@ -891,8 +893,10 @@ same row, prevents successful completion. RAM is proportional to rows, while
 the bounded spool is proportional to rows times rounds times pairs.
 
 Export begins only after the complete invocation transcript finishes. Each
-numeric shard contains 32,768 canonical existing result-input records, except
-for the final short shard. Optional metrics are omitted exactly when
+numeric shard contains 131,072 canonical existing result-input records
+(`TP_RETIREMENT_SAMPLE_SHARD_RECORDS`, independent of the transcript shard
+size), except for the final short shard; 128 shards fill each full manifest
+partition, and a line wider than the proven 415-byte maximum is rejected. Optional metrics are omitted exactly when
 inapplicable; unavailable mandatory observations never become zero. Descriptors
 are emitted only after a successful flush, and an ordered descriptor digest
 binds the complete shard inventory. The writer emits full-cap 16,777,216-record
@@ -905,7 +909,7 @@ The native tests write both transcript and numeric sample fixtures. The Python
 replay imports the C-written numeric records through the production sample
 consumer, joins them to every authenticated invocation, and verifies the
 manifest through the production no-follow result reader on POSIX. A real
-32,768-record boundary, deterministic second collection, copied applicability,
+131,072-record boundary, deterministic second collection, copied applicability,
 partial collection, bypass, stale state, missing metrics, spool mutation,
 truncation, nonempty destinations, descriptor replacement and buffered disk-full
 failures are covered. The commands above run this coverage in the existing

@@ -171,17 +171,20 @@ int tp_retirement_store_open(TpRetirementStore* store, int root,
     return valid;
 }
 
-int tp_retirement_store_plan(TpRetirementStore* store, unsigned owned_files,
+int tp_retirement_store_plan(TpRetirementStore* store, unsigned owned_files, uint64_t owned_bytes,
                              unsigned external_entries, uint64_t external_bytes)
 {
     int valid = store && !store->failed && !store->planned && !store->active &&
                 !store->count && owned_files && owned_files <= store->capacity &&
+                owned_files <= TP_RETIREMENT_STORE_FILES &&
                 external_entries >= 3 && external_entries <= TP_RETIREMENT_STORE_FILES - owned_files &&
-                external_bytes <= TP_RETIREMENT_STORE_TOTAL_BYTES &&
+                owned_bytes && owned_bytes <= TP_RETIREMENT_STORE_TOTAL_BYTES &&
+                external_bytes <= TP_RETIREMENT_STORE_TOTAL_BYTES - owned_bytes &&
                 tp_retirement_store_root(store);
     if (valid)
     {
         store->planned_files = owned_files;
+        store->planned_bytes = owned_bytes;
         store->external_entries = external_entries;
         store->external_bytes = external_bytes;
         store->planned = 1;
@@ -307,7 +310,9 @@ int tp_retirement_store_publish(TpRetirementStore* store, TpRetirementPending* p
                 tp_retirement_store_digest(sha256) && bytes <= pending->limit &&
                 store->external_bytes <= TP_RETIREMENT_STORE_TOTAL_BYTES &&
                 store->total <= TP_RETIREMENT_STORE_TOTAL_BYTES - store->external_bytes &&
-                bytes <= TP_RETIREMENT_STORE_TOTAL_BYTES - store->external_bytes - store->total;
+                bytes <= TP_RETIREMENT_STORE_TOTAL_BYTES - store->external_bytes - store->total &&
+                (!store->planned || (store->total <= store->planned_bytes &&
+                                     bytes <= store->planned_bytes - store->total));
     char leaf[193] = {0};
     struct stat parent_info = {0}, temporary = {0}, named = {0};
     int fd = pending && pending->stream ? fileno(pending->stream) : -1;
@@ -391,6 +396,7 @@ int tp_retirement_store_validate(TpRetirementStore* store)
     }
     valid = valid && total == store->total &&
             (!store->planned || (store->count == store->planned_files &&
+             total <= store->planned_bytes &&
              store->external_entries <= TP_RETIREMENT_STORE_FILES - store->count &&
              store->external_bytes <= TP_RETIREMENT_STORE_TOTAL_BYTES - total));
     if (store && !valid) store->failed = 1;
@@ -534,7 +540,7 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_receipt_validate(TpRetirementStore* 
     valid = valid && length > 0 && (size_t)length < sizeof(expected) &&
             tp_retirement_store_receipt_literal(bytes, used, &offset, expected);
     unsigned shards = 0;
-    uint64_t previous_records = 32768;
+    uint64_t previous_records = TP_RETIREMENT_STORE_RECEIPT_SHARD_RECORDS;
     char previous[TP_RETIREMENT_STORE_PATH_BYTES + 1] = {0};
     while (valid && offset < used && bytes[offset] == '{' &&
            shards < (reopen_shards ? store->capacity - 1 : store->count))
@@ -547,7 +553,8 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_receipt_validate(TpRetirementStore* 
                 tp_retirement_store_receipt_text(bytes, used, &offset, path, sizeof(path)) &&
                 tp_retirement_store_path(path) &&
                 strcmp(path, TP_RETIREMENT_EXECUTION_RECEIPT_PATH) &&
-                (!shards || (strcmp(previous, path) < 0 && previous_records == 32768)) &&
+                (!shards || (strcmp(previous, path) < 0 &&
+                             previous_records == TP_RETIREMENT_STORE_RECEIPT_SHARD_RECORDS)) &&
                 tp_retirement_store_receipt_literal(bytes, used, &offset, ",\"records\":") &&
                 tp_retirement_store_receipt_number(bytes, used, &offset, &shard_records) &&
                 tp_retirement_store_receipt_literal(bytes, used, &offset, ",\"sha256\":\"") &&
@@ -555,7 +562,7 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_receipt_validate(TpRetirementStore* 
                 tp_retirement_store_digest(shard_digest) &&
                 tp_retirement_store_receipt_literal(bytes, used, &offset, "}") &&
                 shard_bytes && shard_bytes <= TP_RETIREMENT_STORE_FILE_BYTES &&
-                shard_records && shard_records <= 32768 &&
+                shard_records && shard_records <= TP_RETIREMENT_STORE_RECEIPT_SHARD_RECORDS &&
                 records <= invocations && shard_records <= invocations - records;
         if (valid && reopen_shards)
         {
