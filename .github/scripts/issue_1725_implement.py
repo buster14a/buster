@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+from pathlib import Path
+import re
+
+
+def replace_one(text: str, pattern: str, replacement: str, label: str) -> str:
+    result, count = re.subn(pattern, replacement, text, count=1, flags=re.DOTALL)
+    if count != 1:
+        raise SystemExit(f"expected one {label}, replaced {count}")
+    return result
+
+
+gen_path = Path("src/buster/lib/compiler/frontend/c/c_gen.c")
+gen = gen_path.read_text()
+marker = "BUSTER_C_INTERNAL String8 c_ir_scalar_type_name(CTypeKind kind)\n"
+helper = r'''BUSTER_C_INTERNAL String8 c_ir_diagnostic_type_name(Arena* arena, IrType const* type)
+{
+    if (!type)
+    {
+        return S8("unresolved type");
+    }
+    if (type->name.length)
+    {
+        return type->name;
+    }
+    switch (type->kind)
+    {
+    case IR_TYPE_VOID: return S8("void");
+    case IR_TYPE_BOOLEAN: return S8("boolean");
+    case IR_TYPE_INTEGER:
+    {
+        return type->is_signed ? string_format(arena, S8("{u32}-bit signed integer"), type->bit_width)
+                               : string_format(arena, S8("{u32}-bit unsigned integer"), type->bit_width);
+    }
+    case IR_TYPE_FLOAT:
+    {
+        return type->float_format == IR_FLOAT_FORMAT_BFLOAT16
+                   ? S8("bfloat16")
+                   : string_format(arena, S8("{u32}-bit floating-point"), type->bit_width);
+    }
+    case IR_TYPE_VA_LIST: return S8("variadic argument list");
+    case IR_TYPE_POINTER: return S8("pointer");
+    case IR_TYPE_SLICE: return S8("slice");
+    case IR_TYPE_ARRAY: return string_format(arena, S8("{u64}-element array"), type->element_count);
+    case IR_TYPE_VECTOR: return string_format(arena, S8("{u64}-element vector"), type->element_count);
+    case IR_TYPE_FUNCTION: return S8("function");
+    case IR_TYPE_RANGE: return S8("range");
+    case IR_TYPE_STRUCT: return S8("structure");
+    case IR_TYPE_UNION: return S8("union");
+    case IR_TYPE_ENUM: return S8("enumeration");
+    case IR_TYPE_COUNT: break;
+    }
+    return S8("unknown type");
+}
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_C_SHARED String8 c_test_ir_diagnostic_type_name(Arena* arena, IrType const* type)
+{
+    return c_ir_diagnostic_type_name(arena, type);
+}
+#endif
+
+'''
+if "c_ir_diagnostic_type_name(" in gen:
+    raise SystemExit("diagnostic type renderer already exists")
+if gen.count(marker) != 1:
+    raise SystemExit(f"expected one scalar type marker, found {gen.count(marker)}")
+gen = gen.replace(marker, helper + marker, 1)
+
+gen = replace_one(
+    gen,
+    r'''builder->failure_message\s*=\s*string_format\(builder->arena,\s*S8\("cannot convert IR type \{u32\} \(kind \{u32\}\) to IR type \{u32\} \(kind \{u32\}\)"\),\s*source_type\.value,\s*\(u32\)source_value->kind,\s*target_type\.value,\s*\(u32\)target_value->kind\);''',
+    '''builder->failure_message =
+        string_format(builder->arena, S8("cannot convert type '{S8}' to type '{S8}'"),
+                      c_ir_diagnostic_type_name(builder->arena, source_value),
+                      c_ir_diagnostic_type_name(builder->arena, target_value));''',
+    "cast diagnostic",
+)
+gen = replace_one(
+    gen,
+    r'''builder->failure_message\s*=\s*string_format\(builder->arena,\s*S8\("cannot zero-initialize unresolved IR type \{u32\}"\),\s*task\.type\.value\);''',
+    '''builder->failure_message = S8("cannot zero-initialize an unresolved type");''',
+    "unresolved zero initializer diagnostic",
+)
+gen = replace_one(
+    gen,
+    r'''builder->failure_message\s*=\s*string_format\(builder->arena,\s*S8\("cannot zero-initialize IR type kind \{u32\}"\),\s*\(u32\)type->kind\);''',
+    '''builder->failure_message = string_format(builder->arena, S8("cannot zero-initialize type '{S8}'"),
+                                                 c_ir_diagnostic_type_name(builder->arena, type));''',
+    "unsupported zero initializer diagnostic",
+)
+gen = replace_one(
+    gen,
+    r'''builder->failure_message\s*=\s*string_format\(\s*builder->arena,\s*S8\("conditional expression predicted incompatible branch types \{u32\} \(kind \{u32\}\) and \{u32\} \(kind \{u32\}\)"\),\s*true_type\.value,\s*true_type_value \? \(u32\)true_type_value->kind : UINT32_MAX,\s*false_type\.value,\s*false_type_value \? \(u32\)false_type_value->kind : UINT32_MAX\);''',
+    '''builder->failure_message =
+        string_format(builder->arena, S8("conditional expression has incompatible branch types '{S8}' and '{S8}'"),
+                      c_ir_diagnostic_type_name(builder->arena, true_type_value),
+                      c_ir_diagnostic_type_name(builder->arena, false_type_value));''',
+    "conditional diagnostic",
+)
+gen = replace_one(
+    gen,
+    r'''\.message\s*=\s*string_format\(arena,\s*S8\("C IR lowering cannot resolve definition '\{S8\}' with C type \{u32\} \(kind \{u32\}\) and IR type \{u32\}"\),\s*entity->name,\s*entity->type\.value,\s*entity->type\.value < parse\.type_count \? \(u32\)parse\.types\[entity->type\.value\]\.kind : UINT32_MAX,\s*type\.value\),''',
+    '''.message = string_format(arena, S8("cannot lower definition '{S8}' because type '{S8}' has no resolved layout"), entity->name,
+                                 c_ir_diagnostic_type_name(arena, type_value)),''',
+    "definition diagnostic",
+)
+for spelling in (
+    "cannot convert IR type {u32}",
+    "cannot zero-initialize unresolved IR type {u32}",
+    "cannot zero-initialize IR type kind {u32}",
+    "conditional expression predicted incompatible branch types {u32}",
+    "C IR lowering cannot resolve definition '{S8}' with C type {u32}",
+):
+    if spelling in gen:
+        raise SystemExit(f"raw diagnostic remains: {spelling}")
+gen_path.write_text(gen)
+
+test_path = Path("src/buster/tests/compiler/diagnostic_test.c")
+test = test_path.read_text()
+include_marker = "#include <buster/lib/os_internal.h>\n\n"
+declaration = "BUSTER_F_DECL String8 c_test_ir_diagnostic_type_name(Arena* arena, IrType const* type);\n\n"
+if test.count(include_marker) != 1:
+    raise SystemExit(f"expected one include marker, found {test.count(include_marker)}")
+test = test.replace(include_marker, include_marker + declaration, 1)
+
+function_marker = '''UnitTestResult compiler_diagnostic_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+'''
+coverage = r'''UnitTestResult compiler_diagnostic_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    IrType signed_integer = {.kind = IR_TYPE_INTEGER, .bit_width = 32, .is_signed = true};
+    IrType unsigned_integer = {.kind = IR_TYPE_INTEGER, .bit_width = 64};
+    IrType floating = {.kind = IR_TYPE_FLOAT, .bit_width = 80};
+    IrType array = {.kind = IR_TYPE_ARRAY, .element_count = 7};
+    IrType named_structure = {.name = S8("struct widget"), .kind = IR_TYPE_STRUCT};
+    BUSTER_STRING_TEST(arguments, c_test_ir_diagnostic_type_name(arguments->arena, 0), S8("unresolved type"));
+    BUSTER_STRING_TEST(arguments, c_test_ir_diagnostic_type_name(arguments->arena, &signed_integer), S8("32-bit signed integer"));
+    BUSTER_STRING_TEST(arguments, c_test_ir_diagnostic_type_name(arguments->arena, &unsigned_integer), S8("64-bit unsigned integer"));
+    BUSTER_STRING_TEST(arguments, c_test_ir_diagnostic_type_name(arguments->arena, &floating), S8("80-bit floating-point"));
+    BUSTER_STRING_TEST(arguments, c_test_ir_diagnostic_type_name(arguments->arena, &array), S8("7-element array"));
+    BUSTER_STRING_TEST(arguments, c_test_ir_diagnostic_type_name(arguments->arena, &named_structure), S8("struct widget"));
+
+    // #1725 was reported through this expression. Its lowering has since been
+    // repaired, so preserve that success while the direct renderer assertions
+    // above cover diagnostics reachable only after internal recovery failures.
+    String8 comma_path = buster_test_temporary_path(arguments->arena, S8("diagnostic-comma-expression"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(comma_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return (1, 2); }\n"))));
+    CompilerDriverResult comma = compiler_diagnostic_test_compile(arguments->arena, comma_path, false);
+    BUSTER_TEST_RAW(arguments, comma.error == COMPILER_DRIVER_ERROR_NONE, comma.diagnostic);
+    BUSTER_TEST(arguments, comma.diagnostic_count == 0);
+    BUSTER_TEST(arguments, os_file_delete(comma_path));
+'''
+if test.count(function_marker) != 1:
+    raise SystemExit(f"expected one diagnostic test marker, found {test.count(function_marker)}")
+test_path.write_text(test.replace(function_marker, coverage, 1))
