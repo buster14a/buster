@@ -85,10 +85,12 @@ publication (below) check their output.
   `ir_block_insert_instruction_after`. `c_ir_finish_construction` runs after SSA
   finish: a refused row or an open block rejects the function with a structured
   diagnostic, so the module is never certified.
-- **Tail after a `noreturn` operand.** A noreturn call or
-  `__builtin_unreachable` inside a larger expression closes its block with an
-  `UNREACHABLE` marker, and the rest of the expression still emits rows. Before
-  this protocol those rows were committed after the terminator on the certified
+- **Tail after a `noreturn` operand.** A `__builtin_unreachable()` inside a
+  larger expression closes its block with an `UNREACHABLE` marker, and the rest
+  of the expression still emits rows (#1748). A noreturn call keeps its block
+  open until its consumer or its expression statement is done (#1682, #1743),
+  so it closes early only where that rule still ends the block at once. Before
+  this protocol such rows were committed after the terminator on the certified
   default path. `c_ir_reopen_unreachable_marker` retracts the marker while it is
   still the newest row, so the tail follows the call in the same block, where
   its operands still dominate it. A disconnected continuation block would

@@ -637,8 +637,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_protocol_definition_tests(UnitTestArgument
 // Expression tails after a noreturn operand. Before the protocol the frontend
 // committed these rows behind UNREACHABLE (and left the block ending in them)
 // while certifying the module; `-fverify-codegen` rejected them with
-// INSTRUCTION_AFTER_TERMINATOR. The builder now retracts the edge-less marker
-// once per such function and the tail follows the call in the same block, so
+// INSTRUCTION_AFTER_TERMINATOR. A noreturn call now keeps its block open until
+// its consumer or its expression statement is done (#1682, #1743), so the
+// die() rows reopen nothing; a __builtin_unreachable() operand still closes
+// the block at once (#1748), and the builder retracts that edge-less marker
+// once per such function so the tail follows it in the same block. Either way
 // the certified output validates, publishes, and passes selected-MIR
 // verification (definitions still dominate their uses) in both frontend forms
 // and every allocator. Functions without such a tail reopen nothing.
@@ -653,7 +656,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_protocol_frontend_tests(UnitTestArguments*
                         "int after_argument(int x) { sink((die(), x)); return x; }\n"
                         "int after_switch(void) { switch (die_value()) { case 1: return 1; default: return 2; } }\n"
                         "int after_initializer(int x) { int y = (die(), x + 1); return y; }\n"
-                        "int after_compound(int x) { take((die(), (struct pair){x})); return 0; }\n");
+                        "int after_compound(int x) { take((die(), (struct pair){x})); return 0; }\n"
+                        "int builtin_argument(int x) { sink((__builtin_unreachable(), x)); return x; }\n"
+                        "int builtin_initializer(int x) { int y = (__builtin_unreachable(), x + 1); return y; }\n"
+                        "int builtin_assignment(int x) { x = (__builtin_unreachable(), 0); return x; }\n");
     String8 control = S8("__attribute__((noreturn)) void die(void);\n"
                          "int control(int x) { if (x) die(); return x + 1; }\n"
                          "int statement(int x) { die(); return x; }\n");
@@ -677,7 +683,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_protocol_frontend_tests(UnitTestArguments*
 #if BUSTER_BENCH_ALLOCATIONS
                 IrConstructionCounters after = ir_construction_counters();
                 u64 reopened = after.values[IR_CONSTRUCTION_COMMIT_REOPENED_MARKERS] - before.values[IR_CONSTRUCTION_COMMIT_REOPENED_MARKERS];
-                BUSTER_TEST(arguments, tails ? reopened == 4 : reopened == 0);
+                BUSTER_TEST(arguments, tails ? reopened == 3 : reopened == 0);
                 BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_COMMIT_REFUSALS] == before.values[IR_CONSTRUCTION_COMMIT_REFUSALS]);
 #endif
                 BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified);

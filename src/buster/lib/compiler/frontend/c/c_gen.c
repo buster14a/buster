@@ -4351,13 +4351,16 @@ BUSTER_C_INTERNAL void c_ir_construction_refused(CIntegerIrBuilder* builder, IrC
 
 BUSTER_C_INTERNAL void c_ir_ssa_follow_retracted_row(CIntegerIrBuilder* builder, IrInstructionId row, IrInstructionId previous);
 
-// A noreturn call or __builtin_unreachable inside a larger expression closes
-// its block with UNREACHABLE (c_ir_end_control_flow_after_call), yet the rest
-// of the expression still emits rows: `v((die(), x))`, `switch (die())`,
-// `int y = (die(), x + 1);`. Those rows never run, and the marker is the one
-// row that would make them invalid -- behind a terminator. UNREACHABLE has no
-// edge, so retracting it while it is still the newest row reopens the block
-// with the call as its tail; the tail rows then follow the call, where the
+// A __builtin_unreachable() inside a larger expression closes its block with
+// UNREACHABLE, yet the rest of the expression still emits rows:
+// `v((__builtin_unreachable(), x))`, `int y = (__builtin_unreachable(), 1);`
+// (#1748). A noreturn call keeps its block open until its consumer or its
+// expression statement is done (c_ir_end_control_flow_after_call), so it
+// reaches this path only where that rule still closes the block at once.
+// Those rows never run, and the marker is the one row that would make them
+// invalid -- behind a terminator. UNREACHABLE has no edge, so retracting it
+// while it is still the newest row reopens the block with the preceding row
+// as its tail; the tail rows then follow it, where the
 // values they use still dominate them (a disconnected block would not). Only
 // such tails reopen a block: statements after a closed block are skipped as
 // dead code before they emit anything, so a function without them lowers
