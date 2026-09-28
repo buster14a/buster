@@ -5,6 +5,11 @@ long add(long a, long b)
     return a + b;
 }
 
+long sub(long a, long b)
+{
+    return a - b;
+}
+
 static int prototyped(void)
 {
     long add(long, long);
@@ -23,7 +28,19 @@ static int unreferenced(void)
     return 0;
 }
 
+static int list(void)
+{
+    long add(long, long), sub(long, long);
+    return (int)(add(2L, 3L) - sub(8L, 3L));
+}
+
+static int mixed(void)
+{
+    long x = 2, add(long, long);
+    return (int)add(x, 3L) - 5;
+}
+
 int main(void)
 {
-    return prototyped() | unprototyped() | unreferenced();
+    return prototyped() | unprototyped() | unreferenced() | list() | mixed();
 }

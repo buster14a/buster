@@ -1773,7 +1773,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_scope_function_declaration(UnitT
         S8("int test(void) { long add(); return (int)add(2L, 3L) - 5; }\nlong add(long a, long b) { return a + b; }\n"),
         S8("int test(void) { long add(long, long); return 0; }\nlong add(long a, long b) { return a + b; }\n"),
         S8("typedef long F(long, long);\nint test(void) { F add; return (int)add(2L, 3L) - 5; }\nlong add(long a, long b) { return a + b; }\n"),
+        S8("int test(void) { long add(long, long), sub(long, long); return (int)(add(2L, 3L) - sub(8L, 3L)); }\nlong add(long a, long b) { return a + b; }\nlong sub(long a, long b) { return a - b; }\n"),
+        S8("int test(void) { long x = 2, add(long, long); return (int)add(x, 3L) - 5; }\nlong add(long a, long b) { return a + b; }\n"),
     };
+    // `x` in the last form is the only declarator that may occupy a local.
+    u32 object_locals[] = {0, 0, 0, 0, 0, 1};
     for (u32 form = 0; form < 2; form += 1)
     {
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
@@ -1799,7 +1803,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_scope_function_declaration(UnitT
                     {
                         local_count += function->instructions[instruction].opcode == IR_OPCODE_LOCAL;
                     }
-                    BUSTER_TEST_RAW(arguments, function->local_count == 0 && local_count == 0, sources[index]);
+                    BUSTER_TEST_RAW(arguments, function->local_count <= object_locals[index] && local_count <= object_locals[index], sources[index]);
                 }
             }
             scratch_end(temporary);
