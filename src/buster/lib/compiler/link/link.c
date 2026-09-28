@@ -4608,8 +4608,12 @@ BUSTER_GLOBAL_LOCAL u32 link_elf_hash(String8 name)
     return result;
 }
 
+// `layout_section_offsets`, when given, receives the image offset of every
+// object section, so the AArch64 writer that overlays this layout can place
+// its own relocations against the same addresses.
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_64_dynamic(Arena* arena, ObjectFile* object,
-                                                                                           NativeExecutableLinkOptions options, LinkElfIndex* exports)
+                                                                                           NativeExecutableLinkOptions options, LinkElfIndex* exports,
+                                                                                           u64* layout_section_offsets)
 {
     NativeExecutableLinkResult result = {0};
     enum
@@ -5722,6 +5726,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                                       .copy_zero_size = copy_slot_count ? copy_slot_cursor - section_offsets[OBJECT_SECTION_ZERO] : 0,
                                       .dynamic = true,
                                   });
+    if (layout_section_offsets)
+    {
+        memcpy(layout_section_offsets, section_offsets, sizeof(section_offsets));
+    }
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
@@ -5949,7 +5957,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             }
             link_write_u32(bytes, output_offset, patched);
         }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+        else if (object_relocation_kind_is_aarch64_elf_page(relocation->kind))
         {
             u32 patched = 0;
             if (section->alignment < 4 ||
@@ -6121,7 +6129,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation relocation = object->relocations[index];
-        if (relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+        if (object_relocation_kind_is_aarch64_elf_page(relocation.kind))
         {
             // The layout staging writer cannot patch an A64 page field. Do
             // not impose an unrelated x86 rel32/absolute32 range on it; the
@@ -6164,7 +6172,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     // stub slot this overlay has to reproduce.  Everything below reads the
     // stripped copy, whose relocations no longer name sections the image does
     // not carry.
-    result = link_native_executable_elf64_x86_64_dynamic(arena, &converted, staging_options, exports);
+    u64 staged_section_offsets[OBJECT_SECTION_COUNT] = {0};
+    result = link_native_executable_elf64_x86_64_dynamic(arena, &converted, staging_options, exports, staged_section_offsets);
     if (result.error != LINK_ERROR_NONE)
     {
         return result;
@@ -6175,11 +6184,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     u32 program_header_count = bytes[56] | ((u32)bytes[57] << 8);
     u64 header_end = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
     u64 entry_stub_offset = align_forward(header_end, 16);
+    // Data sections sit where the staging writer placed them.
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
+    memcpy(section_offsets, staged_section_offsets, sizeof(section_offsets));
     // The layout below has to be the one the x86-64 dynamic writer produced,
     // so the stub slot is that writer's hosted stub size, not this stub's.
     section_offsets[OBJECT_SECTION_TEXT] =
         align_forward(entry_stub_offset + link_elf_entry_stub_slot(x86_stub_size, &plan), object->sections[OBJECT_SECTION_TEXT].alignment);
+    if (section_offsets[OBJECT_SECTION_TEXT] != staged_section_offsets[OBJECT_SECTION_TEXT])
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
     u64 plt_offset = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
     u32 import_count = 0;
     u32* import_indices = arena_allocate(arena, u32, object->symbol_count);
@@ -6351,12 +6367,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         if (relocation->kind != OBJECT_RELOCATION_AARCH64_CALL26 && relocation->kind != OBJECT_RELOCATION_AARCH64_JUMP26 &&
             relocation->kind != OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 &&
             relocation->kind != OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 &&
-            relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_PAGE21 && relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+            !object_relocation_kind_is_aarch64_elf_page(relocation->kind))
         {
             continue;
         }
-        bool page_relocation = relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 ||
-                               relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12;
+        bool page_relocation = object_relocation_kind_is_aarch64_elf_page(relocation->kind);
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
         if (relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 || relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12)
@@ -11670,7 +11685,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
     NativeExecutableLinkResult result = {0};
     if (object->target.cpu_arch == CPU_ARCH_X86_64)
     {
-        result = has_import ? link_native_executable_elf64_x86_64_dynamic(arena, &staging_object, staging_options, exports)
+        result = has_import ? link_native_executable_elf64_x86_64_dynamic(arena, &staging_object, staging_options, exports, 0)
                             : link_native_executable_elf64_x86_64(arena, &staging_object, staging_options);
     }
     else if (object->target.cpu_arch == CPU_ARCH_AARCH64)
@@ -11864,7 +11879,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
             }
             if (object->target.cpu_arch == CPU_ARCH_X86_64)
             {
-                result = dynamic_image ? link_native_executable_elf64_x86_64_dynamic(arena, object, options, exports)
+                result = dynamic_image ? link_native_executable_elf64_x86_64_dynamic(arena, object, options, exports, 0)
                                        : link_native_executable_elf64_x86_64(arena, object, options);
             }
             else
