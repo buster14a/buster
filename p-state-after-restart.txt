@@ -1,0 +1,17 @@
+2710 buster-bench:buster-bench-candidate 4096 1790606454.3045841270 /var/lib/buster-bench/workspaces
+400 buster-bench:buster-bench 104 1790606453.9905783160 /var/lib/buster-bench/workspaces/results/job-1-attempt-2/validate-buster-v1.outcome
+400 buster-bench:buster-bench 128 1790606454.0005785020 /var/lib/buster-bench/queue/cleanup-1
+400 buster-bench:buster-bench 140 1790606453.9945783900 /var/lib/buster-bench/workspaces/results/job-1-attempt-2/validate-buster-v1.bundle
+400 buster-bench:buster-bench 1542 1790606453.5055693120 /var/lib/buster-bench/workspaces/results/job-1-attempt-2/validate-buster-v1.prepare.manifest
+400 buster-bench:buster-bench 195 1790606448.7544811120 /var/lib/buster-bench/queue/attempt-1
+400 buster-bench:buster-bench 301 1790606453.9975784460 /var/lib/buster-bench/workspaces/results/job-1-attempt-2/validate-buster-v1.manifest
+440 buster-bench:buster-bench 232 1790606453.2945653950 /var/lib/buster-bench/queue/worker-1
+440 buster-bench:buster-bench 544 1790606453.4165676600 /var/lib/buster-bench/queue/worker-instance-1
+600 buster-bench:buster-bench 0 1790606446.3174358700 /var/lib/buster-bench/queue/writer.lock
+600 buster-bench:buster-bench 1637 1790606454.3056107220 /var/lib/buster-bench/queue/journal
+640 buster-bench:buster-bench 0 1790606441.6343497950 /var/lib/buster-bench/lease/host.lock
+700 buster-bench:buster-bench 4096 1790606453.9985784650 /var/lib/buster-bench/workspaces/results/job-1-attempt-2
+710 buster-bench:buster-bench 4096 1790606441.6343497950 /var/lib/buster-bench/lease
+710 buster-bench:buster-bench 4096 1790606453.2945653950 /var/lib/buster-bench/workspaces/results
+710 buster-bench:buster-bench 4096 1790606454.0005785020 /var/lib/buster-bench/queue
+710 buster-bench:buster-bench-candidate 4096 1790606441.5190069750 /var/lib/buster-bench

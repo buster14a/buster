@@ -1,0 +1,9 @@
+CLEANUP_IDENTITY case=0 owner=65000 group=65001 mode=0550 expected=removed actual=removed
+CLEANUP_IDENTITY case=1 owner=65001 group=65001 mode=0770 expected=removed actual=removed
+CLEANUP_IDENTITY case=2 owner=65001 group=65001 mode=2770 expected=removed actual=removed
+CLEANUP_IDENTITY case=3 owner=65002 group=65001 mode=0770 expected=refused actual=refused
+CLEANUP_IDENTITY case=4 owner=65002 group=65001 mode=2770 expected=refused actual=refused
+CLEANUP_IDENTITY case=5 owner=65001 group=65001 mode=0750 expected=refused actual=refused
+CLEANUP_IDENTITY case=6 owner=65001 group=65002 mode=0770 expected=refused actual=refused
+CLEANUP_IDENTITY case=7 owner=0 group=65001 mode=0770 expected=refused actual=refused
+CLEANUP_IDENTITY_TEST assertions=43 failures=0

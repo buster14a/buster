@@ -1,0 +1,9 @@
+○ buster-bench.service - Buster benchmark authenticated service (repository reference only)
+     Loaded: loaded (/etc/systemd/system/buster-bench.service; static)
+     Active: inactive (dead)
+       Docs: file:/usr/local/share/doc/buster/bench_service/README.md
+
+Sep 28 14:40:46 c401220c7298 systemd[1]: Starting buster-bench.service - Buster benchmark authenticated service (repository reference only)...
+Sep 28 14:40:46 c401220c7298 systemd[1]: Started buster-bench.service - Buster benchmark authenticated service (repository reference only).
+Sep 28 14:40:54 c401220c7298 systemd[1]: buster-bench.service: Deactivated successfully.
+Sep 28 14:40:54 c401220c7298 systemd[1]: buster-bench.service: Consumed 1.226s CPU time, 161.1M memory peak, 0B memory swap peak.

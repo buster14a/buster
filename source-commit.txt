@@ -1,0 +1,38 @@
+commit bf9efa7de89ee13ede1ecec8fb97e21ee14f9626
+tree e745a2219850baf1b4093bf9f43bf73d2e895a2a
+parent d0c8ce2c452623b79190da18a428842aab19ad7d
+author Claude <noreply@anthropic.com> 1790606132 +0000
+committer Claude <noreply@anthropic.com> 1790606132 +0000
+gpgsig -----BEGIN SSH SIGNATURE-----
+ U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrLzsfFISF4by8Q+FKz27YpkK1USsBB+m
+ amu1QkJnbDsAAAADZ2l0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQDNwC0LA
+ 2xKnOR2MXNuYUSRU03+w7izteIGIppSyCW/PXYqmTsxe6UAgSyKd11627XnivhC4ENVmHozStlom
+ ZAE=
+ -----END SSH SIGNATURE-----
+
+    bench: finish signal cancellations and their recovery (#880 attempt P)
+    
+    Attempt P sent one SIGTERM to the service after the prepare manifest. The
+    cancel path appended CANCEL and ran bq_worker_stop while the cancel flag
+    was still set, so bq_systemd_join returned BQ_WORKER_CANCEL_SIGNAL without
+    reaping the start-outer launcher and bq_worker_stop reported
+    cleanup-failed. The failure path published cancelled evidence and left
+    the job active.
+    
+    Recovery then finished the job as interrupted. The queue only accepts a
+    cancelled outcome for a job with a durable CANCEL, and the published
+    outcome record already said cancelled, so every retry failed without a
+    journal change while holding the lease.
+    
+    - join takes a cancellable flag. The main wait stays cancellable; the
+      cleanup reap runs only after the outer unit is proven empty and is not.
+    - Recovery without a durable outcome adopts an existing outcome record by
+      exact bytes, limited to outcomes the queue accepts; otherwise it uses
+      cancelled for a durable cancellation and interrupted for the rest.
+      Other existing bytes fail closed and are never replaced.
+    - Regression tests: the real systemd join under a pending cancellation,
+      and cancelled-job recovery (converges; fails closed on foreign bytes).
+      Each fails on the old behaviour.
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_019Fss1n4RSPJ4PcQxom5ZDx
