@@ -101,10 +101,18 @@ Before starting a retirement stage, the broker also requires:
 - the toolchain `bin` directory to be root-owned with no write bits;
 - `<attempt>/base/build` to be exactly `buster-bench:buster-bench-candidate`
   `02700`;
+- for baseline stages, `<attempt>/base/build/matched-build` to be exactly
+  `buster-bench:buster-bench-candidate` `02700`;
 - for candidate stages, `<attempt>/candidate/matched-build` to be exactly
   `buster-bench:buster-bench-candidate` `02770`.
 
-PID1 refuses a unit whose `ReadWritePaths` root is missing.
+Each directory is opened by an `O_PATH | O_NOFOLLOW` walk of every path
+component, so a symlinked root or ancestor fails (`bq_broker_retirement_roots`
+lists them). PID1 refuses a unit whose `ReadWritePaths` root is missing. The
+check precedes PID1's bind mount; in that gap only the service identity could
+replace a root, because `base/build` is service-only and the candidate root's
+parent `candidate/` is the service-owned `02710`. The candidate cannot use the
+gap.
 
 `signal` accepts the four unit names `buster-bench-<job>-<attempt>-<stage>.service`
 with `TERM` or `KILL` only, under the same identity checks as other stage

@@ -818,6 +818,30 @@ static bool bq_broker_installed_binary(char const* path, bool static_gate)
     return ok;
 }
 
+/* Retirement directories a stage start requires, each exactly service-owned
+ * with the candidate group and reached by an O_NOFOLLOW component walk:
+ * base/build 02700 for every stage, so the candidate cannot reach the
+ * baseline root, then the stage's own ReadWritePaths root, 02700 for the
+ * baseline and 02770 for the candidate. Returns the count, 0 otherwise.
+ * The check precedes PID1's bind mount. In that gap only the service
+ * identity can replace either root: base/build is service-only and the
+ * candidate root's parent candidate/ is the service-owned 02710. */
+static unsigned bq_broker_retirement_roots(BqBrokerRequest const* request, BqBrokerPaths const* paths,
+                                           char const* roots[2], mode_t modes[2])
+{
+    unsigned count = 0;
+    if (bq_broker_retirement_stage(request->stage))
+    {
+        bool service = bq_broker_service_stage(request->stage);
+        roots[0] = paths->base_build;
+        modes[0] = 02700;
+        roots[1] = service ? paths->retirement_base_build : paths->retirement_candidate_build;
+        modes[1] = service ? 02700 : 02770;
+        count = 2;
+    }
+    return count;
+}
+
 static bool bq_broker_state(BqBrokerRequest const* request, uid_t service_uid,
                             gid_t service_gid, gid_t candidate_gid)
 {
@@ -841,17 +865,15 @@ static bool bq_broker_state(BqBrokerRequest const* request, uid_t service_uid,
              bq_broker_installed_binary(BQ_BROKER_GATE, true);
         if (ok && request->stage == BQ_BROKER_CANDIDATE_GENERATE)
             ok = bq_broker_directory(paths.candidate_staging, service_uid, true);
-        /* Retirement: the installed toolchain is root-owned and immutable;
-         * base/build stays private to the service (the candidate cannot
-         * reach the baseline root); the candidate root is exactly the
-         * service-owned, candidate-group 02770 directory the unit created.
-         * PID1 refuses the unit if a ReadWritePaths root is missing. */
-        if (ok && bq_broker_retirement_stage(request->stage))
-            ok = bq_broker_directory(BQ_RETIREMENT_STAGE_PATH_VALUE, 0, false) &&
-                 bq_broker_private_directory(paths.base_build, service_uid, candidate_gid, 02700);
-        if (ok && (request->stage == BQ_BROKER_RETIREMENT_CANDIDATE_GENERATE ||
-                   request->stage == BQ_BROKER_RETIREMENT_CANDIDATE_BUILD))
-            ok = bq_broker_private_directory(paths.retirement_candidate_build, service_uid, candidate_gid, 02770);
+        /* Retirement: the installed toolchain is root-owned and immutable,
+         * and every bq_broker_retirement_roots directory is exact. PID1
+         * refuses the unit if a ReadWritePaths root is missing. */
+        char const* roots[2] = {0};
+        mode_t modes[2] = {0};
+        unsigned count = bq_broker_retirement_roots(request, &paths, roots, modes);
+        if (ok && count) ok = bq_broker_directory(BQ_RETIREMENT_STAGE_PATH_VALUE, 0, false);
+        for (unsigned index = 0; ok && index < count; index += 1)
+            ok = bq_broker_private_directory(roots[index], service_uid, candidate_gid, modes[index]);
     }
     return ok;
 }
@@ -2084,6 +2106,51 @@ static unsigned bq_broker_retirement_self_test(BqBrokerStartGroups const* groups
     {
         char* cli[] = {"broker", "signal", (char*)foreign[index], "KILL"};
         BQ_RETIREMENT_CHECK(!bq_broker_unit_from_text(foreign[index], &parsed) && !bq_broker_cli(4, cli, &parsed));
+    }
+    /* Each retirement start requires base/build and exactly its own root. */
+    for (unsigned index = 0; index < 4; index += 1)
+    {
+        BqBrokerPaths paths;
+        char const* roots[2] = {0};
+        mode_t modes[2] = {0};
+        request.stage = 6u + index;
+        BQ_RETIREMENT_CHECK(bq_broker_paths(&request, &paths) &&
+                            bq_broker_retirement_roots(&request, &paths, roots, modes) == 2 &&
+                            !strcmp(roots[0], BQ_ATTEMPT "/base/build") && modes[0] == 02700 &&
+                            !strcmp(roots[1], index < 2 ? BQ_ATTEMPT "/base/build/matched-build" :
+                                                          BQ_ATTEMPT "/candidate/matched-build") &&
+                            modes[1] == (index < 2 ? 02700 : 02770));
+    }
+    request.stage = BQ_BROKER_BASE_BUILD;
+    BqBrokerPaths smoke_paths;
+    char const* smoke_roots[2] = {0};
+    mode_t smoke_modes[2] = {0};
+    BQ_RETIREMENT_CHECK(bq_broker_paths(&request, &smoke_paths) &&
+                        bq_broker_retirement_roots(&request, &smoke_paths, smoke_roots, smoke_modes) == 0);
+    /* The root check itself: exact owner, group and mode through a no-follow
+     * walk; a symlinked root or parent and a wrong mode are refused. */
+    char temporary[] = "/tmp/buster-broker-root-XXXXXX";
+    char* base = mkdtemp(temporary);
+    char build[96], root[128], alias[96], through[128], leaf[128];
+    bool made = base && bq_broker_format(build, sizeof(build), "%s/build", base) &&
+                bq_broker_format(root, sizeof(root), "%s/matched-build", build) &&
+                bq_broker_format(alias, sizeof(alias), "%s/alias", base) &&
+                bq_broker_format(through, sizeof(through), "%s/matched-build", alias) &&
+                bq_broker_format(leaf, sizeof(leaf), "%s/leaf", build) &&
+                mkdir(build, 0700) == 0 && mkdir(root, 0700) == 0 && chmod(root, 02700) == 0 &&
+                symlink(build, alias) == 0 && symlink(root, leaf) == 0;
+    BQ_RETIREMENT_CHECK(made && bq_broker_private_directory(root, geteuid(), getegid(), 02700) &&
+                        !bq_broker_private_directory(through, geteuid(), getegid(), 02700) &&
+                        !bq_broker_private_directory(leaf, geteuid(), getegid(), 02700) &&
+                        !bq_broker_private_directory(root, geteuid() + 1, getegid(), 02700) &&
+                        chmod(root, 02750) == 0 && !bq_broker_private_directory(root, geteuid(), getegid(), 02700));
+    if (base)
+    {
+        unlink(leaf);
+        unlink(alias);
+        rmdir(root);
+        rmdir(build);
+        rmdir(base);
     }
     /* The smoke recipe's stages keep their fixed PATH and build directories. */
     request.stage = BQ_BROKER_CANDIDATE_GENERATE;
