@@ -22471,6 +22471,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         S8("struct S { __attribute__((packed)); int a; };\n_Static_assert(sizeof(struct S) == 4, \"members kept\");\nint n = sizeof(struct S);\n"),
         S8("struct S { enum E { A, B }; int a; };\n_Static_assert(sizeof(struct S) == 4 && B == 1, \"members kept\");\n"),
         S8("struct S { struct T { int x; }; int a; } s;\nint f(void) { return s.a; }\n"),
+        S8("struct S { int a; _Static_assert(sizeof(int) == 4, \"x\"); };\n"),
+        S8("struct S { int a; _Static_assert(sizeof(int) == 4, \"x\"); char c; } s, t;\n"
+           "_Static_assert(sizeof(struct S) == 8, \"members kept\");\nint f(void) { return s.a + t.c; }\n"),
+        S8("union U { _Static_assert(1, \"first\"); int a; };\nint n = sizeof(union U);\n"),
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
     {
@@ -22481,6 +22485,45 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-declaration.c"), preprocess, parse, target_native);
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, valid[case_index]);
         BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, valid[case_index]);
+        scratch_end(temporary);
+    }
+
+    String8 failed_assertions[] = {
+        S8("struct S { int a; _Static_assert(sizeof(int) == 8, \"x\"); };\n"),
+        S8("struct S { int a; _Static_assert(sizeof(int) == 8, \"x\"); } a, b;\n"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(failed_assertions); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, failed_assertions[case_index],
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-static-assert.c"), preprocess, parse, target_native);
+        u32 reported = 0;
+        bool located = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count + lowered.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = diagnostic_index < parse.diagnostic_count ? parse.diagnostics[diagnostic_index]
+                                                                               : lowered.diagnostics[diagnostic_index - parse.diagnostic_count];
+            if (diagnostic.kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED)
+            {
+                reported += 1;
+                located = diagnostic.location.line == 1 && diagnostic.location.column == 19;
+            }
+        }
+        BUSTER_TEST_RAW(arguments, reported == 1 && located, failed_assertions[case_index]);
+        scratch_end(temporary);
+    }
+
+    {
+        String8 source = S8("struct S { int a; static_assert(sizeof(int) == 4, \"x\"); static_assert(1); };\nint n = sizeof(struct S);\n");
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_C23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-static-assert-c23.c"), preprocess, parse, target_native);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, source);
+        BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, source);
         scratch_end(temporary);
     }
     return result;

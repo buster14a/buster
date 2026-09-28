@@ -9632,6 +9632,27 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     CPreprocessResult preprocess = frame->preprocess;
     if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
     {
+        // A member _Static_assert declares no member. It is checked with the
+        // file's deferred assertions, once the translation unit's types are
+        // known, so an operand naming a later complete type still evaluates.
+        u32 assertion_start = c_parse_skip_attributes(preprocess, frame->start, frame->end);
+        if (assertion_start < frame->end && preprocess.tokens[assertion_start].kind == C_TOKEN_IDENTIFIER &&
+            c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[assertion_start], C_SYMBOL_WELL_KNOWN_STATIC_ASSERT))
+        {
+            // A definition parsed once per declarator reaches it again.
+            bool deferred = false;
+            for (u32 index = 0; index < result->deferred_static_assert_count && !deferred; index += 1)
+            {
+                deferred = result->deferred_static_asserts[index].token_start == assertion_start;
+            }
+            if (!deferred)
+            {
+                c_parse_defer_static_assert(preprocess, result,
+                                            (CDeclaration){.token_start = assertion_start, .token_count = frame->end - assertion_start}, frame->scope);
+            }
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->end, true);
+            return;
+        }
         frame->checkpoint = *result;
         frame->mutation_mark = machine->mutation_count;
         frame->stage = C_TYPE_PARSE_STAGE_CHILD;
