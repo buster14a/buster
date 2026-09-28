@@ -1,4 +1,4 @@
-name: Temporary issue 1655 source snapshot
+name: Temporary issue 1655 patch staging
 
 on:
   push:
@@ -6,19 +6,39 @@ on:
       - codex/issue-1655-source-snapshot
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  snapshot:
+  stage:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out exact branch tree
+      - name: Check out transport branch
         uses: actions/checkout@v4
-      - name: Upload source tree
-        uses: actions/upload-artifact@v4
         with:
-          name: issue-1655-source-snapshot
-          path: |
-            .
-            !.git/**
-          retention-days: 1
+          path: transport-source
+      - name: Check out exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: 1fb78e310339ac1710f4f1879c1af3889dc5f183
+          fetch-depth: 0
+          path: target
+      - name: Apply and verify issue 1655 patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd target
+          git apply --check ../transport-source/transport/issue-1655.patch
+          git apply ../transport-source/transport/issue-1655.patch
+          git diff --check
+          test "$(git hash-object src/buster/tests/test.c)" = 0976229647de033898bf9455377d86dc70089c3d
+          test "$(git hash-object docs/agents/testing.md)" = f40d8b37402a77cd42d035fc95b4e4c6c3b059cb
+      - name: Commit and publish staging branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd target
+          git config user.name "OpenAI Codex"
+          git config user.email "codex@openai.com"
+          git add src/buster/tests/test.c docs/agents/testing.md
+          git commit -m "test: identify crashed parallel lane gangs (#1655)"
+          git push origin HEAD:refs/heads/codex/issue-1655-staged-1
