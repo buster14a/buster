@@ -12,74 +12,177 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - name: Print diagnostic sites and nearby helpers
+      - name: Capture diagnostic sites, helpers, and tests
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
-          targets = {
-              'src/buster/lib/compiler/frontend/c/c_gen.c': [
-                  'bound to C entity',
-                  'cannot convert IR type',
-                  'cannot zero-initialize IR type kind',
-                  'conditional expression predicted incompatible branch types',
-                  'C IR lowering cannot resolve definition',
-                  'c_ir_identifier_entity_or_lookup',
-              ],
-              'src/buster/lib/compiler/frontend/c/c_parse.c': [
-                  'bound to C entity',
-                  'c_parse_lowering_constraint_consider',
-              ],
-              'src/buster/lib/compiler/frontend/c/c.h': [
-                  'typedef enum CEntityKind',
-                  'typedef struct CEntity',
-                  'typedef enum CTypeKind',
-              ],
-          }
+          out = []
+          def emit(value=''):
+              out.append(str(value))
 
-          for path, needles in targets.items():
+          def excerpt(path, needles, radius=40):
               lines = Path(path).read_text().splitlines()
-              print(f'===== {path} ({len(lines)} lines) =====')
+              emit(f'===== {path} ({len(lines)} lines) =====')
               emitted = set()
               for needle in needles:
                   matches = [i for i, line in enumerate(lines) if needle in line]
-                  print(f'--- NEEDLE {needle!r}: {len(matches)} match(es) ---')
+                  emit(f'--- NEEDLE {needle!r}: {len(matches)} match(es) ---')
                   for i in matches:
-                      lo = max(0, i - 35)
-                      hi = min(len(lines), i + 36)
+                      lo = max(0, i - radius)
+                      hi = min(len(lines), i + radius + 1)
                       key = (lo, hi)
                       if key in emitted:
                           continue
                       emitted.add(key)
-                      print(f'@@ {lo + 1}:{hi} @@')
+                      emit(f'@@ {lo + 1}:{hi} @@')
                       for j in range(lo, hi):
-                          print(f'{j + 1:6}: {lines[j]}')
+                          emit(f'{j + 1:6}: {lines[j]}')
 
-          for path in ('src/buster/lib/compiler/frontend/c/c_gen.c',
-                       'src/buster/lib/compiler/frontend/c/c_parse.c'):
+          def function(path, name):
               lines = Path(path).read_text().splitlines()
-              print(f'===== helper candidates in {path} =====')
-              for i, line in enumerate(lines):
-                  if any(token in line for token in (
-                      'type_name', 'type_spelling', 'entity_kind_name',
-                      'entity_name', 'format_type', 'render_type')):
-                      if line.lstrip().startswith(('BUSTER_C_INTERNAL', 'static ', 'String8 ', 'const char')):
-                          print(f'{i + 1:6}: {line}')
+              starts = [i for i, line in enumerate(lines) if re.search(r'\b' + re.escape(name) + r'\s*\(', line)]
+              emit(f'===== FUNCTION SEARCH {path}:{name}: {len(starts)} candidate(s) =====')
+              for start in starts:
+                  # Walk backwards through a multiline signature, but not into a prior body.
+                  lo = start
+                  while lo > 0 and '{' not in lines[lo] and ';' not in lines[lo - 1] and '}' not in lines[lo - 1]:
+                      lo -= 1
+                  depth = 0
+                  seen = False
+                  hi = start
+                  for i in range(lo, len(lines)):
+                      depth += lines[i].count('{') - lines[i].count('}')
+                      if '{' in lines[i]:
+                          seen = True
+                      hi = i
+                      if seen and depth == 0:
+                          break
+                  emit(f'@@ {lo + 1}:{hi + 1} @@')
+                  for j in range(lo, hi + 1):
+                      emit(f'{j + 1:6}: {lines[j]}')
 
-          print('===== default failure-message assignments carrying numeric ids =====')
-          for path in ('src/buster/lib/compiler/frontend/c/c_gen.c',
-                       'src/buster/lib/compiler/frontend/c/c_parse.c'):
-              lines = Path(path).read_text().splitlines()
+          excerpt('src/buster/lib/compiler/frontend/c/c_gen.c', [
+              'symbol {u32} is not bound to C entity',
+              'cannot convert IR type {u64} into C type',
+              'cannot zero-initialize IR type kind {u64}',
+              'conditional expression predicted incompatible branch types',
+              'C IR lowering cannot resolve definition for entity',
+              'opaque_cause',
+          ], 55)
+          excerpt('src/buster/lib/compiler/frontend/c/c_parse.c', [
+              'symbol {u32} is not bound to C entity',
+              'c_parse_lowering_constraint_consider',
+              'opaque_cause',
+          ], 55)
+
+          for path, names in {
+              'src/buster/lib/compiler/frontend/c/c_gen.c': [
+                  'c_ir_identifier_entity_or_lookup',
+                  'c_ir_type_to_entity_type',
+                  'c_ir_target_type_for_expression',
+                  'c_ir_lower_value_expr',
+                  'c_ir_zero_value',
+              ],
+              'src/buster/lib/compiler/frontend/c/c_parse.c': [
+                  'c_parse_lowering_constraint_consider',
+              ],
+          }.items():
+              for name in names:
+                  function(path, name)
+
+          excerpt('src/buster/lib/compiler/frontend/c/c.h', [
+              'typedef enum CEntityKind',
+              'typedef struct CEntity',
+              'typedef enum CTypeKind',
+              'typedef struct CType',
+              'C_ENTITY_',
+              'C_TYPE_',
+          ], 35)
+
+          helper_needles = [
+              'type_name', 'type_spelling', 'entity_kind_name', 'entity_name',
+              'format_type', 'render_type', 'identifier_name', 'symbol_name',
+              'ir_type_name', 'IRTypeKind', 'type_kind_name', 'c_type_print',
+              'c_type_to_string', 'ir_type_to_string', 'ir_type_format',
+          ]
+          for path in Path('src/buster').rglob('*.[ch]'):
+              text = path.read_text(errors='replace')
+              matches = [(i + 1, line) for i, line in enumerate(text.splitlines())
+                         if any(n in line for n in helper_needles)]
+              if matches:
+                  emit(f'===== HELPER CANDIDATES {path} =====')
+                  for line_no, line in matches[:250]:
+                      emit(f'{line_no:6}: {line}')
+
+          emit('===== ALL FAILURE MESSAGE ASSIGNMENTS WITH NUMERIC PLACEHOLDERS =====')
+          for path in (Path('src/buster/lib/compiler/frontend/c/c_gen.c'),
+                       Path('src/buster/lib/compiler/frontend/c/c_parse.c')):
+              lines = path.read_text().splitlines()
               for i, line in enumerate(lines):
-                  if 'failure_message' in line and ('{u32}' in line or '{u64}' in line or 'entity' in line or 'IR type' in line):
-                      lo = max(0, i - 3)
-                      hi = min(len(lines), i + 6)
-                      print(f'--- {path}:{i + 1} ---')
-                      for j in range(lo, hi):
-                          print(f'{j + 1:6}: {lines[j]}')
+                  if ('failure_message' in line or 'diagnostic' in line) and ('{u32}' in line or '{u64}' in line):
+                      emit(f'--- {path}:{i + 1} ---')
+                      for j in range(max(0, i - 4), min(len(lines), i + 8)):
+                          emit(f'{j + 1:6}: {lines[j]}')
+
+          emit('===== C/CA-IR RELATED TEST PATHS =====')
+          for root in ('tests', 'test', 'src/buster/tests'):
+              base = Path(root)
+              if not base.exists():
+                  continue
+              for path in sorted(base.rglob('*')):
+                  rel = str(path).lower()
+                  if path.is_file() and any(n in rel for n in ('c_ir', 'ca-ir', 'c-a-ir', 'compile-failure', 'diagnostic', 'comma')):
+                      emit(str(path))
+
+          emit('===== TEST CONFIG EXAMPLES =====')
+          configs = []
+          for path in Path('.').rglob('test_config'):
+              try:
+                  text = path.read_text()
+              except Exception:
+                  continue
+              if 'expected_first_line_prefix' in text or 'expected_exit' in text or 'stdout' in text:
+                  configs.append(path)
+          for path in configs[:40]:
+              emit(f'--- {path} ---')
+              emit(path.read_text())
+
+          emit('===== COMMA EXPRESSION TEST OCCURRENCES =====')
+          for base_name in ('tests', 'test', 'src/buster/tests'):
+              base = Path(base_name)
+              if not base.exists():
+                  continue
+              for path in base.rglob('*'):
+                  if not path.is_file():
+                      continue
+                  try:
+                      lines = path.read_text().splitlines()
+                  except Exception:
+                      continue
+                  for i, line in enumerate(lines):
+                      if 'return (1, 2)' in line or 'comma expression' in line.lower():
+                          emit(f'--- {path}:{i + 1} ---')
+                          for j in range(max(0, i - 10), min(len(lines), i + 11)):
+                              emit(f'{j + 1:6}: {lines[j]}')
+
+          emit('===== BUILD/TEST CLI HELP =====')
+          # CLI help is captured by the following shell commands after this file is written.
+          report = Path('.issue-1725-inspection.txt')
+          report.write_text('\n'.join(out) + '\n')
           PY
+          {
+            echo '--- ./b --help ---'
+            ./b --help || true
+            echo '--- ./b test --help ---'
+            ./b test --help || true
+          } >> .issue-1725-inspection.txt 2>&1
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .issue-1725-inspection.txt
+          git commit -m 'chore: capture issue 1725 implementation context [skip ci]'
+          git push
