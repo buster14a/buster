@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Temporary, isolated #1162 validation transport. Never install on a protected host.
 set -Eeuo pipefail
-subject=d0c8ce2c452623b79190da18a428842aab19ad7d
-subject_tree=5c479a7a741dd07f8a9fa8fc6ff3eac4df28635d
+subject=57765f220fae6b4073aa3947b36b9fd605cf2a5b
+subject_tree=eb3163d1f4517661ea86ba8ad5dca611dad28485
 subject_build_blob=a016a487b745357883a5cd76c9c2712485c01d7c
 baseline=ade6ac4b6ecb21f30b61b656439bac476c145e2f
 evidence="${RUNNER_TEMP:?}/issue1162-exact-slice-evidence"
@@ -179,7 +179,7 @@ for path in files:
 manifest = ("\n".join(lines) + "\n").encode()
 expected = {
     "ade6ac4b6ecb21f30b61b656439bac476c145e2f": (375, 42585, "ebf4a4b4e5943dc60dd9fd9d175af643fbe0d0eee72e70e245c688aaabcb3007"),
-    "d0c8ce2c452623b79190da18a428842aab19ad7d": (377, 42835, "16d4267e1b8821454236b2d2dfbadff755c6faa3fa6b3f04e04911ed2ccadf2e"),
+    "57765f220fae6b4073aa3947b36b9fd605cf2a5b": (377, 42835, "1199e6a4c0dceaebd7795d3c7ecb6183c4e21997a183c4f1dea8957170f526cc"),
 }[rev]
 actual = (len(files), len(manifest), hashlib.sha256(manifest).hexdigest())
 print("SOURCE_CLOSURE", rev, "files", actual[0], "bytes", actual[1], "sha256", actual[2], flush=True)
