@@ -7718,6 +7718,82 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
         String8 host_output = {0};
         BUSTER_TEST(arguments, host_library && main_built[1] &&
                                    compiler_driver_test_image_run(arguments, arena, main_paths + 1, 1, host_library_directory, &host_output));
+
+        // GCC's -fPIE code reads a library's data with a rel32 and leaves the
+        // PIE to hold a copy (issue 1710).  The object is written in assembly
+        // so the relocations are the same whichever host compiler assembles
+        // it: rel32 reads, a GOT load and an absolute pointer to one copied
+        // object, and a read of `environ`, whose aliases libc writes.
+        String8 copy_source_path = string_format_z(arena, S8("{S8}/pie_copy_references.s"), directory);
+        String8 copy_source = S8("    .text\n"
+                                 "    .globl copy_read_counter\n"
+                                 "copy_read_counter:\n"
+                                 "    movl shared_counter(%rip), %eax\n"
+                                 "    ret\n"
+                                 "    .globl copy_table_address\n"
+                                 "copy_table_address:\n"
+                                 "    leaq shared_table(%rip), %rax\n"
+                                 "    ret\n"
+                                 "    .globl copy_counter_through_got\n"
+                                 "copy_counter_through_got:\n"
+                                 "    movq shared_counter@GOTPCREL(%rip), %rax\n"
+                                 "    ret\n"
+                                 "    .globl copy_environ\n"
+                                 "copy_environ:\n"
+                                 "    movq environ(%rip), %rax\n"
+                                 "    ret\n"
+                                 "    .data\n"
+                                 "    .p2align 3\n"
+                                 "    .globl copy_counter_pointer\n"
+                                 "copy_counter_pointer:\n"
+                                 "    .quad shared_counter\n"
+                                 "    .section .note.GNU-stack,\"\",@progbits\n");
+        String8 copy_main_path = string_format_z(arena, S8("{S8}/pie_copy_main.c"), directory);
+        String8 copy_main_source = S8("extern char** environ;\n"
+                                      "int* shared_counter_address(void);\n"
+                                      "int shared_add(int value);\n"
+                                      "int copy_read_counter(void);\n"
+                                      "int* copy_table_address(void);\n"
+                                      "int* copy_counter_through_got(void);\n"
+                                      "char** copy_environ(void);\n"
+                                      "extern int* copy_counter_pointer;\n"
+                                      "\n"
+                                      "int application_value = 1000;\n"
+                                      "\n"
+                                      "int application_callback(int value)\n"
+                                      "{\n"
+                                      "    return value * 2;\n"
+                                      "}\n"
+                                      "\n"
+                                      "int main(void)\n"
+                                      "{\n"
+                                      "    int failed = copy_read_counter() != 41;\n"
+                                      "    failed |= (copy_counter_through_got() != shared_counter_address()) << 1;\n"
+                                      "    failed |= (copy_counter_pointer != shared_counter_address()) << 2;\n"
+                                      "    failed |= (copy_table_address()[3] != 4) << 3;\n"
+                                      "    failed |= (copy_environ() == 0 || copy_environ() != environ) << 4;\n"
+                                      "    *copy_counter_through_got() += 1;\n"
+                                      "    failed |= (shared_add(0) != 42 + 2 + 6) << 5;\n"
+                                      "    return failed;\n"
+                                      "}\n");
+        BUSTER_TEST(arguments, file_write(copy_source_path, BUSTER_SLICE_TO_BYTE_SLICE(copy_source)));
+        BUSTER_TEST(arguments, file_write(copy_main_path, BUSTER_SLICE_TO_BYTE_SLICE(copy_main_source)));
+        String8 copy_object = string_format_z(arena, S8("{S8}/pie_copy_references.o"), directory);
+        String8 copy_assemble[] = {S8("-c"), S8("-o"), copy_object, copy_source_path};
+        bool copy_assembled = compiler_driver_test_image_host_compile(arena, copy_assemble, BUSTER_ARRAY_LENGTH(copy_assemble));
+        BUSTER_TEST(arguments, copy_assembled);
+        String8 copy_path = string_format_z(arena, S8("{S8}/pie-copy"), directory);
+        String8 copy_command[] = {S8("-g0"), S8("-pie"), S8("-o"), copy_path, copy_main_path, copy_object, S8("-L"), directory, S8("-lbustershared")};
+        CompilerDriverResult copy_linked = copy_assembled ? compiler_driver_execute_invocation(
+                                                                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(copy_command)))
+                                                          : (CompilerDriverResult){.error = COMPILER_DRIVER_ERROR_LINK};
+        if (copy_linked.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("PIE copy link: {S8}\n"), copy_linked.diagnostic);
+        BUSTER_TEST(arguments, copy_linked.error == COMPILER_DRIVER_ERROR_NONE);
+        String8 copy_output = {0};
+        BUSTER_TEST(arguments, copy_linked.error == COMPILER_DRIVER_ERROR_NONE &&
+                                   compiler_driver_test_image_run(arguments, arena, &copy_path, 1, directory, &copy_output));
+        BUSTER_TEST(arguments, copy_linked.error == COMPILER_DRIVER_ERROR_NONE && host_library &&
+                                   compiler_driver_test_image_run(arguments, arena, &copy_path, 1, host_library_directory, &copy_output));
     }
 
     // Constructor, handler and destructor order across a Buster library and

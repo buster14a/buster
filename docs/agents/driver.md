@@ -418,9 +418,14 @@ ET_DYN at base zero. Its orientation comment is the contract; in short:
   in a shared object, for an exported definition, because an executable may
   copy-relocate the library's data and the library must then follow the copy.
   Direct calls bind to the library's own definitions (ld's
-  `-Bsymbolic-functions` answer). A rel32 to preemptible data or to imported
-  data, 32-bit absolute addresses, and address relocations in code are refused
-  with a hint to compile with `-fPIC`; copy relocations are not produced.
+  `-Bsymbolic-functions` answer). A rel32 to preemptible data, 32-bit absolute
+  addresses, and address relocations in code are refused with a hint to
+  compile with `-fPIC`. A rel32 to imported data is refused in a shared object;
+  a PIE instead reserves a copy slot after `.bss` and emits `R_X86_64_COPY`,
+  as ld and lld do for GCC's `-fPIE` code, and every other reference to that
+  symbol binds to the slot. The slot planning (`link_elf_copy_plan_build`,
+  including the library's alias names such as `environ`/`__environ`) is shared
+  with the fixed-address writer.
 - A shared object exports every defined default-visibility symbol, leaves
   undefined ones for the loader (`-Wl,--no-undefined`/`-z,defs` restore the
   executable's rule), keeps `.init_array`/`.fini_array` for the loader, takes
@@ -436,8 +441,10 @@ ET_DYN at base zero. Its orientation comment is the contract; in short:
 a Buster library loaded by `dlopen` and linked by Buster (fixed-address and
 PIE) and by the host toolchain (PIE and `-no-pie`, whose copy relocations the
 library must follow), calls and data in both directions, the lifecycle order
-of initializers and handlers, a randomized PIE base, a CPython extension when
-`python3` and its headers exist, and the `-fPIC` refusal. AArch64 ELF, PE DLLs
+of initializers and handlers, a randomized PIE base, copy relocations in a
+Buster PIE for an object that reads library data and `environ` with rel32s
+(the shape GCC's `-fPIE` emits), a CPython extension when `python3` and its
+headers exist, and the `-fPIC` refusal. AArch64 ELF, PE DLLs
 and Mach-O dylibs have no writer yet.
 
 ## External ELF debug information
