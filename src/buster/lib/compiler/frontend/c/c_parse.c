@@ -10699,6 +10699,11 @@ BUSTER_C_INTERNAL bool c_parse_expression_syntax_error(CParseResult* result, CPr
                 }
                 else
                 {
+                    // A word that names no value may be a type word Buster
+                    // does not model (`_BitInt`, `__fp16`), starting a type
+                    // name rather than an expression.
+                    CEntityId entity = c_parse_lookup_entity_at(result, preprocess, scope, spelling, index);
+                    modeled = entity.value < result->entity_count && result->entities[entity.value].kind != C_ENTITY_TYPEDEF;
                     expect_operand = false;
                 }
             }
@@ -11014,6 +11019,11 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
             {
                 c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[specifier_index]), C_DIAGNOSTIC_INVALID_ATOMIC_TYPE,
                                    S8("_Atomic requires a type name"));
+            }
+            else if (!depth)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[close - 1]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                                   S8("expected expression"));
             }
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
             return;

@@ -15479,6 +15479,97 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_expression_frames(UnitTestArgum
     return result;
 }
 
+// A typeof operand that is neither a type name nor an expression reports
+// `expected expression` at the operand's `)` instead of dropping the
+// declaration silently until a later use of its name fails.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_malformed_operand_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u32 column;
+    } invalid[] = {
+        {S8("long object; typedef typeof(1 +) t;\n"), 32},
+        {S8("long object; typedef typeof(object +) t;\n"), 37},
+        {S8("typedef typeof() t;\n"), 16},
+        {S8("long object; typedef typeof(1 +) t; t v;\n"), 32},
+        {S8("long object; typedef typeof_unqual(object *) t;\n"), 44},
+        {S8("typedef typeof_unqual() t;\n"), 23},
+        {S8("long object; typedef __typeof__(object <<) t;\n"), 42},
+        {S8("typedef __typeof__() t;\n"), 20},
+        {S8("void f(void) { typeof(1 +) y; }\n"), 26},
+        {S8("void f(void) { typeof() y; }\n"), 23},
+        {S8("void f(void) { long object; __typeof__(object ,) y; }\n"), 48},
+        {S8("void f(void) { __typeof__() y; }\n"), 27},
+        {S8("void f(void) { long object; typeof_unqual(object -) y; }\n"), 51},
+        {S8("void f(void) { typeof_unqual() y; }\n"), 30},
+        {S8("typedef typeof((1 +)) t;\n"), 20},
+        {S8("typedef typeof(typeof(1 +)) t;\n"), 26},
+        {S8("typedef __typeof__(typeof_unqual(())) t;\n"), 35},
+        {S8("long object; typedef typeof(object[object +]) t;\n"), 44},
+        {S8("void f(void) { long object; typeof((object *)) y; }\n"), 45},
+        {S8("void f(void) { __typeof__(typeof((1 -))) y; }\n"), 38},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[case_index].source,
+                                                    (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, invalid[case_index].source);
+        bool diagnosed = parse.diagnostic_count > 0 && string_equal(parse.diagnostics[0].message, S8("expected expression")) &&
+                         parse.diagnostics[0].location.line == 1 && parse.diagnostics[0].location.column == invalid[case_index].column;
+        BUSTER_TEST_RAW(arguments, diagnosed, invalid[case_index].source);
+        scratch_end(temporary);
+    }
+    String8 valid[] = {
+        S8("long object; typedef typeof(object + 1) t; t v;\n"),
+        S8("long object; typedef typeof(object++) t; t v;\n"),
+        S8("long object; typedef typeof_unqual(object) t; t v;\n"),
+        S8("typedef __typeof__(int *) t; t v;\n"),
+        S8("void f(void) { long object; typeof((object)) y; y = 0; }\n"),
+    };
+    // Valid type names Buster cannot type are not reported as syntax errors.
+    String8 untyped[] = {
+        S8("typedef typeof(_BitInt(8) *) t;\n"),
+        S8("typedef typeof(__float128 *) t;\n"),
+        S8("typedef typeof(__fp16 *) t;\n"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(untyped); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, untyped[case_index], (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        bool syntax_error = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+        {
+            syntax_error |= parse.diagnostics[diagnostic_index].kind == C_DIAGNOSTIC_EXPECTED_DECLARATION;
+        }
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && !syntax_error, untyped[case_index]);
+        scratch_end(temporary);
+    }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = S8("typedef typeof(int x) t;\n");
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        bool diagnosed = parse.diagnostic_count > 0 && string_equal(parse.diagnostics[0].message, S8("expected ')' after type name")) &&
+                         parse.diagnostics[0].location.line == 1 && parse.diagnostics[0].location.column == 20;
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && diagnosed, source);
+        scratch_end(temporary);
+    }
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, valid[case_index], (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, valid[case_index]);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // A conditional with void branches is common in Lua's GC-barrier macros:
 // `iscollectable(v) ? luaC_objbarrier(...) : ((void)(0))`.  It has side
 // effects but no result place; lowering must not cast/store a synthetic value
@@ -25393,6 +25484,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_conditional_type);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_cast_prefix_operator);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
+    BUSTER_TEST_FIXTURE(arguments, c_test_typeof_malformed_operand_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
     BUSTER_TEST_FIXTURE(arguments, c_test_pointer_width_integer_conversion);
