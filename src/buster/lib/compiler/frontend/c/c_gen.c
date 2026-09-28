@@ -437,8 +437,10 @@ BUSTER_C_INTERNAL String8 c_ir_diagnostic_type_name(Arena* arena, IrType const* 
     }
     switch (type->kind)
     {
-    case IR_TYPE_VOID: return S8("void");
-    case IR_TYPE_BOOLEAN: return S8("boolean");
+    case IR_TYPE_VOID:
+        return S8("void");
+    case IR_TYPE_BOOLEAN:
+        return S8("boolean");
     case IR_TYPE_INTEGER:
     {
         return type->is_signed ? string_format(arena, S8("{u32}-bit signed integer"), type->bit_width)
@@ -446,21 +448,30 @@ BUSTER_C_INTERNAL String8 c_ir_diagnostic_type_name(Arena* arena, IrType const* 
     }
     case IR_TYPE_FLOAT:
     {
-        return type->float_format == IR_FLOAT_FORMAT_BFLOAT16
-                   ? S8("bfloat16")
-                   : string_format(arena, S8("{u32}-bit floating-point"), type->bit_width);
+        return type->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? S8("bfloat16") : string_format(arena, S8("{u32}-bit floating-point"), type->bit_width);
     }
-    case IR_TYPE_VA_LIST: return S8("variadic argument list");
-    case IR_TYPE_POINTER: return S8("pointer");
-    case IR_TYPE_SLICE: return S8("slice");
-    case IR_TYPE_ARRAY: return string_format(arena, S8("{u64}-element array"), type->element_count);
-    case IR_TYPE_VECTOR: return string_format(arena, S8("{u64}-element vector"), type->element_count);
-    case IR_TYPE_FUNCTION: return S8("function");
-    case IR_TYPE_RANGE: return S8("range");
-    case IR_TYPE_STRUCT: return S8("structure");
-    case IR_TYPE_UNION: return S8("union");
-    case IR_TYPE_ENUM: return S8("enumeration");
-    case IR_TYPE_COUNT: break;
+    case IR_TYPE_VA_LIST:
+        return S8("variadic argument list");
+    case IR_TYPE_POINTER:
+        return S8("pointer");
+    case IR_TYPE_SLICE:
+        return S8("slice");
+    case IR_TYPE_ARRAY:
+        return string_format(arena, S8("{u64}-element array"), type->element_count);
+    case IR_TYPE_VECTOR:
+        return string_format(arena, S8("{u64}-element vector"), type->element_count);
+    case IR_TYPE_FUNCTION:
+        return S8("function");
+    case IR_TYPE_RANGE:
+        return S8("range");
+    case IR_TYPE_STRUCT:
+        return S8("structure");
+    case IR_TYPE_UNION:
+        return S8("union");
+    case IR_TYPE_ENUM:
+        return S8("enumeration");
+    case IR_TYPE_COUNT:
+        break;
     }
     return S8("unknown type");
 }
@@ -8023,9 +8034,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
     if (operation == IR_CONVERSION_COUNT)
     {
         builder->failure_message =
-        string_format(builder->arena, S8("cannot convert type '{S8}' to type '{S8}'"),
-                      c_ir_diagnostic_type_name(builder->arena, source_value),
-                      c_ir_diagnostic_type_name(builder->arena, target_value));
+            string_format(builder->arena, S8("cannot convert type '{S8}' to type '{S8}'"), c_ir_diagnostic_type_name(builder->arena, source_value),
+                          c_ir_diagnostic_type_name(builder->arena, target_value));
         return IR_VALUE_ID_INVALID;
     }
     return c_ir_emit_cast_instruction(builder, value, target_type, operation, source);
@@ -24993,8 +25003,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrT
             }
             if (zero.value == IR_ID_UNDERLYING_INVALID)
             {
-                builder->failure_message = string_format(builder->arena, S8("cannot zero-initialize type '{S8}'"),
-                                                 c_ir_diagnostic_type_name(builder->arena, type));
+                builder->failure_message =
+                    string_format(builder->arena, S8("cannot zero-initialize type '{S8}'"), c_ir_diagnostic_type_name(builder->arena, type));
                 return zero;
             }
             *task.output = zero;
@@ -32831,9 +32841,8 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
         if (result_type.value == IR_ID_UNDERLYING_INVALID)
         {
             builder->failure_message =
-        string_format(builder->arena, S8("conditional expression has incompatible branch types '{S8}' and '{S8}'"),
-                      c_ir_diagnostic_type_name(builder->arena, true_type_value),
-                      c_ir_diagnostic_type_name(builder->arena, false_type_value));
+                string_format(builder->arena, S8("conditional expression has incompatible branch types '{S8}' and '{S8}'"),
+                              c_ir_diagnostic_type_name(builder->arena, true_type_value), c_ir_diagnostic_type_name(builder->arena, false_type_value));
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
@@ -51181,7 +51190,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         {
             result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
                 .message = string_format(arena, S8("cannot lower definition '{S8}' because type '{S8}' has no resolved layout"), entity->name,
-                                 c_ir_diagnostic_type_name(arena, type_value)),
+                                         c_ir_diagnostic_type_name(arena, type_value)),
                 .location = entity->location,
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
