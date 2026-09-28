@@ -737,8 +737,12 @@ static bool bqeg_case(BqEgMutation kind)
     char* const list[] = {"/usr/bin/systemctl", "list-units", "--all", "--plain", "--no-legend",
                           "buster-bench-systemd-broker@*.service", NULL};
     char* const sync[] = {"/usr/bin/journalctl", "--sync", NULL};
+    /* The first failing step and its errno are reported with the case, so a
+     * harness failure is distinguishable from a gate or broker outcome. */
+    int failed_step = 0, failed_errno = 0;
     bool ok = bqeg_unit(kind) && bqeg_command(reload, command_log, 10) == 0 &&
         bqeg_mutate(kind, command_log);
+    if (!ok && !failed_step) { failed_step = 1; failed_errno = errno; }
     char cursor[256] = {0};
     char before[8192] = {0};
     struct timespec clock = {0};
@@ -747,14 +751,17 @@ static bool bqeg_case(BqEgMutation kind)
                  bqeg_file(before_log, before, sizeof(before)) &&
                  clock_gettime(CLOCK_MONOTONIC, &clock) == 0 &&
                  bqeg_command(start, command_log, 10) == 0;
+    if (!ok && !failed_step) { failed_step = 2; failed_errno = errno; }
     char reply[128] = {0};
     if (ok) ok = bqeg_connect(reply);
+    if (!ok && !failed_step) { failed_step = 3; failed_errno = errno; }
     if (ok) ok = bqeg_command(list, units_log, 10) == 0;
     char units[8192] = {0}, unit[128] = {0};
     if (ok)
     {
         ok = bqeg_file(units_log, units, sizeof(units)) && bqeg_fresh_unit(before, units, unit);
     }
+    if (!ok && !failed_step) { failed_step = 4; failed_errno = errno; }
     if (ok)
     {
         char* const show[] = {"/usr/bin/systemctl", "show", "--all", "--no-pager", unit, NULL};
@@ -814,8 +821,10 @@ static bool bqeg_case(BqEgMutation kind)
         ok = !pass && !begin && no_marker && no_entered && !reply[0] &&
              strstr(show, "ExecMainStatus=126\n") != NULL &&
              strstr(show, "Result=exit-code\n") != NULL;
-    printf("BQEG_CASE name=%s unit=%s pass=%d synthetic_begin=%d entered=%d marker=%d status=%s\n",
-           bqeg_names[kind], unit, pass, begin, !no_entered, !no_marker, ok ? "pass" : "fail");
+    printf("BQEG_CASE name=%s unit=%s pass=%d synthetic_begin=%d entered=%d marker=%d status=%s "
+           "failed_step=%d errno=%d\n",
+           bqeg_names[kind], unit, pass, begin, !no_entered, !no_marker, ok ? "pass" : "fail",
+           ok ? 0 : failed_step, ok ? 0 : failed_errno);
     fflush(stdout);
     bool clean = bqeg_command(stop, cleanup_log, 10) == 0;
     if (unit[0])
