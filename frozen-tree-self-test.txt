@@ -1,0 +1,2 @@
+FROZEN_TREE_EVIDENCE_SELF_TEST build_blob=1ea24b90629a2c771c3d0e7d3d517b042ddb4c35 checks=46 failures=0 fixtures-only-not-hosted-proof
+FROZEN_TREE_EVIDENCE_SELF_TEST build_blob=a016a487b745357883a5cd76c9c2712485c01d7c checks=46 failures=0 fixtures-only-not-hosted-proof

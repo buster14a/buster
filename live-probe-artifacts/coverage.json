@@ -1,0 +1,23 @@
+{
+  "captured_when_available": [
+    "installed service full systemctl show and MainPID proc status/mountinfo/cgroup/executable hash",
+    "one passive active-service lease path, descriptor/fdinfo, and /proc/locks snapshot bound to the root receipt",
+    "exact active outer full systemctl show, invocation, MainPID, proc and cgroup identity",
+    "one exact active base-build full systemctl show, invocation, MainPID, proc and cgroup identity before and after payload cleanup",
+    "immutable worker and instance record bytes bound to submit request SHA-256",
+    "complete settled sealed-source metadata and exact fixed workspace path modes at a live base-build checkpoint",
+    "temporary result payload metadata, inode-bound cleanup, and cleanup absence",
+    "broker instance unit/process details only if still listed after the live probe"
+  ],
+  "checkpoint_discovery_window_seconds": 300,
+  "disposition": "normal-path checkpoint probe only",
+  "full_acceptance": "pending",
+  "not_captured_or_not_claimed": [
+    "all five build-stage identities and every final build node before throughput",
+    "recovery scenarios, authenticated publication/replay acceptance, or a complete deployment packet",
+    "short-lived broker processes that exited before post-probe capture",
+    "physical host readiness, host installation, or service/security acceptance",
+    "continuous coordinator FD retention or shared open-file-description identity from inode matching",
+    "instantaneous materializer mkdir/chmod calls or rehashing every sealed source byte"
+  ]
+}

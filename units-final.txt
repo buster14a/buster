@@ -1,0 +1,15 @@
+  UNIT                                            LOAD   ACTIVE SUB       DESCRIPTION
+● buster-bench-1-2.service                        loaded failed failed    /usr/local/libexec/buster-bench-credential-gate 0 65000 65000 65000,65001 -- /usr/local/libexec/buster-bench-service worker-unit /var/lib/buster-bench/lease/host.lock 1 2 validate-buster-v1 /var/lib/buster-bench/workspaces ade6ac4b6ecb21f30b61b656439bac476c145e2f 94ad7a532f6dc7f45bfd364797d2993792f633c1 /var/lib/buster-bench/workspaces/results/job-1-attempt-2
+● buster-bench-systemd-broker@5-855-0.service     loaded failed failed    Buster benchmark constrained systemd broker connection (operator reference) (PID 855/UID 0)
+● buster-bench-systemd-broker@6-881-65000.service loaded failed failed    Buster benchmark constrained systemd broker connection (operator reference) (PID 881/UID 65000)
+● buster-bench-systemd-broker@7-894-65000.service loaded failed failed    Buster benchmark constrained systemd broker connection (operator reference) (PID 894/UID 65000)
+  buster-bench.service                            loaded active running   Buster benchmark authenticated service (repository reference only)
+  buster-bench.slice                              loaded active active    Buster benchmark containment slice (reference values)
+  buster-bench-systemd-broker.socket              loaded active listening Buster benchmark constrained systemd broker socket (operator reference)
+
+Legend: LOAD   → Reflects whether the unit definition was properly loaded.
+        ACTIVE → The high-level unit activation state, i.e. generalization of SUB.
+        SUB    → The low-level unit activation state, values depend on unit type.
+
+7 loaded units listed.
+To show all installed unit files use 'systemctl list-unit-files'.
