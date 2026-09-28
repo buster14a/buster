@@ -157,6 +157,8 @@ def download(asset, destination, token):
 
 
 def extract(archive_stream, install, mode):
+    # Link targets are resolved, so the root must be too (macOS /var -> /private/var).
+    install = install.resolve()
     links = []
     with tarfile.open(fileobj=archive_stream, mode=mode) as archive:
         for member in archive:
@@ -180,7 +182,7 @@ def extract(archive_stream, install, mode):
         else:
             member_relative = kept_member(linkname)
             resolved = install.joinpath(*member_relative.parts) if member_relative else None
-        if resolved is None or install.resolve() not in resolved.parents or not resolved.is_file():
+        if resolved is None or install not in resolved.parents or not resolved.is_file():
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
