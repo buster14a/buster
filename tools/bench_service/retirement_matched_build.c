@@ -112,15 +112,23 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_build_driver_sha(char const* path,
     return ok;
 }
 
-/* broker is NULL for a DIRECT sequence, else the fixed broker executable. */
+/* broker is NULL for a DIRECT sequence, else the fixed broker executable;
+ * broker_workspaces is then the workspace root that broker derives every
+ * attempt path from (BQ_RETIREMENT_STAGE_WORKSPACE_ROOT in production). A
+ * broker sequence requires workspace_root to be exactly that root, so the
+ * cwd and --build-directory its command digest binds are the ones the
+ * broker runs. A DIRECT sequence may use any (test) workspace root. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_begin_stores(BqRetirementBuildStores stores,
     BqJob const* job, int installed, int workspaces, String8 workspace_root, String8 profile,
-    char const* fixed_driver, char const* fixed_toolchain, char const* broker,
+    char const* fixed_driver, char const* fixed_toolchain, char const* broker, char const* broker_workspaces,
     char const preparation_sha256[SHA256_HEX_CAPACITY],
     bool require_new, BqRetirementMatchedBuild* build)
 {
     BqError result = build && fixed_driver && (!broker || (broker[0] == '/' &&
                      strlen(broker) < sizeof(build->broker))) ? BQ_OK : BQ_RECIPE_MISMATCH;
+    if (result == BQ_OK && broker && !(broker_workspaces &&
+        string_equal(workspace_root, string_from_pointer(broker_workspaces))))
+        result = BQ_WORKSPACE_MISMATCH;
     if (build) *build = (BqRetirementMatchedBuild){.generated_root = -1};
     char expected[SHA256_HEX_CAPACITY] = {0}, observed[SHA256_HEX_CAPACITY] = {0};
     BqRetirementPreparation prepared = {0};
@@ -195,7 +203,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_begin_pinned(BqQueue* qu
     bool require_new, BqRetirementMatchedBuild* build)
 {
     BqError result = bq_retirement_matched_build_begin_stores(bq_retirement_build_queue_stores(queue), job,
-        installed, workspaces, workspace_root, profile, fixed_driver, fixed_toolchain, NULL,
+        installed, workspaces, workspace_root, profile, fixed_driver, fixed_toolchain, NULL, NULL,
         preparation_sha256, require_new, build);
     return result;
 }
@@ -986,7 +994,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_build_stage_import(BqRetirementStore e
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_import_stores(BqRetirementBuildStores stores,
     BqJob const* job, int installed, int workspaces, String8 workspace_root,
     String8 profile, char const* fixed_driver, char const* fixed_toolchain, char const* broker,
-    char const preparation_sha256[SHA256_HEX_CAPACITY],
+    char const* broker_workspaces, char const preparation_sha256[SHA256_HEX_CAPACITY],
     char const binary_record_sha256[SHA256_HEX_CAPACITY],
     char const build_record_sha256[SHA256_HEX_CAPACITY], BqRetirementMatchedBuild* verified)
 {
@@ -996,7 +1004,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_import_stores(BqRetireme
         bq_retirement_hex(string_from_pointer(build_record_sha256), 64);
     BqRetirementMatchedBuild current = {0};
     BqError result = valid ? bq_retirement_matched_build_begin_stores(stores, job, installed,
-        workspaces, workspace_root, profile, fixed_driver, fixed_toolchain, broker,
+        workspaces, workspace_root, profile, fixed_driver, fixed_toolchain, broker, broker_workspaces,
         preparation_sha256, false, &current) :
         BQ_RECIPE_MISMATCH;
     BqRetirementBinaries binaries = {0};
@@ -1039,7 +1047,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_import_pinned(BqQueue* q
     char const build_record_sha256[SHA256_HEX_CAPACITY], BqRetirementMatchedBuild* verified)
 {
     BqError result = bq_retirement_matched_build_import_stores(bq_retirement_build_queue_stores(queue), job,
-        installed, workspaces, workspace_root, profile, fixed_driver, fixed_toolchain, NULL,
+        installed, workspaces, workspace_root, profile, fixed_driver, fixed_toolchain, NULL, NULL,
         preparation_sha256, binary_record_sha256, build_record_sha256, verified);
     return result;
 }

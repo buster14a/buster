@@ -19,8 +19,8 @@
  * can fill it but cannot replace it or write anywhere else.
  *
  * Map: BQ_RETIREMENT_STAGE_NAMES, _DRIVER, _TOOLCHAIN_ROOT, _*_VALUE,
- * _BASE_PARENT, _CANDIDATE_PARENT, _BUILD_LEAF, _GENERATE_OPTIONS,
- * _BUILD_OPTIONS, _FIRST_NUMBER.
+ * _WORKSPACE_ROOT, _BASE_PARENT, _CANDIDATE_PARENT, _BUILD_LEAF,
+ * _GENERATE_OPTIONS, _BUILD_OPTIONS, _FIRST_NUMBER.
  */
 #ifndef BUSTER_BENCH_RETIREMENT_STAGE_H
 #define BUSTER_BENCH_RETIREMENT_STAGE_H
@@ -41,6 +41,10 @@
 #define BQ_RETIREMENT_STAGE_LC_ALL_VALUE "C"
 #define BQ_RETIREMENT_STAGE_TZ_VALUE "UTC"
 #define BQ_RETIREMENT_STAGE_HOME_VALUE "/nonexistent"
+
+/* The broker derives every attempt path from this root, so a broker
+ * sequence's cwd and --build-directory digest must be built from it too. */
+#define BQ_RETIREMENT_STAGE_WORKSPACE_ROOT "/var/lib/buster-bench/workspaces"
 
 /* Configured roots, relative to the attempt workspace. base/build is the
  * materializer's service-private 02700 directory; candidate/ is its 02710

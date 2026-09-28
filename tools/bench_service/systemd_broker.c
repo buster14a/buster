@@ -49,7 +49,7 @@
 #define BQ_BROKER_QUEUE "/var/lib/buster-bench/queue"
 #define BQ_BROKER_LEASE "/var/lib/buster-bench/lease/host.lock"
 #define BQ_BROKER_LEASE_RECEIPT "/etc/buster-bench/systemd-broker-lease.identity"
-#define BQ_BROKER_WORKSPACES "/var/lib/buster-bench/workspaces"
+#define BQ_BROKER_WORKSPACES BQ_RETIREMENT_STAGE_WORKSPACE_ROOT
 #define BQ_BROKER_CGROUP_SLICE "/buster.slice/buster-bench.slice"
 #define BQ_BROKER_INSTALLED "/opt/buster-bench/installed"
 #define BQ_BROKER_SERVICE "/usr/local/libexec/buster-bench-service"

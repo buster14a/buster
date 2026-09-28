@@ -2439,7 +2439,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* or
     pid_t peer = bq_prep_test_phase_peer(&phases, 61, 71, true);
     BqRetirementUnitBuilt built = {0};
     BQ_PREP_CHECK(bq_retirement_unit_build_pinned(success.store, &success.unit, workspaces, installed, root,
-                  profile_pins, driver, toolchain_root, broker, geteuid(), &phases, cancel[0], generous, &built) ==
+                  profile_pins, driver, toolchain_root, broker, workspace_path, geteuid(), &phases, cancel[0], generous, &built) ==
                   BQ_OK && built.owned && phases.sequence == BQ_PHASE_PREPARING);
     BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
     BQ_PREP_CHECK(built.verified.launcher == BQ_RETIREMENT_LAUNCH_BROKER && built.verified.next == 4 &&
@@ -2476,18 +2476,18 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* or
     /* Re-import, then tampered record, wrong toolchain and wrong binary. */
     BqRetirementMatchedBuild observed = {0};
     BQ_PREP_CHECK(bq_retirement_unit_build_import_pinned(success.store, &success.unit, workspaces, installed, root,
-                  profile_pins, driver, toolchain_root, broker, built.binary_record_sha256, built.build_record_sha256,
+                  profile_pins, driver, toolchain_root, broker, workspace_path, built.binary_record_sha256, built.build_record_sha256,
                   &observed) == BQ_OK && !strcmp(observed.stage_receipt_sha256[3],
                   built.verified.stage_receipt_sha256[3]));
     BQ_PREP_CHECK(bq_retirement_unit_build_import_pinned(success.store, &success.unit, workspaces, installed, root,
-                  profile_pins, driver, toolchain_root, NULL, built.binary_record_sha256, built.build_record_sha256,
+                  profile_pins, driver, toolchain_root, NULL, NULL, built.binary_record_sha256, built.build_record_sha256,
                   &observed) == BQ_CORRUPT && !observed.preparation_sha256[0]);
     char record_name[48];
     BQ_PREP_CHECK(bq_record_name(record_name, "matched-builds", success.job.id) &&
                   bq_prep_test_flip_sealed(success.attempt, BQ_RETIREMENT_UNIT_EVIDENCE_DIRECTORY, record_name,
                                            BQ_RETIREMENT_EXPORT_MODE, 0400) &&
                   bq_retirement_unit_build_import_pinned(success.store, &success.unit, workspaces, installed, root,
-                      profile_pins, driver, toolchain_root, broker, built.binary_record_sha256,
+                      profile_pins, driver, toolchain_root, broker, workspace_path, built.binary_record_sha256,
                       built.build_record_sha256, &observed) == BQ_CORRUPT && !observed.preparation_sha256[0] &&
                   bq_prep_test_flip_sealed(success.attempt, BQ_RETIREMENT_UNIT_EVIDENCE_DIRECTORY, record_name,
                                            BQ_RETIREMENT_EXPORT_MODE, 0400));
@@ -2501,29 +2501,32 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* or
                    rename(clang_path, saved) == 0 && bq_prep_test_write(clang_path, "fixture only\n") &&
                    chmod(clang_path, 0555) == 0 && chmod(tool_bin, 0555) == 0;
     BQ_PREP_CHECK(swapped && bq_retirement_unit_build_import_pinned(success.store, &success.unit, workspaces,
-                  installed, root, profile_pins, driver, toolchain_root, broker, built.binary_record_sha256,
+                  installed, root, profile_pins, driver, toolchain_root, broker, workspace_path, built.binary_record_sha256,
                   built.build_record_sha256, &observed) != BQ_OK && !observed.preparation_sha256[0]);
     BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 && unlink(clang_path) == 0 && rename(saved, clang_path) == 0 &&
                   chmod(tool_bin, 0555) == 0);
     char const* frozen = BQ_RETIREMENT_BUILD_WORK_DIRECTORY "/trusted-build";
     BQ_PREP_CHECK(bq_prep_test_flip_sealed(success.attempt, frozen, "candidate-ide", 0500, 0500) &&
                   bq_retirement_unit_build_import_pinned(success.store, &success.unit, workspaces, installed, root,
-                      profile_pins, driver, toolchain_root, broker, built.binary_record_sha256,
+                      profile_pins, driver, toolchain_root, broker, workspace_path, built.binary_record_sha256,
                       built.build_record_sha256, &observed) != BQ_OK && !observed.preparation_sha256[0] &&
                   bq_prep_test_flip_sealed(success.attempt, frozen, "candidate-ide", 0500, 0500));
     BQ_PREP_CHECK(bq_retirement_unit_build_import_pinned(success.store, &success.unit, workspaces, installed, root,
-                  profile_pins, driver, toolchain_root, broker, built.binary_record_sha256, built.build_record_sha256,
+                  profile_pins, driver, toolchain_root, broker, workspace_path, built.binary_record_sha256, built.build_record_sha256,
                   &observed) == BQ_OK);
     /* A live result and a second build into the same attempt are refused
      * before any child; PREPARING is already held by this channel. */
     BqRetirementUnitBuilt again = {0};
     BQ_PREP_CHECK(bq_retirement_unit_build_pinned(success.store, &success.unit, workspaces, installed, root,
-                  profile_pins, driver, toolchain_root, broker, geteuid(), &phases, cancel[0], generous, &built) ==
+                  profile_pins, driver, toolchain_root, broker, workspace_path, geteuid(), &phases, cancel[0], generous, &built) ==
                   BQ_BAD_REQUEST && built.owned);
     BQ_PREP_CHECK(bq_retirement_unit_build_pinned(success.store, &success.unit, workspaces, installed, root,
-                  profile_pins, driver, toolchain_root, broker, geteuid(), &phases, cancel[0], generous, &again) ==
+                  profile_pins, driver, toolchain_root, broker, workspace_path, geteuid(), &phases, cancel[0], generous, &again) ==
                   BQ_WORKSPACE_MISMATCH && !again.owned && again.binaries.descriptors[0] == -1);
     BQ_PREP_CHECK(bq_prep_test_read_text(launches, text, sizeof(text)) == (u32)(cursor - text));
+    char kept_binaries[SHA256_HEX_CAPACITY], kept_builds[SHA256_HEX_CAPACITY];
+    memcpy(kept_binaries, built.binary_record_sha256, sizeof(kept_binaries));
+    memcpy(kept_builds, built.build_record_sha256, sizeof(kept_builds));
     BQ_PREP_CHECK(bq_retirement_unit_built_release(&built) && !built.owned && built.binaries.descriptors[0] == -1);
     /* The checked-in blocked profile and a profile without the driver pin
      * fail before the channel is touched. */
@@ -2531,8 +2534,25 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* or
     BQ_PREP_CHECK(bq_retirement_unit_build(success.store, &success.unit, workspaces, installed, root, &untouched,
                   cancel[0], generous, &again) != BQ_OK && !untouched.sequence && !again.owned);
     BQ_PREP_CHECK(bq_retirement_unit_build_pinned(success.store, &success.unit, workspaces, installed, root,
-                  string_from_pointer(fixture.pinned), driver, toolchain_root, broker, geteuid(), &untouched,
+                  string_from_pointer(fixture.pinned), driver, toolchain_root, broker, workspace_path, geteuid(), &untouched,
                   cancel[0], generous, &again) == BQ_RECIPE_MISMATCH && !untouched.sequence && !again.owned);
+    /* A broker sequence binds the broker's own workspace root: the fixed
+     * production root (what bq_retirement_unit_build passes) or none refuses
+     * this test root before the channel, a launch or a re-import. */
+    BQ_PREP_CHECK(bq_retirement_unit_build_pinned(success.store, &success.unit, workspaces, installed, root,
+                  profile_pins, driver, toolchain_root, broker, BQ_RETIREMENT_STAGE_WORKSPACE_ROOT, geteuid(),
+                  &untouched, cancel[0], generous, &again) == BQ_WORKSPACE_MISMATCH && !untouched.sequence);
+    BQ_PREP_CHECK(bq_retirement_unit_build_pinned(success.store, &success.unit, workspaces, installed, root,
+                  profile_pins, driver, toolchain_root, broker, NULL, geteuid(), &untouched, cancel[0], generous,
+                  &again) == BQ_WORKSPACE_MISMATCH && !untouched.sequence && !again.owned);
+    BQ_PREP_CHECK(bq_retirement_unit_build_import_pinned(success.store, &success.unit, workspaces, installed, root,
+                  profile_pins, driver, toolchain_root, broker, BQ_RETIREMENT_STAGE_WORKSPACE_ROOT,
+                  kept_binaries, kept_builds, &observed) == BQ_WORKSPACE_MISMATCH &&
+                  !observed.preparation_sha256[0] &&
+                  bq_retirement_unit_build_import_pinned(success.store, &success.unit, workspaces, installed, root,
+                      profile_pins, driver, toolchain_root, broker, workspace_path, kept_binaries, kept_builds,
+                      &observed) == BQ_OK);
+    BQ_PREP_CHECK(bq_prep_test_read_text(launches, text, sizeof(text)) == (u32)(cursor - text));
     BQ_PREP_CHECK(bq_prep_test_unit_attempt_close(&success));
 
     /* A refused acknowledgement launches nothing and creates no evidence. */
@@ -2541,7 +2561,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* or
                                             pinned, toolchain_root, &refused));
     peer = bq_prep_test_phase_peer(&phases, 62, 72, false);
     BQ_PREP_CHECK(bq_retirement_unit_build_pinned(refused.store, &refused.unit, workspaces, installed, root,
-                  profile_pins, driver, toolchain_root, broker, geteuid(), &phases, cancel[0], generous, &built) ==
+                  profile_pins, driver, toolchain_root, broker, workspace_path, geteuid(), &phases, cancel[0], generous, &built) ==
                   BQ_WORKER_MISMATCH && !built.owned && phases.failed);
     BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
     BQ_PREP_CHECK(bq_prep_test_read_text(launches, text, sizeof(text)) == (u32)(cursor - text) &&
@@ -2567,7 +2587,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* or
         u64 deadline = trial ? bq_phase_clock() + 800000000ull : generous;
         peer = bq_prep_test_phase_peer(&phases, id, id + 10u, true);
         BqError result = bq_retirement_unit_build_pinned(hanging.store, &hanging.unit, workspaces, installed, root,
-            profile_pins, driver, toolchain_root, broker, geteuid(), &phases, cancel[0], deadline, &built);
+            profile_pins, driver, toolchain_root, broker, workspace_path, geteuid(), &phases, cancel[0], deadline, &built);
         if (!trial)
         {
             BQ_PREP_CHECK(armed && setitimer(ITIMER_REAL, &stopped, NULL) == 0 &&
@@ -2690,7 +2710,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* or
     peer = bq_prep_test_phase_peer(&phases, materialized_id, materialized_token, true);
     BQ_PREP_CHECK(subjects && bq_retirement_unit_build_pinned(materialized_store, &materialized_unit,
                   materialized_root, installed, string_from_pointer(root_path), profile_pins, placed_driver,
-                  toolchain_root, placed_broker, geteuid(), &phases, cancel[0], generous, &placed) == BQ_OK &&
+                  toolchain_root, placed_broker, root_path, geteuid(), &phases, cancel[0], generous, &placed) == BQ_OK &&
                   placed.owned && placed.binaries.descriptors[0] >= 3 && placed.binaries.descriptors[1] >= 3);
     BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
     /* Four typed requests in order; the attempt is still the materializer's

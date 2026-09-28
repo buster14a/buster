@@ -237,6 +237,14 @@ handoff. It performs these steps in order:
    `retirement/` export is never written and still holds exactly two files.
 3. `bq_retirement_matched_build_begin_stores` re-imports A from the export,
    checks the driver pin and the toolchain, and binds the broker launcher.
+   A broker sequence requires the caller's workspace root to be exactly the
+   broker's `BQ_RETIREMENT_STAGE_WORKSPACE_ROOT`
+   (`/var/lib/buster-bench/workspaces`, from `retirement_stage.h`), because
+   the broker derives cwd and `--build-directory` from that constant; any
+   other root returns `BQ_WORKSPACE_MISMATCH` before the channel is touched,
+   and the re-import applies the same check. A DIRECT (fixture or queue
+   API) sequence may use a test root; the pinned test seam passes the
+   fixture broker's own root, from which that stand-in derives its paths.
    The toolchain manifest must equal the one prepare verified. It checks that
    the attempt is service-owned and not group- or world-writable (the
    materializer's `02710`; #1018 no longer requires a private attempt). It

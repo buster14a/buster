@@ -53,7 +53,9 @@ typedef struct BqRetirementUnitBuilt
     u32 owned;
 } BqRetirementUnitBuilt;
 
-/* store is the export prepare used. Requires the PREPARING acknowledgement
+/* store is the export prepare used. workspace_root must be exactly
+ * BQ_RETIREMENT_STAGE_WORKSPACE_ROOT, the broker's fixed root, or the build
+ * returns BQ_WORKSPACE_MISMATCH before the channel. Requires the PREPARING acknowledgement
  * before the first child (sent here unless phases already holds it), then
  * runs baseline and candidate generate/build through the broker. A readable
  * cancellation_fd (the SIGTERM self-pipe) or deadline_ns (CLOCK_MONOTONIC,
