@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression for the legacy Clang AVX10 -march=native exception (#1501)."""
+"""Native Clang/GCC configure-policy regressions (#1501, #1654)."""
 
 import os
 from pathlib import Path
@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+
+from linux_asan_runtime_test import LinuxAsanRuntimeTests
 
 
 ROOT = Path(__file__).resolve().parents[1]

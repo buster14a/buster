@@ -781,7 +781,9 @@ if (UNIX AND NOT APPLE AND BUSTER_SANITIZE)
                 )
             endif()
         endif()
-        list(APPEND BUSTER_LINUX_ASAN_RUNTIME_NAMES "libasan.so")
+        if (C_COMPILER_GNU)
+            list(APPEND BUSTER_LINUX_ASAN_RUNTIME_NAMES "libasan.so")
+        endif()
 
         foreach(runtime_name IN LISTS BUSTER_LINUX_ASAN_RUNTIME_NAMES)
             execute_process(
@@ -798,6 +800,21 @@ if (UNIX AND NOT APPLE AND BUSTER_SANITIZE)
                 break()
             endif()
         endforeach()
+    endif()
+
+    if (C_COMPILER_CLANG AND NOT C_COMPILER_ZIG AND NOT BUSTER_LINUX_ASAN_PRELOAD_RUNTIME)
+        string(REGEX MATCH "^[0-9]+" BUSTER_LINUX_ASAN_CLANG_MAJOR "${CMAKE_C_COMPILER_VERSION}")
+        set(BUSTER_LINUX_ASAN_INSTALL_HINT
+            " Install the compiler-rt package matching this Clang.")
+        if (BUSTER_LINUX_ASAN_CLANG_MAJOR)
+            set(BUSTER_LINUX_ASAN_INSTALL_HINT
+                " On Debian/Ubuntu, install libclang-rt-${BUSTER_LINUX_ASAN_CLANG_MAJOR}-dev.")
+        endif()
+        message(FATAL_ERROR
+            "Could not find Clang's shared AddressSanitizer runtime "
+            "(tried ${BUSTER_LINUX_ASAN_RUNTIME_NAMES}) for ${CMAKE_C_COMPILER}."
+            "${BUSTER_LINUX_ASAN_INSTALL_HINT}"
+        )
     endif()
 
     if (BUSTER_LINUX_ASAN_PRELOAD_RUNTIME)

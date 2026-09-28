@@ -164,6 +164,12 @@ A failed post-stage check prints `error: STAGE post-stage check failed: CHECK`.
 ./build.sh test_all_combinations    # the full local matrix CI runs
 ```
 
+On Linux, native Clang sanitizer configurations require Clang's shared
+compiler-rt ASan runtime. Configuration fails before graph generation when it
+is missing; on Debian/Ubuntu, install `libclang-rt-<clang-major>-dev`. GCC
+sanitizer configurations continue to discover `libasan.so`, while Zig keeps
+its separate compiler-rt lookup and fallback policy.
+
 `optnone_audit BUILD_DIRECTORY [--config C]` guards the trusted Clang unity
 `ide`. Its test bodies compile under `#pragma clang optimize off` in
 `src/buster/apps/ide/ide.c` to bound compile memory (#781), and a production
