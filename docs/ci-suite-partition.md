@@ -91,7 +91,6 @@ From a fresh checkout with the hosted prerequisites, run the native slice:
 
 ```sh
 export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
-export CFLAGS=-Wno-invalid-feature-combination
 driver="${RUNNER_TEMP:-/tmp}/buster-build"
 out="$(mktemp -d)/differential"
 clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"

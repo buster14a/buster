@@ -41,7 +41,7 @@ Run the existing build-driver self-test and unchanged full differential command 
 work=$(mktemp -d)
 clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$work/buster-build"
 "$work/buster-build" test_differential --self-test
-CFLAGS=-Wno-invalid-feature-combination "$work/buster-build" generate --cc clang --config Release --linker DEFAULT
+"$work/buster-build" generate --cc clang --config Release --linker DEFAULT
 "$work/buster-build" build --config Release -t ide
 "$work/buster-build" test_differential --ide build/Release/ide --out "$work/differential" --sanitize-oracle
 ```
