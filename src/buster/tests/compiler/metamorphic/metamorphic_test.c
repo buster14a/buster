@@ -1089,7 +1089,9 @@ ProcessResult metamorphic_campaign(Arena* arena)
             else if (meta_prepare_node(&context))
             {
                 if (!context.target_filter.length || string_equal(context.target_filter, S8("ebpf")))
+                {
                     string_print(S8("METAMORPHIC_EBPF_KERNEL available={u32}\n"), (u32)context.ebpf_kernel);
+                }
                 MetaSummary summary = meta_run(&context, seed, cases, mask);
                 string_print(S8("METAMORPHIC_SUMMARY seed={u32} cases={u32} pairs={u32} executed={u32} unexecuted={u32} failures={u32} unique={u32} reducer_replays={u32} frontend_ssa={u32} output={S8}\n"),
                              seed, cases, summary.pairs, summary.executed, summary.unexecuted, summary.failures, summary.unique_failures, summary.reductions, frontend_ssa, directory);
