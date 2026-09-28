@@ -4542,6 +4542,77 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_block_tls(UnitTestArguments* a
     return result;
 }
 
+// Issue 1603: an internal or inline definition nothing reaches is dropped
+// whether or not a prototype came first. The prototype's function stays
+// bodiless as NOT_LOWERED, never the REJECTED placeholder a lowered definition
+// starts from: that state means lowering failed, and the LLVM bitcode,
+// WebAssembly and eBPF emitters refuse the whole unit on it. The cycle's
+// unprototyped half is the no-prototype path, which leaves no function at all.
+// A definition kept for its section is a root, so both of its callees are
+// needed. Before it was, the call to the unprototyped one failed to lower and
+// the prototyped one was left bodiless, referenced as an undefined global.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unneeded_prototyped_definitions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("static int unneeded_static(void);\n"
+                                               "static int unneeded_static(void) { return 1; }\n"
+                                               "static inline int unneeded_inline(void);\n"
+                                               "static inline int unneeded_inline(void) { return 2; }\n"
+                                               "inline int unneeded_external_inline(void);\n"
+                                               "inline int unneeded_external_inline(void) { return 3; }\n"
+                                               "static int unneeded_cycle_a(void);\n"
+                                               "static int unneeded_cycle_b(void) { return unneeded_cycle_a(); }\n"
+                                               "static int unneeded_cycle_a(void) { return unneeded_cycle_b(); }\n"
+                                               "static int needed_static(void);\n"
+                                               "int keep(void) { return needed_static(); }\n"
+                                               "static int needed_static(void) { return 4; }\n"
+                                               "static int section_callee(void) { return 5; }\n"
+                                               "static int section_callee_prototyped(void);\n"
+                                               "__attribute__((section(\".text.kept\"))) static int section_root(void)"
+                                               " { return section_callee() + section_callee_prototyped(); }\n"
+                                               "static int section_callee_prototyped(void) { return 6; }\n"),
+                                            (CPreprocessOptions){
+                                                .target = target_native,
+                                                .data_layout = target_data_layout(target_native),
+                                            });
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("unneeded-prototyped-definitions.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, lowered.program != 0))
+    {
+        IrModule* module = lowered.program->modules;
+        BUSTER_TEST(arguments, module->rejected_function_count == 0);
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            BUSTER_TEST(arguments, module->functions[function_index].state != IR_FUNCTION_REJECTED);
+        }
+        String8 unneeded[] = {S8("unneeded_static"), S8("unneeded_inline"), S8("unneeded_external_inline"), S8("unneeded_cycle_a")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unneeded); index += 1)
+        {
+            IrFunction* function = c_test_find_ir_function(module, unneeded[index]);
+            BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_NOT_LOWERED && !function->block_count);
+        }
+        BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("unneeded_cycle_b")) == 0);
+        IrFunction* needed = c_test_find_ir_function(module, S8("needed_static"));
+        IrFunction* keep = c_test_find_ir_function(module, S8("keep"));
+        BUSTER_TEST(arguments, needed && needed->state == IR_FUNCTION_LOWERED);
+        BUSTER_TEST(arguments, keep && keep->state == IR_FUNCTION_LOWERED);
+        String8 section_reached[] = {S8("section_root"), S8("section_callee"), S8("section_callee_prototyped")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(section_reached); index += 1)
+        {
+            IrFunction* function = c_test_find_ir_function(module, section_reached[index]);
+            BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_LOWERED);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_repeated_incomplete_arrays(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8739,6 +8810,115 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pp_class_masks(UnitTestArguments* argu
     return result;
 }
 
+// The validation populations of CTokenPositionIndex, as defined on the tokens
+// alone: spellings name the keyword families, and an identifier the intern
+// pass never saw belongs to all of them; kinds and punctuators name the pairs.
+typedef enum CTestValidationPopulation
+{
+    C_TEST_VALIDATION_CONTROL_KEYWORDS,
+    C_TEST_VALIDATION_SWITCH,
+    C_TEST_VALIDATION_RETURN,
+    C_TEST_VALIDATION_GOTO,
+    C_TEST_VALIDATION_ASM,
+    C_TEST_VALIDATION_SIZEOF,
+    C_TEST_VALIDATION_BRACE_IDENTIFIERS,
+    C_TEST_VALIDATION_STATEMENT_EXPRESSIONS,
+    C_TEST_VALIDATION_LABEL_ADDRESSES,
+    C_TEST_VALIDATION_COUNT,
+} CTestValidationPopulation;
+
+typedef struct CTestValidationPositions CTestValidationPositions;
+struct CTestValidationPositions
+{
+    u32 const* positions[C_TEST_VALIDATION_COUNT];
+    u32 counts[C_TEST_VALIDATION_COUNT];
+};
+
+BUSTER_GLOBAL_LOCAL CTestValidationPositions c_test_index_validation_positions(CTokenPositionIndex const* index)
+{
+    return (CTestValidationPositions){
+        .positions = {index->control_keyword_positions, index->switch_positions, index->return_positions, index->goto_positions,
+                      index->asm_positions, index->sizeof_positions, index->brace_identifier_positions,
+                      index->statement_expression_positions, index->label_address_positions},
+        .counts = {index->control_keyword_count, index->switch_count, index->return_count, index->goto_count, index->asm_count,
+                   index->sizeof_count, index->brace_identifier_count, index->statement_expression_count, index->label_address_count},
+    };
+}
+
+BUSTER_GLOBAL_LOCAL bool c_test_spelling_in(String8 spelling, String8 const* words, u64 word_count)
+{
+    bool result = false;
+    for (u64 index = 0; index < word_count; index += 1)
+    {
+        result |= string_equal(spelling, words[index]);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_test_token_is(CToken token, CPunctuator punctuator)
+{
+    return token.kind == C_TOKEN_PUNCTUATOR && token.punctuator == punctuator;
+}
+
+BUSTER_GLOBAL_LOCAL CTestValidationPositions c_test_expected_validation_positions(Arena* arena, CPreprocessResult preprocess)
+{
+    String8 const control_words[] = {S8("for"), S8("while"), S8("do"), S8("switch"), S8("break"), S8("continue"), S8("case"), S8("default")};
+    String8 const asm_words[] = {S8("asm"), S8("__asm"), S8("__asm__")};
+    String8 const sizeof_words[] = {S8("sizeof"), S8("_Alignof"), S8("__alignof"), S8("__alignof__")};
+    u32 token_count = (u32)preprocess.token_count;
+    u32* positions[C_TEST_VALIDATION_COUNT];
+    CTestValidationPositions result = {0};
+    for (u32 population = 0; population < C_TEST_VALIDATION_COUNT; population += 1)
+    {
+        positions[population] = arena_allocate(arena, u32, token_count ? token_count : 1);
+        result.positions[population] = positions[population];
+    }
+    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    {
+        CToken token = preprocess.tokens[token_index];
+        bool successor = token_index + 1 < token_count;
+        bool members[C_TEST_VALIDATION_COUNT] = {0};
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+            bool uninterned = !token.symbol;
+            members[C_TEST_VALIDATION_CONTROL_KEYWORDS] = uninterned || c_test_spelling_in(spelling, control_words, BUSTER_ARRAY_LENGTH(control_words));
+            members[C_TEST_VALIDATION_SWITCH] = uninterned || string_equal(spelling, S8("switch"));
+            members[C_TEST_VALIDATION_RETURN] = uninterned || string_equal(spelling, S8("return"));
+            members[C_TEST_VALIDATION_GOTO] = uninterned || string_equal(spelling, S8("goto"));
+            members[C_TEST_VALIDATION_ASM] = uninterned || c_test_spelling_in(spelling, asm_words, BUSTER_ARRAY_LENGTH(asm_words));
+            members[C_TEST_VALIDATION_SIZEOF] = uninterned || c_test_spelling_in(spelling, sizeof_words, BUSTER_ARRAY_LENGTH(sizeof_words));
+            members[C_TEST_VALIDATION_BRACE_IDENTIFIERS] =
+                successor && c_test_token_is(preprocess.tokens[token_index + 1], C_PUNCTUATOR_LEFT_BRACE);
+        }
+        members[C_TEST_VALIDATION_STATEMENT_EXPRESSIONS] = token_index && c_test_token_is(token, C_PUNCTUATOR_LEFT_BRACE) &&
+                                                          c_test_token_is(preprocess.tokens[token_index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        members[C_TEST_VALIDATION_LABEL_ADDRESSES] = successor && c_test_token_is(token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                                                    preprocess.tokens[token_index + 1].kind == C_TOKEN_IDENTIFIER;
+        for (u32 population = 0; population < C_TEST_VALIDATION_COUNT; population += 1)
+        {
+            if (members[population])
+            {
+                positions[population][result.counts[population]] = token_index;
+                result.counts[population] += 1;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 c_test_validation_position_mismatches(CTestValidationPositions actual, CTestValidationPositions expected)
+{
+    u32 result = 0;
+    for (u32 population = 0; population < C_TEST_VALIDATION_COUNT; population += 1)
+    {
+        u32 count = expected.counts[population];
+        result += actual.counts[population] != count ||
+                  (count && memcmp(actual.positions[population], expected.positions[population], sizeof(u32) * count) != 0);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8759,6 +8939,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
         }
         c_test_append_source(source_bytes, source_capacity, &source_length,
                              string_format(arguments->arena, S8("int function_{u32}(int x) {{ label_{u32}: return x; }}\n"), item, item));
+        // Every word and pair of the validation populations, behind empty
+        // statements whose count changes with the item, so that each pair also
+        // lands across a 64-token window edge somewhere in the stream.
+        if (item % 2 == 0)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length,
+                                 string_format(arguments->arena, S8("int control_{u32}(int x) {{"), item));
+            for (u32 pad = 0; pad < item % 61; pad += 1)
+            {
+                c_test_append_source(source_bytes, source_capacity, &source_length, S8(" ;"));
+            }
+            c_test_append_source(source_bytes, source_capacity, &source_length,
+                                 string_format(arguments->arena,
+                                               S8(" struct pair_{u32} {{ int a; }} pair = {{ 0 }}; void* target = &&done_{u32};"
+                                                  " int total = ({{ int inner = x; inner; }});"
+                                                  " for (int i = 0; i < x; i += 1) {{ if (i == 3) continue; total += sizeof(int) + _Alignof(long) + __alignof__(short); }}"
+                                                  " while (x) {{ x -= 1; break; }} do {{ x += 1; }} while (x < 2);"
+                                                  " switch (x) {{ case 1: total += 1; break; default: break; }}"
+                                                  " __asm__(\"\"); if (!target) goto done_{u32}; done_{u32}: return total + pair.a; }}\n"),
+                                               item, item, item, item));
+        }
     }
     CPreprocessResult preprocess = c_preprocess(arguments->arena, (String8){.pointer = source_bytes, .length = source_length}, (CPreprocessOptions){0});
     BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
@@ -8902,6 +9103,107 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
     }
     BUSTER_TEST(arguments, memcmp(scalar_index.matching_delimiters_plus_one, expected_matching_plus_one,
                                   sizeof(*expected_matching_plus_one) * token_count) == 0);
+
+    // The validation populations from the window pass and from the scalar
+    // visit. The window pass reads a '{' in lane 0 against a '(' in the last
+    // lane of the previous window, and an identifier or '&&' in lane 63
+    // against lane 0 of the next; the corpus must reach each of those edges.
+    CTestValidationPositions expected_validation = c_test_expected_validation_positions(arguments->arena, preprocess);
+    u32 empty_populations = 0;
+    for (u32 population = 0; population < C_TEST_VALIDATION_COUNT; population += 1)
+    {
+        empty_populations += expected_validation.counts[population] == 0;
+    }
+    u32 window_edge_pairs[3] = {0};
+    CTestValidationPopulation const edge_populations[3] = {C_TEST_VALIDATION_STATEMENT_EXPRESSIONS, C_TEST_VALIDATION_BRACE_IDENTIFIERS,
+                                                           C_TEST_VALIDATION_LABEL_ADDRESSES};
+    for (u32 edge = 0; edge < 3; edge += 1)
+    {
+        CTestValidationPopulation population = edge_populations[edge];
+        for (u32 position = 0; position < expected_validation.counts[population]; position += 1)
+        {
+            window_edge_pairs[edge] += expected_validation.positions[population][position] % 64 == (edge ? 63u : 0u);
+        }
+    }
+    BUSTER_TEST(arguments, empty_populations == 0);
+    BUSTER_TEST(arguments, window_edge_pairs[0] && window_edge_pairs[1] && window_edge_pairs[2]);
+    BUSTER_TEST(arguments, c_test_validation_position_mismatches(c_test_index_validation_positions(indexed), expected_validation) == 0);
+    BUSTER_TEST(arguments, c_test_validation_position_mismatches(c_test_index_validation_positions(&scalar_index), expected_validation) == 0);
+
+    // An identifier the intern pass never saw joins every keyword population
+    // on both paths. Forget the symbol of every identifier at a position
+    // divisible by three, keywords among them, rebuild both indexes, then
+    // restore the symbols.
+    u32* saved_symbols = arena_allocate(arguments->arena, u32, token_count);
+    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    {
+        saved_symbols[token_index] = preprocess.tokens[token_index].symbol;
+        if (preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && token_index % 3 == 0)
+        {
+            preprocess.tokens[token_index].symbol = 0;
+        }
+    }
+    CTestValidationPositions expected_uninterned = c_test_expected_validation_positions(arguments->arena, preprocess);
+    CTokenPositionIndex uninterned_indexes[2] = {0};
+    for (u32 path = 0; path < 2; path += 1)
+    {
+        parse.position_index = &uninterned_indexes[path];
+        if (path && preprocess.recovery)
+        {
+            preprocess.recovery->token_shapes = 0;
+        }
+        c_parse_position_index_ensure(&parse, preprocess);
+        if (preprocess.recovery)
+        {
+            preprocess.recovery->token_shapes = saved_shapes;
+        }
+    }
+    parse.position_index = saved_index;
+    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    {
+        preprocess.tokens[token_index].symbol = saved_symbols[token_index];
+    }
+    BUSTER_TEST(arguments, expected_uninterned.counts[C_TEST_VALIDATION_RETURN] > expected_validation.counts[C_TEST_VALIDATION_RETURN]);
+    BUSTER_TEST(arguments, uninterned_indexes[0].built && uninterned_indexes[1].built);
+    BUSTER_TEST(arguments, c_test_validation_position_mismatches(c_test_index_validation_positions(&uninterned_indexes[0]), expected_uninterned) == 0);
+    BUSTER_TEST(arguments, c_test_validation_position_mismatches(c_test_index_validation_positions(&uninterned_indexes[1]), expected_uninterned) == 0);
+    return result;
+}
+
+// The other candidate sources of the validation families, against their
+// scalar definitions (c_parse_internal.h). The shape stream opens with dense
+// calls, then runs sparse enough that the scan must step whole windows, with
+// one call planted mid-run and one closing the stream.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_validation_candidates(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CTokenShape const identifier = (CTokenShape)C_TOKEN_IDENTIFIER;
+    CTokenShape const call_open = (CTokenShape)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_LEFT_PARENTHESIS);
+    CTokenShape const call_close = (CTokenShape)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_RIGHT_PARENTHESIS);
+    CTokenShape const number = (CTokenShape)C_TOKEN_PREPROCESSING_NUMBER;
+    CTokenShape const dense[] = {identifier, identifier, call_open, call_close, number};
+    CTokenShape const sparse[] = {identifier, identifier, call_close, number};
+    u32 const shape_count = 230;
+    CTokenShape* shapes = arena_allocate(arguments->arena, CTokenShape, shape_count);
+    u64 state = UINT64_C(0x9e3779b97f4a7c15);
+    for (u32 index = 0; index < shape_count; index += 1)
+    {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        shapes[index] = index < 80 ? dense[state % BUSTER_ARRAY_LENGTH(dense)] : sparse[state % BUSTER_ARRAY_LENGTH(sparse)];
+    }
+    shapes[143] = identifier;
+    shapes[144] = call_open;
+    shapes[shape_count - 2] = identifier;
+    shapes[shape_count - 1] = call_open;
+    BUSTER_TEST(arguments, c_test_parse_call_shape_mismatches(shapes, shape_count) == 0);
+
+    // Two interleaved populations that share positions, then one alone.
+    u32 first[] = {0, 3, 5, 9, 17, 18, 40, 63, 64, 90};
+    u32 second[] = {5, 6, 17, 41, 63, 65, 99};
+    BUSTER_TEST(arguments, c_test_parse_candidate_merge_mismatches(first, BUSTER_ARRAY_LENGTH(first), second, BUSTER_ARRAY_LENGTH(second), 100) == 0);
+    BUSTER_TEST(arguments, c_test_parse_candidate_merge_mismatches(first, BUSTER_ARRAY_LENGTH(first), 0, 0, 100) == 0);
     return result;
 }
 
@@ -23179,6 +23481,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_string_literal_decode_differential);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
     BUSTER_TEST_FIXTURE(arguments, c_test_position_index_tiles);
+    BUSTER_TEST_FIXTURE(arguments, c_test_validation_candidates);
     BUSTER_TEST_FIXTURE(arguments, c_test_oversized_token_spellings);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_source_metrics);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_metrics_path_identity);
@@ -23334,6 +23637,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_parenthesized_operand);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_invalid_block_tls);
+
+    BUSTER_TEST_FIXTURE(arguments, c_test_unneeded_prototyped_definitions);
 
     {
         TemporalArena artifact_temporary = scratch_begin(0, 0);

@@ -72,6 +72,15 @@ installing a pinned and checksummed Zig and the distribution's mold, both of
 which the images lack. Canonical local and Forgejo workflows continue to
 bootstrap with TCC.
 
+Because every hosted driver is Clang-built, the `Workflow lint` job in
+`.github/workflows/ci.yml` also runs the Ubuntu image's GCC over `build.c` with
+`-Wall -Werror -fsyntax-only` and the driver's usual flags. It covers only the
+POSIX side of the driver, produces no binary, and cannot see GCC diagnostics
+emitted during code generation, such as the fortify-dependent
+`-Wunused-result` at `-O1` and above. GCC exempts only a top-level
+`{0}` from `-Wmissing-braces`, so a zeroed element of an array whose first
+member is a struct needs a designator such as `{.build_directory = {0}}`.
+
 The separate `TCC bootstrap / Canonical TCC bootstrap` check guards the
 canonical path on an ephemeral GitHub-hosted Ubuntu runner. For pull requests,
 merge groups, pushes to `main`, and manual runs it builds TinyCC at the pinned
