@@ -13276,6 +13276,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(Unit
         {S8("sizeof (++(item ? item : values[0]))"), false},
         {S8("sizeof ((0, ++42))"), false},
         {S8("sizeof (item ? ++42 : 0)"), false},
+        {S8("sizeof (sizeof (++42))"), false},
         {S8("sizeof no_link(++42)"), false},
         {S8("sizeof values[++42]"), false},
         {S8("sizeof ((const int){1}++)"), false},
@@ -13361,6 +13362,91 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(Unit
             BUSTER_TEST_RAW(arguments, string_ends_with_sequence(analyzed.diagnostics[0].message,
                 S8("increment or decrement operand is not a modifiable place")), declarations[index].source);
         scratch_end(temporary);
+    }
+    return result;
+}
+
+// A type name inside a `sizeof`, `_Alignof`, `typeof` or `typeof_unqual`
+// operand ends at that operand's `)`, including an operand nested in another.
+// A typeof type name followed by an operator was sized as if the type were a
+// value, and a typedef written on one declared nothing without a diagnostic
+// (#1535). A type name in its own
+// cast parentheses is still a cast, and a local that shadows a typedef still
+// makes its operand an expression. `diagnosed` starts at the token the
+// diagnostic names: after `*` that is the operand, since `T *` is a type name.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_name_operand_trailer(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 diagnosed;
+    } cases[] = {
+        {S8("long probe(void) { return sizeof (typeof (object) + 1); }"), S8("+ 1)")},
+        {S8("long probe(void) { return sizeof (typeof (object) * 2); }"), S8("2)")},
+        {S8("long probe(void) { return sizeof (typeof (object) - 1); }"), S8("- 1)")},
+        {S8("long probe(void) { return sizeof (typeof (object) & 1); }"), S8("& 1)")},
+        {S8("long probe(void) { return sizeof (typeof (char) * 2); }"), S8("2)")},
+        {S8("long probe(void) { return _Alignof (typeof (object) + 1); }"), S8("+ 1)")},
+        {S8("long probe(void) { return sizeof (typeof (typeof (object) + 1)); }"), S8("+ 1)")},
+        {S8("long probe(void) { return sizeof (long + 1); }"), S8("+ 1)")},
+        {S8("typedef long alias; long probe(void) { return sizeof (alias * 2); }"), S8("2)")},
+        {S8("long probe(void) { return sizeof (sizeof (long + 1)); }"), S8("+ 1))")},
+        {S8("long probe(void) { long a[2] = {0}; return sizeof (a[_Alignof (typeof (object) * 2)]); }"), S8("2)])")},
+        {S8("typedef typeof (typeof (object) + 1) t;"), S8("+ 1)")},
+        {S8("typedef typeof (typeof (object) * 2) t;"), S8("2)")},
+        {S8("typedef typeof (typeof (object) - 1) t;"), S8("- 1)")},
+        {S8("typedef typeof (typeof (object) & 1) t;"), S8("& 1)")},
+        {S8("typedef typeof_unqual (typeof (object) + 1) t;"), S8("+ 1)")},
+        {S8("typedef typeof_unqual (typeof (object) * 2) t;"), S8("2)")},
+        {S8("typedef typeof_unqual (typeof (object) - 1) t;"), S8("- 1)")},
+        {S8("typedef typeof_unqual (typeof (object) & 1) t;"), S8("& 1)")},
+        {S8("void probe(void) { typeof (typeof (object) + 1) local = 0; (void)local; }"), S8("+ 1)")},
+        {S8("long probe(void) { return (typeof (object)) + 1; }"), {0}},
+        {S8("long probe(void) { return sizeof ((typeof (object)) + 1); }"), {0}},
+        {S8("long probe(void) { return sizeof ((typeof (object))1); }"), {0}},
+        {S8("long probe(void) { return sizeof (typeof (object)) + 1; }"), {0}},
+        {S8("long probe(void) { return sizeof (typeof (object + 1)) + sizeof (typeof (&object)); }"), {0}},
+        {S8("long probe(void) { return sizeof (typeof (object) *) + sizeof (typeof (object)[2]) + sizeof (int (*)(void)); }"), {0}},
+        {S8("long probe(void) { return sizeof (sizeof (long) + 1) + sizeof (sizeof ((typeof (object)) + 1)); }"), {0}},
+        {S8("int probe(int *pointer) { return sizeof (sizeof (++*pointer)); }"), {0}},
+        {S8("typedef typeof ((long) + 1) t; t value;"), {0}},
+        {S8("typedef typeof (typeof (object) *) t; t value;"), {0}},
+        {S8("typedef typeof_unqual (typeof (object) const *) t; t value;"), {0}},
+        {S8("typedef long alias; int probe(int alias) { return sizeof (alias + 1); }"), {0}},
+        {S8("typedef long alias; int probe(void) { int alias = 1; typeof (alias * 2) twice = alias; return twice + sizeof (alias - 1); }"), {0}},
+        {S8("typedef long alias; int probe(void) { enum { alias = 3 }; return sizeof (alias & 1); }"), {0}},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            String8 source = string_format(temporary.arena, S8("long object; {S8}"), cases[case_index].source);
+            bool valid = !cases[case_index].diagnosed.length;
+            u64 diagnosed = valid ? 0 : string_first_sequence(source, cases[case_index].diagnosed);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                     .dialect = C_PREPROCESS_DIALECT_GNU23});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, source);
+            BUSTER_TEST_RAW(arguments, (semantic.diagnostic_count == 0) == valid, source);
+            if (!valid && semantic.diagnostic_count)
+            {
+                BUSTER_TEST_RAW(arguments, string_ends_with_sequence(semantic.diagnostics[0].message, S8("expected ')' after type name")), source);
+                BUSTER_TEST_RAW(arguments, semantic.diagnostics[0].location.offset == diagnosed, source);
+            }
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("type-name-operand-trailer.c"), tokens, syntax,
+                                                            target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, (lowered.diagnostic_count == 0 && lowered.program != 0) == valid, source);
+            if (!valid && lowered.diagnostic_count)
+            {
+                BUSTER_TEST_RAW(arguments, string_ends_with_sequence(lowered.diagnostics[0].message, S8("expected ')' after type name")), source);
+                BUSTER_TEST_RAW(arguments, lowered.diagnostics[0].location.offset == diagnosed, source);
+            }
+            scratch_end(temporary);
+        }
     }
     return result;
 }
@@ -25465,6 +25551,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);
+    BUSTER_TEST_FIXTURE(arguments, c_test_type_name_operand_trailer);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_expression_syntax);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_statement_expression_operand);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_vla_evaluation);
