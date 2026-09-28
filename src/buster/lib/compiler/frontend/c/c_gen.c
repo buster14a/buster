@@ -20946,7 +20946,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             IrType* wide_result_type = ir_type_from_id(&builder->program->types, result_type);
             bool binary128_va_arg = c_ir_type_is_binary128_runtime(builder, result_type);
             bool wide_va_arg_supported =
-                binary128_va_arg || c_ir_type_is_binary128_aggregate(builder, result_type) || c_ir_type_is_f80_x87_shape(builder->program, builder->wide_float_cache, result_type, builder->target) ||
+                binary128_va_arg || c_ir_type_is_binary128_aggregate(builder, result_type) ||
+                c_ir_type_is_f80_x87_shape(builder->program, builder->wide_float_cache, result_type, builder->target) ||
                 (c_ir_type_is_f80_opaque_aggregate(builder->program, builder->wide_float_cache, result_type, builder->target) &&
                  wide_result_type && wide_result_type->layout.resolved && wide_result_type->layout.size <= 16);
             if (!wide_va_arg_supported && c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache, result_type))
