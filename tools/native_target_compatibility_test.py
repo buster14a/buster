@@ -129,20 +129,25 @@ class ProbeTests(unittest.TestCase):
             wrapper = work / "cc-wrapper"
             wrapper.write_text(WRAPPER)
             wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+            # CMake reports uninitialized reads only in files under the source
+            # tree, so the module is copied in, as it sits in the real project.
+            shutil.copyfile(MODULE, work / "NativeTargetCompatibility.cmake")
             (work / "CMakeLists.txt").write_text(textwrap.dedent(f"""
                 cmake_minimum_required(VERSION 3.17)
                 project(native_target_compatibility C)
                 option(BUSTER_CHECK_OPTIONAL_WARNINGS "" {optional_warnings})
-                include("{MODULE.as_posix()}")
+                include("${{CMAKE_CURRENT_SOURCE_DIR}}/NativeTargetCompatibility.cmake")
                 buster_native_target_compatibility_flags(out Clang OFF "{version}" "{processor}" OFF)
                 file(WRITE "${{CMAKE_BINARY_DIR}}/result.txt" "${{out}}")
             """))
             env = dict(os.environ, BUSTER_TEST_AVX10_MODE=mode, BUSTER_TEST_REAL_CC=HOST_CC, CC=str(wrapper))
             env.pop("CFLAGS", None)
-            subprocess.run(
-                [CMAKE, "-S", str(work), "-B", str(work / "build")],
-                env=env, capture_output=True, text=True, check=True,
+            # The build driver's generate policy (build.c generate step).
+            result = subprocess.run(
+                [CMAKE, "--warn-uninitialized", "-Werror=dev", "-S", str(work), "-B", str(work / "build")],
+                env=env, capture_output=True, text=True,
             )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             return (work / "build/result.txt").read_text()
 
     def test_affected_host_keeps_warning_nonfatal(self):

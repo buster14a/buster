@@ -47,16 +47,20 @@ function(buster_native_target_compatibility_flags out_var compiler_id is_zig com
     buster_native_avx10_exception_candidate(candidate "${compiler_id}" "${is_zig}" "${compiler_version}" "${processor}" "${cross_compile}")
     set(flags "")
     if (candidate)
-        set(saved_required_flags "${CMAKE_REQUIRED_FLAGS}")
-        set(saved_required_quiet "${CMAKE_REQUIRED_QUIET}")
+        # The CMAKE_REQUIRED_* settings below are function-scoped, so the
+        # caller's values need no restore. Read the caller's flags only when
+        # defined: the build driver generates with --warn-uninitialized
+        # -Werror=dev, which rejects any read of an undefined variable.
+        set(inherited_required_flags "")
+        if (DEFINED CMAKE_REQUIRED_FLAGS)
+            set(inherited_required_flags "${CMAKE_REQUIRED_FLAGS}")
+        endif()
         set(CMAKE_REQUIRED_QUIET ON)
         set(probe_source "int main(void) { return 0; }\n")
-        set(CMAKE_REQUIRED_FLAGS "${saved_required_flags} -march=native -Werror -Werror=unknown-warning-option -Werror=invalid-feature-combination")
+        set(CMAKE_REQUIRED_FLAGS "${inherited_required_flags} -march=native -Werror -Werror=unknown-warning-option -Werror=invalid-feature-combination")
         check_c_source_compiles("${probe_source}" BUSTER_NATIVE_AVX10_FATAL_PROBE)
-        set(CMAKE_REQUIRED_FLAGS "${saved_required_flags} -march=native -Werror -Werror=unknown-warning-option ${BUSTER_NATIVE_AVX10_EXCEPTION_FLAG}")
+        set(CMAKE_REQUIRED_FLAGS "${inherited_required_flags} -march=native -Werror -Werror=unknown-warning-option ${BUSTER_NATIVE_AVX10_EXCEPTION_FLAG}")
         check_c_source_compiles("${probe_source}" BUSTER_NATIVE_AVX10_TOLERANT_PROBE)
-        set(CMAKE_REQUIRED_FLAGS "${saved_required_flags}")
-        set(CMAKE_REQUIRED_QUIET "${saved_required_quiet}")
         buster_native_avx10_exception_flags(flags ON "${BUSTER_NATIVE_AVX10_FATAL_PROBE}" "${BUSTER_NATIVE_AVX10_TOLERANT_PROBE}")
         if (flags)
             message(STATUS "Legacy Clang AVX10 -march=native exception (#1501): ${flags}")

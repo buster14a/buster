@@ -1893,6 +1893,42 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_scope_function_declaration(UnitT
     return result;
 }
 
+// C11 6.2.1p4: a block-scope function declaration's identifier has block
+// scope, so a file-scope typedef or enumerator of the same spelling is that
+// name again once the block closes (#1715).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_scope_function_declaration_file_scope_name(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("typedef char T;\nlong fn(void) { double T(void); return 0; }\nlong test(void) { T c = 0; return (long)sizeof(c) - 1; }\n"),
+        S8("typedef char T;\nlong test(void) { { double T(void); } T c = 0; return (long)sizeof(c) - 1; }\n"),
+        S8("typedef char T;\nlong fn(void) { double T(void); return (long)T(); }\nlong test(void) { T c = 0; return (long)sizeof(c) - 1; }\n"),
+        S8("enum { T = 7 };\nlong fn(void) { double T(void); return 0; }\nlong test(void) { return T - 7; }\n"),
+    };
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens =
+                c_preprocess(temporary.arena, sources[index], (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0, sources[index]);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("block-function-shadow.c"), tokens, parse, target_native,
+                                                                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, sources[index]);
+            if (lowered.program && !lowered.diagnostic_count)
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                BUSTER_TEST_RAW(arguments, c_test_find_ir_function(module, S8("test")) != 0, sources[index]);
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lexer_rewind_zeroed(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -12513,6 +12549,51 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_function_type_name(UnitTestArgu
             BUSTER_TEST(arguments, global_type && global_type->layout.resolved && global_type->layout.size == expected[expected_index].element_count);
         }
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// A GNU attribute list may sit in a block-scope type name -- a cast, a sizeof
+// or _Alignof operand, a _Generic association -- before or after a `*`. Its
+// words name attributes, not objects, and the type is the one written without
+// it; the block-scope static assertions pin the sizes Clang folds (#1705).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_type_name_attributes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+    BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+    TemporalArena temporary = scratch_begin(0, 0);
+    String8 source = S8("int f(void) { return (int)(long)(int __attribute__((unused)))0 + (int)sizeof(int __attribute__((unused))); }\n"
+                        "int f1(void) { return sizeof(int * __attribute__((unused)) *); }\n"
+                        "int f2(void) { return (int)(long)(int * __attribute__((unused)))0; }\n"
+                        "int f3(void) { int x; return _Generic(&x, int * __attribute__((unused)): 1, default: 0); }\n"
+                        "int f4(void) { return _Alignof(int * __attribute__((unused)) const); }\n"
+                        "int f5(void)\n"
+                        "{\n"
+                        "    _Static_assert(sizeof(int __attribute__((unused))) == 4, \"plain\");\n"
+                        "    _Static_assert(sizeof(int * __attribute__((unused)) *) == 8, \"pointer\");\n"
+                        "    _Static_assert(_Alignof(int * __attribute__((unused)) const) == 8, \"alignment\");\n"
+                        "    return (int)(long)(int * __attribute__((unused)) const __attribute__((unused)) *)8;\n"
+                        "}\n");
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){
+                                                    .target = target.target,
+                                                    .data_layout = target_data_layout(target.target),
+                                                    .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                });
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    CIRLowerResult lowered = {0};
+    if (!preprocess.diagnostic_count && !parse.diagnostic_count)
+    {
+        lowered = c_lower_to_ir(temporary.arena, S8("block-type-name-attributes.c"), preprocess, parse, target.target);
+    }
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program);
+    if (lowered.program && lowered.program->module_count)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
     }
     scratch_end(temporary);
     return result;
@@ -24808,6 +24889,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
     BUSTER_TEST_FIXTURE(arguments, c_test_vla_row_places);
     BUSTER_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration);
+    BUSTER_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration_file_scope_name);
     BUSTER_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
     BUSTER_TEST_FIXTURE(arguments, c_test_scope_interval_index);
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
@@ -24852,6 +24934,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_token_view_constant_range);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_function_type_name);
+    BUSTER_TEST_FIXTURE(arguments, c_test_block_type_name_attributes);
     BUSTER_TEST_FIXTURE(arguments, c_test_void_object_refusals);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);

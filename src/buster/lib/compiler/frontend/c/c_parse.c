@@ -12698,8 +12698,13 @@ BUSTER_C_SHARED CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessR
             .array_bound = C_ARRAY_BOUND_INVALID,
             .kind = C_TYPE_POINTER,
         };
-        while (*index < end && preprocess.tokens[*index].kind == C_TOKEN_IDENTIFIER)
+        for (;;)
         {
+            *index = c_parse_skip_attributes(preprocess, *index, end);
+            if (*index >= end || preprocess.tokens[*index].kind != C_TOKEN_IDENTIFIER)
+            {
+                break;
+            }
             String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[*index]);
             if (c_parse_type_qualifier_word(spelling, &pointer))
             {
@@ -16221,6 +16226,10 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         // but the name has to reach the file-scope function index as well or
         // the call resolves to nothing. Register it there the way a file-scope
         // declaration of the same function would, unless one already is.
+        // C11 6.2.1p4: the identifier itself has block scope, so a file-scope
+        // typedef, object, or enumerator of the same spelling keeps that
+        // name once the block closes. The function then reaches the index
+        // through its declaration alone, with no file-scope binding.
         CType* declared_type = type.value < result->type_count ? &result->types[type.value] : 0;
         // C17 6.2.2p5: without a storage-class specifier the declarator links
         // as if it were written `extern`, so it declares no automatic object.
@@ -16270,11 +16279,14 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                     .declaration_token_plus_one = name_index + 1,
                     .kind = C_ENTITY_FUNCTION,
                 };
-                c_parse_scope_add_entity(result,
-                                         (CScopeId){
-                                             .value = 0,
-                                         },
-                                         function_entity, function_symbol);
+                if (file_scope.value == C_ID_UNDERLYING_INVALID)
+                {
+                    c_parse_scope_add_entity(result,
+                                             (CScopeId){
+                                                 .value = 0,
+                                             },
+                                             function_entity, function_symbol);
+                }
             }
         }
         String8 declared_name = c_token_spelling(preprocess.spelling_base, name);

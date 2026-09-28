@@ -1,6 +1,8 @@
 // Block-scope function declarators without a storage-class specifier link like
 // their `extern` forms and must not become stack objects in the bitcode; taking
 // their address references the file-scope function symbol.
+typedef char T;
+
 long add(long a, long b)
 {
     return a + b;
@@ -67,7 +69,20 @@ long later(long a, long b)
     return a - b;
 }
 
+// The declarator's T has block scope; the file-scope typedef is T again below.
+static int shadow(void)
+{
+    double T(void);
+    return 0;
+}
+
+static int typedef_after_shadow(void)
+{
+    T c = 0;
+    return (int)sizeof(c) - 1;
+}
+
 int main(void)
 {
-    return prototyped() | unprototyped() | unreferenced() | list() | mixed() | address_extern() | address_plain() | address_of_later();
+    return prototyped() | unprototyped() | unreferenced() | list() | mixed() | shadow() | typedef_after_shadow() | address_extern() | address_plain() | address_of_later();
 }
