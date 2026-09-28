@@ -34,6 +34,7 @@
 #define BQ_CLEANUP_ENTRY_CAP 16384u
 #define BQ_CLEANUP_DEPTH_CAP 256u
 #include "retirement_prepare.h"
+#include <stdlib.h>
 #include "retirement_binaries.h"
 
 #ifdef BUSTER_BENCH_SERVICE_TEST
@@ -487,11 +488,13 @@ BUSTER_GLOBAL_LOCAL bool bq_copy_manifest(int installed, int destination, String
     int manifest_fd = source_root >= 0 ?
                       openat(source_root, "source.manifest", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
     struct stat info;
-    u8 manifest_bytes[BQ_RETIREMENT_SOURCE_MANIFEST_CAP];
+    /* The retirement manifest cap is 512 KiB; keep it off the stack, whose
+     * frame would otherwise overflow sanitized builds' default 8 MiB stack. */
+    u8* manifest_bytes = manifest_cap && manifest_cap <= BQ_RETIREMENT_SOURCE_MANIFEST_CAP ?
+                         malloc(manifest_cap) : NULL;
     u32 manifest_size = 0;
-    bool ok = source_root >= 0 && bq_owned_directory(source_root, false, true) && manifest_fd >= 0 &&
+    bool ok = manifest_bytes && source_root >= 0 && bq_owned_directory(source_root, false, true) && manifest_fd >= 0 &&
               fstat(manifest_fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 && (info.st_mode & 0222) == 0 &&
-              manifest_cap <= sizeof(manifest_bytes) &&
               bq_read_file(manifest_fd, manifest_bytes, manifest_cap, &manifest_size);
     String8 manifest = {(char8*)manifest_bytes, manifest_size};
     u64 offset = 0;
@@ -554,6 +557,7 @@ BUSTER_GLOBAL_LOCAL bool bq_copy_manifest(int installed, int destination, String
     {
         close(source_root);
     }
+    free(manifest_bytes);
     return ok;
 }
 
