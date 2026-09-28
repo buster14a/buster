@@ -16,10 +16,8 @@ class AdmissionReadbackTest(unittest.TestCase):
             "name": "benchmark-9700x",
             "deployment_branch_policy": {
                 "protected_branches": False, "custom_branch_policies": True},
-            "protection_rules": [{"type": "required_reviewers",
-                                  "prevent_self_review": True,
-                                  "reviewers": [{"type": "User", "reviewer": {
-                                      "login": "davidgmbb", "id": 39247043}}]}],
+            "protection_rules": [{"id": 1, "node_id": "GA_branch",
+                                  "type": "branch_policy"}],
         }
         self.branches = {"total_count": 1, "branch_policies": [
             {"name": "main", "type": "branch"}]}
@@ -29,40 +27,74 @@ class AdmissionReadbackTest(unittest.TestCase):
     def check(self):
         verify(self.environment, self.branches, self.variable)
 
-    def test_environment_and_disabled_admission(self):
-        self.check()
-        identity = self.environment["protection_rules"][0]["reviewers"][0]["reviewer"]
-        identity["id"] = 1
-        with self.assertRaises(ValueError):
-            self.check()
-        identity["id"] = 39247043
+    def test_main_only_environment_without_manual_approval(self):
         self.check()
         self.environment["protection_rules"].clear()
+        self.check()
+
+    def test_rejects_required_reviewer(self):
+        # The superseded contract: davidgmbb as sole reviewer with
+        # self-review prevention blocked the maintainer's own dispatches.
+        self.environment["protection_rules"].append({
+            "type": "required_reviewers", "prevent_self_review": True,
+            "reviewers": [{"type": "User", "reviewer": {
+                "login": "davidgmbb", "id": 39247043}}]})
         with self.assertRaises(ValueError):
             self.check()
-        self.environment["protection_rules"] = [{"type": "required_reviewers",
-                                                  "prevent_self_review": True,
-                                                  "reviewers": [{"type": "User", "reviewer": {
-                                                      "login": "davidgmbb", "id": 39247043}}]}]
-        reviewer = self.environment["protection_rules"][0]
-        reviewer["prevent_self_review"] = False
+        self.environment["protection_rules"][-1]["prevent_self_review"] = False
         with self.assertRaises(ValueError):
             self.check()
-        reviewer["prevent_self_review"] = True
-        reviewer["reviewers"][0]["reviewer"]["login"] = "buster14a14a"
+        self.environment["protection_rules"][-1]["reviewers"] = []
         with self.assertRaises(ValueError):
             self.check()
-        reviewer["reviewers"][0]["reviewer"]["login"] = "davidgmbb"
-        reviewer["reviewers"].append({"type": "User", "reviewer": {
-            "login": "buster14a14a", "id": 1}})
+
+    def test_rejects_other_protection_rules(self):
+        for rule in ({"type": "wait_timer", "wait_timer": 0},
+                     {"type": "wait_timer", "wait_timer": 30},
+                     {"type": "deployment_protection_rule"},
+                     {"type": None}, {}, "required_reviewers"):
+            with self.subTest(rule=rule):
+                self.environment["protection_rules"] = [
+                    {"type": "branch_policy"}, rule]
+                with self.assertRaises(ValueError):
+                    self.check()
+        self.environment["protection_rules"] = None
         with self.assertRaises(ValueError):
             self.check()
-        reviewer["reviewers"].pop()
+        del self.environment["protection_rules"]
+        with self.assertRaises(ValueError):
+            self.check()
+
+    def test_rejects_branch_policy_drift(self):
         self.branches["branch_policies"].append({"name": "*", "type": "branch"})
         with self.assertRaises(ValueError):
             self.check()
-        self.branches["branch_policies"].pop()
-        self.variable["value"] = "true"
+        self.branches["total_count"] = 2
+        with self.assertRaises(ValueError):
+            self.check()
+        self.branches = {"total_count": 1, "branch_policies": [
+            {"name": "main", "type": "tag"}]}
+        with self.assertRaises(ValueError):
+            self.check()
+        self.branches["branch_policies"][0]["type"] = "branch"
+        self.environment["deployment_branch_policy"]["protected_branches"] = True
+        with self.assertRaises(ValueError):
+            self.check()
+        self.environment["deployment_branch_policy"] = {
+            "protected_branches": False, "custom_branch_policies": False}
+        with self.assertRaises(ValueError):
+            self.check()
+        self.environment["deployment_branch_policy"] = None
+        with self.assertRaises(ValueError):
+            self.check()
+
+    def test_requires_literal_disabled_dispatch(self):
+        for value in ("true", "False", "", "0", False, None):
+            with self.subTest(value=value):
+                self.variable["value"] = value
+                with self.assertRaises(ValueError):
+                    self.check()
+        self.variable = {"name": "OTHER", "value": "false"}
         with self.assertRaises(ValueError):
             self.check()
 

@@ -45,7 +45,8 @@ full commit and tree and check active service PRs before changing the inventory.
   identities and every separately bound lifecycle control. Durable publication
   under #510 remains operator work; an Actions artifact alone is not sufficient.
 - `.github/workflows/9700x-service-dispatch.yml` is the reviewed smoke
-  submission path. It is manual, main-only, protected-environment gated and
+  submission path. It is manual, main-only, restricted to `davidgmbb` by a
+  per-attempt workflow gate without manual approval, and
   fail-closed unless `BENCH_SERVICE_DISPATCH_ENABLED` is exactly `true`. It
   performs no checkout and invokes only literal installed `gateway
   capabilities`, `gateway submit` and `gateway result` commands. Keep it
@@ -193,13 +194,14 @@ the `ryzen-9700x` runner label or from this repository's example values.
 ### GitHub and competing execution
 
 Restrict the runner to the reviewed service workflow and a protected manual
-main dispatch. Provision and verify the environment's actual review/branch
-rules; an `environment:` name in YAML can create an unprotected environment.
+main dispatch. Provision and verify the environment's actual branch rule and
+absence of reviewer/timer rules; an `environment:` name in YAML can create an
+unprotected environment.
 See [GitHub's environment documentation](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments).
 Require immutable action SHAs for any action use, minimal permissions, and
 `persist-credentials: false` for any checkout. The fixed dispatcher has no
-checkout, sets `permissions: {}`, and selects both the restricted group and
-labels exactly:
+checkout, sets `permissions: {}` (only its GitHub-hosted `authorize` job reads
+`actions`), and selects both the restricted group and labels exactly:
 
 ```yaml
 runs-on:
