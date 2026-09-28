@@ -12,6 +12,10 @@
  * configured-root paths come from retirement_stage.h, shared with the
  * matched-build helper and the credential gate. bq_broker_command builds
  * every launch; bq_broker_retirement_self_test pins their exact vectors.
+ * bq_broker_execute relays one command; an abandoned stage relay stops its
+ * exact unit (bq_broker_unit_stop_commands, bq_broker_unit_stop) and replies
+ * BQ_RETIREMENT_STAGE_UNPROVEN_STATUS unless the unit is proven gone (#1785);
+ * bq_broker_unit_stop_self_test pins that path.
  *
  * This executable is Linux-only and deliberately has no Buster dependency.
  */
@@ -65,6 +69,10 @@
 #define BQ_BROKER_DIAG_CHUNK 512u
 #define BQ_BROKER_DIAG_OUTPUT (512u * 1024u)
 #define BQ_BROKER_DIAG_MILLISECONDS 500u
+/* Relayed stage output, and the bound for proving an abandoned unit gone. */
+#define BQ_BROKER_OUTPUT_CAP (16u * 1024u * 1024u)
+#define BQ_BROKER_STOP_MILLISECONDS 15000u
+#define BQ_BROKER_CAPTURE_MILLISECONDS 5000u
 /* A larger NSS group list is refused, never accepted from a truncated buffer. */
 #define BQ_BROKER_ACCOUNT_GROUP_LIMIT 32
 
@@ -100,6 +108,18 @@ typedef struct BqBrokerCommand
     unsigned count;
     bool valid;
 } BqBrokerCommand;
+
+/* The exact stage unit a start may leave behind and the fixed commands that
+ * stop it when its relay is abandoned (#1785). The vectors point into unit,
+ * so the object stays in place. */
+typedef struct BqBrokerUnitStop
+{
+    char unit[128];
+    char const* kill[6];
+    char const* state[7];
+    uint64_t milliseconds;
+    bool enabled;
+} BqBrokerUnitStop;
 
 typedef struct BqBrokerFrame
 {
@@ -1304,25 +1324,13 @@ static void bq_broker_diag_outcome(BqBrokerDiagnostic* diagnostic, int result,
     errno = saved_errno;
 }
 
-static bool bq_broker_show(char const* unit, char output[8192])
+/* Run a fixed argv with a cleared environment, stdout captured (at most
+ * 8191 bytes) and stderr discarded, until the absolute deadline (monotonic
+ * milliseconds). True only for a complete capture and exit status 0. */
+static bool bq_broker_capture(char const* const* arguments, char output[8192], uint64_t deadline)
 {
-    static char const* const properties[] = {"Id", "LoadState", "Slice", "InvocationID", "ControlGroup",
-        "User", "Group", "ExecStart", "PartOf", "BindsTo", "After", "AllowedCPUs", "MemoryMax",
-        "MemorySwapMax", "TasksMax", "RuntimeMaxUSec", "NoNewPrivileges", "ProtectSystem",
-        "PrivateNetwork", "CollectMode"};
-    char options[sizeof(properties) / sizeof(properties[0])][64];
-    char const* arguments[sizeof(properties) / sizeof(properties[0]) + 5] = {BQ_BROKER_CTL, "show", "--no-pager"};
-    bool ok = true;
-    unsigned count = 3;
-    for (unsigned index = 0; ok && index < sizeof(properties) / sizeof(properties[0]); index += 1)
-    {
-        ok = bq_broker_format(options[index], sizeof(options[index]), "--property=%s", properties[index]);
-        if (ok) arguments[count++] = options[index];
-    }
-    arguments[count++] = unit;
-    arguments[count] = NULL;
     int pipefd[2] = {-1, -1};
-    if (ok) ok = pipe2(pipefd, O_CLOEXEC | O_NONBLOCK) == 0;
+    bool ok = pipe2(pipefd, O_CLOEXEC | O_NONBLOCK) == 0;
     pid_t child = ok ? fork() : -1;
     if (child == 0)
     {
@@ -1335,12 +1343,11 @@ static bool bq_broker_show(char const* unit, char output[8192])
         clearenv();
         setenv("PATH", "/usr/bin:/bin", 1);
         setenv("LC_ALL", "C", 1);
-        execv(BQ_BROKER_CTL, (char* const*)arguments);
+        execv(arguments[0], (char* const*)arguments);
         _exit(127);
     }
     if (pipefd[1] >= 0) close(pipefd[1]);
     ok = ok && child > 0;
-    uint64_t deadline = bq_broker_now_milliseconds() + 5000;
     size_t used = 0;
     bool eof = false;
     while (ok && !eof && bq_broker_now_milliseconds() < deadline)
@@ -1383,6 +1390,73 @@ static bool bq_broker_show(char const* unit, char output[8192])
     }
     ok = ok && eof && child > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
     return ok;
+}
+
+static bool bq_broker_show(char const* unit, char output[8192])
+{
+    static char const* const properties[] = {"Id", "LoadState", "Slice", "InvocationID", "ControlGroup",
+        "User", "Group", "ExecStart", "PartOf", "BindsTo", "After", "AllowedCPUs", "MemoryMax",
+        "MemorySwapMax", "TasksMax", "RuntimeMaxUSec", "NoNewPrivileges", "ProtectSystem",
+        "PrivateNetwork", "CollectMode"};
+    char options[sizeof(properties) / sizeof(properties[0])][64];
+    char const* arguments[sizeof(properties) / sizeof(properties[0]) + 5] = {BQ_BROKER_CTL, "show", "--no-pager"};
+    bool ok = true;
+    unsigned count = 3;
+    for (unsigned index = 0; ok && index < sizeof(properties) / sizeof(properties[0]); index += 1)
+    {
+        ok = bq_broker_format(options[index], sizeof(options[index]), "--property=%s", properties[index]);
+        if (ok) arguments[count++] = options[index];
+    }
+    arguments[count++] = unit;
+    arguments[count] = NULL;
+    output[0] = 0;
+    ok = ok && bq_broker_capture(arguments, output, bq_broker_now_milliseconds() + BQ_BROKER_CAPTURE_MILLISECONDS);
+    return ok;
+}
+
+/* A stage start (never the outer unit, whose recursive stop proof the
+ * coordinator owns, nor a signal) can leave its transient unit behind. */
+static bool bq_broker_unit_stop_commands(BqBrokerRequest const* request, BqBrokerUnitStop* stop)
+{
+    BqBrokerPaths paths;
+    memset(stop, 0, sizeof(*stop));
+    stop->enabled = bq_broker_request_valid(request) && request->operation == BQ_BROKER_START &&
+                    request->stage != BQ_BROKER_OUTER && bq_broker_paths(request, &paths) &&
+                    bq_broker_format(stop->unit, sizeof(stop->unit), "%s", paths.unit);
+    if (stop->enabled)
+    {
+        char const* kill[] = {BQ_BROKER_CTL, "kill", "--kill-whom=all", "--signal=KILL", stop->unit, NULL};
+        char const* state[] = {BQ_BROKER_CTL, "show", "--no-pager", "--property=LoadState",
+                               "--property=ActiveState", stop->unit, NULL};
+        memcpy(stop->kill, kill, sizeof(kill));
+        memcpy(stop->state, state, sizeof(state));
+        stop->milliseconds = BQ_BROKER_STOP_MILLISECONDS;
+    }
+    return stop->enabled;
+}
+
+/* SIGKILL every process of the exact unit, then poll until PID1 reports it
+ * unloaded (LoadState=not-found) or stopped (ActiveState inactive or failed:
+ * KillMode=control-group leaves no process) within stop->milliseconds. The
+ * kill's own result is not used: a unit that is already gone or has no
+ * process is expected. True only for that observation. */
+static bool bq_broker_unit_stop(BqBrokerUnitStop const* stop)
+{
+    uint64_t deadline = bq_broker_now_milliseconds() + stop->milliseconds;
+    char output[8192];
+    uint64_t bound = bq_broker_now_milliseconds() + BQ_BROKER_CAPTURE_MILLISECONDS;
+    (void)bq_broker_capture(stop->kill, output, bound < deadline ? bound : deadline);
+    bool gone = false;
+    while (!gone && bq_broker_now_milliseconds() < deadline)
+    {
+        bound = bq_broker_now_milliseconds() + BQ_BROKER_CAPTURE_MILLISECONDS;
+        gone = bq_broker_capture(stop->state, output, bound < deadline ? bound : deadline) &&
+               (bq_broker_field_equals(output, "LoadState", "not-found") ||
+                bq_broker_field_equals(output, "ActiveState", "inactive") ||
+                bq_broker_field_equals(output, "ActiveState", "failed"));
+        if (!gone) poll(NULL, 0, 100);
+    }
+    return gone;
 }
 
 static bool bq_broker_signal_identity(BqBrokerRequest const* request,
@@ -1472,8 +1546,12 @@ static bool bq_broker_write_all(int descriptor, unsigned char const* bytes, size
     return ok;
 }
 
+/* Relay one manager command. For a stage start, stop names its unit: a relay
+ * abandoned after the unit may exist (output cap, poll, read, send, wait or
+ * deadline failure) first stops that exact unit and replies 126 only once it
+ * is proven gone, else BQ_RETIREMENT_STAGE_UNPROVEN_STATUS (#1785). */
 static int bq_broker_execute(BqBrokerCommand const* command, int connection, bool signal_operation,
-                             int32_t* framed_status, bool* frame_delivered)
+                             BqBrokerUnitStop const* stop, int32_t* framed_status, bool* frame_delivered)
 {
     int output[2] = {-1, -1}, error_pipe[2] = {-1, -1};
     bool ok = pipe2(output, O_CLOEXEC) == 0;
@@ -1534,7 +1612,7 @@ static int bq_broker_execute(BqBrokerCommand const* command, int connection, boo
                 else if (ok)
                 {
                     total += (uint64_t)count;
-                    ok = total <= 16u * 1024u * 1024u &&
+                    ok = total <= BQ_BROKER_OUTPUT_CAP &&
                          bq_broker_send_frame(connection, index == 0 ? BQ_BROKER_STDOUT : BQ_BROKER_STDERR,
                                               bytes, (uint32_t)count);
                 }
@@ -1557,11 +1635,14 @@ static int bq_broker_execute(BqBrokerCommand const* command, int connection, boo
     }
     int32_t result = ok && reaped && WIFEXITED(status) ? WEXITSTATUS(status) :
                      ok && reaped && WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 126;
+    bool abandoned = !(ok && reaped);
+    if (abandoned && stop && stop->enabled)
+        result = bq_broker_unit_stop(stop) ? 126 : BQ_RETIREMENT_STAGE_UNPROVEN_STATUS;
     bool sent = bq_broker_send_frame(connection, BQ_BROKER_STATUS, &result, sizeof(result));
     if (!sent) result = 126;
     if (framed_status) *framed_status = result;
     if (frame_delivered) *frame_delivered = sent;
-    return result == 126 ? 1 : 0;
+    return result == 126 || abandoned ? 1 : 0;
 }
 
 static bool bq_broker_accounts_valid(BqBrokerAccounts const* accounts)
@@ -1817,9 +1898,11 @@ static int bq_broker_server(void)
     int result = 1;
     int32_t framed_status = 126;
     bool frame_sent = false;
+    BqBrokerUnitStop stop;
+    if (ok) bq_broker_unit_stop_commands(&request, &stop);
     if (ok)
         result = bq_broker_execute(&command, STDIN_FILENO, request.operation == BQ_BROKER_SIGNAL,
-                                   &framed_status, &frame_sent);
+                                   &stop, &framed_status, &frame_sent);
     else
     {
         int32_t status = 126;
@@ -1840,6 +1923,9 @@ static int bq_broker_client(BqBrokerRequest const* request)
         ok = connect(connection, (struct sockaddr*)&address, sizeof(address)) == 0;
     }
     if (ok) ok = send(connection, request, sizeof(*request), MSG_NOSIGNAL) == sizeof(*request);
+    /* Once a stage start is sent, its unit may exist; a lost connection
+     * before the status frame proves nothing about it (#1785). */
+    bool stage_sent = ok && request->operation == BQ_BROKER_START && request->stage != BQ_BROKER_OUTER;
     int result = 126;
     bool finished = false;
     while (ok && !finished)
@@ -1864,7 +1950,7 @@ static int bq_broker_client(BqBrokerRequest const* request)
             ok = false;
     }
     if (connection >= 0) close(connection);
-    if (!ok || !finished) result = 126;
+    if (!ok || !finished) result = stage_sent ? BQ_RETIREMENT_STAGE_UNPROVEN_STATUS : 126;
     return result;
 }
 
@@ -2170,6 +2256,113 @@ static unsigned bq_broker_retirement_self_test(BqBrokerStartGroups const* groups
     return checks;
 }
 
+/* Drain a relay like the CLI: returns the status frame's value when the
+ * relayed output stayed within the cap, else 255. */
+static int bq_broker_drain_relay(int connection)
+{
+    uint64_t total = 0;
+    int result = 255;
+    bool finished = false;
+    while (!finished)
+    {
+        BqBrokerFrame frame;
+        ssize_t received = recv(connection, &frame, sizeof(frame), 0);
+        finished = received < (ssize_t)offsetof(BqBrokerFrame, bytes) || frame.length > sizeof(frame.bytes);
+        if (!finished && frame.kind == BQ_BROKER_STATUS && frame.length == sizeof(int32_t))
+        {
+            int32_t status;
+            memcpy(&status, frame.bytes, sizeof(status));
+            result = total <= BQ_BROKER_OUTPUT_CAP && status >= 0 && status < 255 ? status : 255;
+            finished = true;
+        }
+        else if (!finished) total += frame.length;
+    }
+    return result;
+}
+
+/* #1785: the exact stop vectors, and a stage relay abandoned past the 16 MiB
+ * cap stopping its unit before it replies: 126 once the unit reads back as
+ * gone, BQ_RETIREMENT_STAGE_UNPROVEN_STATUS while it still reads active.
+ * Returns its checks. */
+static unsigned bq_broker_unit_stop_self_test(bool* passed)
+{
+    unsigned checks = 0;
+    bool ok = true;
+#define BQ_STOP_CHECK(condition) do { checks += 1; if (!(condition)) ok = false; } while (0)
+    BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = 1, .operation = BQ_BROKER_START,
+                               .stage = BQ_BROKER_RETIREMENT_BASE_GENERATE, .job = 1, .attempt = 2};
+    memset(request.base, 'a', 40);
+    memset(request.candidate, 'b', 40);
+    BqBrokerUnitStop stop;
+    char const* unit = "buster-bench-1-2-retirement-base-generate.service";
+    char const* kill_vector[] = {BQ_BROKER_CTL, "kill", "--kill-whom=all", "--signal=KILL", unit, NULL};
+    char const* state_vector[] = {BQ_BROKER_CTL, "show", "--no-pager", "--property=LoadState",
+                                  "--property=ActiveState", unit, NULL};
+    bool vectors = bq_broker_unit_stop_commands(&request, &stop) && stop.milliseconds == BQ_BROKER_STOP_MILLISECONDS;
+    for (unsigned index = 0; vectors && index < 6; index += 1)
+        vectors = kill_vector[index] ? stop.kill[index] && !strcmp(stop.kill[index], kill_vector[index]) :
+                                       stop.kill[index] == NULL;
+    for (unsigned index = 0; vectors && index < 7; index += 1)
+        vectors = state_vector[index] ? stop.state[index] && !strcmp(stop.state[index], state_vector[index]) :
+                                        stop.state[index] == NULL;
+    BQ_STOP_CHECK(vectors);
+    /* Smoke stage units are stopped the same way; the outer unit (the
+     * coordinator's recursive stop proof) and signals never are. */
+    request.stage = BQ_BROKER_BASE_BUILD;
+    BQ_STOP_CHECK(bq_broker_unit_stop_commands(&request, &stop) &&
+                  !strcmp(stop.kill[4], "buster-bench-1-2-base-build.service"));
+    request.stage = BQ_BROKER_OUTER;
+    BQ_STOP_CHECK(!bq_broker_unit_stop_commands(&request, &stop) && !stop.enabled);
+    BqBrokerRequest signal_request = {.magic = BQ_BROKER_MAGIC, .version = 1, .operation = BQ_BROKER_SIGNAL,
+                                      .stage = BQ_BROKER_RETIREMENT_BASE_GENERATE,
+                                      .signal_number = BQ_BROKER_KILL, .job = 1, .attempt = 2};
+    BQ_STOP_CHECK(!bq_broker_unit_stop_commands(&signal_request, &stop) && !stop.enabled);
+    char directory[] = "/tmp/buster-broker-stop-XXXXXX";
+    char* base = mkdtemp(directory);
+    char marker[64];
+    bool marked = base && bq_broker_format(marker, sizeof(marker), "%s/killed", base);
+    BQ_STOP_CHECK(marked);
+    for (unsigned trial = 0; marked && trial < 2; trial += 1)
+    {
+        request.stage = BQ_BROKER_RETIREMENT_BASE_GENERATE;
+        bool built = bq_broker_unit_stop_commands(&request, &stop);
+        /* Stand-ins for systemctl: kill leaves a marker; show reads back the
+         * unit still active, or unloaded and inactive. */
+        stop.kill[0] = "/usr/bin/touch";
+        stop.kill[1] = marker;
+        stop.kill[2] = NULL;
+        stop.state[0] = "/usr/bin/printf";
+        stop.state[1] = trial ? "LoadState=not-found\nActiveState=inactive\n" : "LoadState=loaded\nActiveState=active\n";
+        stop.state[2] = NULL;
+        stop.milliseconds = 300;
+        int pair[2] = {-1, -1};
+        bool paired = built && socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0;
+        pid_t drainer = paired ? fork() : -1;
+        if (drainer == 0)
+        {
+            close(pair[0]);
+            _exit(bq_broker_drain_relay(pair[1]));
+        }
+        if (pair[1] >= 0) close(pair[1]);
+        BqBrokerCommand flood = {.argv = {"/usr/bin/yes"}, .count = 1, .valid = true};
+        int32_t framed = -1;
+        bool delivered = false;
+        int executed = drainer > 0 ? bq_broker_execute(&flood, pair[0], false, &stop, &framed, &delivered) : -1;
+        if (pair[0] >= 0) close(pair[0]);
+        int status = -1;
+        while (drainer > 0 && waitpid(drainer, &status, 0) < 0 && errno == EINTR) {}
+        struct stat info;
+        int32_t expected = trial ? 126 : BQ_RETIREMENT_STAGE_UNPROVEN_STATUS;
+        BQ_STOP_CHECK(executed == 1 && delivered && framed == expected && WIFEXITED(status) &&
+                      WEXITSTATUS(status) == expected && stat(marker, &info) == 0 && unlink(marker) == 0);
+    }
+    if (base) rmdir(base);
+    BQ_STOP_CHECK(BQ_RETIREMENT_STAGE_UNPROVEN_STATUS != 126 && BQ_RETIREMENT_STAGE_UNPROVEN_STATUS != 0);
+#undef BQ_STOP_CHECK
+    if (!ok) *passed = false;
+    return checks;
+}
+
 static int bq_broker_self_test(void)
 {
     BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = 1, .operation = BQ_BROKER_START,
@@ -2455,7 +2648,7 @@ static int bq_broker_self_test(void)
     if (io_ready)
     {
         BqBrokerCommand test_command = {.argv = {"/usr/bin/printf", "broker-output"}, .count = 2, .valid = true};
-        int executed = bq_broker_execute(&test_command, connection[0], false, NULL, NULL);
+        int executed = bq_broker_execute(&test_command, connection[0], false, NULL, NULL, NULL);
         BqBrokerFrame frame;
         ssize_t received = recv(connection[1], &frame, sizeof(frame), 0);
         BQ_BROKER_CHECK(executed == 0 && received == (ssize_t)(offsetof(BqBrokerFrame, bytes) + 13) &&
@@ -2469,7 +2662,7 @@ static int bq_broker_self_test(void)
         test_command.argv[0] = "/usr/bin/false";
         test_command.argv[1] = NULL;
         test_command.count = 1;
-        BQ_BROKER_CHECK(bq_broker_execute(&test_command, connection[0], true, NULL, NULL) == 0);
+        BQ_BROKER_CHECK(bq_broker_execute(&test_command, connection[0], true, NULL, NULL, NULL) == 0);
         received = recv(connection[1], &frame, sizeof(frame), 0);
         status = -1;
         if (received == (ssize_t)(offsetof(BqBrokerFrame, bytes) + sizeof(status)))
@@ -2478,6 +2671,7 @@ static int bq_broker_self_test(void)
     }
     if (connection[0] >= 0) close(connection[0]);
     if (connection[1] >= 0) close(connection[1]);
+    checks += bq_broker_unit_stop_self_test(&ok);
     char temporary[] = "/tmp/buster-systemd-broker-XXXXXX";
     char* root = mkdtemp(temporary);
     BQ_BROKER_CHECK(root != NULL);

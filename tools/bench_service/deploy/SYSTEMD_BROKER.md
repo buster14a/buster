@@ -28,6 +28,34 @@ actual hierarchy.
 The only resume signal is `CONT` for the exact outer instance; stage units
 accept `TERM` or `KILL` only.
 
+### Abandoned stage relays (#1785)
+
+A stage start relays `systemd-run --wait --pipe` until it exits, so its
+status normally means PID1 has reported the stage unit finished. The broker
+can abandon that relay while the unit may still run: more than 16 MiB of
+output (`BQ_BROKER_OUTPUT_CAP`), a poll, read or frame-send failure, a wait
+failure or the relay deadline. It then SIGKILLs `systemd-run` and, before
+replying, stops the exact unit it started (`bq_broker_unit_stop`):
+
+```text
+/usr/bin/systemctl kill --kill-whom=all --signal=KILL buster-bench-<job>-<attempt>-<stage>.service
+/usr/bin/systemctl show --no-pager --property=LoadState --property=ActiveState <same unit>
+```
+
+The kill's own result is ignored, because a unit that is already gone or has
+no process is expected. The broker repeats the readback for at most 15
+seconds until the unit reads `LoadState=not-found` or `ActiveState` is
+`inactive` or `failed`. It replies `126` only after it sees one of those
+states. Otherwise it replies `125` (`BQ_RETIREMENT_STAGE_UNPROVEN_STATUS`,
+from `retirement_stage.h`), which means the unit's absence is not proven.
+The CLI also exits `125` when its connection breaks after it has sent a
+stage start but before a status frame arrives. Refusals and every other
+failure keep `126`. A stage that itself exits with `125` reads as unproven,
+which fails closed. The outer unit is excluded: the coordinator owns its
+recursive stop proof. Signals start no unit. The remaining gap is a
+`systemd-run` killed after it asked PID1 to start the unit but before PID1
+registered it; the readback can then come too early.
+
 ### Retirement matched-build stages (#1020)
 
 Besides the five smoke stages, the broker has four typed stages for the

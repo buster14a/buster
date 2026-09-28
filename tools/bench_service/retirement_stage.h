@@ -20,7 +20,7 @@
  *
  * Map: BQ_RETIREMENT_STAGE_NAMES, _DRIVER, _TOOLCHAIN_ROOT, _*_VALUE,
  * _WORKSPACE_ROOT, _BASE_PARENT, _CANDIDATE_PARENT, _BUILD_LEAF,
- * _GENERATE_OPTIONS, _BUILD_OPTIONS, _FIRST_NUMBER.
+ * _GENERATE_OPTIONS, _BUILD_OPTIONS, _FIRST_NUMBER, _UNPROVEN_STATUS.
  */
 #ifndef BUSTER_BENCH_RETIREMENT_STAGE_H
 #define BUSTER_BENCH_RETIREMENT_STAGE_H
@@ -57,5 +57,14 @@
 #define BQ_RETIREMENT_STAGE_GENERATE_OPTIONS "--cc", "clang", "--no-include-tests", "--no-developer-targets", \
     "--no-check-optional-warnings", "--no-fuzz", "--no-sanitize", "--no-time-trace", "--no-instrument", "--no-lto"
 #define BQ_RETIREMENT_STAGE_BUILD_OPTIONS "-t", "ide", "--", "-j1"
+
+/* Broker CLI status for a stage start (#1785) whose relay was abandoned by
+ * the server (output cap, poll, read, send or wait failure) or lost by the
+ * client after its request was sent, when the stage unit was not then proven
+ * inactive or unloaded. Every other status is the relayed systemd-run --wait
+ * result, a refusal before any unit was started, or an abandonment after
+ * which the broker proved the unit gone (126). A stage whose own exit status
+ * is this value is therefore treated as unproven: never a false proof. */
+#define BQ_RETIREMENT_STAGE_UNPROVEN_STATUS 125
 
 #endif
