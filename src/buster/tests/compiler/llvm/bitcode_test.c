@@ -626,6 +626,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_variadic_diagnostics(UnitTe
         BUSTER_TEST(arguments, !emitted.llvm_bitcode.success && !emitted.llvm_bitcode.bytes.length);
         String8 diagnostic = index == 2 ? S8("va_arg requires a promoted") : S8("va_list operations require x86-64 Linux SysV or Windows Win64");
         BUSTER_TEST(arguments, string_first_sequence(emitted.diagnostic, diagnostic) != BUSTER_STRING_NO_MATCH);
+        // The refusal names the function it stopped in and points at it.
+        String8 function = index == 2 ? S8(" (in function 'llvm_wide_arg')") : S8(" (in function 'llvm_sum_ints')");
+        BUSTER_TEST_RAW(arguments,
+                        string_starts_with_sequence(emitted.diagnostic, S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_varargs.c:")) &&
+                            string_ends_with_sequence(emitted.diagnostic, function),
+                        emitted.diagnostic);
         FileMapRead absent = file_map_read(arena, output, (FileReadOptions){0});
         BUSTER_TEST(arguments, !absent.bytes.pointer);
         file_map_unmap(absent);
