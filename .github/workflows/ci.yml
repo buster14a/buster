@@ -90,6 +90,15 @@ jobs:
           set -euo pipefail
           python3 tools/new_audit.py --self-test
           python3 tools/new_audit.py --check
+      - name: Compile the build driver with GCC
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Hosted jobs build build.c only with Clang; this keeps the POSIX
+          # driver clean under GCC's -Wall -Werror as well.
+          gcc --version
+          gcc -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            -fwrapv -fno-strict-aliasing -funsigned-char -fsyntax-only build.c
       - name: Validate every GitHub workflow
         id: lint
         shell: bash
@@ -275,6 +284,8 @@ jobs:
           run_suite tools/matrix_shard_test.py matrix-shard.log
           run_suite tools/differential_ci_policy_test.py differential-ci-policy.log
           run_suite tools/native_producer_profile_test.py native-producer-profile.log
+          run_suite tools/native_target_compatibility_test.py native-target-compatibility.log
+          run_suite tools/ci_llvm_test.py llvm-installer-test.log
           run_suite tools/ci_configure_evidence_test.py configure-evidence-test.log
           run_suite tools/ci_matrix_phases_test.py matrix-phases-test.log
           run_suite tools/ci_matrix_phases_bridge_test.py matrix-phases-bridge-test.log
@@ -406,9 +417,25 @@ jobs:
             --proof-matched-key "$ZIG_CACHE_PROOF_MATCHED_KEY" \
             --summary "$GITHUB_STEP_SUMMARY"
 
+      # Native lanes prefer the newest stable upstream LLVM over the hosted
+      # image's Clang; macOS keeps Xcode's AppleClang. See docs/ci-llvm.md.
+      - name: Install latest stable LLVM
+        id: llvm
+        if: ${{ !cancelled() && matrix.os != 'macos' && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 15
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LLVM_TARGET: ${{ matrix.arch }}-${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          "$BUSTER_CI_PYTHON" tools/ci_llvm.py --target "$LLVM_TARGET" --work-directory "$RUNNER_TEMP/llvm" \
+            --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV" 2>&1 | tee "$RUNNER_TEMP/buster-ci/llvm.log"
+
       - name: Application compilers
         id: tools_unix
-        if: ${{ !cancelled() && matrix.platform == 'unix' && steps.zig_cache_evidence.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.platform == 'unix' && steps.zig_cache_evidence.outcome == 'success' && (matrix.os == 'macos' || steps.llvm.outcome == 'success') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -432,7 +459,7 @@ jobs:
 
       - name: Combination matrix (Windows)
         id: combinations_windows
-        if: ${{ !cancelled() && matrix.platform == 'windows' && steps.zig_cache_evidence.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.platform == 'windows' && steps.zig_cache_evidence.outcome == 'success' && steps.llvm.outcome == 'success' }}
         shell: powershell
         env:
           BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
@@ -449,9 +476,9 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
           $VsPath = $VsPaths[0].Trim()
           if (-not $VsPath) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
-          # ARM64 uses an emulated amd64 VS host but native standalone LLVM.
+          # ARM64 uses an emulated amd64 VS host but the native installed LLVM.
           & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
-          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          $env:PATH = "$env:BUSTER_CI_LLVM_BIN;$env:PATH"
           # The result step independently re-probes the exact compiler
           # executables recorded by the driver. Preserve this step's selected
           # Visual Studio/LLVM search path and target architecture for it.
@@ -667,14 +694,28 @@ jobs:
             --debug-info OFF \
             --differential-workers '${{ matrix.platform == 'unix' && '4' || '0' }}'
 
+      # Native lanes prefer the newest stable upstream LLVM over the hosted
+      # image's Clang; macOS keeps Xcode's AppleClang. See docs/ci-llvm.md.
+      - name: Install latest stable LLVM
+        id: llvm
+        if: ${{ !cancelled() && matrix.os != 'macos' && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 15
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LLVM_TARGET: ${{ matrix.arch }}-${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          "$BUSTER_CI_PYTHON" tools/ci_llvm.py --target "$LLVM_TARGET" --work-directory "$RUNNER_TEMP/llvm" \
+            --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV" 2>&1 | tee "$RUNNER_TEMP/buster-ci/llvm.log"
+
       # A failed mode suite must not hide the independent differential result.
       # No continue-on-error: either failure still fails this Unix native lane.
       - name: Execution-mode matrix
         id: modes
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'unix' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'unix' && (matrix.os == 'macos' || steps.llvm.outcome == 'success') }}
         shell: bash
-        env:
-          CFLAGS: -Wno-invalid-feature-combination
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
@@ -691,13 +732,12 @@ jobs:
 
       - name: Execution-mode matrix (Windows)
         id: modes_windows
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'windows' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'windows' && (matrix.os == 'macos' || steps.llvm.outcome == 'success') }}
         shell: powershell
         env:
           VS_ARCH: ${{ matrix.vs_arch }}
           VS_COMPONENT: ${{ matrix.vs_component }}
           CLANG_ARCH: ${{ matrix.clang_arch }}
-          CFLAGS: -Wno-invalid-feature-combination
         run: |
           $ErrorActionPreference = 'Stop'
           $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
@@ -708,9 +748,9 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
           $VsPath = $VsPaths[0].Trim()
           if (-not $VsPath) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
-          # ARM64 uses an emulated amd64 VS host but native standalone LLVM.
+          # ARM64 uses an emulated amd64 VS host but the native installed LLVM.
           & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
-          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          $env:PATH = "$env:BUSTER_CI_LLVM_BIN;$env:PATH"
           foreach ($Compiler in @('cl', 'clang')) {
             where.exe $Compiler
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -824,10 +864,8 @@ jobs:
 
       - name: Native configuration differential matrix
         id: differential
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'unix' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'unix' && (matrix.os == 'macos' || steps.llvm.outcome == 'success') }}
         shell: bash
-        env:
-          CFLAGS: -Wno-invalid-feature-combination
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
