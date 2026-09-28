@@ -1662,14 +1662,14 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_signal(BqWorkerBackend* backend, char con
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_systemd_join(BqWorkerBackend* backend, int* status, u64 deadline)
+BUSTER_GLOBAL_LOCAL BqError bq_systemd_join(BqWorkerBackend* backend, int* status, u64 deadline, bool cancellable)
 {
     BqSystemdContext* context = backend->context;
     BqError error = BQ_OK;
     if (context->pid > 0)
     {
         bool finished = false;
-        while (error == BQ_OK && !finished && !bq_worker_cancel_signal)
+        while (error == BQ_OK && !finished && !(cancellable && bq_worker_cancel_signal))
         {
             pid_t waited = waitpid(context->pid, status, WNOHANG);
             if (waited == context->pid)
@@ -1686,7 +1686,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_join(BqWorkerBackend* backend, int* statu
                                                    bq_worker_deadline(now, 100) : deadline);
             }
         }
-        if (bq_worker_cancel_signal && !finished) error = BQ_WORKER_CANCEL_SIGNAL;
+        if (cancellable && bq_worker_cancel_signal && !finished) error = BQ_WORKER_CANCEL_SIGNAL;
     }
     else
     {
@@ -2422,16 +2422,37 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate(int result_directory,
 }
 #endif
 
-BUSTER_GLOBAL_LOCAL bool bq_worker_result_sync_tree(int result_directory)
+/* A long-lived result descriptor can predate the entries a walk must reach.
+ * btrfs (Linux 6.5+) fixes a directory's last readdir index when its open file
+ * is created, and a consumed offset hides entries everywhere, so walks read a
+ * fresh open file that must still be the pinned inode. */
+BUSTER_GLOBAL_LOCAL int bq_worker_reopen_directory(int directory)
+{
+    int result = directory >= 0 ? openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat pinned = {0}, fresh = {0};
+    bool same = result >= 0 && fstat(directory, &pinned) == 0 && fstat(result, &fresh) == 0 &&
+                pinned.st_dev == fresh.st_dev && pinned.st_ino == fresh.st_ino;
+    if (!same && result >= 0)
+    {
+        close(result);
+        result = -1;
+    }
+    return result;
+}
+
+/* Fsyncs the whole result tree. A foreign entry type or an entry replaced
+ * between listing and open is a configuration mismatch; a failed read or
+ * fsync leaves durability unknown. */
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_sync_tree(int result_directory)
 {
     BqWorkerBundleFrame* frames = mmap(NULL, sizeof(*frames) * BQ_WORKER_BUNDLE_DEPTH_CAP,
                                         PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    int root = result_directory >= 0 ? fcntl(result_directory, F_DUPFD_CLOEXEC, 3) : -1;
+    int root = bq_worker_reopen_directory(result_directory);
     DIR* stream = root >= 0 ? fdopendir(root) : NULL;
     if (stream) root = -1;
-    bool ok = frames != MAP_FAILED && stream != NULL;
-    u32 depth = ok ? 1 : 0;
-    if (ok)
+    BqError error = frames != MAP_FAILED && stream != NULL ? BQ_OK : BQ_IO;
+    u32 depth = error == BQ_OK ? 1 : 0;
+    if (error == BQ_OK)
     {
         memset(frames, 0, sizeof(*frames) * BQ_WORKER_BUNDLE_DEPTH_CAP);
         frames[0].stream = stream;
@@ -2442,18 +2463,18 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_result_sync_tree(int result_directory)
         else if (root >= 0) close(root);
         root = -1;
     }
-    while (ok && depth)
+    while (error == BQ_OK && depth)
     {
         BqWorkerBundleFrame* frame = frames + depth - 1;
         errno = 0;
         struct dirent* item = readdir(frame->stream);
         if (!item)
         {
-            if (errno) ok = false;
+            if (errno) error = BQ_IO;
             else
             {
                 int directory = dirfd(frame->stream);
-                ok = fsync(directory) == 0;
+                if (fsync(directory) != 0) error = BQ_IO;
                 closedir(frame->stream);
                 frame->stream = NULL;
                 depth -= 1;
@@ -2466,39 +2487,50 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_result_sync_tree(int result_directory)
         {
             int parent = dirfd(frame->stream);
             struct stat info = {0};
-            ok = parent >= 0 && fstatat(parent, item->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0;
-            if (ok && S_ISDIR(info.st_mode))
+            if (parent < 0 || fstatat(parent, item->d_name, &info, AT_SYMLINK_NOFOLLOW) != 0) error = BQ_IO;
+            else if (S_ISDIR(info.st_mode))
             {
                 int child = depth < BQ_WORKER_BUNDLE_DEPTH_CAP ?
                             openat(parent, item->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
                 DIR* child_stream = child >= 0 ? fdopendir(child) : NULL;
                 if (!child_stream && child >= 0) close(child);
                 struct stat opened = {0};
-                ok = child_stream != NULL && fstat(child, &opened) == 0 && opened.st_dev == info.st_dev &&
-                     opened.st_ino == info.st_ino;
-                if (ok)
+                if (!child_stream || fstat(child, &opened) != 0) error = BQ_IO;
+                else if (opened.st_dev != info.st_dev || opened.st_ino != info.st_ino) error = BQ_CONFIGURATION_MISMATCH;
+                if (error == BQ_OK)
                 {
                     frames[depth].stream = child_stream;
                     depth += 1;
                 }
+                else if (child_stream)
+                {
+                    closedir(child_stream);
+                }
             }
-            else if (ok && S_ISREG(info.st_mode))
+            else if (S_ISREG(info.st_mode))
             {
                 int descriptor = openat(parent, item->d_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
                 struct stat opened = {0};
-                ok = descriptor >= 0 && fstat(descriptor, &opened) == 0 && opened.st_dev == info.st_dev &&
-                     opened.st_ino == info.st_ino && opened.st_size == info.st_size && fsync(descriptor) == 0;
-                if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+                if (descriptor < 0 || fstat(descriptor, &opened) != 0) error = BQ_IO;
+                else if (opened.st_dev != info.st_dev || opened.st_ino != info.st_ino || opened.st_size != info.st_size)
+                    error = BQ_CONFIGURATION_MISMATCH;
+                else if (fsync(descriptor) != 0) error = BQ_IO;
+                if (descriptor >= 0 && close(descriptor) != 0 && error == BQ_OK) error = BQ_IO;
             }
-            else if (ok)
+            else
             {
-                ok = false;
+                error = BQ_CONFIGURATION_MISMATCH;
             }
         }
     }
-    if (root >= 0 && close(root) != 0) ok = false;
+    while (depth)
+    {
+        if (frames[depth - 1].stream) closedir(frames[depth - 1].stream);
+        depth -= 1;
+    }
+    if (root >= 0 && close(root) != 0 && error == BQ_OK) error = BQ_IO;
     if (frames != MAP_FAILED) munmap(frames, sizeof(*frames) * BQ_WORKER_BUNDLE_DEPTH_CAP);
-    return ok;
+    return error;
 }
 
 BUSTER_GLOBAL_LOCAL BqError bq_worker_result_binding_validate_at(BqJob const* job, int result_directory)
@@ -2618,7 +2650,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* conf
                     bq_worker_finalization_recipe(job, finalization) ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
     int job_length = 0, token_length = 0, workspace_length = 0, result_length = 0, base_length = 0, candidate_length = 0;
     int base_binary_length = 0, candidate_binary_length = 0;
-    if (error == BQ_OK && !bq_worker_result_sync_tree(finalization->result_directory)) error = BQ_IO;
+    if (error == BQ_OK) error = bq_worker_result_sync_tree(finalization->result_directory);
     if (error == BQ_OK)
     {
         String8 base = bq_field(&job->request, 3), candidate = bq_field(&job->request, 4);
@@ -3090,20 +3122,70 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_failure_bundle_publish(BqWorkerFinalizatio
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_worker_result_evidence(BqJob const* job, BqOutcome outcome, BqError reason,
-                                                       BqWorkerFinalization* finalization)
+BUSTER_GLOBAL_LOCAL int bq_worker_result_evidence_body(BqJob const* job, BqOutcome outcome, BqError reason,
+                                                       BqWorkerFinalization* finalization, char* body, u32 capacity)
 {
-    char body[BQ_WORKER_EVIDENCE_CAP];
     bool recipe = bq_worker_finalization_recipe(job, finalization);
-    int body_length = recipe ? snprintf(body, sizeof(body),
+    int body_length = recipe ? snprintf(body, capacity,
                                      "schema=1\nrecipe=%s\nstatus=%s\nerror=%s\n"
                                      "job-id=%" PRIu64 "\nattempt-token=%" PRIu64 "\n",
                                      finalization->recipe.name, bq_worker_outcome_name(outcome), bq_error_name(reason),
                                      (uint64_t)job->id, (uint64_t)job->token) : -1;
-    bool ok = recipe && body_length > 0 && (u32)body_length < sizeof(body) &&
+    return body_length > 0 && (u32)body_length < capacity ? body_length : -1;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_evidence(BqJob const* job, BqOutcome outcome, BqError reason,
+                                                       BqWorkerFinalization* finalization)
+{
+    char body[BQ_WORKER_EVIDENCE_CAP];
+    int body_length = bq_worker_result_evidence_body(job, outcome, reason, finalization, body, sizeof(body));
+    bool ok = body_length > 0 &&
               bq_worker_result_control_publish(finalization, finalization->recipe.outcome, body,
                                                 (u64)body_length, 0400) == BQ_OK;
     return ok ? BQ_OK : BQ_IO;
+}
+
+/* A failure path that could not finish may already have published the
+ * immutable outcome record. Recovery adopts exactly those bytes, limited to
+ * `required` when the outcome is already durable, and otherwise to the
+ * outcomes the queue accepts for this job (a durable cancellation only
+ * finishes cancelled). Reasons are limited to those a terminal record can
+ * carry; failed and interrupted reasons must stay readable as failure records.
+ * A missing record keeps the caller's default; any other existing record
+ * fails closed and is never replaced. */
+BUSTER_GLOBAL_LOCAL BqError bq_worker_recover_outcome(BqJob const* job, BqWorkerFinalization* finalization,
+                                                      BqOutcome required, BqOutcome* outcome, BqError* reason)
+{
+    bool recipe = job && finalization && finalization->result_directory >= 0 &&
+                  bq_worker_finalization_recipe(job, finalization);
+    struct stat entry = {0};
+    errno = 0;
+    int lookup = recipe ? fstatat(finalization->result_directory, finalization->recipe.outcome, &entry,
+                                  AT_SYMLINK_NOFOLLOW) : -1;
+    BqError error = !recipe ? BQ_CONFIGURATION_MISMATCH :
+                    lookup != 0 && errno == ENOENT ? BQ_OK :
+                    lookup != 0 ? BQ_IO : BQ_CORRUPT;
+    BqOutcome outcomes[] = {BQ_FAILED, BQ_CANCELLED, BQ_INTERRUPTED};
+    for (u32 index = 0; error == BQ_CORRUPT && index < BUSTER_ARRAY_LENGTH(outcomes); index += 1)
+    {
+        if (required != BQ_NO_OUTCOME ? outcomes[index] != required :
+            (outcomes[index] == BQ_CANCELLED) != job->cancel_requested) continue;
+        u32 last = outcomes[index] == BQ_CANCELLED ? (u32)BQ_WORKER_CANCEL_SIGNAL : (u32)BQ_BOOT_INTERRUPTED;
+        for (u32 candidate = BQ_RECIPE_MISMATCH; error == BQ_CORRUPT && candidate <= last; candidate += 1)
+        {
+            char body[BQ_WORKER_EVIDENCE_CAP];
+            int length = bq_worker_result_evidence_body(job, outcomes[index], (BqError)candidate, finalization,
+                                                        body, sizeof(body));
+            if (length > 0 && bq_worker_evidence_matches(finalization->result_directory,
+                                                         finalization->recipe.outcome, body, (u64)length))
+            {
+                *outcome = outcomes[index];
+                *reason = (BqError)candidate;
+                error = BQ_OK;
+            }
+        }
+    }
+    return error;
 }
 
 BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job, BqOutcome outcome,
@@ -3608,9 +3690,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop(BqWorkerConfig const* config, BqWorke
     if (error == BQ_OK && empty && lease->descriptor < 0 && bq_worker_lease_acquire(lease_path, lease) != 0)
         error = BQ_BUSY;
     if (error == BQ_OK && empty) error = bq_worker_stop_children(config, backend, identity);
+    /* The outer unit is proven empty, so the launcher exits once the broker
+     * reports its outcome. A cancellation that is still pending (this stop may
+     * be serving it) must not abandon that bounded reap as cleanup failure. */
     if (error == BQ_OK && empty)
         error = backend->join(backend, &status,
-                              bq_worker_deadline(backend->clock(backend), BQ_WORKER_COMMAND_MILLISECONDS));
+                              bq_worker_deadline(backend->clock(backend), BQ_WORKER_COMMAND_MILLISECONDS), false);
     if (error == BQ_OK && empty)
     {
         BqWorkerObserved final = {0};
@@ -3669,14 +3754,23 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_recover(BqQueue* queue, BqWorkerConfig con
                                       job->phase < BQ_FINALIZING && !job->result_bound);
         if (error == BQ_OK) error = bq_worker_lease_handoff_purge_stale(finalization->result_directory);
     }
+    BqOutcome outcome = BQ_INTERRUPTED;
+    BqError reason = BQ_WORKER_INTERRUPTED;
     if (error == BQ_OK)
     {
-        error = bq_worker_finish(queue, config, job,
-                                 durable_outcome ? job->outcome : BQ_INTERRUPTED,
-                                 durable_outcome ? BQ_NOT_FOUND :
-                                 strcmp(saved_boot, current_boot) ? BQ_BOOT_INTERRUPTED : BQ_WORKER_INTERRUPTED,
-                                 finalization);
+        /* The queue accepts only a cancelled terminal outcome for a job with a
+         * durable cancellation request; interrupted is for the rest. */
+        outcome = durable_outcome ? job->outcome : job->cancel_requested ? BQ_CANCELLED : BQ_INTERRUPTED;
+        reason = durable_outcome ? BQ_NOT_FOUND :
+                 strcmp(saved_boot, current_boot) ? BQ_BOOT_INTERRUPTED : BQ_WORKER_INTERRUPTED;
     }
+    /* A durable non-success outcome whose result is still unbound may also
+     * have its record published; only that exact outcome may be adopted. */
+    bool adoptable = !durable_outcome || (job->outcome != BQ_SUCCEEDED && !job->result_bound);
+    if (error == BQ_OK && adoptable && config && config->production_path)
+        error = bq_worker_recover_outcome(job, finalization, durable_outcome ? job->outcome : BQ_NO_OUTCOME,
+                                          &outcome, &reason);
+    if (error == BQ_OK) error = bq_worker_finish(queue, config, job, outcome, reason, finalization);
     return error;
 }
 
@@ -3847,7 +3941,7 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     {
         u64 wait = config->limits.runtime_max_usec / 1000;
         wait = wait <= UINT64_MAX - BQ_WORKER_STOP_MILLISECONDS ? wait + BQ_WORKER_STOP_MILLISECONDS : UINT64_MAX;
-        error = backend->join(backend, &status, bq_worker_deadline(backend->clock(backend), wait));
+        error = backend->join(backend, &status, bq_worker_deadline(backend->clock(backend), wait), true);
     }
     bool interrupted_join = error == BQ_WORKER_CANCEL_SIGNAL;
     bool signal_cancelled = interrupted_join || (production && bq_worker_cancel_signal);
@@ -3958,8 +4052,11 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
             }
             else if (production && finalization.result_directory >= 0)
             {
-                BqOutcome retained_outcome = signal_cancelled ? BQ_CANCELLED : BQ_FAILED;
-                BqError retained_reason = signal_cancelled ? BQ_WORKER_CANCEL_SIGNAL : evidence_reason;
+                /* Follow the journal, not the signal: a CANCEL that did not
+                 * become durable must not be published as cancelled. */
+                BqOutcome retained_outcome = job->cancel_requested ? BQ_CANCELLED : BQ_FAILED;
+                BqError retained_reason = job->cancel_requested && signal_cancelled ? BQ_WORKER_CANCEL_SIGNAL :
+                                          evidence_reason;
                 BqError retained = bq_worker_result_evidence(job, retained_outcome, retained_reason, &finalization);
                 if (retained == BQ_OK && !job->result_bound)
                     retained = bq_worker_result_failure_artifacts(job, retained_outcome, retained_reason, &finalization);

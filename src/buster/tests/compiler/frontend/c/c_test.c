@@ -1844,6 +1844,91 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vla_row_places(UnitTestArguments* argu
     return result;
 }
 
+// C17 6.2.2p5: a block-scope function declarator without a storage-class
+// specifier links like its `extern` form and declares no automatic object.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_scope_function_declaration(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("int test(void) { long add(long, long); return (int)add(2L, 3L) - 5; }\nlong add(long a, long b) { return a + b; }\n"),
+        S8("int test(void) { long add(); return (int)add(2L, 3L) - 5; }\nlong add(long a, long b) { return a + b; }\n"),
+        S8("int test(void) { long add(long, long); return 0; }\nlong add(long a, long b) { return a + b; }\n"),
+        S8("typedef long F(long, long);\nint test(void) { F add; return (int)add(2L, 3L) - 5; }\nlong add(long a, long b) { return a + b; }\n"),
+        S8("int test(void) { long add(long, long), sub(long, long); return (int)(add(2L, 3L) - sub(8L, 3L)); }\nlong add(long a, long b) { return a + b; }\nlong sub(long a, long b) { return a - b; }\n"),
+        S8("int test(void) { long x = 2, add(long, long); return (int)add(x, 3L) - 5; }\nlong add(long a, long b) { return a + b; }\n"),
+    };
+    // `x` in the last form is the only declarator that may occupy a local.
+    u32 object_locals[] = {0, 0, 0, 0, 0, 1};
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens =
+                c_preprocess(temporary.arena, sources[index], (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0, sources[index]);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("block-function.c"), tokens, parse, target_native,
+                                                                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, sources[index]);
+            if (lowered.program && !lowered.diagnostic_count)
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                IrFunction* function = c_test_find_ir_function(module, S8("test"));
+                BUSTER_TEST(arguments, function != 0);
+                if (function)
+                {
+                    u32 local_count = 0;
+                    for (u32 instruction = 0; instruction < function->instruction_count; instruction += 1)
+                    {
+                        local_count += function->instructions[instruction].opcode == IR_OPCODE_LOCAL;
+                    }
+                    BUSTER_TEST_RAW(arguments, function->local_count <= object_locals[index] && local_count <= object_locals[index], sources[index]);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+// C11 6.2.1p4: a block-scope function declaration's identifier has block
+// scope, so a file-scope typedef or enumerator of the same spelling is that
+// name again once the block closes (#1715).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_scope_function_declaration_file_scope_name(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("typedef char T;\nlong fn(void) { double T(void); return 0; }\nlong test(void) { T c = 0; return (long)sizeof(c) - 1; }\n"),
+        S8("typedef char T;\nlong test(void) { { double T(void); } T c = 0; return (long)sizeof(c) - 1; }\n"),
+        S8("typedef char T;\nlong fn(void) { double T(void); return (long)T(); }\nlong test(void) { T c = 0; return (long)sizeof(c) - 1; }\n"),
+        S8("enum { T = 7 };\nlong fn(void) { double T(void); return 0; }\nlong test(void) { return T - 7; }\n"),
+    };
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens =
+                c_preprocess(temporary.arena, sources[index], (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0, sources[index]);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("block-function-shadow.c"), tokens, parse, target_native,
+                                                                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, sources[index]);
+            if (lowered.program && !lowered.diagnostic_count)
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                BUSTER_TEST_RAW(arguments, c_test_find_ir_function(module, S8("test")) != 0, sources[index]);
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lexer_rewind_zeroed(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4383,6 +4468,83 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_value_operands(UnitTestA
     return result;
 }
 
+// A noreturn call inside a larger expression statement -- a cast, an
+// argument, a compound literal, an assignment or a comma operand -- leaves its
+// block open for the rest of the statement, which then ends the block in the
+// trap (issue #1736). The statement's rows used to follow the UNREACHABLE.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_expression_statements(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#define C_TEST_NORETURN_STATEMENT_SOURCE(body)                               \
+    S8("__attribute__((noreturn)) void die(void);\n"                          \
+       "__attribute__((noreturn)) int g(void);\n"                             \
+       "__attribute__((noreturn)) void exit(int status);\n"                   \
+       "void sink(int value);\n"                                              \
+       "struct pair { int a; };\n"                                            \
+       "void take(struct pair value);\n"                                      \
+       "int f(int x) { if (x > 5) { " body " } return x; }\n"                 \
+       "int h(void) { die(); }\n")
+    String8 sources[] = {
+        C_TEST_NORETURN_STATEMENT_SOURCE("sink((die(), x));"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("take((die(), (struct pair){x}));"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("x = (g(), 0);"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("(void)g();"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("(void)die();"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("(void)exit(3);"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("x = g();"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("sink(g());"),
+    };
+#undef C_TEST_NORETURN_STATEMENT_SOURCE
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 source = sources[index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                        (CPreprocessOptions){
+                                                            .target = target_native,
+                                                            .data_layout = target_data_layout(target_native),
+                                                        });
+            CParseResult parsed = c_parse(temporary.arena, preprocess);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+            if (parsed.diagnostic_count == 0)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("noreturn-call-expression-statements.c"), preprocess,
+                                                                    parsed, target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    u32 checked = 0;
+                    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                    {
+                        IrFunction* function = module->functions + function_index;
+                        bool statement = string_equal(function->name, S8("f"));
+                        bool whole = string_equal(function->name, S8("h"));
+                        if (statement || whole)
+                        {
+                            bool unreachable = false;
+                            bool returns = false;
+                            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                            {
+                                unreachable |= function->instructions[instruction_index].opcode == IR_OPCODE_UNREACHABLE;
+                                returns |= function->instructions[instruction_index].opcode == IR_OPCODE_RETURN;
+                            }
+                            BUSTER_TEST(arguments, unreachable && returns == statement);
+                            checked += 1;
+                        }
+                    }
+                    BUSTER_TEST(arguments, checked == 2);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_empty_initializers(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4536,6 +4698,39 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ambiguous_promoted_parse(UnitTestArgum
         BUSTER_TEST(arguments, string_equal(ambiguous_array_parse.diagnostics[0].message, S8("ambiguous promoted member designator")));
     }
     scratch_end(ambiguous_promoted_parse_temporary);
+    return result;
+}
+
+// A member declaration naming only a tag, or a typedef for an untagged
+// aggregate, declares nothing; only an untagged definition written in place
+// is an anonymous member (C11 6.7.2.1p13). The layouts are GCC's and Clang's
+// without -fms-extensions (#1706).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tagged_member_declares_nothing(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens;
+    CParseResult parse;
+    CIRLowerResult lowered = c_test_lower_source(temporary.arena,
+        S8("struct S { int a; }; union U { int a; double d; }; typedef struct { int z; } A;\n"
+           "struct T { struct S; int b; };\n"
+           "struct V { union U; int b; };\n"
+           "struct W { A; int b; };\n"
+           "struct Y { struct N { int n; }; int b; };\n"
+           "struct Z { struct Fwd; int b; };\n"
+           "struct X { struct { int p; }; const union { int q; char r[8]; }; int b; };\n"
+           "_Static_assert(sizeof(struct T) == 4 && __builtin_offsetof(struct T, b) == 0, \"tagged struct\");\n"
+           "_Static_assert(sizeof(struct V) == 4 && __builtin_offsetof(struct V, b) == 0, \"tagged union\");\n"
+           "_Static_assert(sizeof(struct W) == 4 && __builtin_offsetof(struct W, b) == 0, \"typedef name\");\n"
+           "_Static_assert(sizeof(struct Y) == 4 && sizeof(struct N) == 4, \"nested tagged definition\");\n"
+           "_Static_assert(sizeof(struct Z) == 4, \"forward tag\");\n"
+           "_Static_assert(sizeof(struct X) == 16 && __builtin_offsetof(struct X, b) == 12, \"anonymous members\");\n"
+           "int read(struct X *x) { return x->p + x->q + x->r[1]; }\n"),
+        S8("tagged-member-declares-nothing.c"), target_native, &tokens, &parse);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
+    scratch_end(temporary);
     return result;
 }
 
@@ -12469,6 +12664,51 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_function_type_name(UnitTestArgu
     return result;
 }
 
+// A GNU attribute list may sit in a block-scope type name -- a cast, a sizeof
+// or _Alignof operand, a _Generic association -- before or after a `*`. Its
+// words name attributes, not objects, and the type is the one written without
+// it; the block-scope static assertions pin the sizes Clang folds (#1705).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_type_name_attributes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+    BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+    TemporalArena temporary = scratch_begin(0, 0);
+    String8 source = S8("int f(void) { return (int)(long)(int __attribute__((unused)))0 + (int)sizeof(int __attribute__((unused))); }\n"
+                        "int f1(void) { return sizeof(int * __attribute__((unused)) *); }\n"
+                        "int f2(void) { return (int)(long)(int * __attribute__((unused)))0; }\n"
+                        "int f3(void) { int x; return _Generic(&x, int * __attribute__((unused)): 1, default: 0); }\n"
+                        "int f4(void) { return _Alignof(int * __attribute__((unused)) const); }\n"
+                        "int f5(void)\n"
+                        "{\n"
+                        "    _Static_assert(sizeof(int __attribute__((unused))) == 4, \"plain\");\n"
+                        "    _Static_assert(sizeof(int * __attribute__((unused)) *) == 8, \"pointer\");\n"
+                        "    _Static_assert(_Alignof(int * __attribute__((unused)) const) == 8, \"alignment\");\n"
+                        "    return (int)(long)(int * __attribute__((unused)) const __attribute__((unused)) *)8;\n"
+                        "}\n");
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){
+                                                    .target = target.target,
+                                                    .data_layout = target_data_layout(target.target),
+                                                    .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                });
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    CIRLowerResult lowered = {0};
+    if (!preprocess.diagnostic_count && !parse.diagnostic_count)
+    {
+        lowered = c_lower_to_ir(temporary.arena, S8("block-type-name-attributes.c"), preprocess, parse, target.target);
+    }
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program);
+    if (lowered.program && lowered.program->module_count)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // `void` is one byte in both layout engines, and an object of it is still
 // refused. GNU gives `void` a size so that a `void *` steps by bytes, and both
 // reference compilers fold `sizeof(void)`, `sizeof(const void)` and
@@ -12789,6 +13029,77 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unprototyped_call_arguments(UnitTestAr
     return result;
 }
 
+/* An unprototyped `long add();` followed by its prototyped definition declares
+   one function, and C11 6.2.7p3 makes the prototype the composite type. The
+   name index resolves every call through the prototype, so the entity's one
+   IrFunction and its symbol carry the prototype's type as well. The definition
+   used to take a second row for the same symbol: the LLVM writer refused the
+   duplicate, and with a function-pointer return the call's reference named a
+   return type the symbol's did not, which canonical validation rejected. */
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unprototyped_then_prototyped(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    struct
+    {
+        String8 source;
+        u32 parameter_count;
+    } cases[] = {
+        {S8("long add();\n"
+            "long add(long a, long b) { return a + b; }\n"
+            "int main(void) { return (int)add(2, 3) - 5; }\n"),
+         2},
+        {S8("static int twice(int x) { return 2 * x; }\n"
+            "int (*add())(int);\n"
+            "int (*add(int w))(int) { (void)w; return twice; }\n"
+            "int main(void) { int (*a)(int) = add(1); return a(4) != 8; }\n"),
+         1},
+        {S8("long add();\n"
+            "int main(void) { return (int)add(2L, 3L) - 5; }\n"
+            "long add(long a, long b);\n"
+            "long add(long a, long b) { return a + b; }\n"),
+         2},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = {0};
+        CParseResult parse = {0};
+        CIRLowerResult ir = c_test_lower_source(temporary.arena, cases[case_index].source, S8("unprototyped-then-prototyped.c"), target_native,
+                                                &tokens, &parse);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, ir.program != 0))
+        {
+            IrModule* module = &ir.program->modules[0];
+            IrFunction* row = 0;
+            u32 row_count = 0;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                if (string_equal(module->functions[function_index].name, S8("add")))
+                {
+                    row = &module->functions[function_index];
+                    row_count += 1;
+                }
+            }
+            if (BUSTER_REQUIRE(arguments, row_count == 1))
+            {
+                IrSymbol* symbol = ir_symbol_from_id(&ir.program->symbols, row->symbol);
+                IrType* type = ir_type_from_id(&ir.program->types, row->canonical_type);
+                BUSTER_TEST(arguments, row->state == IR_FUNCTION_LOWERED);
+                BUSTER_TEST(arguments, symbol && symbol->is_definition && symbol->type.value == row->canonical_type.value);
+                BUSTER_TEST(arguments, type && type->kind == IR_TYPE_FUNCTION && !type->is_unprototyped &&
+                                           type->parameter_count == cases[case_index].parameter_count);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
+
+    return result;
+}
+
 /* C23 made `()` mean `(void)`, so the same calls are a constraint violation
    there, and every dialect refuses a call that overruns a real parameter list.
    Both used to report only that the call could not be prepared, which named
@@ -12931,6 +13242,88 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unevaluated_call_arity_diagnostics(Uni
     return result;
 }
 
+// Constant expressions outside function bodies -- array bounds, enum values,
+// static initializers and _Static_assert -- are syntax-checked before they are
+// folded, so a malformed one is diagnosed instead of being accepted.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_expression_syntax(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u32 column;
+    } cases[] = {
+        {S8("int a[sizeof(1 +)];"), 17},
+        {S8("long object; int a[sizeof(typeof(object) + 1)];"), 42},
+        {S8("struct S { int a[sizeof(long + 1)]; };"), 30},
+        {S8("void f(int a[sizeof(long + 1)]);"), 26},
+        {S8("int a[sizeof(int x)];"), 18},
+        {S8("int a[1 +];"), 10},
+        {S8("long object; long x = sizeof(typeof(object) + 1);"), 45},
+        {S8("long object; _Static_assert(sizeof(typeof(object) + 1) == 8, \"\");"), 51},
+        {S8("enum { E = sizeof(long + 1) };"), 24},
+        {S8("struct S { int a[1 +]; };"), 21},
+        {S8("void f(void) { int a[1 +]; }"), 25},
+        {S8("void f(int a[static 1 +]);"), 24},
+        {S8("int a[(int)];"), 12},
+        {S8("enum { E = 1 + };"), 16},
+        {S8("_Static_assert(1 +, \"\");"), 19},
+        {S8("int a[1 1];"), 9},
+        {S8("int a[sizeof(int) sizeof(int)];"), 19},
+        {S8("int a[sizeof(int)[0]];"), 18},
+        {S8("int a[sizeof()];"), 14},
+        {S8("int a[()];"), 8},
+        {S8("int a[1 x];"), 9},
+        {S8("enum { E = 1 2 };"), 14},
+        {S8("_Static_assert(1 1, \"\");"), 18},
+        {S8("int x = (1 2);"), 12},
+        {S8("int a[_Alignof(int)(1)];"), 20},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, cases[case_index].source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                 .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parsed = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && parsed.diagnostic_count != 0, cases[case_index].source);
+        if (parsed.diagnostic_count)
+        {
+            String8 message = parsed.diagnostics[0].message;
+            BUSTER_TEST_RAW(arguments, string_ends_with_sequence(message, S8("expected expression")) ||
+                                       string_ends_with_sequence(message, S8("expected operator")) ||
+                                       string_ends_with_sequence(message, S8("expected ')' after type name")), cases[case_index].source);
+            BUSTER_TEST_RAW(arguments, parsed.diagnostics[0].location.line == 1 && parsed.diagnostics[0].location.column == cases[case_index].column,
+                            cases[case_index].source);
+        }
+        scratch_end(temporary);
+    }
+    String8 valid[] = {
+        S8("typedef int T; struct P { int x; }; enum { A = 4, B = sizeof(long) + 1, C = _Alignof(struct P), D = A ? 1 : 2 };"
+           " int a1[sizeof(long) + 1]; int a2[sizeof((long) + 1)]; int a3[sizeof(T[3]) / sizeof(T)]; int a4[(T)3 + -1];"
+           " int a5[sizeof(int*) * 2]; int a6[sizeof(struct P*)]; int a7[__builtin_offsetof(struct P, x) + 1];"
+           " int a8[sizeof(const volatile int)]; int a9[sizeof(int[2][3])]; int a10[(A > 1) ? A : 1]; int a11[sizeof \"ab\" \"c\"];"
+           " int a12[_Generic(1, int: 2, default: 3)]; int a13[sizeof(__typeof__(a1))]; int a14[sizeof(int (*)[4])];"
+           " int a15[sizeof((struct P){1})]; int a16[sizeof(int (*)(void))]; int a17[1 ? : 2];"
+           " void f1(int n, int a[static 4], int b[const n], int c[*], int d[const static 2]); void f2(int n, int a[n][n + 1]);"
+           " long x = sizeof(long) + 1; _Static_assert(sizeof(long) + 1 > 4, \"\"); struct S { int m[A + 1]; char c[sizeof(struct P) * 2]; };"
+           " int g(void) { int n = 3; int v[n + 1]; int w[({ 2; })]; return (int)(sizeof v + sizeof w); }"),
+    };
+    for (u32 valid_index = 0; valid_index < BUSTER_ARRAY_LENGTH(valid); valid_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, valid[valid_index],
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                 .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parsed = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && parsed.diagnostic_count == 0, valid[valid_index]);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // A sizeof operand is unevaluated, but every update still requires a
 // modifiable real or pointer place. The same constraint must be reported by
 // syntax-only and by either canonical-IR lowering form.
@@ -12954,6 +13347,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(Unit
         {S8("sizeof (++(item ? item : values[0]))"), false},
         {S8("sizeof ((0, ++42))"), false},
         {S8("sizeof (item ? ++42 : 0)"), false},
+        {S8("sizeof (sizeof (++42))"), false},
         {S8("sizeof no_link(++42)"), false},
         {S8("sizeof values[++42]"), false},
         {S8("sizeof ((const int){1}++)"), false},
@@ -13039,6 +13433,91 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(Unit
             BUSTER_TEST_RAW(arguments, string_ends_with_sequence(analyzed.diagnostics[0].message,
                 S8("increment or decrement operand is not a modifiable place")), declarations[index].source);
         scratch_end(temporary);
+    }
+    return result;
+}
+
+// A type name inside a `sizeof`, `_Alignof`, `typeof` or `typeof_unqual`
+// operand ends at that operand's `)`, including an operand nested in another.
+// A typeof type name followed by an operator was sized as if the type were a
+// value, and a typedef written on one declared nothing without a diagnostic
+// (#1535). A type name in its own
+// cast parentheses is still a cast, and a local that shadows a typedef still
+// makes its operand an expression. `diagnosed` starts at the token the
+// diagnostic names: after `*` that is the operand, since `T *` is a type name.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_name_operand_trailer(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 diagnosed;
+    } cases[] = {
+        {S8("long probe(void) { return sizeof (typeof (object) + 1); }"), S8("+ 1)")},
+        {S8("long probe(void) { return sizeof (typeof (object) * 2); }"), S8("2)")},
+        {S8("long probe(void) { return sizeof (typeof (object) - 1); }"), S8("- 1)")},
+        {S8("long probe(void) { return sizeof (typeof (object) & 1); }"), S8("& 1)")},
+        {S8("long probe(void) { return sizeof (typeof (char) * 2); }"), S8("2)")},
+        {S8("long probe(void) { return _Alignof (typeof (object) + 1); }"), S8("+ 1)")},
+        {S8("long probe(void) { return sizeof (typeof (typeof (object) + 1)); }"), S8("+ 1)")},
+        {S8("long probe(void) { return sizeof (long + 1); }"), S8("+ 1)")},
+        {S8("typedef long alias; long probe(void) { return sizeof (alias * 2); }"), S8("2)")},
+        {S8("long probe(void) { return sizeof (sizeof (long + 1)); }"), S8("+ 1))")},
+        {S8("long probe(void) { long a[2] = {0}; return sizeof (a[_Alignof (typeof (object) * 2)]); }"), S8("2)])")},
+        {S8("typedef typeof (typeof (object) + 1) t;"), S8("+ 1)")},
+        {S8("typedef typeof (typeof (object) * 2) t;"), S8("2)")},
+        {S8("typedef typeof (typeof (object) - 1) t;"), S8("- 1)")},
+        {S8("typedef typeof (typeof (object) & 1) t;"), S8("& 1)")},
+        {S8("typedef typeof_unqual (typeof (object) + 1) t;"), S8("+ 1)")},
+        {S8("typedef typeof_unqual (typeof (object) * 2) t;"), S8("2)")},
+        {S8("typedef typeof_unqual (typeof (object) - 1) t;"), S8("- 1)")},
+        {S8("typedef typeof_unqual (typeof (object) & 1) t;"), S8("& 1)")},
+        {S8("void probe(void) { typeof (typeof (object) + 1) local = 0; (void)local; }"), S8("+ 1)")},
+        {S8("long probe(void) { return (typeof (object)) + 1; }"), {0}},
+        {S8("long probe(void) { return sizeof ((typeof (object)) + 1); }"), {0}},
+        {S8("long probe(void) { return sizeof ((typeof (object))1); }"), {0}},
+        {S8("long probe(void) { return sizeof (typeof (object)) + 1; }"), {0}},
+        {S8("long probe(void) { return sizeof (typeof (object + 1)) + sizeof (typeof (&object)); }"), {0}},
+        {S8("long probe(void) { return sizeof (typeof (object) *) + sizeof (typeof (object)[2]) + sizeof (int (*)(void)); }"), {0}},
+        {S8("long probe(void) { return sizeof (sizeof (long) + 1) + sizeof (sizeof ((typeof (object)) + 1)); }"), {0}},
+        {S8("int probe(int *pointer) { return sizeof (sizeof (++*pointer)); }"), {0}},
+        {S8("typedef typeof ((long) + 1) t; t value;"), {0}},
+        {S8("typedef typeof (typeof (object) *) t; t value;"), {0}},
+        {S8("typedef typeof_unqual (typeof (object) const *) t; t value;"), {0}},
+        {S8("typedef long alias; int probe(int alias) { return sizeof (alias + 1); }"), {0}},
+        {S8("typedef long alias; int probe(void) { int alias = 1; typeof (alias * 2) twice = alias; return twice + sizeof (alias - 1); }"), {0}},
+        {S8("typedef long alias; int probe(void) { enum { alias = 3 }; return sizeof (alias & 1); }"), {0}},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            String8 source = string_format(temporary.arena, S8("long object; {S8}"), cases[case_index].source);
+            bool valid = !cases[case_index].diagnosed.length;
+            u64 diagnosed = valid ? 0 : string_first_sequence(source, cases[case_index].diagnosed);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                     .dialect = C_PREPROCESS_DIALECT_GNU23});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, source);
+            BUSTER_TEST_RAW(arguments, (semantic.diagnostic_count == 0) == valid, source);
+            if (!valid && semantic.diagnostic_count)
+            {
+                BUSTER_TEST_RAW(arguments, string_ends_with_sequence(semantic.diagnostics[0].message, S8("expected ')' after type name")), source);
+                BUSTER_TEST_RAW(arguments, semantic.diagnostics[0].location.offset == diagnosed, source);
+            }
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("type-name-operand-trailer.c"), tokens, syntax,
+                                                            target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, (lowered.diagnostic_count == 0 && lowered.program != 0) == valid, source);
+            if (!valid && lowered.diagnostic_count)
+            {
+                BUSTER_TEST_RAW(arguments, string_ends_with_sequence(lowered.diagnostics[0].message, S8("expected ')' after type name")), source);
+                BUSTER_TEST_RAW(arguments, lowered.diagnostics[0].location.offset == diagnosed, source);
+            }
+            scratch_end(temporary);
+        }
     }
     return result;
 }
@@ -15152,6 +15631,97 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_expression_frames(UnitTestArgum
             BUSTER_TEST(arguments, parse.diagnostics[0].location.line == 1);
             BUSTER_TEST(arguments, parse.diagnostics[0].location.column == invalid_cases[index].column);
         }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// A typeof operand that is neither a type name nor an expression reports
+// `expected expression` at the operand's `)` instead of dropping the
+// declaration silently until a later use of its name fails.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_malformed_operand_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u32 column;
+    } invalid[] = {
+        {S8("long object; typedef typeof(1 +) t;\n"), 32},
+        {S8("long object; typedef typeof(object +) t;\n"), 37},
+        {S8("typedef typeof() t;\n"), 16},
+        {S8("long object; typedef typeof(1 +) t; t v;\n"), 32},
+        {S8("long object; typedef typeof_unqual(object *) t;\n"), 44},
+        {S8("typedef typeof_unqual() t;\n"), 23},
+        {S8("long object; typedef __typeof__(object <<) t;\n"), 42},
+        {S8("typedef __typeof__() t;\n"), 20},
+        {S8("void f(void) { typeof(1 +) y; }\n"), 26},
+        {S8("void f(void) { typeof() y; }\n"), 23},
+        {S8("void f(void) { long object; __typeof__(object ,) y; }\n"), 48},
+        {S8("void f(void) { __typeof__() y; }\n"), 27},
+        {S8("void f(void) { long object; typeof_unqual(object -) y; }\n"), 51},
+        {S8("void f(void) { typeof_unqual() y; }\n"), 30},
+        {S8("typedef typeof((1 +)) t;\n"), 20},
+        {S8("typedef typeof(typeof(1 +)) t;\n"), 26},
+        {S8("typedef __typeof__(typeof_unqual(())) t;\n"), 35},
+        {S8("long object; typedef typeof(object[object +]) t;\n"), 44},
+        {S8("void f(void) { long object; typeof((object *)) y; }\n"), 45},
+        {S8("void f(void) { __typeof__(typeof((1 -))) y; }\n"), 38},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[case_index].source,
+                                                    (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, invalid[case_index].source);
+        bool diagnosed = parse.diagnostic_count > 0 && string_equal(parse.diagnostics[0].message, S8("expected expression")) &&
+                         parse.diagnostics[0].location.line == 1 && parse.diagnostics[0].location.column == invalid[case_index].column;
+        BUSTER_TEST_RAW(arguments, diagnosed, invalid[case_index].source);
+        scratch_end(temporary);
+    }
+    String8 valid[] = {
+        S8("long object; typedef typeof(object + 1) t; t v;\n"),
+        S8("long object; typedef typeof(object++) t; t v;\n"),
+        S8("long object; typedef typeof_unqual(object) t; t v;\n"),
+        S8("typedef __typeof__(int *) t; t v;\n"),
+        S8("void f(void) { long object; typeof((object)) y; y = 0; }\n"),
+    };
+    // Valid type names Buster cannot type are not reported as syntax errors.
+    String8 untyped[] = {
+        S8("typedef typeof(_BitInt(8) *) t;\n"),
+        S8("typedef typeof(__float128 *) t;\n"),
+        S8("typedef typeof(__fp16 *) t;\n"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(untyped); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, untyped[case_index], (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        bool syntax_error = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+        {
+            syntax_error |= parse.diagnostics[diagnostic_index].kind == C_DIAGNOSTIC_EXPECTED_DECLARATION;
+        }
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && !syntax_error, untyped[case_index]);
+        scratch_end(temporary);
+    }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = S8("typedef typeof(int x) t;\n");
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        bool diagnosed = parse.diagnostic_count > 0 && string_equal(parse.diagnostics[0].message, S8("expected ')' after type name")) &&
+                         parse.diagnostics[0].location.line == 1 && parse.diagnostics[0].location.column == 20;
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && diagnosed, source);
+        scratch_end(temporary);
+    }
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, valid[case_index], (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, valid[case_index]);
         scratch_end(temporary);
     }
     return result;
@@ -20211,6 +20781,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parameter_local_alignment(UnitTestArgu
     return result;
 }
 
+// #1660: an attribute list may follow any `*` of a pointer declarator, before
+// or after its qualifiers, and `aligned` there still aligns the declared object.
+// Block-scope objects and typedefs take the `[[...]]` spelling as well.
+// The initializer of `n` lowers its type name through c_ir_type_name_prefix.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_declarator_attributes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+    BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+    TemporalArena temporary = scratch_begin(0, 0);
+    String8 source = S8("struct Aligned { char c; int * __attribute__((aligned(16))) p; };\n"
+                        "struct Chained { int * __attribute__((unused)) * p; int * __attribute__((unused)) const q; int * [[gnu::aligned(16)]] r; };\n"
+                        "int * __attribute__((aligned(16))) g;\n"
+                        "int * __attribute__((unused)) * gg;\n"
+                        "int * __attribute__((unused)) const gc = 0;\n"
+                        "int (* __attribute__((unused)) gp);\n"
+                        "_Static_assert(sizeof(struct Aligned) == 32 && _Alignof(struct Aligned) == 16, \"member alignment\");\n"
+                        "_Static_assert(__builtin_offsetof(struct Aligned, p) == 16, \"member offset\");\n"
+                        "_Static_assert(sizeof(struct Chained) == 32 && __builtin_offsetof(struct Chained, r) == 16, \"chained members\");\n"
+                        "_Static_assert(sizeof(gg) == 8 && sizeof(gc) == 8 && sizeof(gp) == 8, \"file scope\");\n"
+                        "_Static_assert(sizeof(int * __attribute__((unused)) *) == 8, \"type name\");\n"
+                        "int n = sizeof(int * __attribute__((unused)) *);\n"
+                        "int local(void)\n"
+                        "{\n"
+                        "    int value = 1;\n"
+                        "    int * __attribute__((aligned(64))) p = &value;\n"
+                        "    int * __attribute__((unused)) * const __attribute__((unused)) pp = &p;\n"
+                        "    int * [[gnu::aligned(16)]] q = &value;\n"
+                        "    int * [[gnu::unused]] * [[gnu::unused]] const qq = &q;\n"
+                        "    typedef int * [[gnu::aligned(16)]] T;\n"
+                        "    typedef int * [[gnu::unused]] * [[gnu::unused]] const TT;\n"
+                        "    T t = &value;\n"
+                        "    TT tt = &t;\n"
+                        "    return **pp + **qq + **tt + n;\n"
+                        "}\n");
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){
+                                                    .target = target.target,
+                                                    .data_layout = target_data_layout(target.target),
+                                                    .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                });
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    CIRLowerResult lowered = {0};
+    if (!preprocess.diagnostic_count && !parse.diagnostic_count)
+    {
+        lowered = c_lower_to_ir(temporary.arena, S8("pointer-declarator-attributes.c"), preprocess, parse, target.target);
+    }
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program);
+    u32 aligned_locals = 0;
+    if (lowered.program && lowered.program->module_count)
+    {
+        IrModule* module = lowered.program->modules;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            for (u32 index = 0; index < function->instruction_count; index += 1)
+            {
+                IrInstruction* instruction = function->instructions + index;
+                if (instruction->opcode == IR_OPCODE_LOCAL && function->values[instruction->result.value].alignment == 64)
+                {
+                    aligned_locals += 1;
+                }
+            }
+        }
+    }
+    BUSTER_TEST(arguments, aligned_locals == 1);
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23319,6 +23961,168 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_metrics_path_identity(UnitTestA
     return result;
 }
 
+// A member declaration without a usable declarator or type abandons the whole
+// aggregate definition, and the segment's rollback used to take the only
+// report with it, so an unused definition compiled and a used one failed at
+// the use (#1661). Each invalid row is reported once, at the token clang
+// names, and leaves no member row behind. A declaration that declares nothing
+// is valid, only warned about by clang, and keeps the aggregate's members.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        CDiagnosticKind kind;
+        u32 line;
+        u32 column;
+    } invalid[] = {
+        {S8("struct S { int *; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 17},
+        {S8("struct S { int (*)(void); };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 18},
+        {S8("struct S { int (*const)(void); };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 23},
+        {S8("struct S { int (*restrict)(void); };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 26},
+        {S8("struct S { int (*volatile); };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 26},
+        {S8("struct S { int (* __attribute__((unused)))(void); };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 42},
+        {S8("struct S { int (*__attribute__((unused)) const)(void); };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 47},
+        {S8("struct S { int (* _Nonnull)(void); };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 27},
+        {S8("struct S { int (const); };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 17},
+        {S8("struct S { int [3]; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 16},
+        {S8("struct S { int 3; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 16},
+        {S8("struct S { int , a; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 16},
+        {S8("struct S { int a, ; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 19},
+        {S8("struct S { int a : ; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 20},
+        {S8("struct S { unknown_t v; };\n"), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME, 1, 12},
+        {S8("struct S { const unknown_t v; };\n"), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME, 1, 18},
+        {S8("struct S { int *; };\nint n = sizeof(struct S);\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 17},
+        {S8("struct S { int *; } a, b, c;\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 17},
+        {S8("union U { int a; int , b; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 22},
+        {S8("int f(void) { struct L { int a, ; } l; return 0; }\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 33},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[case_index].source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        u32 reported = 0;
+        bool located = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = parse.diagnostics[diagnostic_index];
+            if (diagnostic.kind == invalid[case_index].kind)
+            {
+                reported += 1;
+                located = diagnostic.location.line == invalid[case_index].line && diagnostic.location.column == invalid[case_index].column;
+            }
+        }
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, invalid[case_index].source);
+        BUSTER_TEST_RAW(arguments, reported == 1 && located, invalid[case_index].source);
+        BUSTER_TEST_RAW(arguments, parse.member_count == 0, invalid[case_index].source);
+        scratch_end(temporary);
+    }
+
+    String8 valid[] = {
+        S8("struct S { int; };\n"),
+        S8("struct S { int (* __attribute__((unused)) p)(void); int a; };\n_Static_assert(sizeof(struct S) == 16, \"members kept\");\n"),
+        S8("struct S { int; int a; char c; };\n_Static_assert(sizeof(struct S) == 8, \"members kept\");\nint n = sizeof(struct S);\n"),
+        S8("struct S { __attribute__((packed)); int a; };\n_Static_assert(sizeof(struct S) == 4, \"members kept\");\nint n = sizeof(struct S);\n"),
+        S8("struct S { enum E { A, B }; int a; };\n_Static_assert(sizeof(struct S) == 4 && B == 1, \"members kept\");\n"),
+        S8("struct S { struct T { int x; }; int a; } s;\nint f(void) { return s.a; }\n"),
+        S8("struct S { int a; _Static_assert(sizeof(int) == 4, \"x\"); };\n"),
+        S8("struct S { int a; _Static_assert(sizeof(int) == 4, \"x\"); char c; } s, t;\n"
+           "_Static_assert(sizeof(struct S) == 8, \"members kept\");\nint f(void) { return s.a + t.c; }\n"),
+        S8("union U { _Static_assert(1, \"first\"); int a; };\nint n = sizeof(union U);\n"),
+        S8("enum { K = 2 };\nint f(void) { enum { K = 1 }; struct S { int a; _Static_assert(K == 1, \"k\"); } s; s.a = 0; return s.a; }\n"),
+        S8("int f(void) { enum { K = 1 }; { enum { K = 3 }; struct S { int a; _Static_assert(K == 3, \"k\"); } s; s.a = 0; return s.a; } }\n"),
+        S8("int f(void) { typedef int T; { typedef char T; struct S { int a; _Static_assert(sizeof(T) == 1, \"k\"); } s; s.a = 0; return s.a; } }\n"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, valid[case_index],
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-declaration.c"), preprocess, parse, target_native);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, valid[case_index]);
+        BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, valid[case_index]);
+        scratch_end(temporary);
+    }
+
+    struct
+    {
+        String8 source;
+        u32 column;
+    } trailing[] = {
+        {S8("struct S { int a; _Static_assert(1, \"x\") int b; };\n_Static_assert(sizeof(struct S) == 4, \"b lost\");\n"), 42},
+        {S8("struct S { int a; _Static_assert(1, \"x\") junk; };\nint n = sizeof(struct S);\n"), 42},
+        {S8("struct S { int a; _Static_assert((1), \"x\") [3]; };\n"), 44},
+        {S8("struct S { int a; _Static_assert(1, \"x\") int b; } s, t;\n"), 42},
+        {S8("int f(void) { struct L { int a; _Static_assert(1) char c; } l; return l.a; }\n"), 51},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(trailing); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, trailing[case_index].source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        u32 reported = 0;
+        bool located = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = parse.diagnostics[diagnostic_index];
+            if (diagnostic.kind == C_DIAGNOSTIC_EXPECTED_DECLARATION)
+            {
+                reported += 1;
+                located = diagnostic.location.line == 1 && diagnostic.location.column == trailing[case_index].column &&
+                          string_equal(diagnostic.message, S8("expected ';' after '_Static_assert'"));
+            }
+        }
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, trailing[case_index].source);
+        BUSTER_TEST_RAW(arguments, reported == 1 && located, trailing[case_index].source);
+        scratch_end(temporary);
+    }
+
+    String8 failed_assertions[] = {
+        S8("struct S { int a; _Static_assert(sizeof(int) == 8, \"x\"); };\n"),
+        S8("struct S { int a; _Static_assert(sizeof(int) == 8, \"x\"); } a, b;\n"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(failed_assertions); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, failed_assertions[case_index],
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-static-assert.c"), preprocess, parse, target_native);
+        u32 reported = 0;
+        bool located = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count + lowered.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = diagnostic_index < parse.diagnostic_count ? parse.diagnostics[diagnostic_index]
+                                                                               : lowered.diagnostics[diagnostic_index - parse.diagnostic_count];
+            if (diagnostic.kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED)
+            {
+                reported += 1;
+                located = diagnostic.location.line == 1 && diagnostic.location.column == 19;
+            }
+        }
+        BUSTER_TEST_RAW(arguments, reported == 1 && located, failed_assertions[case_index]);
+        scratch_end(temporary);
+    }
+
+    {
+        String8 source = S8("struct S { int a; static_assert(sizeof(int) == 4, \"x\"); static_assert(1); };\nint n = sizeof(struct S);\n");
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_C23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-static-assert-c23.c"), preprocess, parse, target_native);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, source);
+        BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, source);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unknown_type_name_diagnostics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23348,6 +24152,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unknown_type_name_diagnostics(UnitTest
         {S8("int f(foo *value);\nint following;\n"), S8("foo"), 1, 7, true},
         {S8("int f(int value, foo *pointer);\nint following;\n"), S8("foo"), 1, 18, true},
         {S8("int f(const foo value);\nint following;\n"), S8("foo"), 1, 13, true},
+        {S8("int f(void)\n{\n    __builtin_ms_va_list cursor;\n    return 0;\n}\nint following;\n"), S8("__builtin_ms_va_list"), 3, 5, true},
+        {S8("int f(void)\n{\n    __builtin_ms_va_list *p = 0;\n    return 0;\n}\nint following;\n"), S8("__builtin_ms_va_list"), 3, 5, true},
+        {S8("int f(void)\n{\n    return (int)sizeof(__builtin_ms_va_list);\n}\nint following;\n"), S8("__builtin_ms_va_list"), 3, 24, true},
+        {S8("int f(void *q)\n{\n    return q == (__builtin_ms_va_list *)0;\n}\nint following;\n"), S8("__builtin_ms_va_list"), 3, 18, true},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
     {
@@ -23391,6 +24199,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unknown_type_name_diagnostics(UnitTest
         S8("[[maybe_unused]];\n"),
         S8("__attribute__((unused)) int attributed; __declspec(noinline) int decorated(void) { return 1; }\n"),
         S8("int legacy(old_style_argument); int unspecified();\n"),
+        S8("int variadic(int marker, ...) { __builtin_va_list cursor; __builtin_va_start(cursor, marker); __builtin_va_end(cursor); "
+           "return __builtin_expect(marker, 0); }\n"),
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
     {
@@ -24962,6 +25772,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_constexpr_leaf_storage);
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
     BUSTER_TEST_FIXTURE(arguments, c_test_vla_row_places);
+    BUSTER_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration);
+    BUSTER_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration_file_scope_name);
     BUSTER_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
     BUSTER_TEST_FIXTURE(arguments, c_test_scope_interval_index);
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
@@ -25006,13 +25818,17 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_token_view_constant_range);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_function_type_name);
+    BUSTER_TEST_FIXTURE(arguments, c_test_block_type_name_attributes);
     BUSTER_TEST_FIXTURE(arguments, c_test_void_object_refusals);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
+    BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);
+    BUSTER_TEST_FIXTURE(arguments, c_test_type_name_operand_trailer);
+    BUSTER_TEST_FIXTURE(arguments, c_test_constant_expression_syntax);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_statement_expression_operand);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_vla_evaluation);
     BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
@@ -25031,6 +25847,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_conditional_type);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_cast_prefix_operator);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
+    BUSTER_TEST_FIXTURE(arguments, c_test_typeof_malformed_operand_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
     BUSTER_TEST_FIXTURE(arguments, c_test_pointer_width_integer_conversion);
@@ -25080,6 +25897,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_float_integer_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
     BUSTER_TEST_FIXTURE(arguments, c_test_unknown_type_name_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_member_declaration_without_declarator_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_trailing_token_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_invalid_operand_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
@@ -25114,6 +25932,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_attribute_noreturn);
     BUSTER_TEST_FIXTURE(arguments, c_test_noreturn_call_value_operands);
+    BUSTER_TEST_FIXTURE(arguments, c_test_noreturn_call_expression_statements);
     BUSTER_TEST_FIXTURE(arguments, c_test_gnu_attribute_queries);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_empty_initializers);
@@ -25123,6 +25942,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_ir);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_parse);
+    BUSTER_TEST_FIXTURE(arguments, c_test_tagged_member_declares_nothing);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_invalid_union_initializer);
 
@@ -25697,6 +26517,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_repeated_incomplete_arrays);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_packed_and_aligned_layout);
+    BUSTER_TEST_FIXTURE(arguments, c_test_pointer_declarator_attributes);
     BUSTER_TEST_FIXTURE(arguments, c_test_parameter_local_alignment);
     BUSTER_TEST_FIXTURE(arguments, c_test_qualified_parameter_values);
     BUSTER_TEST_FIXTURE(arguments, c_test_qualified_compound_values);

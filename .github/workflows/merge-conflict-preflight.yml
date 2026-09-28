@@ -34,16 +34,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      # workflow_run and push execute the workflow definition from trusted
-      # current main. Candidate bytes are fetched only into private refs and
-      # consumed by read-only git plumbing; candidate code is never run.
+      # All routes execute trusted current-main code. Candidate objects are
+      # fetched only into private refs and consumed by read-only git plumbing.
       - name: Check out trusted current main
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Refresh default-branch pull-request snapshot
+        if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -B tools/merge_conflict_preflight_refresh.py
+          --repo .
+          --event-path "$GITHUB_EVENT_PATH"
+          --repository "$GITHUB_REPOSITORY"
+          --report-dir evidence/merge-conflict-preflight
+          --summary "$GITHUB_STEP_SUMMARY"
       - name: Analyze exact main/head identities
+        if: ${{ github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
