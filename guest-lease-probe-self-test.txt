@@ -1,0 +1,1 @@
+LIVE_PROBE_LEASE_SELF_TEST checks=13 failures=0 scope=own-temporary-file

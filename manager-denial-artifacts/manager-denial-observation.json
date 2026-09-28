@@ -1,0 +1,500 @@
+{
+  "actors": {
+    "candidate": {
+      "explicit_denial": "AccessDenied",
+      "post": {
+        "properties": {
+          "FragmentPath": "",
+          "Id": "buster-bench-denial-36446551202-1-candidate.service",
+          "LoadState": "not-found",
+          "Transient": "no"
+        },
+        "unit_paths": [
+          {
+            "directory": "absent",
+            "path": "/etc/systemd/system.control"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/system.control"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/transient"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/generator.early"
+          },
+          {
+            "directory_dev": 48,
+            "directory_ino": 9439930,
+            "entry": "absent",
+            "path": "/etc/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/etc/systemd/system.attached"
+          },
+          {
+            "directory_dev": 63,
+            "directory_ino": 4,
+            "entry": "absent",
+            "path": "/run/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/system.attached"
+          },
+          {
+            "directory_dev": 63,
+            "directory_ino": 143,
+            "entry": "absent",
+            "path": "/run/systemd/generator"
+          },
+          {
+            "directory": "absent",
+            "path": "/usr/local/lib/systemd/system"
+          },
+          {
+            "directory_dev": 48,
+            "directory_ino": 9440143,
+            "entry": "absent",
+            "path": "/usr/lib/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/generator.late"
+          }
+        ]
+      },
+      "pre": {
+        "properties": {
+          "FragmentPath": "",
+          "Id": "buster-bench-denial-36446551202-1-candidate.service",
+          "LoadState": "not-found",
+          "Transient": "no"
+        },
+        "unit_paths": [
+          {
+            "directory": "absent",
+            "path": "/etc/systemd/system.control"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/system.control"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/transient"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/generator.early"
+          },
+          {
+            "directory_dev": 48,
+            "directory_ino": 9439930,
+            "entry": "absent",
+            "path": "/etc/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/etc/systemd/system.attached"
+          },
+          {
+            "directory_dev": 63,
+            "directory_ino": 4,
+            "entry": "absent",
+            "path": "/run/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/system.attached"
+          },
+          {
+            "directory_dev": 63,
+            "directory_ino": 143,
+            "entry": "absent",
+            "path": "/run/systemd/generator"
+          },
+          {
+            "directory": "absent",
+            "path": "/usr/local/lib/systemd/system"
+          },
+          {
+            "directory_dev": 48,
+            "directory_ino": 9440143,
+            "entry": "absent",
+            "path": "/usr/lib/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/generator.late"
+          }
+        ]
+      },
+      "read_only_child": {
+        "cap_eff": 0,
+        "gid": 65001,
+        "groups": [
+          65001
+        ],
+        "no_new_privs": 1,
+        "uid": 65001
+      },
+      "read_only_version": "255.4-1ubuntu8.17",
+      "start_child": {
+        "cap_eff": 0,
+        "gid": 65001,
+        "groups": [
+          65001
+        ],
+        "no_new_privs": 1,
+        "uid": 65001
+      },
+      "start_exit": 4,
+      "start_stderr": "Failed to start buster-bench-denial-36446551202-1-candidate.service: Access denied\nSee system logs and 'systemctl status buster-bench-denial-36446551202-1-candidate.service' for details.\n",
+      "unit": "buster-bench-denial-36446551202-1-candidate.service"
+    },
+    "runner": {
+      "explicit_denial": "AccessDenied",
+      "post": {
+        "properties": {
+          "FragmentPath": "",
+          "Id": "buster-bench-denial-36446551202-1-runner.service",
+          "LoadState": "not-found",
+          "Transient": "no"
+        },
+        "unit_paths": [
+          {
+            "directory": "absent",
+            "path": "/etc/systemd/system.control"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/system.control"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/transient"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/generator.early"
+          },
+          {
+            "directory_dev": 48,
+            "directory_ino": 9439930,
+            "entry": "absent",
+            "path": "/etc/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/etc/systemd/system.attached"
+          },
+          {
+            "directory_dev": 63,
+            "directory_ino": 4,
+            "entry": "absent",
+            "path": "/run/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/system.attached"
+          },
+          {
+            "directory_dev": 63,
+            "directory_ino": 143,
+            "entry": "absent",
+            "path": "/run/systemd/generator"
+          },
+          {
+            "directory": "absent",
+            "path": "/usr/local/lib/systemd/system"
+          },
+          {
+            "directory_dev": 48,
+            "directory_ino": 9440143,
+            "entry": "absent",
+            "path": "/usr/lib/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/generator.late"
+          }
+        ]
+      },
+      "pre": {
+        "properties": {
+          "FragmentPath": "",
+          "Id": "buster-bench-denial-36446551202-1-runner.service",
+          "LoadState": "not-found",
+          "Transient": "no"
+        },
+        "unit_paths": [
+          {
+            "directory": "absent",
+            "path": "/etc/systemd/system.control"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/system.control"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/transient"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/generator.early"
+          },
+          {
+            "directory_dev": 48,
+            "directory_ino": 9439930,
+            "entry": "absent",
+            "path": "/etc/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/etc/systemd/system.attached"
+          },
+          {
+            "directory_dev": 63,
+            "directory_ino": 4,
+            "entry": "absent",
+            "path": "/run/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/system.attached"
+          },
+          {
+            "directory_dev": 63,
+            "directory_ino": 143,
+            "entry": "absent",
+            "path": "/run/systemd/generator"
+          },
+          {
+            "directory": "absent",
+            "path": "/usr/local/lib/systemd/system"
+          },
+          {
+            "directory_dev": 48,
+            "directory_ino": 9440143,
+            "entry": "absent",
+            "path": "/usr/lib/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/generator.late"
+          }
+        ]
+      },
+      "read_only_child": {
+        "cap_eff": 0,
+        "gid": 65002,
+        "groups": [
+          65002
+        ],
+        "no_new_privs": 1,
+        "uid": 65002
+      },
+      "read_only_version": "255.4-1ubuntu8.17",
+      "start_child": {
+        "cap_eff": 0,
+        "gid": 65002,
+        "groups": [
+          65002
+        ],
+        "no_new_privs": 1,
+        "uid": 65002
+      },
+      "start_exit": 4,
+      "start_stderr": "Failed to start buster-bench-denial-36446551202-1-runner.service: Access denied\nSee system logs and 'systemctl status buster-bench-denial-36446551202-1-runner.service' for details.\n",
+      "unit": "buster-bench-denial-36446551202-1-runner.service"
+    },
+    "service": {
+      "explicit_denial": "AccessDenied",
+      "post": {
+        "properties": {
+          "FragmentPath": "",
+          "Id": "buster-bench-denial-36446551202-1-service.service",
+          "LoadState": "not-found",
+          "Transient": "no"
+        },
+        "unit_paths": [
+          {
+            "directory": "absent",
+            "path": "/etc/systemd/system.control"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/system.control"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/transient"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/generator.early"
+          },
+          {
+            "directory_dev": 48,
+            "directory_ino": 9439930,
+            "entry": "absent",
+            "path": "/etc/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/etc/systemd/system.attached"
+          },
+          {
+            "directory_dev": 63,
+            "directory_ino": 4,
+            "entry": "absent",
+            "path": "/run/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/system.attached"
+          },
+          {
+            "directory_dev": 63,
+            "directory_ino": 143,
+            "entry": "absent",
+            "path": "/run/systemd/generator"
+          },
+          {
+            "directory": "absent",
+            "path": "/usr/local/lib/systemd/system"
+          },
+          {
+            "directory_dev": 48,
+            "directory_ino": 9440143,
+            "entry": "absent",
+            "path": "/usr/lib/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/generator.late"
+          }
+        ]
+      },
+      "pre": {
+        "properties": {
+          "FragmentPath": "",
+          "Id": "buster-bench-denial-36446551202-1-service.service",
+          "LoadState": "not-found",
+          "Transient": "no"
+        },
+        "unit_paths": [
+          {
+            "directory": "absent",
+            "path": "/etc/systemd/system.control"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/system.control"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/transient"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/generator.early"
+          },
+          {
+            "directory_dev": 48,
+            "directory_ino": 9439930,
+            "entry": "absent",
+            "path": "/etc/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/etc/systemd/system.attached"
+          },
+          {
+            "directory_dev": 63,
+            "directory_ino": 4,
+            "entry": "absent",
+            "path": "/run/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/system.attached"
+          },
+          {
+            "directory_dev": 63,
+            "directory_ino": 143,
+            "entry": "absent",
+            "path": "/run/systemd/generator"
+          },
+          {
+            "directory": "absent",
+            "path": "/usr/local/lib/systemd/system"
+          },
+          {
+            "directory_dev": 48,
+            "directory_ino": 9440143,
+            "entry": "absent",
+            "path": "/usr/lib/systemd/system"
+          },
+          {
+            "directory": "absent",
+            "path": "/run/systemd/generator.late"
+          }
+        ]
+      },
+      "read_only_child": {
+        "cap_eff": 0,
+        "gid": 65000,
+        "groups": [
+          65000,
+          65001
+        ],
+        "no_new_privs": 1,
+        "uid": 65000
+      },
+      "read_only_version": "255.4-1ubuntu8.17",
+      "start_child": {
+        "cap_eff": 0,
+        "gid": 65000,
+        "groups": [
+          65000,
+          65001
+        ],
+        "no_new_privs": 1,
+        "uid": 65000
+      },
+      "start_exit": 4,
+      "start_stderr": "Failed to start buster-bench-denial-36446551202-1-service.service: Access denied\nSee system logs and 'systemctl status buster-bench-denial-36446551202-1-service.service' for details.\n",
+      "unit": "buster-bench-denial-36446551202-1-service.service"
+    }
+  },
+  "limitations": [
+    "bare-account pre-service policy only; stage namespaces and live units are not tested"
+  ],
+  "manager": {
+    "unit_paths": [
+      "/etc/systemd/system.control",
+      "/run/systemd/system.control",
+      "/run/systemd/transient",
+      "/run/systemd/generator.early",
+      "/etc/systemd/system",
+      "/etc/systemd/system.attached",
+      "/run/systemd/system",
+      "/run/systemd/system.attached",
+      "/run/systemd/generator",
+      "/usr/local/lib/systemd/system",
+      "/usr/lib/systemd/system",
+      "/run/systemd/generator.late"
+    ],
+    "version": "255.4-1ubuntu8.17"
+  },
+  "run_attempt": "1",
+  "run_id": "36446551202",
+  "verdict": "BARE_ACCOUNT_MANAGER_DENIAL_OBSERVED"
+}

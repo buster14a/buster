@@ -1,0 +1,37 @@
+{
+  "filesystem": "cgroup2",
+  "recursive_absence_basis": "all six exact unit cgroup leaves are absent on the recorded cgroup2 slice",
+  "root": "/sys/fs/cgroup",
+  "root_device": 30,
+  "root_inode": 7986,
+  "slice": "/sys/fs/cgroup/buster.slice/buster-bench.slice",
+  "slice_device": 30,
+  "slice_inode": 9819,
+  "snapshot": "after",
+  "units": [
+    {
+      "absent": true,
+      "unit": "buster-bench-1-2.service"
+    },
+    {
+      "absent": true,
+      "unit": "buster-bench-1-2-base-generate.service"
+    },
+    {
+      "absent": true,
+      "unit": "buster-bench-1-2-base-build.service"
+    },
+    {
+      "absent": true,
+      "unit": "buster-bench-1-2-candidate-generate.service"
+    },
+    {
+      "absent": true,
+      "unit": "buster-bench-1-2-candidate-build.service"
+    },
+    {
+      "absent": true,
+      "unit": "buster-bench-1-2-throughput.service"
+    }
+  ]
+}

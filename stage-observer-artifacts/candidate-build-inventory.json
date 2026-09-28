@@ -1,0 +1,63 @@
+{
+  "binary_sha256": "be146f2e508e6a114d36a7cad0a51a7c8048f7d318661c2d4455aa3e7d8c6a2e",
+  "boot_id": "8744ef88-c18a-4025-8600-94975e95b6ba",
+  "complete_monotonic_us": 397348735,
+  "hashed_executable_bytes": 28069544,
+  "manifest_binary_sha256": "be146f2e508e6a114d36a7cad0a51a7c8048f7d318661c2d4455aa3e7d8c6a2e",
+  "manifest_identity": {
+    "device": 48,
+    "gid": 65000,
+    "inode": 9454448,
+    "links": 1,
+    "mode": 256,
+    "size": 1679,
+    "uid": 65000
+  },
+  "manifest_sha256": "4a45093d1f4c71011e708bd495fb259f8a8fb133dbb23f03bc6bbbe51e0faf41",
+  "node_count": 3,
+  "nodes": [
+    {
+      "ctime_ns": 1790610964232829959,
+      "device": 48,
+      "gid": 65001,
+      "inode": 9453522,
+      "links": 3,
+      "mode": 360,
+      "mtime_ns": 1790610962958843880,
+      "path": ".",
+      "size": 4096,
+      "type": "dir",
+      "uid": 65000
+    },
+    {
+      "ctime_ns": 1790610964232829959,
+      "device": 48,
+      "gid": 65001,
+      "inode": 9454142,
+      "links": 2,
+      "mode": 360,
+      "mtime_ns": 1790610963666836144,
+      "path": "Release",
+      "size": 4096,
+      "type": "dir",
+      "uid": 65000
+    },
+    {
+      "ctime_ns": 1790610964232829959,
+      "device": 48,
+      "gid": 65001,
+      "inode": 9454311,
+      "links": 1,
+      "mode": 360,
+      "mtime_ns": 1790610963530837630,
+      "path": "Release/ide",
+      "sha256": "be146f2e508e6a114d36a7cad0a51a7c8048f7d318661c2d4455aa3e7d8c6a2e",
+      "size": 28069544,
+      "type": "file",
+      "uid": 65000
+    }
+  ],
+  "partial_ledger_bytes": 681,
+  "root": "/var/lib/buster-bench/workspaces/job-1-attempt-2/candidate/build",
+  "stage": "candidate-build"
+}

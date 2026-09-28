@@ -1,0 +1,5 @@
+buster-bench-systemd-broker@0-758-65000.service loaded active running Buster benchmark constrained systemd broker connection (operator reference) (PID 758/UID 65000)
+buster-bench-systemd-broker@3-831-65000.service loaded active running Buster benchmark constrained systemd broker connection (operator reference) (PID 831/UID 65000)
+buster-bench-systemd-broker@5-861-0.service     loaded failed failed  Buster benchmark constrained systemd broker connection (operator reference) (PID 861/UID 0)
+buster-bench-systemd-broker@6-884-65000.service loaded failed failed  Buster benchmark constrained systemd broker connection (operator reference) (PID 884/UID 65000)
+buster-bench-systemd-broker@7-894-65000.service loaded failed failed  Buster benchmark constrained systemd broker connection (operator reference) (PID 894/UID 65000)

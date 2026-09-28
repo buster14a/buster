@@ -1,0 +1,22 @@
+{
+  "attempts": 3,
+  "first_records_retained": true,
+  "first_snapshots": {
+    "base-build-before": {
+      "reason": "base-build stage is not active",
+      "truncated": false
+    },
+    "outer-before": {
+      "reason": "base-build stage is not active",
+      "truncated": false
+    }
+  },
+  "job": 1,
+  "last_reason": "base-build stage is not active",
+  "other_reason_count": 0,
+  "reason_counts": {
+    "[Errno 2] No such file or directory: 'worker-1'": 2,
+    "base-build stage is not active": 1
+  },
+  "request_sha256": "a4a86f1810e1861e01c9dcfa1c8ca65f509c5aded01cc13b159c60a94d2650c6"
+}

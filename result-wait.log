@@ -1,0 +1,19 @@
+elapsed_seconds=34 exit_status=1
+bench_service: io-uncertain
+elapsed_seconds=74 exit_status=1
+bench_service: io-uncertain
+elapsed_seconds=114 exit_status=1
+bench_service: io-uncertain
+elapsed_seconds=154 exit_status=1
+bench_service: io-uncertain
+elapsed_seconds=195 exit_status=1
+bench_service: io-uncertain
+elapsed_seconds=235 exit_status=1
+bench_service: io-uncertain
+elapsed_seconds=270 exit_status=0
+job=1 token=2 sequence=0 phase=finished outcome=succeeded validity=not-evaluated cancel-requested=0 reconciliation=0 pending=0 retained=0 request-sha256=a4a86f1810e1861e01c9dcfa1c8ca65f509c5aded01cc13b159c60a94d2650c6 failure=ok
+result-bound=1 statistical-decision=not-evaluated
+result-root=/var/lib/buster-bench/workspaces/results/job-1-attempt-2
+manifest-sha256=c1a872ba48416fdf16de974c03903c866c3de340432d4e6e5533ac68029fea7f
+bundle-sha256=fa0172b211566a449c140377d77289f35cd8d726847e6e27fd59d35f284a8e7b
+full-result-sha256=c52838f00a9504d9ef784d08226bd81384675b42d59fa16e7f3b5083019b7fe2

@@ -1,0 +1,95 @@
+binary=/home/runner/work/_temp/issue1162-install/binaries/buster-bench-broker-entry-gate
+static-gate: no dynamic loader or shared-library dependencies
+
+Elf file type is EXEC (Executable file)
+Entry point 0x4016c0
+There are 11 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  LOAD           0x000000 0x0000000000400000 0x0000000000400000 0x000550 0x000550 R   0x1000
+  LOAD           0x001000 0x0000000000401000 0x0000000000401000 0x0844dd 0x0844dd R E 0x1000
+  LOAD           0x086000 0x0000000000486000 0x0000000000486000 0x028884 0x028884 R   0x1000
+  LOAD           0x0aeef0 0x00000000004afef0 0x00000000004afef0 0x005bd8 0x00b358 RW  0x1000
+  NOTE           0x0002a8 0x00000000004002a8 0x00000000004002a8 0x000020 0x000020 R   0x8
+  NOTE           0x0002c8 0x00000000004002c8 0x00000000004002c8 0x000044 0x000044 R   0x4
+  TLS            0x0aeef0 0x00000000004afef0 0x00000000004afef0 0x000018 0x000058 R   0x8
+  GNU_PROPERTY   0x0002a8 0x00000000004002a8 0x00000000004002a8 0x000020 0x000020 R   0x8
+  GNU_EH_FRAME   0x0a29e0 0x00000000004a29e0 0x00000000004a29e0 0x002214 0x002214 R   0x4
+  GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x10
+  GNU_RELRO      0x0aeef0 0x00000000004afef0 0x00000000004afef0 0x004110 0x004110 R   0x1
+
+ Section to Segment mapping:
+  Segment Sections...
+   00     .note.gnu.property .note.gnu.build-id .note.ABI-tag .rela.plt 
+   01     .init .plt .text .fini 
+   02     .rodata .stapsdt.base rodata.cst32 .eh_frame_hdr .eh_frame .gcc_except_table 
+   03     .tdata .init_array .fini_array .data.rel.ro .got .got.plt .data .bss 
+   04     .note.gnu.property 
+   05     .note.gnu.build-id .note.ABI-tag 
+   06     .tdata .tbss 
+   07     .note.gnu.property 
+   08     .eh_frame_hdr 
+   09     
+   10     .tdata .init_array .fini_array .data.rel.ro .got 
+binary=/home/runner/work/_temp/issue1162-install/binaries/buster-bench-build
+	linux-vdso.so.1 (0x00007f39f140b000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f39f1000000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f39f140d000)
+binary=/home/runner/work/_temp/issue1162-install/binaries/buster-bench-credential-gate
+static-gate: no dynamic loader or shared-library dependencies
+
+Elf file type is EXEC (Executable file)
+Entry point 0x4016c0
+There are 11 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  LOAD           0x000000 0x0000000000400000 0x0000000000400000 0x000520 0x000520 R   0x1000
+  LOAD           0x001000 0x0000000000401000 0x0000000000401000 0x08091d 0x08091d R E 0x1000
+  LOAD           0x082000 0x0000000000482000 0x0000000000482000 0x027e5c 0x027e5c R   0x1000
+  LOAD           0x0a9f50 0x00000000004aaf50 0x00000000004aaf50 0x005b60 0x00b2d8 RW  0x1000
+  NOTE           0x0002a8 0x00000000004002a8 0x00000000004002a8 0x000020 0x000020 R   0x8
+  NOTE           0x0002c8 0x00000000004002c8 0x00000000004002c8 0x000044 0x000044 R   0x4
+  TLS            0x0a9f50 0x00000000004aaf50 0x00000000004aaf50 0x000018 0x000058 R   0x8
+  GNU_PROPERTY   0x0002a8 0x00000000004002a8 0x00000000004002a8 0x000020 0x000020 R   0x8
+  GNU_EH_FRAME   0x09e440 0x000000000049e440 0x000000000049e440 0x00216c 0x00216c R   0x4
+  GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x10
+  GNU_RELRO      0x0a9f50 0x00000000004aaf50 0x00000000004aaf50 0x0040b0 0x0040b0 R   0x1
+
+ Section to Segment mapping:
+  Segment Sections...
+   00     .note.gnu.property .note.gnu.build-id .note.ABI-tag .rela.plt 
+   01     .init .plt .text .fini 
+   02     .rodata .stapsdt.base rodata.cst32 .eh_frame_hdr .eh_frame .gcc_except_table 
+   03     .tdata .init_array .fini_array .data.rel.ro .got .got.plt .data .bss 
+   04     .note.gnu.property 
+   05     .note.gnu.build-id .note.ABI-tag 
+   06     .tdata .tbss 
+   07     .note.gnu.property 
+   08     .eh_frame_hdr 
+   09     
+   10     .tdata .init_array .fini_array .data.rel.ro .got 
+binary=/home/runner/work/_temp/issue1162-install/binaries/buster-bench-service
+	linux-vdso.so.1 (0x00007f9c0a8b1000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f9c0a76f000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f9c0a400000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f9c0a8b3000)
+binary=/home/runner/work/_temp/issue1162-install/binaries/buster-bench-systemd-broker
+	linux-vdso.so.1 (0x00007fc9c5c3a000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fc9c5800000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007fc9c5c3c000)
+binary=/home/runner/work/_temp/issue1162-install/binaries/buster-bench-throughput
+	linux-vdso.so.1 (0x00007f7c71ed1000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f7c71d9d000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f7c71a00000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f7c71ed3000)
+binary=/home/runner/work/_temp/issue1162-install/binaries/systemd-broker-live-test
+	linux-vdso.so.1 (0x00007f1fbd770000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f1fbd400000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f1fbd772000)
+binary=/home/runner/work/_temp/issue1162-install/cleanup-identity-tests
+	linux-vdso.so.1 (0x00007fb5f3212000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007fb5f308a000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fb5f2e00000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007fb5f3214000)

@@ -1,0 +1,1 @@
+MANAGER_DENIAL_SELF_TEST checks=56 failures=0 fixtures-only-not-live-proof

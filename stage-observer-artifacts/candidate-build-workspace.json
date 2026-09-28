@@ -1,0 +1,70 @@
+{
+  "attempt": 2,
+  "boot_id": "8744ef88-c18a-4025-8600-94975e95b6ba",
+  "checkpoint": "live-candidate-build-fixed-workspace-paths",
+  "complete_monotonic_us": 265610343,
+  "instance_sha256": "1e5eaa86891c89479bfce5d47724428cf2bf0098b51aa9545c55c59d7986338e",
+  "job": 1,
+  "paths": [
+    {
+      "ctime_ns": 1790610701389834285,
+      "device": 48,
+      "gid": 65001,
+      "inode": 9453522,
+      "links": 2,
+      "mode": 1472,
+      "mtime_ns": 1790610701389834285,
+      "path": "candidate/build",
+      "presence": "present",
+      "size": 4096,
+      "type": "directory",
+      "uid": 65000
+    },
+    {
+      "ctime_ns": 1790610832937264142,
+      "device": 48,
+      "gid": 65001,
+      "inode": 9454001,
+      "links": 6,
+      "mode": 1528,
+      "mtime_ns": 1790610832937264142,
+      "path": "candidate/staging",
+      "presence": "present",
+      "size": 4096,
+      "type": "directory",
+      "uid": 65000
+    },
+    {
+      "path": "candidate/staging/throughput-results",
+      "presence": "absent"
+    },
+    {
+      "path": "candidate/staging/Release/ide",
+      "presence": "absent"
+    },
+    {
+      "ctime_ns": 1790610832922650883,
+      "device": 48,
+      "gid": 65001,
+      "inode": 9454353,
+      "links": 2,
+      "mode": 1528,
+      "mtime_ns": 1790610832922650883,
+      "path": "candidate/staging/Release",
+      "presence": "present",
+      "size": 4096,
+      "type": "directory",
+      "uid": 65001
+    },
+    {
+      "path": "candidate/build/Release/ide",
+      "presence": "absent"
+    },
+    {
+      "path": "candidate/build/Release",
+      "presence": "absent"
+    }
+  ],
+  "scope": "fixed metadata at the checkpoint only; active output contents are not read",
+  "worker_sha256": "e47c06702d26018c8aa77783b4e4e107bdfc9694dfb59af6de6d6e1fd0d5956e"
+}

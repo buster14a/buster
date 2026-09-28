@@ -1,0 +1,27 @@
+commit c137425e3489860d96901bb713e08774d5f695ee
+tree f42c01b7c54e64138b8d97ac38551f6f9ba76702
+parent 15a3bba30da2b9905b1183bc9feb04f29d84e2a7
+parent 57765f220fae6b4073aa3947b36b9fd605cf2a5b
+author David <davidgmbb@gmail.com> 1790610258 +0000
+committer GitHub <noreply@github.com> 1790610258 +0000
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ wsFcBAABCAAQBQJquotSCRC1aQ7uu5UhlAAA7iIQAI1dYpNmRTcff9/jU2kY0HFa
+ x/xMUSIi+kkBCTWyaUqhMiU5IGR0N3POQgCSo6bC6UNj9y8nh1phm0dE+PZyn4Jt
+ YqR5vJeCFilP1Mw7AWiTt3wCk1Tq0r1RIpRwkz9H42E5WzaMgC/6dVSmlqoPVsTq
+ O4me0O1qnAwjWd3CikHIQab/pAvOttZ8UtHsW9yGKmvPJJfAgws76nzxPsBEMB3R
+ NEk1ZJFbBORrWkCj0O2TxXfCaNvrYgD/+8eb5rWjt+zf5c+4yip8k71RTZjpulC/
+ w+FvrQid1QwafycnFHaota+kTd20V94th0IeQXzIyO9xaZSFFnfwzwGCoRizHbBY
+ I5iclgMiEOK4fs4oCIDhJCYCqZdylRrfbHPAq6zuH7NpNYuqGt2zkouRJCinv1MF
+ iN+LpbfN7yKA3NBXNR/jHALPEAbgv5/vxKvxEH0TeyWTgkNuJgHfg7ha0UGWWG96
+ uehQCrQMA6HEs/3QTc+4DvuYyVXn6Ld3ws9oZ0RkwaSx+pRAFcUlJhX2NG/PvvBv
+ QUawCdeW/xjelGaFDe8PuHosyIFtiJ1j79YKccZP/IOjFM6gP8qjprFlzv2XtSXN
+ re8zmqlHcinAUr6uiwWHT2nT4gSe/RUcr6j/cIGVkDcsTf2fu2PhU4lHf9mDTiIi
+ ZjScOe7FXMgUfl+T1Roo
+ =CEgb
+ -----END PGP SIGNATURE-----
+ 
+
+    Merge pull request #1747 from buster14a/codex/880-cancel-cleanup-recovery
+    
+    bench: finish signal cancellations and their recovery (#880 attempt P)

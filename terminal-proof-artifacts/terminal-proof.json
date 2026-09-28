@@ -1,0 +1,210 @@
+{
+  "attempt": 2,
+  "baseline": "ade6ac4b6ecb21f30b61b656439bac476c145e2f",
+  "boot_id": "8744ef88-c18a-4025-8600-94975e95b6ba",
+  "cgroup_snapshots": [
+    {
+      "filesystem": "cgroup2",
+      "recursive_absence_basis": "all six exact unit cgroup leaves are absent on the recorded cgroup2 slice",
+      "root": "/sys/fs/cgroup",
+      "root_device": 30,
+      "root_inode": 7986,
+      "slice": "/sys/fs/cgroup/buster.slice/buster-bench.slice",
+      "slice_device": 30,
+      "slice_inode": 9819,
+      "snapshot": "before",
+      "units": [
+        {
+          "absent": true,
+          "unit": "buster-bench-1-2.service"
+        },
+        {
+          "absent": true,
+          "unit": "buster-bench-1-2-base-generate.service"
+        },
+        {
+          "absent": true,
+          "unit": "buster-bench-1-2-base-build.service"
+        },
+        {
+          "absent": true,
+          "unit": "buster-bench-1-2-candidate-generate.service"
+        },
+        {
+          "absent": true,
+          "unit": "buster-bench-1-2-candidate-build.service"
+        },
+        {
+          "absent": true,
+          "unit": "buster-bench-1-2-throughput.service"
+        }
+      ]
+    },
+    {
+      "filesystem": "cgroup2",
+      "recursive_absence_basis": "all six exact unit cgroup leaves are absent on the recorded cgroup2 slice",
+      "root": "/sys/fs/cgroup",
+      "root_device": 30,
+      "root_inode": 7986,
+      "slice": "/sys/fs/cgroup/buster.slice/buster-bench.slice",
+      "slice_device": 30,
+      "slice_inode": 9819,
+      "snapshot": "after",
+      "units": [
+        {
+          "absent": true,
+          "unit": "buster-bench-1-2.service"
+        },
+        {
+          "absent": true,
+          "unit": "buster-bench-1-2-base-generate.service"
+        },
+        {
+          "absent": true,
+          "unit": "buster-bench-1-2-base-build.service"
+        },
+        {
+          "absent": true,
+          "unit": "buster-bench-1-2-candidate-generate.service"
+        },
+        {
+          "absent": true,
+          "unit": "buster-bench-1-2-candidate-build.service"
+        },
+        {
+          "absent": true,
+          "unit": "buster-bench-1-2-throughput.service"
+        }
+      ]
+    }
+  ],
+  "cleanup_identity": {
+    "attempt_workspace_device": 48,
+    "attempt_workspace_inode": 9453084,
+    "workspaces_device": 48,
+    "workspaces_inode": 9452200
+  },
+  "cleanup_sha256": "8617fe71b51ca19eb9338208d1cbb63b66122fd4f5ed4150c0c81e2ccb2786e8",
+  "directory_paths": {
+    "lease_parent": {
+      "device": 48,
+      "gid": 65000,
+      "inode": 9452199,
+      "mode": 456,
+      "uid": 65000
+    },
+    "lease_receipt_parent": {
+      "device": 48,
+      "gid": 0,
+      "inode": 9452177,
+      "mode": 365,
+      "uid": 0
+    },
+    "result_leaf": {
+      "device": 48,
+      "gid": 65000,
+      "inode": 9453952,
+      "mode": 448,
+      "uid": 65000
+    },
+    "results": {
+      "device": 48,
+      "gid": 65000,
+      "inode": 9452201,
+      "mode": 456,
+      "uid": 65000
+    },
+    "workspaces": {
+      "device": 48,
+      "gid": 65001,
+      "inode": 9452200,
+      "mode": 1480,
+      "uid": 65000
+    }
+  },
+  "disposition": "TERMINAL_SNAPSHOT_PASS",
+  "instance_sha256": "1e5eaa86891c89479bfce5d47724428cf2bf0098b51aa9545c55c59d7986338e",
+  "job": 1,
+  "lease_continuity": "unproven; observations do not establish continuous ownership",
+  "lease_end": {
+    "device": 48,
+    "gid": 65000,
+    "inode": 9453066,
+    "links": 1,
+    "mode": 416,
+    "uid": 65000
+  },
+  "lease_receipt_identity": {
+    "device": 48,
+    "gid": 0,
+    "inode": 9453067,
+    "links": 1,
+    "mode": 292,
+    "size": 24,
+    "uid": 0
+  },
+  "lease_start": {
+    "device": 48,
+    "gid": 65000,
+    "inode": 9453066,
+    "links": 1,
+    "mode": 416,
+    "uid": 65000
+  },
+  "limitations": [
+    "terminal snapshot only",
+    "continuous lease ownership not proven",
+    "full all-stage lifecycle/recovery acceptance remains pending"
+  ],
+  "lock_held_by_job": "unproven; no flock or /proc/locks inspection was performed",
+  "request_sha256": "a4a86f1810e1861e01c9dcfa1c8ca65f509c5aded01cc13b159c60a94d2650c6",
+  "result_leaf": "/var/lib/buster-bench/workspaces/results/job-1-attempt-2",
+  "result_leaf_device": 48,
+  "result_leaf_inode": 9453952,
+  "subject": "c137425e3489860d96901bb713e08774d5f695ee",
+  "systemd_unit_states": [
+    {
+      "active_state": "inactive",
+      "invocation_id": "",
+      "load_state": "not-found",
+      "main_pid": "0",
+      "unit": "buster-bench-1-2.service"
+    },
+    {
+      "active_state": "inactive",
+      "invocation_id": "",
+      "load_state": "not-found",
+      "main_pid": "0",
+      "unit": "buster-bench-1-2-base-generate.service"
+    },
+    {
+      "active_state": "inactive",
+      "invocation_id": "",
+      "load_state": "not-found",
+      "main_pid": "0",
+      "unit": "buster-bench-1-2-base-build.service"
+    },
+    {
+      "active_state": "inactive",
+      "invocation_id": "",
+      "load_state": "not-found",
+      "main_pid": "0",
+      "unit": "buster-bench-1-2-candidate-generate.service"
+    },
+    {
+      "active_state": "inactive",
+      "invocation_id": "",
+      "load_state": "not-found",
+      "main_pid": "0",
+      "unit": "buster-bench-1-2-candidate-build.service"
+    },
+    {
+      "active_state": "inactive",
+      "invocation_id": "",
+      "load_state": "not-found",
+      "main_pid": "0",
+      "unit": "buster-bench-1-2-throughput.service"
+    }
+  ],
+  "worker_sha256": "e47c06702d26018c8aa77783b4e4e107bdfc9694dfb59af6de6d6e1fd0d5956e"
+}
