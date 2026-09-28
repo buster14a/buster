@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Temporary, isolated #1162 validation transport. Never install on a protected host.
 set -Eeuo pipefail
-subject=57765f220fae6b4073aa3947b36b9fd605cf2a5b
-subject_tree=eb3163d1f4517661ea86ba8ad5dca611dad28485
+subject=d0c8ce2c452623b79190da18a428842aab19ad7d
+subject_tree=5c479a7a741dd07f8a9fa8fc6ff3eac4df28635d
 subject_build_blob=a016a487b745357883a5cd76c9c2712485c01d7c
 baseline=ade6ac4b6ecb21f30b61b656439bac476c145e2f
 evidence="${RUNNER_TEMP:?}/issue1162-exact-slice-evidence"
@@ -179,7 +179,7 @@ for path in files:
 manifest = ("\n".join(lines) + "\n").encode()
 expected = {
     "ade6ac4b6ecb21f30b61b656439bac476c145e2f": (375, 42585, "ebf4a4b4e5943dc60dd9fd9d175af643fbe0d0eee72e70e245c688aaabcb3007"),
-    "57765f220fae6b4073aa3947b36b9fd605cf2a5b": (377, 42835, "1199e6a4c0dceaebd7795d3c7ecb6183c4e21997a183c4f1dea8957170f526cc"),
+    "d0c8ce2c452623b79190da18a428842aab19ad7d": (377, 42835, "16d4267e1b8821454236b2d2dfbadff755c6faa3fa6b3f04e04911ed2ccadf2e"),
 }[rev]
 actual = (len(files), len(manifest), hashlib.sha256(manifest).hexdigest())
 print("SOURCE_CLOSURE", rev, "files", actual[0], "bytes", actual[1], "sha256", actual[2], flush=True)
@@ -631,6 +631,23 @@ PWATCH
   p_capture after-sigterm
   sudo docker exec "$guest" pkill -INT -x strace || true
   sleep 1
+  if [[ -n "${BQ_P_REPRO_LOOP_SECONDS:-}" ]]; then
+    # Mirror the host: the old binary is restarted and spins in recovery, then
+    # the operator stops it before the binary is replaced.
+    sudo docker exec "$guest" systemctl start buster-bench.service || true
+    looppid="$(sudo docker exec "$guest" systemctl show -p MainPID --value buster-bench.service)"
+    echo "P_REPRO old-binary restart MainPID=$looppid"
+    sleep "$BQ_P_REPRO_LOOP_SECONDS"
+    sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway result "$job" >"$evidence/p-result-in-loop.txt" 2>&1 || true
+    cat "$evidence/p-result-in-loop.txt"
+    p_capture in-loop
+    stop_started=$(date +%s.%N)
+    sudo docker exec "$guest" systemctl stop buster-bench.service || true
+    stop_ended=$(date +%s.%N)
+    echo "P_REPRO stop started=$stop_started ended=$stop_ended" | tee "$evidence/p-stop-timing.txt"
+    sudo docker exec "$guest" systemctl show buster-bench.service -p ActiveState -p SubState -p Result -p ExecMainStatus -p ExecMainCode -p MainPID | tee -a "$evidence/p-stop-timing.txt"
+    p_capture after-stop
+  fi
   if [[ -n "${BQ_P_REPRO_UPGRADE:-}" ]]; then
     # Replace only the service binary with the fix build while the job is stuck,
     # then let the controlled restart recover it (the planned job-24 disposition).
@@ -656,6 +673,17 @@ PWATCH
   cat "$evidence/p-result-after-restart.txt"
   sleep 2
   p_capture after-restart
+  if [[ -n "${BQ_P_REPRO_LOOP_SECONDS:-}" ]] && grep -q 'phase=finished' "$evidence/p-result-after-restart.txt"; then
+    # Export the finalized cancelled attempt and replay it, as the host would.
+    token="$(sed -nE 's/^job=[0-9]+ token=([0-9]+) .*/\1/p' "$evidence/p-result-after-restart.txt" | head -1)"
+    full="$(sed -nE 's/^full-result-sha256=([a-f0-9]{64})$/\1/p' "$evidence/p-result-after-restart.txt" | head -1)"
+    sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway export "$job" "$token" "$full" >"$evidence/p-export.bin" 2>"$evidence/p-export-receipt.txt" || echo "P_REPRO export exit=$?"
+    sha256sum "$evidence/p-export.bin" | tee "$evidence/p-export-sha256.txt"
+    cat "$evidence/p-export-receipt.txt"
+    receipt="$(sed -nE 's/^export-receipt-sha256=([a-f0-9]{64})$/\1/p' "$evidence/p-export-receipt.txt")"
+    sudo docker cp "$evidence/p-export.bin" "$guest:/root/p-export.bin"
+    sudo docker exec "$guest" sh -c "install -d -m 0700 /root/p-unpack-parent && /usr/local/libexec/buster-bench-service unpack-export /root/p-export.bin /root/p-unpack-parent/out $receipt; echo unpack-exit=\$?; find /root/p-unpack-parent/out -type f | sort | xargs sha256sum" | tee "$evidence/p-unpack.txt" || true
+  fi
   sudo docker exec "$guest" tar -C /root -czf - p-strace >"$evidence/p-strace.tgz" 2>"$evidence/p-strace-tar.log" || true
   echo "BQ_P_REPRO_DONE job=$job"
   exit 0
