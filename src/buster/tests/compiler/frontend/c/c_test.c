@@ -12756,18 +12756,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_statement_expression_operand(Un
     struct
     {
         String8 expression;
+        String8 message;
         u64 value;
         bool valid;
+        bool syntax_valid;
     } cases[] = {
-        {S8("sizeof({ int q = f(); q; })"), 4, true},
-        {S8("_Alignof({ double d = f(); d; })"), 8, true},
-        {S8("__alignof__({ char c = f(); c; })"), 1, true},
-        {S8("sizeof ({ int q = f(); q; }) + 1"), 4, true},
-        {S8("sizeof({ struct Wide w = {0}; (void)f(); w; })"), 16, true},
-        {S8("sizeof({ char buffer[8]; (void)f(); buffer; })"), sizeof(void*), true},
-        {S8("sizeof(({ double d = f(); d; }))"), 8, true},
-        {S8("sizeof({1})"), 0, false},
-        {S8("_Alignof({1})"), 0, false},
+        {S8("sizeof({ int q = f(); q; })"), {0}, 4, true, true},
+        {S8("_Alignof({ double d = f(); d; })"), {0}, 8, true, true},
+        {S8("__alignof__({ char c = f(); c; })"), {0}, 1, true, true},
+        {S8("sizeof ({ int q = f(); q; }) + 1"), {0}, 4, true, true},
+        {S8("sizeof({ struct Wide w = {0}; (void)f(); w; })"), {0}, 16, true, true},
+        {S8("sizeof({ char buffer[8]; (void)f(); buffer; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof(({ double d = f(); d; }))"), {0}, 8, true, true},
+        // A variable-length array declared in the body decays like any other
+        // array; a tail that cannot be typed is diagnosed, never guessed int.
+        {S8("sizeof({ int a[n]; a; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ double a[n][3]; a; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ int a[n]; a + 0; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ int a[n]; (void)f(); a; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof(({ int a[n]; a; }))"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ int a[n][4]; a[0]; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ double a[n]; a[0]; })"), {0}, 8, true, true},
+        {S8("sizeof({ int a[4][n]; a[0]; })"), S8("variably modified array"), 0, false, true},
+        {S8("sizeof({1})"), S8("invalid sizeof operand"), 0, false, false},
+        {S8("_Alignof({1})"), S8("invalid sizeof operand"), 0, false, false},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {
@@ -12776,21 +12788,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_statement_expression_operand(Un
             TemporalArena temporary = scratch_begin(0, 0);
             String8 source = string_format(temporary.arena,
                 S8("int f(void); struct Wide {{ double x; double y; }};"
-                   " long probe(void) {{ return (long)({S8}); }}"), cases[case_index].expression);
+                   " long probe(int n) {{ (void)n; return (long)({S8}); }}"), cases[case_index].expression);
             CPreprocessResult tokens = c_preprocess(temporary.arena, source,
                 (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
                                      .dialect = C_PREPROCESS_DIALECT_GNU17});
             CParserResult syntax = c_parse_ast(temporary.arena, tokens);
             CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
             BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, source);
-            BUSTER_TEST_RAW(arguments, (semantic.diagnostic_count == 0) == cases[case_index].valid, source);
+            BUSTER_TEST_RAW(arguments, (semantic.diagnostic_count == 0) == cases[case_index].syntax_valid, source);
             CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("sizeof-statement-expression.c"), tokens, syntax,
                                                             target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
             BUSTER_TEST_RAW(arguments, (lowered.diagnostic_count == 0 && lowered.program != 0) == cases[case_index].valid, source);
-            if (!cases[case_index].valid && semantic.diagnostic_count && lowered.diagnostic_count)
+            if (!cases[case_index].syntax_valid && semantic.diagnostic_count)
             {
-                BUSTER_TEST_RAW(arguments, string_ends_with_sequence(semantic.diagnostics[0].message, S8("invalid sizeof operand")), source);
-                BUSTER_TEST_RAW(arguments, string_ends_with_sequence(lowered.diagnostics[0].message, S8("invalid sizeof operand")), source);
+                BUSTER_TEST_RAW(arguments, string_ends_with_sequence(semantic.diagnostics[0].message, cases[case_index].message), source);
+            }
+            if (!cases[case_index].valid && lowered.diagnostic_count)
+            {
+                BUSTER_TEST_RAW(arguments, string_ends_with_sequence(lowered.diagnostics[0].message, cases[case_index].message), source);
             }
             if (cases[case_index].valid && lowered.program)
             {
