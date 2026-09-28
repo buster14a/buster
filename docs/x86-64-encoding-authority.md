@@ -206,7 +206,16 @@ by a fixed-disp32 LEA; its final four bytes contain the thread-pointer offset.
 The IE envelope stays seven bytes, and all 16 GPR destinations are derived from
 metadata. Small and zero values do not shrink these ABI-sized envelopes.
 
-The implementation prepares GD, local-exec and IE templates independently.
+`buster_x86_metadata_relax_tls_local_dynamic` owns the local-dynamic envelope
+foreign `-fPIC` objects carry (this compiler never emits it): a seven-byte
+`lea rdi, [rip + x@tlsld]` then a five-byte direct `call` or, under
+`-fno-plt`, a six-byte `call [rip + helper]`. Both calls and the LEA are
+derived from metadata like the GD templates; the call opcode bytes select the
+12- or 13-byte envelope. The replacement is the local-exec FS MOV to RAX behind
+three or four data16 prefixes, with no offset field: each variable's DTPOFF32
+supplies its own offset.
+
+The implementation prepares GD, local-exec, IE and LD templates independently.
 An object-only GD compile derives only its LEA and CALL, not all 36 forms used
 across every recipe. Ordinary non-TLS compiles never initialize this cache.
 `prewarm_all_forms` prepares every group for parallel test consumers.

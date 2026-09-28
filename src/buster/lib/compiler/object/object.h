@@ -160,6 +160,17 @@ typedef enum ObjectRelocationKind
     // R_X86_64_CODE_4_GOTPCRELX: the relaxable REX2 spelling.  The
     // instruction begins four bytes before its relocated field.
     OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX,
+    // Local dynamic, which only foreign -fPIC objects carry: R_X86_64_TLSLD
+    // is a rip-relative field naming the module's DTPMOD64 pair -- one per
+    // image, whatever symbol it is written against -- and always opens
+    // `lea rdi, [rip + x@tlsld]` followed by a call to __tls_get_addr, direct
+    // (PC32/PLT32) or through its GOT slot (GOTPCREL*).  R_X86_64_DTPOFF32
+    // and DTPOFF64 are a variable's offset inside the module's thread-local
+    // block, added to the address that call returns; DTPOFF64 appears only in
+    // debug information.
+    OBJECT_RELOCATION_X86_64_TLSLD,
+    OBJECT_RELOCATION_X86_64_DTPOFF32,
+    OBJECT_RELOCATION_X86_64_DTPOFF64,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
@@ -168,6 +179,9 @@ typedef enum ObjectRelocationKind
 // holding the symbol's address. Ask this instead of naming all three
 // wherever only that shared contract matters.
 BUSTER_F_DECL bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind);
+// The bytes a relocation of this kind patches: eight for the 64-bit data
+// forms, four for every other field this model carries.
+BUSTER_F_DECL u32 object_relocation_kind_width(ObjectRelocationKind kind);
 
 // Apply the ordinary Windows ARM64 PAGEBASE_REL21/PAGEOFFSET_12A contract to
 // one canonical instruction.  The reader removes COFF's inline addend; the

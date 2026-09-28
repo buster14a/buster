@@ -746,7 +746,8 @@
   links here. An instruction shape the relaxation does not recognize fails the
   link by name rather than being rewritten. It relaxes the two indirect
   thread-local models back to local-exec for the same reason
-  (`link_elf_relax_thread_local`).
+  (`link_elf_relax_thread_local`), and a foreign object's local-dynamic
+  sequence too (`link_elf_relax_local_dynamic`).
 
 ## Wide integer conversion rounding
 
