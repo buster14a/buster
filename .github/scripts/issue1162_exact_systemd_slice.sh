@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Temporary, isolated #1162 validation transport. Never install on a protected host.
 set -Eeuo pipefail
-subject=1a4fcc20cfd020ac1e67a495cdfaf481f68bc2fc
-subject_tree=7caddac6e6cf0a580a835f6215cc1e553924ad06
-subject_build_blob=9825adbe2a3f488fcea55a6cd533be6193030d9b
+subject=bc77775dcd608a57429a0db907f122c2ba63eade
+subject_tree=9e72264c2607cb2a9f826e71d3ade5924a503274
+subject_build_blob=0ba30e8a3d4f980a32529b1e677cae4922f0412a
 baseline=ade6ac4b6ecb21f30b61b656439bac476c145e2f
 evidence="${RUNNER_TEMP:?}/issue1162-exact-slice-evidence"
 source_root="$RUNNER_TEMP/issue1162-source"
@@ -179,7 +179,7 @@ for path in files:
 manifest = ("\n".join(lines) + "\n").encode()
 expected = {
     "ade6ac4b6ecb21f30b61b656439bac476c145e2f": (375, 42585, "ebf4a4b4e5943dc60dd9fd9d175af643fbe0d0eee72e70e245c688aaabcb3007"),
-    "1a4fcc20cfd020ac1e67a495cdfaf481f68bc2fc": (375, 42585, "f4e4d817110d648f4094867ad5c4e54478d66cafa30ba541adb47593043e3458"),
+    "bc77775dcd608a57429a0db907f122c2ba63eade": (375, 42585, "3c9b7ce0cc6e01e48161d250cdc8a7e4f3d2766df4fec9f850cabd8624dc36ef"),
 }[rev]
 actual = (len(files), len(manifest), hashlib.sha256(manifest).hexdigest())
 print("SOURCE_CLOSURE", rev, "files", actual[0], "bytes", actual[1], "sha256", actual[2], flush=True)
