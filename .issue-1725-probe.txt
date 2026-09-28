@@ -1,0 +1,192 @@
+Ubuntu clang version 21.1.8 (6ubuntu1)
+Target: x86_64-pc-linux-gnu
+Thread model: posix
+InstalledDir: /usr/lib/llvm-21/bin
+cmake version 4.4.3
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+1.13.2
+BUSTER_BUILD_DIRECTORY: build
+BUSTER_BUILD_CONFIG: Debug
+BUSTER_CC: clang
+BUSTER_LINKER: DEFAULT
++ /usr/local/bin/cmake --warn-uninitialized -Werror=dev -B build -DBUSTER_CI=OFF -DCMAKE_C_COMPILER=clang -DBUSTER_FUZZ_AVAILABLE=OFF -DBUSTER_SANITIZE=OFF -DCMAKE_LINKER_TYPE=DEFAULT -DBUSTER_LTO=OFF -DBUSTER_TIME_TRACE=OFF -DBUSTER_INSTRUMENT=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_LINK_LIBC=ON -DBUSTER_CHECK_OPTIONAL_WARNINGS=ON -DBUSTER_DEVELOPER_TARGETS=ON -DBUSTER_BUILD_DRIVER=/home/runner/work/_temp/buster-build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -G Ninja Multi-Config -DCMAKE_DEFAULT_BUILD_TYPE=Debug -DCMAKE_CONFIGURATION_TYPES=Debug;Release -DBUSTER_SINGLE_THREADED=OFF -DBUSTER_DEBUG_INFO=OFF
+The --warn-uninitialized option is deprecated.  Use -Wuninitialized instead.
+The error=dev option is deprecated.  Use -Werror=author instead.
+-- The C compiler identification is Clang 21.1.8
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/clang - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- BUSTER_VULKAN_SDK: 
+-- BUSTER_SLANGC_EXECUTABLE: BUSTER_SLANGC_EXECUTABLE-NOTFOUND
+-- BUSTER_CI: OFF
+-- BUSTER_LINK_LIBC: ON
+-- BUSTER_OPTIMIZE: configuration-derived
+-- BUSTER_UNITY_BUILD: ON
+-- BUSTER_INCLUDE_TESTS: ON
+-- BUSTER_SANITIZE: OFF
+-- BUSTER_SANITIZER_REDUCED_DEBUG: OFF
+-- BUSTER_DEBUG_INFO: OFF
+-- BUSTER_FRAME_POINTERS: ON
+-- BUSTER_TIME_TRACE: OFF
+-- BUSTER_INSTRUMENT: OFF
+-- BUSTER_FUZZ_AVAILABLE: OFF
+-- BUSTER_LTO: OFF
+-- BUSTER_PRODUCTION_PROFILE: OFF
+-- BUSTER_PGO_GENERATE: 
+-- BUSTER_PGO_USE: 
+-- BUSTER_PGO_MANIFEST: 
+-- BUSTER_PGO_FINGERPRINT: 
+-- BUSTER_CHECK_OPTIONAL_WARNINGS: ON
+-- BUSTER_DEVELOPER_TARGETS: ON
+-- BUSTER_REQUIRE_VULKAN_SDK: ON
+-- BUSTER_COMPILE_SHADERS: OFF
+-- BUSTER_USE_SLANG_SHADERS: OFF
+-- BUSTER_SINGLE_THREADED: OFF
+-- CMAKE_HOST_SYSTEM_PROCESSOR: x86_64
+-- CMAKE_SYSTEM_PROCESSOR: x86_64
+-- CMAKE_GENERATOR: Ninja Multi-Config
+-- CMAKE_CONFIGURATION_TYPES: Debug;Release
+-- CMAKE_DEFAULT_BUILD_TYPE: Debug
+-- CMAKE_BUILD_TYPE: 
+-- CMAKE_C_COMPILER_ID: Clang
+-- CMAKE_LINKER_TYPE: DEFAULT
+-- C_COMPILER_ZIG: OFF
+-- BUSTER_USE_VULKAN: OFF
+-- BUSTER_USE_D3D12: OFF
+-- BUSTER_USE_METAL: OFF
+-- CMAKE_COLOR_DIAGNOSTICS: ON
+-- CMAKE_EXPORT_COMPILE_COMMANDS: ON
+-- GDB: gdb_executable-NOTFOUND
+-- LLDB: lldb_executable-NOTFOUND
+-- Performing Test BUSTER_HAS_C_FLAG__Wexperimental_lifetime_safety
+-- Performing Test BUSTER_HAS_C_FLAG__Wexperimental_lifetime_safety - Success
+-- Performing Test BUSTER_HAS_C_FLAG__Whigher_precision_for_complex_division
+-- Performing Test BUSTER_HAS_C_FLAG__Whigher_precision_for_complex_division - Success
+-- Performing Test BUSTER_HAS_C_FLAG__Wimplicit_void_ptr_cast
+-- Performing Test BUSTER_HAS_C_FLAG__Wimplicit_void_ptr_cast - Success
+-- Performing Test BUSTER_HAS_C_FLAG__Wshift_bool
+-- Performing Test BUSTER_HAS_C_FLAG__Wshift_bool - Success
+-- Performing Test BUSTER_HAS_C_FLAG__Wthread_safety
+-- Performing Test BUSTER_HAS_C_FLAG__Wthread_safety - Success
+-- Performing Test BUSTER_HAS_C_FLAG__Wunique_object_duplication
+-- Performing Test BUSTER_HAS_C_FLAG__Wunique_object_duplication - Success
+-- ide modules: OS;ENTRY_POINT;ARENA;INTEGER;STRING;FLOAT;TRUETYPE;COMPILER_C_FRONTEND;COMPILER_AARCH64_ENCODING;COMPILER_AARCH64_EXACT_BRIDGE;COMPILER_AARCH64_CONTROL_SEMANTICS;COMPILER_AARCH64_SYSTEM_REGISTERS;COMPILER_AARCH64_SEMANTICS;COMPILER_AARCH64_SYSTEM_SEMANTICS;COMPILER_AARCH64_SYNTAX;COMPILER_AARCH64_SEMANTIC_VM;COMPILER_AARCH64_DIRECT_SIMD;COMPILER_AARCH64_COMPLEX_SIMD;COMPILER_AARCH64_MEMORY_SEMANTICS;COMPILER_AARCH64_ALIAS_PROJECTION;COMPILER_ASSEMBLY;COMPILER_ASSEMBLY_UNIT;COMPILER_ASSEMBLY_METADATA;COMPILER_ASSEMBLY_COMPLETION_CENSUS;COMPILER_IR;COMPILER_DIAGNOSTIC;COMPILER_DEBUG;COMPILER_MACHINE;COMPILER_BOOTSTRAP_TRACE;COMPILER_CODEGEN;COMPILER_DWARF;BYTE_WRITER;COMPILER_CODEVIEW;COMPILER_PDB;COMPILER_OBJECT;COMPILER_JIT;COMPILER_LINK;COMPILER_WASM;COMPILER_GPU;COMPILER_LLVM_BITCODE;COMPILER_EBPF;COMPILER_DRIVER;SIMD;FILE;TARGET;TIME;HASH
+-- ide files: src/buster/apps/ide/ide.c src/buster/lib/os.c;src/buster/lib/entry_point.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/float.c;src/buster/lib/truetype.c;src/buster/lib/compiler/frontend/c/c_source.c;src/buster/lib/compiler/frontend/c/c_parse.c;src/buster/lib/compiler/frontend/c/c_gen.c;src/buster/lib/compiler/assembly/aarch64_encoding.c;src/buster/lib/compiler/assembly/aarch64_exact_bridge.c;src/buster/lib/compiler/assembly/aarch64_control_semantics.c;src/buster/lib/compiler/assembly/aarch64_system_registers.c;src/buster/lib/compiler/assembly/aarch64_semantics.c;src/buster/lib/compiler/assembly/aarch64_system_semantics.c;src/buster/lib/compiler/assembly/aarch64_syntax.c;src/buster/lib/compiler/assembly/aarch64_semantic_vm.c;src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_memory_semantics.c;src/buster/lib/compiler/assembly/aarch64_alias_projection.c;src/buster/lib/compiler/assembly/assembly.c;src/buster/lib/compiler/assembly/assembly_unit.c;src/buster/lib/compiler/assembly/x86_64_metadata.c;src/buster/lib/compiler/assembly/x86_64_completion_census.c;src/buster/lib/compiler/ir/ir.c;src/buster/lib/compiler/diagnostic.c;src/buster/lib/compiler/debug/debug.c;src/buster/lib/compiler/codegen/machine.c;src/buster/lib/compiler/codegen/bootstrap_trace.c;src/buster/lib/compiler/codegen/codegen.c;src/buster/lib/compiler/dwarf/dwarf.c;src/buster/lib/byte_writer.c;src/buster/lib/compiler/codeview/codeview.c;src/buster/lib/compiler/pdb/pdb.c;src/buster/lib/compiler/object/object.c;src/buster/lib/compiler/jit/jit.c;src/buster/lib/compiler/link/link.c;src/buster/lib/compiler/wasm/wasm.c;src/buster/lib/compiler/gpu/gpu.c;src/buster/lib/compiler/llvm/bitcode.c;src/buster/lib/compiler/ebpf/ebpf.c;src/buster/lib/compiler/driver/driver.c;src/buster/lib/simd.c;src/buster/lib/file.c;src/buster/lib/target.c;src/buster/lib/time.c;src/buster/lib/hash.c;src/buster/lib/x86_64.c
+-- No supported debugger found for ide_debug
+-- Configuring done (0.9s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/runner/work/buster/buster/build
+CMake generation (cc=clang, fuzz_available=OFF, sanitize=OFF) took 0.914108 seconds (914108000 nanoseconds)
+[1/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/integer_test.c.o
+[2/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/sanitizer_test.c.o
+[3/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/hash_test.c.o
+[4/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/byte_writer_test.c.o
+[5/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/arena_test.c.o
+[6/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/simd_test.c.o
+[7/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/truetype_test.c.o
+[8/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/apps/ide/ide.c.o
+[9/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/metamorphic/metamorphic_test.c.o
+[10/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/file_test.c.o
+[11/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/os_test.c.o
+[12/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/once_test.c.o
+[13/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/macro_conditional_test.c.o
+[14/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c.o
+[15/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/string_test.c.o
+[16/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c.o
+[17/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_system_registers_test.c.o
+[18/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_semantics_test.c.o
+[19/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_system_semantics_test.c.o
+[20/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_syntax_test.c.o
+[21/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_direct_simd_test.c.o
+[22/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_complex_simd_test.c.o
+[23/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/target_test.c.o
+[24/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_memory_semantics_test.c.o
+[25/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_alias_projection_test.c.o
+[26/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_semantic_vm_test.c.o
+[27/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_forwarding_test.c.o
+[28/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_encoding_test.c.o
+[29/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_tls_test.c.o
+[30/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/padding_test.c.o
+[31/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_got_test.c.o
+[32/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/diagnostic_test.c.o
+[33/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/ir/vector_contract_test.c.o
+[34/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_completion_census_test.c.o
+[35/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/machine_select_test.c.o
+[36/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/llvm/bitcode_test.c.o
+[37/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/ir/ir_test.c.o
+[38/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/aarch64_stride_test.c.o
+[39/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/debug/debug_test.c.o
+[40/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/dwarf/dwarf_test.c.o
+[41/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codeview/codeview_test.c.o
+[42/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/codegen_test.c.o
+[43/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/pdb/pdb_test.c.o
+[44/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/jit/jit_test.c.o
+[45/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_metadata_test.c.o
+[46/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/gpu/gpu_test.c.o
+[47/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/object/object_test.c.o
+[48/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/driver/object_path_test.c.o
+[49/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/link/link_test.c.o
+[50/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/x86_64_test.c.o
+[51/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/test.c.o
+[52/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/entry_point.c.o
+[53/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/os.c.o
+[54/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/integer.c.o
+[55/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/arena.c.o
+[56/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/machine_test.c.o
+[57/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/assembly_test.c.o
+[58/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/float.c.o
+[59/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/string.c.o
+[60/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/truetype.c.o
+[61/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_source.c.o
+[62/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_exact_bridge.c.o
+[63/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_control_semantics.c.o
+[64/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/c_test.c.o
+[65/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_system_registers.c.o
+[66/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_system_semantics.c.o
+[67/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_syntax.c.o
+[68/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_encoding.c.o
+[69/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_semantics.c.o
+[70/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_parse.c.o
+[71/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c.o
+[72/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c.o
+[73/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_alias_projection.c.o
+[74/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_memory_semantics.c.o
+[75/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/assembly_unit.c.o
+[76/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/assembly.c.o
+[77/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_semantic_vm.c.o
+[78/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/x86_64_completion_census.c.o
+[79/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/diagnostic.c.o
+[80/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_gen.c.o
+[81/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/debug/debug.c.o
+[82/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/ir/ir.c.o
+[83/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codegen/bootstrap_trace.c.o
+[84/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/byte_writer.c.o
+[85/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/dwarf/dwarf.c.o
+[86/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/pdb/pdb.c.o
+[87/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codeview/codeview.c.o
+[88/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/jit/jit.c.o
+[89/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/object/object.c.o
+[90/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/x86_64_metadata.c.o
+[91/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/wasm/wasm.c.o
+[92/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/llvm/bitcode.c.o
+[93/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codegen/codegen.c.o
+[94/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/gpu/gpu.c.o
+[95/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/simd.c.o
+[96/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/ebpf/ebpf.c.o
+[97/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/file.c.o
+[98/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/link/link.c.o
+[99/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/driver/driver.c.o
+[100/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/hash.c.o
+[101/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/time.c.o
+[102/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/target.c.o
+[103/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/x86_64.c.o
+[104/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codegen/machine.c.o
+[105/106] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/driver/driver_test.c.o
+[106/106] Linking C executable Debug/ide
+IDE=build/Debug/ide
+STATUS=0
+--- stdout ---
+--- stderr ---
