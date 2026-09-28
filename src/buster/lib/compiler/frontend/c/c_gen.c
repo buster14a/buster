@@ -6289,7 +6289,7 @@ BUSTER_C_INTERNAL String8 c_ir_static_local_link_name(CIntegerIrBuilder* builder
 // (issue 1276). Its storage is placed like a file-scope object's, so it is
 // refused on the same outputs and for thread-local storage; false leaves the
 // refusal in failure_message.
-BUSTER_C_INTERNAL bool c_ir_static_local_section_name(CIntegerIrBuilder* builder, CToken name, u32 start, u32 end, bool thread_local,
+BUSTER_C_INTERNAL bool c_ir_static_local_section_name(CIntegerIrBuilder* builder, CToken name, u32 start, u32 end, bool is_thread_local,
                                                       String8* section_name)
 {
     *section_name = c_declaration_section_name(builder->arena, builder->preprocess,
@@ -6298,7 +6298,7 @@ BUSTER_C_INTERNAL bool c_ir_static_local_section_name(CIntegerIrBuilder* builder
                                                    .token_count = end - start,
                                                });
     String8 unsupported_output = c_section_attribute_unsupported_output(builder->target);
-    bool result = !section_name->length || (!unsupported_output.length && !(thread_local && c_attribute_native_binding_target(builder->target)));
+    bool result = !section_name->length || (!unsupported_output.length && !(is_thread_local && c_attribute_native_binding_target(builder->target)));
     if (!result)
     {
         String8 spelling = c_token_spelling(builder->preprocess.spelling_base, name);

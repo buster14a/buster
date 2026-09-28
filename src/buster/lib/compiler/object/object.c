@@ -10896,7 +10896,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         bool zero_fill = plan->source == OBJECT_SECTION_ZERO;
         u64 size = plan->end - plan->base;
         u8* bytes = zero_fill ? 0 : arena_allocate_zeroed(arena, u8, size ? size : 1);
-        if (!zero_fill && plan->end > plan->start)
+        if (!zero_fill && image.pointer && plan->end > plan->start)
         {
             memcpy(bytes + (plan->start - plan->base), image.pointer + plan->start, plan->end - plan->start);
         }
