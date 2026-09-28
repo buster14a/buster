@@ -10510,8 +10510,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                         !c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[missing_name]), &missing_qualifier))
                     {
                         // A name is there, but behind decorations the
-                        // parenthesized declarator parse does not take --
-                        // `int (* __attribute__((unused)) p)(void);`.
+                        // parenthesized declarator parse does not take.
                         u32 diagnostic_start = result->diagnostic_count;
                         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[missing_name]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
                                            S8("unsupported attribute in a parenthesized member declarator"));
@@ -10832,6 +10831,11 @@ BUSTER_C_INTERNAL bool c_parse_expression_syntax_error(CParseResult* result, CPr
                 }
                 else
                 {
+                    // A word that names no value may be a type word Buster
+                    // does not model (`_BitInt`, `__fp16`), starting a type
+                    // name rather than an expression.
+                    CEntityId entity = c_parse_lookup_entity_at(result, preprocess, scope, spelling, index);
+                    modeled = entity.value < result->entity_count && result->entities[entity.value].kind != C_ENTITY_TYPEDEF;
                     expect_operand = false;
                 }
             }
@@ -11147,6 +11151,11 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
             {
                 c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[specifier_index]), C_DIAGNOSTIC_INVALID_ATOMIC_TYPE,
                                    S8("_Atomic requires a type name"));
+            }
+            else if (!depth)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[close - 1]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                                   S8("expected expression"));
             }
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
             return;
@@ -13271,8 +13280,13 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult p
         {
             index += 1;
             CType ignored = {0};
-            while (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
+            for (;;)
             {
+                index = c_parse_skip_attributes(preprocess, index, end);
+                if (index >= end || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER)
+                {
+                    break;
+                }
                 String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
                 if (c_parse_type_qualifier_word(spelling, &ignored) || string_equal(spelling, S8("_Nonnull")) || string_equal(spelling, S8("_Nullable")) ||
                     string_equal(spelling, S8("_Null_unspecified")))
@@ -15583,6 +15597,14 @@ BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(Arena* arena, CParse
     u32 attribute_resume = UINT32_MAX;
     for (u32 token_index = start; token_index < end; token_index += 1)
     {
+        // A C23 attribute list -- `int * [[gnu::aligned(16)]] p;` -- is
+        // bracketed too, but its tokens name attributes, not objects.
+        u32 c23_attribute_end = 0;
+        if (c_parse_c23_attribute_at(preprocess, token_index, end, &c23_attribute_end))
+        {
+            token_index = c23_attribute_end - 1;
+            continue;
+        }
         CToken token = preprocess.tokens[token_index];
         // An array bound may be spelled with offsetof -- SQLite sizes a save
         // buffer as `sizeof(Parse) - offsetof(Parse, sLastToken)` -- and the
@@ -21720,6 +21742,25 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
     return diagnostic;
 }
 
+// Whether the operand's first token names an object, function or enumerator.
+// The type parse falls back to the file's typedef table when its scoped
+// lookup misses, so `typedef long T; ... int T; sizeof (T + 1)` reads `T` as
+// the type; the recorded use, or the scoped lookup, still sees the object, and
+// that operand is an expression whatever the type parse left over.
+BUSTER_C_INTERNAL bool c_parse_type_name_operand_names_value(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 token_index)
+{
+    bool value = false;
+    if (preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER)
+    {
+        u32 use = c_parse_identifier_use_index(result, token_index);
+        CEntityId entity = use != C_ID_UNDERLYING_INVALID
+                               ? result->identifier_uses[use].entity
+                               : c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[token_index]);
+        value = entity.value < result->entity_count && result->entities[entity.value].kind != C_ENTITY_TYPEDEF;
+    }
+    return value;
+}
+
 BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(CTypeParseMachine* machine, CParseResult* result,
                                                                                 CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end)
 {
@@ -21727,6 +21768,11 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
     u64 mark = machine->scratch_arena->position;
     u32* openers = 0;
     CParseCandidates sizeof_words = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_SIZEOF, C_PARSE_POPULATION_NONE, start);
+    // A parenthesized operand's updates are checked once, with the outermost
+    // operand that contains them. A `sizeof` nested inside that operand still
+    // needs its own type-name check: `sizeof (sizeof (long + 1))` passed while
+    // the walk jumped from each outer operand straight to its `)`.
+    u32 walked_end = start;
     for (u32 index = c_parse_candidates_next(&sizeof_words, start, end); !diagnostic.message.length && index + 1 < end;
          index = c_parse_candidates_next(&sizeof_words, index + 1, end))
     {
@@ -21737,6 +21783,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
         bool grouped = c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
         u32 close = grouped ? c_parse_matching_delimiter_indexed(result, preprocess, index + 1) : end;
         if (grouped && close >= end) continue;
+        bool nested = index < walked_end;
         u32 operand_start = grouped ? index + 2 : index + 1;
         u32 operand_end = grouped ? close : c_parse_update_prefix_operand_end(result, preprocess, operand_start, end);
         if (grouped && operand_start < close)
@@ -21765,11 +21812,21 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
                 if (type.value < result->type_count)
                 {
                     type = c_parse_pointer_chain(result, preprocess, type, &cursor, close);
-                    c_parse_array_suffixes(result, preprocess, type, &cursor, close);
+                    type = c_parse_array_suffixes(result, preprocess, type, &cursor, close);
+                }
+                // A type name here must end at the operand's `)`: `sizeof
+                // (typeof (char) * 2)` answered 4 as if `char` were a value, and
+                // `sizeof (long + 1)` 8 (#1535). An operand whose first word
+                // names an object, function or enumerator is an expression
+                // whatever the type parse made of a typedef it shadows.
+                if (type.value < result->type_count && cursor < close && c_parse_type_name_trailer_invalid(preprocess, preprocess.tokens[cursor]) &&
+                    !c_parse_type_name_operand_names_value(result, preprocess, operand_scope, operand_start))
+                {
+                    diagnostic = (CParseInitializerDiagnostic){.message = S8("expected ')' after type name"), .token = cursor};
                 }
             }
         }
-        for (u32 update = operand_start; !diagnostic.message.length && update < operand_end; update += 1)
+        for (u32 update = operand_start; !nested && !diagnostic.message.length && update < operand_end; update += 1)
         {
             CToken current = preprocess.tokens[update];
             if (!c_token_is_punctuator(&current, C_PUNCTUATOR_PLUS_PLUS) && !c_token_is_punctuator(&current, C_PUNCTUATOR_MINUS_MINUS)) continue;
@@ -21802,7 +21859,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
             if (typed && !c_parse_update_operand_modifiable(result, preprocess, place_start, place_end, type))
                 diagnostic = (CParseInitializerDiagnostic){.message = S8("increment or decrement operand is not a modifiable place"), .token = update};
         }
-        if (grouped) index = close;
+        if (grouped && !nested) walked_end = close;
     }
     arena_set_position(machine->scratch_arena, mark);
     return diagnostic;
