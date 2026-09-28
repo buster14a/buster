@@ -1857,7 +1857,7 @@ static void test_retirement_records(char const* root)
      * six sequence digits, but its three null schedule fields make it one
      * byte longer (902 bytes). Both phases must be included in the bound.
      * Across all legal even pair counts, the largest complete schedule under
-     * the 4096*32768 transcript cap has 134217720 invocations (254 pairs,
+     * the 2048*65536 transcript cap has 134217720 invocations (254 pairs,
      * 131586 combined compiler/runtime rows), so sequence 134217719 belongs
      * to a runtime record whose optional compiler fields are null. */
     uint64_t max_elapsed = UINT64_C(86399999999999);
@@ -1916,12 +1916,13 @@ static void test_retirement_records(char const* root)
     max_invocation.warmup = TP_RETIREMENT_WARMUPS - 1;
     max_count = tp_retirement_execution_record(line, sizeof(line), &max_invocation,
         &max_observed, &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX);
-    CHECK(max_count == 902 && line[max_count - 1] == '\n');
+    CHECK(max_count == TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX && line[max_count - 1] == '\n');
     CHECK(tp_retirement_execution_record(line, max_count, &max_invocation, &max_observed,
         &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
-    max_count = tp_retirement_execution_record(line, 903, &max_invocation, &max_observed,
+    max_count = tp_retirement_execution_record(line, TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX + 1, &max_invocation, &max_observed,
         &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX);
-    CHECK(max_count == 902 && tp_path(path, root, "retirement-execution-max-warmup.jsonl"));
+    CHECK(max_count == TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX &&
+          tp_path(path, root, "retirement-execution-max-warmup.jsonl"));
     file = fopen(path, "wb");
     CHECK(file && fwrite(line, 1, max_count, file) == max_count);
     if (file) CHECK(fclose(file) == 0);
@@ -2049,10 +2050,10 @@ static void test_retirement_records(char const* root)
 
 static void test_retirement_shards(char const* root)
 {
-    unsigned workspace[544];
+    unsigned workspace[1088];
     TpRetirementExecution execution;
     TpRetirementTranscript transcript;
-    CHECK(tp_retirement_execution_init(&execution, 1, 136, NULL, 0, 60, workspace, 544));
+    CHECK(tp_retirement_execution_init(&execution, 1, 272, NULL, 0, 60, workspace, 1088));
     CHECK(tp_retirement_transcript_init(&transcript, &execution, "job-1", 2, "boot-123", 2, 1000));
     char digest[65];
     memset(digest, 'a', 64); digest[64] = 0;
@@ -2067,7 +2068,7 @@ static void test_retirement_shards(char const* root)
         CHECK(tp_path(path, root, leaf));
         FILE* file = fopen(path, "wb");
         CHECK(file && tp_retirement_transcript_begin_shard(&transcript, file));
-        unsigned count = part ? 416 : 32768;
+        unsigned count = part ? 832 : TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS;
         for (unsigned i = 0; file && i < count; ++i)
         {
             observed.pid = execution.sequence + 4321;
@@ -2085,7 +2086,7 @@ static void test_retirement_shards(char const* root)
             bytes == shard.bytes && !strcmp(hash, shard.sha256));
     }
     CHECK(tp_retirement_transcript_finish(&transcript, observed.finished_ns + 1));
-    CHECK(transcript.shards == 2 && transcript.total_records == 33184 && transcript.finished);
+    CHECK(transcript.shards == 2 && transcript.total_records == 66368 && transcript.finished);
     char receipt_path[TP_PATH_CAP];
     CHECK(tp_path(receipt_path, root, "retirement-invocation-receipt.json"));
     FILE* receipt_file = fopen(receipt_path, "wb+");

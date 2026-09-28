@@ -2,7 +2,8 @@
  * observations are synthetic; no service receipt or performance verdict. */
 #ifndef BUSTER_THROUGHPUT_RETIREMENT_SAMPLES_TEST_H
 #define BUSTER_THROUGHPUT_RETIREMENT_SAMPLES_TEST_H
-#define TP_SAMPLE_TEST_ROWS 274u
+/* 1093 rows * 120 samples crosses one full 131072-record numeric shard. */
+#define TP_SAMPLE_TEST_ROWS 1093u
 
 typedef struct TpSampleTest
 {
@@ -119,8 +120,8 @@ static void test_sample_manifest_partitions(char const* root)
     TpRetirementTranscript transcript = {.execution = &execution, .finished = 1};
     TpRetirementSamples samples = {.transcript = &transcript, .finished = 1,
         .expected = TP_RETIREMENT_SAMPLE_TOTAL_RECORDS};
-    samples.shards = (unsigned)((samples.expected + TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS - 1) /
-                              TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS);
+    samples.shards = (unsigned)((samples.expected + TP_RETIREMENT_SAMPLE_SHARD_RECORDS - 1) /
+                              TP_RETIREMENT_SAMPLE_SHARD_RECORDS);
     TpRetirementShard* shards = (TpRetirementShard*)calloc(samples.shards, sizeof(*shards));
     CHECK(shards != NULL);
     if (shards)
@@ -129,15 +130,15 @@ static void test_sample_manifest_partitions(char const* root)
         uint64_t remaining = samples.expected;
         for (unsigned i = 0; i < samples.shards; ++i)
         {
-            shards[i].records = remaining < TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS ?
-                remaining : TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS;
+            shards[i].records = remaining < TP_RETIREMENT_SAMPLE_SHARD_RECORDS ?
+                remaining : TP_RETIREMENT_SAMPLE_SHARD_RECORDS;
             shards[i].bytes = shards[i].records * 500;
             memset(shards[i].sha256, 'a', 64);
             tp_retirement_samples_descriptor_hash(&samples.descriptors, &shards[i]);
             remaining -= shards[i].records;
         }
         sha256_finish_hex(&samples.descriptors, samples.descriptors_sha256);
-        CHECK(!remaining && samples.shards == 1206);
+        CHECK(!remaining && samples.shards == 302);
         for (unsigned partition = 0; partition < 3; ++partition)
         {
             char name[64], path[TP_PATH_CAP];
@@ -179,10 +180,11 @@ static void test_retirement_sample_max_record(char const* root)
     unsigned metrics = TP_RETIREMENT_SAMPLE_CODE | TP_RETIREMENT_SAMPLE_RUNTIME;
     char line[TP_RETIREMENT_SAMPLE_LINE_CAP];
     size_t count = tp_retirement_sample_record(line, sizeof(line), row, round, pair, metrics, values);
-    CHECK(count == 415 && line[count - 1] == '\n');
+    CHECK(count == TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX && line[count - 1] == '\n');
     CHECK(tp_retirement_sample_record(line, count, row, round, pair, metrics, values) == 0 && !line[0]);
-    count = tp_retirement_sample_record(line, 416, row, round, pair, metrics, values);
-    CHECK(count == 415 && line[count - 1] == '\n');
+    count = tp_retirement_sample_record(line, TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX + 1, row, round, pair,
+        metrics, values);
+    CHECK(count == TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX && line[count - 1] == '\n');
     values[6] = UINT64_C(86400000000001);
     CHECK(tp_retirement_sample_record(line, sizeof(line), row, round, pair, metrics, values) == 0 && !line[0]);
     values[6] = elapsed;
@@ -196,7 +198,7 @@ static void test_retirement_sample_max_record(char const* root)
     CHECK(tp_retirement_sample_record(line, sizeof(line), row, round, pair, metrics, values) == 0 && !line[0]);
     values[4] = INT64_MAX;
     count = tp_retirement_sample_record(line, sizeof(line), row, round, pair, metrics, values);
-    CHECK(count == 415);
+    CHECK(count == TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX);
     char path[TP_PATH_CAP];
     CHECK(tp_path(path, root, "retirement-samples-max.jsonl"));
     FILE* file = fopen(path, "wb");
@@ -348,7 +350,7 @@ static void test_retirement_samples(char const* root)
             if (empty) CHECK(fclose(empty) == 0);
             test_sample_close(test);
         }
-        /* A real shard boundary splits row 273: a subsequent mutation of that
+        /* A real shard boundary splits row 1092: a subsequent mutation of that
          * row must be caught, rather than trusting a once-per-row precheck. */
         char first_digest[65] = {0}, second_digest[65] = {0};
         char boundary[TP_PATH_CAP], fixture_path[TP_PATH_CAP];
@@ -363,9 +365,9 @@ static void test_retirement_samples(char const* root)
             CHECK(tp_path(fixture_path, boundary, "retirement-samples-0000.jsonl"));
             FILE* output = !pass ? fopen(fixture_path, "wb") : tmpfile();
             CHECK(output && tp_retirement_samples_write_shard(&test->samples, output, &shards[0]));
-            CHECK(shards[0].records == TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS);
+            CHECK(shards[0].records == TP_RETIREMENT_SAMPLE_SHARD_RECORDS);
             if (output) CHECK(fclose(output) == 0);
-            if (pass == 2) CHECK(test_sample_replace(test, TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS, 0, 1234));
+            if (pass == 2) CHECK(test_sample_replace(test, TP_RETIREMENT_SAMPLE_SHARD_RECORDS, 0, 1234));
             CHECK(tp_path(fixture_path, boundary, "retirement-samples-0001.jsonl"));
             output = !pass ? fopen(fixture_path, "wb") : tmpfile();
             CHECK(output != NULL);
@@ -378,7 +380,7 @@ static void test_retirement_samples(char const* root)
             else
             {
                 CHECK(tp_retirement_samples_write_shard(&test->samples, output, &shards[1]));
-                CHECK(shards[1].records == TP_SAMPLE_TEST_ROWS * 120 - TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS);
+                CHECK(shards[1].records == TP_SAMPLE_TEST_ROWS * 120 - TP_RETIREMENT_SAMPLE_SHARD_RECORDS);
                 CHECK(tp_retirement_samples_finish(&test->samples));
                 if (!pass)
                 {

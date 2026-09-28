@@ -2,8 +2,10 @@
  * preparation/oracle/host inputs, exclusive streams and the #426 A/A verdict.
  * freeze copies the fixed command/output identities before any child starts;
  * run only accepts those identities in the existing #619 cursor order. The
- * state machine retains an interrupted attempt as invalid. It does not confer
- * receipt authority, evaluate #426, or admit a service recipe.
+ * state machine retains an interrupted attempt as invalid. capacity and
+ * store_preflight size both stages against the #1023 store entry and byte
+ * ceilings before any timing. It does not confer receipt authority, evaluate
+ * #426, or admit a service recipe.
  */
 #ifndef BUSTER_THROUGHPUT_RETIREMENT_CAMPAIGN_H
 #define BUSTER_THROUGHPUT_RETIREMENT_CAMPAIGN_H
@@ -16,6 +18,8 @@
 #define TP_RETIREMENT_CAMPAIGN_WHOLE_JOB_BUDGET_NS UINT64_C(3600000000000)
 /* tp_retirement_store_plan currently requires at least three external entries. */
 #define TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES 3u
+/* The store's receipt validator admits exactly the producer's shard size. */
+BUSTER_CT_CHECK(TP_RETIREMENT_STORE_RECEIPT_SHARD_RECORDS == TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS);
 
 typedef enum TpRetirementCampaignPhase
 {
@@ -40,17 +44,30 @@ typedef struct TpRetirementCampaignOutcome
     TpRetirementCampaignState execution, validity, aa_qualification, statistical_decision;
 } TpRetirementCampaignOutcome;
 
+/* Byte bounds use the source-proven maximal line widths
+ * (TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX and
+ * TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX), which the writers enforce. They
+ * replace the former 8 KiB-per-line transcript model, which had no consumer. */
 typedef struct TpRetirementCampaignCapacity
 {
     uint64_t compiler_invocations_per_stage, runtime_invocations_per_stage;
     uint64_t invocations_per_stage, samples_per_stage, spool_bytes_per_stage;
-    uint64_t transcript_bytes_per_stage_upper_bound;
+    uint64_t transcript_bytes_per_stage_upper_bound, sample_bytes_per_stage_upper_bound;
     uint64_t transcript_shards_per_stage, sample_shards_per_stage, sample_partitions_per_stage;
     uint64_t total_compiler_invocations, total_runtime_invocations;
     uint64_t total_invocations, total_samples, total_spool_bytes;
-    uint64_t total_transcript_bytes_upper_bound;
+    uint64_t total_transcript_bytes_upper_bound, total_sample_bytes_upper_bound;
     uint64_t total_transcript_shards, total_sample_shards, total_sample_partitions;
+    uint64_t total_shard_files, total_payload_bytes_upper_bound;
 } TpRetirementCampaignCapacity;
+
+/* Exact result-store reservation for one campaign: owned shard files and
+ * worst-case payload bytes plus the caller's external entries and bytes. */
+typedef struct TpRetirementCampaignStorePlan
+{
+    uint64_t owned_files, owned_bytes, external_entries, external_bytes;
+    uint64_t entries, bytes, remaining_entries, remaining_bytes;
+} TpRetirementCampaignStorePlan;
 
 /* Supplied by the caller only after it independently authenticates each
  * phase ceiling for this exact job, population, host and held binaries. The
@@ -123,25 +140,40 @@ static uint64_t tp_retirement_campaign_ceil_div(uint64_t value, uint64_t divisor
     return quotient + !!remainder;
 }
 
+/* Checked entry and byte fit against the #1023 store ceilings. */
+static int tp_retirement_campaign_store_fits(uint64_t owned_files, uint64_t owned_bytes,
+    uint64_t external_entries, uint64_t external_bytes, uint64_t* entries, uint64_t* bytes)
+{
+    int ok = entries && bytes && owned_files && owned_bytes &&
+        external_entries >= TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES &&
+        tp_retirement_campaign_u64_add(owned_files, external_entries, entries) &&
+        *entries <= TP_RETIREMENT_STORE_FILES &&
+        tp_retirement_campaign_u64_add(owned_bytes, external_bytes, bytes) &&
+        *bytes <= TP_RETIREMENT_STORE_TOTAL_BYTES;
+    return ok;
+}
+
 /* Rows and runtime_rows must come from the authenticated correctness/oracle
- * gate. The report includes both fixed stages and a worst-case transcript
- * byte bound (every line at its current 8 KiB validator limit); it does not
- * predict host speed or establish that the whole-job deadline can be met.
- * The aggregate shard check is only a necessary lower bound: other inventory,
- * byte and time qualification remains the service's responsibility. */
+ * gate. The report includes both fixed stages and worst-case transcript and
+ * numeric-shard payload bytes at their proven maximal line widths. It rejects
+ * a campaign whose shard files leave fewer than the minimum external entries
+ * or whose worst-case payload exceeds the store's byte ceiling. It does not
+ * predict host speed or establish that the whole-job deadline can be met;
+ * tp_retirement_campaign_store_preflight adds the caller's exact external
+ * reservation before timing. */
 static int tp_retirement_campaign_capacity(unsigned rows, unsigned runtime_rows, unsigned pairs,
     TpRetirementCampaignCapacity* capacity)
 {
     uint64_t per_variant = 0, invocations_per_row = 0;
     uint64_t compiler_invocations = 0, runtime_invocations = 0, invocations = 0;
     uint64_t samples = tp_retirement_samples_count(rows, pairs), spool_bytes = 0;
-    uint64_t transcript_bytes = 0;
+    uint64_t transcript_bytes = 0, sample_bytes = 0;
     uint64_t transcript_shards = 0, sample_shards = 0;
     uint64_t total_compiler_invocations = 0, total_runtime_invocations = 0;
     uint64_t total_invocations = 0, total_samples = 0, total_spool_bytes = 0;
-    uint64_t total_transcript_bytes = 0;
+    uint64_t total_transcript_bytes = 0, total_sample_bytes = 0, total_payload_bytes = 0;
     uint64_t total_transcript_shards = 0, total_sample_shards = 0, total_sample_partitions = 0;
-    uint64_t total_shard_files = 0;
+    uint64_t total_shard_files = 0, entries = 0, bytes = 0;
     int ok = capacity && rows && runtime_rows <= rows && samples &&
         tp_retirement_campaign_u64_mul(TP_RETIREMENT_ROUNDS, pairs, &per_variant) &&
         tp_retirement_campaign_u64_add(per_variant, TP_RETIREMENT_WARMUPS, &per_variant) &&
@@ -150,13 +182,15 @@ static int tp_retirement_campaign_capacity(unsigned rows, unsigned runtime_rows,
         tp_retirement_campaign_u64_mul(runtime_rows, invocations_per_row, &runtime_invocations) &&
         tp_retirement_campaign_u64_add(compiler_invocations, runtime_invocations, &invocations) &&
         tp_retirement_campaign_u64_mul(samples, TP_RETIREMENT_SAMPLE_RECORD_BYTES, &spool_bytes) &&
-        tp_retirement_campaign_u64_mul(invocations, TP_RETIREMENT_EXECUTION_LINE_CAP, &transcript_bytes);
+        tp_retirement_campaign_u64_mul(invocations, TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX,
+            &transcript_bytes) &&
+        tp_retirement_campaign_u64_mul(samples, TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX, &sample_bytes);
     if (ok)
     {
         transcript_shards = tp_retirement_campaign_ceil_div(invocations,
             TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS);
         sample_shards = tp_retirement_campaign_ceil_div(samples,
-            TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS);
+            TP_RETIREMENT_SAMPLE_SHARD_RECORDS);
         ok = invocations <= (uint64_t)TP_RETIREMENT_TRANSCRIPT_SHARDS * TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS &&
             transcript_shards <= TP_RETIREMENT_TRANSCRIPT_SHARDS &&
             samples <= TP_RETIREMENT_SAMPLE_TOTAL_RECORDS &&
@@ -173,6 +207,8 @@ static int tp_retirement_campaign_capacity(unsigned rows, unsigned runtime_rows,
                 &total_spool_bytes) &&
             tp_retirement_campaign_u64_mul(transcript_bytes, TP_RETIREMENT_CAMPAIGN_STAGES,
                 &total_transcript_bytes) &&
+            tp_retirement_campaign_u64_mul(sample_bytes, TP_RETIREMENT_CAMPAIGN_STAGES,
+                &total_sample_bytes) &&
             tp_retirement_campaign_u64_mul(transcript_shards, TP_RETIREMENT_CAMPAIGN_STAGES,
                 &total_transcript_shards) &&
             tp_retirement_campaign_u64_mul(sample_shards, TP_RETIREMENT_CAMPAIGN_STAGES,
@@ -183,8 +219,10 @@ static int tp_retirement_campaign_capacity(unsigned rows, unsigned runtime_rows,
         ok = ok &&
             tp_retirement_campaign_u64_add(total_transcript_shards, total_sample_shards,
                 &total_shard_files) &&
-            total_shard_files <= TP_RETIREMENT_STORE_FILES -
-                TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES;
+            tp_retirement_campaign_u64_add(total_transcript_bytes, total_sample_bytes,
+                &total_payload_bytes) &&
+            tp_retirement_campaign_store_fits(total_shard_files, total_payload_bytes,
+                TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES, 0, &entries, &bytes);
     }
     if (capacity)
     {
@@ -197,6 +235,7 @@ static int tp_retirement_campaign_capacity(unsigned rows, unsigned runtime_rows,
             capacity->samples_per_stage = samples;
             capacity->spool_bytes_per_stage = spool_bytes;
             capacity->transcript_bytes_per_stage_upper_bound = transcript_bytes;
+            capacity->sample_bytes_per_stage_upper_bound = sample_bytes;
             capacity->transcript_shards_per_stage = transcript_shards;
             capacity->sample_shards_per_stage = sample_shards;
             capacity->sample_partitions_per_stage =
@@ -207,9 +246,50 @@ static int tp_retirement_campaign_capacity(unsigned rows, unsigned runtime_rows,
             capacity->total_samples = total_samples;
             capacity->total_spool_bytes = total_spool_bytes;
             capacity->total_transcript_bytes_upper_bound = total_transcript_bytes;
+            capacity->total_sample_bytes_upper_bound = total_sample_bytes;
             capacity->total_transcript_shards = total_transcript_shards;
             capacity->total_sample_shards = total_sample_shards;
             capacity->total_sample_partitions = total_sample_partitions;
+            capacity->total_shard_files = total_shard_files;
+            capacity->total_payload_bytes_upper_bound = total_payload_bytes;
+        }
+    }
+    return ok;
+}
+
+/* Exact store preflight, called before any timing. external_entries must
+ * cover every inventoried entry that is not a campaign shard (the execution
+ * receipt, manifests, controls, binaries, logs and directories), and
+ * external_bytes is the caller's conservative byte reservation for them.
+ * An inconsistent capacity record, overflow or either store ceiling rejects
+ * with a zeroed plan. owned_files/owned_bytes are the reservation for
+ * tp_retirement_store_plan. */
+static inline int tp_retirement_campaign_store_preflight(TpRetirementCampaignCapacity const* capacity,
+    uint64_t external_entries, uint64_t external_bytes, TpRetirementCampaignStorePlan* plan)
+{
+    uint64_t files = 0, payload = 0, entries = 0, bytes = 0;
+    int ok = capacity && plan &&
+        tp_retirement_campaign_u64_add(capacity->total_transcript_shards,
+            capacity->total_sample_shards, &files) &&
+        files == capacity->total_shard_files &&
+        tp_retirement_campaign_u64_add(capacity->total_transcript_bytes_upper_bound,
+            capacity->total_sample_bytes_upper_bound, &payload) &&
+        payload == capacity->total_payload_bytes_upper_bound &&
+        tp_retirement_campaign_store_fits(files, payload, external_entries, external_bytes,
+            &entries, &bytes);
+    if (plan)
+    {
+        *plan = (TpRetirementCampaignStorePlan){0};
+        if (ok)
+        {
+            plan->owned_files = files;
+            plan->owned_bytes = payload;
+            plan->external_entries = external_entries;
+            plan->external_bytes = external_bytes;
+            plan->entries = entries;
+            plan->bytes = bytes;
+            plan->remaining_entries = TP_RETIREMENT_STORE_FILES - entries;
+            plan->remaining_bytes = TP_RETIREMENT_STORE_TOTAL_BYTES - bytes;
         }
     }
     return ok;

@@ -20,7 +20,17 @@ static int test_retirement_campaign_capacity_is_zero(TpRetirementCampaignCapacit
         !capacity->total_compiler_invocations && !capacity->total_runtime_invocations &&
         !capacity->total_invocations && !capacity->total_samples && !capacity->total_spool_bytes &&
         !capacity->total_transcript_bytes_upper_bound && !capacity->total_transcript_shards &&
-        !capacity->total_sample_shards && !capacity->total_sample_partitions;
+        !capacity->total_sample_shards && !capacity->total_sample_partitions &&
+        !capacity->sample_bytes_per_stage_upper_bound && !capacity->total_sample_bytes_upper_bound &&
+        !capacity->total_shard_files && !capacity->total_payload_bytes_upper_bound;
+    return zero;
+}
+
+static int test_retirement_campaign_store_plan_is_zero(TpRetirementCampaignStorePlan const* plan)
+{
+    int zero = plan && !plan->owned_files && !plan->owned_bytes && !plan->external_entries &&
+        !plan->external_bytes && !plan->entries && !plan->bytes && !plan->remaining_entries &&
+        !plan->remaining_bytes;
     return zero;
 }
 
@@ -223,27 +233,62 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
           large.compiler_invocations_per_stage == UINT64_C(17731968) &&
           large.runtime_invocations_per_stage == 0 &&
           large.total_invocations == UINT64_C(35463936) &&
-          large.total_transcript_bytes_upper_bound ==
-              UINT64_C(35463936) * TP_RETIREMENT_EXECUTION_LINE_CAP);
+          large.transcript_bytes_per_stage_upper_bound ==
+              UINT64_C(17731968) * TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX &&
+          large.sample_bytes_per_stage_upper_bound ==
+              UINT64_C(8720640) * TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX &&
+          large.total_transcript_bytes_upper_bound == UINT64_C(31988470272) &&
+          large.total_sample_bytes_upper_bound == UINT64_C(7238131200) &&
+          large.total_payload_bytes_upper_bound == UINT64_C(39226601472) &&
+          large.total_transcript_shards == 542 && large.total_sample_shards == 134 &&
+          large.total_shard_files == 676);
     CHECK(tp_retirement_campaign_capacity(72672, 72672, 60, &large) &&
           large.compiler_invocations_per_stage == UINT64_C(17731968) &&
           large.runtime_invocations_per_stage == UINT64_C(17731968) &&
           large.invocations_per_stage == UINT64_C(35463936) &&
-          large.total_invocations == UINT64_C(70927872));
+          large.total_invocations == UINT64_C(70927872) &&
+          large.total_shard_files == 1218 &&
+          large.total_payload_bytes_upper_bound == UINT64_C(71215071744));
     CHECK(tp_retirement_campaign_capacity(77762, 0, 60, &large) &&
-          large.total_transcript_shards == 1160 && large.total_sample_shards == 570 &&
-          large.total_transcript_shards + large.total_sample_shards == 1730);
+          large.total_transcript_shards == 580 && large.total_sample_shards == 144 &&
+          large.total_shard_files == 724);
     CHECK(tp_retirement_campaign_capacity(77762, 77762, 60, &large) &&
-          large.total_transcript_shards == 2318 && large.total_sample_shards == 570 &&
-          large.total_transcript_shards + large.total_sample_shards == 2888);
+          large.total_transcript_shards == 1160 && large.total_sample_shards == 144 &&
+          large.total_shard_files == 1304);
+    /* The full compiler-eligible envelope without runtime rows fits the
+     * 128 GiB store through 198 pairs at the proven maximal line widths. */
+    CHECK(tp_retirement_campaign_capacity(77762, 0, 196, &large) &&
+          large.total_shard_files == 2338 &&
+          large.total_payload_bytes_upper_bound == UINT64_C(135843370944));
+    CHECK(tp_retirement_campaign_capacity(77762, 0, 198, &large) &&
+          large.total_shard_files == 2360 &&
+          large.total_payload_bytes_upper_bound == UINT64_C(137223801968));
+    CHECK(!tp_retirement_campaign_capacity(77762, 0, 200, &large) &&
+          test_retirement_campaign_capacity_is_zero(&large));
+    /* 254 pairs is rejected by the byte check alone: the samples and
+     * invocations fit their collector caps and 3026 shard files leave the
+     * minimum external entries, but 175875870640 bytes exceed 128 GiB. */
     CHECK(!tp_retirement_campaign_capacity(77762, 0, 254, &large) &&
           test_retirement_campaign_capacity_is_zero(&large));
-    CHECK(tp_retirement_campaign_capacity(43862, 0, 254, &large) &&
-          large.total_transcript_shards == 2732 && large.total_sample_shards == 1360 &&
-          large.total_transcript_shards + large.total_sample_shards == 4092 &&
-          large.total_transcript_shards + large.total_sample_shards <=
-              TP_RETIREMENT_STORE_FILES - TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES);
-    CHECK(!tp_retirement_campaign_capacity(43863, 0, 254, &large) &&
+    uint64_t entries = 0, bytes = 0;
+    CHECK(tp_retirement_samples_count(77762, 254) == UINT64_C(39503096) &&
+          UINT64_C(79317240) <= (uint64_t)TP_RETIREMENT_TRANSCRIPT_SHARDS * TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS &&
+          2 * (tp_retirement_campaign_ceil_div(UINT64_C(79317240), TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS) +
+               tp_retirement_campaign_ceil_div(UINT64_C(39503096), TP_RETIREMENT_SAMPLE_SHARD_RECORDS)) == 3026 &&
+          2 * (UINT64_C(79317240) * TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX +
+               UINT64_C(39503096) * TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX) == UINT64_C(175875870640));
+    CHECK(tp_retirement_campaign_store_fits(3026, TP_RETIREMENT_STORE_TOTAL_BYTES,
+              TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES, 0, &entries, &bytes) &&
+          entries == 3029 && bytes == TP_RETIREMENT_STORE_TOTAL_BYTES);
+    CHECK(!tp_retirement_campaign_store_fits(3026, UINT64_C(175875870640),
+              TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES, 0, &entries, &bytes));
+    /* With every row runtime-eligible the byte ceiling admits 108 pairs. */
+    CHECK(tp_retirement_campaign_capacity(77762, 77762, 108, &large) &&
+          large.total_shard_files == 2328 &&
+          large.total_payload_bytes_upper_bound == UINT64_C(136267640416));
+    CHECK(!tp_retirement_campaign_capacity(77762, 77762, 110, &large) &&
+          test_retirement_campaign_capacity_is_zero(&large));
+    CHECK(!tp_retirement_campaign_capacity(77762, 77762, 254, &large) &&
           test_retirement_campaign_capacity_is_zero(&large));
     CHECK(!tp_retirement_campaign_capacity(77792, 0, 254, &large));
     CHECK(!tp_retirement_campaign_capacity(72672, 72672, 254, &large));
@@ -253,6 +298,40 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     CHECK(!tp_retirement_campaign_u64_mul(UINT64_MAX, 2, &capacity_value) && !capacity_value);
     capacity_value = 1;
     CHECK(!tp_retirement_campaign_u64_add(UINT64_MAX, 1, &capacity_value) && !capacity_value);
+    /* The exact store preflight adds the caller's external reservation. */
+    TpRetirementCampaignStorePlan store_plan;
+    uint64_t spare_bytes = TP_RETIREMENT_STORE_TOTAL_BYTES - UINT64_C(135843370944);
+    CHECK(tp_retirement_campaign_capacity(77762, 0, 196, &large));
+    CHECK(tp_retirement_campaign_store_preflight(&large, 3, 1024, &store_plan) &&
+          store_plan.owned_files == 2338 && store_plan.owned_bytes == UINT64_C(135843370944) &&
+          store_plan.external_entries == 3 && store_plan.external_bytes == 1024 &&
+          store_plan.entries == 2341 && store_plan.bytes == UINT64_C(135843371968) &&
+          store_plan.remaining_entries == TP_RETIREMENT_STORE_FILES - 2341 &&
+          store_plan.remaining_bytes == spare_bytes - 1024);
+    CHECK(tp_retirement_campaign_store_preflight(&large, TP_RETIREMENT_STORE_FILES - 2338, spare_bytes,
+              &store_plan) &&
+          store_plan.entries == TP_RETIREMENT_STORE_FILES && !store_plan.remaining_entries &&
+          store_plan.bytes == TP_RETIREMENT_STORE_TOTAL_BYTES && !store_plan.remaining_bytes);
+    CHECK(!tp_retirement_campaign_store_preflight(&large, TP_RETIREMENT_STORE_FILES - 2337, 0, &store_plan) &&
+          test_retirement_campaign_store_plan_is_zero(&store_plan));
+    CHECK(!tp_retirement_campaign_store_preflight(&large, 3, spare_bytes + 1, &store_plan) &&
+          test_retirement_campaign_store_plan_is_zero(&store_plan));
+    CHECK(!tp_retirement_campaign_store_preflight(&large,
+              TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES - 1, 0, &store_plan) &&
+          test_retirement_campaign_store_plan_is_zero(&store_plan));
+    CHECK(!tp_retirement_campaign_store_preflight(&large, UINT64_MAX, 0, &store_plan));
+    CHECK(!tp_retirement_campaign_store_preflight(&large, 3, UINT64_MAX, &store_plan));
+    CHECK(!tp_retirement_campaign_store_preflight(NULL, 3, 0, &store_plan) &&
+          test_retirement_campaign_store_plan_is_zero(&store_plan));
+    CHECK(!tp_retirement_campaign_store_preflight(&large, 3, 0, NULL));
+    TpRetirementCampaignCapacity mismatched = large;
+    ++mismatched.total_shard_files;
+    CHECK(!tp_retirement_campaign_store_preflight(&mismatched, 3, 0, &store_plan));
+    mismatched = large;
+    --mismatched.total_payload_bytes_upper_bound;
+    CHECK(!tp_retirement_campaign_store_preflight(&mismatched, 3, 0, &store_plan));
+    mismatched = (TpRetirementCampaignCapacity){0};
+    CHECK(!tp_retirement_campaign_store_preflight(&mismatched, 3, 0, &store_plan));
     CHECK(tp_retirement_campaign_capacity(1, 1, 60, &large));
     TpRetirementCampaignDurationBounds bounds = {
         .reservation_ns = 1000000, .materialization_ns = 1000000,
