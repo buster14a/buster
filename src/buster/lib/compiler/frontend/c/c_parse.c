@@ -10378,8 +10378,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                         !c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[missing_name]), &missing_qualifier))
                     {
                         // A name is there, but behind decorations the
-                        // parenthesized declarator parse does not take --
-                        // `int (* __attribute__((unused)) p)(void);`.
+                        // parenthesized declarator parse does not take.
                         u32 diagnostic_start = result->diagnostic_count;
                         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[missing_name]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
                                            S8("unsupported attribute in a parenthesized member declarator"));
@@ -10700,6 +10699,11 @@ BUSTER_C_INTERNAL bool c_parse_expression_syntax_error(CParseResult* result, CPr
                 }
                 else
                 {
+                    // A word that names no value may be a type word Buster
+                    // does not model (`_BitInt`, `__fp16`), starting a type
+                    // name rather than an expression.
+                    CEntityId entity = c_parse_lookup_entity_at(result, preprocess, scope, spelling, index);
+                    modeled = entity.value < result->entity_count && result->entities[entity.value].kind != C_ENTITY_TYPEDEF;
                     expect_operand = false;
                 }
             }
@@ -11015,6 +11019,11 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
             {
                 c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[specifier_index]), C_DIAGNOSTIC_INVALID_ATOMIC_TYPE,
                                    S8("_Atomic requires a type name"));
+            }
+            else if (!depth)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[close - 1]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                                   S8("expected expression"));
             }
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
             return;
@@ -13139,8 +13148,13 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult p
         {
             index += 1;
             CType ignored = {0};
-            while (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
+            for (;;)
             {
+                index = c_parse_skip_attributes(preprocess, index, end);
+                if (index >= end || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER)
+                {
+                    break;
+                }
                 String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
                 if (c_parse_type_qualifier_word(spelling, &ignored) || string_equal(spelling, S8("_Nonnull")) || string_equal(spelling, S8("_Nullable")) ||
                     string_equal(spelling, S8("_Null_unspecified")))
@@ -15451,6 +15465,14 @@ BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(Arena* arena, CParse
     u32 attribute_resume = UINT32_MAX;
     for (u32 token_index = start; token_index < end; token_index += 1)
     {
+        // A C23 attribute list -- `int * [[gnu::aligned(16)]] p;` -- is
+        // bracketed too, but its tokens name attributes, not objects.
+        u32 c23_attribute_end = 0;
+        if (c_parse_c23_attribute_at(preprocess, token_index, end, &c23_attribute_end))
+        {
+            token_index = c23_attribute_end - 1;
+            continue;
+        }
         CToken token = preprocess.tokens[token_index];
         // An array bound may be spelled with offsetof -- SQLite sizes a save
         // buffer as `sizeof(Parse) - offsetof(Parse, sLastToken)` -- and the
