@@ -123,7 +123,7 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
         list(APPEND BUSTER_TREE_TEST_COMMANDS
             COMMAND ${${BUSTER_TREE_PREFIX}_ANALYZE_OBSERVER} "${CMAKE_COMMAND}" --build "${BUSTER_TREE_BUILD_DIRECTORY}"
                 --config "${BUSTER_TREE_ANALYZE_CONFIG}"
-                --target clang_analyze
+                --target clang_analyze optnone_audit
                 ${BUSTER_TREE_BUILD_OPTIONS}
         )
     endif()
