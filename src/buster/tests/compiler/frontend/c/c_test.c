@@ -12518,6 +12518,51 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_function_type_name(UnitTestArgu
     return result;
 }
 
+// A GNU attribute list may sit in a block-scope type name -- a cast, a sizeof
+// or _Alignof operand, a _Generic association -- before or after a `*`. Its
+// words name attributes, not objects, and the type is the one written without
+// it; the block-scope static assertions pin the sizes Clang folds (#1705).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_type_name_attributes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+    BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+    TemporalArena temporary = scratch_begin(0, 0);
+    String8 source = S8("int f(void) { return (int)(long)(int __attribute__((unused)))0 + (int)sizeof(int __attribute__((unused))); }\n"
+                        "int f1(void) { return sizeof(int * __attribute__((unused)) *); }\n"
+                        "int f2(void) { return (int)(long)(int * __attribute__((unused)))0; }\n"
+                        "int f3(void) { int x; return _Generic(&x, int * __attribute__((unused)): 1, default: 0); }\n"
+                        "int f4(void) { return _Alignof(int * __attribute__((unused)) const); }\n"
+                        "int f5(void)\n"
+                        "{\n"
+                        "    _Static_assert(sizeof(int __attribute__((unused))) == 4, \"plain\");\n"
+                        "    _Static_assert(sizeof(int * __attribute__((unused)) *) == 8, \"pointer\");\n"
+                        "    _Static_assert(_Alignof(int * __attribute__((unused)) const) == 8, \"alignment\");\n"
+                        "    return (int)(long)(int * __attribute__((unused)) const __attribute__((unused)) *)8;\n"
+                        "}\n");
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){
+                                                    .target = target.target,
+                                                    .data_layout = target_data_layout(target.target),
+                                                    .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                });
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    CIRLowerResult lowered = {0};
+    if (!preprocess.diagnostic_count && !parse.diagnostic_count)
+    {
+        lowered = c_lower_to_ir(temporary.arena, S8("block-type-name-attributes.c"), preprocess, parse, target.target);
+    }
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program);
+    if (lowered.program && lowered.program->module_count)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // `void` is one byte in both layout engines, and an object of it is still
 // refused. GNU gives `void` a size so that a `void *` steps by bytes, and both
 // reference compilers fold `sizeof(void)`, `sizeof(const void)` and
@@ -24852,6 +24897,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_token_view_constant_range);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_function_type_name);
+    BUSTER_TEST_FIXTURE(arguments, c_test_block_type_name_attributes);
     BUSTER_TEST_FIXTURE(arguments, c_test_void_object_refusals);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
