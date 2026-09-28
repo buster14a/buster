@@ -23475,6 +23475,84 @@ BUSTER_C_INTERNAL bool c_ir_atomic_type_specifier_at(CIntegerIrBuilder* builder,
            c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
 }
 
+// The GNU vector a type name's specifier run `start .. end` spells over
+// `element`, or `element` itself when the run holds no `vector_size ( N )`.
+// Returns false while N waits on a constant query, and leaves an invalid
+// type for an argument or element the attribute cannot apply to.  The
+// vector's IrType is the one c_lower_to_ir builds for a declared vector of
+// the same shape, so a cast to the spelled type and a typedef of it agree.
+BUSTER_C_INTERNAL bool c_ir_type_name_vector_attribute(CIntegerIrBuilder* builder, IrTypeId element, u32 start, u32 end, IrTypeId* type_out)
+{
+    CPreprocessResult preprocess = builder->preprocess;
+    u32 attribute = end;
+    for (u32 index = start; attribute == end && index + 1 < end; index += 1)
+    {
+        if (preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+            c_parse_vector_size_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index])))
+        {
+            attribute = index;
+        }
+    }
+    bool settled = true;
+    IrTypeId type = element;
+    if (attribute != end)
+    {
+        u32 close = c_ir_matching_delimiter_cached(builder, attribute + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        u32 byte_size = 0;
+        bool sized = false;
+        if (close < end && close == attribute + 3 && preprocess.tokens[attribute + 2].kind == C_TOKEN_PREPROCESSING_NUMBER)
+        {
+            sized = c_parse_attribute_unsigned(c_token_spelling(preprocess.spelling_base, preprocess.tokens[attribute + 2]), &byte_size);
+        }
+        else if (close < end && close > attribute + 2)
+        {
+            CIrConstantValue value = {0};
+            settled = c_ir_query_constant(builder, attribute + 2, close, &value);
+            sized = settled && value.kind == C_IR_CONSTANT_INTEGER && value.integer && value.integer <= UINT32_MAX;
+            byte_size = sized ? (u32)value.integer : 0;
+        }
+        IrType* element_type = ir_type_from_id(&builder->program->types, element);
+        bool arithmetic = element_type && element_type->layout.resolved &&
+                          (element_type->kind == IR_TYPE_INTEGER || element_type->kind == IR_TYPE_FLOAT);
+        u64 element_count = 0;
+        u64 storage_size = 0;
+        u32 alignment = 0;
+        type = IR_TYPE_ID_INVALID;
+        if (sized && arithmetic &&
+            c_vector_type_layout(builder->target, element_type->layout.size, byte_size, &element_count, &storage_size, &alignment))
+        {
+            for (u32 type_index = 0; type.value == IR_ID_UNDERLYING_INVALID && type_index < builder->program->types.count; type_index += 1)
+            {
+                IrType* candidate = builder->program->types.types + type_index;
+                if (candidate->kind == IR_TYPE_VECTOR && candidate->element_type.value == element.value && candidate->element_count == element_count &&
+                    candidate->layout.size == storage_size && candidate->layout.alignment == alignment)
+                {
+                    type = candidate->id;
+                }
+            }
+            if (type.value == IR_ID_UNDERLYING_INVALID)
+            {
+                type = ir_program_add_type(builder->program, (IrType){
+                                                                 .name = S8("GNU vector"),
+                                                                 .element_type = element,
+                                                                 .return_type = IR_TYPE_ID_INVALID,
+                                                                 .layout =
+                                                                     {
+                                                                         .size = storage_size,
+                                                                         .alignment = alignment,
+                                                                         .resolved = true,
+                                                                     },
+                                                                 .kind = IR_TYPE_VECTOR,
+                                                                 .element_count = element_count,
+                                                                 .bit_width = (u32)storage_size * 8,
+                                                             });
+            }
+        }
+    }
+    *type_out = type;
+    return settled;
+}
+
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32 start, u32 end, u32* index_out, CType* qualifiers_out)
 {
     if (start >= end)
@@ -23635,6 +23713,13 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
             // `(map)->key`) needs the full expression type walker.  Unlike
             // lowering, typeof does not evaluate the operand, so this query
             // is side-effect free and preserves array/function types.
+            // A type-name operand -- `typeof(int __attribute__((vector_size(16))))`
+            // -- reads through the type-name reader, which applies the
+            // attributes a type name carries.
+            if (type.value == IR_ID_UNDERLYING_INVALID)
+            {
+                type = c_ir_group_type_name(builder, index + 1, close);
+            }
             if (type.value == IR_ID_UNDERLYING_INVALID)
             {
                 c_ir_sizeof_operand_type_attempt(builder, index + 2, close, &type);
@@ -23782,11 +23867,22 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
     }
     if (type.value != IR_ID_UNDERLYING_INVALID)
     {
-        while (index < end && builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
-               c_parse_type_qualifier_word(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]), &qualifiers))
+        bool qualifier_run = true;
+        while (qualifier_run)
         {
-            index += 1;
+            u32 attribute_end = c_parse_skip_attributes(builder->preprocess, index, end);
+            qualifier_run = attribute_end != index ||
+                            (index < end && builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
+                             c_parse_type_qualifier_word(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]), &qualifiers));
+            index = attribute_end != index ? attribute_end : index + (qualifier_run ? 1u : 0u);
         }
+        IrTypeId vector_type = IR_TYPE_ID_INVALID;
+        type = c_ir_type_name_vector_attribute(builder, type, c_parse_type_name_attribute_start(builder->preprocess, start, index), index, &vector_type)
+                   ? vector_type
+                   : IR_TYPE_ID_INVALID;
+    }
+    if (type.value != IR_ID_UNDERLYING_INVALID)
+    {
         // `_Atomic` written as a qualifier before or after the typedef name,
         // which is the other spelling c_ir_atomic_over_aligned_alias answers
         // for.  It runs before the pointer run below because
