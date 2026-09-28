@@ -144,7 +144,19 @@ PINNED = [
     ("struct", " __attribute__((packed))", None, ["long long lead : 1;", "long long value : 64;"]),
     ("struct", " __attribute__((packed, aligned(8)))", None, ["char byte;", "int value;"]),
     ("struct", "", None, ["char byte;", "int value __attribute__((packed));"]),
+    # A declarator-less tagged or typedef-named member (PRELUDE's types)
+    # declares nothing in GNU C but is an anonymous member in the Microsoft
+    # dialect that Clang speaks by default for *-pc-windows-msvc (#1750).
+    ("struct", "", None, ["char lead;", "struct B0;", "int value : 4;", "char tail;"]),
+    ("struct", "", None, ["char lead;", "B1;", "long long value : 40;", "char tail;"]),
+    ("struct", " __attribute__((packed))", None, ["char lead;", "struct B0;", "int value : 20;", "char tail;"]),
+    ("union", "", None, ["char lead;", "struct B0;", "int value : 3;"]),
+    ("struct", "", None, ["char lead;", "union B2;", "char tail;"]),
+    ("struct", "", None, ["char lead;", "struct B3 { short s; };", "char tail;"]),
+    ("struct", "", 1, ["char lead;", "struct B0;", "char tail;"]),
 ]
+# Types the PINNED records name without declarators.
+PRELUDE = "struct B0 { int x; };\ntypedef struct { short y; } B1;\nunion B2 { char c; double d; };\n"
 
 
 def directed_records():
@@ -212,7 +224,7 @@ def pattern(spelling: str, width, array: str) -> str:
 
 def render(records) -> str:
     # No header: a cross-target compile then needs no SDK or resource tree.
-    out = []
+    out = [PRELUDE.rstrip("\n")]
     for index, record in enumerate(records):
         if record["pack"]:
             out.append(f"#pragma pack(push, {record['pack']})")

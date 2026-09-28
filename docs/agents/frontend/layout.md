@@ -47,6 +47,16 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   records. MinGW's GCC `ms_struct` emulation differs from MSVC for empty
   records, `packed` records with bit-fields and a union's zero-width field;
   Buster's Windows targets are the MSVC ABI.
+- **A declarator-less aggregate member is a dialect fact** (#1706, #1750). In
+  GNU C only an untagged `struct { ... };` or `union { ... };` defined in place
+  is an anonymous member; `struct S;`, a typedef name, or a nested tagged
+  definition declares nothing. Windows targets speak the Microsoft dialect
+  (`c_source.c` predefines `_MSC_EXTENSIONS`), where any complete struct or union
+  named there is an anonymous member that adds storage and promotes its fields,
+  as in cl and Clang `*-pc-windows-msvc`. `c_type_parse_aggregate_segment_step`
+  decides it from the target; the Clang corpus pins both answers on every
+  target, and `c_test_tagged_member_declares_nothing` names its targets and
+  checks that each rejects the other dialect's sizes.
 - **`__attribute__((packed))` and `__attribute__((aligned(N)))`** decide object
   representation, so ignoring them is an ABI divergence rather than a missing
   optimization: a Buster-only program agrees with itself whatever it agrees on,

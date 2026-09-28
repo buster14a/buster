@@ -4731,29 +4731,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ambiguous_promoted_parse(UnitTestArgum
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tagged_member_declares_nothing(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    TemporalArena temporary = scratch_begin(0, 0);
-    CPreprocessResult tokens;
-    CParseResult parse;
-    CIRLowerResult lowered = c_test_lower_source(temporary.arena,
-        S8("struct S { int a; }; union U { int a; double d; }; typedef struct { int z; } A;\n"
-           "struct T { struct S; int b; };\n"
-           "struct V { union U; int b; };\n"
-           "struct W { A; int b; };\n"
-           "struct Y { struct N { int n; }; int b; };\n"
-           "struct Z { struct Fwd; int b; };\n"
-           "struct X { struct { int p; }; const union { int q; char r[8]; }; int b; };\n"
-           "_Static_assert(sizeof(struct T) == 4 && __builtin_offsetof(struct T, b) == 0, \"tagged struct\");\n"
-           "_Static_assert(sizeof(struct V) == 4 && __builtin_offsetof(struct V, b) == 0, \"tagged union\");\n"
-           "_Static_assert(sizeof(struct W) == 4 && __builtin_offsetof(struct W, b) == 0, \"typedef name\");\n"
-           "_Static_assert(sizeof(struct Y) == 4 && sizeof(struct N) == 4, \"nested tagged definition\");\n"
-           "_Static_assert(sizeof(struct Z) == 4, \"forward tag\");\n"
-           "_Static_assert(sizeof(struct X) == 16 && __builtin_offsetof(struct X, b) == 12, \"anonymous members\");\n"
-           "int read(struct X *x) { return x->p + x->q + x->r[1]; }\n"),
-        S8("tagged-member-declares-nothing.c"), target_native, &tokens, &parse);
-    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
-    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-    BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
-    scratch_end(temporary);
+    // A declarator-less tagged or typedef-named aggregate member declares
+    // nothing in GNU C but is an anonymous member in the Microsoft dialect.
+    // The expectations are clang's (18, `x86_64-unknown-linux-gnu` and
+    // `x86_64-pc-windows-msvc`), not the target under test, and each target
+    // must also reject the other dialect's answer.
+    String8 dialects[] = {
+        S8("#define MS 0\n"),
+        S8("#define MS 1\n"),
+    };
+    struct
+    {
+        String8 triple;
+        u32 dialect;
+    } cases[] = {
+        {S8("x86_64-unknown-linux-gnu"), 0},
+        {S8("aarch64-unknown-linux-gnu"), 0},
+        {S8("aarch64-apple-darwin"), 0},
+        {S8("x86_64-pc-windows-msvc"), 1},
+        {S8("aarch64-pc-windows-msvc"), 1},
+    };
+    String8 body = S8("struct S { int a; }; union U { int a; double d; }; typedef struct { int z; } A;\n"
+                      "struct T { struct S; int b; };\n"
+                      "struct V { union U; int b; };\n"
+                      "struct W { A; int b; };\n"
+                      "struct Y { struct N { int n; }; int b; };\n"
+                      "struct X { struct { int p; }; const union { int q; char r[8]; }; int b; };\n"
+                      "_Static_assert(sizeof(struct T) == (MS ? 8 : 4) && __builtin_offsetof(struct T, b) == (MS ? 4 : 0), \"tagged struct\");\n"
+                      "_Static_assert(sizeof(struct V) == (MS ? 16 : 4) && __builtin_offsetof(struct V, b) == (MS ? 8 : 0), \"tagged union\");\n"
+                      "_Static_assert(sizeof(struct W) == (MS ? 8 : 4) && __builtin_offsetof(struct W, b) == (MS ? 4 : 0), \"typedef name\");\n"
+                      "_Static_assert(sizeof(struct Y) == (MS ? 8 : 4) && sizeof(struct N) == 4, \"nested tagged definition\");\n"
+                      "_Static_assert(sizeof(struct X) == 16 && __builtin_offsetof(struct X, b) == 12, \"anonymous members\");\n"
+                      "int read(struct X *x) { return x->p + x->q + x->r[1]; }\n"
+                      "#if MS\n"
+                      "int promoted(struct T *t, struct V *v, struct W *w, struct Y *y) { return t->a + v->a + w->z + y->n; }\n"
+                      "#else\n"
+                      "struct Z { struct Fwd; int b; };\n"
+                      "_Static_assert(sizeof(struct Z) == 4, \"forward tag\");\n"
+                      "#endif\n");
+    for (u64 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        Target target = target_parse_triple(cases[case_index].triple).target;
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult tokens;
+            CParseResult parse;
+            String8 pieces[] = {dialects[dialect], body};
+            String8 source = string_join_arena(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pieces), false);
+            CIRLowerResult lowered =
+                c_test_lower_source(temporary.arena, source, S8("tagged-member-declares-nothing.c"), target, &tokens, &parse);
+            bool accepted = tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.program != 0 && lowered.diagnostic_count == 0;
+            if (accepted != (dialect == cases[case_index].dialect))
+            {
+                arguments->show(arguments, S8("tagged member: {S8} {S8} the {S8} answer\n"), cases[case_index].triple,
+                                accepted ? S8("accepts") : S8("rejects"), dialect ? S8("Microsoft") : S8("GNU"));
+            }
+            BUSTER_TEST(arguments, accepted == (dialect == cases[case_index].dialect));
+            scratch_end(temporary);
+        }
+    }
     return result;
 }
 
