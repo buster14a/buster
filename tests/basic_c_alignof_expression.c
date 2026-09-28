@@ -9,6 +9,11 @@
 // it fills a table with `__alignof__(x)` over four thread-local objects.
 // Predicting the operand's type instead would decay `arr` and answer 8.
 //
+// A named object's own `_Alignas` or `aligned` raises that answer, and the
+// raised answer is an integer constant expression: GCC and Clang fold
+// `_Alignas(64) int g; _Alignof(g)` to 64 in a static assertion, a static
+// initializer and a function body alike (#1704).
+//
 // Every value below was compared against clang for this target.
 
 struct pair
@@ -32,6 +37,14 @@ static char bytes[7];
 static char* pointer;
 static __thread int thread_local_int;
 static quad vector;
+static _Alignas(64) int aligned_object;
+static int attribute_aligned_object __attribute__((aligned(32)));
+extern int redeclared_object;
+_Alignas(16) int redeclared_object;
+_Static_assert(_Alignof(aligned_object) == 64, "alignof an _Alignas object");
+_Static_assert(__alignof__(attribute_aligned_object) == 32, "alignof an aligned object");
+_Static_assert(__alignof__(redeclared_object) == 16, "alignof a redeclared object");
+static unsigned long folded_alignment = __alignof__(aligned_object);
 
 int main(void)
 {
@@ -104,6 +117,25 @@ int main(void)
     if (sizeof values != 3 * sizeof(struct pair))
     {
         return 15;
+    }
+    // A declared alignment raises the type's, wherever the answer is read.
+    _Alignas(128) int aligned_local = 0;
+    _Static_assert(_Alignof(aligned_local) == 128, "alignof an _Alignas local");
+    if (__alignof__(aligned_object) != 64 || _Alignof((aligned_object)) != 64)
+    {
+        return 16;
+    }
+    if (__alignof__(attribute_aligned_object) != 32 || __alignof__(redeclared_object) != 16)
+    {
+        return 17;
+    }
+    if (_Alignof(aligned_local) != 128 || ((unsigned long)&aligned_local & 127) != 0)
+    {
+        return 18;
+    }
+    if (folded_alignment != 64)
+    {
+        return 19;
     }
     return 0;
 }

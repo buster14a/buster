@@ -416,7 +416,9 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   The prediction is still the last resort for both words, under the same
   guards: an inline aggregate definition and an object whose array type never
   mapped are refused rather than guessed at. `tests/basic_c_alignof_expression.c`
-  is the fixture, and every value in it was compared against clang.
+  is the fixture, and every value in it was compared against clang. A named
+  object's own `_Alignas`/`aligned` then raises that answer, in constant
+  expressions too; see [`_Alignof` over an object](layout.md#_alignof-over-an-object).
 - **`void` is one byte, and an object of it is still refused.** GNU gives
   `void` a size and an alignment of one so that arithmetic on a `void *` steps
   by bytes, and clang and gcc both fold `sizeof(void)`, `sizeof(const void)`
