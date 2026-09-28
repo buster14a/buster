@@ -9557,8 +9557,16 @@ struct MachineX64Encoder
     // Logical frame offsets remain relative to the top of the fixed frame.
     // Dynamic Win64 frames put physical RBP at its bottom for PE unwinding.
     u32 frame_base_offset;
+    // The last allocator edit that stored a general register to a frame
+    // offset, and the byte count it ended at. A reload of the same register
+    // from the same offset starting exactly there, inside the same block, is
+    // the verified store-reload-same-slot-64 rewrite: it emits nothing.
+    u32 frame_store_end;
+    u32 frame_store_offset;
+    u8 frame_store_register;
+    bool frame_store_valid;
     bool overflow;
-    u8 reserved[3];
+    u8 reserved[1];
 };
 
 // These exact-form keys are generated-snapshot identities, not architectural
@@ -11224,7 +11232,6 @@ enum
     MACHINE_X64_FIXED_TEMPLATE_CMP32_RAX_RCX = MACHINE_X64_FIXED_TEMPLATE_CMP64_RCX + 16,
     MACHINE_X64_FIXED_TEMPLATE_CMP64_RAX_RCX,
     MACHINE_X64_FIXED_TEMPLATE_MOV_RBP_RSP,
-    MACHINE_X64_FIXED_TEMPLATE_MOV_RSP_RBP,
     // sub rsp, imm8 / imm32 with the immediate patched.  The prologue passes
     // 1..127 to the byte form and 128..4096 to the wide one, which are the
     // value classes the two rows were proven with.
@@ -11251,7 +11258,18 @@ enum
     MACHINE_X64_FIXED_TEMPLATE_IDIV_RCX = MACHINE_X64_FIXED_TEMPLATE_DIV_RCX + 2,
     MACHINE_X64_FIXED_TEMPLATE_CDQ_CQO = MACHINE_X64_FIXED_TEMPLATE_IDIV_RCX + 2,
     MACHINE_X64_FIXED_TEMPLATE_MOV_RAX_RDX = MACHINE_X64_FIXED_TEMPLATE_CDQ_CQO + 2,
-    MACHINE_X64_FIXED_TEMPLATE_STATIC_COUNT = MACHINE_X64_FIXED_TEMPLATE_MOV_RAX_RDX + 2,
+    // Verified local rewrites (docs/machine-rewrite-campaign.md): xor r32, r32
+    // for a zero materialization whose flags are dead, and LEAVE for a System
+    // V epilogue without callee-saved pushes.
+    MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF = MACHINE_X64_FIXED_TEMPLATE_MOV_RAX_RDX + 2,
+    MACHINE_X64_FIXED_TEMPLATE_LEAVE = MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF + 16,
+    // movups xmm0 <-> [rbp + disp8/disp32] with the displacement patched: one
+    // sixteen-byte aggregate-copy chunk at a frame offset (frame-copy-16).
+    MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD8,
+    MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD32,
+    MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE8,
+    MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE32,
+    MACHINE_X64_FIXED_TEMPLATE_STATIC_COUNT,
 };
 // Recipe variants and sequence steps whose operands are all fixed -- a zero
 // relative, a rip-relative zero, RAX/RDX/RSP, XMM0/XMM1, k0/k1 -- plus at
@@ -12016,14 +12034,17 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64Prepared
 #define MACHINE_X64_CHUNK_DIRECTION_LOAD 0u
 #define MACHINE_X64_CHUNK_DIRECTION_STORE 1u
 BUSTER_GLOBAL_LOCAL u8 machine_x64_chunk_memory_tables[2][MACHINE_X64_CHUNK_WIDTH_COUNT];
-// Frame chunks are the closed RBP, forced-disp32 row of those same tables:
-// the record depends only on direction, width and data register, so prewarm
-// copies the sixteen RBP records of each table here and a spill or reload
-// reads one record instead of re-validating the table index and re-deriving
-// the displacement class and row stride per call. The frame base offset is
-// still added at emission time; it is a per-function fact. A zero byte count
+// Frame chunks are the closed RBP rows of those same tables: the record
+// depends only on direction, width, data register and displacement class, so
+// prewarm copies the sixteen RBP disp32 and disp8 records of each table here
+// and a spill or reload reads one record instead of re-validating the table
+// index and re-deriving the row stride per call. The frame base offset is
+// still added at emission time; it is a per-function fact, and the final
+// displacement picks the class: disp8 when it is a nonzero signed byte (the
+// same instruction, three bytes shorter), disp32 otherwise. A zero byte count
 // is the same refusal an unprepared table gave.
 BUSTER_GLOBAL_LOCAL MachineX64GprEncoding machine_x64_frame_chunk_encodings[2][MACHINE_X64_CHUNK_WIDTH_COUNT][16];
+BUSTER_GLOBAL_LOCAL MachineX64GprEncoding machine_x64_frame_chunk_disp8_encodings[2][MACHINE_X64_CHUNK_WIDTH_COUNT][16];
 // Chunk byte counts are 1, 2, 4 and 8 (machine_x64_copy_chunk); every other
 // value took the ladder's 64-bit arm, so it maps to the last width here.
 BUSTER_GLOBAL_LOCAL u8 const machine_x64_chunk_width_index[9] = {3, 0, 1, 3, 2, 3, 3, 3, 3};
@@ -12063,12 +12084,15 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_chunk_memory_tables(void)
         for (u32 direction = 0; direction < 2; direction += 1)
         {
             u8 table_plus_one = machine_x64_chunk_memory_tables[direction][width_slot];
+            bool table_valid = table_plus_one && table_plus_one <= machine_x64_variable_memory_encoding_table_count;
             for (u32 reg = 0; reg < 16; reg += 1)
             {
                 machine_x64_frame_chunk_encodings[direction][width_slot][reg] =
-                    table_plus_one && table_plus_one <= machine_x64_variable_memory_encoding_table_count
-                        ? machine_x64_variable_memory_encoding_tables[table_plus_one - 1u].encodings[2][reg + (MACHINE_X64_RBP << 4)]
-                        : (MachineX64GprEncoding){0};
+                    table_valid ? machine_x64_variable_memory_encoding_tables[table_plus_one - 1u].encodings[2][reg + (MACHINE_X64_RBP << 4)]
+                                : (MachineX64GprEncoding){0};
+                machine_x64_frame_chunk_disp8_encodings[direction][width_slot][reg] =
+                    table_valid ? machine_x64_variable_memory_encoding_tables[table_plus_one - 1u].encodings[1][reg + (MACHINE_X64_RBP << 4)]
+                                : (MachineX64GprEncoding){0};
             }
         }
     }
@@ -12459,11 +12483,13 @@ BUSTER_GLOBAL_LOCAL MachineX64ShapeMnemonic const machine_x64_shape_mnemonics[] 
     {S8_INITIALIZER("SETBE"), 71},
     {S8_INITIALIZER("SETNB"), 73},
     {S8_INITIALIZER("SETNP"), 75},
+    {S8_INITIALIZER("LEAVE"), 82},
     {S8_INITIALIZER("KXNORQ"), 51},
     {S8_INITIALIZER("XGETBV"), 55},
     {S8_INITIALIZER("MOVDQU"), 76},
     {S8_INITIALIZER("FNSTCW"), 66},
     {S8_INITIALIZER("SETNBE"), 72},
+    {S8_INITIALIZER("MOVUPS"), 83},
     {S8_INITIALIZER("CMPXCHG"), 34},
     {S8_INITIALIZER("UCOMISD"), 35},
     {S8_INITIALIZER("UCOMISS"), 36},
@@ -12483,9 +12509,9 @@ BUSTER_GLOBAL_LOCAL MachineX64ShapeMnemonic const machine_x64_shape_mnemonics[] 
 
 // First row of each length, indexed by length - 2, with a closing bound. There
 // Closing bound for each mnemonic length group.
-BUSTER_GLOBAL_LOCAL u8 const machine_x64_shape_mnemonic_spans[] = {0, 3, 27, 40, 64, 69, 74, 77, 79, 81};
+BUSTER_GLOBAL_LOCAL u8 const machine_x64_shape_mnemonic_spans[] = {0, 3, 27, 40, 65, 71, 76, 79, 81, 83};
 
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonics) == 81);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonics) == 83);
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonic_spans) ==
                 MACHINE_X64_SHAPE_MNEMONIC_MAX_LENGTH - MACHINE_X64_SHAPE_MNEMONIC_MIN_LENGTH + 2u);
 
@@ -12811,6 +12837,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_zero(void)
     (void)machine_x64_metadata_shape_cache_add(S8("CDQ"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("CQO"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("RET"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("LEAVE"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("UD2"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("CPUID"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("NOP"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
@@ -13106,9 +13133,11 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_float_vector_a
         memory_operands[0] = xmm_operand;
         memory_operands[1] = memory_operand;
         (void)machine_x64_metadata_shape_cache_add(S8("MOVDQU"), memory_operands, 2, sse2, attributes);
+        (void)machine_x64_metadata_shape_cache_add(S8("MOVUPS"), memory_operands, 2, sse, attributes);
         memory_operands[0] = memory_operand;
         memory_operands[1] = xmm_operand;
         (void)machine_x64_metadata_shape_cache_add(S8("MOVDQU"), memory_operands, 2, sse2, attributes);
+        (void)machine_x64_metadata_shape_cache_add(S8("MOVUPS"), memory_operands, 2, sse, attributes);
         memory_operand.width = 256;
         BusterX86MetadataPhysicalOperand ymm_operand = machine_x64_exact_ymm_operand(0);
         BusterX86MetadataFeatureInput avx = {.names = machine_x64_avx_features, .count = BUSTER_ARRAY_LENGTH(machine_x64_avx_features)};
@@ -13261,7 +13290,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_instruction(MachineX64Encoder
     if (!features.count)
     {
         if (string_equal(mnemonic, S8("CVTSI2SS")) || string_equal(mnemonic, S8("ADDSS")) || string_equal(mnemonic, S8("UCOMISS")) ||
-            string_equal(mnemonic, S8("SUBSS")) || string_equal(mnemonic, S8("CVTTSS2SI")) || string_equal(mnemonic, S8("MOVSS")))
+            string_equal(mnemonic, S8("SUBSS")) || string_equal(mnemonic, S8("CVTTSS2SI")) || string_equal(mnemonic, S8("MOVSS")) ||
+            string_equal(mnemonic, S8("MOVUPS")))
         {
             features.names = machine_x64_sse_features;
             features.count = BUSTER_ARRAY_LENGTH(machine_x64_sse_features);
@@ -13563,6 +13593,29 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_static_fixed_templates(void)
         scratch = machine_x64_fixed_template_scratch(scratch_bytes);
         (void)machine_x64_emit_metadata_registers(&scratch, S8("CMP"), MACHINE_X64_RCX, reg, 64, 0);
         machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_CMP64_RCX + reg, &scratch, 0);
+        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        (void)machine_x64_emit_metadata_registers(&scratch, S8("XOR"), reg, reg, 32, 0);
+        machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF + reg, &scratch, 0);
+    }
+    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+    (void)machine_x64_emit_metadata_instruction(&scratch, S8("LEAVE"), 0, 0, no_features, attributes, 0);
+    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_LEAVE, &scratch, 0);
+    for (u32 store = 0; store < 2; store += 1)
+    {
+        u32 short_row = store ? MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE8 : MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD8;
+        u32 wide_row = store ? MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE32 : MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD32;
+        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        (void)machine_x64_emit_metadata_xmm_memory(&scratch, S8("MOVUPS"), 0, MACHINE_X64_RBP, -8, store != 0, 128, 0);
+        machine_x64_fixed_template_publish(short_row, &scratch, 1);
+        probe = machine_x64_fixed_template_scratch(probe_bytes);
+        (void)machine_x64_emit_metadata_xmm_memory(&probe, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x5b, store != 0, 128, 0);
+        machine_x64_fixed_template_prove(short_row, &probe, (u8)(-0x5b));
+        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        (void)machine_x64_emit_metadata_xmm_memory(&scratch, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x1000, store != 0, 128, 0);
+        machine_x64_fixed_template_publish(wide_row, &scratch, 4);
+        probe = machine_x64_fixed_template_scratch(probe_bytes);
+        (void)machine_x64_emit_metadata_xmm_memory(&probe, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x5aa55aa5, store != 0, 128, 0);
+        machine_x64_fixed_template_prove(wide_row, &probe, (u32)-0x5aa55aa5);
     }
     scratch = machine_x64_fixed_template_scratch(scratch_bytes);
     (void)machine_x64_emit_metadata_registers(&scratch, S8("CMP"), MACHINE_X64_RAX, MACHINE_X64_RCX, 32, 0);
@@ -13573,9 +13626,6 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_static_fixed_templates(void)
     scratch = machine_x64_fixed_template_scratch(scratch_bytes);
     (void)machine_x64_emit_metadata_registers(&scratch, S8("MOV"), MACHINE_X64_RBP, MACHINE_X64_RSP, 64, 0);
     machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_MOV_RBP_RSP, &scratch, 0);
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_registers(&scratch, S8("MOV"), MACHINE_X64_RSP, MACHINE_X64_RBP, 64, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_MOV_RSP_RBP, &scratch, 0);
 
     // The patched rows: publish a representative of the value class the
     // site passes, then prove a second value of the same class moves only
@@ -13933,6 +13983,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
     MachineX64Encoder* encoder, u8 table_plus_one, u32 reg, u32 base, s32 displacement,
     bool force_disp32, MachineX64ExactEmitCounters* counters);
 
+// The displacement class of a frame chunk: its final RBP displacement fits a
+// disp8 field when it is a nonzero signed byte. Zero keeps disp32 (RBP has no
+// displacement-free form), as does every wider value.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_frame_displacement_is_short(u32 offset, u32 frame_base_offset)
+{
+    s32 displacement = (s32)((0u - offset) + frame_base_offset);
+    return displacement != 0 && displacement >= INT8_MIN && displacement <= INT8_MAX;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk_metadata(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
                                                                       MachineX64ExactEmitCounters* counters)
 {
@@ -13947,6 +14006,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk_metadata(MachineX64E
         return machine_x64_exact_reject(encoder, counters);
     }
     BusterX86MetadataPhysicalOperand operands[2];
+    bool force_disp32 = !machine_x64_frame_displacement_is_short(offset, encoder->frame_base_offset);
     if (load)
     {
         operands[0] = machine_x64_exact_gpr_operand(reg, chunk <= 2 ? 64 : width);
@@ -13958,16 +14018,20 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk_metadata(MachineX64E
         operands[1] = machine_x64_exact_gpr_operand(reg, width);
     }
     MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, 0);
-    return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, true, false, 0, false, counters);
+    return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, force_disp32, false, 0, false,
+                                       counters);
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
                                                                            MachineX64ExactEmitCounters* counters)
 {
     bool result = false;
+    bool short_form = machine_x64_frame_displacement_is_short(offset, encoder->frame_base_offset);
+    u32 direction = load ? MACHINE_X64_CHUNK_DIRECTION_LOAD : MACHINE_X64_CHUNK_DIRECTION_STORE;
     MachineX64GprEncoding const* encoding =
-        machine_x64_frame_chunk_encodings[load ? MACHINE_X64_CHUNK_DIRECTION_LOAD : MACHINE_X64_CHUNK_DIRECTION_STORE]
-                                         [machine_x64_chunk_width_slot(chunk)] + (reg & 15u);
+        (short_form ? machine_x64_frame_chunk_disp8_encodings : machine_x64_frame_chunk_encodings)[direction]
+                                                                                                  [machine_x64_chunk_width_slot(chunk)] +
+        (reg & 15u);
     u32 byte_count = encoding->byte_count;
     if (reg < 16 && byte_count)
     {
@@ -13984,7 +14048,14 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_emit_exact_frame_chunk(Machin
         {
             machine_x64_encoder_copy_encoding(encoder, encoding, byte_count);
             u32 value = (0u - offset) + encoder->frame_base_offset;
-            memcpy(encoder->bytes + encoder->count + byte_count - (u32)sizeof(u32), &value, sizeof(value));
+            if (short_form)
+            {
+                encoder->bytes[encoder->count + byte_count - 1u] = (u8)value;
+            }
+            else
+            {
+                memcpy(encoder->bytes + encoder->count + byte_count - (u32)sizeof(u32), &value, sizeof(value));
+            }
             encoder->count += byte_count;
             if (counters)
             {
@@ -14012,7 +14083,8 @@ bool machine_x64_test_frame_chunk_prepared(void)
             for (u32 reg = 0; reg < 16; reg += 1)
             {
                 u32 byte_count = machine_x64_frame_chunk_encodings[direction][width_slot][reg].byte_count;
-                result &= byte_count > sizeof(u32) && byte_count <= 15;
+                u32 short_count = machine_x64_frame_chunk_disp8_encodings[direction][width_slot][reg].byte_count;
+                result &= byte_count > sizeof(u32) && byte_count <= 15 && short_count + 3u == byte_count;
             }
         }
     }
@@ -14725,10 +14797,13 @@ bool machine_x64_test_block_displacement(u32 target_offset, s64 addend, u32 plac
 }
 #endif
 
+// `step_limit` bounds how many leading steps are emitted; the JCC row passes
+// one to keep only its Jcc when the other successor is the next block.
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* encoder, MachineX64PreparedExactOpcode const* entry,
                                                          MachineInstruction const* instruction, MachineStackPlacement const* placement,
                                                          u8 const* operand_registers, u32 payload, u64 immediate_value,
-                                                         MachineX64ExactEmitCounters* counters, Arena* arena, MachineBuilderStream* fixups)
+                                                         MachineX64ExactEmitCounters* counters, Arena* arena, MachineBuilderStream* fixups,
+                                                         u32 step_limit)
 {
     MachineX64ExactSequence const* sequence = entry ? entry->sequence : 0;
     if (!sequence || !entry->plan_valid || sequence->variant_count == 0 || entry->variant_count != sequence->variant_count ||
@@ -14788,7 +14863,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* enco
     }
     u32 sequence_start = encoder->count;
     u32 parity_mode = (payload >> 9) & 0x3u;
-    for (u32 step_index = 0; step_index < variant->step_count; step_index += 1)
+    for (u32 step_index = 0; step_index < variant->step_count && step_index < step_limit; step_index += 1)
     {
         if (allocated_predicate && step_index == (predicate_result ? 1u : 0u)) continue;
         MachineX64ExactSequenceStep const* step = variant->steps + step_index;
@@ -14943,6 +15018,29 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* enco
     return true;
 }
 
+// Aggregate copies move whole sixteen-byte chunks first, through XMM0 with
+// MOVUPS (frame-copy-16 and pointer-*-copy-16 in
+// tools/machine_rewrite_search.py): an unaligned, uninterpreted data move of
+// the same bytes two 8-byte chunk pairs move, valid because a copy's source
+// and destination objects are disjoint or identical (distinct frame slots
+// never partially overlap, and C11 6.5.16.1p3 leaves any other overlapping
+// assignment undefined). The rows declare XMM0 clobbered and join the
+// implicit vector-state chain, so no staged XMM argument or result can be
+// live across them. The remainder keeps the general-register chunks.
+#define MACHINE_X64_COPY_VECTOR_CHUNK 16u
+
+BUSTER_GLOBAL_LOCAL void machine_x64_emit_frame_vector_chunk(MachineX64Encoder* encoder, bool load, u32 offset)
+{
+    u32 value = (0u - offset) + encoder->frame_base_offset;
+    bool short_form = machine_x64_frame_displacement_is_short(offset, encoder->frame_base_offset);
+    u32 row = load ? (short_form ? MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD8 : MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD32)
+                   : (short_form ? MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE8 : MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE32);
+    if (machine_x64_emit_fixed_template(encoder, row, short_form ? (u8)value : value) == MACHINE_X64_FIXED_TEMPLATE_UNPUBLISHED)
+    {
+        (void)machine_x64_emit_metadata_xmm_memory(encoder, S8("MOVUPS"), 0, MACHINE_X64_RBP, -(s64)(s32)offset, !load, 128, 0);
+    }
+}
+
 // Sized chunk moves shared by the aggregate copy loops, chunked 8/4/2/1
 // exactly like the canonical copy code: narrow loads zero-extend through
 // movzx, narrow stores write their exact width.
@@ -15012,9 +15110,187 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_predicate_frame(MachineX64Encoder* enc
 // their interpretation outside the machine-row dispatcher so the common row
 // path does not duplicate spill/reload/copy/rematerialization policy around
 // every instruction.
+// Flag liveness for the verified zero idiom (zero-idiom in
+// tools/machine_rewrite_search.py): XOR r32, r32 equals MOV r32, 0 except
+// that it writes the arithmetic flags, so it may replace a zero
+// materialization only where no later reader can observe the flags.
+//
+// The proof is deliberately conservative. A reader is any row the opcode
+// metadata marks MACHINE_OPCODE_ROW_FLAGS_USE (SETCC, JCC) plus inline
+// assembly. A killer is a row whose instruction unconditionally writes every
+// consumed flag (CF, PF, ZF, SF, OF): CMP, TEST and the two-operand ALU rows
+// and NEG. Every other row, including the partial or conditional definers
+// (shifts by CL, BSF/BSR, IMUL, calls, expansions), is transparent. Edits
+// never touch the flags. A block's successors come from its JMP or JCC
+// terminator; RET and UD2 have none; any other ending is taken to read the
+// flags. Liveness is the least fixed point of the usual backward equations,
+// one bit per block, so it terminates after at most block_count sweeps.
+typedef struct MachineX64FlagsLiveness MachineX64FlagsLiveness;
+struct MachineX64FlagsLiveness
+{
+    Arena* arena;
+    MachineFunction* function;
+    // One byte per row: nonzero when a later reader may observe the flags
+    // the row leaves behind. Null until the first query.
+    u8* live_after;
+};
+
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_flags_reader(MachineOpcodeRow const* rows, u16 opcode)
+{
+    return (rows[opcode].flags & MACHINE_OPCODE_ROW_FLAGS_USE) != 0 || opcode == MACHINE_X64_INLINE_ASSEMBLY;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_flags_killer(u16 opcode)
+{
+    bool result;
+    switch (opcode)
+    {
+        case MACHINE_X64_CMP32:
+        case MACHINE_X64_CMP64:
+        case MACHINE_X64_TEST_RR:
+        case MACHINE_X64_ADD32:
+        case MACHINE_X64_ADD64:
+        case MACHINE_X64_SUB32:
+        case MACHINE_X64_SUB64:
+        case MACHINE_X64_AND32:
+        case MACHINE_X64_AND64:
+        case MACHINE_X64_OR32:
+        case MACHINE_X64_OR64:
+        case MACHINE_X64_XOR32:
+        case MACHINE_X64_XOR64:
+        case MACHINE_X64_NEG32:
+        case MACHINE_X64_NEG64:
+            result = true;
+            break;
+        default:
+            result = false;
+            break;
+    }
+    return result;
+}
+
+// Whether the flags may be live when block `block_index` ends.
+BUSTER_GLOBAL_LOCAL bool machine_x64_flags_live_out(MachineFunction* function, u32 block_index, u8 const* live_in)
+{
+    MachineBlock const* block = function->blocks + block_index;
+    bool result = true;
+    if (block->instruction_count)
+    {
+        MachineInstruction const* last = function->instructions + block->first_instruction + block->instruction_count - 1u;
+        u32 taken = machine_ref_payload(last->operands[0]);
+        u32 fallthrough = machine_ref_payload(last->operands[1]);
+        bool taken_block = machine_ref_kind(last->operands[0]) == MACHINE_REF_BLOCK && taken < function->block_count;
+        bool fallthrough_block = machine_ref_kind(last->operands[1]) == MACHINE_REF_BLOCK && fallthrough < function->block_count;
+        switch (last->opcode)
+        {
+            case MACHINE_X64_RET:
+            case MACHINE_X64_UD2:
+                result = false;
+                break;
+            case MACHINE_X64_JMP:
+                result = !taken_block || live_in[taken];
+                break;
+            case MACHINE_X64_JCC:
+                result = !taken_block || !fallthrough_block || live_in[taken] || live_in[fallthrough];
+                break;
+            default:
+                result = true;
+                break;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_flags_liveness_solve(MachineX64FlagsLiveness* liveness)
+{
+    MachineFunction* function = liveness->function;
+    MachineOpcodeRow const* rows = machine_opcode_row_table();
+    u32 block_count = function->block_count;
+    u8* live_after = arena_allocate(liveness->arena, u8, function->instruction_count ? function->instruction_count : 1u);
+    // Per block: what the first flag-relevant row does on entry (0 nothing,
+    // 1 reads, 2 kills), then the live-in bit being solved for.
+    u8* entry = arena_allocate(liveness->arena, u8, block_count ? block_count : 1u);
+    u8* live_in = arena_allocate(liveness->arena, u8, block_count ? block_count : 1u);
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        MachineBlock const* block = function->blocks + block_index;
+        u8 state = 0;
+        for (u32 offset = 0; offset < block->instruction_count && !state; offset += 1)
+        {
+            u16 opcode = function->instructions[block->first_instruction + offset].opcode;
+            state = machine_x64_flags_reader(rows, opcode) ? 1 : machine_x64_flags_killer(opcode) ? 2 : 0;
+        }
+        entry[block_index] = state;
+        live_in[block_index] = 0;
+    }
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (u32 reverse = block_count; reverse > 0; reverse -= 1)
+        {
+            u32 block_index = reverse - 1u;
+            u8 live = entry[block_index] == 1 ? 1 : entry[block_index] == 2 ? 0 : (u8)machine_x64_flags_live_out(function, block_index, live_in);
+            if (live != live_in[block_index])
+            {
+                live_in[block_index] = live;
+                changed = true;
+            }
+        }
+    }
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        MachineBlock const* block = function->blocks + block_index;
+        bool live = machine_x64_flags_live_out(function, block_index, live_in);
+        for (u32 reverse = block->instruction_count; reverse > 0; reverse -= 1)
+        {
+            u32 row = block->first_instruction + reverse - 1u;
+            u16 opcode = function->instructions[row].opcode;
+            live_after[row] = (u8)live;
+            live = machine_x64_flags_reader(rows, opcode) || (!machine_x64_flags_killer(opcode) && live);
+        }
+    }
+    liveness->live_after = live_after;
+}
+
+// Whether no reader can observe the flags at `point`. A BEFORE point sees
+// the row's own read or kill; later phases see only what follows the row.
+BUSTER_GLOBAL_LOCAL bool machine_x64_flags_dead_at(MachineX64FlagsLiveness* liveness, MachinePoint point)
+{
+    if (!liveness->live_after)
+    {
+        machine_x64_flags_liveness_solve(liveness);
+    }
+    u32 row = machine_point_instruction(point);
+    bool live = true;
+    if (row < liveness->function->instruction_count)
+    {
+        live = liveness->live_after[row] != 0;
+        if (machine_point_phase(point) == MACHINE_POINT_BEFORE || machine_point_phase(point) == MACHINE_POINT_EARLY)
+        {
+            u16 opcode = liveness->function->instructions[row].opcode;
+            live = machine_x64_flags_reader(machine_opcode_row_table(), opcode) || (!machine_x64_flags_killer(opcode) && live);
+        }
+    }
+    return !live;
+}
+
+// xor r32, r32: the zero idiom, for a caller that has proved the flags dead.
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_zero_idiom(MachineX64Encoder* encoder, u32 reg, MachineX64ExactEmitCounters* counters)
+{
+    bool result = true;
+    if (machine_x64_emit_fixed_template_counted(encoder, MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF + reg, counters) ==
+        MACHINE_X64_FIXED_TEMPLATE_UNPUBLISHED)
+    {
+        result = machine_x64_emit_metadata_registers(encoder, S8("XOR"), reg, reg, 32, counters);
+    }
+    return result && !encoder->overflow;
+}
+
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 machine_x64_emit_edit_run(MachineX64Encoder* encoder, MachineFunction* function,
                                                                 MachineStackPlacement* placement, u32 edit_cursor,
-                                                                MachinePoint point, bool default_store)
+                                                                MachinePoint point, bool default_store,
+                                                                MachineX64FlagsLiveness* flags)
 {
     while (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == point)
     {
@@ -15023,7 +15299,12 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 machine_x64_emit_edit_run(MachineX64Encode
         bool vector_location = edit->location >= MACHINE_X64_ZMM0 && !predicate_location;
         if (edit->kind == MACHINE_EDIT_COPY)
         {
-            if (predicate_location)
+            if (edit->location == edit->subject)
+            {
+                // self-copy-64: a whole-register copy onto itself changes no
+                // state, for general, vector and predicate registers alike.
+            }
+            else if (predicate_location)
             {
                 u8 regs[4] = {(u8)edit->location, (u8)edit->subject, 0, 0};
                 (void)machine_x64_emit_predicate_row(encoder, &(MachineInstruction){.opcode = MACHINE_X64_KMOV, .payload = 64}, regs);
@@ -15043,8 +15324,11 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 machine_x64_emit_edit_run(MachineX64Encode
         }
         else if (edit->kind == MACHINE_EDIT_REMATERIALIZE)
         {
-            if (predicate_location) (void)machine_x64_emit_predicate_constant(encoder, edit->location, function->immediates[edit->subject]);
-            else (void)machine_x64_emit_exact_immediate_value(encoder, edit->location, function->immediates[edit->subject], 0);
+            u64 value = function->immediates[edit->subject];
+            if (predicate_location) (void)machine_x64_emit_predicate_constant(encoder, edit->location, value);
+            else if (value == 0 && edit->location < 16 && machine_x64_flags_dead_at(flags, point))
+                (void)machine_x64_emit_zero_idiom(encoder, edit->location, 0);
+            else (void)machine_x64_emit_exact_immediate_value(encoder, edit->location, value, 0);
         }
         else
         {
@@ -15069,8 +15353,24 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 machine_x64_emit_edit_run(MachineX64Encode
             }
             else
             {
-                (void)machine_x64_emit_exact_frame_chunk(
-                    encoder, !store, edit->location, frame_offset, 8, 0);
+                // store-reload-same-slot-64: an allocator reload that reads
+                // back the register just stored to the same offset, with
+                // nothing emitted in between, is already satisfied.
+                bool reloads_last_store = !store && encoder->frame_store_valid && encoder->frame_store_end == encoder->count &&
+                                          encoder->frame_store_register == edit->location &&
+                                          encoder->frame_store_offset == frame_offset &&
+                                          (edit->kind == MACHINE_EDIT_RELOAD || edit->kind == MACHINE_EDIT_TEMP_RELOAD);
+                if (!reloads_last_store)
+                {
+                    (void)machine_x64_emit_exact_frame_chunk(encoder, !store, edit->location, frame_offset, 8, 0);
+                }
+                if (store)
+                {
+                    encoder->frame_store_valid = !encoder->overflow;
+                    encoder->frame_store_end = encoder->count;
+                    encoder->frame_store_register = (u8)edit->location;
+                    encoder->frame_store_offset = frame_offset;
+                }
             }
         }
         edit_cursor += 1;
@@ -15396,10 +15696,14 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         encoder.frame_base_offset = placement->frame_size;
     }
     u32 edit_cursor = 0;
+    MachineX64FlagsLiveness flags_liveness = {.arena = arena, .function = function};
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         MachineBlock* block = function->blocks + block_index;
         result.block_offsets[block_index] = encoder.count;
+        // A block start may be a branch target: nothing stored before it can
+        // stand in for a reload after it.
+        encoder.frame_store_valid = false;
         for (u32 offset = 0; offset < block->instruction_count; offset += 1)
         {
             u32 instruction_index = block->first_instruction + offset;
@@ -15409,7 +15713,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             MachinePoint before = machine_point_make(instruction_index, MACHINE_POINT_BEFORE);
             if (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == before)
             {
-                edit_cursor = machine_x64_emit_edit_run(&encoder, function, placement, edit_cursor, before, false);
+                edit_cursor = machine_x64_emit_edit_run(&encoder, function, placement, edit_cursor, before, false, &flags_liveness);
             }
             MachineX64PreparedExactOpcode const* exact_entry = machine_x64_exact_opcode_for_opcode(machine_x64_predicate_legacy_opcode(instruction->opcode));
             bool exact_required = exact_entry && exact_entry->exact_required;
@@ -15438,16 +15742,65 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     exact_immediate = instruction->payload;
                 }
                 bool exact_emitted = false;
-                if (!exact_immediate_valid)
+                // Branch layout (docs/machine-rewrite-campaign.md): blocks are
+                // emitted in index order, so a terminator's successor at
+                // block_index + 1 is reached by falling through. A JMP there
+                // emits nothing; a JCC keeps only its Jcc when the fallthrough
+                // is next, or inverts the condition (x86 nibbles pair at bit
+                // 0) and branches to the fallthrough when the taken block is
+                // next. Allocator edits after the terminator, a non-final
+                // row, or an asm-goto landing addend on the JMP keep the full
+                // form.
+                MachineInstruction layout_row = *instruction;
+                u32 layout_step_limit = UINT32_MAX;
+                bool layout_elided = false;
+                bool layout_final = offset + 1u == block->instruction_count &&
+                                    !(edit_cursor < placement->edit_count &&
+                                      placement->edits[edit_cursor].point == machine_point_make(instruction_index, MACHINE_POINT_AFTER));
+                u32 next_block = block_index + 1u;
+                bool taken_is_block = machine_ref_kind(instruction->operands[0]) == MACHINE_REF_BLOCK;
+                bool fallthrough_is_block = machine_ref_kind(instruction->operands[1]) == MACHINE_REF_BLOCK;
+                if (layout_final && instruction->opcode == MACHINE_X64_JMP && taken_is_block &&
+                    machine_ref_payload(instruction->operands[0]) == next_block &&
+                    !(block_addend_targets && block_addend_targets[block_index] == next_block))
+                {
+                    layout_elided = true;
+                }
+                else if (layout_final && instruction->opcode == MACHINE_X64_JCC && taken_is_block && fallthrough_is_block &&
+                         (instruction->payload & ~0xfu) == 0)
+                {
+                    if (machine_ref_payload(instruction->operands[1]) == next_block)
+                    {
+                        layout_step_limit = 1;
+                    }
+                    else if (machine_ref_payload(instruction->operands[0]) == next_block)
+                    {
+                        layout_row.payload = instruction->payload ^ 1u;
+                        layout_row.operands[0] = instruction->operands[1];
+                        layout_row.operands[1] = instruction->operands[0];
+                        layout_step_limit = 1;
+                    }
+                }
+                if (layout_elided)
+                {
+                    exact_emitted = true;
+                }
+                else if (!exact_immediate_valid)
                 {
                     exact_counters.attempts += 1;
                     exact_counters.fallbacks += 1;
                 }
+                else if (instruction->opcode == MACHINE_X64_MOV_RI && exact_immediate == 0 && operand_registers[0] < 16 &&
+                         machine_x64_flags_dead_at(&flags_liveness, machine_point_make(instruction_index, MACHINE_POINT_AFTER)))
+                {
+                    exact_emitted = machine_x64_emit_zero_idiom(&encoder, operand_registers[0], &exact_counters);
+                }
                 else
                 {
                     exact_emitted = exact_entry->sequence_required
-                                         ? machine_x64_emit_exact_sequence(&encoder, exact_entry, instruction, placement, operand_registers,
-                                                                           instruction->payload, exact_immediate, &exact_counters, arena, &fixups)
+                                         ? machine_x64_emit_exact_sequence(&encoder, exact_entry, &layout_row, placement, operand_registers,
+                                                                           layout_row.payload, exact_immediate, &exact_counters, arena, &fixups,
+                                                                           layout_step_limit)
                                          : machine_x64_emit_exact_recipe(&encoder, exact_entry, instruction, placement, operand_registers,
                                                                          instruction->payload, exact_immediate, false, &exact_counters);
                 }
@@ -15469,7 +15822,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     // authoritative.
                     encoder.overflow = true;
                 }
-                else if (exact_entry->descriptor)
+                else if (exact_entry->descriptor && !layout_elided)
                 {
                     // Relative and symbolic forms deliberately query the
                     // metadata encoder with a neutral zero displacement. The
@@ -15617,12 +15970,20 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                                 }
                             }
                         }
-                        else if (!saves_first)
+                        if (!placement->callee_saved_mask && !saves_first)
                         {
-                            machine_x64_emit_fixed_registers(&encoder, MACHINE_X64_FIXED_TEMPLATE_MOV_RSP_RBP, S8("MOV"),
-                                                             MACHINE_X64_RSP, MACHINE_X64_RBP, 64);
+                            // epilogue-leave: LEAVE is MOV RSP, RBP; POP RBP
+                            // and has no flag effect. System V unwind records
+                            // describe only the prologue; Win64 frames, whose
+                            // epilogue grammar excludes LEAVE, save first.
+                            machine_x64_emit_fixed_instruction(&encoder, MACHINE_X64_FIXED_TEMPLATE_LEAVE, S8("LEAVE"),
+                                                               (BusterX86MetadataFeatureInput){0});
                         }
-                        machine_x64_emit_fixed_register(&encoder, MACHINE_X64_FIXED_TEMPLATE_POP + MACHINE_X64_RBP, S8("POP"), MACHINE_X64_RBP, 64);
+                        else
+                        {
+                            machine_x64_emit_fixed_register(&encoder, MACHINE_X64_FIXED_TEMPLATE_POP + MACHINE_X64_RBP, S8("POP"),
+                                                            MACHINE_X64_RBP, 64);
+                        }
                         machine_x64_emit_fixed_instruction(&encoder, MACHINE_X64_FIXED_TEMPLATE_RET, S8("RET"), (BusterX86MetadataFeatureInput){0});
                     }
                     break; case MACHINE_X64_CALL_DIRECT:
@@ -16077,6 +16438,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         u32 destination_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])];
                         u32 source_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])];
                         u32 copied = 0;
+                        for (; instruction->payload - copied >= MACHINE_X64_COPY_VECTOR_CHUNK; copied += MACHINE_X64_COPY_VECTOR_CHUNK)
+                        {
+                            machine_x64_emit_frame_vector_chunk(&encoder, true, source_offset - copied);
+                            machine_x64_emit_frame_vector_chunk(&encoder, false, destination_offset - copied);
+                        }
                         while (copied < instruction->payload)
                         {
                             u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
@@ -16090,6 +16456,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         u32 destination_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])];
                         u32 source_register = operand_registers[1];
                         u32 copied = 0;
+                        for (; instruction->payload - copied >= MACHINE_X64_COPY_VECTOR_CHUNK; copied += MACHINE_X64_COPY_VECTOR_CHUNK)
+                        {
+                            (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVUPS"), 0, source_register, (s64)copied, false, 128, 0);
+                            machine_x64_emit_frame_vector_chunk(&encoder, false, destination_offset - copied);
+                        }
                         while (copied < instruction->payload)
                         {
                             u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
@@ -16103,6 +16474,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         u32 destination_register = operand_registers[0];
                         u32 source_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])];
                         u32 copied = 0;
+                        for (; instruction->payload - copied >= MACHINE_X64_COPY_VECTOR_CHUNK; copied += MACHINE_X64_COPY_VECTOR_CHUNK)
+                        {
+                            machine_x64_emit_frame_vector_chunk(&encoder, true, source_offset - copied);
+                            (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVUPS"), 0, destination_register, (s64)copied, true, 128, 0);
+                        }
                         while (copied < instruction->payload)
                         {
                             u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
@@ -16661,7 +17037,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             MachinePoint after = machine_point_make(instruction_index, MACHINE_POINT_AFTER);
             if (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == after)
             {
-                edit_cursor = machine_x64_emit_edit_run(&encoder, function, placement, edit_cursor, after, true);
+                edit_cursor = machine_x64_emit_edit_run(&encoder, function, placement, edit_cursor, after, true, &flags_liveness);
             }
         }
     }

@@ -128,6 +128,36 @@
   variadic signature checks the general incoming-address expansion past 4095
   bytes. Darwin callers extend narrow integer register arguments to 32 bits
   before physical-register staging, as required by its public ABI.
+- The x86-64 encoder applies the verified local rewrites of the
+  [machine rewrite campaign](../machine-rewrite-campaign.md), each an encoding
+  choice under a precondition it decides locally: frame chunks use disp8
+  when the final RBP displacement is a nonzero signed byte; an allocator
+  `COPY` onto its own register and a `RELOAD`/`TEMP_RELOAD` right after the
+  64-bit spill of the same register to the same offset (same block) emit
+  nothing; `MOV_RI` rows and `REMATERIALIZE` edits of zero use `XOR r32, r32`
+  where `machine_x64_flags_dead_at` proves no reader observes the flags;
+  System V frames without callee-saved pushes return through `LEAVE`. The
+  flag proof treats only `CMP`, `TEST`, two-operand ALU rows and `NEG` as
+  killers and only `MACHINE_OPCODE_ROW_FLAGS_USE` rows and inline assembly as
+  readers; keep new flag readers marked, or the proof becomes unsound. New
+  forms come from metadata-published fixed templates, never literal bytes.
+- x86-64 blocks are emitted in index order, and the encoder lays out a
+  block's final terminator against that order: a `JMP` to block `index + 1`
+  emits nothing; a `JCC` whose fallthrough is next emits only its `Jcc`, and
+  one whose taken block is next branches on the inverted condition (x86
+  condition nibbles pair at bit 0) to its fallthrough. Allocator edits after
+  the terminator, an asm-goto landing addend on the `JMP`, or a `JCC` payload
+  that is not a plain condition nibble keep the two-branch form. Block order
+  therefore affects size, never semantics.
+- x86-64 `COPY_FRAME_FROM_FRAME`, `COPY_FRAME_FROM_PTR` and
+  `COPY_PTR_FROM_FRAME` move whole sixteen-byte chunks through XMM0 with
+  `MOVUPS` (RBP-frame sides from patched fixed templates), then 8/4/2/1-byte
+  general-register tails, ascending, each chunk loaded whole before it is
+  stored. That plan is exact for disjoint or identical objects, which C
+  assignment requires (C11 6.5.16.1p3), and for every overlap where the
+  former eight-byte plan was exact. The rows declare XMM0 clobbered and join
+  the implicit vector-state chain; selection must keep placing copies before
+  XMM argument staging and after result capture.
 - x86 ADD/SUB/AND/OR/XOR/IMUL rows are three-operand machine SSA with operand
   0 tied to operand 1. Allocators satisfy the physical two-address constraint;
   selectors must not reintroduce a MOV plus mutable USE_DEFINE result.
