@@ -1,0 +1,293 @@
+name: Apply and validate issue 1731
+
+on:
+  push:
+    branches:
+      - ai_x86_64_long_double_float16
+
+permissions:
+  contents: write
+
+jobs:
+  apply-test-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply focused implementation and regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, found {count}")
+              file.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "src/buster/lib/compiler/frontend/c/c_gen.c",
+              '''        if (source_value->kind == IR_TYPE_FLOAT && source_value->bit_width == 64)
+          {
+              runtime = S8("__truncdfhf2");
+              runtime_parameter = builder->f64_type;
+          }
+          else if (source_type.value != builder->f32_type.value)
+          {''',
+              '''        if (source_value->kind == IR_TYPE_FLOAT && source_value->bit_width == 80 &&
+              c_ir_target_supports_f80(builder->target))
+          {
+              runtime = S8("__truncxfhf2");
+              runtime_parameter = source_type;
+          }
+          else if (source_value->kind == IR_TYPE_FLOAT && source_value->bit_width == 64)
+          {
+              runtime = S8("__truncdfhf2");
+              runtime_parameter = builder->f64_type;
+          }
+          else if (source_type.value != builder->f32_type.value)
+          {''')
+
+          replace_once(
+              "src/buster/lib/compiler/frontend/c/c_parse.c",
+              '''BUSTER_C_INTERNAL String8 c_parse_scalar_conversion_message(Target target, CTypeKind to, CTypeKind from, bool runtime)
+          {''',
+              '''BUSTER_C_INTERNAL bool c_parse_target_supports_f80_float16_runtime(Target target)
+          {
+              TargetDataLayout layout = target_data_layout(target);
+              bool supported_os = target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID ||
+                                  target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+              bool supported = target.cpu_arch == CPU_ARCH_X86_64 && supported_os &&
+                               ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_SYSTEMV_X86_64 &&
+                               layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 80 &&
+                               layout.long_double_type.size == 16 && layout.long_double_type.alignment == 16;
+              return supported;
+          }
+
+          BUSTER_C_INTERNAL String8 c_parse_scalar_conversion_message(Target target, CTypeKind to, CTypeKind from, bool runtime)
+          {''')
+
+          replace_once(
+              "src/buster/lib/compiler/frontend/c/c_parse.c",
+              '''    else if (runtime && to == C_TYPE_FLOAT16 && (from == C_TYPE_LONG_DOUBLE || from == C_TYPE_LONG_DOUBLE_COMPLEX) &&
+                       target_data_layout(target).long_double_type.bit_width > 64)
+                  message = S8("C IR lowering does not support this runtime conversion to binary16");''',
+              '''    else if (runtime && to == C_TYPE_FLOAT16 && (from == C_TYPE_LONG_DOUBLE || from == C_TYPE_LONG_DOUBLE_COMPLEX) &&
+                       target_data_layout(target).long_double_type.bit_width > 64 &&
+                       !c_parse_target_supports_f80_float16_runtime(target))
+                  message = S8("C IR lowering does not support this runtime conversion to binary16");''')
+
+          replace_once(
+              "docs/agents/frontend/wide-floats-assembly.md",
+              '''  targets need no F16C or AVX512-FP16 feature. On x86-64, lowering widens each half through
+            `__extendhfsf2`, performs arithmetic in binary32, and rounds immediately back
+            through `__truncsfhf2`; a binary64 source uses `__truncdfhf2`. Darwin x86-64's''',
+              '''  targets need no F16C or AVX512-FP16 feature. On x86-64, lowering widens each half through
+            `__extendhfsf2`, performs arithmetic in binary32, and rounds immediately back
+            through `__truncsfhf2`; a binary64 source uses `__truncdfhf2`. On supported
+            System V x86-64 targets, an x87 `long double` source uses `__truncxfhf2`
+            directly, avoiding an intermediate binary64 rounding; widening a half to x87
+            remains exact through binary32. Darwin x86-64's''')
+
+          replace_once(
+              "tests/basic_c_f80_machine.c",
+              '''} F80Image;
+
+          typedef struct F80Wrapper { long double value; } F80Wrapper;''',
+              '''} F80Image;
+
+          typedef union F16Image
+          {
+              _Float16 value;
+              unsigned short bits;
+          } F16Image;
+
+          typedef struct F80Wrapper { long double value; } F80Wrapper;''')
+
+          replace_once(
+              "tests/basic_c_f80_machine.c",
+              '''double f80_to_double(long double value) { return (double)value; }
+          float f80_to_float(long double value) { return (float)value; }
+          long double f80_from_signed(long long value) { return (long double)value; }''',
+              '''double f80_to_double(long double value) { return (double)value; }
+          float f80_to_float(long double value) { return (float)value; }
+          _Float16 f80_to_float16(long double value) { return (_Float16)value; }
+          _Float16 f80_complex_to_float16(_Complex long double value) { return (_Float16)value; }
+          long double f80_from_float16(_Float16 value) { return (long double)value; }
+          long double f80_from_signed(long long value) { return (long double)value; }''')
+
+          replace_once(
+              "tests/basic_c_f80_machine.c",
+              '''double f80_to_double(long double value);
+          float f80_to_float(long double value);
+          long double f80_from_signed(long long value);''',
+              '''double f80_to_double(long double value);
+          float f80_to_float(long double value);
+          _Float16 f80_to_float16(long double value);
+          _Float16 f80_complex_to_float16(_Complex long double value);
+          long double f80_from_float16(_Float16 value);
+          long double f80_from_signed(long long value);''')
+
+          replace_once(
+              "tests/basic_c_f80_machine.c",
+              '''#ifndef F80_MACHINE_LIBRARY
+          int main(void)
+          {''',
+              '''#ifndef F80_MACHINE_LIBRARY
+          static _Float16 f80_reference_to_float16(long double value)
+          {
+              return (_Float16)value;
+          }
+
+          static _Float16 f80_reference_complex_to_float16(_Complex long double value)
+          {
+              return (_Float16)value;
+          }
+
+          static int f80_float16_matches(long double value)
+          {
+              F16Image expected;
+              F16Image actual;
+              expected.value = f80_reference_to_float16(value);
+              actual.value = f80_to_float16(value);
+              return expected.bits == actual.bits;
+          }
+
+          static int f80_complex_float16_matches(_Complex long double value)
+          {
+              F16Image expected;
+              F16Image actual;
+              expected.value = f80_reference_complex_to_float16(value);
+              actual.value = f80_complex_to_float16(value);
+              return expected.bits == actual.bits;
+          }
+
+          static int f80_float16_widen_matches(unsigned short bits)
+          {
+              F16Image input;
+              input.bits = bits;
+              return f80_from_float16(input.value) == (long double)input.value;
+          }
+
+          int main(void)
+          {''')
+
+          replace_once(
+              "tests/basic_c_f80_machine.c",
+              '''    failed |= f80_from_double(-3.25) != -3.25L || f80_from_float(1.5f) != 1.5L;
+              failed |= f80_to_double(3.25L) != 3.25 || f80_to_float(-1.5L) != -1.5f;
+              failed |= f80_from_signed(-9223372036854775807LL) != -9223372036854775807.0L;''',
+              '''    failed |= f80_from_double(-3.25) != -3.25L || f80_from_float(1.5f) != 1.5L;
+              failed |= f80_to_double(3.25L) != 3.25 || f80_to_float(-1.5L) != -1.5f;
+              // The values just above the binary16 ties are still below one
+              // binary64 ulp. A path through double therefore rounds the wrong
+              // way even though the ordinary tie cases happen to look correct.
+              volatile long double half_even_tie = 0x1.002p0L;
+              volatile long double half_above_tie = 0x1.0020000000000002p0L;
+              volatile long double half_odd_tie = 0x1.006p0L;
+              volatile long double half_min_subnormal = 0x1p-24L;
+              volatile long double half_zero_tie = 0x1p-25L;
+              volatile long double half_above_zero_tie = 0x1.0000000000000002p-25L;
+              volatile long double half_maximum = 0x1.ffcp15L;
+              volatile long double half_overflow_tie = 0x1.ffep15L;
+              failed |= !f80_float16_matches(half_even_tie);
+              failed |= !f80_float16_matches(half_above_tie);
+              failed |= !f80_float16_matches(half_odd_tie);
+              failed |= !f80_float16_matches(half_min_subnormal);
+              failed |= !f80_float16_matches(half_zero_tie);
+              failed |= !f80_float16_matches(half_above_zero_tie);
+              failed |= !f80_float16_matches(half_maximum);
+              failed |= !f80_float16_matches(half_overflow_tie);
+              failed |= !f80_float16_matches(nan.value);
+              _Complex long double complex_half;
+              __real__ complex_half = half_above_tie;
+              __imag__ complex_half = nan.value;
+              failed |= !f80_complex_float16_matches(complex_half);
+              failed |= !f80_float16_widen_matches(0x0001);
+              failed |= !f80_float16_widen_matches(0x03ff);
+              failed |= !f80_float16_widen_matches(0x3c00);
+              failed |= !f80_float16_widen_matches(0x7bff);
+              failed |= !f80_float16_widen_matches(0x8001);
+              F16Image negative_zero_half;
+              negative_zero_half.bits = 0x8000;
+              F80Image negative_zero_f80;
+              negative_zero_f80.value = f80_from_float16(negative_zero_half.value);
+              failed |= negative_zero_f80.bits.significand != 0 || negative_zero_f80.bits.exponent != 0x8000;
+              failed |= f80_from_signed(-9223372036854775807LL) != -9223372036854775807.0L;''')
+          PY
+          git diff --check
+
+      - name: Build compiler and run focused x87 binary16 matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$driver" build --config Release -t ide
+          mkdir -p build/issue-1731
+          for mode in none mir-stack fast quality; do
+            for ssa in on off; do
+              object="build/issue-1731/f80-${mode}-${ssa}.o"
+              executable="build/issue-1731/f80-${mode}-${ssa}"
+              flags=(-c -g0 "-fregister-allocator=${mode}" -fverify-codegen)
+              if [[ "$ssa" == on ]]; then
+                flags+=(-ffrontend-ssa)
+              else
+                flags+=(-fno-frontend-ssa)
+              fi
+              if [[ "$mode" != none ]]; then
+                flags+=(-fno-machine-fallback)
+              fi
+              build/Release/ide cc "${flags[@]}" -DF80_MACHINE_LIBRARY tests/basic_c_f80_machine.c -o "$object"
+              clang -std=gnu17 -Wall -Wextra -Werror -DF80_MACHINE_HOST tests/basic_c_f80_machine.c "$object" -lm -lgcc -o "$executable"
+              "$executable"
+            done
+          done
+
+      - name: Run full compiler gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/buster-build"
+          "$driver" build --config Release -t test_all
+          "$driver" test_mode_matrix --config Release
+
+      - name: Commit validated implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/ai-1731-apply.yml
+          git diff --check
+          python3 - <<'PY'
+          import subprocess
+
+          allowed = {
+              ".github/workflows/ai-1731-apply.yml",
+              "docs/agents/frontend/wide-floats-assembly.md",
+              "src/buster/lib/compiler/frontend/c/c_gen.c",
+              "src/buster/lib/compiler/frontend/c/c_parse.c",
+              "tests/basic_c_f80_machine.c",
+          }
+          changed = set(subprocess.check_output(["git", "diff", "--name-only", "HEAD"], text=True).splitlines())
+          unexpected = changed - allowed
+          missing = allowed - changed
+          if unexpected or missing:
+              raise SystemExit(f"unexpected={sorted(unexpected)} missing={sorted(missing)}")
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/agents/frontend/wide-floats-assembly.md \
+                  src/buster/lib/compiler/frontend/c/c_gen.c \
+                  src/buster/lib/compiler/frontend/c/c_parse.c \
+                  tests/basic_c_f80_machine.c
+          git commit -m "c: support x87 long double to _Float16"
+          git push origin HEAD:ai_x86_64_long_double_float16
