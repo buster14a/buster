@@ -261,6 +261,10 @@ BUSTER_C_EXTERN void c_parse_scope_add_entity(CParseResult* result, CScopeId sco
 BUSTER_C_EXTERN CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end);
 BUSTER_C_EXTERN bool c_parse_c23_attribute_at(CPreprocessResult preprocess, u32 index, u32 end, u32* after_out);
 BUSTER_C_EXTERN u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 index, u32 end);
+// The first token of `start .. end` past its last typeof operand group: a
+// type name's own attributes follow that group, while the attributes inside
+// it already shaped the operand's type.
+BUSTER_C_EXTERN u32 c_parse_type_name_attribute_start(CPreprocessResult preprocess, u32 start, u32 end);
 // The decimal or hexadecimal value of an attribute's integer argument, as it
 // is spelled: `aligned(16)`, `constructor(101)`. False when the spelling is
 // not one, which every caller reads as "the attribute named no argument".
@@ -698,6 +702,7 @@ typedef enum CParseExpressionTypeOperation
     C_PARSE_EXPRESSION_TYPE_LOGICAL_NOT,
     C_PARSE_EXPRESSION_TYPE_INDIRECTION,
     C_PARSE_EXPRESSION_TYPE_ADDRESS_OF,
+    C_PARSE_EXPRESSION_TYPE_COMPLEX_PART,
 } CParseExpressionTypeOperation;
 
 typedef enum CTypeParseFrameKind
