@@ -23080,6 +23080,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_invalid_operand_diagnostics(Uni
         S8("int x; int f(__typeof__(__extension__ (x), 1, (long)1) p, __typeof__((x), 1, (long)1) q);\nvoid h(void) { f(0, 0); }\n"),
         S8("double _Complex z; int f(__typeof__(__real__ z) p, __typeof__(__imag__ (z)) q, __typeof__(__extension__ __real__ z) r);\n"),
         S8("int x; typedef __typeof__(__extension__ x) T; T v;\n"),
+        S8("int x; double _Complex z; int g(void) { __typeof__(__extension__ x) l = x; __typeof__(__extension__ (long)1) m = 0; __typeof__(__real__ z) r = 0; __typeof__(__imag__ z) i = 0; return l + (int)m + (int)r + (int)i; }\n"),
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
     {
