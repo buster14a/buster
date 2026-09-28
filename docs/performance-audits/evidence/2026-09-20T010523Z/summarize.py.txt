@@ -1,0 +1,12 @@
+import json, math, statistics, sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+for case in ['AA','853','854','856','857']:
+ for round_ in range(2):
+  rows=[r for r in d['records'] if r['case']==case and r['round']==round_]
+  if len(rows)!=40: continue
+  pairs=[next(r['wall_ns'] for r in rows if r['pair']==i and r['leg']=='candidate')/next(r['wall_ns'] for r in rows if r['pair']==i and r['leg']=='base') for i in range(20)]
+  blocks=[math.sqrt(pairs[i]*pairs[i+1]) for i in range(0,20,2)]
+  base=statistics.median(r['wall_ns'] for r in rows if r['leg']=='base')/1e6
+  candidate=statistics.median(r['wall_ns'] for r in rows if r['leg']=='candidate')/1e6
+  print(f'| {case} | {round_+1} | {base:.3f} | {candidate:.3f} | {100*(statistics.median(blocks)-1):+.3f}% | [{100*(min(blocks)-1):+.3f}%, {100*(max(blocks)-1):+.3f}%] |')

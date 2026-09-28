@@ -1,0 +1,65 @@
+import fcntl, hashlib, json, os, pathlib, random, statistics, subprocess, time
+root = pathlib.Path('/home/david/bench/issue791-review-20260920')
+root.mkdir(exist_ok=True)
+lock = open('/home/david/bench/host.lock', 'a')
+fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+repo = pathlib.Path('/home/david/bench/issue791-20260919/repo')
+refs = {'base':'82a63c5110aa63c3fb0e03d045a49343148ca787', 'base854':'e013ef03b560677b1a6b47590e9eb05171b9b34d', '853':'afe51e39837da2f762e718a4807927f041374929', '854':'41c9e32d92f2435fc354bb053903041c46f110c4', '856':'f1c6f7c89614229089f911d3451fb06f352a4c49', '857':'1ccba8a9d65aa59193a581b98900f64e72417583'}
+env = dict(os.environ, LC_ALL='C', BUSTER_TEST_JOBS='4')
+def call(args, cwd, log):
+    with open(root / log, 'w') as out:
+        subprocess.run(args, cwd=cwd, env=env, stdout=out, stderr=subprocess.STDOUT, check=True)
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+subprocess.run(['git','fetch','origin'],cwd=repo,check=True)
+for name, ref in refs.items():
+    path = root / name
+    if not path.exists():
+        subprocess.run(['git','worktree','add','--detach',str(path),ref],cwd=repo,check=True)
+    assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=path,text=True).strip()==ref
+    if not (path/'build/CMakeCache.txt').exists():
+        call(['./build.sh','generate'],path,name+'-generate.log')
+    print('BUILD', name, ref, flush=True)
+    call(['./build.sh','build','--config','Release','-t','ide'],path,name+'-build.log')
+print('BUILDS_COMPLETE',flush=True)
+source = root / 'base'
+output = source / 'build/review-stage1'
+args = ['cc','-Isrc','-Ibuild/generated','-DBUSTER_UNITY_BUILD=1','-DBUSTER_INCLUDE_TESTS=0','-g','-v','src/buster/apps/ide/ide.c','-lm','-o',str(output)]
+identities = {name: {'revision':ref,'sha256':digest(root/name/'build/Release/ide')} for name,ref in refs.items()}
+(root/'identities.json').write_text(json.dumps(identities,indent=2))
+records=[]
+expected=None
+summary=None
+def sample(case, leg, name, round_, pair, measured):
+    global expected, summary
+    command=['taskset','-c','2',str(root/name/'build/Release/ide'),*args]
+    start=time.monotonic_ns()
+    p=subprocess.run(command,cwd=source,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+    elapsed=time.monotonic_ns()-start
+    prefix=f'{case}-{round_}-{pair}-{leg}'
+    (root/(prefix+'.log')).write_bytes(p.stdout)
+    if p.returncode: raise RuntimeError(prefix+' failed')
+    sha=digest(output)
+    lines=[s for s in p.stdout.decode().splitlines() if s.startswith(('IR_FAST ','IR_LOCAL_PROMOTION ','IR_LOCAL_PROMOTION_WORK ','CODEGEN '))]
+    if expected is None: expected,summary=sha,lines
+    if sha != expected or lines != summary: raise RuntimeError(prefix+' output mismatch')
+    records.append(dict(case=case,leg=leg,compiler=name,round=round_,pair=pair,measured=measured,wall_ns=elapsed,sha256=sha))
+    (root/'samples.json').write_text(json.dumps({'command':args,'identities':identities,'summary':summary,'records':records},indent=2))
+for case in ['AA','853','854','856','857']:
+    base='base854' if case=='854' else 'base'
+    candidate='base' if case=='AA' else case
+    for i in range(2):
+        sample(case,'base',base,-1,i,False)
+        sample(case,'candidate',candidate,-1,i,False)
+    rng=random.Random(791)
+    for round_ in range(2):
+        for block in range(10):
+            order=['base','candidate']; rng.shuffle(order)
+            for offset in range(2):
+                for leg in order:
+                    sample(case,leg,base if leg=='base' else candidate,round_,block*2+offset,True)
+                order.reverse()
+        rows=[r for r in records if r['case']==case and r['round']==round_]
+        ratios=[next(r['wall_ns'] for r in rows if r['pair']==i and r['leg']=='candidate')/next(r['wall_ns'] for r in rows if r['pair']==i and r['leg']=='base') for i in range(20)]
+        print('ROUND',case,round_, 'median_paired_percent',100*(statistics.median(ratios)-1),flush=True)
+print('TIMING_COMPLETE',flush=True)

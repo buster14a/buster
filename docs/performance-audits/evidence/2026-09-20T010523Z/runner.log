@@ -1,0 +1,29 @@
+BUILD base 82a63c5110aa63c3fb0e03d045a49343148ca787
+Preparing worktree (detached HEAD e013ef03)
+HEAD is now at e013ef03 Merge pull request #875 from buster14a/fix/874-process-tree-readiness
+BUILD base854 e013ef03b560677b1a6b47590e9eb05171b9b34d
+Preparing worktree (detached HEAD afe51e39)
+HEAD is now at afe51e39 Integrate current main and migrate generated retirement bindings
+BUILD 853 afe51e39837da2f762e718a4807927f041374929
+Preparing worktree (detached HEAD 41c9e32d)
+HEAD is now at 41c9e32d audit: record dedicated 9700X measurements for #791 slice #854
+BUILD 854 41c9e32d92f2435fc354bb053903041c46f110c4
+Preparing worktree (detached HEAD f1c6f7c8)
+HEAD is now at f1c6f7c8 Integrate current main and migrate generated retirement bindings
+BUILD 856 f1c6f7c89614229089f911d3451fb06f352a4c49
+Preparing worktree (detached HEAD 1ccba8a9)
+HEAD is now at 1ccba8a9 Integrate current main and migrate generated retirement bindings
+BUILD 857 1ccba8a9d65aa59193a581b98900f64e72417583
+BUILDS_COMPLETE
+ROUND AA 0 median_paired_percent 0.1077112065288155
+ROUND AA 1 median_paired_percent 0.07834352052147331
+ROUND 853 0 median_paired_percent 0.20748823918605996
+ROUND 853 1 median_paired_percent 0.28076494988578116
+Traceback (most recent call last):
+  File "/home/david/bench/issue791-review-run.py", line 52, in <module>
+    sample(case,'base',base,-1,i,False)
+    ~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/david/bench/issue791-review-run.py", line 45, in sample
+    if sha != expected or lines != summary: raise RuntimeError(prefix+' output mismatch')
+                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: 854--1-0-base output mismatch
