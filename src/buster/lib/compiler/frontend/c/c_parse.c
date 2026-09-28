@@ -11843,10 +11843,15 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
         {
             String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[aggregate_index]);
             // The old entity walk chose the oldest matching typedef, even when
-            // a scoped lookup had already rejected the name. Keep that
+            // a scoped lookup had found no binding for the name. Keep that
             // fallback contract; the bucket helper validates partial parse
-            // metadata before using the newest-first chain.
-            CEntityId typedef_entity = c_parse_lookup_typedef_name_fallback(result, spelling);
+            // metadata before using the newest-first chain.  A name the scope
+            // binds to an object, function or enumerator is that entity, not
+            // a typedef further out: `typeof(T)` over a local `long T` that
+            // shadows a file-scope `typedef char T` names the local.
+            CEntityId scoped_entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, frame->scope, &preprocess.tokens[aggregate_index]);
+            bool names_ordinary = scoped_entity.value < result->entity_count && result->entities[scoped_entity.value].kind != C_ENTITY_TYPEDEF;
+            CEntityId typedef_entity = names_ordinary ? C_ENTITY_ID_INVALID : c_parse_lookup_typedef_name_fallback(result, spelling);
             if (typedef_entity.value < result->entity_count)
             {
                 CEntity* entity = &result->entities[typedef_entity.value];
