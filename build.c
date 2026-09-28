@@ -22899,6 +22899,68 @@ BUSTER_GLOBAL_LOCAL ProcessResult release_build_parallelism_tests(void)
     return PROCESS_RESULT_SUCCESS;
 }
 
+// Commands that parse their own arguments and run before the ordinary option
+// loop. The shared generic argument diagnostic must not follow their failures.
+BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
+{
+    bool result = false;
+    switch (command)
+    {
+        case BUILD_COMMAND_MATRIX_PHASE_RUN:
+        case BUILD_COMMAND_PRODUCTION_PROFILE:
+        case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
+        case BUILD_COMMAND_CLANG_ANALYZE:
+        case BUILD_COMMAND_OPTNONE_AUDIT:
+        case BUILD_COMMAND_TEST_DIFFERENTIAL:
+        case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
+        case BUILD_COMMAND_TEST_UEFI:
+        case BUILD_COMMAND_SOURCE_SIZE:
+        case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
+        {
+            result = true;
+        }
+        break;
+        default:
+        {
+        }
+        break;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
+{
+    typedef struct BuildCommandArgumentOwnershipTest BuildCommandArgumentOwnershipTest;
+    struct BuildCommandArgumentOwnershipTest
+    {
+        BuildCommand command;
+        bool owns_arguments;
+    };
+
+    BuildCommandArgumentOwnershipTest tests[] = {
+        {.command = BUILD_COMMAND_TEST_UEFI, .owns_arguments = true},
+        {.command = BUILD_COMMAND_CLANG_ANALYZE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
+        {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
+        {.command = BUILD_COMMAND_SOURCE_SIZE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_BUILD, .owns_arguments = false},
+        {.command = BUILD_COMMAND_GENERATE, .owns_arguments = false},
+        {.command = BUILD_COMMAND_TEST_ALL_COMBINATIONS, .owns_arguments = false},
+    };
+
+    ProcessResult result = PROCESS_RESULT_SUCCESS;
+    for (u32 test_i = 0; test_i < BUSTER_ARRAY_LENGTH(tests); test_i += 1)
+    {
+        BuildCommandArgumentOwnershipTest test = tests[test_i];
+        if (build_command_owns_arguments(test.command) != test.owns_arguments)
+        {
+            string_print(S8("error: build command argument ownership test {u32} failed\n"), test_i);
+            result = PROCESS_RESULT_FAILED;
+        }
+    }
+    return result;
+}
+
 typedef struct MatrixTestCombination MatrixTestCombination;
 struct MatrixTestCombination
 {
@@ -24560,6 +24622,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     }
     if (owns_preflight)
     {
+        if (build_command_argument_ownership_tests() != PROCESS_RESULT_SUCCESS)
+        {
+            return PROCESS_RESULT_FAILED;
+        }
         if (!clang_analyze_self_test(arena) || !optnone_audit_self_test(arena))
         {
             return PROCESS_RESULT_FAILED;
@@ -39219,58 +39285,24 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     TestMuslOptions test_musl_options = {0};
     TestCpythonOptions test_cpython_options = {0};
 
-    if (command == BUILD_COMMAND_MATRIX_PHASE_RUN)
+    bool command_owns_arguments = build_command_owns_arguments(command);
+    if (command_owns_arguments)
     {
-        result = matrix_phase_run(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
-        argument_i = arguments.length;
-    }
-    else if (command == BUILD_COMMAND_PRODUCTION_PROFILE)
-    {
-        result = production_profile_main(
-            arena,
-            (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i},
-            arguments.pointer[0]);
-        argument_i = arguments.length;
-    }
-    else if (command == BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST)
-    {
-        result = production_profile_self_test(arena);
-        argument_i = arguments.length;
-    }
-    else if (command == BUILD_COMMAND_CLANG_ANALYZE)
-    {
-        result = clang_analyze_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
-        argument_i = arguments.length;
-    }
-    else if (command == BUILD_COMMAND_OPTNONE_AUDIT)
-    {
-        result = optnone_audit_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
-        argument_i = arguments.length;
-    }
-    else if (command == BUILD_COMMAND_TEST_DIFFERENTIAL)
-    {
-        result = differential_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
-        argument_i = arguments.length;
-    }
-    else if (command == BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS)
-    {
-        result = native_retirement_census_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
-        argument_i = arguments.length;
-    }
-    else if (command == BUILD_COMMAND_TEST_UEFI)
-    {
-        result = uefi_boot_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i}, arguments.pointer[0]);
-        argument_i = arguments.length;
-    }
-    else if (command == BUILD_COMMAND_SOURCE_SIZE)
-    {
-        result = source_size_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
-        argument_i = arguments.length;
-    }
-
-    if (command == BUILD_COMMAND_TEST_GPU_TOOLCHAINS)
-    {
-        result = gpu_tools_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
+        SliceString8 owned_arguments = {.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i};
+        switch (command)
+        {
+            case BUILD_COMMAND_MATRIX_PHASE_RUN: result = matrix_phase_run(arena, owned_arguments); break;
+            case BUILD_COMMAND_PRODUCTION_PROFILE: result = production_profile_main(arena, owned_arguments, arguments.pointer[0]); break;
+            case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST: result = production_profile_self_test(arena); break;
+            case BUILD_COMMAND_CLANG_ANALYZE: result = clang_analyze_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_OPTNONE_AUDIT: result = optnone_audit_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_TEST_DIFFERENTIAL: result = differential_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS: result = native_retirement_census_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_TEST_UEFI: result = uefi_boot_main(arena, owned_arguments, arguments.pointer[0]); break;
+            case BUILD_COMMAND_SOURCE_SIZE: result = source_size_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_TEST_GPU_TOOLCHAINS: result = gpu_tools_main(arena, owned_arguments); break;
+            default: BUSTER_UNREACHABLE(); break;
+        }
         argument_i = arguments.length;
     }
 
@@ -40133,14 +40165,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
 
     // Every parse-failure path above leaves argument_i on the offending
     // argument; report it here so no failure exits silently with code 1.
-    // Differential execution has already emitted its own usage or result.
-    if (result != PROCESS_RESULT_SUCCESS &&
-        command != BUILD_COMMAND_PRODUCTION_PROFILE &&
-        command != BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST &&
-        command != BUILD_COMMAND_TEST_DIFFERENTIAL &&
-        command != BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS &&
-        command != BUILD_COMMAND_SOURCE_SIZE &&
-        command != BUILD_COMMAND_TEST_GPU_TOOLCHAINS)
+    // Commands that own their arguments have already reported their failure.
+    if (result != PROCESS_RESULT_SUCCESS && !command_owns_arguments)
     {
         if (argument_i < arguments.length)
         {
