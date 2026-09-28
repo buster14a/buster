@@ -638,8 +638,8 @@ PWATCH
     looppid="$(sudo docker exec "$guest" systemctl show -p MainPID --value buster-bench.service)"
     echo "P_REPRO old-binary restart MainPID=$looppid"
     sleep "$BQ_P_REPRO_LOOP_SECONDS"
-    sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway result "$job" >"$evidence/p-result-in-loop.txt" 2>&1 || true
-    cat "$evidence/p-result-in-loop.txt"
+    sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway result "$job" >"$evidence/p-gateway-in-loop.txt" 2>&1 || true
+    cat "$evidence/p-gateway-in-loop.txt"
     p_capture in-loop
     stop_started=$(date +%s.%N)
     sudo docker exec "$guest" systemctl stop buster-bench.service || true
@@ -671,12 +671,13 @@ PWATCH
     sleep 1
   done
   cat "$evidence/p-result-after-restart.txt"
+  cp "$evidence/p-result-after-restart.txt" "$evidence/p-gateway-after-restart.txt"
   sleep 2
   p_capture after-restart
-  if [[ -n "${BQ_P_REPRO_LOOP_SECONDS:-}" ]] && grep -q 'phase=finished' "$evidence/p-result-after-restart.txt"; then
+  if [[ -n "${BQ_P_REPRO_LOOP_SECONDS:-}" ]] && grep -q 'phase=finished' "$evidence/p-gateway-after-restart.txt"; then
     # Export the finalized cancelled attempt and replay it, as the host would.
-    token="$(sed -nE 's/^job=[0-9]+ token=([0-9]+) .*/\1/p' "$evidence/p-result-after-restart.txt" | head -1)"
-    full="$(sed -nE 's/^full-result-sha256=([a-f0-9]{64})$/\1/p' "$evidence/p-result-after-restart.txt" | head -1)"
+    token="$(sed -nE 's/^job=[0-9]+ token=([0-9]+) .*/\1/p' "$evidence/p-gateway-after-restart.txt" | head -1)"
+    full="$(sed -nE 's/^full-result-sha256=([a-f0-9]{64})$/\1/p' "$evidence/p-gateway-after-restart.txt" | head -1)"
     sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway export "$job" "$token" "$full" >"$evidence/p-export.bin" 2>"$evidence/p-export-receipt.txt" || echo "P_REPRO export exit=$?"
     sha256sum "$evidence/p-export.bin" | tee "$evidence/p-export-sha256.txt"
     cat "$evidence/p-export-receipt.txt"
