@@ -1,0 +1,52 @@
+diff --git a/src/buster/lib/compiler/codegen/machine_x86_64.c b/src/buster/lib/compiler/codegen/machine_x86_64.c
+index c94fd591..f1c2b4c9 100644
+--- a/src/buster/lib/compiler/codegen/machine_x86_64.c
++++ b/src/buster/lib/compiler/codegen/machine_x86_64.c
+@@ -13651,20 +13651,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
+     MachineX64Encoder* encoder, u8 table_plus_one, u32 reg, u32 base, s32 displacement,
+     bool force_disp32, MachineX64ExactEmitCounters* counters);
+ 
+-BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
+-                                                             MachineX64ExactEmitCounters* counters)
++BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk_metadata(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
++                                                                      MachineX64ExactEmitCounters* counters)
+ {
+-    // Spill/reload and expansion chunks are the same MOV/MOVZX population as
+-    // pointer memory.  Preserve their canonical frame shape by selecting the
+-    // already-proven disp32 lane rather than rebuilding physical operands.
+-    if (machine_x64_emit_variable_memory_encoding(
+-            encoder,
+-            machine_x64_chunk_memory_tables[load ? MACHINE_X64_CHUNK_DIRECTION_LOAD : MACHINE_X64_CHUNK_DIRECTION_STORE]
+-                                           [machine_x64_chunk_width_slot(chunk)],
+-            reg, MACHINE_X64_RBP, (s32)(0u - offset), true, counters))
+-        return true;
+-    if (encoder->overflow) return false;
+-
+     u16 opcode = load ? (chunk == 1 ? MACHINE_X64_LOAD_PTR8 : chunk == 2 ? MACHINE_X64_LOAD_PTR16 : chunk == 4 ? MACHINE_X64_LOAD_PTR32
+                                                                            : MACHINE_X64_LOAD_FRAME)
+                       : (chunk == 1 ? MACHINE_X64_STORE_FRAME8 : chunk == 2 ? MACHINE_X64_STORE_FRAME16 : chunk == 4 ? MACHINE_X64_STORE_FRAME32
+@@ -13690,6 +13679,24 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* e
+     return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, true, false, 0, false, counters);
+ }
+ 
++BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
++                                                                           MachineX64ExactEmitCounters* counters)
++{
++    // Spill/reload and expansion chunks are the same MOV/MOVZX population as
++    // pointer memory.  Preserve their canonical frame shape by selecting the
++    // already-proven disp32 lane rather than rebuilding physical operands.
++    bool result = machine_x64_emit_variable_memory_encoding(
++        encoder,
++        machine_x64_chunk_memory_tables[load ? MACHINE_X64_CHUNK_DIRECTION_LOAD : MACHINE_X64_CHUNK_DIRECTION_STORE]
++                                       [machine_x64_chunk_width_slot(chunk)],
++        reg, MACHINE_X64_RBP, (s32)(0u - offset), true, counters);
++    if (!result && !encoder->overflow)
++    {
++        result = machine_x64_emit_exact_frame_chunk_metadata(encoder, load, reg, offset, chunk, counters);
++    }
++    return result;
++}
++
+ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_x87(MachineX64Encoder* encoder, String8 mnemonic,
+                                                BusterX86MetadataPhysicalOperand const* operands, u32 operand_count);
+ BUSTER_GLOBAL_LOCAL void machine_x64_emit_x87_memory(MachineX64Encoder* encoder, String8 mnemonic, s32 displacement, u16 width);

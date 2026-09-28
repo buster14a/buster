@@ -33,6 +33,10 @@
 //                                              c_lex dispatches and
 //                                              c_lex_reference is the
 //                                              differential baseline
+//   c_token_preceded_by_space,                 source spacing: the `#` white-
+//   c_token_requires_separator                 space test and the lexical-
+//                                              join guard -E and quoting
+//                                              diagnostics print through
 //   CTokenStream, c_token_stream_reserve       final token rows plus the
 //                                              one-byte kind|punctuator
 //                                              sidecar consumed by parser
@@ -372,6 +376,26 @@ BUSTER_C_INTERNAL void c_source_map_publish(Arena* arena, CSourceMapRecovery* re
     recovery->map.count = map->count;
     recovery->capacity = map->capacity;
 }
+
+// Only the append-only C23 respell phase may use this boundary: equal counts
+// there mean every existing key and its sentinel are still final. This is not
+// a general mutation cache. Keep published storage alive in the TU arena;
+// canonical lowering copies its pointers for later diagnostics and debug info.
+BUSTER_C_INTERNAL void c_source_map_publish_appended(Arena* arena, CSourceMapRecovery* recovery, CSourceMap const* map)
+{
+    if (map->count != recovery->map.count)
+    {
+        c_source_map_publish(arena, recovery, map);
+    }
+}
+
+#if BUSTER_INCLUDE_TESTS
+void c_test_source_map_publish_appended(Arena* arena, CSourceMapRecovery* recovery, IrSourceRegion* regions, u32 count, u32 capacity)
+{
+    CSourceMap map = {.arena = arena, .regions = regions, .count = count, .capacity = capacity};
+    c_source_map_publish_appended(arena, recovery, &map);
+}
+#endif
 
 BUSTER_C_SHARED bool c_ir_decode_character_value(Arena* arena, char8 const* spelling_base, CToken token, Target target, u64* value_out, CTypeKind* kind_out);
 
@@ -2746,12 +2770,12 @@ struct CMacroDefinition
     // token's spelling against every parameter name on every expansion.
     // Null when the replacement list is empty.
     u32* parameter_index;
-    // One count per parameter: how many replacement tokens name it. The
-    // substituted list's exact capacity is a dot product of this with the
-    // arguments' token counts, which is a walk of the parameters (1,4 on
-    // this workload) where reading it off the replacement list is a third
-    // walk of the list (6,9 tokens). Null when there are no parameters.
-    u32* parameter_use_count;
+    // Ordinary substitution uses per parameter, excluding stringization and
+    // either side of a paste. Zero means argument prescan is unnecessary;
+    // raw tokens remain available to # and ##. In a paste/stringize-free
+    // definition every use is ordinary, so this also retains the exact
+    // replacement-capacity dot product. Null when there are no parameters.
+    u32* parameter_expand_count;
     u32 replacement_count;
     // The replacement tokens that name no parameter: the fixed half of that
     // capacity.
@@ -2984,10 +3008,9 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin___memmove_chk"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin___memset_chk"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin_clz"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
-    // The `l` spellings sit between the int and long long ones and lower the
-    // same way -- the operand's own width decides the operation -- so their
-    // absence only ever surfaces on an LP64 target where a caller reached
-    // for the `unsigned long` form (CPython's _Py_bit_length does).
+    // The `l` spellings take unsigned long, which is target-dependent (LP64
+    // versus LLP64). The shared signature policy below selects their operand
+    // width before the count operation; all these spellings return int.
     { S8_INITIALIZER("__builtin_clzl"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_clzll"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_ctz"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
@@ -3046,6 +3069,21 @@ BUSTER_C_SHARED CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling)
     }
 
     return C_SYMBOL_BUILTIN_NONE;
+}
+
+// Fixed GNU signatures for clz/ctz/popcount. The operation kind is shared by
+// three spellings; the suffix determines the parameter width, while the C
+// result type is always int. CTypeKind retains the target's long data model.
+CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String8 spelling)
+{
+    CTypeKind result = C_TYPE_INVALID;
+    if (builtin == C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS || builtin == C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS ||
+        builtin == C_SYMBOL_BUILTIN_POPULATION_COUNT)
+    {
+        result = string_ends_with_sequence(spelling, S8("ll")) ? C_TYPE_UNSIGNED_LONG_LONG :
+                 string_ends_with_sequence(spelling, S8("l")) ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_INT;
+    }
+    return result;
 }
 
 // One probe entry of the intern table. The identity of a name is its first
@@ -3534,6 +3572,89 @@ BUSTER_C_INTERNAL bool c_token_preceded_by_space(char8 const* spelling_base, CTo
     return previous.kind == C_TOKEN_NEWLINE || previous.offset + c_token_length(spelling_base, previous) != token.offset;
 }
 
+// The converse question, asked by a printer rather than by `#`: would these
+// two spellings, written with nothing between them, lex back as these two
+// tokens? Identifiers, numbers and literal prefixes run into one another, and
+// a punctuator followed by a spelling that extends it (`-` `-`, `<` `:`)
+// maximal-munches into another; every other pair may touch.
+BUSTER_C_INTERNAL bool c_token_literal_has_prefix(String8 spelling)
+{
+    bool result = spelling.length && spelling.pointer[0] != '\'' && spelling.pointer[0] != '"';
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_token_identifier_is_literal_prefix(String8 spelling)
+{
+    bool result = (spelling.length == 1 &&
+                   (spelling.pointer[0] == 'u' || spelling.pointer[0] == 'U' || spelling.pointer[0] == 'L')) ||
+                  (spelling.length == 2 && spelling.pointer[0] == 'u' && spelling.pointer[1] == '8');
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_token_punctuators_join(CToken previous, String8 current)
+{
+    char8 first = current.length ? current.pointer[0] : 0;
+    bool result = false;
+    switch ((CPunctuator)previous.punctuator)
+    {
+    case C_PUNCTUATOR_PERCENT: result = first == ':' || first == '>'; break;
+    case C_PUNCTUATOR_HASH_DIGRAPH: result = first == '%'; break;
+    case C_PUNCTUATOR_LESS: result = first == '<' || first == '=' || first == ':' || first == '%'; break;
+    case C_PUNCTUATOR_GREATER: result = first == '>' || first == '='; break;
+    case C_PUNCTUATOR_EQUAL:
+    case C_PUNCTUATOR_EXCLAMATION:
+    case C_PUNCTUATOR_STAR:
+    case C_PUNCTUATOR_CARET: result = first == '='; break;
+    case C_PUNCTUATOR_AMPERSAND: result = first == '&' || first == '='; break;
+    case C_PUNCTUATOR_PIPE: result = first == '|' || first == '='; break;
+    case C_PUNCTUATOR_SLASH: result = first == '/' || first == '*' || first == '='; break;
+    case C_PUNCTUATOR_PLUS: result = first == '+' || first == '='; break;
+    case C_PUNCTUATOR_MINUS: result = first == '-' || first == '>' || first == '='; break;
+    case C_PUNCTUATOR_HASH: result = first == '#'; break;
+    case C_PUNCTUATOR_COLON: result = first == '>'; break;
+    case C_PUNCTUATOR_DOT: result = first == '.'; break;
+    case C_PUNCTUATOR_SHIFT_LEFT:
+    case C_PUNCTUATOR_SHIFT_RIGHT: result = first == '='; break;
+    default: break;
+    }
+    return result;
+}
+
+bool c_token_requires_separator(CToken previous, String8 previous_spelling, CToken current, String8 current_spelling)
+{
+    bool result = false;
+    if (previous.kind == C_TOKEN_IDENTIFIER)
+    {
+        result = current.kind == C_TOKEN_IDENTIFIER ||
+                 (current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length && current_spelling.pointer[0] != '.');
+        if (!result && (current.kind == C_TOKEN_CHARACTER_LITERAL || current.kind == C_TOKEN_STRING_LITERAL))
+        {
+            result = c_token_literal_has_prefix(current_spelling) || c_token_identifier_is_literal_prefix(previous_spelling);
+        }
+    }
+    else if (previous.kind == C_TOKEN_PREPROCESSING_NUMBER)
+    {
+        result = current.kind == C_TOKEN_IDENTIFIER || current.kind == C_TOKEN_PREPROCESSING_NUMBER ||
+                 current.kind == C_TOKEN_CHARACTER_LITERAL ||
+                 (current.kind == C_TOKEN_STRING_LITERAL && c_token_literal_has_prefix(current_spelling));
+        if (!result && current.kind == C_TOKEN_PUNCTUATOR && previous_spelling.length)
+        {
+            char8 last = previous_spelling.pointer[previous_spelling.length - 1];
+            char8 first = current_spelling.length ? current_spelling.pointer[0] : 0;
+            result = first == '.' ||
+                     ((first == '+' || first == '-') &&
+                      (last == 'e' || last == 'E' || last == 'p' || last == 'P'));
+        }
+    }
+    else if (previous.kind == C_TOKEN_PUNCTUATOR)
+    {
+        result = (previous.punctuator == C_PUNCTUATOR_DOT && current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length &&
+                  current_spelling.pointer[0] != '.') ||
+                 (current.kind == C_TOKEN_PUNCTUATOR && c_token_punctuators_join(previous, current_spelling));
+    }
+    return result;
+}
+
 typedef struct CPreprocessTokenNode CPreprocessTokenNode;
 struct CPreprocessTokenNode
 {
@@ -3777,12 +3898,12 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
     // Allocated for every parameter list, empty replacement included: a
     // `#define F(x)` with no replacement tokens still reaches the capacity
     // walk below over its parameters.
-    u32* parameter_use_count = parameter_count ? arena_allocate(arena, u32, parameter_count) : 0;
+    u32* parameter_expand_count = parameter_count ? arena_allocate(arena, u32, parameter_count) : 0;
     for (u32 index = 0; index < parameter_count; index += 1)
     {
-        parameter_use_count[index] = 0;
+        parameter_expand_count[index] = 0;
     }
-    macro->definition.parameter_use_count = parameter_use_count;
+    macro->definition.parameter_expand_count = parameter_expand_count;
     if (replacement_count)
     {
         u32* parameter_index = arena_allocate(arena, u32, replacement_count);
@@ -3793,7 +3914,10 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
             parameter_index[index] = found >= 0 ? (u32)found : C_MACRO_PARAMETER_NONE;
             if (found >= 0)
             {
-                parameter_use_count[found] += 1;
+                bool stringized = index && c_token_is_punctuator(&replacement[index - 1], C_PUNCTUATOR_HASH);
+                bool pasted = (index && c_macro_is_paste(replacement[index - 1])) ||
+                              (index + 1 < replacement_count && c_macro_is_paste(replacement[index + 1]));
+                parameter_expand_count[found] += !stringized && !pasted;
                 macro->definition.plain_count -= 1;
             }
         }
@@ -4485,7 +4609,11 @@ BUSTER_C_INTERNAL CPpToken c_macro_pragma_token(CSpellingSpace* space, CMacro* m
 
 // The next argument that needs an expansion context of its own, or null
 // once every remaining argument is resolved and the invocation is ready to
-// materialize. An argument none of whose identifiers names a defined macro
+// materialize. Definition-owned demand is reused before inspecting any raw
+// argument: unused, stringized-only and pasted-only parameters must not be
+// prescanned. A mixed-use parameter still needs one expansion, shared by all
+// ordinary uses. Pragma operands are expanded despite their empty replacement.
+// An argument none of whose identifiers names a defined macro
 // — disabled ones included, since a name the disabled bit refuses must
 // still be painted no_expand — rescans to exactly itself, so its expansion
 // aliases its tokens instead of paying a child context, a task node and an
@@ -4500,8 +4628,10 @@ BUSTER_C_INTERNAL CMacroExpansionContext* c_macro_continuation_advance(Arena* ar
     while (!child && continuation->argument_index < continuation->argument_count)
     {
         CMacroArgument* argument = continuation->arguments + continuation->argument_index;
+        bool used_expanded = continuation->macro->definition.pragma_like ||
+                             continuation->macro->definition.parameter_expand_count[continuation->argument_index] != 0;
         bool needs_expansion = false;
-        for (u64 token_index = 0; token_index < argument->token_count && !needs_expansion; token_index += 1)
+        for (u64 token_index = 0; used_expanded && token_index < argument->token_count && !needs_expansion; token_index += 1)
         {
             CPpToken token = argument->tokens[token_index];
             if (token.token.kind == C_TOKEN_IDENTIFIER && !token.no_expand)
@@ -4533,8 +4663,8 @@ BUSTER_C_INTERNAL CMacroExpansionContext* c_macro_continuation_advance(Arena* ar
 // The paste-free, stringify-free replacement of a non-builtin macro written
 // straight into its task batch: the same rows the plain branch of
 // c_macro_replacement_tokens stages, minus the staging array and its copy.
-// The batch size is exact (plain_count plus each parameter's use count times
-// its expanded count), so one reservation precedes every write; the ENABLE
+// The batch size is exact (plain_count plus each parameter's ordinary-use count
+// times its expanded count), so one reservation precedes every write; the ENABLE
 // marker takes the batch base and the substituted list is written downward
 // from the batch end, the reverse order c_macro_expansion_tasks_push stores.
 // Sources are the definition and argument arrays, never task storage, so
@@ -4549,7 +4679,7 @@ BUSTER_C_INTERNAL void c_macro_produce_plain_tasks(Arena* arena, CMacroExpansion
     u64 token_count = macro->definition.plain_count;
     for (u32 parameter_index = 0; parameter_index < parameter_count; parameter_index += 1)
     {
-        token_count += (u64)macro->definition.parameter_use_count[parameter_index] * arguments[parameter_index].expanded_token_count;
+        token_count += (u64)macro->definition.parameter_expand_count[parameter_index] * arguments[parameter_index].expanded_token_count;
     }
     c_macro_expansion_tasks_reserve(arena, tasks, token_count, true);
     CMacroExpansionTask* batch = tasks->data + tasks->count;
@@ -5417,6 +5547,9 @@ BUSTER_C_INTERNAL bool c_conditional_target_os_supported(OperatingSystem os, Str
     case OPERATING_SYSTEM_UEFI:
         result = string_equal(spelling, S8("uefi"));
         break;
+    case OPERATING_SYSTEM_WASI:
+        result = string_equal(spelling, S8("wasip1")) || string_equal(spelling, S8("wasi"));
+        break;
     case OPERATING_SYSTEM_FREESTANDING:
     case OPERATING_SYSTEM_COUNT:
     default:
@@ -5548,6 +5681,7 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
             String8 argument = c_token_spelling(base, arguments[0]);
             supported = is_target_arch        ? (options->target.cpu_arch == CPU_ARCH_AARCH64
                                                       ? string_equal(argument, S8("arm64")) || string_equal(argument, S8("aarch64"))
+                                                  : options->target.cpu_arch == CPU_ARCH_WASM32 ? string_equal(argument, S8("wasm32"))
                                                   : options->target.cpu_arch == CPU_ARCH_WASM64 ? string_equal(argument, S8("wasm64"))
                                                   : options->target.cpu_arch == CPU_ARCH_BPFEL
                                                       ? string_equal(argument, S8("bpfel")) || string_equal(argument, S8("bpf")) ||
@@ -5573,9 +5707,11 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
     return true;
 }
 
+// Parse-side constant queries share the reducer but retain their existing
+// semantics; only conditional-inclusion arithmetic widens decoded types.
 BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
                                                                      CPpStampTable* stamps, CPpToken* tokens, u32 token_count, u32 expansion_limit,
-                                                                     CPreprocessResult* result,
+                                                                     bool preprocessor_arithmetic, CPreprocessResult* result,
                                                                      CPreprocessOptions* options, String8 including_path,
                                                                      CIncludeSearchOrigin including_origin, u64* value_out)
 {
@@ -5649,8 +5785,8 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
                 if (valid)
                 {
                     // The literal is uintmax_t when it says so or when its
-                    // value does not fit intmax_t. Characters and keywords
-                    // below remain signed regardless of their bit patterns.
+                    // value does not fit intmax_t. Character constants carry
+                    // their decoded type only in preprocessing arithmetic.
                     bool literal_unsigned = value > (u64)INT64_MAX;
                     for (u64 suffix_index = 0; suffix_index < number_spelling.length; suffix_index += 1)
                     {
@@ -5666,9 +5802,20 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
                 u64 character = 0;
                 CTypeKind character_kind = C_TYPE_INVALID;
                 valid = expect_operand && c_ir_decode_character_value(arena, base, token, result->target, &character, &character_kind);
+                bool character_unsigned = false;
+                if (valid && preprocessor_arithmetic)
+                {
+                    IrTypeKind character_ir_kind;
+                    u32 character_width = 0;
+                    u32 character_alignment = 0;
+                    bool character_signed = true;
+                    valid = c_ir_scalar_type_properties(result->target, character_kind, &character_ir_kind, &character_width,
+                                                        &character_signed, &character_alignment);
+                    character_unsigned = valid && !character_signed;
+                }
                 if (valid)
                 {
-                    value_flags[value_count] = 0;
+                    value_flags[value_count] = character_unsigned ? C_CONDITIONAL_VALUE_UNSIGNED : 0;
                     values[value_count++] = character;
                     expect_operand = false;
                 }
@@ -5795,7 +5942,7 @@ BUSTER_C_SHARED bool c_integer_expression_evaluate(Arena* arena, char8 const* sp
             .token = tokens[token_index],
         };
     }
-    return c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, result, 0, (String8){0},
+    return c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, false, result, 0, (String8){0},
                                                        (CIncludeSearchOrigin){0}, value_out);
 }
 
@@ -5805,7 +5952,7 @@ BUSTER_C_INTERNAL bool c_conditional_evaluate(Arena* arena, CSpellingSpace* spac
 {
     u64 value = 0;
     bool valid =
-        c_integer_expression_evaluate_with_features(arena, space, symbols, first_macro, stamps, tokens, token_count, expansion_limit, result, &options, including_path,
+        c_integer_expression_evaluate_with_features(arena, space, symbols, first_macro, stamps, tokens, token_count, expansion_limit, true, result, &options, including_path,
                                                     including_origin, &value);
     *value_out = value != 0;
     return valid;
@@ -6375,9 +6522,9 @@ BUSTER_C_INTERNAL void c_macro_push_definition(CPreprocessPragmaContext context,
         entry->definition.parameters = arena_allocate(context.arena, String8, macro->definition.parameter_count);
         memcpy(entry->definition.parameters, macro->definition.parameters,
                sizeof(*entry->definition.parameters) * macro->definition.parameter_count);
-        entry->definition.parameter_use_count = arena_allocate(context.arena, u32, macro->definition.parameter_count);
-        memcpy(entry->definition.parameter_use_count, macro->definition.parameter_use_count,
-               sizeof(*entry->definition.parameter_use_count) * macro->definition.parameter_count);
+        entry->definition.parameter_expand_count = arena_allocate(context.arena, u32, macro->definition.parameter_count);
+        memcpy(entry->definition.parameter_expand_count, macro->definition.parameter_expand_count,
+               sizeof(*entry->definition.parameter_expand_count) * macro->definition.parameter_count);
     }
     *context.macro_push_stack = entry;
 }
@@ -8217,25 +8364,26 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                        constant_parameters, 1, true, false);
     }
     bool windows_target = options.target.os == OPERATING_SYSTEM_WINDOWS;
-    bool llp64_target = target_uses_llp64_data_model(options.target);
     bool short_wchar_target = target_uses_16_bit_wchar(options.target);
     String8 signed_pointer_type = layout.long_integer.size == layout.pointer.size ? S8("long") : S8("long long");
     String8 unsigned_pointer_type = layout.unsigned_long_integer.size == layout.pointer.size ? S8("unsigned long") : S8("unsigned long long");
+    String8 signed_64_type = layout.long_integer.bit_width == 64 ? S8("long") : S8("long long");
+    String8 unsigned_64_type = layout.unsigned_long_integer.bit_width == 64 ? S8("unsigned long") : S8("unsigned long long");
 #define C_DEFINE_TYPE_MACRO(name, replacement) c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8(name), (replacement))
     C_DEFINE_TYPE_MACRO("__SIZE_TYPE__", unsigned_pointer_type);
     C_DEFINE_TYPE_MACRO("__PTRDIFF_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__INTPTR_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__UINTPTR_TYPE__", unsigned_pointer_type);
-    C_DEFINE_TYPE_MACRO("__INTMAX_TYPE__", signed_pointer_type);
-    C_DEFINE_TYPE_MACRO("__UINTMAX_TYPE__", unsigned_pointer_type);
+    C_DEFINE_TYPE_MACRO("__INTMAX_TYPE__", signed_64_type);
+    C_DEFINE_TYPE_MACRO("__UINTMAX_TYPE__", unsigned_64_type);
     C_DEFINE_TYPE_MACRO("__INT8_TYPE__", S8("signed char"));
     C_DEFINE_TYPE_MACRO("__UINT8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__INT16_TYPE__", S8("short"));
     C_DEFINE_TYPE_MACRO("__UINT16_TYPE__", S8("unsigned short"));
     C_DEFINE_TYPE_MACRO("__INT32_TYPE__", S8("int"));
     C_DEFINE_TYPE_MACRO("__UINT32_TYPE__", S8("unsigned int"));
-    C_DEFINE_TYPE_MACRO("__INT64_TYPE__", signed_pointer_type);
-    C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", unsigned_pointer_type);
+    C_DEFINE_TYPE_MACRO("__INT64_TYPE__", signed_64_type);
+    C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", unsigned_64_type);
     C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") :
                       target_uses_unsigned_wchar(options.target) ? S8("unsigned int") : S8("int"));
     C_DEFINE_TYPE_MACRO("__WINT_TYPE__", options.target.os == OPERATING_SYSTEM_UEFI ? S8("unsigned short") : S8("unsigned int"));
@@ -8462,10 +8610,15 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             C_DEFINE_TYPE_MACRO("_M_ARM64", S8("1"));
         }
     }
-    if (!llp64_target)
+    if (layout.pointer.size == 8 && layout.long_integer.size == 8)
     {
         C_DEFINE_TYPE_MACRO("__LP64__", S8("1"));
         C_DEFINE_TYPE_MACRO("_LP64", S8("1"));
+    }
+    else if (layout.pointer.size == 4 && layout.long_integer.size == 4)
+    {
+        C_DEFINE_TYPE_MACRO("__ILP32__", S8("1"));
+        C_DEFINE_TYPE_MACRO("_ILP32", S8("1"));
     }
     if (options.target.os == OPERATING_SYSTEM_ANDROID && options.target.os_version_major)
     {
@@ -8520,6 +8673,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         operating_system_macros[operating_system_macro_count++] = S8("__ELF__");
     }
     break;
+    case OPERATING_SYSTEM_WASI:
+    {
+        operating_system_macros[operating_system_macro_count++] = S8("__wasi__");
+        operating_system_macros[operating_system_macro_count++] = S8("__wasip1__");
+    }
+    break;
     case OPERATING_SYSTEM_FREESTANDING:
     case OPERATING_SYSTEM_COUNT:
     {
@@ -8535,13 +8694,22 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__APPLE_CC__"), S8("6000"));
     }
     String8 architecture_macro = options.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("__aarch64__")
+                               : options.target.cpu_arch == CPU_ARCH_WASM32  ? S8("__wasm32__")
                                : options.target.cpu_arch == CPU_ARCH_WASM64  ? S8("__wasm64__")
                                : options.target.cpu_arch == CPU_ARCH_BPFEL   ? S8("__bpfel__")
                                                                              : S8("__x86_64__");
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, architecture_macro, standard_replacement, 1, 0, 0, false, false);
-    if (options.target.cpu_arch == CPU_ARCH_WASM64)
+    if (options.target.cpu_arch == CPU_ARCH_WASM32 || options.target.cpu_arch == CPU_ARCH_WASM64)
     {
         c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__wasm__"), standard_replacement, 1, 0, 0, false, false);
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__wasm"), standard_replacement, 1, 0, 0, false, false);
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro,
+                       options.target.cpu_arch == CPU_ARCH_WASM32 ? S8("__wasm32") : S8("__wasm64"), standard_replacement, 1, 0, 0, false,
+                       false);
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__wasm_mutable_globals__"), standard_replacement, 1, 0, 0, false, false);
+    }
+    if (options.target.cpu_arch == CPU_ARCH_WASM64)
+    {
         c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__wasm_memory64__"), standard_replacement, 1, 0, 0, false, false);
     }
     if (options.target.cpu_arch == CPU_ARCH_BPFEL)
@@ -9367,11 +9535,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     result.files = file_table.files;
     result.file_count = file_table.count;
     c_source_map_publish(arena, recovery, &map);
-    // Respelling appends regions at the tail of the space, in order, and
-    // queries the map as it goes; publish once so those queries land, and
-    // again for what they added.
+    // Respelling queries the published prefix and may append regions (moving
+    // their backing array). Rebuild keys only for that appended tail; without
+    // it, a second publication would retain an identical key array in the TU.
     c_preprocess_respell_c23(space, &map, &result);
-    c_source_map_publish(arena, recovery, &map);
+    c_source_map_publish_appended(arena, recovery, &map);
     u32 page_count = (u32)((space->used >> IR_SOURCE_MAP_PAGE_SHIFT) + 1);
     u32* pages = arena_allocate(arena, u32, page_count);
     u32 fill_entry = 0;

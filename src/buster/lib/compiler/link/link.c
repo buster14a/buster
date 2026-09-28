@@ -1773,6 +1773,19 @@ BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, O
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL u8 link_symbol_thread_local_state(ObjectFile* object, ObjectSymbol* symbol)
+{
+    u8 result = symbol->thread_local_state;
+    if (result == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN && symbol->section != OBJECT_SECTION_UNDEFINED && symbol->section < object->section_count)
+    {
+        ObjectSectionKind kind = object->sections[symbol->section].kind;
+        result = kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? OBJECT_SYMBOL_THREAD_LOCAL_YES
+                                                                                                      : OBJECT_SYMBOL_THREAD_LOCAL_NO;
+    }
+
+    return result;
+}
+
 // GNU runs every prioritized initializer before every unprioritized one,
 // ascending, across the *whole program* rather than within one translation
 // unit, and `ld` gets that off the section name: every `.init_array.NNNNN`
@@ -2112,7 +2125,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 result.error = LINK_ERROR_INVALID_INPUT;
                 return result;
             }
-            if (source->comdat > object->comdat_count ||
+            if (source->comdat > object->comdat_count || source->thread_local_state > OBJECT_SYMBOL_THREAD_LOCAL_YES ||
                 (source->section != OBJECT_SECTION_UNDEFINED &&
                  (source->section >= object->section_count ||
                   source->value > BUSTER_MAX(object->sections[source->section].data.length, object->sections[source->section].virtual_size) ||
@@ -2120,6 +2133,18 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
             {
                 result.error = LINK_ERROR_INVALID_INPUT;
                 return result;
+            }
+            if (source->section != OBJECT_SECTION_UNDEFINED && source->section < object->section_count &&
+                source->thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN)
+            {
+                ObjectSectionKind section_kind = object->sections[source->section].kind;
+                bool section_is_thread_local = section_kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                                               section_kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+                if ((source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES) != section_is_thread_local)
+                {
+                    result.error = LINK_ERROR_INVALID_INPUT;
+                    return result;
+                }
             }
             ObjectSymbol discarded_source = {0};
             if (link_comdat_is_discarded(&comdat_plan, object_index, source->comdat))
@@ -2167,6 +2192,21 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 ObjectSymbol* destination = &result.object.symbols[destination_index];
                 bool destination_defined = destination->section != OBJECT_SECTION_UNDEFINED;
                 bool source_defined = source->section != OBJECT_SECTION_UNDEFINED;
+                u8 destination_thread_local_state = link_symbol_thread_local_state(&result.object, destination);
+                u8 source_thread_local_state = link_symbol_thread_local_state(object, source);
+                // Undefined symbols in COFF and Mach-O may not carry a TLS
+                // bit, so their readers leave the state unknown. Definitions
+                // still derive it from their section, and known IR facts are
+                // checked on every target format.
+                bool thread_local_mismatch = destination_thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN &&
+                                             source_thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN &&
+                                             destination_thread_local_state != source_thread_local_state;
+                if (thread_local_mismatch)
+                {
+                    result.error = LINK_ERROR_TLS_SYMBOL_MISMATCH;
+                    result.symbol = link_string_copy(arena, source->name);
+                    return result;
+                }
                 // Two definitions collide only when neither is replaceable.
                 // A replaceable definition — COFF selectany COMDAT, ELF weak,
                 // Mach-O N_WEAK_DEF — yields to a strong one whichever side it
@@ -2194,6 +2234,9 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 // even when another does not.
                 bool merged_hidden = destination->hidden || source->hidden;
                 bool merged_weak = destination->weak && source->weak;
+                u8 merged_thread_local_state = destination_thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN
+                                                   ? destination_thread_local_state
+                                                   : source_thread_local_state;
                 if (source_replaces)
                 {
                     if (!link_symbol_definition_set(destination, source, object, section_offsets + (u64)object_index * OBJECT_SECTION_COUNT, arena))
@@ -2203,6 +2246,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                     }
                 }
                 destination->hidden = merged_hidden;
+                destination->thread_local_state = merged_thread_local_state;
                 if (destination->section == OBJECT_SECTION_UNDEFINED)
                 {
                     destination->weak = merged_weak;
@@ -11708,6 +11752,7 @@ String8 link_error_name(LinkError error)
         S8_INITIALIZER("entry symbol"),
         S8_INITIALIZER("relocation"),
         S8_INITIALIZER("no default version for symbol"),
+        S8_INITIALIZER("TLS/non-TLS symbol mismatch"),
     };
 
     return error < LINK_ERROR_COUNT ? names[error] : S8("unknown error");

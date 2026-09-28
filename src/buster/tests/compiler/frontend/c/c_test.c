@@ -1479,6 +1479,132 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_runtime(UnitTestArguments* argume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_volatile_split_bit_fields(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("#pragma pack(1)\n"
+                        "struct signed_bits { signed : 29; volatile signed f1 : 30; };\n"
+                        "struct unsigned_bits { signed : 3; volatile unsigned f8 : 31; };\n"
+                        "static struct signed_bits signed_object;\n"
+                        "static struct unsigned_bits unsigned_object;\n"
+                        "static int take_signed(int value) { return value; }\n"
+                        "static unsigned take_unsigned(unsigned value) { return value; }\n"
+                        "int read_signed(void) { return signed_object.f1; }\n"
+                        "int call_signed(void) { return take_signed(signed_object.f1); }\n"
+                        "int branch_signed(int enabled) { return enabled || signed_object.f1 | 0; }\n"
+                        "int conditional_signed(int enabled) { return enabled ? (signed_object.f1 | 0) : 1; }\n"
+                        "long long widen_signed(void) { return signed_object.f1; }\n"
+                        "unsigned read_unsigned(void) { return unsigned_object.f8; }\n"
+                        "unsigned call_unsigned(void) { return take_unsigned(unsigned_object.f8); }\n"
+                        "int main(void) {\n"
+                        "    int signed_values[] = {0, 1, -1, 123456789, -123456789, 536870911, -536870912};\n"
+                        "    for (unsigned index = 0; index < sizeof(signed_values) / sizeof(signed_values[0]); index += 1) {\n"
+                        "        int value = signed_values[index];\n"
+                        "        signed_object.f1 = value;\n"
+                        "        if (read_signed() != value || call_signed() != value || widen_signed() != (long long)value) return 1;\n"
+                        "        if (branch_signed(0) != (value != 0) || branch_signed(1) != 1) return 2;\n"
+                        "        if (conditional_signed(0) != 1 || conditional_signed(1) != value) return 3;\n"
+                        "    }\n"
+                        "    unsigned unsigned_values[] = {0u, 1u, 19088743u, 1073741824u, 2147483647u};\n"
+                        "    for (unsigned index = 0; index < sizeof(unsigned_values) / sizeof(unsigned_values[0]); index += 1) {\n"
+                        "        unsigned value = unsigned_values[index];\n"
+                        "        unsigned_object.f8 = value;\n"
+                        "        if (read_unsigned() != value || call_unsigned() != value) return 4;\n"
+                        "    }\n"
+                        "    return 0;\n"
+                        "}\n");
+    Target targets[] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        targets[index].cpu_arch = index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[index].os = index < 2 ? OPERATING_SYSTEM_LINUX : index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+    }
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 dialect = 0; dialect < 2; dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessOptions options = {
+                    .target = targets[target_index],
+                    .data_layout = target_data_layout(targets[target_index]),
+                    .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                };
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source, options);
+                CParseResult parse = c_parse(temporary.arena, tokens);
+                if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+                {
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("volatile-split-bit-fields.c"), tokens, parse,
+                                                                          targets[target_index],
+                                                                          (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                    {
+                        IrValidationResult validation = ir_validate_canonical_module(lowered.program, &lowered.program->modules[0]);
+                        BUSTER_TEST_RAW(arguments, validation.error == IR_VALIDATION_NONE,
+                                        string_format(temporary.arena,
+                                                      S8("volatile split bit-fields target={u32} dialect={u32} form={u32}: error={u32}"),
+                                                      target_index, dialect, form, (u32)validation.error));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("volatile-split-bit-fields"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                                S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontend_forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        String8 promotion_forms[] = {S8("-fcanonical-local-promotion"), S8("-fno-canonical-local-promotion")};
+        String8 dialect_flags[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialect_flags); dialect += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontend_forms); form += 1)
+                {
+                    for (u32 promotion = 0; promotion < BUSTER_ARRAY_LENGTH(promotion_forms); promotion += 1)
+                    {
+                        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                        String8 output = buster_test_temporary_path(temporary.arena, S8("volatile-split-bit-fields-run"), S8(".exe"));
+                        String8 command[] = {S8("-nostdinc"), dialect_flags[dialect], allocators[allocator], frontend_forms[form],
+                                            promotion_forms[promotion], S8("-fverify-codegen"), S8("-o"), output, source_path};
+                        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                                                                                                 (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                        invocation.reject_machine_fallback = allocator != 0;
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                                        string_format(temporary.arena,
+                                                      S8("volatile split bit-fields {S8} {S8} {S8} {S8}: {S8}"),
+                                                      dialect_flags[dialect], allocators[allocator], frontend_forms[form], promotion_forms[promotion],
+                                                      compiled.diagnostic));
+                        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            String8 run[] = {output};
+                            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                                       (ProcessSpawnOptions){.use_process_environment = true});
+                            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                            {
+                                ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                                BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                                string_format(temporary.arena,
+                                                              S8("volatile split bit-fields runtime status={u32} timed_out={u32}"),
+                                                              execution.platform_status, (u32)execution.timed_out));
+                            }
+                        }
+                        scratch_end(temporary);
+                    }
+                }
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1980,6 +2106,222 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_static_aggregates(UnitTestArgume
         BUSTER_TEST(arguments, ir_validate_canonical_module(local_static_ir.program, module).error == IR_VALIDATION_NONE);
     }
     scratch_end(local_static_temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 c_test_relocation_random(u64* state)
+{
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    return *state;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_test_relocation_replays_agree(CTestInitializerRelocationReplay const* replay, u32 operation_count)
+{
+    bool agree = replay->indexed_stop == replay->reference_stop;
+    if (agree && replay->indexed_stop == operation_count)
+    {
+        agree = replay->indexed_count == replay->reference_count;
+        for (u32 record = 0; agree && record < replay->indexed_count; record += 1)
+        {
+            agree = replay->indexed[record].symbol.value == replay->reference[record].symbol.value &&
+                    replay->indexed[record].offset == replay->reference[record].offset;
+        }
+    }
+    return agree;
+}
+
+// The indexed clear drops exactly the records the whole-array compaction
+// drops, in the same order, and fails where it fails (#1450).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_relocation_index(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    u32 const operation_capacity = 256;
+    CTestInitializerRelocationOperation* operations = arena_allocate(temporary.arena, CTestInitializerRelocationOperation, 16384);
+    CTestInitializerRelocationReplay replay = {0};
+    u64 state = 0x9e3779b97f4a7c15ull;
+    u32 disagreements = 0;
+    u32 built = 0;
+    u32 stopped = 0;
+    u32 removed = 0;
+    for (u32 trial = 0; trial < 1024; trial += 1)
+    {
+        TemporalArena trial_scratch = arena_begin_temporal(temporary.arena);
+        u32 pointer_size = c_test_relocation_random(&state) & 1 ? 8 : 4;
+        u64 slots = 1 + c_test_relocation_random(&state) % 48;
+        u64 byte_count = slots * pointer_size + c_test_relocation_random(&state) % pointer_size;
+        u32 operation_count = 1 + (u32)(c_test_relocation_random(&state) % operation_capacity);
+        u32 capacity = c_test_relocation_random(&state) % 8 ? (u32)slots + operation_count + 2 : 1 + (u32)(c_test_relocation_random(&state) % (slots + 2));
+        u64 last_append = 0;
+        for (u32 operation_index = 0; operation_index < operation_count; operation_index += 1)
+        {
+            u64 roll = c_test_relocation_random(&state) % 100;
+            CTestInitializerRelocationOperation operation = {.symbol = operation_index + 1};
+            if (roll < 45 || (operation_index && operations[operation_index - 1].clear && roll < 70))
+            {
+                u64 shape = c_test_relocation_random(&state) % 100;
+                u64 slot_offset = c_test_relocation_random(&state) % slots * pointer_size;
+                // A designated store appends where it just cleared.
+                operation.offset = operation_index && operations[operation_index - 1].clear && roll >= 45 ? operations[operation_index - 1].offset
+                                   : shape < 70                                                       ? slot_offset
+                                   : shape < 85 ? c_test_relocation_random(&state) % (byte_count - pointer_size + 1)
+                                   : shape < 95 ? last_append
+                                                : byte_count + c_test_relocation_random(&state) % (2 * pointer_size);
+                last_append = operation.offset;
+            }
+            else
+            {
+                u64 shape = c_test_relocation_random(&state) % 100;
+                operation.clear = true;
+                operation.offset = shape < 60 ? c_test_relocation_random(&state) % slots * pointer_size : c_test_relocation_random(&state) % (byte_count + 3);
+                u64 room = operation.offset <= byte_count ? byte_count - operation.offset : 0;
+                u64 size_shape = c_test_relocation_random(&state) % 100;
+                operation.size = size_shape < 30 ? pointer_size
+                                 : size_shape < 45 ? 0
+                                 : size_shape < 65 ? 2 * pointer_size
+                                 : size_shape < 95 ? c_test_relocation_random(&state) % (room + 1)
+                                                   : room + 1;
+            }
+            operations[operation_index] = operation;
+        }
+        c_test_initializer_relocation_replay(trial_scratch.arena, pointer_size, byte_count, capacity, operations, operation_count, &replay);
+        disagreements += !c_test_relocation_replays_agree(&replay, operation_count);
+        built += replay.index_built;
+        stopped += replay.reference_stop < operation_count;
+        removed += replay.index_built && replay.indexed_appends > replay.indexed_count;
+        scratch_end(trial_scratch);
+    }
+    BUSTER_TEST(arguments, disagreements == 0);
+    // The index removed records in many trials (dead marks need no counting build).
+    BUSTER_TEST(arguments, built > 256 && stopped > 64 && removed > 256);
+
+    // Designator families at N = 2048 pointer slots.
+    u32 const slot_count = 2048;
+    u32 capacity = slot_count + 1 + 3 * slot_count + 1;
+    for (u32 family = 0; family < 4; family += 1)
+    {
+        TemporalArena family_scratch = arena_begin_temporal(temporary.arena);
+        u32 operation_count = 0;
+        for (u32 index = 0; index < slot_count; index += 1)
+        {
+            // Family 0 walks a fixed permutation; the others store in order.
+            u32 slot = family == 0 ? (u32)((index * 1021u + 7u) % slot_count) : index;
+            operations[operation_count++] = (CTestInitializerRelocationOperation){.offset = (u64)slot * 8, .size = 8, .clear = true};
+            operations[operation_count++] = (CTestInitializerRelocationOperation){.offset = (u64)slot * 8, .symbol = 1};
+        }
+        u32 repeat_count = family == 1 ? slot_count : family == 2 ? slot_count / 8 : family == 3 ? 3 * slot_count : 0;
+        for (u32 index = 0; index < repeat_count; index += 1)
+        {
+            // 1: every slot designated again; 2: one override per eight
+            // slots after a range default; 3: one slot overwritten until the
+            // dead records outnumber the live ones, twice over.
+            u64 slot = family == 1 ? index : family == 2 ? (u64)index * 8 : 5;
+            operations[operation_count++] = (CTestInitializerRelocationOperation){.offset = slot * 8, .size = 8, .clear = true};
+            operations[operation_count++] = (CTestInitializerRelocationOperation){.offset = slot * 8, .symbol = 2 + index};
+        }
+        c_test_initializer_relocation_replay(family_scratch.arena, 8, (u64)slot_count * 8, capacity, operations, operation_count, &replay);
+        BUSTER_TEST(arguments, c_test_relocation_replays_agree(&replay, operation_count) && replay.indexed_stop == operation_count);
+        BUSTER_TEST(arguments, replay.indexed_count == slot_count);
+#if BUSTER_BENCH_ALLOCATIONS
+        u64 clears = operation_count / 2;
+        BUSTER_TEST(arguments, replay.index_bucket_visits <= 2 * clears && replay.index_group_visits <= 2 * clears);
+        BUSTER_TEST(arguments, replay.index_removed_rows == repeat_count);
+        BUSTER_TEST(arguments, replay.index_compaction_rows <= 4 * (u64)operation_count);
+        if (family == 0 || family == 1)
+        {
+            // The whole-array compaction reads every record per clear.
+            BUSTER_TEST(arguments, replay.reference_compaction_rows >= (u64)slot_count * slot_count / 4);
+        }
+        if (family == 3)
+        {
+            BUSTER_TEST(arguments, replay.index_compaction_rows != 0);
+        }
+#endif
+        scratch_end(family_scratch);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// Lowered tables keep the order the whole-array compaction produced:
+// survivors in the order they were stored.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_relocation_lowering(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    u32 const slot_count = 256;
+    String8 source = {0};
+    for (u32 index = 0; index < slot_count; index += 1)
+    {
+        source = string_format(temporary.arena, S8("{S8}int a{u32}, b{u32};\n"), source, index, index);
+    }
+    source = string_format(temporary.arena, S8("{S8}int d;\nint *shuffled[{u32}] = {{"), source, slot_count);
+    for (u32 index = 0; index < slot_count; index += 1)
+    {
+        u32 slot = (index * 101u + 3u) % slot_count;
+        source = string_format(temporary.arena, S8("{S8}[{u32}] = &a{u32}, "), source, slot, slot);
+    }
+    source = string_format(temporary.arena, S8("{S8}}};\nint *twice[{u32}] = {{"), source, slot_count);
+    for (u32 pass = 0; pass < 2; pass += 1)
+    {
+        for (u32 index = 0; index < slot_count; index += 1)
+        {
+            source = string_format(temporary.arena, pass ? S8("{S8}[{u32}] = &b{u32}, ") : S8("{S8}[{u32}] = &a{u32}, "), source, index, index);
+        }
+    }
+    source = string_format(temporary.arena, S8("{S8}}};\nint *ranged[{u32}] = {{[0 ... {u32}] = &d"), source, slot_count, slot_count - 1);
+    for (u32 index = 0; index < slot_count; index += 8)
+    {
+        source = string_format(temporary.arena, S8("{S8}, [{u32}] = &b{u32}"), source, index, index);
+    }
+    source = string_format(temporary.arena, S8("{S8}}};\n"), source);
+    CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                                                                       .target = target_native,
+                                                                       .data_layout = target_data_layout(target_native),
+                                                                       .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                                   });
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("initializer-relocations.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, lowered.program != 0))
+    {
+        IrModule* module = &lowered.program->modules[0];
+        u64 pointer_size = lowered.program->data_layout.pointer.size;
+        u32 checked = 0;
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            IrGlobal* global = module->globals + global_index;
+            IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, global->symbol);
+            u32 table = !symbol ? 0 : string_equal(symbol->name, S8("shuffled")) ? 1 : string_equal(symbol->name, S8("twice")) ? 2
+                                    : string_equal(symbol->name, S8("ranged"))     ? 3 : 0;
+            if (!table)
+            {
+                continue;
+            }
+            checked += 1;
+            BUSTER_TEST(arguments, global->relocation_count == slot_count);
+            for (u32 record = 0; record < global->relocation_count && record < slot_count; record += 1)
+            {
+                // Shuffled keeps store order; twice keeps only the second
+                // pass; ranged keeps the untouched defaults in index order,
+                // then the overrides.
+                u32 overrides = slot_count / 8;
+                u32 slot = table == 1 ? (record * 101u + 3u) % slot_count
+                           : table == 2 ? record
+                           : record < slot_count - overrides ? record + record / 7 + 1
+                                                               : (record - (slot_count - overrides)) * 8;
+                String8 expected = table == 1 ? string_format(temporary.arena, S8("a{u32}"), slot)
+                                   : table == 2 || record >= slot_count - overrides ? string_format(temporary.arena, S8("b{u32}"), slot)
+                                                                                     : S8("d");
+                IrSymbol* target = ir_symbol_from_id(&lowered.program->symbols, global->relocations[record].symbol);
+                BUSTER_TEST(arguments, target && string_equal(target->name, expected) && global->relocations[record].offset == slot * pointer_size);
+            }
+        }
+        BUSTER_TEST(arguments, checked == 3);
+    }
+    scratch_end(temporary);
     return result;
 }
 
@@ -2656,6 +2998,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fresh_binding_publication(UnitTestArgu
     return result;
 }
 
+// A function declared through a function typedef opens a function scope like
+// any prototype, but brings no `(` to the token census: `F f0, f1, f2;` is
+// three function scopes and no parenthesis. A unit of such declarations with
+// few parentheses outgrew the scope table and failed validation.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_typedef_scopes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    u32 generated_count = 64;
+    u64 source_capacity = BUSTER_KB(8);
+    char8* source_buffer = arena_allocate(temporary.arena, char8, source_capacity);
+    u64 source_length = 0;
+    // One file-scope declarator list, single file-scope declarations, and
+    // single block-scope declarations; only `F` and `main` bring a `(`.
+    c_test_append_source(source_buffer, source_capacity, &source_length, S8("typedef int F(void);\nF "));
+    for (u32 index = 0; index < generated_count; index += 1)
+    {
+        c_test_append_source(source_buffer, source_capacity, &source_length,
+                             string_format(temporary.arena, S8("{S8}list_{u32}"), index ? S8(", ") : S8(""), index));
+    }
+    c_test_append_source(source_buffer, source_capacity, &source_length, S8(";\n"));
+    for (u32 index = 0; index < generated_count; index += 1)
+    {
+        c_test_append_source(source_buffer, source_capacity, &source_length, string_format(temporary.arena, S8("F single_{u32};\n"), index));
+    }
+    c_test_append_source(source_buffer, source_capacity, &source_length, S8("int main(void)\n{\n"));
+    for (u32 index = 0; index < generated_count; index += 1)
+    {
+        c_test_append_source(source_buffer, source_capacity, &source_length, string_format(temporary.arena, S8("F local_{u32};\n"), index));
+    }
+    c_test_append_source(source_buffer, source_capacity, &source_length, S8("return 0;\n}\n"));
+    String8 sources[] = {
+        S8("typedef void Handler(int);\nHandler on_open, on_close, on_error;\nint main(void) { return 0; }\n"),
+        S8("typedef int F(void); F f0, f1, f2; int main(void) { return 0; }\n"),
+        S8("typedef void H(int);\nint main(void) { H a, b, c; return 0; }\n"),
+        {
+            .pointer = source_buffer,
+            .length = source_length,
+        },
+    };
+    u32 function_counts[] = {4, 4, 4, generated_count * 3 + 1};
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, sources[source_index], S8("function-typedef-scopes.c"), target_native, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.scope_count <= parse.scope_capacity);
+        u32 function_count = 0;
+        for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+        {
+            CDeclaration declaration = parse.declarations[declaration_index];
+            if (declaration.kind == C_DECLARATION_FUNCTION)
+            {
+                function_count += 1;
+                BUSTER_TEST(arguments, declaration.scope.value != 0 && declaration.scope.value < parse.scope_count);
+            }
+        }
+        BUSTER_TEST(arguments, function_count == function_counts[source_index]);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_growth(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2773,6 +3182,90 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_identity(UnitTestArgu
     CTypeId duplicate = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Shared"), .tag_scope = {1}});
     BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("Shared"), (CScopeId){1}).value == duplicate.value);
     BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("NoRoom"), (CScopeId){0}).value < parse.type_count);
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_unique_search(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    // The index names a tag's only row, says no row carries an absent one,
+    // and leaves every other answer to the caller's search.
+    CAggregateLookup lookup = {.slot_count = 8};
+    lookup.slots = arena_allocate_zeroed(temporary.arena, CAggregateLookupSlot, lookup.slot_count);
+    CScope scopes[] = {{.parent = C_SCOPE_ID_INVALID}, {.parent = {0}}};
+    CParseResult parse = {.arena = temporary.arena, .aggregate_lookup = &lookup, .scopes = scopes, .scope_count = BUSTER_ARRAY_LENGTH(scopes),
+        .types = arena_allocate(temporary.arena, CType, 64), .type_capacity = 64};
+    bool decided = false;
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Only"), &decided).value == C_ID_UNDERLYING_INVALID && decided);
+    CTypeId only = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Only"), .tag_scope = {1}});
+    CTypeId other_kind = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_UNION, .tag = S8("Only"), .tag_scope = {0}});
+    CType qualified = parse.types[only.value];
+    qualified.has_unqualified_type = true;
+    qualified.unqualified_type = only;
+    qualified.is_const = true;
+    c_test_aggregate_lookup_add(&parse, qualified);
+    // Scope does not enter the answer: the one row is the one the search
+    // would return from any reference, visible or not.
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Only"), &decided).value == only.value && decided);
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_UNION, S8("Only"), &decided).value == other_kind.value && decided);
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_ENUM, S8("Only"), &decided).value == C_ID_UNDERLYING_INVALID && decided);
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, (String8){0}, &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Twice"), .tag_scope = {0}});
+    c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Twice"), .tag_scope = {1}});
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Twice"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    // A rolled-back row leaves its slot stale, which the caller searches; a
+    // row reusing the id under the tag answers again.
+    CParseResult checkpoint = parse;
+    CTypeId speculative = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Speculative"), .tag_scope = {0}});
+    c_test_aggregate_lookup_rollback(&parse, checkpoint);
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Speculative"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_ENUM, .tag = S8("Reuse"), .tag_scope = {0}});
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Speculative"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    c_test_aggregate_lookup_rollback(&parse, checkpoint);
+    CTypeId reused = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Speculative"), .tag_scope = {1}});
+    BUSTER_TEST(arguments, reused.value == speculative.value);
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Speculative"), &decided).value == reused.value && decided);
+    lookup.incomplete = true;
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Only"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    parse.aggregate_lookup = 0;
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Only"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+
+    // Lowering: 64 tags named by casts cost no search row; a shadowed tag
+    // still searches, and each search visits the whole table.
+    for (u32 shadow = 0; shadow < 2; shadow += 1)
+    {
+        String8 source = {0};
+        for (u32 row = 0; row < 64; row += 1)
+        {
+            source = string_format(temporary.arena, S8("{S8}struct U{u32} {{ int a; long b[{u32}]; }};\n"), source, row, row + 1);
+        }
+        source = string_format(temporary.arena, S8("{S8}int use(void* p) {{ int s = 0;\n"), source);
+        for (u32 row = 0; row < 64; row += 1)
+        {
+            source = string_format(temporary.arena, S8("{S8}s += ((struct U{u32}*)p)->a + (int)sizeof(struct U{u32});\n"), source, row, row);
+        }
+        if (shadow)
+        {
+            source = string_format(temporary.arena, S8("{S8}{{ struct U7 {{ char c; }}; s += ((struct U7*)p)->c; }}\n"), source);
+        }
+        source = string_format(temporary.arena, S8("{S8}return s; }\n"), source);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                                                                       .target = target_native,
+                                                                       .data_layout = target_data_layout(target_native),
+                                                                   });
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("aggregate-unique.c"), tokens, parsed, target_native);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parsed.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program != 0);
+#if BUSTER_BENCH_ALLOCATIONS
+        if (BUSTER_REQUIRE(arguments, parsed.aggregate_lookup != 0))
+        {
+            u64 rows = parsed.aggregate_lookup->lowering_search_type_count;
+            BUSTER_TEST(arguments, shadow ? rows != 0 && rows % parsed.type_count == 0 : rows == 0);
+        }
+#endif
+    }
     scratch_end(temporary);
     return result;
 }
@@ -3989,6 +4482,62 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_nonconstant(UnitTestAr
     return result;
 }
 
+// A non-constant static assertion quotes its whole controlling expression.
+// The quote once stopped at the first `,` or `)` at any depth (#1573), so a
+// parenthesized operand or a call printed truncated and unbalanced. Tokens
+// keep their source adjacency; a comment, line break or macro boundary reads
+// as one space. A `_Generic` assertion is deferred and its diagnostic, which
+// quotes nothing, is pinned unchanged.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_nonconstant_quote(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 message;
+    } cases[] = {
+        {S8("int value;\n_Static_assert(value, \"simple\");\n"),
+         S8("static assertion expression is not an integer constant expression: value")},
+        {S8("int value;\n_Static_assert((value + 1) != 0, \"parenthesized\");\n"),
+         S8("static assertion expression is not an integer constant expression: (value + 1) != 0")},
+        {S8("int pair(int, int);\n_Static_assert(pair(1, 2), \"call\");\n"),
+         S8("static assertion expression is not an integer constant expression: pair(1, 2)")},
+        {S8("int pair(int, int);\n_Static_assert((1 << 32) != 0 && pair(1, 2), \"both\");\n"),
+         S8("static assertion expression is not an integer constant expression: (1 << 32) != 0 && pair(1, 2)")},
+        {S8("int pair(int, int);\n_Static_assert(pair(1, 2));\n"),
+         S8("static assertion expression is not an integer constant expression: pair(1, 2)")},
+        {S8("int local(int n) { _Static_assert((n + 1) * 2, \"local\"); return n; }\n"),
+         S8("static assertion expression is not an integer constant expression: (n + 1) * 2")},
+        {S8("int pair(int, int);\n_Static_assert(pair(/* first */ 1,\n    2) + pair( 3 , 4 ), \"layout\");\n"),
+         S8("static assertion expression is not an integer constant expression: pair( 1, 2) + pair( 3 , 4 )")},
+        {S8("#define NEGATIVE -1\nint pair(int, int);\n_Static_assert(pair(-NEGATIVE, 2), \"macro\");\n"),
+         S8("static assertion expression is not an integer constant expression: pair(- - 1 , 2)")},
+        {S8("int pair(int, int);\n_Static_assert(_Generic(0, int: pair(1, 2), default: 0), \"generic\");\n"),
+         S8("static assertion expression is not an integer constant expression")},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                                                (CPreprocessOptions){
+                                                    .target = target_native,
+                                                    .data_layout = target_data_layout(target_native),
+                                                });
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CIRLowerResult analysis = c_analyze(temporary.arena, S8("static-assert-quote.c"), tokens, syntax, target_native);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+        BUSTER_TEST_RAW(arguments, analysis.diagnostic_count == 1, cases[case_index].source);
+        if (analysis.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, analysis.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT);
+            BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, cases[case_index].message);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_tls(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4413,6 +4962,77 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_block_tls(UnitTestArguments* a
     BUSTER_TEST(arguments, invalid_block_tls_parse.diagnostic_count >= 1);
     BUSTER_TEST(arguments, found_invalid_block_tls_diagnostic);
     scratch_end(invalid_block_tls_temporary);
+    return result;
+}
+
+// Issue 1603: an internal or inline definition nothing reaches is dropped
+// whether or not a prototype came first. The prototype's function stays
+// bodiless as NOT_LOWERED, never the REJECTED placeholder a lowered definition
+// starts from: that state means lowering failed, and the LLVM bitcode,
+// WebAssembly and eBPF emitters refuse the whole unit on it. The cycle's
+// unprototyped half is the no-prototype path, which leaves no function at all.
+// A definition kept for its section is a root, so both of its callees are
+// needed. Before it was, the call to the unprototyped one failed to lower and
+// the prototyped one was left bodiless, referenced as an undefined global.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unneeded_prototyped_definitions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("static int unneeded_static(void);\n"
+                                               "static int unneeded_static(void) { return 1; }\n"
+                                               "static inline int unneeded_inline(void);\n"
+                                               "static inline int unneeded_inline(void) { return 2; }\n"
+                                               "inline int unneeded_external_inline(void);\n"
+                                               "inline int unneeded_external_inline(void) { return 3; }\n"
+                                               "static int unneeded_cycle_a(void);\n"
+                                               "static int unneeded_cycle_b(void) { return unneeded_cycle_a(); }\n"
+                                               "static int unneeded_cycle_a(void) { return unneeded_cycle_b(); }\n"
+                                               "static int needed_static(void);\n"
+                                               "int keep(void) { return needed_static(); }\n"
+                                               "static int needed_static(void) { return 4; }\n"
+                                               "static int section_callee(void) { return 5; }\n"
+                                               "static int section_callee_prototyped(void);\n"
+                                               "__attribute__((section(\".text.kept\"))) static int section_root(void)"
+                                               " { return section_callee() + section_callee_prototyped(); }\n"
+                                               "static int section_callee_prototyped(void) { return 6; }\n"),
+                                            (CPreprocessOptions){
+                                                .target = target_native,
+                                                .data_layout = target_data_layout(target_native),
+                                            });
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("unneeded-prototyped-definitions.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, lowered.program != 0))
+    {
+        IrModule* module = lowered.program->modules;
+        BUSTER_TEST(arguments, module->rejected_function_count == 0);
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            BUSTER_TEST(arguments, module->functions[function_index].state != IR_FUNCTION_REJECTED);
+        }
+        String8 unneeded[] = {S8("unneeded_static"), S8("unneeded_inline"), S8("unneeded_external_inline"), S8("unneeded_cycle_a")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unneeded); index += 1)
+        {
+            IrFunction* function = c_test_find_ir_function(module, unneeded[index]);
+            BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_NOT_LOWERED && !function->block_count);
+        }
+        BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("unneeded_cycle_b")) == 0);
+        IrFunction* needed = c_test_find_ir_function(module, S8("needed_static"));
+        IrFunction* keep = c_test_find_ir_function(module, S8("keep"));
+        BUSTER_TEST(arguments, needed && needed->state == IR_FUNCTION_LOWERED);
+        BUSTER_TEST(arguments, keep && keep->state == IR_FUNCTION_LOWERED);
+        String8 section_reached[] = {S8("section_root"), S8("section_callee"), S8("section_callee_prototyped")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(section_reached); index += 1)
+        {
+            IrFunction* function = c_test_find_ir_function(module, section_reached[index]);
+            BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_LOWERED);
+        }
+    }
+    scratch_end(temporary);
     return result;
 }
 
@@ -6050,24 +6670,308 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_locations(UnitTestArguments
     return result;
 }
 
+// Published key storage is never rewound, even when a later map supersedes it.
+// The no-append branch must be genuinely allocation-free, not merely equivalent.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_publication(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 counts[] = {0, 1, 2, 63, 64, 65, 255, 256, 257, 1024, 65536};
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(32), .flags = {.no_pool = 1}});
+    if (BUSTER_REQUIRE(arguments, arena != 0))
+    {
+        for (u32 repetition = 0; repetition < 3; repetition += 1)
+        {
+            CSourceMapRecovery recovery = {0};
+            IrSourceMap snapshots[BUSTER_ARRAY_LENGTH(counts)] = {0};
+            for (u32 size = 0; size < BUSTER_ARRAY_LENGTH(counts); size += 1)
+            {
+                u32 count = counts[size];
+                // A distinct backing array models the growth during respelling.
+                IrSourceRegion* regions = count ? arena_allocate(arena, IrSourceRegion, count) : 0;
+                for (u32 index = 0; index < count; index += 1)
+                {
+                    regions[index] = (IrSourceRegion){.start = index * 16, .source = index % 7,
+                                                      .kind = IR_SOURCE_REGION_STAMP};
+                }
+                u64 before = arena->position;
+                c_test_source_map_publish_appended(arena, &recovery, regions, count, count);
+                u64 alignment = BUSTER_ALIGN_OF(IrSourceRegionKey);
+                u64 expected = count ? (before + alignment - 1) / alignment * alignment + sizeof(IrSourceRegionKey) * (count + 1) : before;
+                BUSTER_TEST(arguments, arena->position == expected);
+                BUSTER_TEST(arguments, recovery.map.count == count && recovery.capacity == count);
+                if (BUSTER_REQUIRE(arguments, !count || (recovery.map.keys && recovery.map.regions == regions)))
+                {
+                    if (count)
+                    {
+                        BUSTER_TEST(arguments, recovery.map.keys[count].start == UINT32_MAX && recovery.map.keys[count].source == 0);
+                    }
+                    snapshots[size] = recovery.map;
+                    // Interleaved persistent allocations make a broad rewind or
+                    // in-place replacement observable, as do the saved models.
+                    u8* canary = arena_allocate(arena, u8, 97);
+                    memset(canary, 0x5a, 97);
+                    u64 position = arena->position;
+                    u64 committed = arena->os_position;
+                    u64 dirty = arena_dirty_position(arena);
+                    c_test_source_map_publish_appended(arena, &recovery, regions, count, count);
+                    BUSTER_TEST(arguments, arena->position == position && arena->os_position == committed);
+                    BUSTER_TEST(arguments, arena_dirty_position(arena) == dirty);
+                    BUSTER_TEST(arguments, recovery.map.keys == snapshots[size].keys);
+                    BUSTER_TEST(arguments, recovery.map.regions == snapshots[size].regions);
+                    for (u32 index = 0; index < 97; index += 1)
+                    {
+                        BUSTER_TEST(arguments, canary[index] == 0x5a);
+                    }
+                }
+            }
+            for (u32 size = 0; size < BUSTER_ARRAY_LENGTH(counts); size += 1)
+            {
+                IrSourceMap copy = snapshots[size];
+                if (BUSTER_REQUIRE(arguments, copy.count == counts[size] && (!copy.count || copy.keys)))
+                {
+                    for (u32 index = 0; index < copy.count; index += 1)
+                    {
+                        BUSTER_TEST(arguments, copy.keys[index].start == index * 16 && copy.keys[index].source == index % 7);
+                    }
+                    if (copy.count)
+                    {
+                        BUSTER_TEST(arguments, copy.keys[copy.count].start == UINT32_MAX && copy.keys[copy.count].source == 0);
+                    }
+                }
+            }
+            // No consumers survive this test-owned boundary. The next pass
+            // must work on poisoned, previously committed storage, not fresh zeroes.
+            memset((u8*)arena + arena_minimum_position, 0xa5, arena->position - arena_minimum_position);
+            arena_reset_to_start(arena);
+        }
+        // A no-op publication also succeeds with no reservation left. The
+        // prerequisite keeps the intentional unconditional-publication negative
+        // control an ordinary assertion failure rather than a fatal overflow.
+        IrSourceRegion region = {.start = 0, .kind = IR_SOURCE_REGION_STAMP};
+        CSourceMapRecovery recovery = {0};
+        c_test_source_map_publish_appended(arena, &recovery, &region, 1, 1);
+        u64 position = arena->position;
+        c_test_source_map_publish_appended(arena, &recovery, &region, 1, 1);
+        if (BUSTER_REQUIRE(arguments, arena->position == position))
+        {
+            (void)arena_allocate(arena, u8, arena->reserved_size - arena->position);
+            c_test_source_map_publish_appended(arena, &recovery, &region, 1, 1);
+            BUSTER_TEST(arguments, arena->position == arena->reserved_size);
+            BUSTER_TEST(arguments, recovery.map.keys[0].start == 0 && recovery.map.keys[1].start == UINT32_MAX);
+        }
+        BUSTER_TEST(arguments, arena_destroy(arena, 1));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_lifetime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8(""),
+        S8("int tiny;\n"),
+        S8("#define KEEP(x) x\n#define JOIN(a,b) a##b\n"
+           "#line 73 \"map-lifetime.c\"\n#warning retained message\n"
+           "bool JOIN(va,lue);\nalignas(16) int aligned_value;\n"
+           "static_assert(alignof(int) >= 1, \"ok\");\nthread_local int tls;\n"
+           "int f(void) { return KEEP(alignof(int)) + value; }\n"),
+        S8("int broken(\n"),
+    };
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128), .flags = {.no_pool = 1}});
+    if (BUSTER_REQUIRE(arguments, arena != 0))
+    {
+        for (u32 repetition = 0; repetition < 3; repetition += 1)
+        {
+            for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+            {
+                Target target = target_native;
+                CPreprocessOptions options = {.source_path = S8("tests/map-lifetime.c"), .target = target,
+                    .data_layout = target_data_layout(target),
+                    .dialect = source_index == 2 || repetition == 1 ? C_PREPROCESS_DIALECT_C23 : C_PREPROCESS_DIALECT_C17};
+                CPreprocessResult preprocess = c_preprocess(arena, sources[source_index], options);
+                if (BUSTER_REQUIRE(arguments, preprocess.recovery && preprocess.tokens && !preprocess.error_count))
+                {
+                    CPreprocessResult saved = preprocess;
+                    IrSourceMap map = preprocess.recovery->map;
+                    CSourceLocation* locations = arena_allocate(arena, CSourceLocation, preprocess.token_count);
+                    for (u64 index = 0; index < preprocess.token_count; index += 1)
+                    {
+                        locations[index] = c_preprocess_token_location(&preprocess, preprocess.tokens[index]);
+                    }
+                    BUSTER_TEST(arguments, preprocess.warning_count == (source_index == 2));
+                    if (source_index == 2 && BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 1))
+                    {
+                        BUSTER_STRING_TEST(arguments, preprocess.diagnostics[0].message, S8("retained message"));
+                        BUSTER_TEST(arguments, preprocess.diagnostics[0].location.line == 73);
+                    }
+                    CParserResult syntax = c_parse_ast(arena, preprocess);
+                    CIRLowerResult lowered = {0};
+                    CDiagnostic parser_diagnostic = {0};
+                    if (source_index == 3)
+                    {
+                        if (BUSTER_REQUIRE(arguments, syntax.diagnostic_count && syntax.diagnostics))
+                        {
+                            parser_diagnostic = syntax.diagnostics[0];
+                            parser_diagnostic.message = string_duplicate_arena(arguments->arena, parser_diagnostic.message, false);
+                            BUSTER_TEST(arguments, parser_diagnostic.message.length != 0);
+                        }
+                    }
+                    else if (BUSTER_REQUIRE(arguments, syntax.diagnostic_count == 0))
+                    {
+                        CAnalysisResult analysis = c_analyze_semantics_only(arena, preprocess, syntax);
+                        if (BUSTER_REQUIRE(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0))
+                        {
+                            // The model and preprocess descriptors are copied by
+                            // value. Their borrowed payload must remain valid.
+                            CAnalysisResult analysis_copy = analysis;
+                            lowered = c_lower_to_ir(arena, options.source_path, saved, analysis_copy, target);
+                            BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+                        }
+                    }
+                    // A second live TU shares the caller arena, but owns its
+                    // own spelling/token arenas and malformed-input diagnostics.
+                    CPreprocessResult other = c_preprocess(arena,
+                        S8("#line 9 \"map-other.c\"\n#error another message\nint other;\n"), options);
+                    if (BUSTER_REQUIRE(arguments, other.recovery && other.error_count == 1 && other.diagnostic_count == 1))
+                    {
+                        BUSTER_STRING_TEST(arguments, other.diagnostics[0].message, S8("another message"));
+                        BUSTER_TEST(arguments, other.diagnostics[0].location.line == 9);
+                    }
+                    memset(arena_allocate(arena, u8, 8192), 0x5a, 8192);
+                    for (u64 index = 0; index < saved.token_count; index += 1)
+                    {
+                        CSourceLocation location = c_preprocess_token_location(&saved, saved.tokens[index]);
+                        BUSTER_TEST(arguments, location.file == locations[index].file && location.line == locations[index].line &&
+                                               location.column == locations[index].column && location.map_offset == locations[index].map_offset);
+                        if (lowered.program)
+                        {
+                            IrSourcePosition position = ir_source_map_position(&lowered.program->source_map, saved.tokens[index].offset, 0);
+                            BUSTER_TEST(arguments, position.source == location.file && position.line == location.line && position.column == location.column);
+                        }
+                    }
+                    BUSTER_TEST(arguments, saved.recovery->map.keys == map.keys && saved.recovery->map.regions == map.regions);
+                    if (lowered.program)
+                    {
+                        BUSTER_TEST(arguments, lowered.program->source_map.keys == map.keys && lowered.program->source_map.regions == map.regions);
+                        BUSTER_TEST(arguments, lowered.program->source_map.pages == map.pages && lowered.program->source_map.count == map.count);
+                    }
+                    if (source_index == 2 && BUSTER_REQUIRE(arguments, saved.diagnostic_count == 1))
+                    {
+                        BUSTER_STRING_TEST(arguments, saved.diagnostics[0].message, S8("retained message"));
+                        BUSTER_TEST(arguments, saved.diagnostics[0].location.line == 73);
+                    }
+                    if (source_index == 3 && parser_diagnostic.message.length)
+                    {
+                        BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].message, parser_diagnostic.message);
+                        BUSTER_TEST(arguments, syntax.diagnostics[0].kind == parser_diagnostic.kind &&
+                                               syntax.diagnostics[0].location.line == parser_diagnostic.location.line);
+                    }
+                    if (other.recovery)
+                    {
+                        arena_destroy(other.recovery->spelling_arena, 1);
+                        arena_destroy(other.recovery->token_arena, 1);
+                        arena_destroy(other.recovery->token_shape_arena, 1);
+                    }
+                }
+                if (preprocess.recovery)
+                {
+                    arena_destroy(preprocess.recovery->spelling_arena, 1);
+                    arena_destroy(preprocess.recovery->token_arena, 1);
+                    arena_destroy(preprocess.recovery->token_shape_arena, 1);
+                }
+                memset((u8*)arena + arena_minimum_position, 0xa5, arena->position - arena_minimum_position);
+                arena_reset_to_start(arena);
+            }
+        }
+        // The respell pass appends one STAMP per alias. Cross the region
+        // array's initial 256-row growth boundary and larger populations.
+        u32 counts[] = {0, 1, 255, 256, 257, 4096};
+        for (u32 size = 0; size < BUSTER_ARRAY_LENGTH(counts); size += 1)
+        {
+            u64 capacity = (u64)counts[size] * 32 + 1;
+            char8* bytes = arena_allocate(arena, char8, capacity);
+            u64 length = 0;
+            for (u32 index = 0; index < counts[size]; index += 1)
+            {
+                c_test_append_source(bytes, capacity, &length, string_format(arena, S8("bool value_{u32};\n"), index));
+            }
+            CPreprocessResult preprocess = c_preprocess(arena, (String8){.pointer = bytes, .length = length},
+                (CPreprocessOptions){.source_path = S8("tests/map-growth.c"), .dialect = C_PREPROCESS_DIALECT_C23});
+            if (BUSTER_REQUIRE(arguments, preprocess.recovery && !preprocess.diagnostic_count && preprocess.token_count == (u64)counts[size] * 3 + 1))
+            {
+                IrSourceMap map = preprocess.recovery->map;
+                BUSTER_TEST(arguments, map.count >= counts[size] && map.keys[map.count].start == UINT32_MAX);
+                for (u32 index = 0; index < counts[size]; index += 1)
+                {
+                    CToken token = preprocess.tokens[index * 3];
+                    BUSTER_STRING_TEST(arguments, c_token_spelling(preprocess.spelling_base, token), S8("_Bool"));
+                    CSourceLocation location = c_preprocess_token_location(&preprocess, token);
+                    BUSTER_TEST(arguments, location.line == index + 1 && location.column == 1);
+                }
+                for (u32 index = 0; index < map.count; index += 1)
+                {
+                    BUSTER_TEST(arguments, map.keys[index].start == map.regions[index].start && map.keys[index].source == map.regions[index].source);
+                }
+            }
+            if (preprocess.recovery)
+            {
+                arena_destroy(preprocess.recovery->spelling_arena, 1);
+                arena_destroy(preprocess.recovery->token_arena, 1);
+                arena_destroy(preprocess.recovery->token_shape_arena, 1);
+            }
+            arena_reset_to_start(arena);
+        }
+        // These are the supported nullable construction failures. In-arena
+        // exhaustion is fatal and remains covered by the arena subprocess suite.
+        for (u32 failure = 0; failure < 2; failure += 1)
+        {
+            arena_pool_release_thread();
+            // Ensure the detail block cannot request a commit before the
+            // intended new spelling-arena construction consumes the one-shot seam.
+            (void)arena_allocate(arena, u8, 4096);
+            arena_reset_to_start(arena);
+            if (failure) { arena_test_fail_next_commit(); }
+            else { arena_test_fail_next_reserve(); }
+            CPreprocessResult rejected = c_preprocess(arena, S8("int x;\n"), (CPreprocessOptions){0});
+            BUSTER_TEST(arguments, rejected.recovery == 0 && rejected.tokens == 0 && rejected.token_count == 0);
+            CPreprocessResult retried = c_preprocess(arena, S8("int x;\n"), (CPreprocessOptions){0});
+            BUSTER_TEST(arguments, retried.recovery && retried.tokens && !retried.error_count);
+            if (retried.recovery)
+            {
+                arena_destroy(retried.recovery->spelling_arena, 1);
+                arena_destroy(retried.recovery->token_arena, 1);
+                arena_destroy(retried.recovery->token_shape_arena, 1);
+            }
+            arena_reset_to_start(arena);
+        }
+        BUSTER_TEST(arguments, arena_destroy(arena, 1));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    u32 sizes[] = {0, 1, 2, 15, 16, 17, 62, 63, 64, 65, 126, 127, 128, 129, 513};
+    u32 sizes[] = {0, 1, 2, 15, 16, 17, 62, 63, 64, 65, 126, 127, 128, 129, 255, 256, 257, 513, 1023, 1024, 1025};
     for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(sizes); size_index += 1)
     {
-        for (u32 nested = 0; nested < 2; nested += 1)
+        for (u32 nested = 0; nested < 4; nested += 1)
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             u64 capacity = BUSTER_KB(16);
             char8* bytes = arena_allocate(temporary.arena, char8, capacity);
             u64 length = 0;
-            c_test_append_source(bytes, capacity, &length, S8("#define ID(x) x\n#define DUP(x) x x\n#define NUMBERS "));
+            c_test_append_source(bytes, capacity, &length, S8("#define ID(x) x\n#define DUP(x) x x\n#define PAIR(a,b) a b\n#define NUMBERS "));
             for (u32 index = 0; index < sizes[size_index]; index += 1)
             {
                 c_test_append_source(bytes, capacity, &length, string_format(temporary.arena, S8("{u32} "), index));
             }
-            c_test_append_source(bytes, capacity, &length, nested ? S8("\nID(DUP(NUMBERS)) tail\n") : S8("\nNUMBERS tail\n"));
+            // Later invocations remain suspended below child floors while
+            // NUMBERS and repeated substitutions cross task-growth boundaries.
+            String8 invocations[] = {S8("\nNUMBERS tail\n"), S8("\nID(DUP(NUMBERS)) tail\n"),
+                                     S8("\nID(DUP(NUMBERS)) ID(NUMBERS) tail\n"),
+                                     S8("\nPAIR(ID(DUP(NUMBERS)),DUP(NUMBERS)) tail\n")};
+            c_test_append_source(bytes, capacity, &length, invocations[nested]);
             CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){.pointer = bytes, .length = length},
                                                         (CPreprocessOptions){.source_path = S8("macro-task-batches.c")});
             u64 expected_count = (u64)sizes[size_index] * (nested + 1);
@@ -6086,7 +6990,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* 
     String8 definitions = S8("#define ID(x) x\n#define DUP(x) x x\n#define FN(x) x\n#define PAIR(a,b) a b\n"
                              "#define ALIAS FN\n#define EMPTY\n#define SELF SELF\n#define A B\n#define B A\n"
                              "#define CAT(a,b) a ## b\n#define STR(x) #x\n#define V(first,...) first __VA_ARGS__\n"
-                             "#define REC(x) x REC(x)\n");
+                             "#define REC(x) x REC(x)\n#define ALIAS2 ALIAS\n#define EXPAND_STR(x) STR(x)\n#define EDGE(a,b) a+b\n");
     struct
     {
         String8 input;
@@ -6108,6 +7012,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* 
         {S8("ID(EMPTY) tail"), S8("tail")},
         {S8("DUP(FN)(9)"), S8("FN 9")},
         {S8("ID(REC(1))"), S8("1 REC(1)")},
+        {S8("PAIR(,FN)(7)"), S8("7")},
+        {S8("PAIR(FN,)(7)"), S8("7")},
+        {S8("PAIR(EMPTY,FN)(7)"), S8("7")},
+        {S8("ID(ALIAS2)(13)"), S8("13")},
+        {S8("ID(DUP(FN))(9)"), S8("FN 9")},
+        {S8("PAIR(DUP(A),DUP(SELF)) tail"), S8("A A SELF SELF tail")},
+        {S8("ID(CAT(F,N))(19)"), S8("19")},
+        {S8("V(,7,8)"), S8("7,8")},
+        {S8("EXPAND_STR(EDGE(,1))"), S8("\"+1\"")},
+        {S8("EXPAND_STR(EDGE(1,))"), S8("\"1+\"")},
+        {S8("EXPAND_STR(EDGE(EMPTY,1))"), S8("\"+1\"")},
+        {S8("EXPAND_STR(EDGE(FN(1),FN(2)))"), S8("\"1+2\"")},
+        {S8("EXPAND_STR(PAIR(,FN)(7))"), S8("\"7\"")},
+        {S8("EXPAND_STR(ID(REC(1)))"), S8("\"1 REC(1)\"")},
+
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {
@@ -6136,7 +7055,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* 
     c_test_preprocessed_token(arguments, &result, locations, 2, C_TOKEN_STRING_LITERAL, S8("\"task-origin.c\""));
     for (u64 index = 0; index + 1 < locations.token_count; index += 1)
     {
-        BUSTER_TEST(arguments, c_preprocess_token_location(&locations, locations.tokens[index]).line == 321);
+        CSourceLocation location = c_preprocess_token_location(&locations, locations.tokens[index]);
+        BUSTER_TEST(arguments, location.line == 321);
+        if (BUSTER_REQUIRE(arguments, location.file < locations.file_count))
+        {
+            BUSTER_STRING_TEST(arguments, locations.files[location.file], S8("task-origin.c"));
+        }
+        BUSTER_TEST(arguments, location.column == (index < 2 ? 1 : index == 2 ? 19 : 28));
     }
     scratch_end(temporary);
 
@@ -6590,6 +7515,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_ffs"), all_targets},
         {S8("__builtin_ffsl"), all_targets},
         {S8("__builtin_ffsll"), all_targets},
+        {S8("__builtin_clz"), all_targets},
+        {S8("__builtin_clzl"), all_targets},
+        {S8("__builtin_clzll"), all_targets},
+        {S8("__builtin_ctz"), all_targets},
+        {S8("__builtin_ctzl"), all_targets},
+        {S8("__builtin_ctzll"), all_targets},
+        {S8("__builtin_popcount"), all_targets},
+        {S8("__builtin_popcountl"), all_targets},
+        {S8("__builtin_popcountll"), all_targets},
         {S8("__is_target_arch"), all_targets},
         {S8("not_a_builtin"), 0},
         {S8("__atomic_"), 0},
@@ -6705,6 +7639,89 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_ffs_sources[index], (CPreprocessOptions){.target = targets[0]});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count != 0);
+        scratch_end(temporary);
+    }
+
+    // The nine fixed-signature bit-count spellings take unsigned
+    // int/long/long long and return signed int. The target-dependent long
+    // width must be visible in canonical IR on both frontend forms.
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            String8 source = S8(
+                "_Static_assert(sizeof(__builtin_clz(1u)) == sizeof(int), \"clz result\");\n"
+                "_Static_assert(sizeof(__builtin_clzl(1ul)) == sizeof(int), \"clzl result\");\n"
+                "_Static_assert(sizeof(__builtin_clzll(1ull)) == sizeof(int), \"clzll result\");\n"
+                "_Static_assert(sizeof(__builtin_ctz(1u)) == sizeof(int), \"ctz result\");\n"
+                "_Static_assert(sizeof(__builtin_ctzl(1ul)) == sizeof(int), \"ctzl result\");\n"
+                "_Static_assert(sizeof(__builtin_ctzll(1ull)) == sizeof(int), \"ctzll result\");\n"
+                "_Static_assert(sizeof(__builtin_popcount(1u)) == sizeof(int), \"popcount result\");\n"
+                "_Static_assert(sizeof(__builtin_popcountl(1ul)) == sizeof(int), \"popcountl result\");\n"
+                "_Static_assert(sizeof(__builtin_popcountll(1ull)) == sizeof(int), \"popcountll result\");\n"
+                "int query_counts(unsigned long long value) {\n"
+                "    return __builtin_clz(value) + __builtin_clzl(value) + __builtin_clzll(value) +\n"
+                "           __builtin_ctz(value) + __builtin_ctzl(value) + __builtin_ctzll(value) +\n"
+                "           __builtin_popcount(value) + __builtin_popcountl(value) + __builtin_popcountll(value);\n"
+                "}\n");
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("count-signatures.c"), preprocess, parse, target,
+                    (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    IrFunction* function = c_test_find_ir_function(module, S8("query_counts"));
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        u32 count_width_32 = 0;
+                        u32 count_width_64 = 0;
+                        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                        {
+                            IrInstruction* instruction = function->instructions + instruction_index;
+                            if (instruction->opcode == IR_OPCODE_UNARY &&
+                                (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
+                                 instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS))
+                            {
+                                IrType* type = ir_type_from_id(&lowered.program->types, instruction->canonical_type);
+                                if (BUSTER_REQUIRE(arguments, type != 0))
+                                {
+                                    count_width_32 += type->bit_width == 32;
+                                    count_width_64 += type->bit_width == 64;
+                                }
+                            }
+                        }
+                        BUSTER_TEST(arguments, count_width_32 == (target_uses_llp64_data_model(target) ? 4u : 2u));
+                        BUSTER_TEST(arguments, count_width_64 == (target_uses_llp64_data_model(target) ? 2u : 4u));
+                        BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+
+    String8 invalid_count_sources[] = {
+        S8("int f(void) { return __builtin_clz(); }"),
+        S8("int f(void) { return __builtin_clzll(1, 2); }"),
+        S8("int f(void) { return __builtin_ctzl((int*)0); }"),
+        S8("int f(void) { return __builtin_popcountll((struct Bad { int x; }){0}); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_count_sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_count_sources[index], (CPreprocessOptions){.target = targets[0]});
         CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
         CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
@@ -8216,6 +9233,115 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pp_class_masks(UnitTestArguments* argu
     return result;
 }
 
+// The validation populations of CTokenPositionIndex, as defined on the tokens
+// alone: spellings name the keyword families, and an identifier the intern
+// pass never saw belongs to all of them; kinds and punctuators name the pairs.
+typedef enum CTestValidationPopulation
+{
+    C_TEST_VALIDATION_CONTROL_KEYWORDS,
+    C_TEST_VALIDATION_SWITCH,
+    C_TEST_VALIDATION_RETURN,
+    C_TEST_VALIDATION_GOTO,
+    C_TEST_VALIDATION_ASM,
+    C_TEST_VALIDATION_SIZEOF,
+    C_TEST_VALIDATION_BRACE_IDENTIFIERS,
+    C_TEST_VALIDATION_STATEMENT_EXPRESSIONS,
+    C_TEST_VALIDATION_LABEL_ADDRESSES,
+    C_TEST_VALIDATION_COUNT,
+} CTestValidationPopulation;
+
+typedef struct CTestValidationPositions CTestValidationPositions;
+struct CTestValidationPositions
+{
+    u32 const* positions[C_TEST_VALIDATION_COUNT];
+    u32 counts[C_TEST_VALIDATION_COUNT];
+};
+
+BUSTER_GLOBAL_LOCAL CTestValidationPositions c_test_index_validation_positions(CTokenPositionIndex const* index)
+{
+    return (CTestValidationPositions){
+        .positions = {index->control_keyword_positions, index->switch_positions, index->return_positions, index->goto_positions,
+                      index->asm_positions, index->sizeof_positions, index->brace_identifier_positions,
+                      index->statement_expression_positions, index->label_address_positions},
+        .counts = {index->control_keyword_count, index->switch_count, index->return_count, index->goto_count, index->asm_count,
+                   index->sizeof_count, index->brace_identifier_count, index->statement_expression_count, index->label_address_count},
+    };
+}
+
+BUSTER_GLOBAL_LOCAL bool c_test_spelling_in(String8 spelling, String8 const* words, u64 word_count)
+{
+    bool result = false;
+    for (u64 index = 0; index < word_count; index += 1)
+    {
+        result |= string_equal(spelling, words[index]);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_test_token_is(CToken token, CPunctuator punctuator)
+{
+    return token.kind == C_TOKEN_PUNCTUATOR && token.punctuator == punctuator;
+}
+
+BUSTER_GLOBAL_LOCAL CTestValidationPositions c_test_expected_validation_positions(Arena* arena, CPreprocessResult preprocess)
+{
+    String8 const control_words[] = {S8("for"), S8("while"), S8("do"), S8("switch"), S8("break"), S8("continue"), S8("case"), S8("default")};
+    String8 const asm_words[] = {S8("asm"), S8("__asm"), S8("__asm__")};
+    String8 const sizeof_words[] = {S8("sizeof"), S8("_Alignof"), S8("__alignof"), S8("__alignof__")};
+    u32 token_count = (u32)preprocess.token_count;
+    u32* positions[C_TEST_VALIDATION_COUNT];
+    CTestValidationPositions result = {0};
+    for (u32 population = 0; population < C_TEST_VALIDATION_COUNT; population += 1)
+    {
+        positions[population] = arena_allocate(arena, u32, token_count ? token_count : 1);
+        result.positions[population] = positions[population];
+    }
+    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    {
+        CToken token = preprocess.tokens[token_index];
+        bool successor = token_index + 1 < token_count;
+        bool members[C_TEST_VALIDATION_COUNT] = {0};
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+            bool uninterned = !token.symbol;
+            members[C_TEST_VALIDATION_CONTROL_KEYWORDS] = uninterned || c_test_spelling_in(spelling, control_words, BUSTER_ARRAY_LENGTH(control_words));
+            members[C_TEST_VALIDATION_SWITCH] = uninterned || string_equal(spelling, S8("switch"));
+            members[C_TEST_VALIDATION_RETURN] = uninterned || string_equal(spelling, S8("return"));
+            members[C_TEST_VALIDATION_GOTO] = uninterned || string_equal(spelling, S8("goto"));
+            members[C_TEST_VALIDATION_ASM] = uninterned || c_test_spelling_in(spelling, asm_words, BUSTER_ARRAY_LENGTH(asm_words));
+            members[C_TEST_VALIDATION_SIZEOF] = uninterned || c_test_spelling_in(spelling, sizeof_words, BUSTER_ARRAY_LENGTH(sizeof_words));
+            members[C_TEST_VALIDATION_BRACE_IDENTIFIERS] =
+                successor && c_test_token_is(preprocess.tokens[token_index + 1], C_PUNCTUATOR_LEFT_BRACE);
+        }
+        members[C_TEST_VALIDATION_STATEMENT_EXPRESSIONS] = token_index && c_test_token_is(token, C_PUNCTUATOR_LEFT_BRACE) &&
+                                                          c_test_token_is(preprocess.tokens[token_index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        members[C_TEST_VALIDATION_LABEL_ADDRESSES] = successor && c_test_token_is(token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                                                    preprocess.tokens[token_index + 1].kind == C_TOKEN_IDENTIFIER;
+        for (u32 population = 0; population < C_TEST_VALIDATION_COUNT; population += 1)
+        {
+            if (members[population])
+            {
+                positions[population][result.counts[population]] = token_index;
+                result.counts[population] += 1;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 c_test_validation_position_mismatches(CTestValidationPositions actual, CTestValidationPositions expected)
+{
+    u32 result = 0;
+    for (u32 population = 0; population < C_TEST_VALIDATION_COUNT; population += 1)
+    {
+        u32 count = expected.counts[population];
+        result += actual.counts[population] != count ||
+                  (count && memcmp(actual.positions[population], expected.positions[population], sizeof(u32) * count) != 0);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8236,6 +9362,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
         }
         c_test_append_source(source_bytes, source_capacity, &source_length,
                              string_format(arguments->arena, S8("int function_{u32}(int x) {{ label_{u32}: return x; }}\n"), item, item));
+        // Every word and pair of the validation populations, behind empty
+        // statements whose count changes with the item, so that each pair also
+        // lands across a 64-token window edge somewhere in the stream.
+        if (item % 2 == 0)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length,
+                                 string_format(arguments->arena, S8("int control_{u32}(int x) {{"), item));
+            for (u32 pad = 0; pad < item % 61; pad += 1)
+            {
+                c_test_append_source(source_bytes, source_capacity, &source_length, S8(" ;"));
+            }
+            c_test_append_source(source_bytes, source_capacity, &source_length,
+                                 string_format(arguments->arena,
+                                               S8(" struct pair_{u32} {{ int a; }} pair = {{ 0 }}; void* target = &&done_{u32};"
+                                                  " int total = ({{ int inner = x; inner; }});"
+                                                  " for (int i = 0; i < x; i += 1) {{ if (i == 3) continue; total += sizeof(int) + _Alignof(long) + __alignof__(short); }}"
+                                                  " while (x) {{ x -= 1; break; }} do {{ x += 1; }} while (x < 2);"
+                                                  " switch (x) {{ case 1: total += 1; break; default: break; }}"
+                                                  " __asm__(\"\"); if (!target) goto done_{u32}; done_{u32}: return total + pair.a; }}\n"),
+                                               item, item, item, item));
+        }
     }
     CPreprocessResult preprocess = c_preprocess(arguments->arena, (String8){.pointer = source_bytes, .length = source_length}, (CPreprocessOptions){0});
     BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
@@ -8379,6 +9526,107 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
     }
     BUSTER_TEST(arguments, memcmp(scalar_index.matching_delimiters_plus_one, expected_matching_plus_one,
                                   sizeof(*expected_matching_plus_one) * token_count) == 0);
+
+    // The validation populations from the window pass and from the scalar
+    // visit. The window pass reads a '{' in lane 0 against a '(' in the last
+    // lane of the previous window, and an identifier or '&&' in lane 63
+    // against lane 0 of the next; the corpus must reach each of those edges.
+    CTestValidationPositions expected_validation = c_test_expected_validation_positions(arguments->arena, preprocess);
+    u32 empty_populations = 0;
+    for (u32 population = 0; population < C_TEST_VALIDATION_COUNT; population += 1)
+    {
+        empty_populations += expected_validation.counts[population] == 0;
+    }
+    u32 window_edge_pairs[3] = {0};
+    CTestValidationPopulation const edge_populations[3] = {C_TEST_VALIDATION_STATEMENT_EXPRESSIONS, C_TEST_VALIDATION_BRACE_IDENTIFIERS,
+                                                           C_TEST_VALIDATION_LABEL_ADDRESSES};
+    for (u32 edge = 0; edge < 3; edge += 1)
+    {
+        CTestValidationPopulation population = edge_populations[edge];
+        for (u32 position = 0; position < expected_validation.counts[population]; position += 1)
+        {
+            window_edge_pairs[edge] += expected_validation.positions[population][position] % 64 == (edge ? 63u : 0u);
+        }
+    }
+    BUSTER_TEST(arguments, empty_populations == 0);
+    BUSTER_TEST(arguments, window_edge_pairs[0] && window_edge_pairs[1] && window_edge_pairs[2]);
+    BUSTER_TEST(arguments, c_test_validation_position_mismatches(c_test_index_validation_positions(indexed), expected_validation) == 0);
+    BUSTER_TEST(arguments, c_test_validation_position_mismatches(c_test_index_validation_positions(&scalar_index), expected_validation) == 0);
+
+    // An identifier the intern pass never saw joins every keyword population
+    // on both paths. Forget the symbol of every identifier at a position
+    // divisible by three, keywords among them, rebuild both indexes, then
+    // restore the symbols.
+    u32* saved_symbols = arena_allocate(arguments->arena, u32, token_count);
+    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    {
+        saved_symbols[token_index] = preprocess.tokens[token_index].symbol;
+        if (preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && token_index % 3 == 0)
+        {
+            preprocess.tokens[token_index].symbol = 0;
+        }
+    }
+    CTestValidationPositions expected_uninterned = c_test_expected_validation_positions(arguments->arena, preprocess);
+    CTokenPositionIndex uninterned_indexes[2] = {0};
+    for (u32 path = 0; path < 2; path += 1)
+    {
+        parse.position_index = &uninterned_indexes[path];
+        if (path && preprocess.recovery)
+        {
+            preprocess.recovery->token_shapes = 0;
+        }
+        c_parse_position_index_ensure(&parse, preprocess);
+        if (preprocess.recovery)
+        {
+            preprocess.recovery->token_shapes = saved_shapes;
+        }
+    }
+    parse.position_index = saved_index;
+    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    {
+        preprocess.tokens[token_index].symbol = saved_symbols[token_index];
+    }
+    BUSTER_TEST(arguments, expected_uninterned.counts[C_TEST_VALIDATION_RETURN] > expected_validation.counts[C_TEST_VALIDATION_RETURN]);
+    BUSTER_TEST(arguments, uninterned_indexes[0].built && uninterned_indexes[1].built);
+    BUSTER_TEST(arguments, c_test_validation_position_mismatches(c_test_index_validation_positions(&uninterned_indexes[0]), expected_uninterned) == 0);
+    BUSTER_TEST(arguments, c_test_validation_position_mismatches(c_test_index_validation_positions(&uninterned_indexes[1]), expected_uninterned) == 0);
+    return result;
+}
+
+// The other candidate sources of the validation families, against their
+// scalar definitions (c_parse_internal.h). The shape stream opens with dense
+// calls, then runs sparse enough that the scan must step whole windows, with
+// one call planted mid-run and one closing the stream.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_validation_candidates(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CTokenShape const identifier = (CTokenShape)C_TOKEN_IDENTIFIER;
+    CTokenShape const call_open = (CTokenShape)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_LEFT_PARENTHESIS);
+    CTokenShape const call_close = (CTokenShape)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_RIGHT_PARENTHESIS);
+    CTokenShape const number = (CTokenShape)C_TOKEN_PREPROCESSING_NUMBER;
+    CTokenShape const dense[] = {identifier, identifier, call_open, call_close, number};
+    CTokenShape const sparse[] = {identifier, identifier, call_close, number};
+    u32 const shape_count = 230;
+    CTokenShape* shapes = arena_allocate(arguments->arena, CTokenShape, shape_count);
+    u64 state = UINT64_C(0x9e3779b97f4a7c15);
+    for (u32 index = 0; index < shape_count; index += 1)
+    {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        shapes[index] = index < 80 ? dense[state % BUSTER_ARRAY_LENGTH(dense)] : sparse[state % BUSTER_ARRAY_LENGTH(sparse)];
+    }
+    shapes[143] = identifier;
+    shapes[144] = call_open;
+    shapes[shape_count - 2] = identifier;
+    shapes[shape_count - 1] = call_open;
+    BUSTER_TEST(arguments, c_test_parse_call_shape_mismatches(shapes, shape_count) == 0);
+
+    // Two interleaved populations that share positions, then one alone.
+    u32 first[] = {0, 3, 5, 9, 17, 18, 40, 63, 64, 90};
+    u32 second[] = {5, 6, 17, 41, 63, 65, 99};
+    BUSTER_TEST(arguments, c_test_parse_candidate_merge_mismatches(first, BUSTER_ARRAY_LENGTH(first), second, BUSTER_ARRAY_LENGTH(second), 100) == 0);
+    BUSTER_TEST(arguments, c_test_parse_candidate_merge_mismatches(first, BUSTER_ARRAY_LENGTH(first), 0, 0, 100) == 0);
     return result;
 }
 
@@ -10801,6 +12049,55 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_constant_expression(UnitTestArg
     return result;
 }
 
+// #629: the integer-range evaluator must use the source token indices. With
+// compact lexing, copying the expression under an assertion wrapper borrowed
+// the original shape sidecar and rejected this valid sizeof compound literal.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_token_view_constant_range(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena,
+            S8("struct TokenViewPair { int x, y; };\n"
+               "#pragma pack(push, 1)\n"
+               "struct TokenViewPacked { char c; int x; };\n"
+               "#pragma pack(pop)\n"
+               "int unrelated = 7;\n"
+               "constexpr int size = sizeof (struct TokenViewPair){1, 2};\n"
+               "constexpr int packed_size = sizeof (struct TokenViewPacked){1, 2};\n"
+               "_Static_assert(sizeof (struct TokenViewPacked){1, 2} == 5, \"compound literal, comma\");\n"
+               "int array[(size == 8 && packed_size == 5) ? 1 : -1];\n"),
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                 .dialect = C_PREPROCESS_DIALECT_C23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+        {
+            bool found_size = false;
+            bool found_packed_size = false;
+            for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+            {
+                CEntity* entity = parse.entities + entity_index;
+                found_size |= string_equal(entity->name, S8("size")) && entity->has_constant_value && entity->constant_value == 8;
+                found_packed_size |= string_equal(entity->name, S8("packed_size")) && entity->has_constant_value && entity->constant_value == 5;
+            }
+            BUSTER_TEST(arguments, found_size);
+            BUSTER_TEST(arguments, found_packed_size);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("token-view-constant.c"), preprocess, parse,
+                                                                target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count))
+            {
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // A type name may spell a function -- `int(void)` -- not just a pointer to one
 // -- `int (*)(void)`. The type-name resolution accepted only the pointer
 // declarator, so a bare function declarator left the whole type name unresolved
@@ -11497,9 +12794,187 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_named_call_arity_without_ir(UnitTestAr
     return result;
 }
 
+// The label-provenance walk runs only for a body that takes a label address
+// or branches through a computed goto. A body with a label and the `&&`
+// operator is the common shape it must skip; every spelling the walk itself
+// recognizes as a label address, including a cast through a keyword type or
+// a typedef, still admits it, and the diagnostics those bodies produce are
+// unchanged. The seam asks the production gate; the walk has no counter. The
+// sizeof/alignof operand cases were rejected before this gate: the walk's cast
+// test took `sizeof(int)` for a cast and reported a label escaping through the
+// return, which GCC and Clang accept.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_values_gate(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 function;
+        bool needed;
+        bool invalid;
+        String8 message;
+    } cases[] = {
+        {S8("int f(int a, int b) { if (a && b) goto done; a += b; done: return a && b; }"), S8("f"), false, false, {0}},
+        {S8("int g(int); int f(int a, int b) { retry: if (g(a) && (b) && g(a && b)) goto retry; return (a) && b; }"), S8("f"), false, false, {0}},
+        {S8("int f(int a) { char c = 'x'; again: if (c == 'x' && a) goto again; return (c) && a; }"), S8("f"), false, false, {0}},
+        {S8("int f(int a, int b) { struct s { int x; } v = {a}; l: return (v.x) && b && (int)a; }"), S8("f"), false, false, {0}},
+        {S8("typedef int T; int f(int a) { l: return sizeof(T) && a; }"), S8("f"), false, false, {0}},
+        {S8("int f(int a) { l: return sizeof(int) && a; }"), S8("f"), false, false, {0}},
+        {S8("int f(int a) { l: return _Alignof(int) && a; }"), S8("f"), false, false, {0}},
+        {S8("int f(int a, int b) { return a && b; }"), S8("f"), false, false, {0}},
+        {S8("int f(void) { void *p = &&done; goto *p; done: return 0; }"), S8("f"), true, false, {0}},
+        {S8("int f(void) { void *p = (void *)&&done; goto *p; done: return 0; }"), S8("f"), true, false, {0}},
+        {S8("int f(void) { typedef void *P; P p = (P)&&done; goto *p; done: return 0; }"), S8("f"), true, false, {0}},
+        {S8("int f(void) { typedef void *P; P p = 0; p = (const P)&&done; goto *p; done: return 0; }"), S8("f"), true, false, {0}},
+        {S8("int f(void *p) { goto *p; }"), S8("f"), true, true, S8("in function 'f': computed goto requires a function-local void pointer label value")},
+        {S8("int f(int a) { l: return a && &&l; }"), S8("f"), true, true, S8("in function 'f': a label address may not escape through a function return")},
+        {S8("void *saved; int f(void) { saved = &&target; target: return 0; }"), S8("f"), true, true,
+         S8("in function 'f': a label address may not be stored in static storage")},
+        {S8("void *f(void) { a: return &&a; }"), S8("f"), true, true, S8("in function 'f': a label address may not escape through a function return")},
+        {S8("void h(void *); void f(void) { a: h(&&a); }"), S8("f"), true, true, S8("in function 'f': a label address may not escape through a function call")},
+        {S8("struct pair { void *target; }; int f(int i) { struct pair t[2] = { { &&z }, { &&o } }; goto *t[i].target; z: return 1; o: return 2; }"),
+         S8("f"), true, true, S8("in function 'f': dynamic indexing of label-containing aggregate elements is unsupported")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, cases[index].source,
+                                                (CPreprocessOptions){.target = target_native,
+                                                                     .data_layout = target_data_layout(target_native),
+                                                                     .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, cases[index].source);
+        BUSTER_TEST_RAW(arguments, analysis.analysis_complete, cases[index].source);
+        BUSTER_TEST_RAW(arguments, (analysis.diagnostic_count != 0) == cases[index].invalid, cases[index].source);
+        if (cases[index].message.length && analysis.diagnostic_count)
+        {
+            BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, cases[index].message);
+        }
+        CDeclaration const* function = 0;
+        for (u32 declaration = 0; declaration < analysis.declaration_count; declaration += 1)
+        {
+            CDeclaration const* candidate = analysis.declarations + declaration;
+            if (candidate->kind == C_DECLARATION_FUNCTION && candidate->is_definition && string_equal(candidate->name, cases[index].function))
+            {
+                function = candidate;
+            }
+        }
+        BUSTER_TEST_RAW(arguments, function != 0, cases[index].source);
+        if (function)
+        {
+            BUSTER_TEST_RAW(arguments, c_test_parse_label_values_needed(&analysis, tokens, function) == cases[index].needed, cases[index].source);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // Member names live in their aggregate's namespace. They must not bind to
 // an unrelated ordinary function during the named-call arity prepass; the
 // type-driven member-call path remains responsible for their diagnostics.
+// Array bounds are constant expressions evaluated once per initializer frame;
+// element counts, nested members, designators and target data models must keep
+// their diagnostics in syntax-only and ordinary compilation.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_frame_bounds(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 excess = S8("initializer has more elements than the aggregate can hold");
+    struct
+    {
+        String8 source;
+        String8 lp64_message;
+        String8 llp64_message;
+    } cases[] = {
+        {S8("enum { N = 3 };\nstatic const int t[N] = {1, 2, 3};\nint main(void) { return t[2]; }\n"), {0}, {0}},
+        {S8("enum { N = 3 };\nstatic const int t[N] = {1, 2, 3, 4};\nint main(void) { return t[2]; }\n"), excess, excess},
+        {S8("struct row { int v[sizeof(long) / 4]; int k; };\nstatic const struct row rows[2] = {{{1, 2}, 3}, {{4, 5}, 6}};\n"
+            "int main(void) { return rows[1].k; }\n"), {0}, excess},
+        {S8("struct row { int v[2]; int k; };\nstatic const struct row rows[1] = {{{1, 2, 3}, 3}};\nint main(void) { return rows[0].k; }\n"),
+         excess, excess},
+        {S8("int main(void) { struct p { int x[1 + 1]; int y; } a[2] = {1, 2, 3, 4, 5, 6}; int b[2 + 1] = {1, 2, 3}; return a[1].y + b[2]; }\n"),
+         {0}, {0}},
+        {S8("int main(void) { struct p { int x[1 + 1]; int y; } a[2] = {1, 2, 3, 4, 5, 6, 7}; return a[1].y; }\n"),
+         S8("in function 'main': could not lower initializer expression for local 'a'"),
+         S8("in function 'main': could not lower initializer expression for local 'a'")},
+        {S8("static int d[2 * 2] = {[3] = 1, [0] = 2, 5};\nint main(void) { return d[1]; }\n"), {0}, {0}},
+        {S8("static int d[2 * 2] = {[4] = 1};\nint main(void) { return d[0]; }\n"),
+         S8("array designator index is outside the array bounds"), S8("array designator index is outside the array bounds")},
+        {S8("struct s { int x; int y; };\nstatic const int b[__builtin_offsetof(struct s, y) / sizeof(int) + 1] = {1, 2};\n"
+            "int main(void) { return b[1]; }\n"), {0}, {0}},
+        {S8("struct s { int x; int y; };\nstatic const int b[__builtin_offsetof(struct s, y) / sizeof(int) + 1] = {1, 2, 3};\n"
+            "int main(void) { return b[1]; }\n"), excess, excess},
+        {S8("int main(void) { return sizeof((int[1 + 1]){1, 2}) == 2 * sizeof(int) ? 0 : 1; }\n"), {0}, {0}},
+    };
+    Target targets[] = {
+        target_native,
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        bool llp64 = target_uses_llp64_data_model(targets[target_index]);
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            String8 message = llp64 ? cases[case_index].llp64_message : cases[case_index].lp64_message;
+            for (u32 mode = 0; mode < 3; mode += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                                                        (CPreprocessOptions){
+                                                            .target = targets[target_index],
+                                                            .data_layout = target_data_layout(targets[target_index]),
+                                                            .dialect = C_PREPROCESS_DIALECT_GNU17,
+                                                        });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0);
+                u32 diagnostic_count = 0;
+                String8 first = {0};
+                bool certified = false;
+                if (mode == 2)
+                {
+#if BUSTER_BENCH_ALLOCATIONS
+                    IrConstructionCounters before = ir_construction_counters();
+#endif
+                    CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+#if BUSTER_BENCH_ALLOCATIONS
+                    IrConstructionCounters after = ir_construction_counters();
+                    BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+                    for (u32 counter = 0; counter < IR_CONSTRUCTION_COUNT; counter += 1)
+                    {
+                        BUSTER_TEST(arguments, before.values[counter] == after.values[counter]);
+                    }
+#endif
+                    BUSTER_TEST(arguments, analysis.analysis_complete);
+                    diagnostic_count = analysis.diagnostic_count;
+                    first = diagnostic_count ? analysis.diagnostics[0].message : (String8){0};
+                    certified = !diagnostic_count;
+                }
+                else
+                {
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("initializer-frame-bounds.c"), tokens, syntax,
+                                                                    targets[target_index],
+                                                                    (CIRLowerOptions){.disable_direct_ssa = mode != 0});
+                    diagnostic_count = lowered.diagnostic_count;
+                    first = diagnostic_count ? lowered.diagnostics[0].message : (String8){0};
+                    certified = lowered.program != 0 && lowered.canonical_ir_certified;
+                }
+                BUSTER_TEST_RAW(arguments, diagnostic_count == (message.length ? 1u : 0u), cases[case_index].source);
+                if (message.length && diagnostic_count)
+                {
+                    BUSTER_TEST_RAW(arguments, string_ends_with_sequence(first, message), cases[case_index].source);
+                }
+                else
+                {
+                    BUSTER_TEST_RAW(arguments, certified, cases[case_index].source);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_call_arity_ownership(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -11696,6 +13171,189 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_body_sizeof_expression(UnitTe
     scratch_end(temporary);
     return result;
 }
+
+// Control groups inside a non-VLA sizeof operand are not evaluated, even
+// when the containing object is a VLA. The sizeof owner re-enters expression
+// lowering for VLA-typed operands; fixed-size rows and scalar elements stay
+// unevaluated. The contexts observe completed full expressions and avoid
+// imposing an order on unrelated calls.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_control_preparation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 setup;
+        u32 size;
+    } layouts[] = {
+        {S8("int a[3][3];"), 12},
+        {S8("int n = 3; int a[n][3];"), 12},
+        {S8("int n = 3; int a[n];"), 4},
+    };
+    struct
+    {
+        String8 expression;
+        bool nested_sizeof;
+    } expressions[] = {
+        {S8("sizeof(a[(choose ? index++ : tick())])"), false},
+        {S8("sizeof(a[(choose ? tick() : index++)])"), false},
+        {S8("sizeof a[choose ? index++ : tick()]"), false},
+        {S8("sizeof(a[choose && (index++, 1)])"), false},
+        {S8("sizeof(a[(index = tick())])"), false},
+        {S8("sizeof(sizeof(a[index++]))"), true},
+    };
+    enum { CONTEXT_COUNT = 6, PROBE_COUNT = BUSTER_ARRAY_LENGTH(layouts) * BUSTER_ARRAY_LENGTH(expressions) * CONTEXT_COUNT };
+    String8 source = S8("static volatile unsigned index; static volatile unsigned hits; static volatile unsigned choose;\n"
+                        "static unsigned tick(void) { hits += 1; return 0; }\n"
+                        "static unsigned long identity(unsigned long value) { return value; }\n"
+                        "static unsigned long ordinary_control(void) { return (unsigned long)(index++ + tick()); }\n");
+    String8 checks = S8("int main(void) { unsigned failures = 0; unsigned long value;\n");
+    u32 probe_count = 0;
+    for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(layouts); layout += 1)
+    {
+        for (u32 expression_index = 0; expression_index < BUSTER_ARRAY_LENGTH(expressions); expression_index += 1)
+        {
+            for (u32 context = 0; context < CONTEXT_COUNT; context += 1)
+            {
+                u32 expected = expressions[expression_index].nested_sizeof ? 8 : layouts[layout].size;
+                String8 expression = expressions[expression_index].expression;
+                String8 body = {0};
+                switch (context)
+                {
+                case 0:
+                    body = string_format(arguments->arena, S8("unsigned long value = ({S8}); return value;"), expression);
+                    break;
+                case 1:
+                    body = string_format(arguments->arena, S8("return identity({S8});"), expression);
+                    break;
+                case 2:
+                    body = string_format(arguments->arena, S8("return ({S8});"), expression);
+                    break;
+                case 3:
+                    body = string_format(arguments->arena,
+                        S8("unsigned long value = {u32}ul + 1ul; if (({S8}) == {u32}ul) value = {u32}ul; return value;"),
+                        expected, expression, expected, expected);
+                    break;
+                case 4:
+                    body = string_format(arguments->arena, S8("(void)({S8}); return {u32}ul;"), expression, expected);
+                    break;
+                case 5:
+                    body = string_format(arguments->arena,
+                        S8("return ({{ unsigned long value = ({S8}); value; }});"), expression);
+                    break;
+                }
+                u32 probe = probe_count++;
+                String8 function = string_format(arguments->arena, S8("probe_{u32}"), probe);
+                source = string_format(arguments->arena, S8("{S8}static unsigned long {S8}(void) {{ {S8} {S8} }}\n"),
+                                       source, function, layouts[layout].setup, body);
+                for (u32 selected = 0; selected < 2; selected += 1)
+                {
+                    checks = string_format(arguments->arena,
+                        S8("{S8}index = 0; hits = 0; choose = {u32}u; value = {S8}(); "
+                           "failures |= (value != {u32}ul) | (index != 0u) | (hits != 0u);\n"),
+                        checks, selected, function, expected);
+                }
+            }
+        }
+    }
+    BUSTER_TEST(arguments, probe_count == PROBE_COUNT);
+    checks = string_format(arguments->arena,
+        S8("{S8}index = 0; hits = 0; value = ordinary_control(); "
+           "failures |= (value != 0ul) | (index != 1u) | (hits != 1u); return (int)failures; }\n"),
+        checks);
+    String8 source_text = string_format(arguments->arena, S8("{S8}{S8}"), source, checks);
+
+    Target targets[6] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        targets[target_index].cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[target_index].os = target_index < 2 ? OPERATING_SYSTEM_LINUX
+                               : target_index < 4 ? OPERATING_SYSTEM_WINDOWS
+                                                  : OPERATING_SYSTEM_MACOS;
+    }
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            Arena* conflicts[] = {arguments->arena};
+            TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source_text,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("sizeof-control-preparation.c"), tokens, parsed, target,
+                (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+            if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                for (u32 probe = 0; probe < PROBE_COUNT; probe += 1)
+                {
+                    String8 function_name = string_format(temporary.arena, S8("probe_{u32}"), probe);
+                    IrFunction* function = c_test_find_ir_function(module, function_name);
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        u32 volatile_accesses = 0;
+                        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                        {
+                            volatile_accesses += function->instructions[instruction_index].volatile_access;
+                        }
+                        u32 calls = c_test_ir_direct_call_count(lowered.program, function, S8("tick"));
+                        String8 observation = string_format(temporary.arena,
+                            S8("layout/expression/context={u32}/{u32}/{u32} volatile={u32} tick-calls={u32}"),
+                            probe / (BUSTER_ARRAY_LENGTH(expressions) * CONTEXT_COUNT),
+                            (probe / CONTEXT_COUNT) % BUSTER_ARRAY_LENGTH(expressions), probe % CONTEXT_COUNT,
+                            volatile_accesses, calls);
+                        BUSTER_TEST_RAW(arguments, volatile_accesses == 0, observation);
+                        BUSTER_TEST_RAW(arguments, calls == 0, observation);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("sizeof-control-preparation"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                Arena* conflicts[] = {arguments->arena};
+                TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                String8 output = buster_test_temporary_path(temporary.arena, S8("sizeof-control-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), output, source_path};
+                CompilerDriverInvocation invocation =
+                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0},
+                        (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena,
+                                S8("sizeof control {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[frontend], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArguments* arguments)
 {
@@ -12615,10 +14273,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_type_prediction(UnitTestAr
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    BUSTER_UNUSED(arguments);
     TemporalArena temporary = scratch_begin(0, 0);
     CPreprocessResult tokens = c_preprocess(temporary.arena,
-                                            S8("static double object;\n"
+                                            S8("struct Bits { unsigned int one:1; unsigned short us:3; };\n"
+                                               "static double object;\n"
                                                "typedef __typeof__(*(double *)0) from_cast;\n"
                                                "typedef __typeof__(*(0 ? (double *)0 : (double *)0)) same_arms;\n"
                                                "typedef __typeof__(*(0 ? (double *)0 : (void *)!(1))) selected_true;\n"
@@ -12626,8 +14284,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
                                                "typedef __typeof__(*(0 ? (double *)0 : (char *)0)) mismatched;\n"
                                                "typedef __typeof__(0 ? (double *)0 : (char *)0) mismatched_pointer;\n"
                                                "typedef __typeof__(*(0 ? (const double *)0 : (double *)0)) qualified;\n"
-                                               "typedef __typeof__(&object) address;\n"),
-                                            (CPreprocessOptions){0});
+                                               "typedef __typeof__(&object) address;\n"
+                                               "typedef __typeof__(+((struct Bits *)0)->one) unary_plus_bit;\n"
+                                               "typedef __typeof__(-((struct Bits *)0)->one) unary_minus_bit;\n"
+                                               "typedef __typeof__(~((struct Bits *)0)->one) unary_complement_bit;\n"
+                                               "typedef __typeof__(((struct Bits *)0)->one + 0) binary_add_bit;\n"
+                                               "typedef __typeof__(((struct Bits *)0)->one << 1) left_shift_bit;\n"
+                                               "typedef __typeof__(((struct Bits *)0)->one ? ((struct Bits *)0)->one : ((struct Bits *)0)->one) conditional_bit;\n"
+                                               "typedef __typeof__(+((struct Bits *)0)->us) unary_plus_short_bit;\n"),
+                                            (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
     CParseResult parse = c_parse(temporary.arena, tokens);
     BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, parse.diagnostic_count == 0);
@@ -12657,6 +14322,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
         // selected.
         {S8("qualified"), C_TYPE_DOUBLE, C_TYPE_VOID},
         {S8("address"), C_TYPE_POINTER, C_TYPE_DOUBLE},
+        {S8("unary_plus_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("unary_minus_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("unary_complement_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("binary_add_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("left_shift_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("conditional_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("unary_plus_short_bit"), C_TYPE_INT, C_TYPE_VOID},
     };
     for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
     {
@@ -12693,6 +14365,122 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
     CParseResult size_parse = c_parse(temporary.arena, sizes);
     BUSTER_TEST(arguments, sizes.diagnostic_count == 0);
     BUSTER_TEST(arguments, size_parse.diagnostic_count == 0);
+
+    // The semantic type attached to typeof must agree with the type carried
+    // by the raw function signature on both supported desktop ABIs and both
+    // lowering frontends.
+    String8 promotion_source = S8("struct Bits { unsigned int one:1; };\n"
+                                  "__typeof__(+((struct Bits *)0)->one) unary_plus(struct Bits *p) { return +p->one; }\n"
+                                  "__typeof__(((struct Bits *)0)->one + 0) binary_add(struct Bits *p) { return p->one + 0; }\n"
+                                  "__typeof__(((struct Bits *)0)->one << 1) left_shift(struct Bits *p) { return p->one << 1; }\n"
+                                  "__typeof__(((struct Bits *)0)->one ? ((struct Bits *)0)->one : ((struct Bits *)0)->one) conditional(struct Bits *p) { return p->one ? p->one : p->one; }\n");
+    Target promotion_targets[] = {target_native, target_native};
+    promotion_targets[0].cpu_arch = CPU_ARCH_X86_64;
+    promotion_targets[0].os = OPERATING_SYSTEM_LINUX;
+    promotion_targets[1].cpu_arch = CPU_ARCH_AARCH64;
+    promotion_targets[1].os = OPERATING_SYSTEM_LINUX;
+    String8 promotion_names[] = {S8("unary_plus"), S8("binary_add"), S8("left_shift"), S8("conditional")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(promotion_targets); target_index += 1)
+    {
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            TemporalArena lowered_temporary = scratch_begin(&arguments->arena, 1);
+            Target target = promotion_targets[target_index];
+            CPreprocessResult promotion_tokens = c_preprocess(lowered_temporary.arena, promotion_source, (CPreprocessOptions){
+                .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+            CParseResult promotion_parse = c_parse(lowered_temporary.arena, promotion_tokens);
+            BUSTER_TEST(arguments, promotion_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, promotion_parse.diagnostic_count == 0);
+            if (promotion_tokens.diagnostic_count == 0 && promotion_parse.diagnostic_count == 0)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(lowered_temporary.arena, S8("integer-promotion-typeof.c"),
+                    promotion_tokens, promotion_parse, target, (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+                BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+                BUSTER_TEST(arguments, lowered.program && lowered.program->module_count);
+                if (lowered.program && lowered.program->module_count)
+                {
+                    IrProgram* program = lowered.program;
+                    IrModule* module = program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(promotion_names); name_index += 1)
+                    {
+                        IrFunction* function = c_test_find_ir_function(module, promotion_names[name_index]);
+                        BUSTER_TEST(arguments, function != 0);
+                        IrType* signature = function ? ir_type_from_id(&program->types, function->canonical_type) : 0;
+                        IrType* return_type = signature ? ir_type_from_id(&program->types, signature->return_type) : 0;
+                        BUSTER_TEST(arguments, return_type && return_type->kind == IR_TYPE_INTEGER &&
+                                                    return_type->bit_width == 32 && return_type->is_signed);
+                    }
+                }
+            }
+            scratch_end(lowered_temporary);
+        }
+    }
+
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    // Keep the runtime source in this registered test. New tracked runtime
+    // fixtures require a separate retirement-ledger policy transition.
+    String8 runtime_source = buster_test_temporary_path(arguments->arena, S8("typeof-integer-promotions"), S8(".c"));
+    String8 runtime_text = S8("#define IS_INT_TYPE(expression) _Generic((__typeof__(expression))0, int: 1, default: 0)\n"
+                              "#define IS_UINT_TYPE(expression) _Generic((__typeof__(expression))0, unsigned int: 1, default: 0)\n"
+                              "struct Bits { unsigned int one:1; unsigned short us:3; };\n"
+                              "int main(void) { struct Bits bits = {1, 5}; struct Bits *p = &bits;\n"
+                              " unsigned char uc = 7; short s = 7; _Bool b = 1; int result = 0;\n"
+                              " result |= !IS_UINT_TYPE(p->one);\n"
+                              " result |= !IS_INT_TYPE(+p->one);\n"
+                              " result |= !IS_INT_TYPE(-p->one);\n"
+                              " result |= !IS_INT_TYPE(~p->one);\n"
+                              " result |= !IS_INT_TYPE(p->one + 0);\n"
+                              " result |= !IS_INT_TYPE(p->one << 1);\n"
+                              " result |= !IS_INT_TYPE(p->one ? p->one : p->one);\n"
+                              " result |= !IS_INT_TYPE(+p->us);\n"
+                              " result |= !IS_INT_TYPE(+uc);\n"
+                              " result |= !IS_INT_TYPE(+s);\n"
+                              " result |= !IS_INT_TYPE(+b);\n"
+                              " result |= !IS_INT_TYPE(uc ? uc : uc);\n"
+                              " return result; }\n");
+    BUSTER_TEST(arguments, file_write(runtime_source, BUSTER_SLICE_TO_BYTE_SLICE(runtime_text)));
+    String8 allocator_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                                 S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 runtime_dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+    String8 runtime_frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(runtime_dialects); dialect += 1)
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocator_modes); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(runtime_frontends); frontend += 1)
+            {
+                TemporalArena runtime_temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(runtime_temporary.arena, S8("typeof-integer-promotions-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), runtime_dialects[dialect], allocator_modes[allocator], runtime_frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), output, runtime_source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(runtime_temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = allocator != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(runtime_temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(runtime_temporary.arena, S8("typeof integer promotions {S8} {S8} {S8}: {S8}"),
+                        runtime_dialects[dialect], allocator_modes[allocator], runtime_frontends[frontend], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(runtime_temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(runtime_temporary.arena, S8("typeof integer promotions runtime {S8} {S8} {S8}: status={u32} timed_out={u32}"),
+                                runtime_dialects[dialect], allocator_modes[allocator], runtime_frontends[frontend],
+                                execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(runtime_temporary);
+            }
+        }
+    }
+#endif
     scratch_end(temporary);
     return result;
 }
@@ -19745,6 +21533,68 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_sparse_finish(UnitTestArgum
     return result;
 }
 
+// Returns the parameters frontend SSA keeps, or UINT64_MAX when the source
+// does not lower to canonical IR that validates and prepares.
+BUSTER_GLOBAL_LOCAL u64 c_test_direct_ssa_retained_parameters(Arena* arena, u32 case_count, u32 shape)
+{
+    u64 capacity = (u64)case_count * 160 + 512;
+    char8* bytes = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length,
+        S8("long test(long* p,long n){long acc=n,mix=1,carry=2;while(p){switch(*p){"));
+    for (u32 index = 0; index < case_count; index += 1)
+    {
+        String8 body = shape == 0   ? S8("case {u32}:{{acc+=p[1]*{u32};mix^=acc;break;}}")
+                       : shape == 1 ? S8("case {u32}:acc+=p[1]*{u32};mix^=acc;break;")
+                       : shape == 2 ? S8("case {u32}:{{acc+=p[1]*{u32};mix^=acc;break;acc+=mix;}}")
+                                    : S8("case {u32}:{{acc+=p[1]*{u32};mix^=acc;}}");
+        c_test_append_source(bytes, capacity, &length, string_format(arena, body, index, index + 3));
+    }
+    c_test_append_source(bytes, capacity, &length, S8("default:return acc;}p=(long*)p[2];}return acc+mix+carry;}"));
+    CPreprocessResult tokens = c_preprocess(arena, (String8){bytes, length}, (CPreprocessOptions){0});
+    CParseResult parse = c_parse(arena, tokens);
+    u64 retained = UINT64_MAX;
+    if (!tokens.diagnostic_count && !parse.diagnostic_count)
+    {
+        CIRLowerResult direct = c_lower_to_ir(arena, S8("dead-continuation.c"), tokens, parse, target_native);
+        bool valid = direct.program && !direct.diagnostic_count &&
+                     ir_validate_canonical_module(direct.program, direct.program->modules).error == IR_VALIDATION_NONE &&
+                     ir_prepare_canonical_module(direct.program, direct.program->modules, false).error == IR_VALIDATION_NONE;
+        retained = valid ? direct.direct_ssa.parameters_created - direct.direct_ssa.parameters_removed : UINT64_MAX;
+    }
+    return retained;
+}
+
+// A braced case body that ends in `break` leaves the block after its closing
+// brace without a predecessor, and the next case label still receives an edge
+// from it. That edge never runs. Deciding a merge from it kept one block
+// parameter per case for every local read after the label, so a braced
+// interpreter carried a merge of its whole live state into every opcode and
+// the join after the switch. The braced form must now keep exactly as many
+// parameters as the unbraced one, independent of the case count, while a
+// genuine braced fallthrough still merges both of its paths.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_dead_continuation_edges(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    // Shapes: 0 braced `break`, 1 unbraced `break`, 2 braced `break` followed
+    // by dead code that reads the locals, 3 braced genuine fallthrough.
+    u64 small[4];
+    u64 large[4];
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(small); shape += 1)
+    {
+        small[shape] = c_test_direct_ssa_retained_parameters(temporary.arena, 4, shape);
+        large[shape] = c_test_direct_ssa_retained_parameters(temporary.arena, 64, shape);
+        BUSTER_TEST(arguments, small[shape] != UINT64_MAX && large[shape] != UINT64_MAX);
+    }
+    BUSTER_TEST(arguments, small[0] == small[1] && large[0] == large[1]);
+    BUSTER_TEST(arguments, large[0] == small[0] && large[2] == small[2]);
+    BUSTER_TEST(arguments, large[2] == large[0]);
+    BUSTER_TEST(arguments, large[3] > small[3] && large[3] > large[0]);
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -20323,6 +22173,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
         {S8("0b1111111111111111111111111111111111111111111111111111111111111111ULL"), UINT64_MAX},
         {S8("18'446'744'073'709'551'615ULL"), UINT64_MAX},
         {S8("0xFF'FFu"), 65535}, {S8("0'77"), 63}, {S8("0b10'10"), 10},
+        // Overflow depends on significant digits, not digit count, and runs
+        // cross every eight-byte boundary; a blocked conversion must agree.
+        {S8("000000000000000000000000000001"), 1},
+        {S8("0x0000000000000000FFFFFFFFFFFFFFFF"), UINT64_MAX},
+        {S8("18446744073709551614"), UINT64_MAX - 1},
+        {S8("12345678"), 12345678}, {S8("123456789"), 123456789},
+        {S8("0x12345678"), UINT64_C(0x12345678)}, {S8("0x123456789abcdef0"), UINT64_C(0x123456789abcdef0)},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(valid); index += 1)
     {
@@ -20356,6 +22213,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
         S8("0b10000000000000000000000000000000000000000000000000000000000000000ULL"),
         S8("99999999999999999999999999999999999999"),
         S8("'1"), S8("0x'1"), S8("1''0"), S8("1'"), S8("1'u"), S8("0b1'2"),
+        S8("99999999999999999999"), S8("0001844674407370955161"), S8("0x1'g"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
     {
@@ -21228,6 +23086,870 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_post_tag_declaration_specifiers(UnitTe
     scratch_end(temporary);
     return result;
 }
+// sizeof evaluates an operand of VLA type, even when its saved size is known.
+// For int a[n][3], a[index++] has fixed row type; for int a[n], it has
+// scalar type. Neither operand is evaluated. Every probe observes effects after the
+// tested full expression; none prescribes an order for sibling arguments.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_vla_evaluation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 setup;
+        String8 base;
+        u32 size;
+        bool evaluated;
+    } layouts[] = {
+        {S8("int n = 3; int a[2][n];"), S8("a"), 12, true},
+        {S8("int n = 3; int a[2][n]; int (*p)[n] = a;"), S8("p"), 12, true},
+        {S8("int n = 3; int a[n][3];"), S8("a"), 12, false},
+        {S8("int n = 3; int a[n];"), S8("a"), 4, false},
+    };
+    struct
+    {
+        String8 index;
+        u32 index_after;
+        u32 hits_after;
+        u32 calls;
+        u32 stores;
+    } effects[] = {
+        {S8("index++"), 1, 0, 0, 1},
+        {S8("tick()"), 0, 1, 1, 0},
+        {S8("({ index += 1; 0; })"), 1, 0, 0, 1},
+    };
+    enum { C_SIZEOF_VLA_CONTEXT_COUNT = 6 };
+    struct
+    {
+        String8 body;
+        u32 size;
+        u32 index_after;
+    } neighbors[] = {
+        {S8("int n = 3; int a[2][n]; return sizeof(((a[index++])));"), 12, 1},
+        {S8("int n = 3; int a[2][n]; n = 7; return sizeof(a[index++]);"), 12, 1},
+        {S8("int n = 3; typedef int Row[n]; Row a[2]; return sizeof(a[index++]);"), 12, 1},
+        {S8("int n = 3; int a[2][n]; return sizeof(sizeof(a[index++])) != sizeof(sizeof(0));"), 0, 0},
+        {S8("int n = 3; int a[2][n]; return 1 + sizeof(a[index++]);"), 13, 1},
+        {S8("int n = 3; int a[2][n]; return sizeof(a[index++]) + 1;"), 13, 1},
+    };
+    enum
+    {
+        C_SIZEOF_VLA_PROBE_COUNT = BUSTER_ARRAY_LENGTH(layouts) * BUSTER_ARRAY_LENGTH(effects) * C_SIZEOF_VLA_CONTEXT_COUNT +
+                                  BUSTER_ARRAY_LENGTH(neighbors),
+    };
+    u32 expected_calls[C_SIZEOF_VLA_PROBE_COUNT];
+    u32 expected_stores[C_SIZEOF_VLA_PROBE_COUNT];
+    String8 source = S8("static volatile unsigned index; static volatile unsigned hits;\n"
+                        "static unsigned tick(void) { hits += 1; return 0; }\n"
+                        "static unsigned long identity(unsigned long value) { return value; }\n");
+    String8 checks = S8("int main(void) { unsigned failures = 0; unsigned long value;\n");
+    u32 probe_count = 0;
+    for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(layouts); layout += 1)
+    {
+        for (u32 effect = 0; effect < BUSTER_ARRAY_LENGTH(effects); effect += 1)
+        {
+            String8 expression = string_format(arguments->arena, S8("sizeof({S8}[{S8}])"), layouts[layout].base, effects[effect].index);
+            String8 bodies[] = {
+                string_format(arguments->arena, S8("unsigned long value = {S8}; return value;"), expression),
+                string_format(arguments->arena, S8("return identity({S8});"), expression),
+                string_format(arguments->arena, S8("return {S8};"), expression),
+                string_format(arguments->arena, S8("unsigned long value = 0; if ({S8} == {u32}ul) value = {u32}ul; return value;"),
+                              expression, layouts[layout].size, layouts[layout].size),
+                string_format(arguments->arena, S8("{S8}; return 0;"), expression),
+                string_format(arguments->arena, S8("return ({{ unsigned long value = {S8}; value; }});"), expression),
+            };
+            BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(bodies) == C_SIZEOF_VLA_CONTEXT_COUNT);
+            for (u32 context = 0; context < BUSTER_ARRAY_LENGTH(bodies); context += 1)
+            {
+                u32 size = context == 4 ? 0 : layouts[layout].size;
+                u32 index_after = layouts[layout].evaluated ? effects[effect].index_after : 0;
+                u32 hits_after = layouts[layout].evaluated ? effects[effect].hits_after : 0;
+                expected_calls[probe_count] = (layouts[layout].evaluated ? effects[effect].calls : 0) + (context == 1);
+                expected_stores[probe_count] = layouts[layout].evaluated ? effects[effect].stores : 0;
+                source = string_format(arguments->arena, S8("{S8}static unsigned long probe_{u32}(void) {{{S8} {S8}}}\n"),
+                                       source, probe_count, layouts[layout].setup, bodies[context]);
+                checks = string_format(arguments->arena,
+                    S8("{S8}index = 0; hits = 0; value = probe_{u32}(); failures |= (value != {u32}ul) | (index != {u32}u) | (hits != {u32}u);\n"),
+                    checks, probe_count, size, index_after, hits_after);
+                probe_count += 1;
+            }
+        }
+    }
+    for (u32 neighbor = 0; neighbor < BUSTER_ARRAY_LENGTH(neighbors); neighbor += 1)
+    {
+        expected_calls[probe_count] = 0;
+        expected_stores[probe_count] = neighbors[neighbor].index_after;
+        source = string_format(arguments->arena, S8("{S8}static unsigned long probe_{u32}(void) {{{S8}}}\n"),
+                               source, probe_count, neighbors[neighbor].body);
+        checks = string_format(arguments->arena,
+            S8("{S8}index = 0; hits = 0; value = probe_{u32}(); failures |= (value != {u32}ul) | (index != {u32}u) | (hits != 0);\n"),
+            checks, probe_count, neighbors[neighbor].size, neighbors[neighbor].index_after);
+        probe_count += 1;
+    }
+    BUSTER_TEST(arguments, probe_count == C_SIZEOF_VLA_PROBE_COUNT);
+    source = string_format(arguments->arena, S8("{S8}{S8}return (int)failures; }}\n"), source, checks);
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            bool valid = !tokens.diagnostic_count && !syntax.diagnostic_count && !semantic.diagnostic_count && semantic.analysis_complete;
+            if (BUSTER_REQUIRE(arguments, valid))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("sizeof-vla-evaluation.c"), tokens, semantic, target,
+                                                                   (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                bool lowered_success = lowered.program && !lowered.diagnostic_count && lowered.program->module_count == 1;
+                if (BUSTER_REQUIRE(arguments, lowered_success))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    for (u32 probe = 0; probe < probe_count; probe += 1)
+                    {
+                        String8 name = string_format(temporary.arena, S8("probe_{u32}"), probe);
+                        IrFunction* function = c_test_find_ir_function(module, name);
+                        if (BUSTER_REQUIRE(arguments, function != 0))
+                        {
+                            u32 calls = 0;
+                            u32 stores = 0;
+                            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                            {
+                                IrInstruction* instruction = function->instructions + instruction_index;
+                                calls += instruction->opcode == IR_OPCODE_CALL;
+                                stores += instruction->opcode == IR_OPCODE_STORE && instruction->volatile_access;
+                            }
+                            BUSTER_TEST_RAW(arguments, calls == expected_calls[probe] && stores == expected_stores[probe],
+                                string_format(temporary.arena, S8("sizeof VLA {S8} target={u32} form={u32}: calls={u32}/{u32} volatile-stores={u32}/{u32}"),
+                                              name, target_index, form, calls, expected_calls[probe], stores, expected_stores[probe]));
+                        }
+                    }
+                }
+                else
+                {
+                    String8 diagnostic = lowered.diagnostic_count && lowered.diagnostics ? lowered.diagnostics[0].message
+                                                                                         : S8("no lowering diagnostic");
+                    arguments->show(arguments,
+                        S8("sizeof VLA lowering target={u32} form={u32} diagnostics={u32} modules={u32} first_diagnostic={S8}\n"),
+                        target_index, form, lowered.diagnostic_count, lowered.program ? lowered.program->module_count : 0, diagnostic);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 input = buster_test_temporary_path(arguments->arena, S8("sizeof-vla-evaluation"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                               S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("sizeof-vla-evaluation-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char"),
+                                     allocators[allocator], frontends[form], S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = allocator != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("sizeof VLA {S8} {S8}: {S8}"), allocators[allocator], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                               (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("sizeof VLA runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                          allocators[allocator], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
+// Compound assignment uses the binary operator's conversions before the final
+// store/result conversion. The rows deliberately distinguish those stages.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL String8 c_test_compound_conversion_source(Arena* arena)
+{
+    typedef struct CCompoundConversionRow CCompoundConversionRow;
+    struct CCompoundConversionRow
+    {
+        String8 type;
+        String8 initial;
+        String8 operation;
+        String8 right_type;
+        String8 right;
+        String8 expected;
+    };
+    CCompoundConversionRow rows[] = {
+        {S8("int"), S8("5"), S8("*"), S8("double"), S8("1.5"), S8("7")},
+        {S8("int"), S8("7"), S8("/"), S8("double"), S8("2.5"), S8("2")},
+        {S8("int"), S8("-2"), S8("+"), S8("double"), S8("1.5"), S8("0")},
+        {S8("int"), S8("2"), S8("-"), S8("double"), S8("1.5"), S8("0")},
+        {S8("unsigned char"), S8("200"), S8("/"), S8("int"), S8("256"), S8("0")},
+        {S8("unsigned char"), S8("200"), S8("%"), S8("int"), S8("257"), S8("200")},
+        {S8("unsigned int"), S8("12"), S8("/"), S8("unsigned long long"), S8("0x100000002ULL"), S8("0")},
+        {S8("int"), S8("-9"), S8("/"), S8("unsigned int"), S8("2u"), S8("2147483643")},
+        {S8("_Bool"), S8("1"), S8("-"), S8("int"), S8("2"), S8("1")},
+        {S8("float"), S8("1.0f"), S8("-"), S8("double"), S8("0x1.000001p0"), S8("-0x1p-24")},
+        {S8("int"), S8("5"), S8("*"), S8("int"), S8("2"), S8("10")},
+        {S8("unsigned char"), S8("254"), S8("+"), S8("int"), S8("2"), S8("0")},
+        {S8("double"), S8("5.0"), S8("*"), S8("double"), S8("1.5"), S8("7.5")},
+    };
+    u32 context_count = 6;
+    u32 probe_count = BUSTER_ARRAY_LENGTH(rows) * context_count;
+    String8* parts = arena_allocate(arena, String8, 2 * probe_count + BUSTER_ARRAY_LENGTH(rows) + 4);
+    u32 count = 0;
+    parts[count++] = S8("static double compound_identity(double value) { return value; }\n");
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
+    {
+        CCompoundConversionRow item = rows[row];
+        parts[count++] = string_format(arena, S8(
+            "static volatile {S8} value_{u32};\nstatic volatile {S8} rhs_{u32};\n"
+            "static volatile unsigned hits_{u32};\n"
+            "static {S8} right_{u32}(void) {{ hits_{u32} += 1; return rhs_{u32}; }}\n"),
+            item.type, row, item.right_type, row, row, item.right_type, row, row, row);
+        String8 expression = string_format(arena, S8("(value_{u32} {S8}= right_{u32}())"), row, item.operation, row);
+        for (u32 context = 0; context < context_count; context += 1)
+        {
+            u32 probe = row * context_count + context;
+            String8 body = {0};
+            switch (context)
+            {
+            case 0: body = string_format(arena, S8("double observed = {S8}; return observed;"), expression); break;
+            case 1: body = string_format(arena, S8("return compound_identity({S8});"), expression); break;
+            case 2: body = string_format(arena, S8("return {S8};"), expression); break;
+            case 3: body = string_format(arena, S8("double observed = -999; if ({S8} == ({S8})) observed = ({S8}); return observed;"),
+                                         expression, item.expected, item.expected); break;
+            case 4: body = string_format(arena, S8("{S8}; return 0;"), expression); break;
+            case 5: body = string_format(arena, S8("return ({{ double observed = {S8}; observed; }});"), expression); break;
+            }
+            String8 observed = context == 4 ? S8("0") : item.expected;
+            parts[count++] = string_format(arena, S8(
+                "static double evaluate_{u32}(void) {{ {S8} }}\n"
+                "static int probe_{u32}(void) {{ value_{u32} = {S8}; rhs_{u32} = {S8}; hits_{u32} = 0; "
+                "double observed = evaluate_{u32}(); return (observed != ({S8})) | "
+                "((value_{u32} != ({S8})) << 1) | ((hits_{u32} != 1u) << 2); }}\n"),
+                probe, body, probe, row, item.initial, row, item.right, row, probe, observed, row, item.expected, row);
+        }
+    }
+    // These stable scalar objects have disjoint effects. No sibling evaluation
+    // order is assumed, and the indexed destination must be evaluated once.
+    // Pointer and atomic controls retain their existing separate lowering.
+    parts[count++] = S8(
+        "static int neighbors(void) {\n"
+        "    int plain = 5; double factor = 1.5; int plain_result = (plain *= factor);\n"
+        "    int values[2] = {5, 99}; unsigned index = 0;\n"
+        "    int indexed_result = (values[index++] *= factor);\n"
+        "    int objects[4] = {0}; int *pointer = objects; pointer += 2; pointer -= 1;\n"
+        "    _Atomic unsigned atom = 1; unsigned atomic_result = (atom += 2u);\n"
+        "    unsigned long long wide = 0x100000000ULL; wide >>= 32;\n"
+        "    return plain != 7 || plain_result != 7 || indexed_result != 7 || index != 1 ||\n"
+        "        values[0] != 7 || values[1] != 99 || pointer != objects + 1 ||\n"
+        "        atom != 3 || atomic_result != 3 || wide != 1;\n"
+        "}\nint main(void) { int result = neighbors();\n");
+    for (u32 probe = 0; probe < probe_count; probe += 1)
+    {
+        parts[count++] = string_format(arena, S8("if (probe_{u32}()) result = 1;\n"), probe);
+    }
+    parts[count++] = S8("return result; }\n");
+    return string_join_arena(arena, (SliceString8){.pointer = parts, .length = count}, false);
+}
+
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_compound_assignment_conversions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CCompoundIrCase CCompoundIrCase;
+    struct CCompoundIrCase
+    {
+        String8 source;
+        IrBinaryOperation operation;
+        u32 width;
+        bool floating;
+        bool signed_integer;
+    };
+    CCompoundIrCase cases[] = {
+        {S8("int probe(volatile int *p, double rhs) { return *p *= rhs; }"), IR_BINARY_FLOAT_MULTIPLY, 64, true, false},
+        {S8("int probe(volatile int *p, double rhs) { return *p /= rhs; }"), IR_BINARY_FLOAT_DIVIDE, 64, true, false},
+        {S8("int probe(volatile int *p, double rhs) { return *p += rhs; }"), IR_BINARY_FLOAT_ADD, 64, true, false},
+        {S8("int probe(volatile int *p, double rhs) { return *p -= rhs; }"), IR_BINARY_FLOAT_SUBTRACT, 64, true, false},
+        {S8("unsigned char probe(volatile unsigned char *p, int rhs) { return *p /= rhs; }"), IR_BINARY_SIGNED_DIVIDE, 32, false, true},
+        {S8("unsigned char probe(volatile unsigned char *p, int rhs) { return *p %= rhs; }"), IR_BINARY_SIGNED_REMAINDER, 32, false, true},
+        {S8("unsigned probe(volatile unsigned *p, unsigned long long rhs) { return *p /= rhs; }"), IR_BINARY_UNSIGNED_DIVIDE, 64, false, false},
+        {S8("int probe(volatile int *p, unsigned rhs) { return *p /= rhs; }"), IR_BINARY_UNSIGNED_DIVIDE, 32, false, false},
+        {S8("_Bool probe(volatile _Bool *p, int rhs) { return *p -= rhs; }"), IR_BINARY_INTEGER_SUBTRACT, 32, false, true},
+        {S8("float probe(volatile float *p, double rhs) { return *p -= rhs; }"), IR_BINARY_FLOAT_SUBTRACT, 64, true, false},
+        {S8("int probe(volatile int *p, int rhs) { return *p *= rhs; }"), IR_BINARY_INTEGER_MULTIPLY, 32, false, true},
+        {S8("unsigned char probe(volatile unsigned char *p, int rhs) { return *p += rhs; }"), IR_BINARY_INTEGER_ADD, 32, false, true},
+        {S8("double probe(volatile double *p, double rhs) { return *p *= rhs; }"), IR_BINARY_FLOAT_MULTIPLY, 64, true, false},
+    };
+    Target targets[] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        targets[target_index].cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[target_index].os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CCompoundIrCase expected = cases[case_index];
+                Target target = targets[target_index];
+                CPreprocessResult tokens = c_preprocess(temporary.arena, expected.source, (CPreprocessOptions){
+                    .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17,
+                });
+                CParseResult parse = c_parse(temporary.arena, tokens);
+                if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+                {
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("compound-conversions.c"), tokens, parse, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                    {
+                        IrProgram* program = lowered.program;
+                        IrModule* module = program->modules;
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                        IrFunction* function = c_test_find_ir_function(module, S8("probe"));
+                        if (BUSTER_REQUIRE(arguments, function != 0))
+                        {
+                            u32 operations = 0;
+                            IrValueId arithmetic_result = IR_VALUE_ID_INVALID;
+                            u32 volatile_loads = 0;
+                            u32 volatile_stores = 0;
+                            for (u32 index = 0; index < function->instruction_count; index += 1)
+                            {
+                                IrInstruction* instruction = function->instructions + index;
+                                volatile_loads += instruction->opcode == IR_OPCODE_LOAD && instruction->volatile_access;
+                                volatile_stores += instruction->opcode == IR_OPCODE_STORE && instruction->volatile_access;
+                                if (instruction->opcode == IR_OPCODE_BINARY)
+                                {
+                                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                                    if (BUSTER_REQUIRE(arguments, type != 0))
+                                    {
+                                        if (type->kind == IR_TYPE_BOOLEAN && instruction->binary_operation == IR_BINARY_INTEGER_NOT_EQUAL)
+                                        {
+                                            // Store/result conversion to _Bool compares the arithmetic
+                                            // result with zero. It is not another arithmetic operation,
+                                            // and must not normalize the RHS before subtraction.
+                                            if (BUSTER_REQUIRE(arguments, instruction->operands && instruction->operand_count == 2))
+                                            {
+                                                BUSTER_TEST_RAW(arguments, arithmetic_result.value != IR_ID_UNDERLYING_INVALID &&
+                                                    (instruction->operands[0].value == arithmetic_result.value ||
+                                                     instruction->operands[1].value == arithmetic_result.value), expected.source);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            operations += 1;
+                                            arithmetic_result = instruction->result;
+                                            bool matched = instruction->binary_operation == expected.operation && type->bit_width == expected.width &&
+                                                type->kind == (expected.floating ? IR_TYPE_FLOAT : IR_TYPE_INTEGER) &&
+                                                (expected.floating || type->is_signed == expected.signed_integer);
+                                            BUSTER_TEST_RAW(arguments, matched, string_format(temporary.arena,
+                                                S8("COMPOUND_IR case={u32} target={u32} form={u32} operation={u32}/{u32} width={u32}/{u32} source={S8}"),
+                                                case_index, target_index, form, (u32)instruction->binary_operation, (u32)expected.operation,
+                                                type->bit_width, expected.width, expected.source));
+                                        }
+                                    }
+                                }
+                            }
+                            BUSTER_TEST(arguments, operations == 1);
+                            BUSTER_TEST(arguments, volatile_loads == 1);
+                            BUSTER_TEST(arguments, volatile_stores == 1);
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena source_temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = c_test_compound_conversion_source(source_temporary.arena);
+    String8 source_path = buster_test_temporary_path(source_temporary.arena, S8("compound-conversion-family"), S8(".c"));
+    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                {
+                    Arena* conflicts[] = {arguments->arena, source_temporary.arena};
+                    TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("compound-conversion-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char"),
+                        S8("-fverify-codegen"), allocators[allocator], frontends[form], optimizations[optimization], S8("-o"), output, source_path};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = allocator != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("compound family {S8} {S8} {S8}: {S8}"),
+                                      allocators[allocator], frontends[form], optimizations[optimization], compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("compound runtime {S8} {S8} {S8}: status={u32} timed_out={u32}"),
+                                    allocators[allocator], frontends[form], optimizations[optimization], execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    scratch_end(source_temporary);
+#endif
+    return result;
+}
+
+// Check the expression separately from the atomic object: a narrow RMW can
+// store the wrapped byte while its promoted arithmetic result is still 256.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL String8 const c_test_atomic_compound_result_source = S8_INITIALIZER(
+    "static _Atomic(unsigned char) byte;\n"
+    "static _Atomic(unsigned short) half;\n"
+    "static unsigned rhs_hits;\n"
+    "static int rhs(void) { rhs_hits += 1; return 1; }\n"
+    "int main(void) {\n"
+    "    int failed = 0;\n"
+    "    int types_ok = _Generic((byte += 1), unsigned char: 1, default: 0) &&\n"
+    "        _Generic((++byte), unsigned char: 1, default: 0) &&\n"
+    "        _Generic((byte++), unsigned char: 1, default: 0) &&\n"
+    "        _Generic((half += 1), unsigned short: 1, default: 0);\n"
+    "    failed |= !types_ok || byte != 0 || half != 0;\n"
+    "    byte = 255; int observed = (byte += rhs());\n"
+    "    failed |= observed != 0 || byte != 0 || rhs_hits != 1;\n"
+    "    byte = 0; observed = (byte -= 1);\n"
+    "    failed |= observed != 255 || byte != 255;\n"
+    "    half = 65535; observed = (half += 1);\n"
+    "    failed |= observed != 0 || half != 0;\n"
+    "    byte = 255; observed = ++byte;\n"
+    "    failed |= observed != 0 || byte != 0;\n"
+    "    byte = 255; failed |= ++byte != 0 || byte != 0;\n"
+    "    byte = 255; observed = byte++;\n"
+    "    failed |= observed != 255 || byte != 0;\n"
+    "    byte = 255; observed = (unsigned char)(byte += 1);\n"
+    "    failed |= observed != 0 || byte != 0;\n"
+    "    byte = 3; observed = (byte += 2);\n"
+    "    failed |= observed != 5 || byte != 5;\n"
+    "    unsigned char ordinary = 255; observed = (ordinary += 1);\n"
+    "    failed |= observed != 0 || ordinary != 0;\n"
+    "    return failed;\n"
+    "}\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_result(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source = buster_test_temporary_path(arguments->arena, S8("atomic-compound-result"), S8(".c"));
+    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_atomic_compound_result_source))))
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("atomic-compound-result-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), S8("-std=c17"), S8("-fverify-codegen"), allocators[allocator],
+                                        frontends[form], optimizations[optimization], S8("-o"), output, source};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = allocator != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("atomic compound {S8} {S8} {S8}: {S8}"),
+                                      allocators[allocator], frontends[form], optimizations[optimization], compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("atomic result {S8} {S8} {S8}: status={u32} timed_out={u32}"),
+                                              allocators[allocator], frontends[form], optimizations[optimization],
+                                              execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// Buster deliberately selects signed __int128 for decimal magnitudes above
+// INT64_MAX. Test that established extension, not Clang's different raw-literal
+// policy, and retain explicit unsigned suffixes/casts as independent controls.
+BUSTER_GLOBAL_LOCAL String8 const c_test_integer_literal_policy_source = S8_INITIALIZER(
+    "typedef __int128 wide;\n"
+    "#define LO ((wide)9223372036854775808ULL)\n"
+    "#define HI ((wide)18446744073709551615ULL)\n"
+    "enum { literal_index = (9223372036854775808 >> 63) };\n"
+    "int literal_designated[2] = { [(18446744073709551615 >> 63)] = 9 };\n"
+    "wide literal_scalar = 9223372036854775808;\n"
+    "wide literal_array[3] = { 9223372036854775808, 18446744073709551615L, 18446744073709551615LL };\n"
+    "wide literal_conditional = 1 ? 18446744073709551615 : 0;\n"
+    "wide literal_return(void) { return 18446744073709551615; }\n"
+    "wide literal_echo(wide x) { return x; }\n"
+    "_Static_assert(sizeof(9223372036854775808) == 16, \"wide literal\");\n"
+    "_Static_assert(sizeof(18446744073709551615LL) == 16, \"wide suffix\");\n"
+    "_Static_assert(sizeof(+9223372036854775808) == 16, \"promotion\");\n"
+    "_Static_assert(sizeof(1 ? 9223372036854775808 : 0U) == 16, \"conditional type\");\n"
+    "_Static_assert(sizeof(18446744073709551615ULL) == 8, \"unsigned suffix\");\n"
+    "_Static_assert(sizeof(0xffffffffffffffff) == 8, \"hex candidate\");\n"
+    "_Static_assert(sizeof((unsigned long long)9223372036854775808) == 8, \"explicit cast\");\n"
+    "_Static_assert(sizeof(2147483648L) == 8, \"LP64 and LLP64 candidate order\");\n"
+    "int main(void)\n"
+    "{\n"
+    "    wide local = 9223372036854775808;\n"
+    "    wide array[2] = { 9223372036854775808L, 18446744073709551615LL };\n"
+    "    int result = local != LO || array[0] != LO || array[1] != HI;\n"
+    "    result |= literal_scalar != LO || literal_array[0] != LO || literal_array[1] != HI || literal_array[2] != HI;\n"
+    "    result |= literal_conditional != HI || literal_return() != HI || literal_echo(18446744073709551615) != HI;\n"
+    "    result |= literal_index != 1 || literal_designated[1] != 9;\n"
+    "    result |= sizeof(9223372036854775808) != 16 || sizeof(+9223372036854775808) != 16;\n"
+    "    result |= sizeof(1 ? 9223372036854775808 : 0U) != 16;\n"
+    "    result |= sizeof((unsigned long long)9223372036854775808) != 8;\n"
+    "    result |= (1 ? -1 : 9223372036854775808) >= 0;\n"
+    "    result |= (1 ? 9223372036854775808 : 0) != LO;\n"
+    "    result |= 9223372036854775808L != LO || 18446744073709551615LL != HI;\n"
+    "    result |= sizeof(1L) != sizeof(long) || sizeof(1UL) != sizeof(unsigned long);\n"
+    "    result |= sizeof(2147483648L) != 8 || sizeof(0xffffffffffffffff) != 8;\n"
+    "    return result;\n"
+    "}\n"
+);
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_literal_policy(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU11, C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23};
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, c_test_integer_literal_policy_source, (CPreprocessOptions){
+                    .target = target, .data_layout = target_data_layout(target),
+                    .dialect = dialects[dialect],
+                });
+                CParseResult parse = c_parse(temporary.arena, tokens);
+                if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+                {
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("integer-literal-policy.c"), tokens, parse, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                    {
+                        IrProgram* program = lowered.program;
+                        IrModule* module = program->modules;
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                        u32 checked = 0;
+                        for (u32 index = 0; index < module->global_count; index += 1)
+                        {
+                            IrGlobal* global = module->globals + index;
+                            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global->symbol);
+                            if (symbol && (string_equal(symbol->name, S8("literal_scalar")) || string_equal(symbol->name, S8("literal_conditional"))))
+                            {
+                                bool low = string_equal(symbol->name, S8("literal_scalar"));
+                                IrType* type = ir_type_from_id(&program->types, global->type);
+                                checked += 1;
+                                if (BUSTER_REQUIRE(arguments, type && global->bytes.pointer && global->bytes.length == 16))
+                                {
+                                    BUSTER_TEST(arguments, type->kind == IR_TYPE_INTEGER && type->is_signed && type->bit_width == 128);
+                                    for (u32 byte_index = 0; byte_index < 16; byte_index += 1)
+                                    {
+                                        u8 expected = (u8)(byte_index >= 8 ? 0 : low ? byte_index == 7 ? 128 : 0 : 255);
+                                        u32 offset = program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte_index : 15 - byte_index;
+                                        BUSTER_TEST(arguments, global->bytes.pointer[offset] == expected);
+                                    }
+                                }
+                            }
+                        }
+                        BUSTER_TEST(arguments, checked == 2);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_literal_policy_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 dialects[] = {S8("-std=gnu11"), S8("-std=gnu17"), S8("-std=gnu23")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("integer-literal-policy"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_integer_literal_policy_source))))
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("integer-literal-policy-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
+                                         S8("-fverify-codegen"), S8("-o"), output, source};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// Only the selected GNU choose-expression arm owns effects. The tests use
+// scalar results and one-argument identity wrappers; no sibling evaluation
+// order or escaping statement-expression lifetime is assumed.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_choose_expr_evaluation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 expression;
+        u32 calls;
+        u32 stores;
+        u32 effects;
+        u32 value;
+    } cases[] = {
+        {S8("__builtin_choose_expr(1, 7, mark())"), 0, 0, 0, 7},
+        {S8("__builtin_choose_expr(0, mark(), 7)"), 0, 0, 0, 7},
+        {S8("__builtin_choose_expr(1, mark(), 7)"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(0, 7, mark())"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(1, 7, identity(mark()))"), 0, 0, 0, 7},
+        {S8("__builtin_choose_expr(0, 7, identity(mark()))"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(1, mark(), other())"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(0, other(), mark())"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(1, 7, (hits += 1))"), 0, 0, 0, 7},
+        {S8("__builtin_choose_expr(0, 7, (hits += 1))"), 0, 1, 1, 1},
+        {S8("__builtin_choose_expr(1, 7, (flag ? mark() : 0))"), 0, 0, 0, 7},
+        {S8("__builtin_choose_expr(0, 0, (flag ? mark() : 0))"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(1, 7, ({ mark(); 7; }))"), 0, 0, 0, 7},
+        {S8("__builtin_choose_expr(0, 0, ({ mark(); 7; }))"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(1, __builtin_choose_expr(0, other(), mark()), other())"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(0, __builtin_choose_expr(1, other(), mark()), 7)"), 0, 0, 0, 7},
+        {S8("sizeof(__builtin_choose_expr(1, mark(), other()))"), 0, 0, 0, 4},
+        {S8("_Generic(0, int: __builtin_choose_expr(1, mark(), other()), default: other())"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(1, _Generic(0, int: mark(), default: other()), other())"), 1, 0, 1, 7},
+        {S8("__builtin_choose_expr(1, __builtin_constant_p(mark()) + 7, other())"), 0, 0, 0, 7},
+    };
+    enum { CONTEXT_COUNT = 6, CASE_COUNT = BUSTER_ARRAY_LENGTH(cases), PROBE_COUNT = CASE_COUNT * CONTEXT_COUNT };
+    TemporalArena sources_temporary = scratch_begin(&arguments->arena, 1);
+    String8 definitions[PROBE_COUNT + 1];
+    String8 checks[PROBE_COUNT + 2];
+    definitions[0] = S8("static volatile unsigned hits;"
+        "static int mark(void) { hits += 1; return 7; }"
+        "static int other(void) { hits += 100; return 9; }"
+        "static int identity(int value) { return value; }\n");
+    checks[0] = S8("int main(void) { int failed = 0; int value;\n");
+    for (u32 case_index = 0; case_index < CASE_COUNT; case_index += 1)
+    {
+        for (u32 context = 0; context < CONTEXT_COUNT; context += 1)
+        {
+            String8 expression = cases[case_index].expression;
+            u32 expected = cases[case_index].value;
+            String8 body = {0};
+            switch (context)
+            {
+            case 0:
+                body = string_format(sources_temporary.arena, S8("int value = ({S8}); return value;"), expression);
+                break;
+            case 1:
+                body = string_format(sources_temporary.arena, S8("return identity({S8});"), expression);
+                break;
+            case 2:
+                body = string_format(sources_temporary.arena, S8("return ({S8});"), expression);
+                break;
+            case 3:
+                body = string_format(sources_temporary.arena,
+                    S8("int value = {u32}; if (({S8}) == {u32}) value = {u32}; return value;"), expected + 1, expression, expected, expected);
+                break;
+            case 4:
+                // A discarded full expression has no value observation.
+                body = string_format(sources_temporary.arena, S8("(void)({S8}); return {u32};"), expression, expected);
+                break;
+            case 5:
+                body = string_format(sources_temporary.arena, S8("return ({{ int inner = ({S8}); inner; }});"), expression);
+                break;
+            }
+            u32 probe = case_index * CONTEXT_COUNT + context;
+            definitions[probe + 1] = string_format(sources_temporary.arena,
+                S8("int probe_{u32}(int flag) {{ {S8} }}\n"), probe, body);
+            // Update, call completion, and observation are separate full
+            // expressions. Both unselected and exactly-once controls matter.
+            checks[probe + 1] = string_format(sources_temporary.arena,
+                S8("hits = 0; value = probe_{u32}(1); failed |= value != {u32}; failed |= hits != {u32}u;\n"),
+                probe, expected, cases[case_index].effects);
+        }
+    }
+    checks[PROBE_COUNT + 1] = S8("return failed; }\n");
+    String8 parts[] = {
+        string_join_arena(sources_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(definitions), false),
+        string_join_arena(sources_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(checks), false),
+    };
+    String8 source_text = string_join_arena(sources_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+    Target targets[] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        targets[index].cpu_arch = index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[index].os = index < 2 ? OPERATING_SYSTEM_LINUX : index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+    }
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            Arena* conflicts[] = {arguments->arena, sources_temporary.arena};
+            TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source_text,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("choose-expr-evaluation.c"), tokens, parsed, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                for (u32 probe = 0; probe < PROBE_COUNT; probe += 1)
+                {
+                    String8 name = string_format(temporary.arena, S8("probe_{u32}"), probe);
+                    IrFunction* function = c_test_find_ir_function(module, name);
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        u32 stores = 0;
+                        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                        {
+                            IrInstruction* instruction = function->instructions + instruction_index;
+                            stores += instruction->opcode == IR_OPCODE_STORE && instruction->volatile_access;
+                        }
+                        u32 calls = c_test_ir_direct_call_count(lowered.program, function, S8("mark"));
+                        u32 discarded = c_test_ir_direct_call_count(lowered.program, function, S8("other"));
+                        String8 observation = string_format(temporary.arena,
+                            S8("{S8}: mark={u32}/{u32} other={u32}/0 volatile-stores={u32}/{u32}"),
+                            name, calls, cases[probe / CONTEXT_COUNT].calls, discarded, stores, cases[probe / CONTEXT_COUNT].stores);
+                        BUSTER_TEST_RAW(arguments, calls == cases[probe / CONTEXT_COUNT].calls, observation);
+                        BUSTER_TEST_RAW(arguments, discarded == 0, observation);
+                        BUSTER_TEST_RAW(arguments, stores == cases[probe / CONTEXT_COUNT].stores, observation);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("choose-expr-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                Arena* conflicts[] = {arguments->arena, sources_temporary.arena};
+                TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                String8 output = buster_test_temporary_path(temporary.arena, S8("choose-expr-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source_path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("choose-expr {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    scratch_end(sources_temporary);
+    return result;
+}
 
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
@@ -21252,15 +23974,20 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_string_literal_decode_differential);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
     BUSTER_TEST_FIXTURE(arguments, c_test_position_index_tiles);
+    BUSTER_TEST_FIXTURE(arguments, c_test_validation_candidates);
     BUSTER_TEST_FIXTURE(arguments, c_test_oversized_token_spellings);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_source_metrics);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_metrics_path_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_transparent_union_abi);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_semantic_basics);
     BUSTER_TEST_FIXTURE(arguments, c_test_typedef_fallback_lookup);
+    BUSTER_TEST_FIXTURE(arguments, c_test_compound_assignment_conversions);
+    BUSTER_TEST_FIXTURE(arguments, c_test_atomic_compound_result);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_global_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
     BUSTER_TEST_FIXTURE(arguments, c_test_typed_enum_integer_constants);
+    BUSTER_TEST_FIXTURE(arguments, c_test_integer_literal_policy);
+    BUSTER_TEST_FIXTURE(arguments, c_test_integer_literal_policy_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_lowering);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
@@ -21269,22 +23996,30 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_enum_ranges);
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_enum_range_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
+    BUSTER_TEST_FIXTURE(arguments, c_test_volatile_split_bit_fields);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
+    BUSTER_TEST_FIXTURE(arguments, c_test_token_view_constant_range);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_function_type_name);
     BUSTER_TEST_FIXTURE(arguments, c_test_void_object_refusals);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);
+    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_vla_evaluation);
     BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
+    BUSTER_TEST_FIXTURE(arguments, c_test_initializer_frame_bounds);
+    BUSTER_TEST_FIXTURE(arguments, c_test_label_values_gate);
     BUSTER_TEST_FIXTURE(arguments, c_test_member_call_arity_ownership);
     BUSTER_TEST_FIXTURE(arguments, c_test_function_body_sizeof_expression);
+    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_control_preparation);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_control_flow);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
+    BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_dead_continuation_edges);
     BUSTER_TEST_FIXTURE(arguments, c_test_for_declaration_scopes);
     BUSTER_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
@@ -21311,6 +24046,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_pasted_keyword_body_walk);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_map_order);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_map_locations);
+    BUSTER_TEST_FIXTURE(arguments, c_test_source_map_publication);
+    BUSTER_TEST_FIXTURE(arguments, c_test_source_map_lifetime);
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_task_batches);
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_plain_production);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_vla_and_ir);
@@ -21341,6 +24078,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_static_range_designators);
+    BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_index);
+    BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_lowering);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_member_search_scratch);
     BUSTER_TEST_FIXTURE(arguments, c_test_u64_initializer_slots);
@@ -21348,9 +24087,11 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_parse_storage_growth);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_fresh_binding_publication);
+    BUSTER_TEST_FIXTURE(arguments, c_test_function_typedef_scopes);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_growth);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_tag_scope_typedef_identity);
+    BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_unique_search);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
 
@@ -21379,6 +24120,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 
     BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_nonconstant);
 
+    BUSTER_TEST_FIXTURE(arguments, c_test_static_assert_nonconstant_quote);
+
     BUSTER_TEST_FIXTURE(arguments, c_test_local_tls);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_invalid_local_static_initializer);
@@ -21394,6 +24137,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_sizeof_parenthesized_operand);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_invalid_block_tls);
+
+    BUSTER_TEST_FIXTURE(arguments, c_test_unneeded_prototyped_definitions);
 
     {
         TemporalArena artifact_temporary = scratch_begin(0, 0);

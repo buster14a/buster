@@ -1,0 +1,62 @@
+name: COFF extended relocation interoperability
+
+on:
+  pull_request:
+    paths:
+      - src/buster/lib/compiler/object/object.c
+      - src/buster/tests/compiler/object/object_test.c
+      - tools/fixtures/coff_extended_relocations_clang.s
+      - tools/fixtures/coff_extended_relocations_subject.c
+      - tools/fixtures/coff_extended_relocations_support.c
+      - tools/test_coff_extended_relocations.py
+      - .github/workflows/coff-extended-relocations.yml
+  workflow_dispatch:
+
+concurrency:
+  group: coff-extended-relocations-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  interoperability:
+    if: ${{ vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Build the Release compiler and run external COFF checks
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path -LiteralPath $VsWhere)) { throw "vswhere was not found at $VsWhere" }
+          $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw "Visual Studio x64 tools were not found" }
+          $VsPath = $VsPaths[0].Trim()
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          foreach ($Tool in @('clang', 'llvm-readobj', 'lld-link')) {
+            Get-Command $Tool | Out-Null
+          }
+          $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o $Driver
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver build --config Release -t ide
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/test_coff_extended_relocations.py --ide build/Release/ide.exe --output (Join-Path $env:RUNNER_TEMP 'coff-extended-relocations')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain COFF interoperability evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coff-extended-relocations-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/coff-extended-relocations
+          if-no-files-found: warn
+          retention-days: 7

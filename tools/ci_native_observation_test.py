@@ -580,6 +580,61 @@ class NativeObservationTest(unittest.TestCase):
         self.assertIn("uses: ./.github/actions/native-artifact-upload", primary_upload)
 
 
+    def test_desktop_log_upload_reuses_bounded_action_for_all_shards(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        workflow = (repository_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        desktop = workflow.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
+        lanes = re.search(r"(?m)^        lane: \[([^\]]+)\]$", desktop)
+        shards = re.search(r"(?m)^        shard: \[([^\]]+)\]$", desktop)
+        self.assertIsNotNone(lanes)
+        self.assertIsNotNone(shards)
+        self.assertEqual(lanes.group(1).split(", "), [
+            "linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64",
+            "windows-x86_64", "windows-aarch64",
+        ])
+        self.assertEqual(shards.group(1).split(", "), ["release", "checks"])
+        steps = dict(re.findall(
+            r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", desktop,
+        ))
+        upload = steps["Retain desktop logs"]
+        self.assertIn("id: checkout", steps["Checkout"])
+        self.assertLess(desktop.index("      - name: Checkout"), desktop.index("      - name: Retain desktop logs"))
+        self.assertIn("if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}", upload)
+        self.assertIn("uses: ./.github/actions/native-artifact-upload", upload)
+        self.assertIn("label: desktop", upload)
+        self.assertIn("label_title: Desktop", upload)
+        self.assertIn(
+            "name: desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}",
+            upload,
+        )
+        self.assertIn("path: ${{ runner.temp }}/buster-ci/", upload)
+        self.assertIn("compression-level: 6", upload)
+        self.assertIn("if-no-files-found: ignore", upload)
+        self.assertIn("retention-days: 7", upload)
+        self.assertNotIn("uses: actions/upload-artifact@", upload)
+        self.assertNotRegex(desktop, r"(?m)^\s*continue-on-error:")
+        # The caller runs after failed builds, but never loads a local action
+        # without checkout or retries after cancellation.
+        condition = re.search(r"(?m)^        if: \$\{\{ (.+) \}\}$", upload)
+        self.assertIsNotNone(condition)
+        terms = condition.group(1).split(" && ")
+        for checkout, cancelled, earlier_failure, expected in (
+            ("success", False, None, True),
+            ("success", False, "build", True),
+            ("success", False, "test", True),
+            ("success", False, "summary", True),
+            ("failure", False, "checkout", False),
+            ("skipped", False, "checkout", False),
+            ("success", True, "test", False),
+        ):
+            with self.subTest(checkout=checkout, cancelled=cancelled, earlier_failure=earlier_failure):
+                values = {
+                    "!cancelled()": not cancelled,
+                    "steps.checkout.outcome == 'success'": checkout == "success",
+                }
+                self.assertEqual(set(terms), set(values))
+                self.assertEqual(all(values[term] for term in terms), expected)
+
     def test_mobile_log_upload_reuses_bounded_action_for_all_matrix_entries(self):
         repository_root = Path(__file__).resolve().parents[1]
         workflow = (repository_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
@@ -601,7 +656,47 @@ class NativeObservationTest(unittest.TestCase):
         summary = steps["Mobile result and reproduction"]
         upload = steps["Retain mobile logs"]
         self.assertIn("if: ${{ always() && steps.checkout.outcome == 'success' }}", summary)
-        self.assertIn("if: ${{ !cancelled() }}", upload)
+        # Exercise the actual caller condition, not the composite's internal
+        # retry guards. Only this small conjunction vocabulary is supported;
+        # Actions adds success() implicitly when no status function appears.
+        condition = re.search(r"(?m)^        if: \$\{\{ (.+) \}\}$", upload)
+        self.assertIsNotNone(condition)
+        terms = condition.group(1).split(" && ")
+        scenarios = (
+            ("success", False, None, True),
+            ("success", False, "setup", True),
+            ("success", False, "build", True),
+            ("success", False, "test", True),
+            ("success", False, "summary", True),
+            ("failure", False, "checkout", False),
+            ("skipped", False, "checkout", False),
+            ("cancelled", False, "checkout", False),
+            ("", False, "checkout", False),
+            ("success", True, None, False),
+            ("success", True, "test", False),
+            ("failure", True, "checkout", False),
+        )
+        for lane, _, _, _ in entries:
+            for checkout, cancelled, earlier_failure, expected in scenarios:
+                with self.subTest(lane=lane, checkout=checkout, cancelled=cancelled,
+                                  earlier_failure=earlier_failure):
+                    values = {
+                        "!cancelled()": not cancelled,
+                        "success()": checkout == "success" and earlier_failure is None and not cancelled,
+                        "always()": True,
+                        "steps.checkout.outcome == 'success'": checkout == "success",
+                    }
+                    self.assertTrue(set(terms) <= values.keys())
+                    explicit_status = any(term in terms for term in ("!cancelled()", "success()", "always()"))
+                    enabled = all(values[term] for term in terms)
+                    if not explicit_status:
+                        enabled = enabled and values["success()"]
+                    self.assertEqual(expected, enabled)
+        self.assertIn("id: checkout", steps["Checkout"])
+        self.assertLess(mobile.index("      - name: Checkout"), mobile.index("      - name: Retain mobile logs"))
+        # Retaining evidence must never forgive a checkout or payload failure.
+        self.assertNotRegex(mobile, r"(?m)^\s*continue-on-error:")
+        self.assertIn("if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}", upload)
         self.assertIn("uses: ./.github/actions/native-artifact-upload", upload)
         self.assertIn("label: mobile", upload)
         self.assertIn("label_title: Mobile", upload)

@@ -82,12 +82,14 @@ only as part of the reviewed queue rollout; never remove an existing requirement
 | --- | --- | --- | --- |
 | CI complete | ci.yml | GitHub PR merge revision | Exact synthetic group |
 | Linux x86-64 bootstrap evidence | self-host-audit.yml | GitHub PR merge revision | Exact synthetic group |
-| Canonical TCC bootstrap | tcc-bootstrap.yml | Explicit PR head (existing #245 policy) | Exact synthetic group |
+| Canonical TCC bootstrap | tcc-bootstrap.yml | Explicit PR head (existing #245 policy); its [source-size](source-size.md) step measures the GitHub PR merge revision | Exact synthetic group |
 | GPU Linux consumers | gpu-toolchains.yml | Workflow-selected PR revision | Exact synthetic group |
 | Benchmark service workflow policy | bench-service-policy.yml | GitHub PR merge revision | Exact synthetic group |
 | API migration policy | api-migration-policy.yml | Bounded API compatibility policy | Exact synthetic group |
 | Native retirement merge admission | api-migration-policy.yml | Exact head and trusted integration evidence | Exact generated tree plus successful trusted writer publication |
 | Main integration admission | merge-queue-admission.yml | Readiness/regression checks only | Trusted-base verification of the exact group and all six gates |
+
+`CI complete` also runs the [merge-parent preservation guard](merge-parent-preservation.md) over merges introduced by each PR candidate, merge-group candidate, and main push. It uses the event's exact base commit and does not require a feature branch to be updated when `main` advances.
 
 `CI complete` retains desktop x86-64/AArch64, mobile, native-mode, UEFI, lint and
 static-analysis ownership. The independent self-host and canonical bootstrap

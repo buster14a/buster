@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline regression for the hosted differential worker policy."""
+"""Offline regressions for hosted differential CI policies."""
 
 from pathlib import Path
 import unittest
@@ -46,6 +46,17 @@ class DifferentialCIPolicyTests(unittest.TestCase):
         self.assertIn("*jobs = BUSTER_MIN(*jobs, quota);", runner)
         self.assertIn("#if BUSTER_SINGLE_THREADED\n        *jobs = 1;", runner)
         self.assertIn('os_get_environment_variable(S8("BUSTER_TEST_JOBS"))', runner)
+
+    def test_msvc_reference_has_bounded_timeout_samples_and_short_timeout_control(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        step = workflow.split("      - name: Native MSVC reference differential", 1)[1]
+        step = step.split("\n      - name:", 1)[0]
+
+        self.assertIn("'--reference-timeout', '60', '--strict-mir'", step)
+        self.assertIn("if ($env:VS_ARCH -eq 'arm64') {\n            $MsvcArgs += @('--reference-samples', '12')", step)
+        self.assertIn("$env:VS_ARCH -eq 'arm64'", step)
+        self.assertIn("test_differential --self-test --reference-timeout 1", step)
+        self.assertIn("DIFFERENTIAL_TIMEOUT_CONTROL reference_timeout_seconds=1 result=timeout", step)
 
 
 if __name__ == "__main__":

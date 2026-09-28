@@ -89,6 +89,13 @@ typedef enum ObjectSymbolKind
     OBJECT_SYMBOL_COUNT,
 } ObjectSymbolKind;
 
+enum
+{
+    OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN,
+    OBJECT_SYMBOL_THREAD_LOCAL_NO,
+    OBJECT_SYMBOL_THREAD_LOCAL_YES,
+};
+
 typedef enum ObjectRelocationKind
 {
     OBJECT_RELOCATION_X86_64_PC32,
@@ -239,7 +246,10 @@ struct ObjectSymbol
     // the ELF writer and reader carry it -- COFF and Mach-O have no
     // equivalent per-symbol visibility byte.
     bool hidden;
-    u8 reserved;
+    // The ELF symbol type carries TLS identity even when section is undefined.
+    // UNKNOWN is retained for object formats that do not encode this property
+    // on an undefined symbol. This occupies the former reserved byte.
+    u8 thread_local_state;
 };
 
 typedef struct ObjectRelocation ObjectRelocation;

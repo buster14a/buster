@@ -281,6 +281,30 @@ and later admission proof. Preserve original failed attempts and diagnosis.
 Mark every unavailable gate explicitly. An Actions artifact's finite retention
 is not the entire durable publication policy. Keep the service-owned original,
 exact downloaded copy and their digests attributable to the same attempt.
-Leave the implementation PR in draft until the requested exact-head checks,
-independent review and real smoke/recovery slice have passed. Do not merge a
-branch onto main merely to run unreviewed code on the dedicated host.
+
+## Implementation admission before live qualification
+
+For a service implementation PR, finish its exact-head checks and independent
+source review while draft. Before marking a sandbox repair ready, obtain the
+required **isolated real-systemd** slice for the exact tested source, binary
+hashes, manager/kernel and effective sandbox properties. Exercise actual
+materialization, staging and output creation, visibility verification and
+complete build-tree freezing under the relevant trusted/candidate identities.
+Retain failures and cleanup observations. Repository fixtures and a standalone
+syscall-filter probe do not replace this slice. Do not install an unmerged PR
+on Benchpress to satisfy a pre-merge gate.
+
+After those pre-merge gates pass, the owner marks the draft ready and submits
+it to the normal main merge queue. The queue must validate the actual combined
+tree; refresh preflight and admission if main or the PR head changes. A clean
+branch need not be rebased solely because it is behind main. Once the admitted
+PR is merged, record the resulting protected-main commit/tree. Only then
+install the reviewed artifact under fresh administrator and host receipts and
+start a new, separately keyed rehearsal through the protected fixed gateway.
+
+The full real smoke/recovery campaign described above is **post-merge** #880
+qualification, not a prerequisite for marking its implementation PR ready.
+It still requires the five distinct scenarios, durable export/download/replay,
+recursive absence and subsequent reservation before #880 can close. An
+unavailable pre-merge slice or ambiguous live-host state remains a failed gate;
+neither the merge queue nor the operator controls may be bypassed.

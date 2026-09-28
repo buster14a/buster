@@ -52,7 +52,18 @@ subject to either problem.
 **Issues are the task queue.** Work that is real but not being done right now
 becomes an issue, not a paragraph in an audit that nobody will find — a chip
 filed against a memory is invisible to the next agent, while an issue is
-something a fresh session can pick up cold. Write the body as a **prompt**: what
+something a fresh session can pick up cold. An agent that encounters a separate
+actionable problem reports it during the task, before session end or handoff:
+search open and closed issues/PRs for the root cause; comment with fresh evidence
+on the matching record, or file a new issue if none exists. A finding fixed in
+the active PR belongs in that PR's description and regression evidence; link an
+existing issue if one tracks it. Group symptoms with the same root cause in one
+record and separate independent problems. Report a blocker on its owning issue
+or PR as soon as it changes the next action. Do not open a new issue for every
+flaky retry or known duplicate. When access prevents publication, preserve a
+ready-to-post body and explicitly identify the unposted report in the handoff.
+
+Write the body as a **prompt**: what
 is wrong and how it was diagnosed, the file and symbol names to start from,
 the constraints and do-not-retries that earlier work already paid for, how to
 validate the fix (which oracle, which harness, which counters), and a
@@ -200,6 +211,17 @@ merge-base SHA/tree and the exact combined tree when clean. A result for
 same head still shows a green status. The default-branch refresh rewrites the
 status for open PRs, and the later merge-group admission path must validate its
 own exact combined head rather than reuse a historical PR-head result.
+
+The default-branch sweep retries selected transient GET failures at most three
+times within a 240-second refresh budget, using bounded backoff and server
+rate-limit timing when safe. Status POSTs are sent once: a timeout after a write
+may leave publication uncertain. A per-PR lookup failure retains an error JSON
+and allows later independent PRs to be checked; a systemic rate limit or spent
+budget leaves the rest unattempted. The retained `refresh.json` and job summary
+count completed, failed, and unattempted work. Incomplete coverage exits 2;
+ordinary blocking PR conflicts do not fail the main-push sweep. A missing
+lookup never authorizes a status, and a green result for an older main remains
+stale until that exact PR is successfully refreshed.
 
 The preflight never checks out, rebases, merges or updates a PR branch. It uses
 `git merge-tree` plumbing, reports every unmerged path and Git's conflict kind,

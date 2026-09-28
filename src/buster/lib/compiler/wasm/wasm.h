@@ -1,9 +1,11 @@
 #pragma once
 
-// Direct WebAssembly Memory64 emitter.  The emitter intentionally consumes
-// canonical typed IR, rather than target-machine IR: WebAssembly has a small
-// scalar instruction vocabulary and keeping this boundary typed makes
-// unsupported ABI shapes fail before any bytes are produced.
+// Direct WebAssembly emitter.  It supports both core wasm32 modules (including
+// WASI Preview 1 command modules) and Memory64 wasm64 modules.  The emitter
+// intentionally consumes canonical typed IR, rather than target-machine IR:
+// WebAssembly has a small scalar instruction vocabulary and keeping this
+// boundary typed makes unsupported ABI shapes fail before any bytes are
+// produced.
 
 #include <buster/lib/arena.h>
 #include <buster/lib/compiler/ir/ir.h>
@@ -45,8 +47,9 @@ typedef struct Wasm64Stats Wasm64Stats;
 struct Wasm64Stats
 {
     bool memory64;
+    bool wasi_preview1;
     bool deterministic;
-    u8 reserved[6];
+    u8 reserved[5];
     u32 module_count;
     u32 function_count;
     u32 defined_function_count;
@@ -81,22 +84,55 @@ struct Wasm64Artifact
 };
 
 typedef struct Wasm64Options Wasm64Options;
+
+typedef enum WasmEnvironment
+{
+    WASM_ENVIRONMENT_FREESTANDING,
+    WASM_ENVIRONMENT_WASI_PREVIEW1,
+    WASM_ENVIRONMENT_COUNT,
+} WasmEnvironment;
+
 struct Wasm64Options
 {
-    // Zero uses the deterministic defaults: export memory as "memory", start
-    // data at 64 KiB, and choose the smallest memory64 minimum containing all
-    // static bytes and the complete 64 KiB upward-growing stack. A non-zero
-    // max is encoded as the memory64 maximum; zero means no explicit maximum.
+    // Export memory as "memory" and reserve a complete 64 KiB stack above
+    // static data. The minimum covers the stack; a zero maximum is unbounded.
     String8 memory_export_name;
     u64 initial_pages;
     u64 maximum_pages;
+    WasmEnvironment environment;
+    // 4 selects wasm32; 8 selects Memory64 wasm64.
+    u8 pointer_size;
     bool export_memory;
     bool export_functions;
     bool deterministic;
-    u8 reserved[5];
+    // For WASI Preview 1, synthesize the command `_start` adapter around a C
+    // `main` when the program does not define `_start` itself.
+    bool synthesize_start;
+    u8 reserved[3];
 };
 
-#define WASM64_OPTIONS_DEFAULT ((Wasm64Options){.export_memory = true, .export_functions = true, .deterministic = true})
+#define WASM64_OPTIONS_DEFAULT                                                                                                             \
+    ((Wasm64Options){.environment = WASM_ENVIRONMENT_FREESTANDING, .pointer_size = 8, .export_memory = true, .export_functions = true,       \
+                     .deterministic = true})
+#define WASM32_WASI_OPTIONS_DEFAULT                                                                                                        \
+    ((Wasm64Options){.environment = WASM_ENVIRONMENT_WASI_PREVIEW1, .pointer_size = 4, .export_memory = true, .export_functions = true,      \
+                     .deterministic = true, .synthesize_start = true})
+
+// Generic spellings for new callers.  The Wasm64-prefixed names remain source
+// compatible with the original Memory64-only API.
+typedef Wasm64ErrorCode WasmErrorCode;
+typedef Wasm64Error WasmError;
+typedef Wasm64Stats WasmStats;
+typedef Wasm64Artifact WasmArtifact;
+typedef Wasm64Options WasmOptions;
+
+#define WASM_OPTIONS_DEFAULT WASM64_OPTIONS_DEFAULT
+#define WASM_OPTIONS_WASI_PREVIEW1 WASM32_WASI_OPTIONS_DEFAULT
+
+BUSTER_F_DECL WasmArtifact wasm_emit(Arena* arena, IrProgram* program, IrModule* modules, u32 module_count, WasmOptions options);
+BUSTER_F_DECL WasmArtifact wasm_emit_program(Arena* arena, IrProgram* program, WasmOptions options);
+BUSTER_F_DECL bool wasm_artifact_is_valid(WasmArtifact artifact);
+BUSTER_F_DECL String8 wasm_error_code_name(WasmErrorCode code);
 
 BUSTER_F_DECL Wasm64Artifact wasm64_emit(Arena* arena, IrProgram* program, IrModule* modules, u32 module_count);
 BUSTER_F_DECL Wasm64Artifact wasm64_emit_with_options(Arena* arena, IrProgram* program, IrModule* modules, u32 module_count,
