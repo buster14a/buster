@@ -1,0 +1,44 @@
+name: Campaign evidence readback
+
+# Read-only helper for the #880 campaign: prints small verdict files from a
+# retained Actions artifact into the job log. Runs only on this scratch branch.
+on:
+  push:
+    branches: [codex/880-evidence-readback]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  readback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: issue1162-exact-systemd-slice
+          run-id: 36333252424
+          github-token: ${{ github.token }}
+          path: a23
+      - name: Print verdict files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd a23
+          find . -type f -printf '%s %p\n' | sort -k2 > ../listing.txt
+          wc -l ../listing.txt
+          grep -v -E '/(stage|workspace)-observer-artifacts/|/replay/' ../listing.txt | head -400
+          for f in broker-reconciliation.json broker-reconciliation-stderr.txt broker-observer-exit.txt \
+                   broker-journal-capture.json broker-overlap.jsonl frozen-tree-reconciliation.json \
+                   frozen-tree-reconciliation.log stage-observer-exit.txt manager-denial*.json final.txt; do
+            for g in $f; do
+              [ -f "$g" ] || continue
+              echo "=== $g"; head -c 60000 "$g"; echo
+            done
+          done
+          for g in broker-observer-artifacts/*; do
+            s=$(stat -c %s "$g")
+            echo "=== $g ($s bytes)"
+            if [ "$s" -lt 40000 ]; then cat "$g"; echo; else head -c 4000 "$g"; echo; fi
+          done
