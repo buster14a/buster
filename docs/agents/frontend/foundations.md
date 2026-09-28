@@ -344,15 +344,31 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   8,192 and 16,384 tag boundaries and rollback across growth. With
   `BUSTER_BENCH_ALLOCATIONS=ON`, it also bounds production probes/rehash work
   and requires zero fallback type visits for unique tags;
-  `BUSTER_AGGREGATE_CENSUS=1` prints these diagnostic-only counts.
+  `BUSTER_AGGREGATE_CENSUS=1` prints these diagnostic-only counts. Lowering's
+  tag type names (`c_ir_type_name_prefix`) ask `c_parse_aggregate_unique`
+  first: an unused slot on a complete index means no row, and a live slot
+  not marked `multiple` is the only row, whatever the reference scope. Only
+  duplicated, stale or incomplete keys search the type table (#1467);
+  `c_test_aggregate_unique_search` requires zero lowering search rows for
+  unique tags.
 - Each aggregate initializer context retains a `CIrInitializerRelocationExtent`.
   Before clearing a subobject, it incorporates only relocation records appended
   since the preceding query. Clears wholly outside the occupied extent skip
-  relocation compaction. Overlapping clears preserve stable record order and
-  recompute the surviving bounds during that same compaction. The extent is a
-  conservative overlap test: holes inside it and arbitrary repeated overwrites
-  still take the full compaction path. GNU range copies use their parent
-  context's extent; separately materialized range values own a fresh context.
+  relocation compaction. The extent is a conservative overlap test; a clear
+  inside it (holes, unordered designators, repeated overwrites, overrides of a
+  GNU range default) goes through the context's
+  `CIrInitializerRelocationIndex` instead of the whole array (#1450). The index
+  buckets records by offset / pointer size, one group per exact offset, so a
+  clear visits the buckets its range spans plus the records it removes.
+  Removed records stay in the context's scratch as tombstones until they
+  outnumber the live ones, then one stable pass drops them; the context
+  publishes its live records, in stable record order, to the caller's array
+  when it finishes. Appenders see the caller's capacity plus the dead count.
+  The legacy folder's clears keep the whole-array compaction. GNU range copies
+  use their parent context's extent and index; separately materialized range
+  values own a fresh context. `c_test_initializer_relocation_index` replays
+  random append/clear scripts through both paths and requires identical
+  arrays and failure points.
 - `c_parse_validate_constexpr_declaration` validates a leaf root from one local
   work entry, without acquiring scratch or clearing the translation-unit type
   universe. Arrays, structs and unions retain the explicit private graph walk.
