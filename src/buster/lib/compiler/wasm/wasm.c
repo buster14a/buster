@@ -8,6 +8,8 @@
 // Local aggregate snapshots use private shadow-stack slots. Their SSA locals
 // carry slot addresses; loads copy immediately, so later stores cannot change
 // an earlier value. Function ABIs and block parameters remain scalar-only.
+// wasm64_build_name_payload names the data segments of section-attributed
+// data in the name section.
 
 // Linear-memory layout policy: static data starts one 64 KiB region above
 // address zero. Its aligned end is the initial pointer and inclusive lower
@@ -17,6 +19,7 @@ enum
 {
     WASM64_DATA_BASE = 0x10000,
     WASM64_STACK_SIZE = 0x10000,
+    WASM64_NAME_SUBSECTION_DATA_SEGMENT = 9,
 };
 
 #define WASM64_MAX_MEMORY_PAGES (UINT64_C(1) << 48)
@@ -117,6 +120,7 @@ struct Wasm64Context
     Wasm64Buffer export_payload;
     Wasm64Buffer code_payload;
     Wasm64Buffer data_payload;
+    Wasm64Buffer name_payload;
     Wasm64Signature* signatures;
     u32 signature_count;
     u32 signature_capacity;
@@ -1310,7 +1314,7 @@ static bool wasm64_data_add_global(Wasm64Context* context, IrGlobal* global, u32
     }
     Wasm64DataRecord record = {.global = global, .symbol = symbol, .bytes = bytes, .size = size, .offset = context->data_cursor, .module_index = module_index,
                                .has_bytes = false};
-    if (size && (global->initializer_kind != IR_GLOBAL_INITIALIZER_ZERO || global->relocation_count))
+    if (size && (global->initializer_kind != IR_GLOBAL_INITIALIZER_ZERO || global->relocation_count || symbol->section_name.length))
     {
         record.has_bytes = true;
     }
@@ -3700,6 +3704,48 @@ static bool wasm64_build_data_payload(Wasm64Context* context)
     return true;
 }
 
+// A section attribute on a data definition names its data segment in the
+// name section's data-segment subsection, the placement Clang records for
+// Wasm. Segment indices follow wasm64_build_data_payload's order.
+static bool wasm64_build_name_payload(Wasm64Context* context)
+{
+    u32 named_count = 0;
+    for (u32 index = 0; index < context->data_count; index += 1)
+    {
+        Wasm64DataRecord* record = context->data_records + index;
+        if (record->has_bytes && record->symbol->section_name.length)
+        {
+            named_count += 1;
+        }
+    }
+    if (named_count)
+    {
+        Wasm64Buffer subsection = {0};
+        wasm64_buffer_init(&subsection, context->arena);
+        wasm64_buffer_u32_leb(&subsection, named_count);
+        u32 segment_index = 0;
+        for (u32 index = 0; index < context->data_count; index += 1)
+        {
+            Wasm64DataRecord* record = context->data_records + index;
+            if (!record->has_bytes)
+            {
+                continue;
+            }
+            if (record->symbol->section_name.length)
+            {
+                wasm64_buffer_u32_leb(&subsection, segment_index);
+                wasm64_buffer_string(&subsection, record->symbol->section_name);
+            }
+            segment_index += 1;
+        }
+        wasm64_buffer_string(&context->name_payload, wasm64_s8("name"));
+        wasm64_buffer_u8(&context->name_payload, WASM64_NAME_SUBSECTION_DATA_SEGMENT);
+        wasm64_buffer_u32_leb(&context->name_payload, (u32)subsection.length);
+        wasm64_buffer_bytes(&context->name_payload, subsection.data, subsection.length);
+    }
+    return true;
+}
+
 static void wasm64_append_section(Wasm64Buffer* output, u8 id, Wasm64Buffer* payload)
 {
     if (!payload->length)
@@ -3731,6 +3777,7 @@ static bool wasm64_build_module(Wasm64Context* context, ByteSlice* output)
     wasm64_append_section(&result, 7, &context->export_payload);
     wasm64_append_section(&result, 10, &context->code_payload);
     wasm64_append_section(&result, 11, &context->data_payload);
+    wasm64_append_section(&result, 0, &context->name_payload);
     *output = (ByteSlice){.pointer = result.data, .length = result.length};
     context->stats.binary_bytes = result.length;
     return true;
@@ -3771,6 +3818,7 @@ static void wasm64_context_initialize(Wasm64Context* context, Arena* arena, IrPr
     wasm64_buffer_init(&context->export_payload, arena);
     wasm64_buffer_init(&context->code_payload, arena);
     wasm64_buffer_init(&context->data_payload, arena);
+    wasm64_buffer_init(&context->name_payload, arena);
 }
 
 static bool wasm64_validate_inputs(Wasm64Context* context)
@@ -3857,7 +3905,7 @@ static WasmArtifact wasm_emit_internal(Arena* arena, IrProgram* program, IrModul
     {
         valid = wasm64_build_type_payload(&context) && wasm64_build_import_payload(&context) && wasm64_build_function_payload(&context) &&
                 wasm64_build_memory_payload(&context) && wasm64_build_global_payload(&context) && wasm64_build_export_payload(&context) &&
-                wasm64_build_code_payload(&context) && wasm64_build_data_payload(&context);
+                wasm64_build_code_payload(&context) && wasm64_build_data_payload(&context) && wasm64_build_name_payload(&context);
     }
     if (valid && !wasm64_failed(&context))
     {
