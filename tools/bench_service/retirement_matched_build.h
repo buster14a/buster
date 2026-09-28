@@ -5,17 +5,28 @@
  * Launch seam (#1020): a DIRECT sequence forks the verified driver itself
  * (fixture and legacy queue API). A BROKER sequence forks only the fixed
  * systemd broker CLI with a typed start-stage request, so each subject runs
- * in its own broker stage unit as its stage user; the retirement-* stage
- * names are not yet accepted by the installed broker, which fails closed. */
+ * in its own broker stage unit as its stage user. The broker constructs the
+ * same argv, cwd, environment and umask from retirement_stage.h.
+ *
+ * Layout (#1018, #1020): the attempt stays the materializer's traversable
+ * 02710. The helper owns the private retirement-work/ directory (logs and
+ * trusted-build/) and creates each subject's configured root fresh before
+ * its generate: base/build/matched-build (02700, service only) and
+ * candidate/matched-build (02770, candidate group). A broker stage can write
+ * only its own root and cannot replace it. */
 #ifndef BUSTER_BENCH_RETIREMENT_MATCHED_BUILD_H
 #define BUSTER_BENCH_RETIREMENT_MATCHED_BUILD_H
 
 #include "retirement_binaries.h"
 #include "retirement_toolchain.h"
+#include "retirement_stage.h"
 #include <sys/types.h>
 
-#define BQ_RETIREMENT_BUILD_STAGES 4u
+#define BQ_RETIREMENT_BUILD_STAGES BQ_RETIREMENT_STAGE_COUNT
 #define BQ_RETIREMENT_BUILD_PATH_CAP 512u
+/* Exact modes of the service-created configured roots. */
+#define BQ_RETIREMENT_BUILD_BASE_ROOT_MODE 02700
+#define BQ_RETIREMENT_BUILD_CANDIDATE_ROOT_MODE 02770
 
 typedef struct BqRetirementBuildStage
 {
@@ -42,7 +53,10 @@ typedef struct BqRetirementMatchedBuild
 {
     char workspace[BQ_RETIREMENT_BUILD_PATH_CAP];
     char attempt[BQ_RETIREMENT_BUILD_PATH_CAP];
-    char build[BQ_RETIREMENT_BUILD_PATH_CAP];
+    /* The private retirement-work directory: logs and trusted-build/. */
+    char work[BQ_RETIREMENT_BUILD_PATH_CAP];
+    /* Configured root per subject (0 baseline, 1 candidate). */
+    char build[2][BQ_RETIREMENT_BUILD_PATH_CAP];
     char source[2][BQ_RETIREMENT_BUILD_PATH_CAP];
     /* Imported A facts rechecked through the cwd descriptor at every launch. */
     BqRetirementSource prepared_source[2];
@@ -80,8 +94,8 @@ typedef struct BqRetirementBuildProcess
      * proves absent, every descendant that did not leave it. */
     pid_t process, group;
     u64 directory_device, directory_inode, log_device, log_inode;
-    /* Build stages hold their generated root; generate stages retain any old
-     * root until completion so a no-op cannot claim a fresh configuration. */
+    /* Every stage holds its configured root: a generate the root it created
+     * just before launch, a build the root its generate completed. */
     u64 build_device, build_inode;
     u64 log_bytes;
     char name[32], command_sha256[SHA256_HEX_CAPACITY];
@@ -100,7 +114,7 @@ BUSTER_F_DECL bool bq_retirement_matched_build_stage(BqRetirementMatchedBuild* b
 /* Release a generated root if the job ends before its matching build. Do not
  * call while a stage child is running; the worker first cancels and reaps it. */
 BUSTER_F_DECL bool bq_retirement_matched_build_release(BqRetirementMatchedBuild* build);
-/* A fresh log is created exclusively in the held attempt directory. Poll
+/* A fresh log is created exclusively in the held work directory. Poll
  * drains bounded child output, returning 0 while running or draining, 1 for
  * exit zero with complete capture, and -1 for a child/capture/wait failure.
  * A reaped nonzero child can still supply durable failure evidence. Abort

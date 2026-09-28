@@ -369,16 +369,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_build_pinned(BqRetirementStore st
             workspace_root, profile, driver, toolchain_root, broker, prepared->preparation_sha256, true, &build);
     if (result == BQ_OK && strcmp(build.toolchain.manifest_sha256, prepared->toolchain.manifest_sha256))
         result = BQ_CONFIGURATION_MISMATCH;
+    /* Each generate launch creates its subject's own configured root
+     * (base/build/matched-build, candidate/matched-build), so the candidate
+     * never starts from, or can write, the baseline configuration. */
     for (u32 stage = 0; result == BQ_OK && stage < BQ_RETIREMENT_BUILD_STAGES; stage += 1)
-    {
-        /* The baseline configured root moves aside, service-owned and intact,
-         * so the candidate generate must create a fresh root of its own. */
-        if (stage == 2u && renameat2(attempt, "matched-build", attempt, "matched-build-baseline",
-                                     RENAME_NOREPLACE) != 0) result = BQ_WORKSPACE_MISMATCH;
-        if (result == BQ_OK)
-            result = bq_retirement_unit_stage(stores, &prepared->job, installed, workspaces, profile,
-                                              candidate_uid, cancellation_fd, deadline_ns, &build);
-    }
+        result = bq_retirement_unit_stage(stores, &prepared->job, installed, workspaces, profile,
+                                          candidate_uid, cancellation_fd, deadline_ns, &build);
     if (result == BQ_OK)
         result = bq_retirement_unit_evidence_closed(evidence, workspaces, &prepared->job, false) &&
                  fchmod(evidence, BQ_RETIREMENT_EXPORT_MODE) == 0 && fsync(evidence) == 0 && fsync(attempt) == 0 ?

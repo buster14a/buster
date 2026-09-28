@@ -28,6 +28,92 @@ actual hierarchy.
 The only resume signal is `CONT` for the exact outer instance; stage units
 accept `TERM` or `KILL` only.
 
+### Retirement matched-build stages (#1020)
+
+Besides the five smoke stages, the broker has four typed stages for the
+retirement matched builds. `worker-unit` requests them through
+`bq_retirement_unit_build` as `start-stage <job> <attempt> <stage> <base>
+<candidate>`. The request can select only the stage name, the job and attempt
+and the two revisions, which are validated as for every other stage. Paths,
+argv and environment all come from constants in
+`tools/bench_service/retirement_stage.h`. The matched-build helper, the broker
+and the credential gate all include that header, so the command the broker
+runs is byte-for-byte the command the helper's receipt digest binds. These
+stages are not reachable today: the retirement recipe is still rejected by
+queue admission, by `worker-unit` and by the build driver, and `bq_worker_unit`
+does not call the unit build.
+
+| Stage (gate number) | User, umask | cwd | Only `ReadWritePaths` | Driver verb |
+|---|---|---|---|---|
+| `retirement-base-generate` (6) | `buster-bench`, `0077` | `<attempt>/base/source` | `<attempt>/base/build/matched-build` | `generate` |
+| `retirement-base-build` (7) | `buster-bench`, `0077` | `<attempt>/base/source` | `<attempt>/base/build/matched-build` | `build` |
+| `retirement-candidate-generate` (8) | `buster-bench-candidate`, `0007` | `<attempt>/candidate/source` | `<attempt>/candidate/matched-build` | `generate` |
+| `retirement-candidate-build` (9) | `buster-bench-candidate`, `0007` | `<attempt>/candidate/source` | `<attempt>/candidate/matched-build` | `build` |
+
+`<attempt>` is `/var/lib/buster-bench/workspaces/job-<job>-attempt-<attempt>`.
+Each stage runs through the credential gate. Its payload is the installed,
+root-owned `/usr/local/libexec/buster-bench-build`, whose SHA-256 the helper
+checks against the profile's `build-driver-sha256` before every request. Its
+exact argv is:
+
+```text
+/usr/local/libexec/buster-bench-build generate --build-directory <root> --config Release
+    --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings
+    --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
+/usr/local/libexec/buster-bench-build build --build-directory <root> --config Release -t ide -- -j1
+```
+
+The environment is exactly
+`PATH=/opt/buster-bench/installed/toolchain/native-retirement-performance-v1/bin`,
+`LC_ALL=C`, `TZ=UTC` and `HOME=/nonexistent`. `systemd-run --setenv` passes
+those four values, and the gate clears everything it inherited from PID1 and
+installs exactly these four before `execv`. The smoke stages keep
+`PATH=/usr/bin:/bin` and `LC_ALL=C`. The toolchain root is the fixed installed
+constant, never a request field.
+
+The unit properties are the same as for the smoke build stages: the same
+slice, `AllowedCPUs`, memory, tasks and runtime limits, `PartOf`, `BindsTo`
+and `After` on the outer unit, `--collect`, and the same common sandbox. That
+sandbox includes `NoNewPrivileges=yes`, `ProtectSystem=strict`,
+`MemoryDenyWriteExecute=yes`, `RestrictSUIDSGID=yes`, empty capability sets,
+`PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX` and the
+`@system-service` system-call filter. `InaccessiblePaths` covers the queue,
+the lease and the attempt's result directory. Baseline stages have
+`ReadOnlyPaths=<attempt>/base/source <attempt>/candidate/source`. Candidate
+stages have `ReadOnlyPaths=<attempt>/base/source <attempt>/base/build
+<attempt>/candidate/source`. The only differences from the smoke stages are
+the environment, the gate stage numbers 6 to 9 and the writable path.
+
+**Layout.** The attempt stays the materializer's `02710`. The helper keeps its
+stage logs and `trusted-build/` in a private `<attempt>/retirement-work/`
+(`02700`, service only), which no stage can write. Immediately before each
+generate, the service creates that subject's configured root, new and empty:
+`base/build/matched-build` is `02700` inside the private `base/build`, and
+`candidate/matched-build` is `02770`, service-owned with the candidate group,
+inside the `02710` `candidate/`. That root is the stage's only
+`ReadWritePaths` entry, so the stage fills a bind mount and cannot rename or
+replace the root. A generate must therefore configure in place. The baseline
+root cannot be reached by the candidate (`base/build` is `02700`), and the
+baseline stage cannot write the candidate root, because under
+`ProtectSystem=strict` it is outside its only writable path.
+
+Before starting a retirement stage, the broker also requires:
+- the toolchain `bin` directory to be root-owned with no write bits;
+- `<attempt>/base/build` to be exactly `buster-bench:buster-bench-candidate`
+  `02700`;
+- for candidate stages, `<attempt>/candidate/matched-build` to be exactly
+  `buster-bench:buster-bench-candidate` `02770`.
+
+PID1 refuses a unit whose `ReadWritePaths` root is missing.
+
+`signal` accepts the four unit names `buster-bench-<job>-<attempt>-<stage>.service`
+with `TERM` or `KILL` only, under the same identity checks as other stage
+units: exact user, slice, limits, sandbox readback, `PartOf`, `BindsTo`,
+`After`, and a gated `ExecStart` naming the gate, the stage number, the role's
+credentials, the build driver and the verb. No pre-gate legacy form exists
+for these units, so a direct `ExecStart` of the driver is refused. Any other
+retirement-like name is not a unit name the broker recognizes.
+
 The template retains root UID with empty capability sets. Its primary group
 is `buster-bench` and its supplementary group is `buster-bench-candidate`.
 The broker's own request-time check tolerates root's group 0 besides those
@@ -188,8 +274,9 @@ job payload it checks real, effective, saved and filesystem UID/GID, the
 complete supplementary group set, no-new-privileges and empty capability
 sets. A mismatch exits without executing the payload. It performs no NSS
 lookup or privilege transition. After validation it replaces the environment
-with the fixed PATH and locale and executes the existing stage-specific
-absolute executable. The typed broker protocol still owns all payload
+with the fixed PATH and locale (for the four retirement stages, exactly the
+toolchain PATH, `LC_ALL=C`, `TZ=UTC` and `HOME=/nonexistent`) and executes
+the existing stage-specific absolute executable. The typed broker protocol still owns all payload
 arguments; the helper is not a new request interface.
 
 Build the gate statically with no ELF interpreter or dynamic segment and a
@@ -265,8 +352,10 @@ owner's residual-authority decision are not supplied by this diagnostic.
 ## Build and review
 
 From the reviewed checkout, run `./build.sh bench_service_broker self-test` and
-`./build.sh bench_service self-test`. The former constructs all six fixed
-launches and exercises malformed request rejection without manager access.
+`./build.sh bench_service self-test`. The former constructs all ten fixed
+launches, compares each retirement stage's complete `systemd-run` vector with a
+spelled-out expectation, and exercises malformed request, unknown stage,
+request-path and foreign-unit rejection without manager access.
 Review the broker source, this packet, the socket/template service, tmpfiles,
 and the changed service/build-driver call sites as one transition. Build the
 installed service, build driver, throughput tool and broker from one selected
@@ -410,8 +499,9 @@ socket, system manager or queue/lease state.
    denied for service, candidate and runner identities. The broker must remain
    the sole manager write path for the service. Do not add `manage-units`, a
    unit-name-only polkit rule or a wildcard executable sudo rule.
-3. With admission still disabled, exercise fixed outer and all five stage
-   launches in an operator-controlled real-systemd rehearsal that proves
+3. With admission still disabled, exercise fixed outer and all five smoke stage
+   launches (and, before the retirement recipe is admitted, the four
+   retirement stage launches) in an operator-controlled real-systemd rehearsal that proves
    stdout, stderr, status, timeout/cancellation, broker interruption, exact
    properties/UIDs, recursive absence and continuous lease identity. Any
    uncertain instance retains the quarantine lease and blocks new admission.

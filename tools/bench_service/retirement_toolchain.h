@@ -3,7 +3,10 @@
 #ifndef BUSTER_BENCH_RETIREMENT_TOOLCHAIN_H
 #define BUSTER_BENCH_RETIREMENT_TOOLCHAIN_H
 
-#define BQ_RETIREMENT_TOOLCHAIN_ROOT "/opt/buster-bench/installed/toolchain/native-retirement-performance-v1"
+#include "retirement_stage.h"
+
+/* The broker and credential gate put this same root's bin/ on PATH. */
+#define BQ_RETIREMENT_TOOLCHAIN_ROOT BQ_RETIREMENT_STAGE_TOOLCHAIN_ROOT
 #define BQ_RETIREMENT_TOOLCHAIN_PATH_CAP 512u
 
 typedef struct BqRetirementToolchain

@@ -237,12 +237,17 @@ handoff. It performs these steps in order:
    `retirement/` export is never written and still holds exactly two files.
 3. `bq_retirement_matched_build_begin_stores` re-imports A from the export,
    checks the driver pin and the toolchain, and binds the broker launcher.
-   The toolchain manifest must equal the one prepare verified.
+   The toolchain manifest must equal the one prepare verified. It checks that
+   the attempt is service-owned and not group- or world-writable (the
+   materializer's `02710`; #1018 no longer requires a private attempt). It
+   then creates the helper's private `retirement-work/` (`02700`), which
+   must be new and holds the stage logs and `trusted-build/`.
 4. It runs baseline generate and build, then candidate generate and build.
-   Before candidate generate it renames the baseline configured root to
-   `matched-build-baseline` with `RENAME_NOREPLACE`, so the candidate must
-   create a fresh root. Each stage polls the log pipe and the cancellation
-   descriptor under the deadline.
+   Each generate launch first creates that subject's configured root, new,
+   empty and service-owned: `base/build/matched-build` (`02700`) or
+   `candidate/matched-build` (`02770`, candidate group). The candidate never
+   starts from the baseline configuration and cannot write it. Each stage
+   polls the log pipe and the cancellation descriptor under the deadline.
 5. Each completed stage writes `matched-log-<n>-<id>` and
    `matched-stage-<n>-<id>` into `retirement-build/`. The last stage also
    writes `binaries-<id>` and `matched-builds-<id>` there. Every record is
@@ -295,35 +300,36 @@ cannot satisfy a broker sequence. The direct launcher (fork and `fexecve` of
 the held driver in the held source) remains for the fixture and the queue
 API.
 
-**The installed broker does not accept the `retirement-*` stage names**, so
-every production broker launch fails closed today. `bq_worker_unit` does not
-call `bq_retirement_unit_build`, and the recipe gates still reject the job
-first.
+`bq_worker_unit` does not call `bq_retirement_unit_build`, and the recipe
+gates still reject the job first.
 
-### Broker contract change needed before admission
+### Broker retirement stages
 
-Running these stages for real needs a reviewed change to the broker's
-installed contract, which this change does not make:
+The broker source (`systemd_broker.c`) and the credential gate now accept the
+four typed stages, and `signal` accepts their units. The stage table, the
+exact unit properties, the environment and the layout are documented in
+[SYSTEMD_BROKER.md](deploy/SYSTEMD_BROKER.md#retirement-matched-build-stages-1020).
+`retirement_stage.h` is the single source of the stage names, driver path,
+toolchain root, environment values, configured-root paths and driver
+arguments. The helper, broker and gate all include it, so the broker runs
+exactly the command whose digest the helper records:
 
-1. Four fixed stages in `systemd_broker.c` (`bq_broker_stages`,
-   `bq_broker_command`, `bq_broker_unit_from_text`,
-   `bq_broker_gate_exec_identity`) and in the credential gate. Each must run
-   `/usr/local/libexec/buster-bench-build` with the exact matched-build argv
-   from `bq_retirement_matched_build_stage`, working directory
-   `<attempt>/<subject>/source` and environment `PATH=<toolchain>/bin`,
-   `LC_ALL=C`, `TZ=UTC` and `HOME=/nonexistent`. Umasks are `0077` and
-   `0007` and identities `buster-bench` and `buster-bench-candidate`. Today the
-   broker and gate fix `PATH=/usr/bin:/bin` and the smoke build directories
-   `base/build` and `candidate/staging`.
-2. A workspace layout in which the shared `matched-build` pathname can be
-   created by the baseline stage user, moved aside by the unit and created
-   fresh by the candidate stage user. The attempt directory is `02710`, so
-   the candidate can only traverse it. This needs a reviewed service-owned
-   parent with matching `ReadWritePaths`, as `candidate/staging` has, or a
-   changed pathname policy.
-3. The matched-build helper requires a private attempt directory, while the
-   materializer creates `02710`; one of them must change.
-4. The broker's `signal` operation must accept the retirement stage units.
+- The driver is `/usr/local/libexec/buster-bench-build`.
+- The argv is `bq_retirement_matched_build_stage`'s.
+- The cwd is `<attempt>/<subject>/source`.
+- The environment is `PATH=<toolchain>/bin`, `LC_ALL=C`, `TZ=UTC` and
+  `HOME=/nonexistent`, set by the gate after it clears PID1's environment.
+- Umasks are `0077` and `0007`, for identities `buster-bench` and
+  `buster-bench-candidate`.
+
+The only writable path of a stage is its subject's service-created
+configured root.
+
+The installed broker, credential gate and service still predate this
+contract, so every production broker launch fails closed until LOCAL
+installs the reviewed binaries. That installation needs its own packet
+(new binary digests, and a disposable real-systemd rehearsal of the four
+units).
 
 ## Capacity derivation
 
@@ -400,8 +406,11 @@ does not assert build provenance merely because the source preparation succeeds.
 The private `bq_retirement_binaries_record` and
 `bq_retirement_binaries_import` seam now binds frozen binary outputs to that
 preparation. After both successful *trusted* Clang stages, the integrator must
-put exactly the timed executables at `job-<id>-attempt-<token>/trusted-build/`
-`base-ide` and `candidate-ide` beneath the workspace root. The
+put exactly the timed executables at
+`job-<id>-attempt-<token>/retirement-work/trusted-build/` `base-ide` and
+`candidate-ide` beneath the workspace root. `retirement-work` must be
+service-owned and private. The attempt above it must be service-owned and
+not group- or world-writable. The
 `trusted-build` directory must be service-owned, private and mode-read-only;
 each executable must be service-owned, single-link, executable, mode-read-only,
 nonempty and at most 512 MiB. The recorder independently imports A, hashes
@@ -440,8 +449,9 @@ private service-side sequence around it. `begin` imports the exact A record,
 checks the compiled profile's `build-driver-sha256` against the installed fixed
 driver, and validates the workspace descriptor/path identity. `stage` returns
 four exact commands: baseline generate/build, then candidate generate/build,
-using the same `matched-build` configured pathname, fixed Release/Clang flags,
-single-job Ninja build and explicit environment. The source of `PATH` is the
+each with its own subject's configured root (`base/build/matched-build`,
+`candidate/matched-build`), fixed Release/Clang flags, a single-job Ninja
+build and an explicit environment. The source of `PATH` is the
 fixed `/opt/buster-bench/installed/toolchain/native-retirement-performance-v1/bin`.
 Before issuance, the service requires `toolchain-manifest-sha256` in the
 compiled profile and verifies the installed bundle beneath the held installed
@@ -469,13 +479,17 @@ generation or any stale output before baseline build poisons the sequence;
 a successful no-op stage cannot freeze an inherited executable. The worker
 must isolate that directory and reap descendants across this check and the
 build so another process cannot replace the name during the attempt.
-The helper requires an absent configured root before baseline generate. For
-candidate generate it holds the prior root, if present, through child
-completion and requires the new configured root to be a different inode owned
-by the expected baseline or candidate identity. A successful no-op generate
-over cached baseline objects cannot pass. After
-either successful generate it holds the new root through the matching build
-launch and checks the name and inode before creating the build log or child.
+Each generate launch creates its subject's configured root itself, with an
+exclusive `mkdir`. The root is service-owned with the exact mode (`02700`
+baseline, `02770` candidate), and the helper holds it through child
+completion. A pre-existing root, such as a stale or planted configuration,
+refuses the launch before any log or child exists. On completion the named
+root must still be that inode with that owner and mode. A generate may fill
+the root but must not replace it. In a broker stage the root is a bind mount
+the stage cannot replace; a DIRECT driver that replaces it fails. After
+either successful generate the helper holds the root through the matching
+build launch and checks the name and inode before creating the build log or
+child.
 The build stage keeps its root descriptor through completion, preventing inode
 reuse. The runner must release an unfinished generated root after cancellation
 and descendant cleanup.
@@ -550,9 +564,9 @@ inode, moves its `Release` directory, and rewrites one byte without changing
 the file size. Each change invalidates the held output observation before the
 fixture restores the executable and completes the normal stage.
 It swaps the configured directory after both generate stages and checks that
-the corresponding build never starts. A candidate generate that succeeds
-without replacing the baseline configured root, or produces a root owned by
-the wrong identity, also fails before build.
+the corresponding build never starts. A candidate root planted before its
+generate refuses the launch without a log. A generated root whose mode
+changed fails before build.
 The reference-policy fixture installs a template and inventory built for the
 real A fixture's subjects and toolchain bundle. It checks a successful import,
 refusal to overwrite a live policy and each missing or mismatched pin. It also
@@ -588,3 +602,12 @@ self-pipe write and an expired deadline each stop a hanging generate: the
 build returns cancelled or timed out, the recorded driver pid no longer
 exists, the broker receives a `signal ... KILL` request and no receipt or
 `trusted-build` is written. Descriptor counts match before and after.
+The #1018 completion case builds on an attempt created by the real
+`bq_materialize`, so the attempt is the production `02710` rather than a
+fixture directory. Real materialization admits only the smoke recipe, so a
+`validate-buster-v1` job with the same two commits creates the layout; the
+retirement request then reseals that attempt, records A and exports it. It
+checks that `bq_retirement_unit_build` succeeds with the four broker requests
+in order. Afterwards the attempt is still `02710`, `retirement-work` is
+private, and the two roots are `02700` and `02770`. Requiring a private
+attempt again makes this case fail.

@@ -21,7 +21,8 @@
  * and runs the matching stage itself as the test user. It derives the
  * workspace, attempt, source cwd, build path and umask from its own location
  * and the typed fields, as the real broker derives them from constants; the
- * real broker instead starts a sandboxed stage unit as the stage user. */
+ * real broker instead starts a sandboxed stage unit as the stage user whose
+ * only writable path is that service-created configured root. */
 static int fixture_broker(int argc, char** argv)
 {
     static char const* const stages[] = {"retirement-base-generate", "retirement-base-build",
@@ -51,7 +52,8 @@ static int fixture_broker(int argc, char** argv)
     {
         char driver[640], build[640], source[700];
         int driver_length = snprintf(driver, sizeof(driver), "%s/fixture-driver", root);
-        int build_length = snprintf(build, sizeof(build), "%s/job-%s-attempt-%s/matched-build", root, argv[2], argv[3]);
+        int build_length = snprintf(build, sizeof(build), "%s/job-%s-attempt-%s/%s/matched-build", root, argv[2],
+                                    argv[3], stage < 2 ? "base/build" : "candidate");
         int source_length = snprintf(source, sizeof(source), "%s/job-%s-attempt-%s/%s/source", root, argv[2],
                                      argv[3], stage < 2 ? "base" : "candidate");
         char* generate[] = {driver, "generate", "--build-directory", build, "--config", "Release", "--cc", "clang",
@@ -102,11 +104,13 @@ int main(int argc, char** argv)
              * record or dependent timed child follows a failed generate. */
             bool probe = strstr(argv[3], "driver-exec-probe") != NULL;
             bool no_leak = !probe || (fcntl(90, F_GETFD) < 0 && errno == EBADF);
-            /* One zero-exit candidate generate deliberately leaves the old
-             * configured root intact to test the no-op/cache rejection. */
-            bool stale_candidate = candidate && strstr(argv[3], "job-46-attempt-56") != NULL;
-            result = !no_leak ? 6 : strstr(argv[3], "job-30-attempt-40") ? 5 :
-                     stale_candidate || mkdir(argv[3], 0700) == 0 ? 0 : 1;
+            /* Like the real driver in a broker stage, whose configured root
+             * is a bind mount it cannot replace: fill the root in place, or
+             * create it when a probe names a fresh path. */
+            struct stat root_info = {0};
+            bool root = mkdir(argv[3], 0700) == 0 ||
+                        (errno == EEXIST && lstat(argv[3], &root_info) == 0 && S_ISDIR(root_info.st_mode));
+            result = !no_leak ? 6 : strstr(argv[3], "job-30-attempt-40") ? 5 : root ? 0 : 1;
             puts(result ? "fixture generate failed" : "fixture generated");
             /* Jobs 63 and 64 hang in generate after recording their pid, for
              * the unit's cancellation and deadline cleanup regressions. */
