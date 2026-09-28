@@ -12744,6 +12744,77 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(Unit
     return result;
 }
 
+// GNU C lets a statement expression share the parentheses of sizeof,
+// _Alignof and __alignof__: `sizeof({ int q = f(); q; })` is the size of the
+// trailing expression statement's type and, like any sizeof operand, is not
+// evaluated. Syntax-only and both lowering forms must accept the same operands
+// and fold the same value, while a brace group that is not a statement
+// expression stays an invalid operand.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_statement_expression_operand(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 expression;
+        u64 value;
+        bool valid;
+    } cases[] = {
+        {S8("sizeof({ int q = f(); q; })"), 4, true},
+        {S8("_Alignof({ double d = f(); d; })"), 8, true},
+        {S8("__alignof__({ char c = f(); c; })"), 1, true},
+        {S8("sizeof ({ int q = f(); q; }) + 1"), 4, true},
+        {S8("sizeof({ struct Wide w = {0}; (void)f(); w; })"), 16, true},
+        {S8("sizeof({ char buffer[8]; (void)f(); buffer; })"), sizeof(void*), true},
+        {S8("sizeof(({ double d = f(); d; }))"), 8, true},
+        {S8("sizeof({1})"), 0, false},
+        {S8("_Alignof({1})"), 0, false},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            String8 source = string_format(temporary.arena,
+                S8("int f(void); struct Wide {{ double x; double y; }};"
+                   " long probe(void) {{ return (long)({S8}); }}"), cases[case_index].expression);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                     .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, source);
+            BUSTER_TEST_RAW(arguments, (semantic.diagnostic_count == 0) == cases[case_index].valid, source);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("sizeof-statement-expression.c"), tokens, syntax,
+                                                            target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, (lowered.diagnostic_count == 0 && lowered.program != 0) == cases[case_index].valid, source);
+            if (!cases[case_index].valid && semantic.diagnostic_count && lowered.diagnostic_count)
+            {
+                BUSTER_TEST_RAW(arguments, string_ends_with_sequence(semantic.diagnostics[0].message, S8("invalid sizeof operand")), source);
+                BUSTER_TEST_RAW(arguments, string_ends_with_sequence(lowered.diagnostics[0].message, S8("invalid sizeof operand")), source);
+            }
+            if (cases[case_index].valid && lowered.program)
+            {
+                IrModule* module = lowered.program->modules;
+                bool folded = false;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    IrFunction* function = module->functions + function_index;
+                    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                    {
+                        IrInstruction* instruction = &function->instructions[instruction_index];
+                        BUSTER_TEST_RAW(arguments, instruction->opcode != IR_OPCODE_CALL, source);
+                        folded |= instruction->opcode == IR_OPCODE_CONSTANT_INTEGER && instruction->immediate_count &&
+                                  instruction->immediates[0] == cases[case_index].value;
+                    }
+                }
+                BUSTER_TEST_RAW(arguments, folded, source);
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // This narrow semantic seam has C bindings/types as inputs, not a canonical
 // program. It is not an assertion that syntax-only as a whole is IR-free.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_named_call_arity_without_ir(UnitTestArguments* arguments)
@@ -24009,6 +24080,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);
+    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_statement_expression_operand);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_vla_evaluation);
     BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_frame_bounds);

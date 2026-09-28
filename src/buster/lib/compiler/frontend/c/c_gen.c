@@ -25992,6 +25992,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder
 BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 start, u32 end);
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, u32 remaining_depth, bool promote_bit_fields);
+BUSTER_C_INTERNAL bool c_ir_statement_expression_tail(CIntegerIrBuilder* builder, u32 open, u32 close, u32* start_out, u32* end_out);
 
 BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_operand_decay(CIntegerIrBuilder* builder, IrTypeId type)
 {
@@ -26196,7 +26197,10 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
         CTypeId declared = builder->parse.entities[entity.value].type;
         type = declared.value < builder->parse.type_count ? builder->c_type_ir_map[declared.value] : IR_TYPE_ID_INVALID;
     }
-    else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT)
+    // A local with no lowered storage yet -- one declared inside an unevaluated
+    // statement expression -- still has its declared type.
+    else if (entity.value < builder->parse.entity_count &&
+             (builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT || builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL))
     {
         CTypeId c_type = builder->parse.entities[entity.value].type;
         if (c_type.value < builder->parse.type_count)
@@ -26304,7 +26308,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     while (trimmed)
     {
         trimmed = false;
-        while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        while (start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+               !c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACE) &&
                c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
         {
             start += 1;
@@ -26730,6 +26735,25 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
         {
             return false;
         }
+        // A GNU statement expression `({ ...; tail; })` has the type of its
+        // trailing expression statement after array decay, and void without one.
+        if (start + 2 < close && c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACE) &&
+            c_ir_matching_delimiter_cached(builder, start + 1, close, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == close - 1)
+        {
+            u32 tail_start = 0;
+            u32 tail_end = 0;
+            IrTypeId tail_type = builder->void_type;
+            if (c_ir_statement_expression_tail(builder, start + 1, close - 1, &tail_start, &tail_end))
+            {
+                if (!c_ir_sizeof_operand_type_attempt_depth(builder, tail_start, tail_end, &tail_type, remaining_depth, true))
+                {
+                    return false;
+                }
+                tail_type = c_ir_sizeof_operand_decay(builder, tail_type);
+            }
+            *type_out = tail_type;
+            return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
+        }
         IrTypeId cast_type = IR_TYPE_ID_INVALID;
         bool named = c_ir_query_group_type_name(builder, start, close, &cast_type);
         if (builder->queries->has_request)
@@ -26859,8 +26883,25 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     return false;
 }
 
+// `sizeof({ ...; tail; })` shares the operator's parentheses with the GNU
+// statement expression, so an operand range that is exactly a brace group is
+// widened to the `({ ... })` it spells.
+BUSTER_C_INTERNAL void c_ir_sizeof_statement_expression_operand(CIntegerIrBuilder* builder, u32* start, u32* end)
+{
+    if (*start > 0 && *start < *end && *end < builder->preprocess.token_count &&
+        c_token_is_punctuator(&builder->preprocess.tokens[*start], C_PUNCTUATOR_LEFT_BRACE) &&
+        c_token_is_punctuator(&builder->preprocess.tokens[*start - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        c_token_is_punctuator(&builder->preprocess.tokens[*end], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+        c_ir_matching_delimiter_cached(builder, *start, *end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == *end - 1)
+    {
+        *start -= 1;
+        *end += 1;
+    }
+}
+
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out)
 {
+    c_ir_sizeof_statement_expression_operand(builder, &start, &end);
     return c_ir_sizeof_operand_type_attempt_depth(builder, start, end, type_out, 64, false);
 }
 
@@ -27028,6 +27069,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
     {
         return false;
     }
+    c_ir_sizeof_statement_expression_operand(builder, &start, &end);
     u32 expression_start = start;
     u32 expression_end = end;
     u32 dereference_count = 0;
@@ -27047,7 +27089,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
             start += 1;
             normalized = true;
         }
-        if (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        if (start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+            !c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACE))
         {
             u32 close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             if (close == end - 1)
