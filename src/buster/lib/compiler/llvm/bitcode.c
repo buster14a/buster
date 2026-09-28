@@ -7,12 +7,12 @@
 // unabbreviated records: this keeps the implementation small and auditable,
 // while remaining a fully conforming, self-describing LLVM bitcode stream.
 //
-// Collection-time lookups are hashed so they stay O(1) expected as the module
-// grows: llvm_bc_add_constant deduplicates through constant_slots, and
-// llvm_bc_name_available checks link names through name_slots, and
-// llvm_bc_find_integer_count reads integer_count_functions. These indexes only
-// locate rows; pool and entity order, and therefore value IDs, remain
-// insertion order.
+// Collection-time lookups stay O(1) expected as the module grows:
+// llvm_bc_add_constant deduplicates through the constant_slots hash index,
+// llvm_bc_name_available checks link names through the name_slots hash index,
+// and llvm_bc_find_integer_count reads the integer_count_functions table. These
+// indexes only locate rows; pool and entity order, and therefore value IDs,
+// remain insertion order.
 
 enum
 {
