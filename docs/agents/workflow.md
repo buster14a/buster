@@ -52,7 +52,18 @@ subject to either problem.
 **Issues are the task queue.** Work that is real but not being done right now
 becomes an issue, not a paragraph in an audit that nobody will find — a chip
 filed against a memory is invisible to the next agent, while an issue is
-something a fresh session can pick up cold. Write the body as a **prompt**: what
+something a fresh session can pick up cold. An agent that encounters a separate
+actionable problem reports it during the task, before session end or handoff:
+search open and closed issues/PRs for the root cause; comment with fresh evidence
+on the matching record, or file a new issue if none exists. A finding fixed in
+the active PR belongs in that PR's description and regression evidence; link an
+existing issue if one tracks it. Group symptoms with the same root cause in one
+record and separate independent problems. Report a blocker on its owning issue
+or PR as soon as it changes the next action. Do not open a new issue for every
+flaky retry or known duplicate. When access prevents publication, preserve a
+ready-to-post body and explicitly identify the unposted report in the handoff.
+
+Write the body as a **prompt**: what
 is wrong and how it was diagnosed, the file and symbol names to start from,
 the constraints and do-not-retries that earlier work already paid for, how to
 validate the fix (which oracle, which harness, which counters), and a

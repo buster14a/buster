@@ -1,8 +1,10 @@
 # Agent instructions
 
-**buster** is a from-scratch C compiler and toolchain written in C. `ide` is
-the headless compiler, test runner, benchmark driver, and metadata tool; its
-name is retained for build compatibility. C is the sole active source frontend.
+**Buster** is a personal monorepo of applications, shared C components, tools
+and experiments. The compiler and toolchain is one project; find the others
+in [PROJECTS.md](PROJECTS.md). Its `ide` target is the headless compiler, test
+runner, benchmark driver and metadata tool; the name is retained for build
+compatibility. C is the compiler's sole active source frontend.
 
 This file contains the rules needed for everyday work. Read the matching
 [topic references](#topic-references) before changing a subsystem; search their
@@ -12,8 +14,10 @@ disagree, inspect the code and update the affected guide in the same change.
 
 ## Priorities and boundaries
 
-- Optimize **compiler throughput and time to an artifact**. Do not add passes
-  or spend compile time improving generated programs unless requested.
+- For compiler work, optimize **compiler throughput and time to an artifact**.
+  Do not add passes or spend compile time improving generated programs unless
+  requested. Other projects keep their own documented behavior and validation
+  contracts; catalogue membership does not impose compiler benchmarks on them.
 - Prefer compact contiguous data, explicit counts, indices, masks, homogeneous
   batches, and precomputed facts. Organize and measure the workload before
   choosing instructions; fewer misses or SIMD readiness alone is not a speedup.
@@ -63,10 +67,11 @@ disagree, inspect the code and update the affected guide in the same change.
   preserve MSVC, AArch64, and self-hosting. Read the [SIMD guide](docs/agents/simd.md)
   before changing kernels and the [parallelism guide](docs/agents/parallelism.md)
   before changing concurrency or shared initialization.
-- New modules must be registered in CMake, added to the `ide` module list, and
-  included in its unity block. Wire tests into the CMake test source/header lists
-  and `src/buster/tests/test.c`; keep test declarations behind
-  `BUSTER_INCLUDE_TESTS` and private seams in `*_internal.h`.
+- Modules consumed by `ide` must be registered in CMake, added to its module
+  list, and included in its unity block. Other applications register their own
+  dependencies; do not pull unused modules into the compiler. Wire shared tests
+  into the CMake test source/header lists and `src/buster/tests/test.c`; keep test
+  declarations behind `BUSTER_INCLUDE_TESTS` and private seams in `*_internal.h`.
 
 ## Build and validation
 
@@ -94,6 +99,7 @@ existing configured tree, use `build` for incremental work. `--sanitize`,
 |---|---|
 | Before and after compiler changes | `./build.sh test_self_host --config Release` — reproduce the baseline and preserve the byte-identical fixed point. |
 | Production behavior | Add a focused regression, then `./build.sh build --config Release -t test_all`. |
+| Growing production or build code | Commit, then `./build.sh source_size --base "$(git merge-base origin/main HEAD)"`; past 32 KiB, acknowledge per [source-size policy](docs/source-size.md). |
 | Allocator, ABI, or backend changes | `./build.sh test_mode_matrix --config Release`; cover `none`, `mir-stack`, `fast`, and `quality` as applicable. |
 | Sanitized validation | With the build directory idle: `./build.sh generate --sanitize`, then `./build.sh build -t test_all`. |
 | Full local compiler/configuration matrix | `./build.sh test_all_combinations`. |
@@ -129,6 +135,13 @@ index in `PERFORMANCE_AUDITS.md`, and never rewrite an existing audit.
 
 ## Forge, issues, and pull requests
 
+Identify the owning project/component and existing issue before work. Follow
+[project and feature tracking](docs/project-tracking.md): capability changes
+update the owning documentation in the same PR; before handoff record the
+branch/PR, exact revision, actual validation, unresolved findings and next action
+on the issue/PR. Keep live progress out of PROJECTS.md and preserve the existing
+[research lifecycle](docs/agents/research.md).
+
 Use the repository/host the user names; for a GitHub URL, work on that GitHub
 repository. Otherwise inspect the current remote. The project also retains
 Forgejo workflows and a source-free GitHub runner broker; their infrastructure
@@ -142,8 +155,21 @@ URL already identifies its issue and must not be remapped.
 
 Write issue/PR bodies using structured arguments or a body file. Do not interpolate
 Markdown into shell commands. Use `--force-with-lease`, never bare `--force`,
-when an authorized rebase requires a force-push. Record deferred work as an
-actionable issue with evidence, affected symbols, validation, and completion criteria.
+when an authorized rebase requires a force-push.
+
+Report every actionable problem discovered during a task on this repository's
+GitHub forge before ending the session or handing off. This includes defects, missing
+coverage, CI or infrastructure failures, and blockers, even when the assigned
+task is different. Search open and closed issues and PRs first; add new evidence
+to the relevant issue or PR instead of opening a duplicate. If no record exists,
+create an issue with the exact revision, observed versus expected behavior,
+reproduction or source evidence, affected symbols, validation already run,
+remaining uncertainty, and completion criteria. Mark hypotheses as unverified;
+do not present a failed experiment or an unrelated transient as a confirmed
+defect. Link the report from the active PR or handoff. If GitHub writing is
+unavailable, retain a ready-to-post report in the handoff and say explicitly
+that it has not been published. Do not silently drop a finding because it is
+outside the current task.
 
 ## Topic references
 
@@ -153,7 +179,8 @@ against the current revision before treating them as current limitations.
 
 | Area | Guide |
 |---|---|
-| Project, paths, application entrypoints | [Project and repository map](docs/agents/project.md) |
+| Projects, features and work tracking | [Catalogue](PROJECTS.md) and [tracking](docs/project-tracking.md) |
+| Source paths and application entrypoints | [Project and repository map](docs/agents/project.md) |
 | Build driver, configuration flags, self-host, matrix scheduling | [Build](docs/agents/build.md) |
 | Module/test registration, platform CI, broker restrictions | [Tests and CI](docs/agents/testing.md) |
 | External library/application harnesses | [Compatibility index](docs/agents/compatibility.md) |

@@ -1,0 +1,6 @@
+ns per dependent add 0.2463, imul 0.7310, horner step (imul+add) 0.9752
+imul/add latency ratio 2.97, horner step/add 3.96
+ns per dependent add 0.2433, imul 0.7346, horner step (imul+add) 0.9850
+imul/add latency ratio 3.02, horner step/add 4.05
+ns per dependent add 0.2443, imul 0.7332, horner step (imul+add) 0.9745
+imul/add latency ratio 3.00, horner step/add 3.99
