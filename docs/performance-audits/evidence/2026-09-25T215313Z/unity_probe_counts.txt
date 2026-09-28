@@ -1,0 +1,8 @@
+== ide-probe (frozen d9e736e unity, -g0 -c)
+FASTPROBE calls=5916 slot_calls=5206 blocks=175397 slots=120467 plane_words=1773101 worklist_visits=391619 bits_total=88383940 bits_fixed=87996696 bits_colorable=386624 bits_untouched=0 slots_fixed=117409 slots_colorable=3023 slots_untouched=35 max_slots=9524 max_blocks=8393 max_bits=72189995
+PROBE layout_calls=440 layout_offset_calls=23 layout_solves=118 layout_offset_solves=23 layout_pending_seeded=2748271 layout_pending_visits=1264469 layout_offset_pending_visits=514860 layout_passes=127 layout_scratch_bytes=134489334 type_count_max=137911 def_scans=1160 def_scan_iterations=18725775 def_scan_misses=1160 member_calls=276372 member_direct_visits=2354012 member_promoted_calls=2767 member_promoted_memset_bytes=296975457 offsetof_member_calls=23 offsetof_memset_bytes=1227207
+41e267555b2cd39cc8ec1155b34c56db8916c0499e19cb9a908ca603a3483959
+== ide-proto-probe (frozen d9e736e unity, -g0 -c)
+FASTPROBE calls=2127 slot_calls=1417 blocks=103300 slots=74684 plane_words=105107 worklist_visits=175418 bits_total=387244 bits_fixed=0 bits_colorable=0 bits_untouched=0 slots_fixed=0 slots_colorable=3023 slots_untouched=0 max_slots=9524 max_blocks=8393 max_bits=47232
+PROBE layout_calls=440 layout_offset_calls=23 layout_solves=118 layout_offset_solves=23 layout_pending_seeded=2748271 layout_pending_visits=1264469 layout_offset_pending_visits=514860 layout_passes=127 layout_scratch_bytes=134489334 type_count_max=137911 def_scans=1160 def_scan_iterations=18725775 def_scan_misses=1160 member_calls=276372 member_direct_visits=2354012 member_promoted_calls=2767 member_promoted_memset_bytes=296975457 offsetof_member_calls=23 offsetof_memset_bytes=1227207
+41e267555b2cd39cc8ec1155b34c56db8916c0499e19cb9a908ca603a3483959
