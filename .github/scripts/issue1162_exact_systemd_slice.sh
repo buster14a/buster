@@ -294,7 +294,7 @@ done >"$evidence/installed-binary-dependencies.txt" 2>&1
 printf 'PATH=%s\nLANG=%s\nLC_ALL=%s\n' "$PATH" "${LANG-}" "${LC_ALL-}" >"$evidence/build-environment.txt"
 cat > "$payload/Dockerfile" <<'DOCKERFILE'
 FROM ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv dbus util-linux python3 clang cmake ninja-build binutils build-essential git ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv dbus util-linux python3 clang cmake ninja-build binutils build-essential git ca-certificates strace && rm -rf /var/lib/apt/lists/*
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]
 DOCKERFILE
@@ -568,6 +568,13 @@ sudo docker exec "$guest" systemctl show buster-bench.service -p ActiveState -p 
 sudo docker exec "$guest" systemctl is-active --quiet buster-bench.service
 key="issue1162-${GITHUB_RUN_ID}"
 sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway capabilities | tee "$evidence/gateway-capabilities.txt"
+if [[ "${BQ_P_REPRO:-}" == 1 ]]; then
+  # Scratch #880 attempt-P reproduction only: trace the service and its manager helpers.
+  sudo docker exec "$guest" install -d -m 0700 /root/p-strace
+  svcpid="$(sudo docker exec "$guest" systemctl show -p MainPID --value buster-bench.service)"
+  sudo docker exec -d "$guest" strace -f -tt -T -s 256 -o /root/p-strace/run -p "$svcpid"
+  sleep 2
+fi
 sudo docker exec "$guest" sh -ec 'test -f /var/lib/buster-bench/lease/host.lock; test ! -L /var/lib/buster-bench/lease/host.lock; stat -c "%d %i %h %a %u %g" /var/lib/buster-bench/lease/host.lock' >"$evidence/lease-before-submit.txt"
 read -r lease_device lease_inode lease_links lease_mode lease_uid lease_gid lease_extra <"$evidence/lease-before-submit.txt"
 [[ "$lease_device" =~ ^[0-9]+$ && "$lease_inode" =~ ^[1-9][0-9]*$ &&
@@ -582,6 +589,60 @@ request_sha="$(sed -nE 's/.*request-sha256=([a-f0-9]{64}).*/\1/p' "$evidence/sub
 test -n "$job"
 test -n "$request_sha"
 echo "JOB=$job"
+if [[ "${BQ_P_REPRO:-}" == 1 ]]; then
+  # Scratch #880 attempt-P reproduction: one SIGTERM to the service MainPID at the
+  # first moment the prepare manifest exists, then capture, controlled restart and
+  # a traced recovery window. Never a qualification result.
+  sudo docker exec -i "$guest" python3 - "$job" <<'PWATCH' | tee "$evidence/p-watch.log"
+import glob, os, signal, subprocess, sys, time
+job = sys.argv[1]
+root = "/var/lib/buster-bench/workspaces/results"
+main = int(subprocess.check_output(["systemctl", "show", "-p", "MainPID", "--value", "buster-bench.service"]).strip())
+deadline = time.monotonic() + 600
+while time.monotonic() < deadline:
+    hits = glob.glob(f"{root}/job-{job}-attempt-*/validate-buster-v1.prepare.manifest")
+    if hits:
+        directory = os.path.dirname(hits[0])
+        os.kill(main, signal.SIGTERM)
+        print(f"{time.time_ns()} SIGTERM pid={main} dir={directory} present={sorted(os.listdir(directory))}", flush=True)
+        break
+    time.sleep(0.001)
+else:
+    print("EXPIRED", flush=True)
+    sys.exit(1)
+PWATCH
+  for _ in $(seq 1 600); do
+    state="$(sudo docker exec "$guest" systemctl is-active buster-bench.service || true)"
+    if [[ "$state" != active && "$state" != deactivating ]]; then break; fi
+    sleep 0.1
+  done
+  sleep 3
+  p_capture() {
+    local tag=$1
+    sudo docker exec "$guest" systemctl list-units --all --no-pager 'buster-bench*' >"$evidence/p-units-$tag.txt" 2>&1 || true
+    sudo docker exec "$guest" sh -c 'for u in $(systemctl list-units --all --plain --no-legend "buster-bench*" | awk "{print \$1}"); do systemctl show "$u" -p Id -p LoadState -p ActiveState -p SubState -p Result -p MainPID -p InvocationID -p ControlGroup -p ExecMainStatus -p CollectMode; echo; done' >"$evidence/p-unit-show-$tag.txt" 2>&1 || true
+    sudo docker exec "$guest" journalctl --no-pager -b -o short-precise >"$evidence/p-journal-$tag.txt" 2>&1 || true
+    sudo docker exec "$guest" sh -c 'find /var/lib/buster-bench -xdev -printf "%m %u:%g %s %T@ %p\n" | sort' >"$evidence/p-state-$tag.txt" 2>&1 || true
+    sudo docker exec "$guest" sh -c 'cd /var/lib/buster-bench/queue && for f in *; do [ "$f" = journal ] && continue; echo "== $f"; head -c 2048 "$f"; echo; done; ls -la; od -A d -t x1 journal | tail -n 60' >"$evidence/p-queue-$tag.txt" 2>&1 || true
+    sudo docker exec "$guest" sh -c 'for f in /var/lib/buster-bench/workspaces/results/job-*/validate-buster-v1.*; do echo "== $f"; head -c 4096 "$f"; echo; done' >"$evidence/p-result-$tag.txt" 2>&1 || true
+    sudo docker exec "$guest" cat /proc/locks >"$evidence/p-locks-$tag.txt" 2>&1 || true
+    sudo docker exec "$guest" systemctl status --no-pager buster-bench.service >"$evidence/p-service-status-$tag.txt" 2>&1 || true
+  }
+  p_capture after-sigterm
+  sudo docker exec "$guest" pkill -INT -x strace || true
+  sleep 1
+  sudo docker exec "$guest" systemctl start buster-bench.service || true
+  newpid="$(sudo docker exec "$guest" systemctl show -p MainPID --value buster-bench.service)"
+  echo "P_REPRO restarted MainPID=$newpid"
+  sudo docker exec "$guest" timeout 8 strace -f -tt -T -s 256 -o /root/p-strace/recovery -p "$newpid" || true
+  sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway result "$job" >"$evidence/p-result-after-restart.txt" 2>&1 || true
+  cat "$evidence/p-result-after-restart.txt"
+  sleep 2
+  p_capture after-restart
+  sudo docker exec "$guest" tar -C /root -czf - p-strace >"$evidence/p-strace.tgz" 2>"$evidence/p-strace-tar.log" || true
+  echo "BQ_P_REPRO_DONE job=$job"
+  exit 0
+fi
 observer_valid=false
 observer_budget=$((wait_deadline - SECONDS - 35))
 if (( observer_budget > 0 )); then
