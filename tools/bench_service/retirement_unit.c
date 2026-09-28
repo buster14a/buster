@@ -295,8 +295,10 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_cancelled(int cancellation_fd)
 }
 
 /* Launch the next stage and wait for it under the cancellation descriptor
- * and the absolute deadline. A cancelled or expired stage is killed, reaped
- * and proven absent before this returns; a settled one is completed. */
+ * and the absolute deadline. A cancelled or expired stage, and a broker stage
+ * that settled other than cleanly, is stopped and proven absent
+ * (bq_retirement_matched_build_cancel) before anything is recorded; a
+ * settled one is then completed. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_stage(BqRetirementBuildStores stores, BqJob const* job,
     int installed, int workspaces, String8 profile, uid_t candidate_uid, int cancellation_fd, u64 deadline_ns,
     BqRetirementMatchedBuild* build)
@@ -320,12 +322,21 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_stage(BqRetirementBuildStores sto
             result = bq_retirement_unit_cancelled(cancellation_fd) ? BQ_WORKER_CANCEL_SIGNAL :
                      bq_retirement_build_clock_ns() >= deadline_ns ? BQ_WORKER_TIMEOUT : BQ_OK;
     }
-    if (process.state && !settled)
+    /* A broker stage that settled any other way than exit 0 with complete
+     * capture (a nonzero or unproven CLI status, a log overflow, a capture or
+     * wait failure) may have left its unit running: it takes the same KILL
+     * and proof as a cancelled one before any failure evidence is written. */
+    bool unproven = settled < 0 && process.launcher == BQ_RETIREMENT_LAUNCH_BROKER;
+    if (process.state && (!settled || unproven))
     {
         u64 now = bq_retirement_build_clock_ns();
         u64 cleanup = now && now <= UINT64_MAX - BQ_RETIREMENT_UNIT_CLEANUP_NS ?
                       now + BQ_RETIREMENT_UNIT_CLEANUP_NS : 0;
         if (!bq_retirement_matched_build_cancel(build, &process, cleanup)) result = BQ_CLEANUP_FAILED;
+        else if (settled) unproven = false;
+    }
+    if (process.state && (!settled || unproven))
+    {
         bq_retirement_matched_build_abort(&process);
         if (!bq_retirement_matched_build_release(build) && result == BQ_OK) result = BQ_IO;
         build->failed = true;

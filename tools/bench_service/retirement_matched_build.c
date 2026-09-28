@@ -13,8 +13,10 @@
  * Launch seam: bq_retirement_build_exec_fd (DIRECT, fexecve of the held
  * driver in the held source cwd) or bq_retirement_build_exec_broker (BROKER,
  * fexecve of the fixed broker CLI with a typed start-stage request). Both
- * children lead their own process group; bq_retirement_matched_build_cancel
- * kills, reaps and proves that group absent.
+ * children lead their own process group. bq_retirement_matched_build_cancel
+ * kills, reaps and proves a DIRECT group absent; for a BROKER stage,
+ * bq_retirement_build_broker_stop sends the broker KILL and takes the CLI's
+ * relayed exit as the absence proof (see there).
  * Layout: bq_retirement_build_root_create makes each subject's configured
  * root fresh before its generate (retirement_stage.h names the paths the
  * broker makes writable); logs and trusted-build/ live in the private
@@ -35,6 +37,8 @@
 #define BQ_RETIREMENT_BUILD_DRIVER_CAP (64u * 1024u * 1024u)
 #define BQ_RETIREMENT_BUILD_BINARY_CAP (512u * 1024u * 1024u)
 #define BQ_RETIREMENT_BUILD_DRIVER BQ_RETIREMENT_STAGE_DRIVER
+/* Retry interval for a broker KILL that has not yet succeeded. */
+#define BQ_RETIREMENT_BUILD_KILL_RETRY_NS (250ull * 1000000ull)
 
 /* Typed broker stage names for the four matched-build stages; the broker's
  * fixed table and the credential gate take them from the same header. */
@@ -584,6 +588,7 @@ int bq_retirement_matched_build_poll(BqRetirementBuildProcess* process)
                        waitpid(process->process, &status, WNOHANG) : 0;
         if (waited == process->process && waited > 0)
         {
+            process->exited = WIFEXITED(status);
             process->exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
             process->state = BQ_RETIREMENT_BUILD_DRAINING;
             process->process = 0;
@@ -591,8 +596,11 @@ int bq_retirement_matched_build_poll(BqRetirementBuildProcess* process)
         }
         else if (waited < 0 && errno != EINTR)
         {
+            /* The child's exit is unobserved, so nothing about it is proven. */
             process->state = BQ_RETIREMENT_BUILD_WAIT_FAILED;
             process->process = 0;
+            process->exited = false;
+            process->exit_code = -1;
         }
         if (process->state == BQ_RETIREMENT_BUILD_DRAINING && process->capture_failed)
             process->state = BQ_RETIREMENT_BUILD_WAIT_FAILED;
@@ -620,11 +628,10 @@ void bq_retirement_matched_build_abort(BqRetirementBuildProcess* process)
     }
 }
 
-/* Ask the fixed broker to KILL a stage unit it may have started for this
- * sequence. The request is the broker's typed signal operation with a unit
- * name derived from constants, bounded by deadline_ns and reaped here. */
-BUSTER_GLOBAL_LOCAL bool bq_retirement_build_broker_signal(BqRetirementMatchedBuild const* build, u32 stage,
-    u64 deadline_ns)
+/* Start the fixed broker's typed `signal <unit> KILL` for this sequence's
+ * stage unit, from a held and verified descriptor, as its own process group
+ * with output discarded. Returns the child for the caller to reap, or -1. */
+BUSTER_GLOBAL_LOCAL pid_t bq_retirement_build_broker_kill(BqRetirementMatchedBuild const* build, u32 stage)
 {
     char unit[160];
     int length = stage < BQ_RETIREMENT_BUILD_STAGES ? snprintf(unit, sizeof(unit),
@@ -646,23 +653,76 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_build_broker_signal(BqRetirementMatchedBu
     if (child > 0) setpgid(child, child);
     if (null >= 0) close(null);
     if (broker >= 0) close(broker);
+    return child;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_retirement_build_kill_reap(pid_t child, int* status)
+{
+    kill(-child, SIGKILL);
+    kill(child, SIGKILL);
+    while (waitpid(child, status, 0) < 0 && errno == EINTR) {}
+}
+
+/* BROKER cleanup proof (#1020, #1785). The held child is only the broker
+ * CLI: its process group says nothing about the stage unit, and a broker
+ * `signal ... KILL` (systemctl kill) that succeeds is not absence, while one
+ * that fails may only mean the unit is already collected or not yet created.
+ * So the KILL is sent first, and repeated every BQ_RETIREMENT_BUILD_KILL_RETRY_NS
+ * while it has not succeeded and the CLI is alive (a unit created after an
+ * early KILL is still reached); its result is never proof. The CLI is then
+ * reaped, with its log pipe drained, until deadline_ns. The CLI exits only
+ * when the broker's status frame arrives or its connection breaks. Absence
+ * is proven only by a normal CLI exit with a status other than
+ * BQ_RETIREMENT_STAGE_UNPROVEN_STATUS: the relayed systemd-run --wait
+ * result (PID1 reported the unit finished), a refusal before any unit was
+ * started, or an abandoned relay after which the broker read the unit back
+ * as gone. A CLI still running at the deadline is killed as a last resort
+ * and nothing is proven; the KILL child is reaped on every path. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_build_broker_stop(BqRetirementMatchedBuild const* build,
+    BqRetirementBuildProcess* process, u64 deadline_ns)
+{
+    pid_t signaller = build ? bq_retirement_build_broker_kill(build, process->stage) : -1;
+    u64 retry_ns = bq_retirement_build_clock_ns() + BQ_RETIREMENT_BUILD_KILL_RETRY_NS;
+    bool delivered = false;
     int status = 0;
-    bool reaped = false;
-    while (child > 0 && !reaped && bq_retirement_build_clock_ns() < deadline_ns)
+    while (bq_retirement_build_clock_ns() < deadline_ns && (process->process > 0 || signaller > 0))
     {
-        pid_t waited = waitpid(child, &status, WNOHANG);
-        if (waited == child) reaped = true;
-        else if (waited < 0 && errno != EINTR) child = -1;
-        else bq_retirement_build_pause();
+        if (signaller > 0)
+        {
+            pid_t waited = waitpid(signaller, &status, WNOHANG);
+            if (waited == signaller) delivered = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+            if (waited == signaller || (waited < 0 && errno != EINTR)) signaller = -1;
+        }
+        if (process->process > 0)
+        {
+            pid_t waited = waitpid(process->process, &status, WNOHANG);
+            if (waited == process->process)
+            {
+                process->exited = WIFEXITED(status);
+                process->exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            }
+            else if (waited < 0 && errno != EINTR) process->exited = false;
+            if (waited == process->process || (waited < 0 && errno != EINTR)) process->process = 0;
+        }
+        if (process->reader >= 3 && !process->log_eof) bq_retirement_build_drain(process);
+        u64 now = bq_retirement_build_clock_ns();
+        if (build && signaller <= 0 && !delivered && process->process > 0 && now >= retry_ns)
+        {
+            signaller = bq_retirement_build_broker_kill(build, process->stage);
+            retry_ns = now + BQ_RETIREMENT_BUILD_KILL_RETRY_NS;
+        }
+        if (process->process > 0 || signaller > 0) bq_retirement_build_pause();
     }
-    if (child > 0 && !reaped)
+    if (signaller > 0) bq_retirement_build_kill_reap(signaller, &status);
+    bool proven = build && process->process == 0 && process->exited &&
+                  process->exit_code != BQ_RETIREMENT_STAGE_UNPROVEN_STATUS;
+    if (process->process > 0)
     {
-        kill(-child, SIGKILL);
-        kill(child, SIGKILL);
-        while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+        bq_retirement_build_kill_reap(process->process, &status);
+        process->process = 0;
+        process->exited = false;
     }
-    ok = ok && reaped && WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    return ok;
+    return proven;
 }
 
 bool bq_retirement_matched_build_cancel(BqRetirementMatchedBuild const* build, BqRetirementBuildProcess* process,
@@ -670,31 +730,34 @@ bool bq_retirement_matched_build_cancel(BqRetirementMatchedBuild const* build, B
 {
     bool live = process && (process->state == BQ_RETIREMENT_BUILD_RUNNING ||
                             process->state == BQ_RETIREMENT_BUILD_DRAINING);
+    bool brokered = process && process->launcher == BQ_RETIREMENT_LAUNCH_BROKER && process->state;
     bool ok = process != NULL;
-    if (live && process->group > 0)
+    if (brokered)
+        ok = bq_retirement_build_broker_stop(build, process, deadline_ns);
+    else if (live)
     {
-        kill(-process->group, SIGKILL);
+        /* DIRECT: the child is the stage itself and leads its own group. */
+        if (process->group > 0) kill(-process->group, SIGKILL);
         if (process->process > 0) kill(process->process, SIGKILL);
+        while (process->process > 0 && bq_retirement_build_clock_ns() < deadline_ns)
+        {
+            int status = 0;
+            pid_t waited = waitpid(process->process, &status, WNOHANG);
+            if (waited == process->process || (waited < 0 && errno != EINTR)) process->process = 0;
+            else bq_retirement_build_pause();
+        }
+        ok = process->process == 0;
+        bool absent = process->group <= 0;
+        while (!absent && bq_retirement_build_clock_ns() < deadline_ns)
+        {
+            errno = 0;
+            absent = kill(-process->group, 0) != 0 && errno == ESRCH;
+            if (!absent) bq_retirement_build_pause();
+        }
+        ok = ok && absent;
     }
-    while (live && process->process > 0 && bq_retirement_build_clock_ns() < deadline_ns)
-    {
-        int status = 0;
-        pid_t waited = waitpid(process->process, &status, WNOHANG);
-        if (waited == process->process || (waited < 0 && errno != EINTR)) process->process = 0;
-        else bq_retirement_build_pause();
-    }
-    ok = ok && (!live || process->process == 0);
-    bool absent = !live || process->group <= 0;
-    while (!absent && bq_retirement_build_clock_ns() < deadline_ns)
-    {
-        errno = 0;
-        absent = kill(-process->group, 0) != 0 && errno == ESRCH;
-        if (!absent) bq_retirement_build_pause();
-    }
-    ok = ok && absent;
-    if (live && process->launcher == BQ_RETIREMENT_LAUNCH_BROKER)
-        ok = build && bq_retirement_build_broker_signal(build, process->stage, deadline_ns) && ok;
-    /* Settled either way; an unproven cleanup is reported, never retried here. */
+    /* A live stage is settled either way; an unproven cleanup is reported,
+     * never retried here. A settled one keeps its observed outcome. */
     if (live)
     {
         process->state = BQ_RETIREMENT_BUILD_WAIT_FAILED;

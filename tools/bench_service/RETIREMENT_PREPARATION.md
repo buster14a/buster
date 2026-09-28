@@ -275,15 +275,45 @@ every path. The coordinator's later replay reads the same files through the
 same importer.
 
 A readable cancellation descriptor or an expired deadline stops the running
-stage. The unit sends `SIGKILL` to the stage's process group, reaps the
-child and waits until `kill(-group, 0)` reports `ESRCH`, within the worker's
-10-second stop budget. It then asks the broker to KILL the stage unit and
-returns `BQ_WORKER_CANCEL_SIGNAL` or `BQ_WORKER_TIMEOUT`. If absence is not
-proven it returns `BQ_CLEANUP_FAILED`. The self-pipe byte is not consumed.
+stage within the worker's 10-second stop budget; the unit then returns
+`BQ_WORKER_CANCEL_SIGNAL` or `BQ_WORKER_TIMEOUT`, or `BQ_CLEANUP_FAILED` if
+absence is not proven. The self-pipe byte is not consumed. What is proven
+depends on the launcher (`bq_retirement_matched_build_cancel`):
+
+- **Broker stage (the unit's launcher).** The held child is only the broker
+  CLI, so its process group says nothing about the stage unit, and a
+  successful `signal ... KILL` (`systemctl kill`) does not prove absence.
+  The unit first sends the broker `signal
+  buster-bench-<job>-<attempt>-<stage>.service KILL`. A KILL that fails, for
+  example because the unit is already collected (`--collect`) or not created
+  yet (not loaded, `126`), is expected and not an error. While it has not
+  succeeded and the CLI is alive, the unit repeats it every 250 ms, so a unit
+  created after an early KILL is still reached. The unit keeps reaping the
+  CLI and draining its log pipe until the deadline. The CLI exits only when
+  the broker's status frame arrives or its connection breaks. Absence is
+  proven only by a normal CLI exit whose status is not `125`
+  (`BQ_RETIREMENT_STAGE_UNPROVEN_STATUS`). Such a status is one of three
+  things: the relayed `systemd-run --wait` result, which means PID1 reported
+  the unit finished; a refusal before any unit was started; or an abandoned
+  relay after which the broker read the unit back as gone (see
+  [SYSTEMD_BROKER.md](deploy/SYSTEMD_BROKER.md#abandoned-stage-relays-1785)).
+  If the CLI is still running at the deadline, the unit kills its process
+  group as a last resort and returns `BQ_CLEANUP_FAILED`.
+- **Broker stage that settled badly.** A stage can settle without exit 0
+  and complete capture: a nonzero CLI status (including `126` and `125`), a
+  log overflow, or a capture or wait failure. It takes the same KILL and
+  proof before anything else. If absence is proven, the stage is completed
+  as before: a reaped nonzero exit writes its failed receipt, and the unit
+  returns `BQ_WORKER_FAILED`. If absence is not proven, the unit returns
+  `BQ_CLEANUP_FAILED` and writes no receipt.
+- **Direct stage (fixture and queue API).** The child is the stage itself.
+  The unit sends `SIGKILL` to its process group, reaps it and waits until
+  `kill(-group, 0)` reports `ESRCH`. Descendants that leave the process group
+  are outside this proof.
+
 A failed or cancelled build leaves its partial evidence unsealed in the
-attempt for the coordinator's failure path. Descendants that leave the
-process group are outside this proof; for broker stages, the stage unit's
-cgroup and the coordinator's recursive stop proof remain authoritative.
+attempt for the coordinator's failure path. The stage unit's cgroup and the
+coordinator's recursive stop proof remain authoritative.
 
 ### Isolation: both subjects through the broker
 
@@ -596,7 +626,10 @@ link, a symlinked record and a replaced directory. The fixture counts
 `/proc/self/fd` entries before and after to show that no descriptor leaks.
 The unit-build fixture compiles the matched-build fixture a second time as
 `fixture-broker`. That stand-in records each typed request in
-`broker-launches` and runs the stage itself as the test user; it does not
+`broker-launches`. It runs the stage as the test user in a forked child,
+which plays the unit, records the child's pid, waits for it the way
+`systemd-run --wait` does and relays its status. Its `signal ... KILL`
+kills a recorded unit, or returns `126` when there is none. It does not
 prove the broker's identity split or sandbox. On fresh real-A attempts it
 checks that the success path acknowledges PREPARING, issues the four
 `start-stage` requests in order, seals ten evidence files, re-imports cleanly
@@ -609,7 +642,22 @@ acknowledgement must leave no launch, log or evidence directory. A SIGALRM
 self-pipe write and an expired deadline each stop a hanging generate: the
 build returns cancelled or timed out, the recorded driver pid no longer
 exists, the broker receives a `signal ... KILL` request and no receipt or
-`trusted-build` is written. Descriptor counts match before and after.
+`trusted-build` is written. The broker cleanup cases call the cancel
+directly:
+- A stage that already finished and was collected is proven by the CLI's
+  relayed exit, although its KILL returns `126`. The old
+  group-then-signal order reported `BQ_CLEANUP_FAILED` here.
+- A cancel before the unit exists retries the KILL until it reaches the
+  stage.
+- A KILL that reports success but leaves the stage running makes the
+  cancel false at its deadline, with the CLI and the stage killed.
+Through the unit, four more jobs check the other broker outcomes:
+- A relayed exit 5 and a refusal with `126` are proven and write failed
+  receipts, and the unit returns `BQ_WORKER_FAILED`.
+- A log overflow is proven and refused.
+- A relayed `125` returns `BQ_CLEANUP_FAILED` with no receipt.
+Each of the four sends exactly one KILL. Descriptor counts match before and
+after.
 The #1018 completion case builds on an attempt created by the real
 `bq_materialize`, so the attempt is the production `02710` rather than a
 fixture directory. Real materialization admits only the smoke recipe, so a

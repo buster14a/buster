@@ -2404,6 +2404,144 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_flip_sealed(int parent, char const* direct
     return ok;
 }
 
+/* A broker-launched baseline generate of a fresh real-A attempt, driven
+ * through the matched-build API so cleanup is called directly. */
+typedef struct BqPrepBrokerStage
+{
+    BqPrepUnitAttempt attempt;
+    BqRetirementMatchedBuild build;
+    BqRetirementBuildProcess process;
+    int evidence;
+} BqPrepBrokerStage;
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_broker_launch(BqQueue* queue, BqJob const* original, u64 id, int installed,
+    int workspaces, BqRetirementPreparation const* original_preparation, char const* pinned,
+    char const* toolchain_root, char const* driver, char const* broker, char const* workspace_path,
+    BqPrepBrokerStage* out)
+{
+    *out = (BqPrepBrokerStage){.build = {.generated_root = -1}, .evidence = -1};
+    bool created = false;
+    bool ok = bq_prep_test_unit_attempt(queue, original, id, installed, workspaces, original_preparation, pinned,
+                                        toolchain_root, &out->attempt);
+    out->evidence = ok ? bq_create_inherited_group_directory(out->attempt.attempt,
+                             BQ_RETIREMENT_UNIT_EVIDENCE_DIRECTORY, 02700, &created) : -1;
+    BqRetirementBuildStores stores = {out->attempt.store, {out->evidence}};
+    ok = ok && out->evidence >= 0 && created &&
+         bq_retirement_matched_build_begin_stores(stores, &out->attempt.job, installed, workspaces,
+             string_from_pointer(workspace_path), string_from_pointer(pinned), driver, toolchain_root, broker,
+             workspace_path, out->attempt.digest, true, &out->build) == BQ_OK &&
+         bq_retirement_matched_build_launch(&out->build, &out->process);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_broker_close(BqPrepBrokerStage* stage)
+{
+    bq_retirement_matched_build_abort(&stage->process);
+    bool ok = stage->process.state == 0 && bq_retirement_matched_build_release(&stage->build);
+    if (stage->evidence >= 0 && close(stage->evidence) != 0) ok = false;
+    stage->evidence = -1;
+    return bq_prep_test_unit_attempt_close(&stage->attempt) && ok;
+}
+
+/* The broker's "signal <unit> KILL" requests for this job's baseline generate. */
+BUSTER_GLOBAL_LOCAL u32 bq_prep_test_kill_requests(char const* launches, u64 id)
+{
+    char text[16384], expected[160];
+    bq_prep_test_read_text(launches, text, sizeof(text));
+    int length = snprintf(expected, sizeof(expected), "signal buster-bench-%" PRIu64 "-%" PRIu64
+                          "-retirement-base-generate.service KILL\n", (uint64_t)id, (uint64_t)id + 10u);
+    u32 count = 0;
+    for (char* at = length > 0 ? strstr(text, expected) : NULL; at; at = strstr(at + length, expected)) count += 1;
+    return count;
+}
+
+/* The pid a hanging fixture generate recorded in its configured root, or 0. */
+BUSTER_GLOBAL_LOCAL long bq_prep_test_driver_pid(char const* workspace_path, u64 id)
+{
+    char path[512], text[32];
+    int length = snprintf(path, sizeof(path), "%s/job-%" PRIu64 "-attempt-%" PRIu64
+                          "/" BQ_RETIREMENT_STAGE_BASE_PARENT "/matched-build/pid",
+                          workspace_path, (uint64_t)id, (uint64_t)id + 10u);
+    long pid = length > 0 && (size_t)length < sizeof(path) && bq_prep_test_read_text(path, text, sizeof(text)) ?
+               strtol(text, NULL, 10) : 0;
+    return pid;
+}
+
+/* Gone, or a zombie left for a reaper outside this test, within a second. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_pid_gone(long pid)
+{
+    bool gone = false;
+    for (u32 attempt = 0; pid > 1 && !gone && attempt < 100; attempt += 1)
+    {
+        char path[64], text[512];
+        errno = 0;
+        gone = kill((pid_t)pid, 0) != 0 && errno == ESRCH;
+        int length = snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
+        char* state = !gone && length > 0 && (size_t)length < sizeof(path) &&
+                      bq_prep_test_read_text(path, text, sizeof(text)) ? strrchr(text, ')') : NULL;
+        if (state && state[1] == ' ' && state[2] == 'Z') gone = true;
+        struct timespec pause = {0, 10000000};
+        if (!gone) nanosleep(&pause, NULL);
+    }
+    return gone;
+}
+
+/* BROKER cleanup (#1020, #1785): the held child is only the broker CLI, so
+ * absence is its relayed exit after the broker KILL, never the CLI's process
+ * group or the KILL's own result. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_broker_cleanup(BqQueue* queue, BqJob const* original, int installed,
+    int workspaces, BqRetirementPreparation const* original_preparation, char const* pinned,
+    char const* toolchain_root, char const* driver, char const* broker, char const* workspace_path,
+    char const* launches)
+{
+    /* Already finished and collected: the KILL finds no unit (126), which the
+     * old group-then-signal order reported as BQ_CLEANUP_FAILED; the CLI's
+     * relayed exit 0 is the proof. */
+    BqPrepBrokerStage stage = {0};
+    BQ_PREP_CHECK(bq_prep_test_broker_launch(queue, original, 70, installed, workspaces, original_preparation,
+                                             pinned, toolchain_root, driver, broker, workspace_path, &stage));
+    siginfo_t exited = {0};
+    BQ_PREP_CHECK(stage.process.process > 0 &&
+                  waitid(P_PID, (id_t)stage.process.process, &exited, WEXITED | WNOWAIT) == 0 &&
+                  exited.si_code == CLD_EXITED && exited.si_status == 0);
+    BQ_PREP_CHECK(bq_retirement_matched_build_cancel(&stage.build, &stage.process,
+                                                     bq_phase_clock() + 5000000000ull) &&
+                  stage.process.state == BQ_RETIREMENT_BUILD_WAIT_FAILED && !stage.process.process &&
+                  bq_prep_test_kill_requests(launches, 70) == 1);
+    BQ_PREP_CHECK(bq_prep_test_broker_close(&stage));
+
+    /* Cancelled before the unit exists: the first KILL finds none, so it is
+     * retried until it reaches the hanging stage the broker starts later, and
+     * the CLI then exits with the relayed result. */
+    BQ_PREP_CHECK(bq_prep_test_broker_launch(queue, original, 65, installed, workspaces, original_preparation,
+                                             pinned, toolchain_root, driver, broker, workspace_path, &stage));
+    BQ_PREP_CHECK(bq_retirement_matched_build_cancel(&stage.build, &stage.process,
+                                                     bq_phase_clock() + 5000000000ull) &&
+                  stage.process.state == BQ_RETIREMENT_BUILD_WAIT_FAILED && !stage.process.process &&
+                  bq_prep_test_kill_requests(launches, 65) >= 2);
+    long pid = bq_prep_test_driver_pid(workspace_path, 65);
+    BQ_PREP_CHECK(!pid || bq_prep_test_pid_gone(pid));
+    BQ_PREP_CHECK(bq_prep_test_broker_close(&stage));
+
+    /* A KILL that reports success but leaves the stage running: the CLI never
+     * exits, so it is killed at the deadline and absence is not proven. */
+    BQ_PREP_CHECK(bq_prep_test_broker_launch(queue, original, 66, installed, workspaces, original_preparation,
+                                             pinned, toolchain_root, driver, broker, workspace_path, &stage));
+    pid = 0;
+    for (u32 attempt = 0; !pid && attempt < 500; attempt += 1)
+    {
+        struct timespec pause = {0, 10000000};
+        pid = bq_prep_test_driver_pid(workspace_path, 66);
+        if (!pid) nanosleep(&pause, NULL);
+    }
+    u64 before = bq_phase_clock();
+    BQ_PREP_CHECK(pid > 1 && !bq_retirement_matched_build_cancel(&stage.build, &stage.process, before + 700000000ull) &&
+                  bq_phase_clock() - before < 5000000000ull && stage.process.state == BQ_RETIREMENT_BUILD_WAIT_FAILED &&
+                  !stage.process.process && bq_prep_test_kill_requests(launches, 66) == 1);
+    BQ_PREP_CHECK(bq_prep_test_pid_gone(pid));
+    BQ_PREP_CHECK(bq_prep_test_broker_close(&stage));
+}
+
 BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* original, int installed,
     int workspaces, char const* installed_path, char const* workspace_path, char const* profile,
     BqRetirementPreparation const* original_preparation)
@@ -2623,6 +2761,41 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* or
         BQ_PREP_CHECK(evidence >= 0 && fstatat(evidence, receipt, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT);
         if (evidence >= 0) close(evidence);
         BQ_PREP_CHECK(bq_prep_test_unit_attempt_close(&hanging));
+    }
+    bq_prep_test_broker_cleanup(queue, original, installed, workspaces, original_preparation, pinned, toolchain_root,
+                                driver, broker, workspace_path, launches);
+    /* A broker stage that settles any other way than exit 0 with complete
+     * capture takes the same KILL and proof before its failure is recorded:
+     * a relayed nonzero exit (67) and a refusal before any unit (71, 126) are
+     * proven and leave a failed receipt, a log overflow (69) is proven and
+     * refused, and an unproven relay (68, 125) is BQ_CLEANUP_FAILED with no
+     * receipt. */
+    u64 const settle_ids[] = {67, 71, 69, 68};
+    BqError const settle_results[] = {BQ_WORKER_FAILED, BQ_WORKER_FAILED, BQ_WORKER_FAILED, BQ_CLEANUP_FAILED};
+    char const* const settle_exits[] = {"\nexit=5\n", "\nexit=126\n", NULL, NULL};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(settle_ids); index += 1)
+    {
+        u64 id = settle_ids[index];
+        BqPrepUnitAttempt settling = {0};
+        BQ_PREP_CHECK(bq_prep_test_unit_attempt(queue, original, id, installed, workspaces, original_preparation,
+                                                pinned, toolchain_root, &settling));
+        peer = bq_prep_test_phase_peer(&phases, id, id + 10u, true);
+        BqError result = bq_retirement_unit_build_pinned(settling.store, &settling.unit, workspaces, installed, root,
+            profile_pins, driver, toolchain_root, broker, workspace_path, geteuid(), &phases, cancel[0], generous,
+            &built);
+        BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
+        BQ_PREP_CHECK(result == settle_results[index] && !built.owned && bq_prep_test_kill_requests(launches, id) == 1);
+        char receipt[48], receipt_text[1024] = {0};
+        u32 receipt_size = 0;
+        evidence = openat(settling.attempt, BQ_RETIREMENT_UNIT_EVIDENCE_DIRECTORY,
+                          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        bool named = bq_record_name(receipt, "matched-stage-0", id) && evidence >= 0;
+        bool recorded = named && bq_record_read_at(evidence, receipt, (u8*)receipt_text, sizeof(receipt_text) - 1u,
+                                                   &receipt_size) == BQ_OK;
+        BQ_PREP_CHECK(named && (settle_exits[index] ? recorded && strstr(receipt_text, settle_exits[index]) :
+                                                      fstatat(evidence, receipt, &info, AT_SYMLINK_NOFOLLOW) != 0));
+        if (evidence >= 0) close(evidence);
+        BQ_PREP_CHECK(bq_prep_test_unit_attempt_close(&settling));
     }
     /* #1018 completion: the attempt made by the real bq_materialize, whose mode
      * is the production 02710 rather than a fixture's private directory. The

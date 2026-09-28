@@ -101,6 +101,8 @@ typedef struct BqRetirementBuildProcess
     char name[32], command_sha256[SHA256_HEX_CAPACITY];
     u32 stage, state, launcher;
     int exit_code;
+    /* The child was reaped after a normal exit, with exit_code its status. */
+    bool exited;
     bool log_overflow, capture_failed, log_eof;
 } BqRetirementBuildProcess;
 
@@ -123,9 +125,15 @@ BUSTER_F_DECL bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* 
     BqRetirementBuildProcess* process);
 BUSTER_F_DECL int bq_retirement_matched_build_poll(BqRetirementBuildProcess* process);
 BUSTER_F_DECL void bq_retirement_matched_build_abort(BqRetirementBuildProcess* process);
-/* SIGKILL the stage's process group, reap the child and prove the group
- * absent before deadline_ns (CLOCK_MONOTONIC). A BROKER stage also asks the
- * broker to KILL its stage unit. The process is then settled for abort. */
+/* Stop the stage and prove it absent before deadline_ns (CLOCK_MONOTONIC).
+ * DIRECT: SIGKILL the child's process group, reap the child and wait for the
+ * group to be gone (a live process only). BROKER, live or already settled:
+ * the child is only the broker CLI, so ask the broker to KILL the stage unit
+ * (retried while it fails and the CLI lives), then reap the CLI; only its
+ * normal exit with a status other than BQ_RETIREMENT_STAGE_UNPROVEN_STATUS,
+ * sent once systemd-run --wait returned or the broker proved the unit gone,
+ * proves absence. A CLI alive at the deadline is killed and false returned.
+ * A live process is then settled for abort; a settled one keeps its outcome. */
 BUSTER_F_DECL bool bq_retirement_matched_build_cancel(BqRetirementMatchedBuild const* build,
     BqRetirementBuildProcess* process, u64 deadline_ns);
 BUSTER_F_DECL BqError bq_retirement_matched_build_complete(BqQueue* queue, BqJob const* job,
