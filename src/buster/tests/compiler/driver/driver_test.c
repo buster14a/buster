@@ -8721,6 +8721,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_aggregate_targ
     String8 targets[] = {S8("x86_64-unknown-linux-gnu"), S8("wasm64-unknown-freestanding"), S8("bpfel-unknown-linux")};
     String8 clang = executable_resolve_in_path(arguments->arena, S8("clang"));
     String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+    BUSTER_UNUSED(consumer);
+    BUSTER_UNUSED(clang);
     for (u32 configuration = 0; configuration < BUSTER_ARRAY_LENGTH(forms) * BUSTER_ARRAY_LENGTH(targets); configuration += 1)
     {
         u32 form = configuration / BUSTER_ARRAY_LENGTH(targets);

@@ -3627,7 +3627,7 @@ BUSTER_GLOBAL_LOCAL u32 llvm_bc_bit_field_aggregate(LlvmBcContext* context, Llvm
             if (valid)
             {
                 u64 mask = field->bit_width < 64 ? (UINT64_C(1) << field->bit_width) - 1 : UINT64_MAX;
-                count += (width < 64) + (field->bit_width < 64);
+                count += (u32)(width < 64) + (u32)(field->bit_width < 64);
                 u32 mask_value = constants ? llvm_bc_integer_constant_for_type_id(context, context->i64_type_id, 64, mask) : 0;
                 if (emit)
                 {
