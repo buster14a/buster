@@ -33,6 +33,10 @@
 //                                              c_lex dispatches and
 //                                              c_lex_reference is the
 //                                              differential baseline
+//   c_token_preceded_by_space,                 source spacing: the `#` white-
+//   c_token_requires_separator                 space test and the lexical-
+//                                              join guard -E and quoting
+//                                              diagnostics print through
 //   CTokenStream, c_token_stream_reserve       final token rows plus the
 //                                              one-byte kind|punctuator
 //                                              sidecar consumed by parser
@@ -3566,6 +3570,89 @@ BUSTER_C_INTERNAL CSourceLocation c_pp_stamp_location(CPpStampTable const* stamp
 BUSTER_C_INTERNAL bool c_token_preceded_by_space(char8 const* spelling_base, CToken previous, CToken token)
 {
     return previous.kind == C_TOKEN_NEWLINE || previous.offset + c_token_length(spelling_base, previous) != token.offset;
+}
+
+// The converse question, asked by a printer rather than by `#`: would these
+// two spellings, written with nothing between them, lex back as these two
+// tokens? Identifiers, numbers and literal prefixes run into one another, and
+// a punctuator followed by a spelling that extends it (`-` `-`, `<` `:`)
+// maximal-munches into another; every other pair may touch.
+BUSTER_C_INTERNAL bool c_token_literal_has_prefix(String8 spelling)
+{
+    bool result = spelling.length && spelling.pointer[0] != '\'' && spelling.pointer[0] != '"';
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_token_identifier_is_literal_prefix(String8 spelling)
+{
+    bool result = (spelling.length == 1 &&
+                   (spelling.pointer[0] == 'u' || spelling.pointer[0] == 'U' || spelling.pointer[0] == 'L')) ||
+                  (spelling.length == 2 && spelling.pointer[0] == 'u' && spelling.pointer[1] == '8');
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_token_punctuators_join(CToken previous, String8 current)
+{
+    char8 first = current.length ? current.pointer[0] : 0;
+    bool result = false;
+    switch ((CPunctuator)previous.punctuator)
+    {
+    case C_PUNCTUATOR_PERCENT: result = first == ':' || first == '>'; break;
+    case C_PUNCTUATOR_HASH_DIGRAPH: result = first == '%'; break;
+    case C_PUNCTUATOR_LESS: result = first == '<' || first == '=' || first == ':' || first == '%'; break;
+    case C_PUNCTUATOR_GREATER: result = first == '>' || first == '='; break;
+    case C_PUNCTUATOR_EQUAL:
+    case C_PUNCTUATOR_EXCLAMATION:
+    case C_PUNCTUATOR_STAR:
+    case C_PUNCTUATOR_CARET: result = first == '='; break;
+    case C_PUNCTUATOR_AMPERSAND: result = first == '&' || first == '='; break;
+    case C_PUNCTUATOR_PIPE: result = first == '|' || first == '='; break;
+    case C_PUNCTUATOR_SLASH: result = first == '/' || first == '*' || first == '='; break;
+    case C_PUNCTUATOR_PLUS: result = first == '+' || first == '='; break;
+    case C_PUNCTUATOR_MINUS: result = first == '-' || first == '>' || first == '='; break;
+    case C_PUNCTUATOR_HASH: result = first == '#'; break;
+    case C_PUNCTUATOR_COLON: result = first == '>'; break;
+    case C_PUNCTUATOR_DOT: result = first == '.'; break;
+    case C_PUNCTUATOR_SHIFT_LEFT:
+    case C_PUNCTUATOR_SHIFT_RIGHT: result = first == '='; break;
+    default: break;
+    }
+    return result;
+}
+
+bool c_token_requires_separator(CToken previous, String8 previous_spelling, CToken current, String8 current_spelling)
+{
+    bool result = false;
+    if (previous.kind == C_TOKEN_IDENTIFIER)
+    {
+        result = current.kind == C_TOKEN_IDENTIFIER ||
+                 (current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length && current_spelling.pointer[0] != '.');
+        if (!result && (current.kind == C_TOKEN_CHARACTER_LITERAL || current.kind == C_TOKEN_STRING_LITERAL))
+        {
+            result = c_token_literal_has_prefix(current_spelling) || c_token_identifier_is_literal_prefix(previous_spelling);
+        }
+    }
+    else if (previous.kind == C_TOKEN_PREPROCESSING_NUMBER)
+    {
+        result = current.kind == C_TOKEN_IDENTIFIER || current.kind == C_TOKEN_PREPROCESSING_NUMBER ||
+                 current.kind == C_TOKEN_CHARACTER_LITERAL ||
+                 (current.kind == C_TOKEN_STRING_LITERAL && c_token_literal_has_prefix(current_spelling));
+        if (!result && current.kind == C_TOKEN_PUNCTUATOR && previous_spelling.length)
+        {
+            char8 last = previous_spelling.pointer[previous_spelling.length - 1];
+            char8 first = current_spelling.length ? current_spelling.pointer[0] : 0;
+            result = first == '.' ||
+                     ((first == '+' || first == '-') &&
+                      (last == 'e' || last == 'E' || last == 'p' || last == 'P'));
+        }
+    }
+    else if (previous.kind == C_TOKEN_PUNCTUATOR)
+    {
+        result = (previous.punctuator == C_PUNCTUATOR_DOT && current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length &&
+                  current_spelling.pointer[0] != '.') ||
+                 (current.kind == C_TOKEN_PUNCTUATOR && c_token_punctuators_join(previous, current_spelling));
+    }
+    return result;
 }
 
 typedef struct CPreprocessTokenNode CPreprocessTokenNode;
@@ -7913,8 +8000,8 @@ BUSTER_C_INTERNAL void c_preprocess_undefine_directive(Arena* arena, CSymbolTabl
 
 bool c_preprocess_dialect_is_gnu(CPreprocessDialect dialect)
 {
-    return dialect == C_PREPROCESS_DIALECT_GNU99 || dialect == C_PREPROCESS_DIALECT_GNU11 || dialect == C_PREPROCESS_DIALECT_GNU17 ||
-           dialect == C_PREPROCESS_DIALECT_GNU23;
+    return dialect == C_PREPROCESS_DIALECT_GNU89 || dialect == C_PREPROCESS_DIALECT_GNU99 || dialect == C_PREPROCESS_DIALECT_GNU11 ||
+           dialect == C_PREPROCESS_DIALECT_GNU17 || dialect == C_PREPROCESS_DIALECT_GNU23;
 }
 
 BUSTER_C_INTERNAL String8 c_preprocess_standard_version(CPreprocessDialect dialect)
@@ -7933,6 +8020,7 @@ BUSTER_C_INTERNAL String8 c_preprocess_standard_version(CPreprocessDialect diale
     case C_PREPROCESS_DIALECT_GNU23:
     case C_PREPROCESS_DIALECT_C23:
         return S8("202311L");
+    case C_PREPROCESS_DIALECT_GNU89:
     case C_PREPROCESS_DIALECT_COUNT:
         return (String8){0};
     }
@@ -8153,7 +8241,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .length = 1,
         .kind = C_TOKEN_PREPROCESSING_NUMBER,
     };
-    standard_replacement[1] = c_space_token(space, c_preprocess_standard_version(options.dialect), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+    String8 standard_version = c_preprocess_standard_version(options.dialect);
+    standard_replacement[1] = standard_version.length ? c_space_token(space, standard_version, C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE) : (CToken){0};
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC__"), standard_replacement, 1, 0, 0, false, false);
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__BUSTER__"), standard_replacement, 1, 0, 0, false, false);
     // The GNU version macros are not a dialect switch.  Both reference
@@ -8655,7 +8744,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         hosted_replacement.offset = C_SPELLING_ZERO;
     }
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_HOSTED__"), &hosted_replacement, 1, 0, 0, false, false);
-    c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_VERSION__"), standard_replacement + 1, 1, 0, 0, false, false);
+    // C90 predates __STDC_VERSION__, so gnu89 leaves it undefined as gcc does.
+    if (standard_version.length)
+    {
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_VERSION__"), standard_replacement + 1, 1, 0, 0, false, false);
+    }
     CTokenStream token_stream = {
         .arena = token_arena,
         .shape_arena = token_shape_arena,

@@ -5079,7 +5079,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_wide_vector_boundaries(UnitTestA
     return result;
 }
 
-#if BUSTER_CPU_ARCH_X86_64 && BUSTER_COMPILER_CLANG && !BUSTER_SANITIZE
+// Host execution needs Clang's ms_abi functions and __builtin_ms_va_*
+// builtins. Buster predefines __clang__ but implements neither, so its own
+// self-compile skips these host calls.
+#if BUSTER_CPU_ARCH_X86_64 && BUSTER_COMPILER_CLANG && !BUSTER_SANITIZE && !defined(__BUSTER__)
+#define MACHINE_TEST_WIN64_HOST_ABI 1
+#else
+#define MACHINE_TEST_WIN64_HOST_ABI 0
+#endif
+
+#if MACHINE_TEST_WIN64_HOST_ABI
 typedef unsigned __int128 MachineTestWin64Wide;
 struct MachineTestWin64Big { unsigned long long words[5]; };
 typedef MachineTestWin64Wide __attribute__((ms_abi)) MachineTestWin64Mix(MachineTestWin64Wide, double, MachineTestWin64Wide,
@@ -5160,7 +5169,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_win64_wide(UnitTestArguments* ar
                         (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
                     BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
                     BUSTER_TEST(arguments, generated.statistics.function_count == 4 && generated.statistics.fallback_function_count == 0);
-#if BUSTER_CPU_ARCH_X86_64 && BUSTER_COMPILER_CLANG && !BUSTER_SANITIZE
+#if MACHINE_TEST_WIN64_HOST_ABI
                     if (generated.error == CODEGEN_ERROR_NONE)
                     {
                         // Clang's ms_abi lets Linux/macOS hosts execute these
@@ -5231,7 +5240,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_win64_wide(UnitTestArguments* ar
     return result;
 }
 
-#if BUSTER_CPU_ARCH_X86_64 && BUSTER_COMPILER_CLANG && !BUSTER_SANITIZE
+#if MACHINE_TEST_WIN64_HOST_ABI
 struct MachineTestWin64Aligned32 { _Alignas(32) unsigned long long words[4]; };
 struct MachineTestWin64Aligned64 { _Alignas(64) unsigned long long words[8]; };
 struct MachineTestWin64Aligned128 { _Alignas(128) unsigned long long words[16]; };
@@ -5321,7 +5330,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_win64_aligned(UnitTestArguments*
                         BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
                         BUSTER_TEST(arguments, generated.statistics.function_count == (variant ? 4u : 2u));
                         BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
-#if BUSTER_CPU_ARCH_X86_64 && BUSTER_COMPILER_CLANG && !BUSTER_SANITIZE
+#if MACHINE_TEST_WIN64_HOST_ABI
                         if (generated.error == CODEGEN_ERROR_NONE)
                         {
                             BUSTER_TEST(arguments, generated.relocation_count == 0);
@@ -5399,7 +5408,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_win64_aligned(UnitTestArguments*
     return result;
 }
 
-#if BUSTER_CPU_ARCH_X86_64 && BUSTER_COMPILER_CLANG && !BUSTER_SANITIZE
+#if MACHINE_TEST_WIN64_HOST_ABI
 #define MACHINE_TEST_WIN64_VECTOR_TARGET __attribute__((target("avx512f,avx512bw")))
 typedef unsigned long long MachineTestWin64Vector __attribute__((vector_size(64)));
 typedef MachineTestWin64Vector __attribute__((ms_abi)) MachineTestWin64VectorMix(MachineTestWin64Vector, double,
@@ -5561,7 +5570,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_win64_vector(UnitTestArguments* 
                         BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
                         BUSTER_TEST(arguments, generated.statistics.function_count == (variant ? 4u : 2u));
                         BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
-#if BUSTER_CPU_ARCH_X86_64 && BUSTER_COMPILER_CLANG && !BUSTER_SANITIZE
+#if MACHINE_TEST_WIN64_HOST_ABI
                         TargetCpuFeatures host = cpu_detect_features_x86_64();
                         if (generated.error == CODEGEN_ERROR_NONE && target_cpu_features_contains(host, TARGET_CPU_FEATURE_X86_AVX512F) &&
                             target_cpu_features_contains(host, TARGET_CPU_FEATURE_X86_AVX512BW))
@@ -7190,6 +7199,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, machine_fast_close_live_ranges_test(arguments->arena));
+    BUSTER_TEST(arguments, machine_fast_close_slot_ranges_test(arguments->arena));
     BUSTER_TEST_FIXTURE(arguments, machine_test_sparse_local_state);
     BUSTER_TEST_FIXTURE(arguments, machine_test_constant_short_circuit);
     BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_line_mark_repair);
