@@ -55,3 +55,40 @@ jobs:
             tools/bench_service/exclusive_admission_test.c \
             -o "$RUNNER_TEMP/exclusive-admission-test"
           "$RUNNER_TEMP/exclusive-admission-test"
+      - name: Reject contaminated broker account groups before state inspection
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -O2 -Wall -Wextra -Werror \
+            -fwrapv -fno-strict-aliasing -funsigned-char \
+            tools/bench_service/systemd_broker_group_test.c \
+            -o "$RUNNER_TEMP/systemd-broker-group-test"
+          "$RUNNER_TEMP/systemd-broker-group-test"
+      - name: Build and exercise the static effective-credential gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -O2 -Wall -Wextra -Werror \
+            -fwrapv -fno-strict-aliasing -funsigned-char \
+            -static -Wl,-z,noexecstack \
+            tools/bench_service/credential_gate.c \
+            -o "$RUNNER_TEMP/buster-bench-credential-gate"
+          readelf -W -l "$RUNNER_TEMP/buster-bench-credential-gate" > "$RUNNER_TEMP/credential-gate-elf.txt"
+          cat "$RUNNER_TEMP/credential-gate-elf.txt"
+          if grep -Eq 'INTERP|DYNAMIC|GNU_STACK.*RWE' "$RUNNER_TEMP/credential-gate-elf.txt"; then
+            echo '::error::Credential gate must be static with a nonexecutable stack.'
+            exit 1
+          fi
+          "$RUNNER_TEMP/buster-bench-credential-gate" --self-test
+      - name: Exercise credential and numeric account receipt rejection
+        shell: bash
+        run: |
+          set -euo pipefail
+          flags=(-std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char)
+          for test in credential_gate_test credential_gate_elf_test systemd_broker_account_test; do
+            clang "${flags[@]}" "tools/bench_service/$test.c" -o "$RUNNER_TEMP/$test"
+          done
+          clang "${flags[@]}" tools/bench_service/credential_gate.c -o "$RUNNER_TEMP/gate-dynamic-negative"
+          "$RUNNER_TEMP/credential_gate_test"
+          "$RUNNER_TEMP/credential_gate_elf_test" "$RUNNER_TEMP/buster-bench-credential-gate" "$RUNNER_TEMP/gate-dynamic-negative"
+          "$RUNNER_TEMP/systemd_broker_account_test"

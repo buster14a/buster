@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <pwd.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -28,6 +29,12 @@
 #define BQ_DIRECTORY_CAP 1024u
 #define BQ_CLEANUP_ENTRY_CAP 16384u
 #define BQ_CLEANUP_DEPTH_CAP 256u
+
+#ifdef BUSTER_BENCH_SERVICE_TEST
+/* Deterministic test-only seam: a successful mkdir whose mode changes before
+ * verification must remain distinguishable from a pre-existing collision. */
+BUSTER_GLOBAL_LOCAL bool bq_test_unverify_next_create;
+#endif
 
 typedef struct BqDirectoryList
 {
@@ -127,6 +134,56 @@ BUSTER_GLOBAL_LOCAL bool bq_workspace_root_directory(int fd)
     ok = ok && (info.st_mode & S_ISGID) != 0;
 #endif
     return ok;
+}
+
+BUSTER_GLOBAL_LOCAL int bq_create_inherited_group_directory(int parent, char const* name, mode_t mode, bool* created)
+{
+    struct stat parent_info = {0}, child_info = {0};
+    *created = false;
+    bool ok = fstat(parent, &parent_info) == 0 && S_ISDIR(parent_info.st_mode) &&
+              parent_info.st_uid == geteuid() && (mode & S_ISGID) != 0 && (mode & 0007) == 0;
+#ifdef __linux__
+    ok = ok && (parent_info.st_mode & S_ISGID) != 0;
+#endif
+    if (ok)
+    {
+#ifdef __linux__
+        /* Linux inherits SGID from the parent. RestrictSUIDSGID rejects both
+         * mkdir and chmod when SGID appears in the requested mode. The service
+         * is single-threaded; restore its private umask before opening files. */
+        mode_t previous_umask = umask(0007);
+        int status = mkdirat(parent, name, mode & 0777);
+        int saved_errno = errno;
+        umask(previous_umask);
+        errno = saved_errno;
+        *created = status == 0;
+#ifdef BUSTER_BENCH_SERVICE_TEST
+        if (*created && bq_test_unverify_next_create)
+        {
+            bq_test_unverify_next_create = false;
+            if (fchmodat(parent, name, 0700, 0) != 0) ok = false;
+        }
+#endif
+#else
+        *created = mkdirat(parent, name, mode) == 0;
+        if (*created && fchmodat(parent, name, mode, 0) != 0) ok = false;
+#endif
+    }
+    else
+    {
+        errno = EPERM;
+    }
+    int child = ok && *created ? openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = child >= 0 && fstat(child, &child_info) == 0 && S_ISDIR(child_info.st_mode) &&
+         child_info.st_uid == geteuid() && child_info.st_gid == parent_info.st_gid &&
+         (child_info.st_mode & 07777) == mode;
+    if (!ok)
+    {
+        if (child >= 0) close(child);
+        child = -1;
+        if (*created) errno = EPERM;
+    }
+    return child;
 }
 
 BUSTER_GLOBAL_LOCAL bool bq_workspace_reconcile_root_directory(int fd)
@@ -380,7 +437,8 @@ BUSTER_GLOBAL_LOCAL bool bq_copy_verified_file(int source_root, int destination_
     }
     char8 digest[SHA256_HEX_CAPACITY];
     sha256_finish_hex(&hash, digest);
-    ok = ok && copied == (u64)info.st_size && expected.length == 64 && !memcmp(digest, expected.pointer, 64) && fsync(destination) == 0;
+    ok = ok && copied == (u64)info.st_size && expected.length == 64 && !memcmp(digest, expected.pointer, 64) &&
+         fchmod(destination, 0440) == 0 && fsync(destination) == 0;
     if (ok)
     {
         *total += copied;
@@ -437,7 +495,8 @@ BUSTER_GLOBAL_LOCAL bool bq_copy_manifest(int installed, int destination, String
     int copy = ok ? openat(destination, ".source-manifest", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0440) : -1;
     if (ok)
     {
-        ok = copy >= 0 && bq_write_all(copy, manifest_bytes, manifest_size) && fsync(copy) == 0;
+        ok = copy >= 0 && bq_write_all(copy, manifest_bytes, manifest_size) &&
+             fchmod(copy, 0440) == 0 && fsync(copy) == 0;
     }
     if (copy >= 0)
     {
@@ -570,13 +629,30 @@ BUSTER_GLOBAL_LOCAL bool bq_entry_identity(int parent, char const* name, dev_t d
     return ok;
 }
 
+/* Group write alone is not proof of candidate ownership. Resolve the fixed
+ * account once per cleanup; a missing/aliased identity disables the foreign
+ * owner exception without preventing cleanup of service-owned fixtures. */
+BUSTER_GLOBAL_LOCAL bool bq_cleanup_candidate_directory(struct stat const* child, gid_t workspace_group,
+                                                           uid_t service_uid, uid_t candidate_uid, gid_t candidate_gid)
+{
+    mode_t mode = child->st_mode & 07777;
+    bool ok = candidate_uid != (uid_t)-1 && candidate_uid != 0 && candidate_uid != service_uid &&
+              candidate_gid != (gid_t)-1 && candidate_gid != 0 && candidate_gid == workspace_group &&
+              child->st_uid == candidate_uid && child->st_gid == candidate_gid &&
+              S_ISDIR(child->st_mode) && (mode == 0770 || mode == 02770);
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_remove_workspace_payload(int workspace)
 {
+    struct passwd* candidate = getpwnam("buster-bench-candidate");
+    uid_t candidate_uid = candidate ? candidate->pw_uid : (uid_t)-1;
+    gid_t candidate_gid = candidate ? candidate->pw_gid : (gid_t)-1;
     BqCleanupFrame frames[BQ_CLEANUP_DEPTH_CAP];
     memset(frames, 0, sizeof(frames));
     int root = openat(workspace, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     struct stat root_info;
-    bool ok = root >= 0 && fstat(root, &root_info) == 0;
+    bool ok = root >= 0 && fstat(root, &root_info) == 0 && root_info.st_uid == geteuid();
     frames[0].stream = ok ? fdopendir(root) : NULL;
     if (!frames[0].stream && root >= 0)
     {
@@ -615,15 +691,22 @@ BUSTER_GLOBAL_LOCAL bool bq_remove_workspace_payload(int workspace)
                 {
                     ok = depth < BQ_CLEANUP_DEPTH_CAP && directories < BQ_DIRECTORY_CAP;
                     int child = ok ? openat(directory, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-                    struct stat child_info;
+                    struct stat child_info = {0};
                     ok = child >= 0 && fstat(child, &child_info) == 0 && child_info.st_dev == info.st_dev &&
-                         child_info.st_ino == info.st_ino;
+                         child_info.st_ino == info.st_ino && child_info.st_dev == root_info.st_dev;
                     DIR* stream = ok ? fdopendir(child) : NULL;
                     if (!stream && child >= 0)
                     {
                         close(child);
                     }
-                    ok = stream != NULL && fchmod(dirfd(stream), 0700) == 0;
+                    /* Candidate build directories inherit the attempt group.
+                     * The service can remove entries through group write, but
+                     * cannot chmod a foreign-owned directory without CAP_FOWNER. */
+                    bool trusted_owned = child_info.st_uid == geteuid();
+                    bool candidate_owned = bq_cleanup_candidate_directory(&child_info, root_info.st_gid,
+                                                                           geteuid(), candidate_uid, candidate_gid);
+                    ok = stream != NULL && (trusted_owned ? fchmod(dirfd(stream), 0700) == 0 :
+                                            candidate_owned);
                     if (ok)
                     {
                         BqCleanupFrame* next = frames + depth;
@@ -786,13 +869,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_record_read(BqQueue* queue, char const* name, u8*
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_record_write(BqQueue* queue, char const* name, u8 const* bytes, u32 size, bool existing_ok)
+BUSTER_GLOBAL_LOCAL BqError bq_record_write_mode(BqQueue* queue, char const* name, u8 const* bytes,
+                                                  u32 size, bool existing_ok, mode_t mode)
 {
     int fd = openat(queue->directory_fd, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400);
     BqError error = BQ_IO;
     if (fd >= 0)
     {
-        if (bq_write_all(fd, bytes, size) && fsync(fd) == 0 && fsync(queue->directory_fd) == 0)
+        if (bq_write_all(fd, bytes, size) && fchmod(fd, mode) == 0 &&
+            fsync(fd) == 0 && fsync(queue->directory_fd) == 0)
         {
             error = BQ_OK;
         }
@@ -803,11 +888,21 @@ BUSTER_GLOBAL_LOCAL BqError bq_record_write(BqQueue* queue, char const* name, u8
         u8 actual[640];
         u32 actual_size = 0;
         error = bq_record_read(queue, name, actual, sizeof(actual), &actual_size);
+        struct stat info = {0};
+        if (error == BQ_OK &&
+            (fstatat(queue->directory_fd, name, &info, AT_SYMLINK_NOFOLLOW) != 0 ||
+             (info.st_mode & 07777) != mode)) error = BQ_CORRUPT;
         if (error == BQ_OK && (actual_size != size || memcmp(actual, bytes, size)))
         {
             error = BQ_CORRUPT;
         }
     }
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_record_write(BqQueue* queue, char const* name, u8 const* bytes, u32 size, bool existing_ok)
+{
+    BqError error = bq_record_write_mode(queue, name, bytes, size, existing_ok, 0400);
     return error;
 }
 
@@ -1136,20 +1231,16 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
     {
         error = BQ_RECIPE_MISMATCH;
     }
+    int workspace = -1;
     if (error == BQ_OK)
     {
-        created = mkdirat(workspaces, name, BQ_WORKSPACE_TRAVERSE_MODE) == 0;
-        if (created && fchmodat(workspaces, name, BQ_WORKSPACE_TRAVERSE_MODE, 0) != 0)
+        workspace = bq_create_inherited_group_directory(workspaces, name, BQ_WORKSPACE_TRAVERSE_MODE, &created);
+        if (workspace < 0)
         {
-            created = false;
-        }
-        if (!created)
-        {
-            collision = errno == EEXIST;
+            collision = !created && errno == EEXIST;
             error = BQ_WORKSPACE_MISMATCH;
         }
     }
-    int workspace = created ? openat(workspaces, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     if (error == BQ_OK && (workspace < 0 || fstat(workspace, &workspace_info) != 0 ||
                            !bq_workspace_seal(workspace, job, true) || fsync(workspaces) != 0))
     {
@@ -1158,18 +1249,16 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
     char const* subjects[] = {"base", "candidate"};
     for (u32 subject = 0; error == BQ_OK && subject < 2; subject += 1)
     {
-        mode_t subject_mode = subject == 0 ? 02750 : BQ_WORKSPACE_TRAVERSE_MODE;
+        mode_t subject_mode = BQ_WORKSPACE_TRAVERSE_MODE;
         mode_t build_mode = BQ_WORKSPACE_PRIVATE_BUILD_MODE;
-        bool made = mkdirat(workspace, subjects[subject], subject_mode) == 0;
-        if (made && fchmodat(workspace, subjects[subject], subject_mode, 0) != 0)
-        {
-            made = false;
-        }
-        int subject_fd = made ? openat(workspace, subjects[subject], O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-        made = subject_fd >= 0 && mkdirat(subject_fd, "source", 02750) == 0 &&
-               fchmodat(subject_fd, "source", 02750, 0) == 0 && mkdirat(subject_fd, "build", build_mode) == 0 &&
-               fchmodat(subject_fd, "build", build_mode, 0) == 0;
-        int source = made ? openat(subject_fd, "source", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        bool subject_created = false, source_created = false, build_created = false;
+        int subject_fd = bq_create_inherited_group_directory(workspace, subjects[subject], subject_mode,
+                                                               &subject_created);
+        int source = subject_fd >= 0 ? bq_create_inherited_group_directory(subject_fd, "source", 02750,
+                                                                            &source_created) : -1;
+        int build = source >= 0 ? bq_create_inherited_group_directory(subject_fd, "build", build_mode,
+                                                                       &build_created) : -1;
+        bool made = source >= 0 && build >= 0;
         if (made)
         {
             String8 revision = bq_field(&job->request, 3 + subject);
@@ -1178,6 +1267,10 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
         if (source >= 0)
         {
             close(source);
+        }
+        if (build >= 0)
+        {
+            close(build);
         }
         if (subject_fd >= 0)
         {
