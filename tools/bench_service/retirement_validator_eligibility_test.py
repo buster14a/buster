@@ -3,7 +3,11 @@
 
 This intentionally uses the repository's small ContractTests fixture. It proves
 that the validator's row-bound applicability and skip evidence reaches the C
-service projection; it does not stand in for an authenticated full census.
+service projection, and that the C per-row #1020 configuration_sha256 equals
+this module's row_configuration_digest reference for every row; it does not
+stand in for an authenticated full census. The reference lives here, outside
+the trusted native_retirement_contract module, and only reads that module's
+canonical_digest and ROW_IDENTITY_FIELDS.
 """
 
 import argparse
@@ -34,6 +38,18 @@ UNAVAILABLE_RECORD = (
 )
 
 
+# Shared with retirement_prepare_tests.c: the C service derives the same
+# digest from the equivalent rows.tsv line.
+GOLDEN_IDENTITY = (
+    "0", "tests/a.c", "x86_64-unknown-linux-gnu", "systemv-x86_64", "baseline",
+    "fixture-features", "none", "local-backed-canonical", "0", "compiler-default",
+    "supported-object-zero-fallback", "semantic-gate-509", "semantic-gate-509", "none",
+    "groups/0/none.argv",
+)
+GOLDEN_CONFIGURATION_SHA256 = "b8f9e4810f3286d61bc6dcee5fa0c72fa9d873d8e32f5b84f739e16bd426a585"
+ESCAPED_CONFIGURATION_SHA256 = "ad3528db6f10ea70b67c3b86ef3b8dcb41654c2416ab476c4126385ca3246521"
+
+
 def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -41,6 +57,56 @@ def sha256(data):
 def require(condition, message):
     if not condition:
         raise RuntimeError(message)
+
+
+def row_configuration_digest(identity):
+    """Return one row's #508 ``configuration_sha256`` (#1020).
+
+    ``identity`` is ``rows_identity[row]`` from native_retirement_contract's
+    per-shard ``validate``: the ``ROW_IDENTITY_FIELDS`` values in order,
+    without the ``row`` key (so it includes ``group`` and ``argv_evidence``
+    and excludes ``selected``). The merged schema-2 report binds that map
+    through ``rows_identity_fields`` and ``rows_identity_sha256``. The digest
+    is the contract's ``canonical_digest`` of the tuple as a JSON list, with
+    no extra fields; the C service projection derives the same bytes from
+    pinned rows.tsv.
+    """
+    contract = contract_test.contract
+    values = list(identity)
+    require(len(values) == len(contract.ROW_IDENTITY_FIELDS) - 1,
+            "row configuration identity has the wrong arity")
+    require(all(isinstance(value, str) for value in values),
+            "row configuration identity values must be strings")
+    return contract.canonical_digest(values)
+
+
+def check_row_configuration_reference():
+    """Golden and serialization checks for row_configuration_digest."""
+    contract = contract_test.contract
+    require(tuple(field for field in contract.ROW_IDENTITY_FIELDS if field != "row") == (
+        "group", "fixture", "target", "target_abi", "cpu", "cpu_features", "allocator",
+        "frontend_lowering", "PIC", "fixture_recipe", "compile_obligation", "link_obligation",
+        "execution_obligation", "diagnostic_obligation", "argv_evidence"),
+            "ROW_IDENTITY_FIELDS changed; the #1020 configuration definition must be re-reviewed")
+    require(row_configuration_digest(GOLDEN_IDENTITY) == GOLDEN_CONFIGURATION_SHA256,
+            "row_configuration_digest golden changed")
+    require(row_configuration_digest(list(GOLDEN_IDENTITY)) == GOLDEN_CONFIGURATION_SHA256,
+            "row_configuration_digest depends on the identity container type")
+    encoded = ("[" + ",".join('"' + value + '"' for value in GOLDEN_IDENTITY) + "]").encode("ascii")
+    require(sha256(encoded) == GOLDEN_CONFIGURATION_SHA256,
+            "row_configuration_digest is not the compact JSON list digest")
+    escaped = ("0", 'tests/q"b\\s/x.c') + GOLDEN_IDENTITY[2:]
+    encoded = ('["0","tests/q\\"b\\\\s/x.c",' +
+               ",".join('"' + value + '"' for value in GOLDEN_IDENTITY[2:]) + "]").encode("ascii")
+    require(sha256(encoded) == ESCAPED_CONFIGURATION_SHA256 and
+            row_configuration_digest(escaped) == ESCAPED_CONFIGURATION_SHA256,
+            "row_configuration_digest does not escape quote and backslash canonically")
+    for malformed in (GOLDEN_IDENTITY[:-1], ("0",) + GOLDEN_IDENTITY, GOLDEN_IDENTITY[:-1] + (1,)):
+        try:
+            row_configuration_digest(malformed)
+        except RuntimeError:
+            continue
+        raise RuntimeError(f"row_configuration_digest accepted malformed identity {malformed!r}")
 
 
 def run_validator(shards, output):
@@ -140,14 +206,43 @@ def probe_result(probe, artifacts):
                           capture_output=True, text=True)
 
 
-def expect_probe_success(probe, artifacts):
+def expected_configurations(report, shard):
+    """Python reference #1020 configuration_sha256 values, in row order."""
+    _row_fields, census_rows = contract_test.read_table(shard / "rows.tsv")
+    identities = contract_test.contract.field_map(
+        census_rows, contract_test.contract.ROW_IDENTITY_FIELDS, "row")
+    require(report["rows_identity_fields"] == list(contract_test.contract.ROW_IDENTITY_FIELDS),
+            "validator report does not bind the expected rows_identity fields")
+    require(contract_test.contract.canonical_map_digest(identities) == report["rows_identity_sha256"],
+            "rows.tsv identity tuples do not match the report's rows_identity_sha256")
+    require(list(identities) == [str(row) for row in range(len(census_rows))],
+            "rows.tsv identity map is not in row order")
+    validated = contract_test.contract.validate(shard)["rows_identity"]
+    require({key: list(value) for key, value in validated.items()} ==
+            {key: list(value) for key, value in identities.items()},
+            "validate() rows_identity differs from the rows.tsv identity tuples")
+    for row in census_rows:
+        raw = [row[field] for field in contract_test.contract.ROW_IDENTITY_FIELDS if field != "row"]
+        require(sha256(json.dumps(raw, separators=(",", ":")).encode("ascii")) ==
+                row_configuration_digest(identities[row["row"]]),
+                f"row {row['row']} configuration digest is not its compact rows.tsv tuple")
+    return [row_configuration_digest(identities[str(row)])
+            for row in range(len(census_rows))]
+
+
+def expect_probe_success(probe, artifacts, configurations):
     result = probe_result(probe, artifacts)
     require(result.returncode == 0,
             "compiled C eligibility probe rejected the genuine fixture:\n" +
             result.stdout + result.stderr)
-    require(result.stdout.strip() == EXPECTED_PROBE_OUTPUT,
+    lines = result.stdout.splitlines()
+    require(lines[:1] == [EXPECTED_PROBE_OUTPUT],
             "compiled C eligibility probe returned an unexpected projection: " +
             result.stdout.strip())
+    expected = [f"VALIDATOR_CONFIGURATION row={row} sha256={digest}"
+                for row, digest in enumerate(configurations)]
+    require(lines[1:] == expected,
+            "C configuration_sha256 projection differs from row_configuration_digest")
 
 
 def expect_tamper_rejected(probe, artifacts, path, replacement, label):
@@ -272,6 +367,7 @@ def expect_missing_profile_pin_rejected(probe, artifacts, key):
 def execute(probe):
     require(probe.is_file() and os.access(probe, os.X_OK),
             f"compiled C probe is missing or not executable: {probe}")
+    check_row_configuration_reference()
     fixture = contract_test.ContractTests(methodName="runTest")
     fixture.setUp()
     try:
@@ -306,7 +402,10 @@ def execute(probe):
         write_profile(artifacts["profile"], artifacts)
         make_read_only(*(path for name, path in artifacts.items() if name != "profile"))
 
-        expect_probe_success(probe, artifacts)
+        configurations = expected_configurations(report, shard)
+        require(len(configurations) == 192 and len(set(configurations)) == 192,
+                "fixture configuration digests are not distinct per row")
+        expect_probe_success(probe, artifacts, configurations)
         expect_tamper_rejected(
             probe, artifacts, artifacts["report"],
             lambda data: replace_once(data, b'"clean_candidate": true',
@@ -417,7 +516,7 @@ def execute(probe):
             "residual digest")
         expect_missing_profile_pin_rejected(
             probe, artifacts, "validator-source-applicability-sha256")
-        expect_probe_success(probe, artifacts)
+        expect_probe_success(probe, artifacts, configurations)
     finally:
         fixture.tearDown()
 
@@ -429,7 +528,8 @@ def main():
     arguments = parser.parse_args()
     execute(arguments.probe.resolve())
     print("schema-2 validator eligibility fixture passed "
-          "(192 rows, 160 eligible, 32 skipped; positive and tamper probes)")
+          "(192 rows, 160 eligible, 32 skipped, 192 C/Python configuration digests; "
+          "positive and tamper probes)")
 
 
 if __name__ == "__main__":

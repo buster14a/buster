@@ -44,8 +44,11 @@ syntax and count but cannot grant their correctness authority until the
 service reopens and replays independent supplement evidence. With no held
 residual-file descriptor in this service boundary, it permits only the canonical zero-row,
 untruncated residual summary and matching header-only digest; it does not read
-the residual TSV. It also does not authenticate per-row configuration
-identities, compiler/runtime command plans, #509
+the residual TSV. It derives each census row's #1020 `configuration_sha256`
+from the pinned `rows.tsv` bytes and requires every B row, of any stage, to
+carry the value for its `census_row`
+([definition](retirement_census_import.md#per-row-configuration_sha256-1020)).
+It does not authenticate compiler/runtime command plans, #509
 required-check receipt bytes/digests, or independent-oracle bytes. A valid
 projection therefore returns fail-closed `BQ_RECIPE_MISMATCH` before the
 correctness gate begins. Before the validator projection, the production entry
@@ -56,7 +59,7 @@ mechanics only; it does not authorize readiness or a timed launch.
 The separate `_built_pinned` fixture seam can import matched-build evidence and
 acquire held binaries for lower-level tests. The production `begin_service`
 entry intentionally does not call it after projection: independent
-configuration, command, #509 receipt, and oracle authority must be supplied
+command, #509 receipt, and oracle authority must be supplied
 before that handoff can be enabled. The existing pinned service test seam uses
 a synthetic one-row B declaration after four real miniature host-compiled
 process stages and readback. Neither fixture provides a trusted Clang build,
@@ -116,9 +119,10 @@ deadlines, cancellation, complete semantic receipts and the independent oracle.
 The eventual production caller must verify the complete #1018 preparation and
 independently replay the #508/#929 support, raw census, validator report, and
 sparse eligibility projection. The current C code checks only the staged raw
-identity and source-ledger projection described above. It does not yet derive
-or authenticate each row's configuration, compiler/runtime commands, #509
-receipts, or oracle from an admitted source. A `retained-control` label alone
+identity and source-ledger projection described above, including the derived
+per-row `configuration_sha256` join. It does not yet derive or authenticate
+each row's compiler/runtime commands, #509 receipts, or oracle from an
+admitted source. A `retained-control` label alone
 does not exclude a row. No candidate output, manifest, or request may select
 these missing authority values.
 
@@ -202,11 +206,13 @@ inventory's `clang_sha256` against a freshly held, bundle-rechecked
 digests, decoded plan and held Clang to `producer_begin` instead of computing
 its own. The
 checked-in blocked profile lacks both reference pins, so the public importer
-fails closed and no worker path calls it. Real reviewed pin values, a producer
-caller in the worker and an approved #508 per-row `configuration_sha256`
-serializer all remain open. Until that serializer exists, template
-configuration digests are reviewed assertions compared only with B's declared
-rows. [RETIREMENT_PREPARATION.md](RETIREMENT_PREPARATION.md#installed-reference-policy-1020)
+fails closed and no worker path calls it. Real reviewed pin values and a
+producer caller in the worker remain open. The importer holds no `rows.tsv`
+or validator projection, so it does not compare template configuration
+digests with the derived #1020 value directly. `begin_service` binds B's rows
+to that value and `bq_retirement_oracle_authority_begin` compares template
+rows with the same B rows. The future worker caller must pass the unchanged
+joined B array to both for the template to inherit the binding. [RETIREMENT_PREPARATION.md](RETIREMENT_PREPARATION.md#installed-reference-policy-1020)
 describes the file formats and joins.
 
 Before `row`, the service derives exact compiler and applicable runtime command

@@ -393,6 +393,81 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_write_bytes(char const* path, char const* 
     return ok;
 }
 
+/* #1020: the service derives each row's configuration_sha256 from rows.tsv as
+ * row_configuration_digest does in retirement_validator_eligibility_test.py
+ * (which shares the golden below) and joins
+ * every B row, including LINK/SELF_HOST stages, to the census row it names. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_configuration_join(String8 text, String8 const known_fields[17],
+    BqRetirementPrepared const* prepared, BqRetirementTrustedRow* trusted)
+{
+    static char const golden[] = "b8f9e4810f3286d61bc6dcee5fa0c72fa9d873d8e32f5b84f739e16bd426a585";
+    BqRetirementValidatorRawRow known = {0};
+    for (u32 field = 0; field < BUSTER_ARRAY_LENGTH(known.fields); field += 1) known.fields[field] = known_fields[field];
+    char known_digest[SHA256_HEX_CAPACITY] = {0};
+    BQ_PREP_CHECK(bq_retirement_validator_row_configuration_sha256(&known, known_digest) &&
+                  !strcmp(known_digest, golden));
+    BqRetirementValidatorRawRow control = known;
+    control.fields[10] = S8("0");
+    control.fields[0] = S8("7");
+    BQ_PREP_CHECK(bq_retirement_validator_row_configuration_sha256(&control, known_digest) &&
+                  !strcmp(known_digest, golden));
+    control.fields[16] = S8("groups/0/fast.argv");
+    BQ_PREP_CHECK(bq_retirement_validator_row_configuration_sha256(&control, known_digest) &&
+                  strcmp(known_digest, golden));
+    control.fields[16] = S8("groups/0/\x7f.argv");
+    BQ_PREP_CHECK(!bq_retirement_validator_row_configuration_sha256(&control, known_digest) &&
+                  !known_digest[0]);
+
+    BqRetirementValidatorRawRow* raw = NULL;
+    char rows_identity[SHA256_HEX_CAPACITY] = {0};
+    BqRetirementValidatorEligibility eligibility = {0};
+    bool ok = bq_retirement_validator_rows_digest(text, prepared->object_rows, rows_identity, &raw);
+    eligibility.row_count = prepared->object_rows;
+    eligibility.classification = ok ? calloc(prepared->object_rows, 1) : NULL;
+    eligibility.configuration_sha256 = ok ?
+        calloc(prepared->object_rows, sizeof(*eligibility.configuration_sha256)) : NULL;
+    ok = ok && eligibility.classification && eligibility.configuration_sha256;
+    for (u32 row = 0; ok && row < prepared->object_rows; row += 1)
+    {
+        eligibility.classification[row] = 1;
+        ok = bq_retirement_validator_row_configuration_sha256(raw + row, eligibility.configuration_sha256[row]);
+    }
+    for (u32 row = 0; ok && row < prepared->rows; row += 1)
+        memcpy(trusted[row].configuration_sha256, eligibility.configuration_sha256[trusted[row].census_row],
+               SHA256_HEX_CAPACITY);
+    BQ_PREP_CHECK(ok && !strcmp(eligibility.configuration_sha256[0], golden) &&
+                  strcmp(eligibility.configuration_sha256[0], eligibility.configuration_sha256[1]) &&
+                  bq_retirement_validator_rows_join(prepared, trusted, &eligibility));
+    if (ok)
+    {
+        u32 const link = prepared->object_rows;
+        trusted[17].configuration_sha256[0] ^= 1;
+        BQ_PREP_CHECK(!bq_retirement_validator_rows_join(prepared, trusted, &eligibility));
+        trusted[17].configuration_sha256[0] ^= 1;
+        trusted[link].configuration_sha256[63] ^= 1;
+        BQ_PREP_CHECK(!bq_retirement_validator_rows_join(prepared, trusted, &eligibility));
+        memcpy(trusted[link].configuration_sha256, eligibility.configuration_sha256[1], SHA256_HEX_CAPACITY);
+        BQ_PREP_CHECK(!bq_retirement_validator_rows_join(prepared, trusted, &eligibility));
+        memcpy(trusted[link].configuration_sha256, eligibility.configuration_sha256[0], SHA256_HEX_CAPACITY);
+        BQ_PREP_CHECK(bq_retirement_validator_rows_join(prepared, trusted, &eligibility));
+        eligibility.classification[5] = 0;
+        BQ_PREP_CHECK(!bq_retirement_validator_rows_join(prepared, trusted, &eligibility));
+        eligibility.classification[5] = 1;
+        eligibility.row_count -= 1;
+        BQ_PREP_CHECK(!bq_retirement_validator_rows_join(prepared, trusted, &eligibility));
+        eligibility.row_count += 1;
+        trusted[3].census_row = 2;
+        memcpy(trusted[3].configuration_sha256, eligibility.configuration_sha256[2], SHA256_HEX_CAPACITY);
+        BQ_PREP_CHECK(!bq_retirement_validator_rows_join(prepared, trusted, &eligibility));
+        trusted[3].census_row = 3;
+        memcpy(trusted[3].configuration_sha256, eligibility.configuration_sha256[3], SHA256_HEX_CAPACITY);
+        BQ_PREP_CHECK(bq_retirement_validator_rows_join(prepared, trusted, &eligibility));
+    }
+    free(eligibility.classification);
+    free(eligibility.configuration_sha256);
+    free(raw);
+}
+
 /* Both #508 inputs.tsv and rows.tsv need pins independent of B's declaration.
  * This fixture's input digest below is an independent known SHA-256 vector. */
 BUSTER_GLOBAL_LOCAL void bq_prep_test_raw_census_boundary(void)
@@ -516,6 +591,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_raw_census_boundary(void)
                       bq_retirement_census_identity_sha256(known_fields, service_identity) &&
                       !strcmp(expected_identity, "f87f6401cf1b60971613e1fd7f740e30828c1d93b29830b94e681b325433b6fb") &&
                       !strcmp(expected_identity, service_identity));
+        bq_prep_test_configuration_join((String8){(char8*)text, used}, known_fields, &prepared, trusted);
     }
     static char const inputs_pin[] = "0e2ddd7a187c0aa3371021b5e4d3939440320ab41043ade4f3b087e4d8adb17c";
     char profile[384] = {0};

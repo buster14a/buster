@@ -2,10 +2,12 @@
  * The _pinned and _built_pinned functions remain lower-level fixture seams for
  * matched-build import and held binaries. Production begin_service reimports
  * the durable A preparation, matched-build and binary records, then validates
- * the raw #508 identity and staged source-ledger eligibility projection. It
+ * the raw #508 identity and staged source-ledger eligibility projection.
+ * bq_retirement_validator_row_configuration_sha256 derives each census row's
+ * #1020 configuration_sha256 from the pinned rows.tsv bytes and
+ * bq_retirement_validator_rows_join requires B's rows to carry it. It still
  * fails closed before acquiring binaries or beginning correctness because
- * full validator, configuration, command, #509, and oracle authority is not
- * yet imported.
+ * full validator, command, #509, and oracle authority is not yet imported.
  * bq_retirement_reference_policy_import (end of file) reads the installed,
  * profile-pinned #1020 reference template and inventory, joins them to A,
  * the support/census/toolchain pins and a held bin/clang; its synthetic-
@@ -46,6 +48,9 @@ struct BqRetirementValidatorEligibility
     u8* compiler_eligible;
     u8* classification;
     char (*skip_proof_sha256)[SHA256_HEX_CAPACITY];
+    /* #1020 per-row configuration_sha256, derived from the pinned rows.tsv
+     * bytes whose rows_identity_sha256 the report binds. */
+    char (*configuration_sha256)[SHA256_HEX_CAPACITY];
     char compiler_sha256[SHA256_HEX_CAPACITY];
     char baseline_sha256[SHA256_HEX_CAPACITY];
     char evidence_sha256[SHA256_HEX_CAPACITY];
@@ -858,6 +863,40 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_validator_raw_row_compare(void const* left
     return order;
 }
 
+/* One #508 rows_identity value: the ROW_IDENTITY_FIELDS columns after the
+ * `row` key (so `selected`, column 10, is omitted) as a compact JSON list of
+ * printable-ASCII strings, byte-identical to Python's canonical_digest input. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_json_identity_list(Sha256* hash,
+    BqRetirementValidatorRawRow const* row)
+{
+    bool ok = hash && row;
+    if (ok) sha256_add(hash, "[", 1);
+    u32 values = 0;
+    for (u32 field = 1; ok && field < BUSTER_ARRAY_LENGTH(row->fields); field += 1)
+    {
+        if (field == 10) continue;
+        if (values) sha256_add(hash, ",", 1);
+        ok = bq_retirement_validator_json_string(hash, row->fields[field]);
+        values += ok;
+    }
+    if (ok) sha256_add(hash, "]", 1);
+    return ok;
+}
+
+/* #1020 per-row configuration_sha256: canonical_digest(list(rows_identity[row]))
+ * (the Python reference is row_configuration_digest in
+ * retirement_validator_eligibility_test.py). */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_row_configuration_sha256(
+    BqRetirementValidatorRawRow const* row, char digest[SHA256_HEX_CAPACITY])
+{
+    Sha256 hash;
+    sha256_init(&hash);
+    bool ok = digest && bq_retirement_validator_json_identity_list(&hash, row);
+    if (ok) sha256_finish_hex(&hash, (char8*)digest);
+    else if (digest) memset(digest, 0, SHA256_HEX_CAPACITY);
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_rows_digest(String8 text, u32 expected_rows,
     char digest[SHA256_HEX_CAPACITY], BqRetirementValidatorRawRow** rows_output)
 {
@@ -898,17 +937,8 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_rows_digest(String8 text, u32 e
     for (u32 index = 0; ok && index < count; index += 1)
     {
         BqRetirementValidatorRawRow const* row = ordered[index];
-        ok = bq_retirement_validator_json_map_begin(&hash, row->fields[0], index == 0);
-        if (ok) sha256_add(&hash, "[", 1);
-        u32 values = 0;
-        for (u32 field = 1; ok && field < BUSTER_ARRAY_LENGTH(row->fields); field += 1)
-        {
-            if (field == 10) continue;
-            if (values) sha256_add(&hash, ",", 1);
-            ok = bq_retirement_validator_json_string(&hash, row->fields[field]);
-            values += ok;
-        }
-        if (ok) sha256_add(&hash, "]", 1);
+        ok = bq_retirement_validator_json_map_begin(&hash, row->fields[0], index == 0) &&
+             bq_retirement_validator_json_identity_list(&hash, row);
     }
     if (ok)
     {
@@ -2089,6 +2119,16 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_eligibility_projection(int supp
                     string_from_pointer(report_sha), manifest_profile, applicability_text, skips_text,
                     raw_rows, subjects, subject_count, ledger, ledger_count, row_count, projection);
         }
+        /* raw_rows produced the rows_identity_sha256 matched above, so each
+         * digest is a projection of the report-bound identity tuple. */
+        if (ok)
+        {
+            projection->configuration_sha256 = calloc(row_count, sizeof(*projection->configuration_sha256));
+            ok = projection->configuration_sha256 != NULL;
+        }
+        for (u32 index = 0; ok && index < row_count; index += 1)
+            ok = bq_retirement_validator_row_configuration_sha256(raw_rows + index,
+                                                                  projection->configuration_sha256[index]);
         if (ok)
         {
             memcpy(projection->compiler_sha256, manifest_compiler->value.pointer, 64);
@@ -2131,9 +2171,42 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_eligibility_projection(int supp
         free(projection->compiler_eligible);
         free(projection->classification);
         free(projection->skip_proof_sha256);
+        free(projection->configuration_sha256);
         memset(projection, 0, sizeof(*projection));
     }
     return ok;
+}
+
+/* Joins B's declared rows to the projection: every census ordinal is in
+ * range and classified, object ordinals are covered exactly once, and every
+ * row (any stage) carries the #1020 configuration_sha256 derived for the
+ * census row it names. B cannot select its own configuration identity. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_rows_join(BqRetirementPrepared const* prepared,
+    BqRetirementTrustedRow const* rows, BqRetirementValidatorEligibility const* eligibility)
+{
+    bool joined = prepared && rows && eligibility && eligibility->classification &&
+                  eligibility->configuration_sha256 && eligibility->row_count == prepared->object_rows;
+    u8* seen = joined ? calloc(prepared->object_rows, 1) : NULL;
+    joined = joined && seen != NULL;
+    for (u32 index = 0; joined && index < prepared->rows; index += 1)
+    {
+        BqRetirementTrustedRow const* row = rows + index;
+        u32 ordinal = row->census_row;
+        joined = ordinal < eligibility->row_count && eligibility->classification[ordinal] >= 1 &&
+                 eligibility->classification[ordinal] <= 5 &&
+                 !memcmp(row->configuration_sha256, eligibility->configuration_sha256[ordinal],
+                         SHA256_HEX_CAPACITY);
+        if (joined && row->stage == BQ_RETIREMENT_STAGE_OBJECT)
+        {
+            joined = !seen[ordinal];
+            if (joined) seen[ordinal] = 1;
+        }
+    }
+    u32 seen_count = 0;
+    for (u32 index = 0; joined && index < prepared->object_rows; index += 1) seen_count += seen[index] != 0;
+    joined = joined && seen_count == prepared->object_rows;
+    free(seen);
+    return joined;
 }
 
 #if defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
@@ -2269,35 +2342,19 @@ BqError bq_retirement_correctness_begin_service(BqQueue* queue, BqJob const* job
         eligibility.row_count == prepared->object_rows &&
         !memcmp(prepared->binary_sha256[1], eligibility.compiler_sha256, SHA256_HEX_CAPACITY) &&
         !memcmp(prepared->binary_sha256[0], eligibility.baseline_sha256, SHA256_HEX_CAPACITY);
-    bool joined = authenticated_eligibility;
-    u8* seen = joined ? calloc(prepared->object_rows, 1) : NULL;
-    joined = joined && seen != NULL;
-    for (u32 index = 0; joined && index < prepared->rows; index += 1)
-    {
-        BqRetirementTrustedRow const* row = rows + index;
-        u32 ordinal = row->census_row;
-        joined = ordinal < eligibility.row_count && eligibility.classification[ordinal] >= 1 &&
-                 eligibility.classification[ordinal] <= 5;
-        if (joined && row->stage == BQ_RETIREMENT_STAGE_OBJECT)
-        {
-            joined = !seen[ordinal];
-            if (joined) seen[ordinal] = 1;
-        }
-    }
-    u32 seen_count = 0;
-    for (u32 index = 0; joined && index < prepared->object_rows; index += 1) seen_count += seen[index] != 0;
-    joined = joined && seen_count == prepared->object_rows;
-    free(seen);
-    /* Eligibility is only one part of B's authority. This staged importer
-     * does not independently authenticate configuration identities, #509
-     * receipt bytes, command plans, or the oracle. A valid projection still
-     * fails closed before caller facts can enter the correctness gate. */
+    bool joined = authenticated_eligibility &&
+        bq_retirement_validator_rows_join(prepared, rows, &eligibility);
+    /* Eligibility and configuration identity are only part of B's authority.
+     * This staged importer does not independently authenticate #509 receipt
+     * bytes, command plans, or the oracle. A valid projection still fails
+     * closed before caller facts can enter the correctness gate. */
     BqError result = !fresh ? BQ_RECIPE_MISMATCH :
                      a_result != BQ_OK ? a_result :
                      joined ? BQ_RECIPE_MISMATCH : BQ_SOURCE_MISMATCH;
     free(eligibility.compiler_eligible);
     free(eligibility.classification);
     free(eligibility.skip_proof_sha256);
+    free(eligibility.configuration_sha256);
     if (result != BQ_OK && fresh) gate->failed = 1;
     return result;
 }
@@ -2307,10 +2364,12 @@ BqError bq_retirement_correctness_begin_service(BqQueue* queue, BqJob const* job
  * them, never a request. Each file's SHA-256 must equal its own compiled
  * profile pin (a missing key fails closed), both decoders must round-trip
  * canonically, and the template must join A's imported subjects, the support,
- * census-row and toolchain-manifest pins and a freshly held bin/clang. No
- * #508 per-row configuration_sha256 serializer exists yet, so template
- * configuration digests stay reviewed assertions that authority_begin only
- * compares with B's declared rows; this importer does not replace that. */
+ * census-row and toolchain-manifest pins and a freshly held bin/clang. It
+ * holds no rows.tsv or validator projection, so it cannot derive the #1020
+ * per-row configuration_sha256 itself. The derived value reaches template
+ * rows only through B: begin_service's bq_retirement_validator_rows_join binds
+ * every B row to it, and authority_begin compares each template row with the
+ * same B row. A caller must pass that unchanged B array to both. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_reference_read_installed(int recipes, char const* name,
     u32 cap, u8** output, u32* length, char digest[SHA256_HEX_CAPACITY])
 {
