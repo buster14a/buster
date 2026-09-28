@@ -201,7 +201,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_unpack(char const* archive_path, char cons
         if (valid) memcpy(job.result_root, key + 13, (size_t)(end - (key + 13)));
         if (manifest >= 0) close(manifest);
         if (!valid || bq_worker_result_binding_validate_at(&job, root) != BQ_OK) error = BQ_EXPORT_INVALID;
-        if (error == BQ_OK && (!bq_worker_result_sync_tree(root) || fsync(parent) != 0)) error = BQ_IO;
+        if (error == BQ_OK && (bq_worker_result_sync_tree(root) != BQ_OK || fsync(parent) != 0)) error = BQ_IO;
     }
     if (root >= 0) close(root);
     if (parent >= 0) close(parent);
