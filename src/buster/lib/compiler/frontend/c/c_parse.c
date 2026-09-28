@@ -9639,13 +9639,47 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         if (assertion_start < frame->end && preprocess.tokens[assertion_start].kind == C_TOKEN_IDENTIFIER &&
             c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[assertion_start], C_SYMBOL_WELL_KNOWN_STATIC_ASSERT))
         {
+            // The assertion ends at its closing parenthesis; anything between
+            // it and the member ';' is not part of any declaration.
+            u32 assertion_end = frame->end;
+            u32 depth = 0;
+            for (u32 index = assertion_start + 1; index < frame->end && assertion_end == frame->end; index += 1)
+            {
+                CToken token = preprocess.tokens[index];
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    depth += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && depth)
+                {
+                    depth -= 1;
+                    if (!depth)
+                    {
+                        assertion_end = index + 1;
+                    }
+                }
+            }
             // A definition parsed once per declarator reaches it again.
             bool deferred = false;
             for (u32 index = 0; index < result->deferred_static_assert_count && !deferred; index += 1)
             {
                 deferred = result->deferred_static_asserts[index].token_start == assertion_start;
             }
-            if (!deferred)
+            if (assertion_end < frame->end)
+            {
+                CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[assertion_end]);
+                for (u32 index = 0; index < result->diagnostic_count && !deferred; index += 1)
+                {
+                    CDiagnostic standing = result->diagnostics[index];
+                    deferred = standing.location.offset == location.offset && standing.location.file == location.file &&
+                               standing.location.map_offset == location.map_offset;
+                }
+                if (!deferred)
+                {
+                    c_parse_diagnostic(result, location, C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("expected ';' after '_Static_assert'"));
+                }
+            }
+            else if (!deferred)
             {
                 c_parse_defer_static_assert(preprocess, result,
                                             (CDeclaration){.token_start = assertion_start, .token_count = frame->end - assertion_start}, frame->scope);
@@ -21600,6 +21634,9 @@ BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* m
     for (u32 index = 0; index < result->deferred_static_assert_count; index += 1)
     {
         CDeferredStaticAssert assertion = result->deferred_static_asserts[index];
+        // A member assertion is deferred from its aggregate's scope; the
+        // innermost block enclosing it is where its names bind.
+        assertion.scope = c_parse_scope_for_token(result, assertion.scope, assertion.token_start);
         CDeclaration declaration = {.token_start = assertion.token_start, .token_count = assertion.token_count};
         u32 start = 0;
         u32 end = 0;

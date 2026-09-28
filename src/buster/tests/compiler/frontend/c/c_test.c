@@ -22475,6 +22475,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         S8("struct S { int a; _Static_assert(sizeof(int) == 4, \"x\"); char c; } s, t;\n"
            "_Static_assert(sizeof(struct S) == 8, \"members kept\");\nint f(void) { return s.a + t.c; }\n"),
         S8("union U { _Static_assert(1, \"first\"); int a; };\nint n = sizeof(union U);\n"),
+        S8("enum { K = 2 };\nint f(void) { enum { K = 1 }; struct S { int a; _Static_assert(K == 1, \"k\"); } s; s.a = 0; return s.a; }\n"),
+        S8("int f(void) { enum { K = 1 }; { enum { K = 3 }; struct S { int a; _Static_assert(K == 3, \"k\"); } s; s.a = 0; return s.a; } }\n"),
+        S8("int f(void) { typedef int T; { typedef char T; struct S { int a; _Static_assert(sizeof(T) == 1, \"k\"); } s; s.a = 0; return s.a; } }\n"),
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
     {
@@ -22485,6 +22488,40 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("member-declaration.c"), preprocess, parse, target_native);
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, valid[case_index]);
         BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, valid[case_index]);
+        scratch_end(temporary);
+    }
+
+    struct
+    {
+        String8 source;
+        u32 column;
+    } trailing[] = {
+        {S8("struct S { int a; _Static_assert(1, \"x\") int b; };\n_Static_assert(sizeof(struct S) == 4, \"b lost\");\n"), 42},
+        {S8("struct S { int a; _Static_assert(1, \"x\") junk; };\nint n = sizeof(struct S);\n"), 42},
+        {S8("struct S { int a; _Static_assert((1), \"x\") [3]; };\n"), 44},
+        {S8("struct S { int a; _Static_assert(1, \"x\") int b; } s, t;\n"), 42},
+        {S8("int f(void) { struct L { int a; _Static_assert(1) char c; } l; return l.a; }\n"), 51},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(trailing); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, trailing[case_index].source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        u32 reported = 0;
+        bool located = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = parse.diagnostics[diagnostic_index];
+            if (diagnostic.kind == C_DIAGNOSTIC_EXPECTED_DECLARATION)
+            {
+                reported += 1;
+                located = diagnostic.location.line == 1 && diagnostic.location.column == trailing[case_index].column &&
+                          string_equal(diagnostic.message, S8("expected ';' after '_Static_assert'"));
+            }
+        }
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, trailing[case_index].source);
+        BUSTER_TEST_RAW(arguments, reported == 1 && located, trailing[case_index].source);
         scratch_end(temporary);
     }
 
