@@ -15043,6 +15043,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_malformed_operand_diagnostics(U
         {S8("void f(void) { __typeof__() y; }\n"), 27},
         {S8("void f(void) { long object; typeof_unqual(object -) y; }\n"), 51},
         {S8("void f(void) { typeof_unqual() y; }\n"), 30},
+        {S8("typedef typeof((1 +)) t;\n"), 20},
+        {S8("typedef typeof(typeof(1 +)) t;\n"), 26},
+        {S8("typedef __typeof__(typeof_unqual(())) t;\n"), 35},
+        {S8("long object; typedef typeof(object[object +]) t;\n"), 44},
+        {S8("void f(void) { long object; typeof((object *)) y; }\n"), 45},
+        {S8("void f(void) { __typeof__(typeof((1 -))) y; }\n"), 38},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
     {
@@ -15063,6 +15069,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_malformed_operand_diagnostics(U
         S8("typedef __typeof__(int *) t; t v;\n"),
         S8("void f(void) { long object; typeof((object)) y; y = 0; }\n"),
     };
+    // Well-formed operands Buster cannot type, or malformed ones that could
+    // begin a type name, are reported at the operand without a syntax error.
+    struct
+    {
+        String8 source;
+        u32 column;
+    } untyped[] = {
+        {S8("typedef typeof(_BitInt(8) *) t;\n"), 16},
+        {S8("typedef typeof(__float128 *) t;\n"), 16},
+        {S8("typedef typeof(__fp16 *) t;\n"), 16},
+        {S8("typedef typeof(int x) t;\n"), 16},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(untyped); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, untyped[case_index].source,
+                                                    (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, untyped[case_index].source);
+        bool diagnosed = parse.diagnostic_count > 0 && parse.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+                         parse.diagnostics[0].location.line == 1 && parse.diagnostics[0].location.column == untyped[case_index].column;
+        BUSTER_TEST_RAW(arguments, diagnosed, untyped[case_index].source);
+        scratch_end(temporary);
+    }
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
