@@ -142,11 +142,14 @@ every path.
 
 The checked-in blocked profile has none of the reference pins, so the public
 importer fails closed today, and nothing in the worker calls it. Real pin
-values still need a reviewed installed template and inventory. Each template
-row's `configuration_sha256` is still a reviewed assertion that
-`bq_retirement_oracle_authority_begin` compares only with B's declared rows.
-The approved #508 per-row configuration serializer that would derive it
-independently does not exist yet, and this importer does not invent one.
+values still need a reviewed installed template and inventory. This importer
+holds no `rows.tsv` or validator projection and does not check template
+`configuration_sha256` values itself. `bq_retirement_oracle_authority_begin`
+compares them with B's declared rows. `begin_service` binds those rows to the
+#1020 per-row digest derived from pinned `rows.tsv`
+([definition](retirement_census_import.md#per-row-configuration_sha256-1020)),
+so a caller that passes the same B array to both binds the template
+transitively.
 The fixture in `retirement_prepare_tests.c` exercises the importer through its
 `BQ_RETIREMENT_CORRECTNESS_TEST_ONLY` seam
 `bq_retirement_reference_policy_import_pinned` with a synthetic profile.

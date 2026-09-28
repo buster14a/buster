@@ -1,6 +1,8 @@
 /* Standalone exercise of the B-owned #508 schema-2 eligibility projection.
  * The Python fixture creates genuine validator evidence and supplies its
- * temporary profile pins; this probe never synthesizes classifications. */
+ * temporary profile pins; this probe never synthesizes classifications. It
+ * also prints each row's derived #1020 configuration_sha256 for the fixture's
+ * cross-language comparison. */
 #define BQ_RETIREMENT_CORRECTNESS_TEST_ONLY 1
 #define main bq_service_cli_main
 #include "main.c"
@@ -60,6 +62,9 @@ int main(int argc, char** argv)
         }
         printf("VALIDATOR_ELIGIBILITY rows=%u eligible=%u skipped=%u\n",
                projection.row_count, eligible, skipped);
+        /* The fixture compares these with row_configuration_digest. */
+        for (u32 index = 0; index < projection.row_count; index += 1)
+            printf("VALIDATOR_CONFIGURATION row=%u sha256=%s\n", index, projection.configuration_sha256[index]);
     }
     else fprintf(stderr, "VALIDATOR_ELIGIBILITY rejected\n");
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(descriptors); index += 1)
@@ -69,6 +74,7 @@ int main(int argc, char** argv)
     free(projection.compiler_eligible);
     free(projection.classification);
     free(projection.skip_proof_sha256);
+    free(projection.configuration_sha256);
     int result = ok ? 0 : 1;
     return result;
 }

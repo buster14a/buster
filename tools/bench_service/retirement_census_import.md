@@ -58,7 +58,8 @@ The projection checks the complete fixed target, frontend, PIC, and allocator
 matrix; zero-based row and group order; fixture path, recipe, and compile
 obligation against the authenticated source ledger; and the approved #508
 canonical JSON identity digest for each row. The staged service entry checks
-projection ordinals against the supplied B rows, but does not import the
+projection ordinals and per-row `configuration_sha256` values against the
+supplied B rows, but does not import the
 matched build or begin the correctness gate. The lower-level `_built_pinned`
 fixture seam exercises matched-build import separately. The `inputs.tsv` projection joins
 every line to the pinned support declaration, validates byte count, SHA-256,
@@ -88,9 +89,54 @@ The installed #1020 reference template also carries a `census_sha256` value.
 pinned separately by `reference-template-sha256` and
 `reference-inventory-sha256` (see
 [RETIREMENT_PREPARATION.md](RETIREMENT_PREPARATION.md#installed-reference-policy-1020)).
-That join ties the reference policy to the pinned census bytes. It does not
-derive any per-row `configuration_sha256`, because the #508 serializer for
-that identity is not yet approved.
+That join ties the reference policy to the pinned census bytes. The importer
+holds neither `rows.tsv` nor the validator projection, so it does not derive
+per-row `configuration_sha256` values itself (see below).
+
+## Per-row `configuration_sha256` (#1020)
+
+Each census row's `configuration_sha256` is a projection of the identity #508
+already approves, with no added fields or policy:
+
+    configuration_sha256(row) = canonical_digest(list(rows_identity[row]))
+
+`rows_identity[row]` is the per-shard `validate` map in
+`tools/native_retirement_contract.py`, built by
+`field_map(rows, ROW_IDENTITY_FIELDS, "row")`. Its value is the 15
+`ROW_IDENTITY_FIELDS` values after the `row` key, in order: `group`,
+`fixture`, `target`, `target_abi`, `cpu`, `cpu_features`, `allocator`,
+`frontend_lowering`, `PIC`, `fixture_recipe`, `compile_obligation`,
+`link_obligation`, `execution_obligation`, `diagnostic_obligation` and
+`argv_evidence`. `selected` is shard-local and excluded. The merged schema-2
+report carries the map only through `rows_identity_fields` and
+`rows_identity_sha256` (`canonical_map_digest`). `canonical_digest` is SHA-256
+of `json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))`,
+so the digest input is `["v1","v2",...,"v15"]`. Only `"` and `\` are escaped
+because the C side accepts only printable ASCII. The Python reference is
+`row_configuration_digest` in `retirement_validator_eligibility_test.py`. It
+only reads `canonical_digest` and `ROW_IDENTITY_FIELDS` from the contract
+module, so the definition adds no trusted native-retirement implementation
+code.
+
+In C, `bq_retirement_validator_row_configuration_sha256` hashes the same list
+from the pinned `rows.tsv` fields. It uses the list writer that
+`bq_retirement_validator_rows_digest` also uses for the report-bound
+`rows_identity_sha256`. `bq_retirement_validator_eligibility_projection`
+exposes one digest per census row in `configuration_sha256`. The production
+`begin_service` passes it to `bq_retirement_validator_rows_join`, which
+requires every B row, of any stage, to carry the digest of the census row
+named by its `census_row`. B's caller-asserted value therefore cannot choose
+its own configuration identity. Reference template rows are native
+LINK/SELF_HOST rows. `bq_retirement_oracle_authority_begin` compares their
+`configuration_sha256` with the same B rows, so the template is bound to the
+derived value only transitively. A future worker caller must pass the
+unchanged B row array that `begin_service` joined to `authority_begin`. The
+pinned reference-policy importer has no projection to join against directly.
+`retirement_prepare_tests.c` and `retirement_validator_eligibility_test.py`
+share one golden digest. The real schema-2 fixture compares all 192 C digests with
+the Python reference.
+
+## Production status
 
 The production profile
 `profiles/native-retirement-performance-v1.blocked` currently lacks the raw
@@ -106,11 +152,12 @@ rows at 192 rows per subject.
 The production service entry reimports the durable A preparation, fixed
 matched-build and frozen-binary records, then checks their source and binary
 identities against the supplied B declaration. It checks projection ordinals
-against the supplied B rows but does not overwrite them, acquire launchable
+and derived configuration digests against the supplied B rows but does not
+overwrite them, acquire launchable
 binary descriptors, or call the correctness-gate begin function.
 Even a valid full-census projection returns `BQ_RECIPE_MISMATCH` until the
-separate authority joins are implemented. Missing facts include an approved
-#508 per-row `configuration_sha256` serializer, independent verification of
+separate authority joins are implemented. The per-row `configuration_sha256`
+join above is in place. Missing facts include independent verification of
 per-row compiler/runtime argv/cwd/environment and CPU provenance, an
 authenticated #509 required-check list and receipt bytes/digests, and
 independent-oracle bytes/digest from an admitted producer. The gate can validate
@@ -124,9 +171,11 @@ remains blocked; do not treat the staged projection as full authority.
 `retirement_validator_eligibility_test.py` generates genuine #508 schema-2
 validator output from a miniature source fixture, runs the Python evidence
 checks/replay, then invokes the C probe with runtime-computed pins. Its positive
-case includes both unavailable and platform-inapplicable rows; re-pinned
+case includes both unavailable and platform-inapplicable rows and requires
+every C `configuration_sha256` to equal `row_configuration_digest`; re-pinned
 tamper cases cover failure arrays, acceptance/unavailable equality,
 `clean_acceptance`, absent-ledger classification, supported-gap and residual
 summaries, class-map membership, skip membership/sidecar data, and required
 pins. It does not grant production authority. The separate private fixture in
-`retirement_prepare_tests.c` continues to test the raw support/input/row join.
+`retirement_prepare_tests.c` continues to test the raw support/input/row join
+and the B-row configuration join, including LINK/SELF_HOST rows.
