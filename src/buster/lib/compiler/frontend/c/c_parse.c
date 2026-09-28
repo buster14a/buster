@@ -10371,8 +10371,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                         !c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[missing_name]), &missing_qualifier))
                     {
                         // A name is there, but behind decorations the
-                        // parenthesized declarator parse does not take --
-                        // `int (* __attribute__((unused)) p)(void);`.
+                        // parenthesized declarator parse does not take.
                         u32 diagnostic_start = result->diagnostic_count;
                         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[missing_name]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
                                            S8("unsupported attribute in a parenthesized member declarator"));

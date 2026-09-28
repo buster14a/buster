@@ -23501,7 +23501,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
         {S8("struct S { int (*__attribute__((unused)) const)(void); };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 47},
         {S8("struct S { int (* _Nonnull)(void); };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 27},
         {S8("struct S { int (const); };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 17},
-        {S8("struct S { int (* __attribute__((unused)) p)(void); int a; };\n"), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, 1, 43},
         {S8("struct S { int [3]; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 16},
         {S8("struct S { int 3; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 16},
         {S8("struct S { int , a; };\n"), C_DIAGNOSTIC_EXPECTED_DECLARATION, 1, 16},
@@ -23539,6 +23538,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_declaration_without_declarator_
 
     String8 valid[] = {
         S8("struct S { int; };\n"),
+        S8("struct S { int (* __attribute__((unused)) p)(void); int a; };\n_Static_assert(sizeof(struct S) == 16, \"members kept\");\n"),
         S8("struct S { int; int a; char c; };\n_Static_assert(sizeof(struct S) == 8, \"members kept\");\nint n = sizeof(struct S);\n"),
         S8("struct S { __attribute__((packed)); int a; };\n_Static_assert(sizeof(struct S) == 4, \"members kept\");\nint n = sizeof(struct S);\n"),
         S8("struct S { enum E { A, B }; int a; };\n_Static_assert(sizeof(struct S) == 4 && B == 1, \"members kept\");\n"),
