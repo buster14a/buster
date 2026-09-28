@@ -2061,6 +2061,16 @@ BUSTER_GLOBAL_LOCAL u32 d_sanitizer_runtime_self_test(Arena* arena, DSettings* p
             path_join(arena, root, S8("sanitizer-compile-fatal")));
         recover_built = d_success(recover_compile) && path_exists(arena, recover_path);
         fatal_built = d_success(fatal_compile) && path_exists(arena, fatal_path);
+        if (!recover_built)
+        {
+            string_print(S8("DIFFERENTIAL_SANITIZER_COMPILE_FAIL mode=recover kind={u32} status={u32}\n{S8}{S8}\n"),
+                (u32)recover_compile.kind, recover_compile.status, recover_compile.output, recover_compile.error);
+        }
+        if (!fatal_built)
+        {
+            string_print(S8("DIFFERENTIAL_SANITIZER_COMPILE_FAIL mode=fatal kind={u32} status={u32}\n{S8}{S8}\n"),
+                (u32)fatal_compile.kind, fatal_compile.status, fatal_compile.output, fatal_compile.error);
+        }
         if (recover_built && fatal_built && !settings.io_failed)
         {
             String8 recover_run_argv[] = {recover_path};
