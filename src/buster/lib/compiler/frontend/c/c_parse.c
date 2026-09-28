@@ -15045,10 +15045,10 @@ BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(Arena* arena, CParse
     {
         // A C23 attribute list -- `int * [[gnu::aligned(16)]] p;` -- is
         // bracketed too, but its tokens name attributes, not objects.
-        u32 attribute_end = 0;
-        if (c_parse_c23_attribute_at(preprocess, token_index, end, &attribute_end))
+        u32 c23_attribute_end = 0;
+        if (c_parse_c23_attribute_at(preprocess, token_index, end, &c23_attribute_end))
         {
-            token_index = attribute_end - 1;
+            token_index = c23_attribute_end - 1;
             continue;
         }
         CToken token = preprocess.tokens[token_index];
