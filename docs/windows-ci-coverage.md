@@ -75,7 +75,6 @@ architecture, with standalone LLVM first on `PATH`:
 ```powershell
 $ErrorActionPreference = 'Stop'
 $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
-$env:CFLAGS = '-Wno-invalid-feature-combination'
 $Driver = Join-Path $env:TEMP 'buster-build.exe'
 clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable `
   -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o $Driver
