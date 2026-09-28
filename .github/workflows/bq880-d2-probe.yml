@@ -1,0 +1,40 @@
+name: bq880 D2 probe (scratch)
+on:
+  push:
+    branches: [codex/880-d2-probe]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: probe
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: 425b8b5ac571a3320681f0394de61a82cbc42e5f
+          fetch-depth: 0
+          path: src425
+      - name: Provision accounts, toolchain, driver and installed base sources
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -q && sudo apt-get install -y -q mold ninja-build
+          clang --version | head -1; cmake --version | head -1; mold --version; systemctl --version | head -1
+          sudo groupadd -g 1967 buster-bench && sudo groupadd -g 1966 buster-bench-candidate
+          sudo useradd -r -M -s /usr/sbin/nologin -u 1967 -g buster-bench -G buster-bench-candidate buster-bench
+          sudo useradd -r -M -s /usr/sbin/nologin -u 1966 -g buster-bench-candidate buster-bench-candidate
+          cd src425 && mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o build/buster-bench-build
+          sudo install -D -m 0755 build/buster-bench-build /usr/local/libexec/buster-bench-build
+          B=/opt/buster-bench/installed/sources/ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          sudo mkdir -p $B && git archive ade6ac4b6ecb21f30b61b656439bac476c145e2f src cmake CMakeLists.txt | sudo tar -x -C $B
+          rm -rf build && git status --porcelain
+      - name: Run D2
+        run: sudo bash probe/.github/bq880-d2/bq880_d2.sh "$GITHUB_WORKSPACE/src425" /var/tmp/bq880-d2 2>&1 | tee d2.log
+      - name: Journal of the D2 units
+        if: always()
+        run: sudo journalctl --no-pager -o short-iso -u 'bq880-d2-*' | tail -n 80
