@@ -747,7 +747,10 @@ struct CArrayBound
     bool is_static;
     bool is_star;
     bool has_inferred_count;
-    u8 reserved;
+    // A `const` written inside the brackets. A parameter declared with it is
+    // adjusted to a const pointer (C17 6.7.6.3p7), so `int a[const 2]` is
+    // not modifiable although its elements are.
+    bool is_const;
 };
 
 typedef struct CType CType;
@@ -1198,6 +1201,9 @@ struct CAggregateLookup
     u64 probe_count;
     u64 rehash_slot_count;
     u64 fallback_type_count;
+    // Rows lowering's tag type-name search visited because the index could
+    // not name the one candidate.
+    u64 lowering_search_type_count;
 #endif
 };
 

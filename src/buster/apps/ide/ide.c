@@ -59,15 +59,21 @@
 
 #if BUSTER_UNITY_BUILD
 #if BUSTER_INCLUDE_TESTS
-// Keep the intrinsic vocabulary outside the optnone region used for test
-// bodies; otherwise Clang can make production SIMD intrinsics uninlinable.
+// Test bodies compile optnone to bound the unity compile's memory (#781).
+// `#pragma clang optimize off` marks only the functions *defined* inside its
+// region. The `#pragma clang attribute` form it replaces marked every
+// function a test source merely *declared* there too, so the production
+// functions that test headers redeclare ran at -O0 in the trusted Release
+// `ide` (#1376). A production header that defines functions must still be
+// included before the region, as simd.h's fallbacks are here;
+// `./build.sh optnone_audit` fails when one is not.
 #include <buster/lib/simd.h>
 #if BUSTER_COMPILER_CLANG
-#pragma clang attribute push (__attribute__((optnone)), apply_to=function)
+#pragma clang optimize off
 #endif
 #include <buster/tests/test.c>
 #if BUSTER_COMPILER_CLANG
-#pragma clang attribute pop
+#pragma clang optimize on
 #endif
 #endif
 #include <buster/lib/byte_writer.c>

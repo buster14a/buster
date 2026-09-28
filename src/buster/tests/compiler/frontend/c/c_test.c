@@ -2109,6 +2109,222 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_static_aggregates(UnitTestArgume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL u64 c_test_relocation_random(u64* state)
+{
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    return *state;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_test_relocation_replays_agree(CTestInitializerRelocationReplay const* replay, u32 operation_count)
+{
+    bool agree = replay->indexed_stop == replay->reference_stop;
+    if (agree && replay->indexed_stop == operation_count)
+    {
+        agree = replay->indexed_count == replay->reference_count;
+        for (u32 record = 0; agree && record < replay->indexed_count; record += 1)
+        {
+            agree = replay->indexed[record].symbol.value == replay->reference[record].symbol.value &&
+                    replay->indexed[record].offset == replay->reference[record].offset;
+        }
+    }
+    return agree;
+}
+
+// The indexed clear drops exactly the records the whole-array compaction
+// drops, in the same order, and fails where it fails (#1450).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_relocation_index(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    u32 const operation_capacity = 256;
+    CTestInitializerRelocationOperation* operations = arena_allocate(temporary.arena, CTestInitializerRelocationOperation, 16384);
+    CTestInitializerRelocationReplay replay = {0};
+    u64 state = 0x9e3779b97f4a7c15ull;
+    u32 disagreements = 0;
+    u32 built = 0;
+    u32 stopped = 0;
+    u32 removed = 0;
+    for (u32 trial = 0; trial < 1024; trial += 1)
+    {
+        TemporalArena trial_scratch = arena_begin_temporal(temporary.arena);
+        u32 pointer_size = c_test_relocation_random(&state) & 1 ? 8 : 4;
+        u64 slots = 1 + c_test_relocation_random(&state) % 48;
+        u64 byte_count = slots * pointer_size + c_test_relocation_random(&state) % pointer_size;
+        u32 operation_count = 1 + (u32)(c_test_relocation_random(&state) % operation_capacity);
+        u32 capacity = c_test_relocation_random(&state) % 8 ? (u32)slots + operation_count + 2 : 1 + (u32)(c_test_relocation_random(&state) % (slots + 2));
+        u64 last_append = 0;
+        for (u32 operation_index = 0; operation_index < operation_count; operation_index += 1)
+        {
+            u64 roll = c_test_relocation_random(&state) % 100;
+            CTestInitializerRelocationOperation operation = {.symbol = operation_index + 1};
+            if (roll < 45 || (operation_index && operations[operation_index - 1].clear && roll < 70))
+            {
+                u64 shape = c_test_relocation_random(&state) % 100;
+                u64 slot_offset = c_test_relocation_random(&state) % slots * pointer_size;
+                // A designated store appends where it just cleared.
+                operation.offset = operation_index && operations[operation_index - 1].clear && roll >= 45 ? operations[operation_index - 1].offset
+                                   : shape < 70                                                       ? slot_offset
+                                   : shape < 85 ? c_test_relocation_random(&state) % (byte_count - pointer_size + 1)
+                                   : shape < 95 ? last_append
+                                                : byte_count + c_test_relocation_random(&state) % (2 * pointer_size);
+                last_append = operation.offset;
+            }
+            else
+            {
+                u64 shape = c_test_relocation_random(&state) % 100;
+                operation.clear = true;
+                operation.offset = shape < 60 ? c_test_relocation_random(&state) % slots * pointer_size : c_test_relocation_random(&state) % (byte_count + 3);
+                u64 room = operation.offset <= byte_count ? byte_count - operation.offset : 0;
+                u64 size_shape = c_test_relocation_random(&state) % 100;
+                operation.size = size_shape < 30 ? pointer_size
+                                 : size_shape < 45 ? 0
+                                 : size_shape < 65 ? 2 * pointer_size
+                                 : size_shape < 95 ? c_test_relocation_random(&state) % (room + 1)
+                                                   : room + 1;
+            }
+            operations[operation_index] = operation;
+        }
+        c_test_initializer_relocation_replay(trial_scratch.arena, pointer_size, byte_count, capacity, operations, operation_count, &replay);
+        disagreements += !c_test_relocation_replays_agree(&replay, operation_count);
+        built += replay.index_built;
+        stopped += replay.reference_stop < operation_count;
+        removed += replay.index_built && replay.indexed_appends > replay.indexed_count;
+        scratch_end(trial_scratch);
+    }
+    BUSTER_TEST(arguments, disagreements == 0);
+    // The index removed records in many trials (dead marks need no counting build).
+    BUSTER_TEST(arguments, built > 256 && stopped > 64 && removed > 256);
+
+    // Designator families at N = 2048 pointer slots.
+    u32 const slot_count = 2048;
+    u32 capacity = slot_count + 1 + 3 * slot_count + 1;
+    for (u32 family = 0; family < 4; family += 1)
+    {
+        TemporalArena family_scratch = arena_begin_temporal(temporary.arena);
+        u32 operation_count = 0;
+        for (u32 index = 0; index < slot_count; index += 1)
+        {
+            // Family 0 walks a fixed permutation; the others store in order.
+            u32 slot = family == 0 ? (u32)((index * 1021u + 7u) % slot_count) : index;
+            operations[operation_count++] = (CTestInitializerRelocationOperation){.offset = (u64)slot * 8, .size = 8, .clear = true};
+            operations[operation_count++] = (CTestInitializerRelocationOperation){.offset = (u64)slot * 8, .symbol = 1};
+        }
+        u32 repeat_count = family == 1 ? slot_count : family == 2 ? slot_count / 8 : family == 3 ? 3 * slot_count : 0;
+        for (u32 index = 0; index < repeat_count; index += 1)
+        {
+            // 1: every slot designated again; 2: one override per eight
+            // slots after a range default; 3: one slot overwritten until the
+            // dead records outnumber the live ones, twice over.
+            u64 slot = family == 1 ? index : family == 2 ? (u64)index * 8 : 5;
+            operations[operation_count++] = (CTestInitializerRelocationOperation){.offset = slot * 8, .size = 8, .clear = true};
+            operations[operation_count++] = (CTestInitializerRelocationOperation){.offset = slot * 8, .symbol = 2 + index};
+        }
+        c_test_initializer_relocation_replay(family_scratch.arena, 8, (u64)slot_count * 8, capacity, operations, operation_count, &replay);
+        BUSTER_TEST(arguments, c_test_relocation_replays_agree(&replay, operation_count) && replay.indexed_stop == operation_count);
+        BUSTER_TEST(arguments, replay.indexed_count == slot_count);
+#if BUSTER_BENCH_ALLOCATIONS
+        u64 clears = operation_count / 2;
+        BUSTER_TEST(arguments, replay.index_bucket_visits <= 2 * clears && replay.index_group_visits <= 2 * clears);
+        BUSTER_TEST(arguments, replay.index_removed_rows == repeat_count);
+        BUSTER_TEST(arguments, replay.index_compaction_rows <= 4 * (u64)operation_count);
+        if (family == 0 || family == 1)
+        {
+            // The whole-array compaction reads every record per clear.
+            BUSTER_TEST(arguments, replay.reference_compaction_rows >= (u64)slot_count * slot_count / 4);
+        }
+        if (family == 3)
+        {
+            BUSTER_TEST(arguments, replay.index_compaction_rows != 0);
+        }
+#endif
+        scratch_end(family_scratch);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// Lowered tables keep the order the whole-array compaction produced:
+// survivors in the order they were stored.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_relocation_lowering(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    u32 const slot_count = 256;
+    String8 source = {0};
+    for (u32 index = 0; index < slot_count; index += 1)
+    {
+        source = string_format(temporary.arena, S8("{S8}int a{u32}, b{u32};\n"), source, index, index);
+    }
+    source = string_format(temporary.arena, S8("{S8}int d;\nint *shuffled[{u32}] = {{"), source, slot_count);
+    for (u32 index = 0; index < slot_count; index += 1)
+    {
+        u32 slot = (index * 101u + 3u) % slot_count;
+        source = string_format(temporary.arena, S8("{S8}[{u32}] = &a{u32}, "), source, slot, slot);
+    }
+    source = string_format(temporary.arena, S8("{S8}}};\nint *twice[{u32}] = {{"), source, slot_count);
+    for (u32 pass = 0; pass < 2; pass += 1)
+    {
+        for (u32 index = 0; index < slot_count; index += 1)
+        {
+            source = string_format(temporary.arena, pass ? S8("{S8}[{u32}] = &b{u32}, ") : S8("{S8}[{u32}] = &a{u32}, "), source, index, index);
+        }
+    }
+    source = string_format(temporary.arena, S8("{S8}}};\nint *ranged[{u32}] = {{[0 ... {u32}] = &d"), source, slot_count, slot_count - 1);
+    for (u32 index = 0; index < slot_count; index += 8)
+    {
+        source = string_format(temporary.arena, S8("{S8}, [{u32}] = &b{u32}"), source, index, index);
+    }
+    source = string_format(temporary.arena, S8("{S8}}};\n"), source);
+    CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                                                                       .target = target_native,
+                                                                       .data_layout = target_data_layout(target_native),
+                                                                       .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                                   });
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("initializer-relocations.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, lowered.program != 0))
+    {
+        IrModule* module = &lowered.program->modules[0];
+        u64 pointer_size = lowered.program->data_layout.pointer.size;
+        u32 checked = 0;
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            IrGlobal* global = module->globals + global_index;
+            IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, global->symbol);
+            u32 table = !symbol ? 0 : string_equal(symbol->name, S8("shuffled")) ? 1 : string_equal(symbol->name, S8("twice")) ? 2
+                                    : string_equal(symbol->name, S8("ranged"))     ? 3 : 0;
+            if (!table)
+            {
+                continue;
+            }
+            checked += 1;
+            BUSTER_TEST(arguments, global->relocation_count == slot_count);
+            for (u32 record = 0; record < global->relocation_count && record < slot_count; record += 1)
+            {
+                // Shuffled keeps store order; twice keeps only the second
+                // pass; ranged keeps the untouched defaults in index order,
+                // then the overrides.
+                u32 overrides = slot_count / 8;
+                u32 slot = table == 1 ? (record * 101u + 3u) % slot_count
+                           : table == 2 ? record
+                           : record < slot_count - overrides ? record + record / 7 + 1
+                                                               : (record - (slot_count - overrides)) * 8;
+                String8 expected = table == 1 ? string_format(temporary.arena, S8("a{u32}"), slot)
+                                   : table == 2 || record >= slot_count - overrides ? string_format(temporary.arena, S8("b{u32}"), slot)
+                                                                                     : S8("d");
+                IrSymbol* target = ir_symbol_from_id(&lowered.program->symbols, global->relocations[record].symbol);
+                BUSTER_TEST(arguments, target && string_equal(target->name, expected) && global->relocations[record].offset == slot * pointer_size);
+            }
+        }
+        BUSTER_TEST(arguments, checked == 3);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_range_designators(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2782,6 +2998,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fresh_binding_publication(UnitTestArgu
     return result;
 }
 
+// A function declared through a function typedef opens a function scope like
+// any prototype, but brings no `(` to the token census: `F f0, f1, f2;` is
+// three function scopes and no parenthesis. A unit of such declarations with
+// few parentheses outgrew the scope table and failed validation.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_typedef_scopes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    u32 generated_count = 64;
+    u64 source_capacity = BUSTER_KB(8);
+    char8* source_buffer = arena_allocate(temporary.arena, char8, source_capacity);
+    u64 source_length = 0;
+    // One file-scope declarator list, single file-scope declarations, and
+    // single block-scope declarations; only `F` and `main` bring a `(`.
+    c_test_append_source(source_buffer, source_capacity, &source_length, S8("typedef int F(void);\nF "));
+    for (u32 index = 0; index < generated_count; index += 1)
+    {
+        c_test_append_source(source_buffer, source_capacity, &source_length,
+                             string_format(temporary.arena, S8("{S8}list_{u32}"), index ? S8(", ") : S8(""), index));
+    }
+    c_test_append_source(source_buffer, source_capacity, &source_length, S8(";\n"));
+    for (u32 index = 0; index < generated_count; index += 1)
+    {
+        c_test_append_source(source_buffer, source_capacity, &source_length, string_format(temporary.arena, S8("F single_{u32};\n"), index));
+    }
+    c_test_append_source(source_buffer, source_capacity, &source_length, S8("int main(void)\n{\n"));
+    for (u32 index = 0; index < generated_count; index += 1)
+    {
+        c_test_append_source(source_buffer, source_capacity, &source_length, string_format(temporary.arena, S8("F local_{u32};\n"), index));
+    }
+    c_test_append_source(source_buffer, source_capacity, &source_length, S8("return 0;\n}\n"));
+    String8 sources[] = {
+        S8("typedef void Handler(int);\nHandler on_open, on_close, on_error;\nint main(void) { return 0; }\n"),
+        S8("typedef int F(void); F f0, f1, f2; int main(void) { return 0; }\n"),
+        S8("typedef void H(int);\nint main(void) { H a, b, c; return 0; }\n"),
+        {
+            .pointer = source_buffer,
+            .length = source_length,
+        },
+    };
+    u32 function_counts[] = {4, 4, 4, generated_count * 3 + 1};
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, sources[source_index], S8("function-typedef-scopes.c"), target_native, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.scope_count <= parse.scope_capacity);
+        u32 function_count = 0;
+        for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+        {
+            CDeclaration declaration = parse.declarations[declaration_index];
+            if (declaration.kind == C_DECLARATION_FUNCTION)
+            {
+                function_count += 1;
+                BUSTER_TEST(arguments, declaration.scope.value != 0 && declaration.scope.value < parse.scope_count);
+            }
+        }
+        BUSTER_TEST(arguments, function_count == function_counts[source_index]);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_growth(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2899,6 +3182,90 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_identity(UnitTestArgu
     CTypeId duplicate = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Shared"), .tag_scope = {1}});
     BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("Shared"), (CScopeId){1}).value == duplicate.value);
     BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("NoRoom"), (CScopeId){0}).value < parse.type_count);
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_unique_search(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    // The index names a tag's only row, says no row carries an absent one,
+    // and leaves every other answer to the caller's search.
+    CAggregateLookup lookup = {.slot_count = 8};
+    lookup.slots = arena_allocate_zeroed(temporary.arena, CAggregateLookupSlot, lookup.slot_count);
+    CScope scopes[] = {{.parent = C_SCOPE_ID_INVALID}, {.parent = {0}}};
+    CParseResult parse = {.arena = temporary.arena, .aggregate_lookup = &lookup, .scopes = scopes, .scope_count = BUSTER_ARRAY_LENGTH(scopes),
+        .types = arena_allocate(temporary.arena, CType, 64), .type_capacity = 64};
+    bool decided = false;
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Only"), &decided).value == C_ID_UNDERLYING_INVALID && decided);
+    CTypeId only = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Only"), .tag_scope = {1}});
+    CTypeId other_kind = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_UNION, .tag = S8("Only"), .tag_scope = {0}});
+    CType qualified = parse.types[only.value];
+    qualified.has_unqualified_type = true;
+    qualified.unqualified_type = only;
+    qualified.is_const = true;
+    c_test_aggregate_lookup_add(&parse, qualified);
+    // Scope does not enter the answer: the one row is the one the search
+    // would return from any reference, visible or not.
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Only"), &decided).value == only.value && decided);
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_UNION, S8("Only"), &decided).value == other_kind.value && decided);
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_ENUM, S8("Only"), &decided).value == C_ID_UNDERLYING_INVALID && decided);
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, (String8){0}, &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Twice"), .tag_scope = {0}});
+    c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Twice"), .tag_scope = {1}});
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Twice"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    // A rolled-back row leaves its slot stale, which the caller searches; a
+    // row reusing the id under the tag answers again.
+    CParseResult checkpoint = parse;
+    CTypeId speculative = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Speculative"), .tag_scope = {0}});
+    c_test_aggregate_lookup_rollback(&parse, checkpoint);
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Speculative"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_ENUM, .tag = S8("Reuse"), .tag_scope = {0}});
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Speculative"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    c_test_aggregate_lookup_rollback(&parse, checkpoint);
+    CTypeId reused = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Speculative"), .tag_scope = {1}});
+    BUSTER_TEST(arguments, reused.value == speculative.value);
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Speculative"), &decided).value == reused.value && decided);
+    lookup.incomplete = true;
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Only"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    parse.aggregate_lookup = 0;
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&parse, C_TYPE_STRUCT, S8("Only"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+
+    // Lowering: 64 tags named by casts cost no search row; a shadowed tag
+    // still searches, and each search visits the whole table.
+    for (u32 shadow = 0; shadow < 2; shadow += 1)
+    {
+        String8 source = {0};
+        for (u32 row = 0; row < 64; row += 1)
+        {
+            source = string_format(temporary.arena, S8("{S8}struct U{u32} {{ int a; long b[{u32}]; }};\n"), source, row, row + 1);
+        }
+        source = string_format(temporary.arena, S8("{S8}int use(void* p) {{ int s = 0;\n"), source);
+        for (u32 row = 0; row < 64; row += 1)
+        {
+            source = string_format(temporary.arena, S8("{S8}s += ((struct U{u32}*)p)->a + (int)sizeof(struct U{u32});\n"), source, row, row);
+        }
+        if (shadow)
+        {
+            source = string_format(temporary.arena, S8("{S8}{{ struct U7 {{ char c; }}; s += ((struct U7*)p)->c; }}\n"), source);
+        }
+        source = string_format(temporary.arena, S8("{S8}return s; }\n"), source);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                                                                       .target = target_native,
+                                                                       .data_layout = target_data_layout(target_native),
+                                                                   });
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("aggregate-unique.c"), tokens, parsed, target_native);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parsed.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program != 0);
+#if BUSTER_BENCH_ALLOCATIONS
+        if (BUSTER_REQUIRE(arguments, parsed.aggregate_lookup != 0))
+        {
+            u64 rows = parsed.aggregate_lookup->lowering_search_type_count;
+            BUSTER_TEST(arguments, shadow ? rows != 0 && rows % parsed.type_count == 0 : rows == 0);
+        }
+#endif
+    }
     scratch_end(temporary);
     return result;
 }
@@ -21110,6 +21477,68 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_sparse_finish(UnitTestArgum
     return result;
 }
 
+// Returns the parameters frontend SSA keeps, or UINT64_MAX when the source
+// does not lower to canonical IR that validates and prepares.
+BUSTER_GLOBAL_LOCAL u64 c_test_direct_ssa_retained_parameters(Arena* arena, u32 case_count, u32 shape)
+{
+    u64 capacity = (u64)case_count * 160 + 512;
+    char8* bytes = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length,
+        S8("long test(long* p,long n){long acc=n,mix=1,carry=2;while(p){switch(*p){"));
+    for (u32 index = 0; index < case_count; index += 1)
+    {
+        String8 body = shape == 0   ? S8("case {u32}:{{acc+=p[1]*{u32};mix^=acc;break;}}")
+                       : shape == 1 ? S8("case {u32}:acc+=p[1]*{u32};mix^=acc;break;")
+                       : shape == 2 ? S8("case {u32}:{{acc+=p[1]*{u32};mix^=acc;break;acc+=mix;}}")
+                                    : S8("case {u32}:{{acc+=p[1]*{u32};mix^=acc;}}");
+        c_test_append_source(bytes, capacity, &length, string_format(arena, body, index, index + 3));
+    }
+    c_test_append_source(bytes, capacity, &length, S8("default:return acc;}p=(long*)p[2];}return acc+mix+carry;}"));
+    CPreprocessResult tokens = c_preprocess(arena, (String8){bytes, length}, (CPreprocessOptions){0});
+    CParseResult parse = c_parse(arena, tokens);
+    u64 retained = UINT64_MAX;
+    if (!tokens.diagnostic_count && !parse.diagnostic_count)
+    {
+        CIRLowerResult direct = c_lower_to_ir(arena, S8("dead-continuation.c"), tokens, parse, target_native);
+        bool valid = direct.program && !direct.diagnostic_count &&
+                     ir_validate_canonical_module(direct.program, direct.program->modules).error == IR_VALIDATION_NONE &&
+                     ir_prepare_canonical_module(direct.program, direct.program->modules, false).error == IR_VALIDATION_NONE;
+        retained = valid ? direct.direct_ssa.parameters_created - direct.direct_ssa.parameters_removed : UINT64_MAX;
+    }
+    return retained;
+}
+
+// A braced case body that ends in `break` leaves the block after its closing
+// brace without a predecessor, and the next case label still receives an edge
+// from it. That edge never runs. Deciding a merge from it kept one block
+// parameter per case for every local read after the label, so a braced
+// interpreter carried a merge of its whole live state into every opcode and
+// the join after the switch. The braced form must now keep exactly as many
+// parameters as the unbraced one, independent of the case count, while a
+// genuine braced fallthrough still merges both of its paths.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_dead_continuation_edges(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    // Shapes: 0 braced `break`, 1 unbraced `break`, 2 braced `break` followed
+    // by dead code that reads the locals, 3 braced genuine fallthrough.
+    u64 small[4];
+    u64 large[4];
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(small); shape += 1)
+    {
+        small[shape] = c_test_direct_ssa_retained_parameters(temporary.arena, 4, shape);
+        large[shape] = c_test_direct_ssa_retained_parameters(temporary.arena, 64, shape);
+        BUSTER_TEST(arguments, small[shape] != UINT64_MAX && large[shape] != UINT64_MAX);
+    }
+    BUSTER_TEST(arguments, small[0] == small[1] && large[0] == large[1]);
+    BUSTER_TEST(arguments, large[0] == small[0] && large[2] == small[2]);
+    BUSTER_TEST(arguments, large[2] == large[0]);
+    BUSTER_TEST(arguments, large[3] > small[3] && large[3] > large[0]);
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -21688,6 +22117,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
         {S8("0b1111111111111111111111111111111111111111111111111111111111111111ULL"), UINT64_MAX},
         {S8("18'446'744'073'709'551'615ULL"), UINT64_MAX},
         {S8("0xFF'FFu"), 65535}, {S8("0'77"), 63}, {S8("0b10'10"), 10},
+        // Overflow depends on significant digits, not digit count, and runs
+        // cross every eight-byte boundary; a blocked conversion must agree.
+        {S8("000000000000000000000000000001"), 1},
+        {S8("0x0000000000000000FFFFFFFFFFFFFFFF"), UINT64_MAX},
+        {S8("18446744073709551614"), UINT64_MAX - 1},
+        {S8("12345678"), 12345678}, {S8("123456789"), 123456789},
+        {S8("0x12345678"), UINT64_C(0x12345678)}, {S8("0x123456789abcdef0"), UINT64_C(0x123456789abcdef0)},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(valid); index += 1)
     {
@@ -21721,6 +22157,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
         S8("0b10000000000000000000000000000000000000000000000000000000000000000ULL"),
         S8("99999999999999999999999999999999999999"),
         S8("'1"), S8("0x'1"), S8("1''0"), S8("1'"), S8("1'u"), S8("0b1'2"),
+        S8("99999999999999999999"), S8("0001844674407370955161"), S8("0x1'g"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
     {
@@ -23526,6 +23963,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_control_flow);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
+    BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_dead_continuation_edges);
     BUSTER_TEST_FIXTURE(arguments, c_test_for_declaration_scopes);
     BUSTER_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
@@ -23584,6 +24022,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_static_range_designators);
+    BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_index);
+    BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_lowering);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_member_search_scratch);
     BUSTER_TEST_FIXTURE(arguments, c_test_u64_initializer_slots);
@@ -23591,9 +24031,11 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_parse_storage_growth);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_fresh_binding_publication);
+    BUSTER_TEST_FIXTURE(arguments, c_test_function_typedef_scopes);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_growth);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_tag_scope_typedef_identity);
+    BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_unique_search);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
 
