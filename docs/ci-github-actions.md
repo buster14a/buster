@@ -305,6 +305,21 @@ the exact run/head, final job attempts, observed required-step status and
 conclusion, refresh count, and any unresolved proof errors. A green job-level
 conclusion alone cannot pass the gate.
 
+A hosted runner that stops reporting cannot run its own summary or upload
+steps, so the gate also records controller-visible interruption evidence. For
+each failed job that GitHub finalized with a step still `in_progress`, it reads
+that check run's annotations (job-scoped `checks: read`, 30-second budget) and
+adds an `interruption` record to `desktop-partitions.json`: the active and
+pending steps, runner name/labels, last reported step transition, finalization
+time, `silent_seconds` between them, and the annotations. It also prints a
+`CI_RUNNER_INTERRUPTION` line to the gate's log. The classification is
+`runner-communication-lost` only when GitHub's own annotation says
+`The hosted runner lost communication with the server.`; otherwise it is
+`unterminated-step`, or `annotation-unavailable` when the read fails. The
+record never changes the gate's verdict and does not identify a root cause.
+`silent_seconds` bounds the unobserved tail; it is not compiler work. Retry
+policy is unchanged: see [cancellation recovery](ci-cancellation-recovery.md).
+
 The Android summary also exposes the existing wrapper records from
 `RUNNER_TEMP/buster-ci/android.log` in both `summary.md` / the job summary and
 `result.json`'s `android` field. Its two configuration rows show batch status,

@@ -593,6 +593,69 @@ class CompletionGateTests(unittest.TestCase):
         self.assertEqual(fetch.call_count, 3)
         sleep.assert_called_once_with(1.0)
 
+    def lost_runner_job(self, jobs):
+        target = next(job for job in jobs if job["name"] == "macOS x86-64 checks")
+        target.update(conclusion="failure", started_at="2026-09-28T15:17:35Z", completed_at="2026-09-28T16:04:37Z",
+                      runner_name="GitHub Actions 1000119276", labels=["macos-26-intel"])
+        target["steps"] = [
+            {"name": "Install verified Zig", "status": "completed", "conclusion": "success",
+             "started_at": "2026-09-28T15:17:51Z", "completed_at": "2026-09-28T15:18:13Z"},
+            {"name": "Combination matrix (Linux, macOS)", "status": "in_progress", "conclusion": None,
+             "started_at": "2026-09-28T15:18:19Z", "completed_at": None},
+            {"name": "Desktop result and reproduction", "status": "pending", "conclusion": None,
+             "started_at": None, "completed_at": None},
+            {"name": "Retain desktop logs", "status": "pending", "conclusion": None,
+             "started_at": None, "completed_at": None}]
+        return target
+
+    def test_interruption_evidence_classifies_only_api_visible_facts(self):
+        job = self.lost_runner_job(self.sample())
+        lost = [{"message": github_ci_time.RUNNER_LOST_MESSAGE + " Anything in your workflow ..."}]
+        record = github_ci_time.interruption_evidence(job, lost)
+        self.assertEqual(record["classification"], "runner-communication-lost")
+        self.assertEqual(record["active_steps"], [{"name": "Combination matrix (Linux, macOS)",
+                                                   "started_at": "2026-09-28T15:18:19Z"}])
+        self.assertEqual(record["pending_steps"], 2)
+        self.assertEqual(record["last_progress_at"], "2026-09-28T15:18:19Z")
+        self.assertEqual(record["silent_seconds"], 2778.0)
+        self.assertEqual(record["runner_name"], "GitHub Actions 1000119276")
+        self.assertEqual(github_ci_time.interruption_evidence(job, [{"message": "Process completed with exit code 1."}])
+                         ["classification"], "unterminated-step")
+        unavailable = github_ci_time.interruption_evidence(job, None, "annotation read failed: HTTP 403")
+        self.assertEqual(unavailable["classification"], "annotation-unavailable")
+        self.assertIsNone(unavailable["annotations"])
+        job["completed_at"] = None
+        self.assertIsNone(github_ci_time.interruption_evidence(job, lost)["silent_seconds"])
+        job["conclusion"] = "cancelled"
+        self.assertIsNone(github_ci_time.interruption_evidence(job, lost))
+        ordinary = self.sample()[0]
+        ordinary["conclusion"] = "failure"
+        self.assertIsNone(github_ci_time.interruption_evidence(ordinary, lost))
+
+    def test_gate_retains_interruption_evidence_without_changing_its_verdict(self):
+        jobs = self.sample()
+        target = self.lost_runner_job(jobs)
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
+        batch = {"total_count": len(jobs), "jobs": jobs}
+        lost = [{"message": github_ci_time.RUNNER_LOST_MESSAGE}]
+        for annotations, classification in ((lost, "runner-communication-lost"),
+                                            (OSError("HTTP 403"), "annotation-unavailable"),
+                                            ({"message": "unexpected"}, "annotation-unavailable")):
+            with mock.patch.object(github_ci_time, "api_get", side_effect=[run, batch, annotations]) as fetch, \
+                    mock.patch.object(github_ci_time.time, "sleep") as sleep, \
+                    mock.patch("sys.stderr") as stderr:
+                result = github_ci_time.require_jobs(args)
+            self.assertFalse(result["success"])
+            sleep.assert_not_called()
+            self.assertEqual(fetch.call_count, 3)
+            self.assertIn(f"check-runs/{target['id']}/annotations", fetch.call_args_list[2].args[1])
+            self.assertTrue(any("required job did not complete successfully" in error for error in result["errors"]))
+            record = next(job for job in result["jobs"] if job["name"] == "macOS x86-64 checks")["interruption"]
+            self.assertEqual(record["classification"], classification)
+            self.assertIn("CI_RUNNER_INTERRUPTION", "".join(call.args[0] for call in stderr.write.call_args_list))
+            self.assertTrue(all("interruption" not in job for job in result["jobs"] if job["name"] != target["name"]))
+
     def test_workflow_expands_exact_cross_product_and_keeps_gate_wiring(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         desktop = workflow.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
@@ -615,6 +678,7 @@ class CompletionGateTests(unittest.TestCase):
         self.assertIn("test_mode_matrix --config Release", native)
         aggregate = workflow.split("\n  complete:", 1)[1]
         self.assertIn("actions: read", aggregate)
+        self.assertIn("checks: read", aggregate)
         self.assertIn("github_ci_time.py require-jobs", aggregate)
         self.assertIn("Verify every desktop partition exists", aggregate)
         self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer]", aggregate)

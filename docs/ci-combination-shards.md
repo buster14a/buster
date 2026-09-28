@@ -99,7 +99,8 @@ duplicate same-attempt, foreign-run/source and future-attempt records fail.
 `CI complete` itself must be active in the current attempt. The run head SHA
 and actual checkout SHA are recorded separately (PR merge checkouts differ).
 No branch protection, check requirement, write permission or secret is changed;
-only `CI complete` adds job-scoped `actions: read` for this inventory.
+only `CI complete` adds job-scoped `actions: read` for this inventory and
+`checks: read` for the annotations of interrupted jobs.
 
 ## Reproduce
 
