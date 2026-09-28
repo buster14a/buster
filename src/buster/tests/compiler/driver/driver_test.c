@@ -14685,12 +14685,34 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // linker as the AArch64 GOT pair at both optimization levels (issue 1719).
     if (aarch64_i128_clang_available)
     {
+        // Hidden visibility keeps the absent references from becoming dynamic
+        // imports, so the image stays static and runs under qemu.
+        String8 weak_source =
+            S8("extern int weak_present __attribute__((weak, visibility(\"hidden\")));\n"
+               "extern int weak_absent __attribute__((weak, visibility(\"hidden\")));\n"
+               "extern int weak_present_array[] __attribute__((weak, visibility(\"hidden\")));\n"
+               "extern int weak_absent_array[] __attribute__((weak, visibility(\"hidden\")));\n"
+               "int main(void)\n"
+               "{\n"
+               "    int status = 0;\n"
+               "    if (!&weak_present || weak_present != 42) status |= 1;\n"
+               "    if (&weak_absent) status |= 2;\n"
+               "    if (!weak_present_array || weak_present_array[1] != 7) status |= 4;\n"
+               "    if (weak_absent_array) status |= 8;\n"
+               "    return status;\n"
+               "}\n");
+        String8 weak_definition_source = S8("int weak_present = 42;\nint weak_present_array[] = {6, 7, 8};\n");
+        String8 weak_source_path = buster_test_temporary_path(arguments->arena, S8("buster-c-aarch64-weak-refs"), S8(".c"));
+        String8 weak_definition_source_path = buster_test_temporary_path(arguments->arena, S8("buster-c-aarch64-weak-definition"), S8(".c"));
+        bool weak_sources_written = file_write(weak_source_path, BUSTER_SLICE_TO_BYTE_SLICE(weak_source)) &&
+                                    file_write(weak_definition_source_path, BUSTER_SLICE_TO_BYTE_SLICE(weak_definition_source));
+        BUSTER_TEST(arguments, weak_sources_written);
         String8 weak_levels[] = {S8("-O0"), S8("-O2")};
         String8 weak_definition_path = buster_test_temporary_path(arguments->arena, S8("buster-c-aarch64-weak-definition"), S8(".o"));
         String8 weak_start_path = buster_test_temporary_path(arguments->arena, S8("buster-c-aarch64-weak-start"), S8(".o"));
         String8 weak_compile_definition[] = {
             S8("clang"), S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-fno-pic"), S8("-ffreestanding"), S8("-g0"), S8("-c"), S8("-o"),
-            weak_definition_path, S8("tests/basic_c_aarch64_weak_refs_definition.c"),
+            weak_definition_path, weak_definition_source_path,
         };
         String8 weak_compile_start[] = {
             S8("clang"), S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-g0"), S8("-c"), S8("-o"), weak_start_path,
@@ -14704,7 +14726,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(weak_compile_definition), (SliceString8){0}, (SliceString8){0}, weak_options);
         ProcessSpawnResult weak_start_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(weak_compile_start), (SliceString8){0}, (SliceString8){0}, weak_options);
-        bool weak_support_compiled = weak_definition_spawn.handle &&
+        bool weak_support_compiled = weak_sources_written && weak_definition_spawn.handle &&
                                      os_process_wait_sync(arguments->arena, weak_definition_spawn).result == PROCESS_RESULT_SUCCESS &&
                                      weak_start_spawn.handle && os_process_wait_sync(arguments->arena, weak_start_spawn).result == PROCESS_RESULT_SUCCESS;
         BUSTER_TEST(arguments, weak_support_compiled);
@@ -14714,7 +14736,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 weak_image_path = buster_test_temporary_path(arguments->arena, S8("buster-c-aarch64-weak-refs"), S8(".elf"));
             String8 weak_compile[] = {
                 S8("clang"), S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-fno-pic"), weak_levels[level], S8("-ffreestanding"),
-                S8("-g0"), S8("-c"), S8("-o"), weak_object_path, S8("tests/basic_c_aarch64_weak_refs.c"),
+                S8("-g0"), S8("-c"), S8("-o"), weak_object_path, weak_source_path,
             };
             ProcessSpawnResult weak_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(weak_compile), (SliceString8){0}, (SliceString8){0}, weak_options);
