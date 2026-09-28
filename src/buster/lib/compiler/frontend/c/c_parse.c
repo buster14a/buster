@@ -7928,6 +7928,27 @@ BUSTER_C_SHARED bool c_parse_c23_attribute_at(CPreprocessResult preprocess, u32 
     return true;
 }
 
+BUSTER_C_SHARED u32 c_parse_type_name_attribute_start(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u32 result = start;
+    for (u32 index = start; index + 1 < end; index += 1)
+    {
+        String8 spelling = preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]) : (String8){0};
+        bool is_typeof = string_equal(spelling, S8("typeof")) || string_equal(spelling, S8("__typeof__")) || string_equal(spelling, S8("__typeof")) ||
+                         string_equal(spelling, S8("typeof_unqual"));
+        if (is_typeof && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_parse_matching_delimiter(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            if (close < end)
+            {
+                result = close + 1;
+                index = close;
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_C_SHARED u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 index, u32 end)
 {
     for (;;)
@@ -10083,6 +10104,12 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
     u32 operand_end = frame->close - 1;
     CTypeId type = machine->result_valid ? machine->result_type : C_TYPE_ID_INVALID;
     u32 type_index = machine->result_index;
+    if (frame->stage == C_TYPE_PARSE_STAGE_CHILD && type.value != C_ID_UNDERLYING_INVALID)
+    {
+        type_index = c_parse_skip_attributes(preprocess, type_index, operand_end);
+        type = c_parse_apply_vector_attribute(result, preprocess, frame->scope, type, c_parse_type_name_attribute_start(preprocess, operand_start, type_index),
+                                              type_index);
+    }
     if (frame->stage == C_TYPE_PARSE_STAGE_CHILD && type.value != C_ID_UNDERLYING_INVALID && type_index < operand_end)
     {
         type = c_parse_pointer_chain(result, preprocess, type, &type_index, operand_end);
@@ -10997,7 +11024,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_type_name_specifiers(CTypeParseMachine* machin
     if (type.value != C_ID_UNDERLYING_INVALID)
     {
         *declarator_start = c_parse_skip_attributes(preprocess, *declarator_start, end);
-        type = c_parse_apply_vector_attribute(result, preprocess, scope, type, start, *declarator_start);
+        type = c_parse_apply_vector_attribute(result, preprocess, scope, type, c_parse_type_name_attribute_start(preprocess, start, *declarator_start),
+                                              *declarator_start);
     }
     return type;
 }
@@ -14241,23 +14269,6 @@ BUSTER_C_SHARED bool c_parse_type_start_token(CParseResult* result, CPreprocessR
     return c_parse_type_start_token_lookup(result, preprocess, scope, token, &type_word, &entity);
 }
 
-// The end of the GNU attribute list starting at `index`, or `index` itself
-// when none starts there. An attribute list inside an expression -- in the
-// type name of a cast, a sizeof or an _Alignof operand -- names attributes,
-// not entities, so the use binders step over it instead of resolving
-// `vector_size` or `aligned` as identifiers.
-BUSTER_C_INTERNAL u32 c_parse_gnu_attribute_list_end(CPreprocessResult preprocess, u32 index, u32 end)
-{
-    u32 result = index;
-    if (index + 1 < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
-        c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index], C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE) | C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE_SHORT)) &&
-        c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-    {
-        result = c_parse_skip_attributes(preprocess, index, end);
-    }
-    return result;
-}
-
 BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 token_index,
                                                       CEntityId entity);
 
@@ -14365,10 +14376,72 @@ BUSTER_C_INTERNAL u32 c_parse_builtin_offsetof_end(CPreprocessResult preprocess,
     return index;
 }
 
+// Where a use binder resumes when `index` opens a GNU attribute list, or is
+// the `*resume` point at which a list's items continue after an argument
+// list; `index` itself otherwise.  An attribute list inside an expression --
+// in the type name of a cast, a sizeof or an _Alignof operand -- names
+// attributes, not entities, so their names are stepped over.  The arguments
+// of `vector_size` and `aligned` are constant expressions that may name
+// block-scope objects: the binder resumes at their `(` to bind them, and
+// `*resume` records the index after their `)`.  Every other attribute's
+// arguments -- format archetypes, mode names, cleanup functions -- are
+// stepped over with its name.
+BUSTER_C_INTERNAL u32 c_parse_gnu_attribute_names_end(CPreprocessResult preprocess, u32 index, u32 end, u32* resume)
+{
+    u32 cursor = index;
+    bool head = index + 2 < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
+                c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index], C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE) | C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE_SHORT)) &&
+                c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_LEFT_PARENTHESIS);
+    if (head || (index < end && index == *resume))
+    {
+        cursor = head ? index + 3 : index;
+        *resume = UINT32_MAX;
+        bool items = true;
+        while (items && cursor < end)
+        {
+            CToken token = preprocess.tokens[cursor];
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+            {
+                cursor += 1;
+            }
+            else if (token.kind == C_TOKEN_IDENTIFIER)
+            {
+                String8 name = c_token_spelling(preprocess.spelling_base, token);
+                cursor += 1;
+                if (cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    u32 close = c_parse_builtin_offsetof_end(preprocess, cursor, end);
+                    if (c_parse_vector_size_word(name) || c_parse_aligned_attribute_word(name))
+                    {
+                        *resume = close;
+                        items = false;
+                    }
+                    else
+                    {
+                        cursor = close;
+                    }
+                }
+            }
+            else
+            {
+                if (cursor + 1 < end && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                    c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                {
+                    cursor += 2;
+                }
+                items = false;
+            }
+        }
+    }
+    return cursor;
+}
+
 BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start,
                                                               u32 end)
 {
     u32 bracket_depth = 0;
+    u32 attribute_resume = UINT32_MAX;
     for (u32 token_index = start; token_index < end; token_index += 1)
     {
         CToken token = preprocess.tokens[token_index];
@@ -14381,7 +14454,7 @@ BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(Arena* arena, CParse
             token_index = c_parse_builtin_offsetof_end(preprocess, token_index + 1, end) - 1;
             continue;
         }
-        u32 attribute_end = c_parse_gnu_attribute_list_end(preprocess, token_index, end);
+        u32 attribute_end = c_parse_gnu_attribute_names_end(preprocess, token_index, end, &attribute_resume);
         if (attribute_end != token_index)
         {
             token_index = attribute_end - 1;
@@ -14886,6 +14959,7 @@ BUSTER_C_INTERNAL bool c_parse_statement_expression_at(CPreprocessResult preproc
 BUSTER_C_INTERNAL void c_parse_bind_auto_initializer_identifiers(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                                     u32 start, u32 end)
 {
+    u32 attribute_resume = UINT32_MAX;
     for (u32 use_index = start; use_index < end; use_index += 1)
     {
         CToken use = preprocess.tokens[use_index];
@@ -14901,7 +14975,7 @@ BUSTER_C_INTERNAL void c_parse_bind_auto_initializer_identifiers(Arena* arena, C
             use_index = statement_group_end;
             continue;
         }
-        u32 attribute_end = c_parse_gnu_attribute_list_end(preprocess, use_index, end);
+        u32 attribute_end = c_parse_gnu_attribute_names_end(preprocess, use_index, end, &attribute_resume);
         if (attribute_end != use_index)
         {
             use_index = attribute_end - 1;
@@ -15695,6 +15769,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 }
             }
         }
+        u32 attribute_resume = UINT32_MAX;
         for (u32 use_index = initializer_start; use_index < segment_end; use_index += 1)
         {
             CToken use = preprocess.tokens[use_index];
@@ -15723,7 +15798,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 use_index = aggregate_end;
                 continue;
             }
-            u32 attribute_end = c_parse_gnu_attribute_list_end(preprocess, use_index, segment_end);
+            u32 attribute_end = c_parse_gnu_attribute_names_end(preprocess, use_index, segment_end, &attribute_resume);
             if (attribute_end != use_index)
             {
                 use_index = attribute_end - 1;
@@ -16357,6 +16432,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
     result->binding_scope = scope;
     u32 body_end = body_start + body_token_count;
     u32 index = body_start;
+    u32 gnu_attribute_resume = UINT32_MAX;
     bool statement_start = true;
     u32 asm_goto_label_start = UINT32_MAX;
     u32 asm_goto_label_end = UINT32_MAX;
@@ -16629,7 +16705,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                 continue;
             }
         }
-        u32 gnu_attribute_end = c_parse_gnu_attribute_list_end(preprocess, index, body_end);
+        u32 gnu_attribute_end = c_parse_gnu_attribute_names_end(preprocess, index, body_end, &gnu_attribute_resume);
         if (gnu_attribute_end != index)
         {
             index = gnu_attribute_end;
