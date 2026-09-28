@@ -30,9 +30,11 @@ accept `TERM` or `KILL` only.
 
 The template retains root UID with empty capability sets. Its primary group
 is `buster-bench` and its supplementary group is `buster-bench-candidate`.
-Systemd may also retain root's group 0 in the effective supplementary set;
-the server permits only group 0 and those two fixed groups and requires the
-candidate group to be present. Read back the effective set during review.
+The broker's own request-time check tolerates root's group 0 besides those
+two fixed groups and requires the candidate group. The entry gate below is
+stricter: it admits exactly the service and candidate groups, which is what
+systemd grants with this template (Attempt 23's live readback showed
+`Groups: 65000 65001`). Read back the effective set during review.
 The broker can traverse the service-group-only queue, lease and results
 parents and the candidate-group workspace ancestry. Worker records are
 `0440` service:service, the stable lease is `0640` service:service, and each
@@ -41,14 +43,16 @@ directory components with `O_PATH`, checks the exact owner/group/mode, and
 reads only the named records and manifests. Candidate and runner accounts
 have neither service-group membership nor access to the socket.
 
-### Prospective broker entry enforcement (#1162)
+### Broker entry enforcement (#1162)
 
-`broker_entry_gate.c` is the source component for the prospective same-PID
-entry criterion recorded in #1162. `bench_service_broker` builds the separate
-static `build/bench-service-tools/broker-entry-gate`; `self-test` also runs its
-component regressions. The deployed unit template still directly starts the
-broker. This component is not an installation release or service-readiness
-verdict. The payload credential gate below remains unchanged.
+`broker_entry_gate.c` implements the same-PID entry criterion selected in
+#1162 (comment 5858483525). `bench_service_broker` builds the separate static
+`build/bench-service-tools/broker-entry-gate`; `self-test` also runs its
+component regressions. Install it root-owned `0755` as
+`/usr/local/libexec/buster-bench-broker-entry-gate`: it is the template's
+only `ExecStart`, and it `fexecve`s the installed broker's fixed
+`serve-connection` entry in the same PID. The payload credential gate below
+remains unchanged.
 
 The new entry executable accepts no arguments. It reads the canonical numeric
 account receipt and the local `/etc/passwd`, `/etc/group` and `/etc/nsswitch.conf`
@@ -61,10 +65,11 @@ group entry for `buster-bench`, `buster-bench-candidate` and
 `buster-github-runner`. Duplicate dedicated names or a different name using
 any dedicated UID/GID fail before PASS. It also checks all four inherited root
 UIDs and service GIDs. Its complete expected
-supplementary set is **exactly** group 0, the receipt's service GID and its
-candidate GID, once each, in any kernel order. Future unit integration must
-explicitly pin `SupplementaryGroups=root buster-bench buster-bench-candidate`;
-it must not silently inherit whichever subset an NSS configuration produces.
+supplementary set is **exactly** the receipt's service GID and its candidate
+GID, once each, in any kernel order; root's group 0 or any other group fails.
+The template pins `Group=buster-bench` and
+`SupplementaryGroups=buster-bench-candidate`; a changed NSS membership that
+adds a group is rejected before PASS rather than silently inherited.
 Effective NSS `passwd` and `group` directives must each occur once and contain
 exactly `files` or `files systemd` in that order, with default success-return
 semantics and no inline comment; `[SUCCESS=merge]`, action overrides, cache or additional sources
@@ -119,21 +124,26 @@ hashes. A mismatched file or policy fails the entire attempt. Seccomp mode 2 doe
 filter. Trusted installation and the verified immutable systemd filter are
 mandatory parts of the claim, as are the existing namespace and mount policy.
 
-Before enabling this component, finish the installation manifest and unit
-integration, strict per-instance manager/gate/broker/outcome reconciliation,
-and independent exact-source review (including absence of later broker
-credential, namespace, mount and parent-FD0 changes). Missing, duplicate or
-inconsistent evidence must reject the whole attempt. The fresh disposable
-real-systemd full-service proof must cover every required positive operation
-and negative mutation, including UID-only and runner-GID rebinding with zero
-PASS/BEGIN/manager effect, duplicate names/aliases, NSS actions/cache,
-groups, capability sets,
-NNP/seccomp/mount weakening, FD0, ELF tampering and missing evidence, with
-zero broker BEGIN/manager effects for rejected entry. Component fixtures
-use synthetic capability queries and a real socketpair with a synthetic
-local pathname; they do not prove PID1's descriptor inheritance or a live
-systemd sandbox. Retain external process captures wherever available and
-independently replay the full raw attempt. Attempt23 remains failed.
+Acceptance evidence for every activated instance is the exact join checked by
+`.github/scripts/issue1162_broker_entry_evidence.py`: PID 1's start job and
+terminal record for one invocation; one observer lifecycle whose manager
+signals report the same MainPID, then removal or a completed retained-failed
+`systemctl show` naming the same invocation and PID; exactly one gate PASS
+whose trusted journald PID/unit/invocation/stream equal the broker's, whose
+start ticks and FD0 equal the broker diagnostic and which precedes the broker's
+first record; its installed file tuples, hashes and accounts equal to the root
+readback taken outside the unit before activation and after the job; and one
+complete allowlisted broker diagnostic whose outcome agrees with PID 1.
+Missing, duplicate or inconsistent evidence rejects the whole attempt.
+External process captures are retained and every complete one must agree with
+the joined identity; they are no longer required to win each millisecond race.
+Rejected entry is proven by the disposable real-systemd component workflow
+`broker-entry-gate-systemd.yml`: account/receipt rebinding, groups (including
+root's group 0), capability sets, NNP/seccomp and mount weakening, FD0, ELF
+tampering, NSS actions/cache and a failed PASS send each produce zero broker
+entry. Component fixtures use a synthetic broker, and synthetic capability
+queries in the unit tests; the full-service slice exercises the real broker.
+Attempt 23 remains failed; this criterion does not upgrade it.
 
 ### Effective credentials before each transient payload
 

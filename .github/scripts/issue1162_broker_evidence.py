@@ -53,8 +53,11 @@ JOURNAL_UNIT_FIELDS = ("UNIT", "_SYSTEMD_UNIT", "OBJECT_SYSTEMD_UNIT", "COREDUMP
 DATA_FIELDS = ("stat", "status", "mountinfo", "cgroup", "exe", "socket")
 DATA_LIMITS = {"stat": 4096, "status": 16384, "mountinfo": 131072,
                "cgroup": 4096, "exe": 767, "socket": 255}
+# The broker unit now enters through the static same-PID entry gate, so the
+# executor -> gate -> broker transition is also a known pre-exec state.
 PREEXEC_EXECUTABLES = frozenset(("/lib/systemd/systemd-executor",
-                                 "/usr/lib/systemd/systemd-executor"))
+                                 "/usr/lib/systemd/systemd-executor",
+                                 "/usr/local/libexec/buster-bench-broker-entry-gate"))
 UNIT_RE = re.compile(
     r"buster-bench-systemd-broker@(?P<counter>0|[1-9][0-9]*)-"
     r"(?P<peer_pid>[1-9][0-9]*)-(?P<peer_uid>0|[1-9][0-9]*)\.service\Z")

@@ -14,6 +14,7 @@ workspace_observer_helper="$repo_root/.github/scripts/issue1162_workspace_observ
 manager_denial_helper="$repo_root/.github/scripts/issue1162_manager_denial_probe.py"
 broker_observer_helper="$repo_root/.github/scripts/issue1162_broker_observer.py"
 broker_evidence_helper="$repo_root/.github/scripts/issue1162_broker_evidence.py"
+broker_entry_helper="$repo_root/.github/scripts/issue1162_broker_entry_evidence.py"
 frozen_tree_helper="$repo_root/.github/scripts/issue1162_frozen_tree_evidence.py"
 payload="$RUNNER_TEMP/issue1162-install"
 guest="issue1162-exact-${GITHUB_RUN_ID:?}"
@@ -28,6 +29,7 @@ python3 "$workspace_observer_helper" --self-test | tee "$evidence/workspace-obse
 python3 "$manager_denial_helper" --self-test | tee "$evidence/manager-denial-self-test.txt"
 python3 "$broker_observer_helper" --self-test | tee "$evidence/broker-observer-self-test.txt"
 python3 "$broker_evidence_helper" --self-test | tee "$evidence/broker-evidence-self-test.txt"
+python3 "$broker_entry_helper" --self-test | tee "$evidence/broker-entry-evidence-self-test.txt"
 python3 "$frozen_tree_helper" self-test | tee "$evidence/frozen-tree-self-test.txt"
 python3 "$repo_root/.github/scripts/issue1162_ancestor_preflight_test.py" | tee "$evidence/ancestor-preflight-self-test.txt"
 observer_pid=
@@ -245,6 +247,10 @@ install -m 0755 build/bench-service-tools/systemd-broker "$payload/binaries/bust
 install -m 0755 build/bench-service-tools/credential-gate "$payload/binaries/buster-bench-credential-gate"
 readelf -W -l "$payload/binaries/buster-bench-credential-gate" | tee "$evidence/credential-gate-elf.txt"
 if grep -Eq 'INTERP|DYNAMIC|GNU_STACK.*RWE' "$evidence/credential-gate-elf.txt"; then exit 1; fi
+# The broker unit's first ExecStart: the static same-PID entry gate (#1162).
+install -m 0755 build/bench-service-tools/broker-entry-gate "$payload/binaries/buster-bench-broker-entry-gate"
+readelf -W -l "$payload/binaries/buster-bench-broker-entry-gate" | tee "$evidence/broker-entry-gate-elf.txt"
+if grep -Eq 'INTERP|DYNAMIC|GNU_STACK.*RWE' "$evidence/broker-entry-gate-elf.txt"; then exit 1; fi
 install -m 0755 build/bench-service-tools/systemd-broker-live-test "$payload/binaries/systemd-broker-live-test"
 install -m 0755 build/throughput "$payload/binaries/buster-bench-throughput"
 # The existing root-only cleanup regression owns fresh /tmp fixtures and is
@@ -265,7 +271,7 @@ sha256sum "$stage_observer_helper" "$payload/issue1162_stage_observer.py" | tee 
 sha256sum "$workspace_observer_helper" "$payload/issue1162_workspace_observer.py" | tee "$evidence/workspace-observer-helper-sha256.txt"
 sha256sum "$manager_denial_helper" "$payload/issue1162_manager_denial_probe.py" | tee "$evidence/manager-denial-helper-sha256.txt"
 sha256sum "$broker_observer_helper" "$payload/issue1162_broker_observer.py" | tee "$evidence/broker-observer-helper-sha256.txt"
-sha256sum "$broker_evidence_helper" "$frozen_tree_helper" | tee "$evidence/offline-evidence-helpers-sha256.txt"
+sha256sum "$broker_evidence_helper" "$broker_entry_helper" "$frozen_tree_helper" | tee "$evidence/offline-evidence-helpers-sha256.txt"
 clang --version | head -1 | tee "$evidence/toolchains.txt"
 cmake --version | head -1 | tee -a "$evidence/toolchains.txt"
 ninja --version | tee -a "$evidence/toolchains.txt"
@@ -277,7 +283,8 @@ for tool in clang cmake ninja; do
 done >"$evidence/build-tool-dependencies.txt" 2>&1
 for binary in "$payload"/binaries/* "$payload/cleanup-identity-tests"; do
   printf 'binary=%s\n' "$binary"
-  if [[ "$binary" == "$payload/binaries/buster-bench-credential-gate" ]]; then
+  if [[ "$binary" == "$payload/binaries/buster-bench-credential-gate" ||
+        "$binary" == "$payload/binaries/buster-bench-broker-entry-gate" ]]; then
     printf 'static-gate: no dynamic loader or shared-library dependencies\n'
     readelf -W -l "$binary"
   else
@@ -375,7 +382,8 @@ dpkg-query -W -f='${Package} ${Version}\n'
 for executable in /usr/local/libexec/buster-bench-* /usr/local/libexec/systemd-broker-live-test /root/issue1162-install/cleanup-identity-tests /usr/bin/clang /usr/bin/cmake /usr/bin/ninja; do
   printf 'runtime-executable=%s resolved=%s\n' "$executable" "$(readlink -f "$executable")"
   sha256sum "$executable"
-  if [ "$executable" = /usr/local/libexec/buster-bench-credential-gate ]; then
+  if [ "$executable" = /usr/local/libexec/buster-bench-credential-gate ] ||
+     [ "$executable" = /usr/local/libexec/buster-bench-broker-entry-gate ]; then
     headers="$(readelf -W -l "$executable")"
     printf '%s\n' "$headers"
     if printf '%s\n' "$headers" | grep -Eq 'INTERP|DYNAMIC|GNU_STACK.*RWE'; then exit 1; fi
@@ -521,6 +529,39 @@ assert int(raw[raw.rfind(")")+2:].split()[19]) == record["observer_start_ticks"]
 print(json.dumps(record, sort_keys=True))
 BROKER_READY
 kill -0 "$broker_observer_pid"
+entry_readback() {
+  # Root readback outside every broker unit: exact tuples and bytes that each
+  # gate PASS must repeat. Taken before activation and after the job finishes.
+  sudo docker exec -i "$guest" python3 - <<'ENTRY_READBACK' >"$evidence/entry-readback-$1.json"
+import hashlib, json, os
+paths = {"gate": "/usr/local/libexec/buster-bench-broker-entry-gate",
+         "broker": "/usr/local/libexec/buster-bench-systemd-broker",
+         "receipt": "/etc/buster-bench/systemd-broker-accounts.identity",
+         "passwd": "/etc/passwd", "group": "/etc/group", "nsswitch": "/etc/nsswitch.conf"}
+files = {}
+for name, path in paths.items():
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        data = b""
+        while chunk := os.read(fd, 1 << 20):
+            data += chunk
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    assert (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) == \
+        (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) and len(data) == after.st_size
+    files[name] = {"path": path, "sha256": hashlib.sha256(data).hexdigest(), "uid": after.st_uid,
+                   "gid": after.st_gid, "mode": after.st_mode, "nlink": after.st_nlink, "bytes": len(data),
+                   "tuple": "%d:%d:%d:%d:%d:%d:%d" % (after.st_dev, after.st_ino, after.st_size,
+                            after.st_mtime_ns // 10**9, after.st_mtime_ns % 10**9,
+                            after.st_ctime_ns // 10**9, after.st_ctime_ns % 10**9)}
+print(json.dumps({"schema": "issue1162-broker-entry-readback-v1", "files": files}, sort_keys=True))
+ENTRY_READBACK
+  cat "$evidence/entry-readback-$1.json"
+}
+entry_readback before
+sudo docker exec "$guest" cat /etc/nsswitch.conf | tee "$evidence/guest-nsswitch.conf"
 sudo docker exec "$guest" systemctl start buster-bench-systemd-broker.socket
 sudo docker exec "$guest" systemctl start buster-bench.service
 sudo docker exec "$guest" systemctl show buster-bench.service -p ActiveState -p MainPID -p ControlGroup -p RestrictSUIDSGID -p NoNewPrivileges -p CapabilityBoundingSet | tee "$evidence/service-effective.txt"
@@ -672,7 +713,9 @@ cat "$evidence/frozen-tree-reconciliation.log"
 # requires the source's reviewed durable-before-next-launch ordering plus
 # complete independent equality; a late external scan is still reported late.
 broker_valid=false
-if collect_broker_observer && capture_broker_journal; then
+entry_readback_after=false
+if entry_readback after; then entry_readback_after=true; fi
+if [[ "$entry_readback_after" == true ]] && collect_broker_observer && capture_broker_journal; then
   python3 - "$evidence" "$payload" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$job" "$token" "$subject" "$subject_tree" <<'BROKER_INPUTS'
 import hashlib, json, pathlib, sys
 root, payload = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
@@ -719,22 +762,40 @@ for index in range(8):
     overlap.append(row)
 (root / "broker-overlap.jsonl").write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in overlap))
 BROKER_INPUTS
-  if python3 "$broker_evidence_helper" --journal-jsonl "$evidence/broker-journal.jsonl" \
+  # Retained, not required: the earlier every-broker external /proc consumer.
+  # Its components are reported; the millisecond race it lost in Attempt 23
+  # is replaced by the #1162 same-PID entry criterion below.
+  set +e
+  python3 "$broker_evidence_helper" --journal-jsonl "$evidence/broker-journal.jsonl" \
     --observer-dir "$evidence/broker-observer-artifacts" --expected-json "$evidence/broker-expected.json" \
     --overlap-jsonl "$evidence/broker-overlap.jsonl" >"$evidence/broker-reconciliation.json" \
-    2>"$evidence/broker-reconciliation-stderr.txt"; then
-    if python3 - "$evidence/broker-reconciliation.json" "$evidence/broker-overlap.jsonl" "$broker_observer_status" <<'BROKER_VERDICT'
-import json, pathlib, sys
-value = json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert all(value[key] is True for key in ("diagnostic_complete", "manager_capture_complete", "external_proc_complete"))
-assert int(sys.argv[3]) == 0
-assert not pathlib.Path(sys.argv[2]).read_bytes() or value["overlap_complete"] is True
-BROKER_VERDICT
-    then broker_valid=true; fi
+    2>"$evidence/broker-reconciliation-stderr.txt"
+  printf 'external_consumer_exit=%s\n' "$?" | tee "$evidence/broker-reconciliation-exit.txt"
+  set -e
+  python3 - "$evidence" "$payload" <<'ENTRY_INPUTS'
+import hashlib, json, pathlib, sys
+root, payload = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+digest = lambda name: hashlib.sha256((payload / "binaries" / name).read_bytes()).hexdigest()
+(root / "broker-entry-expected.json").write_text(json.dumps({
+    "schema": "issue1162-broker-entry-expectation-v1",
+    "gate_sha256": digest("buster-bench-broker-entry-gate"),
+    "broker_sha256": digest("buster-bench-systemd-broker"),
+    "accounts": [65000, 65000, 65001, 65001, 65002, 65002],
+    "readbacks": [str(root / "entry-readback-before.json"), str(root / "entry-readback-after.json")]},
+    sort_keys=True) + "\n")
+ENTRY_INPUTS
+  if python3 "$broker_entry_helper" --journal-jsonl "$evidence/broker-journal.jsonl" \
+    --observer-dir "$evidence/broker-observer-artifacts" --expected-json "$evidence/broker-expected.json" \
+    --entry-expected-json "$evidence/broker-entry-expected.json" \
+    --overlap-jsonl "$evidence/broker-overlap.jsonl" >"$evidence/broker-entry-reconciliation.json" \
+    2>"$evidence/broker-entry-reconciliation-stderr.txt"; then
+    broker_valid=true
   fi
+  cat "$evidence/broker-entry-reconciliation.json"
+  cat "$evidence/broker-reconciliation.json"
 fi
 if [[ "$probe_valid" != true || "$terminal_valid" != true || "$frozen_tree_valid" != true || "$broker_valid" != true || "$manager_denial_valid" != true ]]; then
   echo "SERVICE_RESULT_SUCCEEDED source=$subject job=$job token=$token; live_probe_valid=$probe_valid terminal_proof_valid=$terminal_valid legacy_stage_observer_valid=$observer_valid frozen_tree_reconciled=$frozen_tree_valid broker_reconciled=$broker_valid manager_denial_valid=$manager_denial_valid; full acceptance pending"
   exit 1
 fi
-echo "NORMAL_PATH_EXECUTION_PASS source=$subject job=$job token=$token; live, terminal, independent frozen-tree reconciliation, every-broker reconciliation and bare-account manager probes passed; legacy_stage_observer_valid=$observer_valid remains separately reported; full acceptance pending"
+echo "NORMAL_PATH_EXECUTION_PASS source=$subject job=$job token=$token; live, terminal, independent frozen-tree reconciliation, per-activation manager/observer/gate/broker/outcome reconciliation and bare-account manager probes passed; legacy_stage_observer_valid=$observer_valid remains separately reported; full acceptance pending"

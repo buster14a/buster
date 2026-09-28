@@ -54,8 +54,11 @@ HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 UNIQUE_BUS_NAME = re.compile(r":[0-9]+\.[0-9]+\Z")
 DECIMAL = re.compile(r"(?:0|[1-9][0-9]{0,19})\Z")
 FDINFO_INODE = re.compile(rb"^ino:\s*([0-9]+)\s*$", re.MULTILINE)
+# The broker unit now enters through the static same-PID entry gate, so the
+# executor -> gate -> broker transition is also a known pre-exec state.
 PREEXEC_EXECUTABLES = frozenset(("/lib/systemd/systemd-executor",
-                                  "/usr/lib/systemd/systemd-executor"))
+                                  "/usr/lib/systemd/systemd-executor",
+                                  "/usr/local/libexec/buster-bench-broker-entry-gate"))
 BROKER_EXECUTABLE = "/usr/local/libexec/buster-bench-systemd-broker"
 SUPERSEDABLE_CAPTURE_STATES = frozenset(("transient_proc_disappeared",
                                          "transient_proc_interrupted",
