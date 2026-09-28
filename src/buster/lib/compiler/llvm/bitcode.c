@@ -9,8 +9,9 @@
 //
 // Collection-time lookups are hashed so they stay O(1) expected as the module
 // grows: llvm_bc_add_constant deduplicates through constant_slots, and
-// llvm_bc_name_available checks link names through name_slots. Both indexes
-// only locate rows; pool and entity order, and therefore value IDs, remain
+// llvm_bc_name_available checks link names through name_slots, and
+// llvm_bc_find_integer_count reads integer_count_functions. These indexes only
+// locate rows; pool and entity order, and therefore value IDs, remain
 // insertion order.
 
 enum
@@ -149,6 +150,9 @@ enum
 // Initial slot count of the open-addressed constant and name indexes. Both
 // stay power-of-two sized and at most half full.
 #define LLVM_BC_INDEX_MIN_CAPACITY 64
+// Scalar ctlz/cttz/ctpop declarations, one per operation and width 1..64.
+#define LLVM_BC_INTEGER_COUNT_KIND_COUNT 3
+#define LLVM_BC_INTEGER_COUNT_MAX_WIDTH 64
 
 typedef struct LlvmBcBuffer LlvmBcBuffer;
 struct LlvmBcBuffer
@@ -273,8 +277,6 @@ struct LlvmBcFunction
     u32 final_value_id;
     bool declaration;
     bool synthetic;
-    IrUnaryOperation intrinsic_operation;
-    u32 intrinsic_width;
 };
 
 typedef struct LlvmBcString LlvmBcString;
@@ -345,6 +347,7 @@ struct LlvmBcContext
     u8* symbol_seen;
     u32 module_value_count;
     u32 va_intrinsic_ids[LLVM_BC_VA_INTRINSIC_COUNT];
+    u32 integer_count_functions[LLVM_BC_INTEGER_COUNT_KIND_COUNT][LLVM_BC_INTEGER_COUNT_MAX_WIDTH];
     bool constants_locked;
 };
 
@@ -1662,17 +1665,22 @@ static bool llvm_bc_is_integer_count(IrUnaryOperation operation)
            operation == IR_UNARY_INTEGER_POPULATION_COUNT;
 }
 
+// integer_count_functions holds one declaration per operation/width, as a
+// function index plus one; zero means none has been declared yet.
+BUSTER_CT_CHECK(IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS + 1 &&
+                IR_UNARY_INTEGER_POPULATION_COUNT == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS + LLVM_BC_INTEGER_COUNT_KIND_COUNT - 1);
+static u32* llvm_bc_integer_count_slot(LlvmBcContext* context, IrUnaryOperation operation, u32 width)
+{
+    return &context->integer_count_functions[operation - IR_UNARY_INTEGER_COUNT_LEADING_ZEROS][width - 1];
+}
+
 static LlvmBcFunction* llvm_bc_find_integer_count(LlvmBcContext* context, IrUnaryOperation operation, u32 width)
 {
     LlvmBcFunction* result = 0;
-    for (u32 index = 0; index < context->function_count; index += 1)
+    if (llvm_bc_is_integer_count(operation) && width && width <= LLVM_BC_INTEGER_COUNT_MAX_WIDTH)
     {
-        LlvmBcFunction* function = context->functions + index;
-        if (function->synthetic && function->intrinsic_operation == operation && function->intrinsic_width == width)
-        {
-            result = function;
-            break;
-        }
+        u32 function = *llvm_bc_integer_count_slot(context, operation, width);
+        result = function ? context->functions + (function - 1) : 0;
     }
     return result;
 }
@@ -1708,9 +1716,9 @@ static bool llvm_bc_add_integer_count(LlvmBcContext* context, IrFunction* functi
             context->functions[context->function_count] = (LlvmBcFunction){
                 .name = name, .canonical_type = IR_TYPE_ID_INVALID, .value_id = LLVM_BC_INVALID_ID,
                 .type_id = function_type, .declaration = true, .synthetic = true,
-                .intrinsic_operation = instruction->unary_operation, .intrinsic_width = width,
             };
             llvm_bc_register_name(context, name, context->function_count | LLVM_BC_NAME_FUNCTION);
+            *llvm_bc_integer_count_slot(context, instruction->unary_operation, width) = context->function_count + 1;
             context->function_count += 1;
         }
     }
