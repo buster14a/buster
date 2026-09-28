@@ -26,7 +26,9 @@ jobs:
           start = source.index('          from pathlib import Path\n')
           end = source.index('\n          PY\n', start)
           lines = source[start:end].splitlines()
-          Path('/tmp/apply_1732.py').write_text('\n'.join(line[10:] for line in lines) + '\n')
+          Path('/tmp/apply_1732.py').write_text(
+              '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
+          )
           PY
           python3 /tmp/apply_1732.py
           rm .github/workflows/apply-1732.yml .github/apply-1732-source.yml
