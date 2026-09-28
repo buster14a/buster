@@ -280,6 +280,12 @@ BUSTER_C_EXTERN void c_parse_position_index_ensure(CParseResult* result, CPrepro
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                     String8 name, u32 token_index);
 BUSTER_C_EXTERN bool c_parse_result_reserve_types(CParseResult* result, u32 additional);
+BUSTER_C_EXTERN CTypeId c_parse_aggregate_unique(CParseResult* result, CTypeKind kind, String8 tag, bool* decided);
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+#define C_AGGREGATE_TAG_SEARCH_COUNT(lookup) do { if (lookup) { (lookup)->lowering_search_type_count += 1; } } while (0)
+#else
+#define C_AGGREGATE_TAG_SEARCH_COUNT(lookup) ((void)0)
+#endif
 BUSTER_C_EXTERN void c_type_parse_rollback(CTypeParseMachine* machine, CParseResult* result,
                                              CParseResult checkpoint, u32 mutation_mark);
 BUSTER_C_EXTERN bool c_initializer_consume_separator(CToken* tokens, u32 limit, u32* cursor, u64 next_index);
