@@ -8,7 +8,7 @@ set -euo pipefail
 REPO=${1:?usage: bq880_d2.sh /path/to/clean-425b8b5a-checkout SCRATCH_DIR}
 D=${2:?usage: bq880_d2.sh /path/to/clean-425b8b5a-checkout SCRATCH_DIR}
 BASE=ade6ac4b6ecb21f30b61b656439bac476c145e2f
-test "$(git -C "$REPO" rev-parse HEAD)" = 425b8b5ac571a3320681f0394de61a82cbc42e5f
+test "$(git -C "$REPO" rev-parse HEAD)" = "${BQ_D2_EXPECT:-425b8b5ac571a3320681f0394de61a82cbc42e5f}"
 test -z "$(git -C "$REPO" status --porcelain)"
 test ! -e "$D"
 case "$D" in /tmp/*|/var/tmp/*) echo "SCRATCH_DIR must not be under /tmp or /var/tmp (PrivateTmp hides them)"; exit 2;; esac

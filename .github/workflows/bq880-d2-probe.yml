@@ -5,39 +5,6 @@ on:
 permissions:
   contents: read
 jobs:
-  probe:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          path: probe
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          ref: 425b8b5ac571a3320681f0394de61a82cbc42e5f
-          fetch-depth: 0
-          path: src425
-      - name: Provision accounts, toolchain, driver and installed base sources
-        run: |
-          set -euxo pipefail
-          sudo apt-get update -q && sudo apt-get install -y -q mold ninja-build cmake
-          clang --version | head -1; /usr/bin/cmake --version | head -1; mold --version; systemctl --version | head -1
-          sudo groupadd -g 1967 buster-bench && sudo groupadd -g 1966 buster-bench-candidate
-          sudo useradd -r -M -s /usr/sbin/nologin -u 1967 -g buster-bench -G buster-bench-candidate buster-bench
-          sudo useradd -r -M -s /usr/sbin/nologin -u 1966 -g buster-bench-candidate buster-bench-candidate
-          cd src425 && mkdir -p build
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o build/buster-bench-build
-          sudo install -D -m 0755 build/buster-bench-build /usr/local/libexec/buster-bench-build
-          B=/opt/buster-bench/installed/sources/ade6ac4b6ecb21f30b61b656439bac476c145e2f
-          sudo mkdir -p $B && git archive ade6ac4b6ecb21f30b61b656439bac476c145e2f src cmake CMakeLists.txt | sudo tar -x -C $B
-          rm -rf build && git status --porcelain
-      - name: Run D2
-        run: sudo bash probe/.github/bq880-d2/bq880_d2.sh "$GITHUB_WORKSPACE/src425" /var/lib/bq880-d2 2>&1 | tee d2.log; exit ${PIPESTATUS[0]}
-      - name: Journal of the D2 units
-        if: always()
-        run: sudo journalctl --no-pager -o short-iso -u 'bq880-d2-*' | tail -n 80
   probe-arch-btrfs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -49,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: 425b8b5ac571a3320681f0394de61a82cbc42e5f
+          ref: d9d2c2af5da0f6597fe1bd47cf40536ebc0d026f
           fetch-depth: 0
           path: src425
       - name: Build an Arch image with the host toolchain family
@@ -76,10 +43,10 @@ jobs:
           x 'B=/opt/buster-bench/installed/sources/ade6ac4b6ecb21f30b61b656439bac476c145e2f; mkdir -p $B && git -C /src425 archive ade6ac4b6ecb21f30b61b656439bac476c145e2f src cmake CMakeLists.txt | tar -x -C $B'
           x 'truncate -s 8G /var/tmp/btrfs.img && mkfs.btrfs -q /var/tmp/btrfs.img && mkdir -p /srv/btr && mount -o loop,noatime,compress=zstd:3,ssd,space_cache=v2 /var/tmp/btrfs.img /srv/btr && findmnt -T /srv/btr'
       - name: Run D2 on btrfs inside the Arch systemd guest
-        run: sudo docker exec bqguest bash /bq880_d2.sh /src425 /srv/btr/bq880-d2 2>&1 | tee d2-arch.log; exit ${PIPESTATUS[0]}
+        run: sudo docker exec -e BQ_D2_EXPECT=d9d2c2af5da0f6597fe1bd47cf40536ebc0d026f bqguest bash /bq880_d2.sh /src425 /srv/btr/bq880-d2 2>&1 | tee d2-arch.log; exit ${PIPESTATUS[0]}
       - name: Run D2 on the guest overlay filesystem (control)
         if: always()
-        run: sudo docker exec bqguest bash /bq880_d2.sh /src425 /srv/bq880-d2-overlay 2>&1 | tee d2-arch-overlay.log; exit ${PIPESTATUS[0]}
+        run: sudo docker exec -e BQ_D2_EXPECT=d9d2c2af5da0f6597fe1bd47cf40536ebc0d026f bqguest bash /bq880_d2.sh /src425 /srv/bq880-d2-overlay 2>&1 | tee d2-arch-overlay.log; exit ${PIPESTATUS[0]}
       - name: Guest journal of the D2 units
         if: always()
         run: sudo docker exec bqguest journalctl --no-pager -o short-iso -u 'bq880-d2-*' | tail -n 120
