@@ -19298,7 +19298,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parameter_local_alignment(UnitTestArgu
 
 // #1660: an attribute list may follow any `*` of a pointer declarator, before
 // or after its qualifiers, and `aligned` there still aligns the declared object.
-// The local `sizeof` type name is lowered through c_ir_type_name_prefix.
+// The initializer of `n` lowers its type name through c_ir_type_name_prefix.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_declarator_attributes(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -19316,12 +19316,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_declarator_attributes(UnitTest
                         "_Static_assert(sizeof(struct Chained) == 32 && __builtin_offsetof(struct Chained, r) == 16, \"chained members\");\n"
                         "_Static_assert(sizeof(gg) == 8 && sizeof(gc) == 8 && sizeof(gp) == 8, \"file scope\");\n"
                         "_Static_assert(sizeof(int * __attribute__((unused)) *) == 8, \"type name\");\n"
+                        "int n = sizeof(int * __attribute__((unused)) *);\n"
                         "int local(void)\n"
                         "{\n"
                         "    int value = 1;\n"
                         "    int * __attribute__((aligned(64))) p = &value;\n"
                         "    int * __attribute__((unused)) * const __attribute__((unused)) pp = &p;\n"
-                        "    int n = sizeof(int * __attribute__((unused)) *);\n"
                         "    return **pp + n;\n"
                         "}\n");
     CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
