@@ -465,6 +465,7 @@ typedef enum CPreprocessDialect
     C_PREPROCESS_DIALECT_C11,
     C_PREPROCESS_DIALECT_C17,
     C_PREPROCESS_DIALECT_C23,
+    C_PREPROCESS_DIALECT_GNU89,
     C_PREPROCESS_DIALECT_COUNT,
 } CPreprocessDialect;
 
@@ -1001,6 +1002,9 @@ struct CEntity
     // Block-scope extern declarations are C_ENTITY_LOCAL for lexical lookup,
     // but they name external storage rather than an automatic local place.
     bool is_extern;
+    // The function's only definition so far is GNU inline-only, so the unit
+    // may still give its external definition.
+    bool definition_is_gnu_inline_only;
     CEntityId cleanup_function;
     u32 cleanup_attribute_token;
     u32 cleanup_attribute_end;
@@ -1076,6 +1080,9 @@ struct CDeclaration
     bool is_definition;
     bool is_variadic;
     bool is_constexpr;
+    // A GNU `extern inline` function definition: its body is only for
+    // inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
+    bool is_gnu_inline_only;
     // Set on the second and later declarators of a list: the specifiers were
     // already parsed for the first one, so base_type is supplied rather than
     // recomputed.
@@ -1166,6 +1173,36 @@ struct CParserResult
     u32 diagnostic_count;
     u32 declaration_capacity;
     u32 diagnostic_capacity;
+};
+
+// Definition token -> lowest type id ever given that definition_start.
+// c_parse_scalar_type_core_begin is the only writer of definition_start; a
+// row that holds a start later is that row, a younger copy of it, or one of
+// them restored by rollback, so no live row with the start is older than the
+// recorded id. A scan for rows defined at a token may therefore begin at that
+// id, and skip the table when the start was never assigned. Like the
+// aggregate lookup below, the header outlives rollback, recorded ids only
+// ever decrease, and at most half the slots are occupied; an exhausted arena
+// sets `incomplete` and sends every query back to a whole-table scan.
+typedef struct CDefinitionIndexSlot CDefinitionIndexSlot;
+struct CDefinitionIndexSlot
+{
+    u32 start_plus_one;
+    u32 lowest_type;
+};
+
+typedef struct CDefinitionIndex CDefinitionIndex;
+struct CDefinitionIndex
+{
+    CDefinitionIndexSlot* slots;
+    u32 slot_count;
+    u32 fill;
+    bool incomplete;
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+    u64 search_count;
+    u64 probe_count;
+    u64 scan_row_count;
+#endif
 };
 
 // (kind, tag) -> oldest matching aggregate type id. Speculative rollback
@@ -1304,6 +1341,7 @@ struct CParseResult
     CEntityId* typedef_lookup_buckets;
     CEntityId* name_lookup_buckets;
     CAggregateLookup* aggregate_lookup;
+    CDefinitionIndex* definition_index;
     CTokenPositionIndex* position_index;
     CIdentifierUse* identifier_uses;
     // First recorded use of each token, plus one, so an unused token is the
