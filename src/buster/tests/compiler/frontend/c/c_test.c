@@ -20056,6 +20056,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parameter_local_alignment(UnitTestArgu
     return result;
 }
 
+// #1660: an attribute list may follow any `*` of a pointer declarator, before
+// or after its qualifiers, and `aligned` there still aligns the declared object.
+// Block-scope objects and typedefs take the `[[...]]` spelling as well.
+// The initializer of `n` lowers its type name through c_ir_type_name_prefix.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_declarator_attributes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+    BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+    TemporalArena temporary = scratch_begin(0, 0);
+    String8 source = S8("struct Aligned { char c; int * __attribute__((aligned(16))) p; };\n"
+                        "struct Chained { int * __attribute__((unused)) * p; int * __attribute__((unused)) const q; int * [[gnu::aligned(16)]] r; };\n"
+                        "int * __attribute__((aligned(16))) g;\n"
+                        "int * __attribute__((unused)) * gg;\n"
+                        "int * __attribute__((unused)) const gc = 0;\n"
+                        "int (* __attribute__((unused)) gp);\n"
+                        "_Static_assert(sizeof(struct Aligned) == 32 && _Alignof(struct Aligned) == 16, \"member alignment\");\n"
+                        "_Static_assert(__builtin_offsetof(struct Aligned, p) == 16, \"member offset\");\n"
+                        "_Static_assert(sizeof(struct Chained) == 32 && __builtin_offsetof(struct Chained, r) == 16, \"chained members\");\n"
+                        "_Static_assert(sizeof(gg) == 8 && sizeof(gc) == 8 && sizeof(gp) == 8, \"file scope\");\n"
+                        "_Static_assert(sizeof(int * __attribute__((unused)) *) == 8, \"type name\");\n"
+                        "int n = sizeof(int * __attribute__((unused)) *);\n"
+                        "int local(void)\n"
+                        "{\n"
+                        "    int value = 1;\n"
+                        "    int * __attribute__((aligned(64))) p = &value;\n"
+                        "    int * __attribute__((unused)) * const __attribute__((unused)) pp = &p;\n"
+                        "    int * [[gnu::aligned(16)]] q = &value;\n"
+                        "    int * [[gnu::unused]] * [[gnu::unused]] const qq = &q;\n"
+                        "    typedef int * [[gnu::aligned(16)]] T;\n"
+                        "    typedef int * [[gnu::unused]] * [[gnu::unused]] const TT;\n"
+                        "    T t = &value;\n"
+                        "    TT tt = &t;\n"
+                        "    return **pp + **qq + **tt + n;\n"
+                        "}\n");
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){
+                                                    .target = target.target,
+                                                    .data_layout = target_data_layout(target.target),
+                                                    .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                });
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    CIRLowerResult lowered = {0};
+    if (!preprocess.diagnostic_count && !parse.diagnostic_count)
+    {
+        lowered = c_lower_to_ir(temporary.arena, S8("pointer-declarator-attributes.c"), preprocess, parse, target.target);
+    }
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program);
+    u32 aligned_locals = 0;
+    if (lowered.program && lowered.program->module_count)
+    {
+        IrModule* module = lowered.program->modules;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            for (u32 index = 0; index < function->instruction_count; index += 1)
+            {
+                IrInstruction* instruction = function->instructions + index;
+                if (instruction->opcode == IR_OPCODE_LOCAL && function->values[instruction->result.value].alignment == 64)
+                {
+                    aligned_locals += 1;
+                }
+            }
+        }
+    }
+    BUSTER_TEST(arguments, aligned_locals == 1);
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -25541,6 +25613,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_repeated_incomplete_arrays);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_packed_and_aligned_layout);
+    BUSTER_TEST_FIXTURE(arguments, c_test_pointer_declarator_attributes);
     BUSTER_TEST_FIXTURE(arguments, c_test_parameter_local_alignment);
     BUSTER_TEST_FIXTURE(arguments, c_test_qualified_parameter_values);
     BUSTER_TEST_FIXTURE(arguments, c_test_qualified_compound_values);
