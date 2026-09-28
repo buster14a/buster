@@ -11,6 +11,7 @@ set (CMAKE_COLOR_DIAGNOSTICS ON)
 include(CheckCCompilerFlag)
 include(CheckCSourceCompiles)
 include(cmake/IOSBundleAssets.cmake)
+include(cmake/NativeTargetCompatibility.cmake)
 
 set(BUSTER_CONFIG_TYPES Debug Release)
 
@@ -1312,15 +1313,11 @@ if (WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
     # 32-byte-aligned AVX spills without realigning the incoming stack.
     list(APPEND GNU_FAMILY_NATIVE_TARGET -mno-avx)
 endif()
-if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND NOT BUSTER_CROSS_COMPILE)
-    # On some AVX10 hosts Clang 18's -march=native reports "invalid feature
-    # combination: +avx10.1-256; will be promoted to avx10.1-512", which
-    # -Werror turns into a failure that depends on the runner's CPU. The
-    # promotion happens either way, so silencing the report leaves code
-    # generation unchanged. Clang releases without the group reject the flag.
-    buster_filter_supported_c_flags(GNU_FAMILY_NATIVE_TARGET_DISABLE_WARNINGS -Wno-invalid-feature-combination)
-    list(APPEND GNU_FAMILY_NATIVE_TARGET ${GNU_FAMILY_NATIVE_TARGET_DISABLE_WARNINGS})
-endif()
+buster_native_target_compatibility_flags(
+    GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY
+    "${CMAKE_C_COMPILER_ID}" "${C_COMPILER_ZIG}" "${CMAKE_C_COMPILER_VERSION}" "${CMAKE_SYSTEM_PROCESSOR}" "${BUSTER_CROSS_COMPILE}"
+)
+list(APPEND GNU_FAMILY_NATIVE_TARGET ${GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY})
 
 # Match the unsigned plain-char contract of GNU_FAMILY_OPTIONS. /J changes
 # the compiler's type semantics; defining _CHAR_UNSIGNED alone is not enough.

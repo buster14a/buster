@@ -275,6 +275,7 @@ jobs:
           run_suite tools/matrix_shard_test.py matrix-shard.log
           run_suite tools/differential_ci_policy_test.py differential-ci-policy.log
           run_suite tools/native_producer_profile_test.py native-producer-profile.log
+          run_suite tools/native_target_compatibility_test.py native-target-compatibility.log
           run_suite tools/ci_configure_evidence_test.py configure-evidence-test.log
           run_suite tools/ci_matrix_phases_test.py matrix-phases-test.log
           run_suite tools/ci_matrix_phases_bridge_test.py matrix-phases-bridge-test.log
