@@ -10276,16 +10276,23 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         // records, so it appends nothing and the run that frame owns stays
         // contiguous.
         c_parse_layout_attributes(result, preprocess, frame->start, frame->shared_specifier_end, &frame->is_packed, 0, 0);
-        if (frame->declarator_start == frame->end && frame->base_type.value < result->type_count &&
-            (result->types[frame->base_type.value].kind == C_TYPE_STRUCT || result->types[frame->base_type.value].kind == C_TYPE_UNION))
+        // C11 6.7.2.1p13: only an untagged `struct { ... }` or `union { ... }`
+        // written here is an anonymous member. A tag (`struct S;`) or a
+        // typedef name for an untagged aggregate declares nothing, as in GCC
+        // and Clang without -fms-extensions.
+        CType const* base = frame->base_type.value < result->type_count ? &result->types[frame->base_type.value] : 0;
+        if (frame->declarator_start == frame->end && base && (base->kind == C_TYPE_STRUCT || base->kind == C_TYPE_UNION))
         {
-            BUSTER_VALIDATE(result->member_count < result->member_capacity);
-            result->members[result->member_count++] = (CMember){
-                .location = c_preprocess_token_location(frame->preprocess, frame->first),
-                .type = frame->base_type,
-                .alignment_start = frame->alignment_start,
-                .alignment_count = frame->alignment_count,
-            };
+            if (!base->tag.length && base->definition_start > frame->start && base->definition_start < frame->end)
+            {
+                BUSTER_VALIDATE(result->member_count < result->member_capacity);
+                result->members[result->member_count++] = (CMember){
+                    .location = c_preprocess_token_location(frame->preprocess, frame->first),
+                    .type = frame->base_type,
+                    .alignment_start = frame->alignment_start,
+                    .alignment_count = frame->alignment_count,
+                };
+            }
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->end, true);
             return;
         }

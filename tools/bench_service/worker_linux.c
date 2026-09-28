@@ -1662,14 +1662,14 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_signal(BqWorkerBackend* backend, char con
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_systemd_join(BqWorkerBackend* backend, int* status, u64 deadline)
+BUSTER_GLOBAL_LOCAL BqError bq_systemd_join(BqWorkerBackend* backend, int* status, u64 deadline, bool cancellable)
 {
     BqSystemdContext* context = backend->context;
     BqError error = BQ_OK;
     if (context->pid > 0)
     {
         bool finished = false;
-        while (error == BQ_OK && !finished && !bq_worker_cancel_signal)
+        while (error == BQ_OK && !finished && !(cancellable && bq_worker_cancel_signal))
         {
             pid_t waited = waitpid(context->pid, status, WNOHANG);
             if (waited == context->pid)
@@ -1686,7 +1686,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_join(BqWorkerBackend* backend, int* statu
                                                    bq_worker_deadline(now, 100) : deadline);
             }
         }
-        if (bq_worker_cancel_signal && !finished) error = BQ_WORKER_CANCEL_SIGNAL;
+        if (cancellable && bq_worker_cancel_signal && !finished) error = BQ_WORKER_CANCEL_SIGNAL;
     }
     else
     {
@@ -3122,20 +3122,70 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_failure_bundle_publish(BqWorkerFinalizatio
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_worker_result_evidence(BqJob const* job, BqOutcome outcome, BqError reason,
-                                                       BqWorkerFinalization* finalization)
+BUSTER_GLOBAL_LOCAL int bq_worker_result_evidence_body(BqJob const* job, BqOutcome outcome, BqError reason,
+                                                       BqWorkerFinalization* finalization, char* body, u32 capacity)
 {
-    char body[BQ_WORKER_EVIDENCE_CAP];
     bool recipe = bq_worker_finalization_recipe(job, finalization);
-    int body_length = recipe ? snprintf(body, sizeof(body),
+    int body_length = recipe ? snprintf(body, capacity,
                                      "schema=1\nrecipe=%s\nstatus=%s\nerror=%s\n"
                                      "job-id=%" PRIu64 "\nattempt-token=%" PRIu64 "\n",
                                      finalization->recipe.name, bq_worker_outcome_name(outcome), bq_error_name(reason),
                                      (uint64_t)job->id, (uint64_t)job->token) : -1;
-    bool ok = recipe && body_length > 0 && (u32)body_length < sizeof(body) &&
+    return body_length > 0 && (u32)body_length < capacity ? body_length : -1;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_evidence(BqJob const* job, BqOutcome outcome, BqError reason,
+                                                       BqWorkerFinalization* finalization)
+{
+    char body[BQ_WORKER_EVIDENCE_CAP];
+    int body_length = bq_worker_result_evidence_body(job, outcome, reason, finalization, body, sizeof(body));
+    bool ok = body_length > 0 &&
               bq_worker_result_control_publish(finalization, finalization->recipe.outcome, body,
                                                 (u64)body_length, 0400) == BQ_OK;
     return ok ? BQ_OK : BQ_IO;
+}
+
+/* A failure path that could not finish may already have published the
+ * immutable outcome record. Recovery adopts exactly those bytes, limited to
+ * `required` when the outcome is already durable, and otherwise to the
+ * outcomes the queue accepts for this job (a durable cancellation only
+ * finishes cancelled). Reasons are limited to those a terminal record can
+ * carry; failed and interrupted reasons must stay readable as failure records.
+ * A missing record keeps the caller's default; any other existing record
+ * fails closed and is never replaced. */
+BUSTER_GLOBAL_LOCAL BqError bq_worker_recover_outcome(BqJob const* job, BqWorkerFinalization* finalization,
+                                                      BqOutcome required, BqOutcome* outcome, BqError* reason)
+{
+    bool recipe = job && finalization && finalization->result_directory >= 0 &&
+                  bq_worker_finalization_recipe(job, finalization);
+    struct stat entry = {0};
+    errno = 0;
+    int lookup = recipe ? fstatat(finalization->result_directory, finalization->recipe.outcome, &entry,
+                                  AT_SYMLINK_NOFOLLOW) : -1;
+    BqError error = !recipe ? BQ_CONFIGURATION_MISMATCH :
+                    lookup != 0 && errno == ENOENT ? BQ_OK :
+                    lookup != 0 ? BQ_IO : BQ_CORRUPT;
+    BqOutcome outcomes[] = {BQ_FAILED, BQ_CANCELLED, BQ_INTERRUPTED};
+    for (u32 index = 0; error == BQ_CORRUPT && index < BUSTER_ARRAY_LENGTH(outcomes); index += 1)
+    {
+        if (required != BQ_NO_OUTCOME ? outcomes[index] != required :
+            (outcomes[index] == BQ_CANCELLED) != job->cancel_requested) continue;
+        u32 last = outcomes[index] == BQ_CANCELLED ? (u32)BQ_WORKER_CANCEL_SIGNAL : (u32)BQ_BOOT_INTERRUPTED;
+        for (u32 candidate = BQ_RECIPE_MISMATCH; error == BQ_CORRUPT && candidate <= last; candidate += 1)
+        {
+            char body[BQ_WORKER_EVIDENCE_CAP];
+            int length = bq_worker_result_evidence_body(job, outcomes[index], (BqError)candidate, finalization,
+                                                        body, sizeof(body));
+            if (length > 0 && bq_worker_evidence_matches(finalization->result_directory,
+                                                         finalization->recipe.outcome, body, (u64)length))
+            {
+                *outcome = outcomes[index];
+                *reason = (BqError)candidate;
+                error = BQ_OK;
+            }
+        }
+    }
+    return error;
 }
 
 BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job, BqOutcome outcome,
@@ -3640,9 +3690,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop(BqWorkerConfig const* config, BqWorke
     if (error == BQ_OK && empty && lease->descriptor < 0 && bq_worker_lease_acquire(lease_path, lease) != 0)
         error = BQ_BUSY;
     if (error == BQ_OK && empty) error = bq_worker_stop_children(config, backend, identity);
+    /* The outer unit is proven empty, so the launcher exits once the broker
+     * reports its outcome. A cancellation that is still pending (this stop may
+     * be serving it) must not abandon that bounded reap as cleanup failure. */
     if (error == BQ_OK && empty)
         error = backend->join(backend, &status,
-                              bq_worker_deadline(backend->clock(backend), BQ_WORKER_COMMAND_MILLISECONDS));
+                              bq_worker_deadline(backend->clock(backend), BQ_WORKER_COMMAND_MILLISECONDS), false);
     if (error == BQ_OK && empty)
     {
         BqWorkerObserved final = {0};
@@ -3701,14 +3754,23 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_recover(BqQueue* queue, BqWorkerConfig con
                                       job->phase < BQ_FINALIZING && !job->result_bound);
         if (error == BQ_OK) error = bq_worker_lease_handoff_purge_stale(finalization->result_directory);
     }
+    BqOutcome outcome = BQ_INTERRUPTED;
+    BqError reason = BQ_WORKER_INTERRUPTED;
     if (error == BQ_OK)
     {
-        error = bq_worker_finish(queue, config, job,
-                                 durable_outcome ? job->outcome : BQ_INTERRUPTED,
-                                 durable_outcome ? BQ_NOT_FOUND :
-                                 strcmp(saved_boot, current_boot) ? BQ_BOOT_INTERRUPTED : BQ_WORKER_INTERRUPTED,
-                                 finalization);
+        /* The queue accepts only a cancelled terminal outcome for a job with a
+         * durable cancellation request; interrupted is for the rest. */
+        outcome = durable_outcome ? job->outcome : job->cancel_requested ? BQ_CANCELLED : BQ_INTERRUPTED;
+        reason = durable_outcome ? BQ_NOT_FOUND :
+                 strcmp(saved_boot, current_boot) ? BQ_BOOT_INTERRUPTED : BQ_WORKER_INTERRUPTED;
     }
+    /* A durable non-success outcome whose result is still unbound may also
+     * have its record published; only that exact outcome may be adopted. */
+    bool adoptable = !durable_outcome || (job->outcome != BQ_SUCCEEDED && !job->result_bound);
+    if (error == BQ_OK && adoptable && config && config->production_path)
+        error = bq_worker_recover_outcome(job, finalization, durable_outcome ? job->outcome : BQ_NO_OUTCOME,
+                                          &outcome, &reason);
+    if (error == BQ_OK) error = bq_worker_finish(queue, config, job, outcome, reason, finalization);
     return error;
 }
 
@@ -3879,7 +3941,7 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     {
         u64 wait = config->limits.runtime_max_usec / 1000;
         wait = wait <= UINT64_MAX - BQ_WORKER_STOP_MILLISECONDS ? wait + BQ_WORKER_STOP_MILLISECONDS : UINT64_MAX;
-        error = backend->join(backend, &status, bq_worker_deadline(backend->clock(backend), wait));
+        error = backend->join(backend, &status, bq_worker_deadline(backend->clock(backend), wait), true);
     }
     bool interrupted_join = error == BQ_WORKER_CANCEL_SIGNAL;
     bool signal_cancelled = interrupted_join || (production && bq_worker_cancel_signal);
@@ -3990,8 +4052,11 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
             }
             else if (production && finalization.result_directory >= 0)
             {
-                BqOutcome retained_outcome = signal_cancelled ? BQ_CANCELLED : BQ_FAILED;
-                BqError retained_reason = signal_cancelled ? BQ_WORKER_CANCEL_SIGNAL : evidence_reason;
+                /* Follow the journal, not the signal: a CANCEL that did not
+                 * become durable must not be published as cancelled. */
+                BqOutcome retained_outcome = job->cancel_requested ? BQ_CANCELLED : BQ_FAILED;
+                BqError retained_reason = job->cancel_requested && signal_cancelled ? BQ_WORKER_CANCEL_SIGNAL :
+                                          evidence_reason;
                 BqError retained = bq_worker_result_evidence(job, retained_outcome, retained_reason, &finalization);
                 if (retained == BQ_OK && !job->result_bound)
                     retained = bq_worker_result_failure_artifacts(job, retained_outcome, retained_reason, &finalization);

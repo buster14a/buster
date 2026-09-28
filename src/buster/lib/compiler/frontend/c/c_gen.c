@@ -6288,6 +6288,14 @@ BUSTER_C_INTERNAL String8 c_ir_static_local_link_name(CIntegerIrBuilder* builder
     return string_format(builder->arena, S8(".L.{S8}.{S8}.{u32}"), function_name, entity_value->name, entity.value);
 }
 
+// A block-scope function declarator binds a local entity that designates the
+// file-scope function; its uses lower as function references, not data places.
+BUSTER_C_INTERNAL bool c_ir_entity_has_function_type(CIntegerIrBuilder* builder, CEntityId entity)
+{
+    CTypeId type = entity.value < builder->parse.entity_count ? builder->parse.entities[entity.value].type : C_TYPE_ID_INVALID;
+    return type.value < builder->parse.type_count && builder->parse.types[type.value].kind == C_TYPE_FUNCTION;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_global_place(CIntegerIrBuilder* builder, CEntityId entity, IrSourceRange source)
 {
     if (entity.value >= builder->parse.entity_count || !builder->entity_symbols)
@@ -29038,7 +29046,8 @@ c_ir_expression_core_loop:
                 }
                 else if (entity.value < builder->parse.entity_count &&
                          (builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT ||
-                          (builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL && !local)))
+                          (builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL && !local &&
+                           !c_ir_entity_has_function_type(builder, entity))))
                 {
                     IrValueId place = c_ir_emit_global_place(builder, entity, source);
                     if (place.value != IR_ID_UNDERLYING_INVALID && index + 2 < end &&
@@ -29071,7 +29080,8 @@ c_ir_expression_core_loop:
                     CEntity* enumerator = &builder->parse.entities[entity.value];
                     value = c_ir_emit_enumerator(builder, enumerator, token);
                 }
-                else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_FUNCTION)
+                else if (entity.value < builder->parse.entity_count &&
+                         (builder->parse.entities[entity.value].kind == C_ENTITY_FUNCTION || c_ir_entity_has_function_type(builder, entity)))
                 {
                     value = c_ir_emit_function_pointer(builder, token, c_ir_find_function(builder, c_token_spelling(builder->preprocess.spelling_base, token)));
                 }
