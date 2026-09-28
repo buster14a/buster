@@ -5600,8 +5600,8 @@ BUSTER_C_INTERNAL bool c_parse_type_name_trailer_invalid(CPreprocessResult prepr
 // at its `)`. Call arguments, compound-literal initializers and statement
 // expressions are skipped whole, and a shape the walk does not model ends it
 // without a diagnostic, so it rejects only what no expression can spell.
-BUSTER_C_INTERNAL String8 c_parse_expression_syntax_error(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
-                                                          CScopeId scope, u32 start, u32 end, u32* error_token)
+BUSTER_C_INTERNAL String8 c_parse_constant_expression_syntax_error(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                                   CScopeId scope, u32 start, u32 end, u32* error_token)
 {
     String8 message = {0};
     u64 mark = machine->scratch_arena->position;
@@ -5806,7 +5806,7 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
     u32 syntax_end = 0;
     u32 syntax_token = 0;
     String8 syntax_error = machine && c_parse_static_assert_expression_range(preprocess, declaration, &syntax_start, &syntax_end)
-                               ? c_parse_expression_syntax_error(machine, result, preprocess, scope, syntax_start, syntax_end, &syntax_token)
+                               ? c_parse_constant_expression_syntax_error(machine, result, preprocess, scope, syntax_start, syntax_end, &syntax_token)
                                : (String8){0};
     if (syntax_error.length)
     {
@@ -12780,7 +12780,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                 machine->enum_constant_member_start = aggregate->enum_member_start;
                 machine->enum_constant_members_active = true;
                 u32 syntax_token = 0;
-                String8 syntax_error = c_parse_expression_syntax_error(machine, result, preprocess, frame->scope, expression_start, token_index,
+                String8 syntax_error = c_parse_constant_expression_syntax_error(machine, result, preprocess, frame->scope, expression_start, token_index,
                                                                        &syntax_token);
                 integer_constant = syntax_error.length ? (CIntegerConstant){0}
                                                        : c_parse_typed_integer_constant(machine, temporary.arena, preprocess, result,
@@ -21609,7 +21609,7 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
                 CParseInitializerDiagnostic shape = {0};
                 if (!braced)
                 {
-                    shape.message = c_parse_expression_syntax_error(machine, result, preprocess, scope, start, end, &shape.token);
+                    shape.message = c_parse_constant_expression_syntax_error(machine, result, preprocess, scope, start, end, &shape.token);
                 }
                 if (!shape.message.length)
                     shape = c_parse_validate_initializer_shape(machine, result, preprocess, scope, declaration.type, start, end);
@@ -23841,7 +23841,7 @@ BUSTER_C_INTERNAL void c_parse_validate_array_bound_syntax(CTypeParseMachine* ma
         }
         u32 token = 0;
         String8 message =
-            bound.is_star ? (String8){0} : c_parse_expression_syntax_error(machine, result, preprocess, (CScopeId){.value = 0}, start, end, &token);
+            bound.is_star ? (String8){0} : c_parse_constant_expression_syntax_error(machine, result, preprocess, (CScopeId){.value = 0}, start, end, &token);
         if (message.length)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[token]), C_DIAGNOSTIC_EXPECTED_DECLARATION, message);
