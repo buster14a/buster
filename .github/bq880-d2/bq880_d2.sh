@@ -11,6 +11,7 @@ BASE=ade6ac4b6ecb21f30b61b656439bac476c145e2f
 test "$(git -C "$REPO" rev-parse HEAD)" = 425b8b5ac571a3320681f0394de61a82cbc42e5f
 test -z "$(git -C "$REPO" status --porcelain)"
 test ! -e "$D"
+case "$D" in /tmp/*|/var/tmp/*) echo "SCRATCH_DIR must not be under /tmp or /var/tmp (PrivateTmp hides them)"; exit 2;; esac
 install -d -m 0755 -o root -g root "$D" "$D/bin"
 W=$D/w
 install -d -m 2710 -o buster-bench -g buster-bench-candidate "$W" "$W/base"
@@ -106,7 +107,7 @@ find "$W/base/build" \( -type l -o -type p -o -type s -o \( -type f -links +1 \)
 rc=0; systemd-run --unit=bq880-d2-outer --quiet --wait --pipe --collect --service-type=exec \
   --setenv=PATH=/usr/bin:/bin --setenv=LC_ALL=C "--setenv=BQH_BUILD=$W/base/build" \
   "--setenv=BQH_RESULT=$W/results/job-9-attempt-10" --uid=buster-bench --gid=buster-bench -p UMask=0077 \
-  "${COMMON[@]}" -p "InaccessiblePaths=/var/lib/buster-bench/queue /var/lib/buster-bench/lease" \
+  "${COMMON[@]}" -p "InaccessiblePaths=-/var/lib/buster-bench/queue -/var/lib/buster-bench/lease" \
   -p "ReadOnlyPaths=/opt/buster-bench/installed" -p "ReadWritePaths=$W" "$D/bin/bq_harness" || rc=$?
 echo "D2 sandboxed harness exit=$rc"
 rc=0; setpriv --reuid=buster-bench --regid=buster-bench --init-groups --inh-caps=-all -- \
