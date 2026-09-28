@@ -1,0 +1,4 @@
+/proc/1/status:Seccomp:	0
+/proc/1/status:Seccomp_filters:	0
+/proc/self/status:Seccomp:	0
+/proc/self/status:Seccomp_filters:	0

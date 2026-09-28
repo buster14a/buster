@@ -1,0 +1,52 @@
+BQEG_POSITIVE pid=185 ticks=5291 fd0=9:21822 match=1 synthetic=1
+BQEG_CASE name=positive unit=buster-bench-systemd-broker@0-157-0.service pass=1 synthetic_begin=1 entered=1 marker=1 status=pass
+BQEG_CLEANUP name=positive status=pass
+BQEG_CASE name=receipt-absent unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=receipt-absent status=pass
+BQEG_CASE name=receipt-mode unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=receipt-mode status=pass
+BQEG_CASE name=receipt-service-gid unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=receipt-service-gid status=pass
+BQEG_CASE name=primary-gid unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=primary-gid status=pass
+BQEG_CASE name=missing-group unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=missing-group status=pass
+BQEG_CASE name=extra-group unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=extra-group status=pass
+BQEG_PROBE name=bounding-cap nnp=1 seccomp=2 root_ro=1 submount_ro=1 bounding_chown=1 ambient_chown=0 target=1
+BQEG_CASE name=bounding-cap unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=bounding-cap status=pass
+BQEG_PROBE name=ambient-cap nnp=1 seccomp=2 root_ro=1 submount_ro=1 bounding_chown=1 ambient_chown=1 target=1
+BQEG_CASE name=ambient-cap unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=ambient-cap status=pass
+BQEG_PROBE name=nnp-off nnp=0 seccomp=2 root_ro=1 submount_ro=1 bounding_chown=0 ambient_chown=0 target=1
+BQEG_CASE name=nnp-off unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=nnp-off status=pass
+BQEG_PROBE name=seccomp-off nnp=1 seccomp=0 root_ro=1 submount_ro=1 bounding_chown=0 ambient_chown=0 target=1
+BQEG_CASE name=seccomp-off unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=seccomp-off status=pass
+BQEG_PROBE name=root-rw nnp=1 seccomp=2 root_ro=0 submount_ro=1 bounding_chown=0 ambient_chown=0 target=1
+BQEG_CASE name=root-rw unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=root-rw status=pass
+BQEG_PROBE name=protected-submount-rw nnp=1 seccomp=2 root_ro=1 submount_ro=0 bounding_chown=0 ambient_chown=0 target=1
+BQEG_CASE name=protected-submount-rw unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=protected-submount-rw status=pass
+BQEG_CASE name=wrong-fd0 unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=wrong-fd0 status=pass
+BQEG_CASE name=absent-fd0 unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=absent-fd0 status=pass
+BQEG_CASE name=cloexec-fd0 unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=cloexec-fd0 status=pass
+BQEG_CASE name=broker-mode unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=broker-mode status=pass
+BQEG_CASE name=broker-elf unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=broker-elf status=pass
+BQEG_CASE name=broker-exec-stack unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=broker-exec-stack status=pass
+BQEG_CASE name=journal-send-fails unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=journal-send-fails status=pass
+BQEG_CASE name=nsswitch-merge unit=buster-bench-systemd-broker@0-157-0.service pass=0 synthetic_begin=0 entered=0 marker=0 status=pass
+BQEG_CLEANUP name=nsswitch-merge status=pass
+BQEG_CASE name=nscd-socket unit= pass=0 synthetic_begin=0 entered=0 marker=0 status=fail
+BQEG_CLEANUP name=nscd-socket status=pass
+BQEG_SYSTEMD_RESULT attempted=22 expected=25 status=fail synthetic_component=1

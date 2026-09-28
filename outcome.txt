@@ -1,0 +1,5 @@
+test_status=1
+container_removal_status=0
+proof_copy_status=0
+container_inspect_status=0
+console_status=0

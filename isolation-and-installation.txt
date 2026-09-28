@@ -1,0 +1,6 @@
+/proc/1/exe uid=0 gid=0 mode=755 links=1 dev=49 inode=9179596
+/usr/lib/systemd/systemd uid=0 gid=0 mode=755 links=1 dev=49 inode=9179596
+/.dockerenv uid=0 gid=0 mode=755 links=1 dev=49 inode=9180194
+/run/buster-bench-entry-test.opt-in uid=0 gid=0 mode=644 links=1 dev=63 inode=138
+/usr/local/libexec/buster-bench-broker-entry-gate uid=0 gid=0 mode=755 links=1 dev=49 inode=9180114
+/usr/local/libexec/buster-bench-systemd-broker uid=0 gid=0 mode=755 links=1 dev=49 inode=9180115
