@@ -747,7 +747,10 @@ struct CArrayBound
     bool is_static;
     bool is_star;
     bool has_inferred_count;
-    u8 reserved;
+    // A `const` written inside the brackets. A parameter declared with it is
+    // adjusted to a const pointer (C17 6.7.6.3p7), so `int a[const 2]` is
+    // not modifiable although its elements are.
+    bool is_const;
 };
 
 typedef struct CType CType;
