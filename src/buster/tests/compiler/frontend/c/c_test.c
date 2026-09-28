@@ -4704,13 +4704,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ambiguous_promoted_parse(UnitTestArgum
 // A member declaration naming only a tag, or a typedef for an untagged
 // aggregate, declares nothing; only an untagged definition written in place
 // is an anonymous member (C11 6.7.2.1p13). The layouts are GCC's and Clang's
-// without -fms-extensions (#1706).
+// without -fms-extensions on x86_64-unknown-linux-gnu (#1706).
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tagged_member_declares_nothing(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     TemporalArena temporary = scratch_begin(0, 0);
     CPreprocessResult tokens;
     CParseResult parse;
+    Target target = target_native;
+    target.cpu_arch = CPU_ARCH_X86_64;
+    target.os = OPERATING_SYSTEM_LINUX;
     CIRLowerResult lowered = c_test_lower_source(temporary.arena,
         S8("struct S { int a; }; union U { int a; double d; }; typedef struct { int z; } A;\n"
            "struct T { struct S; int b; };\n"
@@ -4726,11 +4729,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tagged_member_declares_nothing(UnitTes
            "_Static_assert(sizeof(struct Z) == 4, \"forward tag\");\n"
            "_Static_assert(sizeof(struct X) == 16 && __builtin_offsetof(struct X, b) == 12, \"anonymous members\");\n"
            "int read(struct X *x) { return x->p + x->q + x->r[1]; }\n"),
-        S8("tagged-member-declares-nothing.c"), target_native, &tokens, &parse);
+        S8("tagged-member-declares-nothing.c"), target, &tokens, &parse);
     BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
     scratch_end(temporary);
+    return result;
+}
+
+// On *-windows-msvc, where `_MSC_EXTENSIONS` is predefined, a tagged,
+// typedef-named or nested tagged complete aggregate named without a
+// declarator is an anonymous member whose fields are promoted, as with
+// clang *-pc-windows-msvc (#1750).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tagged_member_microsoft_anonymous(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch arches[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 arch_index = 0; arch_index < BUSTER_ARRAY_LENGTH(arches); arch_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens;
+        CParseResult parse;
+        Target target = target_native;
+        target.cpu_arch = arches[arch_index];
+        target.os = OPERATING_SYSTEM_WINDOWS;
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena,
+            S8("struct S { int a; }; union U { int a; double d; }; typedef struct { int z; } A;\n"
+               "struct T { struct S; int b; };\n"
+               "struct V { union U; int b; };\n"
+               "struct W { A; int b; };\n"
+               "struct Y { struct N { int n; }; int b; };\n"
+               "struct X { struct { int p; }; const union { int q; char r[8]; }; int b; };\n"
+               "_Static_assert(sizeof(struct T) == 8 && __builtin_offsetof(struct T, b) == 4, \"tagged struct\");\n"
+               "_Static_assert(sizeof(struct V) == 16 && __builtin_offsetof(struct V, b) == 8, \"tagged union\");\n"
+               "_Static_assert(sizeof(struct W) == 8 && __builtin_offsetof(struct W, b) == 4, \"typedef name\");\n"
+               "_Static_assert(sizeof(struct Y) == 8 && sizeof(struct N) == 4, \"nested tagged definition\");\n"
+               "_Static_assert(sizeof(struct X) == 16 && __builtin_offsetof(struct X, b) == 12, \"anonymous members\");\n"
+               "struct phone { int areacode; long number; };\n"
+               "struct person { char name[30]; char gender; int age; int weight; struct phone; };\n"
+               "int area(struct person *p) { return p->areacode; }\n"
+               "int read(struct T *t, struct V *v, struct W *w, struct Y *y) { return t->a + t->b + v->a + (int)v->d + w->z + y->n + y->b; }\n"),
+            S8("tagged-member-microsoft-anonymous.c"), target, &tokens, &parse);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
+        scratch_end(temporary);
+    }
     return result;
 }
 
@@ -25578,6 +25622,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 
     BUSTER_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_parse);
     BUSTER_TEST_FIXTURE(arguments, c_test_tagged_member_declares_nothing);
+    BUSTER_TEST_FIXTURE(arguments, c_test_tagged_member_microsoft_anonymous);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_invalid_union_initializer);
 
