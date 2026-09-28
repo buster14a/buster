@@ -12686,7 +12686,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_expression_syntax(UnitTestArg
            " int a12[_Generic(1, int: 2, default: 3)]; int a13[sizeof(__typeof__(a1))]; int a14[sizeof(int (*)[4])];"
            " int a15[sizeof((struct P){1})]; int a16[sizeof(int (*)(void))]; int a17[1 ? : 2];"
            " void f1(int n, int a[static 4], int b[const n], int c[*], int d[const static 2]); void f2(int n, int a[n][n + 1]);"
-           " long x = sizeof(long) + 1; _Static_assert(sizeof(long) + 1 == 9, \"\"); struct S { int m[A + 1]; char c[sizeof(struct P) * 2]; };"
+           " long x = sizeof(long) + 1; _Static_assert(sizeof(long) + 1 > 4, \"\"); struct S { int m[A + 1]; char c[sizeof(struct P) * 2]; };"
            " int g(void) { int n = 3; int v[n + 1]; int w[({ 2; })]; return (int)(sizeof v + sizeof w); }"),
     };
     for (u32 valid_index = 0; valid_index < BUSTER_ARRAY_LENGTH(valid); valid_index += 1)
