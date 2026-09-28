@@ -25,6 +25,9 @@ jobs:
     timeout-minutes: 10
     env:
       LC_ALL: C
+      # Hosted Ubuntu supplies a supplementary group; the SGID regression
+      # must cover inheritance from a group other than the primary group.
+      BQ_REQUIRE_DISTINCT_GROUP: '1'
     steps:
       - name: Require CI admission to be enabled
         shell: bash
@@ -83,6 +86,11 @@ jobs:
           ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: ./build.sh bench_service self-test --sanitize
+
+      - name: Broker and static gate component tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: ./build.sh bench_service_broker self-test
 
       - name: Fixed smoke recipe self-test
         if: ${{ !cancelled() }}
