@@ -22433,6 +22433,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unknown_type_name_diagnostics(UnitTest
         {S8("int f(foo *value);\nint following;\n"), S8("foo"), 1, 7, true},
         {S8("int f(int value, foo *pointer);\nint following;\n"), S8("foo"), 1, 18, true},
         {S8("int f(const foo value);\nint following;\n"), S8("foo"), 1, 13, true},
+        {S8("int f(void)\n{\n    __builtin_ms_va_list cursor;\n    return 0;\n}\nint following;\n"), S8("__builtin_ms_va_list"), 3, 5, true},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
     {
@@ -22476,6 +22477,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unknown_type_name_diagnostics(UnitTest
         S8("[[maybe_unused]];\n"),
         S8("__attribute__((unused)) int attributed; __declspec(noinline) int decorated(void) { return 1; }\n"),
         S8("int legacy(old_style_argument); int unspecified();\n"),
+        S8("int variadic(int marker, ...) { __builtin_va_list cursor; __builtin_va_start(cursor, marker); __builtin_va_end(cursor); "
+           "return __builtin_expect(marker, 0); }\n"),
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
     {
