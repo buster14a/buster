@@ -12053,8 +12053,13 @@ BUSTER_C_SHARED CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessR
             .array_bound = C_ARRAY_BOUND_INVALID,
             .kind = C_TYPE_POINTER,
         };
-        while (*index < end && preprocess.tokens[*index].kind == C_TOKEN_IDENTIFIER)
+        for (;;)
         {
+            *index = c_parse_skip_attributes(preprocess, *index, end);
+            if (*index >= end || preprocess.tokens[*index].kind != C_TOKEN_IDENTIFIER)
+            {
+                break;
+            }
             String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[*index]);
             if (c_parse_type_qualifier_word(spelling, &pointer))
             {
@@ -12088,8 +12093,13 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult p
         {
             index += 1;
             CType ignored = {0};
-            while (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
+            for (;;)
             {
+                index = c_parse_skip_attributes(preprocess, index, end);
+                if (index >= end || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER)
+                {
+                    break;
+                }
                 String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
                 if (c_parse_type_qualifier_word(spelling, &ignored) || string_equal(spelling, S8("_Nonnull")) || string_equal(spelling, S8("_Nullable")) ||
                     string_equal(spelling, S8("_Null_unspecified")))

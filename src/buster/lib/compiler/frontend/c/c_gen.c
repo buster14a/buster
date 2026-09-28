@@ -23759,11 +23759,11 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
         while (index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_STAR))
         {
             type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
-            index += 1;
+            index = c_parse_skip_attributes(builder->preprocess, index + 1, end);
             while (index < end && builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
                    c_parse_type_qualifier_word(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]), &qualifiers))
             {
-                index += 1;
+                index = c_parse_skip_attributes(builder->preprocess, index + 1, end);
             }
         }
         *index_out = index;
