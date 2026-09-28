@@ -1,4 +1,4 @@
-name: Inspect C diagnostic lowering sites
+name: Reproduce issue 1725 diagnostic
 
 on:
   push:
@@ -8,179 +8,41 @@ on:
 permissions: {}
 
 jobs:
-  inspect:
+  reproduce:
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Capture compact implementation context
+      - name: Build compiler and capture the comma-expression diagnostic
+        shell: bash
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          out = []
-          def emit(value=''):
-              out.append(str(value))
-
-          def merged_excerpts(path, predicates, radius=22):
-              lines = Path(path).read_text().splitlines()
-              hits = [i for i, line in enumerate(lines) if any(p(line) for p in predicates)]
-              ranges = []
-              for i in hits:
-                  lo, hi = max(0, i - radius), min(len(lines), i + radius + 1)
-                  if ranges and lo <= ranges[-1][1]:
-                      ranges[-1] = (ranges[-1][0], max(ranges[-1][1], hi))
-                  else:
-                      ranges.append((lo, hi))
-              emit(f'===== EXCERPTS {path}: {len(hits)} hits, {len(ranges)} ranges =====')
-              for lo, hi in ranges:
-                  emit(f'@@ {lo + 1}:{hi} @@')
-                  for i in range(lo, hi):
-                      emit(f'{i + 1:6}: {lines[i]}')
-
-          suspicious = [
-              lambda line: 'not bound to C entity' in line,
-              lambda line: 'cannot convert IR type' in line,
-              lambda line: 'zero-initialize IR type' in line,
-              lambda line: 'incompatible branch types' in line,
-              lambda line: 'cannot resolve definition' in line,
-              lambda line: 'failure_message' in line and any(x in line for x in ('{u32}', '{u64}', 'entity', 'symbol', 'IR type', 'kind')),
-          ]
-          for path in ('src/buster/lib/compiler/frontend/c/c_gen.c',
-                       'src/buster/lib/compiler/frontend/c/c_parse.c'):
-              merged_excerpts(path, suspicious, 28)
-
-          # Find multiline failure-message statements whose surrounding statement leaks numeric IDs.
-          for path in ('src/buster/lib/compiler/frontend/c/c_gen.c',
-                       'src/buster/lib/compiler/frontend/c/c_parse.c'):
-              lines = Path(path).read_text().splitlines()
-              emit(f'===== NUMERIC FAILURE STATEMENTS {path} =====')
-              for i, line in enumerate(lines):
-                  if 'failure_message' not in line and 'c_parse_lowering_constraint_consider' not in line:
-                      continue
-                  lo, hi = max(0, i - 3), min(len(lines), i + 12)
-                  window = '\n'.join(lines[lo:hi])
-                  if any(x in window for x in ('{u32}', '{u64}', 'IR_ID_UNDERLYING', '->kind', '.kind')):
-                      emit(f'@@ {lo + 1}:{hi} @@')
-                      for j in range(lo, hi):
-                          emit(f'{j + 1:6}: {lines[j]}')
-
-          # Print compact starts of the affected function definitions.
-          wanted = {
-              'src/buster/lib/compiler/frontend/c/c_gen.c': [
-                  'c_ir_identifier_entity_or_lookup',
-                  'c_ir_type_to_entity_type',
-                  'c_ir_target_type_for_expression',
-                  'c_ir_lower_value_expr',
-                  'c_ir_zero_value',
-              ],
-              'src/buster/lib/compiler/frontend/c/c_parse.c': [
-                  'c_parse_lowering_constraint_consider',
-              ],
-          }
-          for path, names in wanted.items():
-              lines = Path(path).read_text().splitlines()
-              for name in names:
-                  candidates = []
-                  for i, line in enumerate(lines):
-                      if re.search(r'\b' + re.escape(name) + r'\s*\(', line):
-                          sig = '\n'.join(lines[max(0, i - 4):min(len(lines), i + 8)])
-                          if 'BUSTER_C_INTERNAL' in sig and ';' not in '\n'.join(lines[i:min(len(lines), i + 4)]):
-                              candidates.append(i)
-                  emit(f'===== DEFINITION START {path}:{name}: {candidates[:4]} =====')
-                  for i in candidates[:1]:
-                      lo, hi = max(0, i - 8), min(len(lines), i + 90)
-                      for j in range(lo, hi):
-                          emit(f'{j + 1:6}: {lines[j]}')
-
-          # Existing render/name helpers and the exact IR/entity data definitions.
-          helper_rx = re.compile(
-              r'(ir_.*type.*(?:name|format|print|string|render|description)|'
-              r'(?:name|format|print|string|render|description).*ir_.*type|'
-              r'c_.*(?:identifier|entity).*(?:name|format|render|spelling)|'
-              r'(?:name|format|render|spelling).*c_.*(?:identifier|entity))',
-              re.IGNORECASE)
-          emit('===== HELPER CANDIDATE LINES =====')
-          for path in sorted(Path('src/buster').rglob('*')):
-              if not path.is_file() or path.suffix not in ('.c', '.h'):
-                  continue
-              lines = path.read_text(errors='replace').splitlines()
-              matches = [(i, line) for i, line in enumerate(lines) if helper_rx.search(line)]
-              if matches:
-                  emit(f'--- {path} ---')
-                  for i, line in matches[:80]:
-                      emit(f'{i + 1:6}: {line}')
-
-          enum_needles = [
-              'typedef enum IrTypeKind', 'enum IrTypeKind', 'struct IrType',
-              'typedef enum CEntityKind', 'enum CEntityKind', 'struct CEntity',
-              'typedef enum CTypeKind', 'enum CTypeKind', 'struct CType',
-              'typedef struct CIdentifier', 'struct CIdentifier',
-          ]
-          emit('===== TYPE/ENTITY DEFINITIONS =====')
-          for path in sorted(Path('src/buster').rglob('*')):
-              if not path.is_file() or path.suffix not in ('.c', '.h'):
-                  continue
-              lines = path.read_text(errors='replace').splitlines()
-              hits = [i for i, line in enumerate(lines) if any(n in line for n in enum_needles)]
-              for i in hits:
-                  emit(f'--- {path}:{i + 1} ---')
-                  for j in range(max(0, i - 5), min(len(lines), i + 85)):
-                      emit(f'{j + 1:6}: {lines[j]}')
-
-          emit('===== RELEVANT TEST FILES =====')
-          all_files = []
-          for root in ('tests', 'test', 'src/buster/tests'):
-              base = Path(root)
-              if base.exists():
-                  all_files.extend(p for p in base.rglob('*') if p.is_file())
-          relevant = [p for p in all_files if any(x in str(p).lower() for x in
-                      ('compile-failure', 'compile_failure', 'diagnostic', 'c_ir', 'ca-ir', 'comma'))]
-          for path in sorted(relevant)[:600]:
-              emit(str(path))
-
-          emit('===== REPRESENTATIVE FAILURE TESTS =====')
-          shown = 0
-          for path in sorted(all_files):
-              if shown >= 20:
-                  break
-              if path.name not in ('test_config', 'test.c', 'result'):
-                  continue
-              try:
-                  text = path.read_text()
-              except Exception:
-                  continue
-              if ('expected_first_line_prefix' in text or 'expected_exit = 1' in text or
-                  'compile-failure' in text or 'BUSTER_TEST:' in text and 'expected_exit' in text):
-                  emit(f'--- {path} ---')
-                  emit('\n'.join(text.splitlines()[:100]))
-                  shown += 1
-
-          emit('===== COMMA REPRODUCER OCCURRENCES =====')
-          for path in sorted(all_files):
-              try:
-                  lines = path.read_text().splitlines()
-              except Exception:
-                  continue
-              hits = [i for i, line in enumerate(lines) if 'return (1, 2)' in line or 'comma expression' in line.lower()]
-              for i in hits:
-                  emit(f'--- {path}:{i + 1} ---')
-                  for j in range(max(0, i - 8), min(len(lines), i + 9)):
-                      emit(f'{j + 1:6}: {lines[j]}')
-
-          Path('.issue-1725-compact.txt').write_text('\n'.join(out) + '\n')
-          PY
-          {
-            echo '===== ./b --help ====='
-            ./b --help || true
-            echo '===== ./b test --help ====='
-            ./b test --help || true
-          } >> .issue-1725-compact.txt 2>&1
+          set -euo pipefail
+          report=.issue-1725-probe.txt
+          exec > >(tee "$report") 2>&1
+          clang --version
+          cmake --version
+          ninja --version
+          ./build.sh generate --cc clang --config Debug --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          ./build.sh build --config Debug -t ide
+          ide=$(find build -type f -name ide -perm -111 -print -quit)
+          test -n "$ide"
+          printf 'IDE=%s\n' "$ide"
+          cat > /tmp/issue-1725.c <<'EOF'
+          int main(void) { return (1, 2); }
+          EOF
+          set +e
+          "$ide" cc -fsyntax-only -target x86_64-unknown-linux /tmp/issue-1725.c > /tmp/issue-1725.stdout 2> /tmp/issue-1725.stderr
+          status=$?
+          set -e
+          printf 'STATUS=%s\n' "$status"
+          printf '%s\n' '--- stdout ---'
+          cat /tmp/issue-1725.stdout
+          printf '%s\n' '--- stderr ---'
+          cat /tmp/issue-1725.stderr
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add .issue-1725-compact.txt
-          git commit -m 'chore: narrow issue 1725 implementation context [skip ci]'
+          git add "$report"
+          git commit -m 'chore: capture issue 1725 reproducer [skip ci]'
           git push
