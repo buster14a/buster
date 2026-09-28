@@ -4468,6 +4468,83 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_value_operands(UnitTestA
     return result;
 }
 
+// A noreturn call inside a larger expression statement -- a cast, an
+// argument, a compound literal, an assignment or a comma operand -- leaves its
+// block open for the rest of the statement, which then ends the block in the
+// trap (issue #1736). The statement's rows used to follow the UNREACHABLE.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_expression_statements(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#define C_TEST_NORETURN_STATEMENT_SOURCE(body)                               \
+    S8("__attribute__((noreturn)) void die(void);\n"                          \
+       "__attribute__((noreturn)) int g(void);\n"                             \
+       "__attribute__((noreturn)) void exit(int status);\n"                   \
+       "void sink(int value);\n"                                              \
+       "struct pair { int a; };\n"                                            \
+       "void take(struct pair value);\n"                                      \
+       "int f(int x) { if (x > 5) { " body " } return x; }\n"                 \
+       "int h(void) { die(); }\n")
+    String8 sources[] = {
+        C_TEST_NORETURN_STATEMENT_SOURCE("sink((die(), x));"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("take((die(), (struct pair){x}));"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("x = (g(), 0);"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("(void)g();"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("(void)die();"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("(void)exit(3);"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("x = g();"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("sink(g());"),
+    };
+#undef C_TEST_NORETURN_STATEMENT_SOURCE
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 source = sources[index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                        (CPreprocessOptions){
+                                                            .target = target_native,
+                                                            .data_layout = target_data_layout(target_native),
+                                                        });
+            CParseResult parsed = c_parse(temporary.arena, preprocess);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+            if (parsed.diagnostic_count == 0)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("noreturn-call-expression-statements.c"), preprocess,
+                                                                    parsed, target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    u32 checked = 0;
+                    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                    {
+                        IrFunction* function = module->functions + function_index;
+                        bool statement = string_equal(function->name, S8("f"));
+                        bool whole = string_equal(function->name, S8("h"));
+                        if (statement || whole)
+                        {
+                            bool unreachable = false;
+                            bool returns = false;
+                            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                            {
+                                unreachable |= function->instructions[instruction_index].opcode == IR_OPCODE_UNREACHABLE;
+                                returns |= function->instructions[instruction_index].opcode == IR_OPCODE_RETURN;
+                            }
+                            BUSTER_TEST(arguments, unreachable && returns == statement);
+                            checked += 1;
+                        }
+                    }
+                    BUSTER_TEST(arguments, checked == 2);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_empty_initializers(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -25041,6 +25118,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_attribute_noreturn);
     BUSTER_TEST_FIXTURE(arguments, c_test_noreturn_call_value_operands);
+    BUSTER_TEST_FIXTURE(arguments, c_test_noreturn_call_expression_statements);
     BUSTER_TEST_FIXTURE(arguments, c_test_gnu_attribute_queries);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_empty_initializers);
