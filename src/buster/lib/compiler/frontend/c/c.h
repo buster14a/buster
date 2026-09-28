@@ -747,7 +747,10 @@ struct CArrayBound
     bool is_static;
     bool is_star;
     bool has_inferred_count;
-    u8 reserved;
+    // A `const` written inside the brackets. A parameter declared with it is
+    // adjusted to a const pointer (C17 6.7.6.3p7), so `int a[const 2]` is
+    // not modifiable although its elements are.
+    bool is_const;
 };
 
 typedef struct CType CType;
@@ -1198,6 +1201,9 @@ struct CAggregateLookup
     u64 probe_count;
     u64 rehash_slot_count;
     u64 fallback_type_count;
+    // Rows lowering's tag type-name search visited because the index could
+    // not name the one candidate.
+    u64 lowering_search_type_count;
 #endif
 };
 
@@ -1230,10 +1236,35 @@ struct CTokenPositionIndex
     // fresh arena page already holds, and every reader subtracts one, which
     // turns that zero back into the UINT32_MAX the range tests already reject.
     u32* matching_delimiters_plus_one;
+    // Ascending positions of the words and token pairs the semantic validation
+    // families of c_parse_validate_lowering_constraints look for, recorded by
+    // the same pass so each family visits its candidates (CParseCandidates)
+    // instead of re-testing every body token. Keyword populations are exact
+    // for interned identifiers; an identifier the intern pass never saw
+    // (symbol 0) is recorded in all of them, because only its spelling can
+    // say, and every family re-checks the exact word per candidate.
+    u32* control_keyword_positions; // for while do switch break continue case default
+    u32* switch_positions;
+    u32* return_positions;
+    u32* goto_positions;
+    u32* asm_positions;    // asm __asm __asm__
+    u32* sizeof_positions; // sizeof _Alignof __alignof __alignof__
+    u32* brace_identifier_positions;     // an identifier directly followed by '{'
+    u32* statement_expression_positions; // a '{' directly preceded by '('
+    u32* label_address_positions;        // a '&&' directly followed by an identifier
     u32 vector_size_count;
     u32 alignas_count;
     u32 label_candidate_count;
     u32 attribute_count;
+    u32 control_keyword_count;
+    u32 switch_count;
+    u32 return_count;
+    u32 goto_count;
+    u32 asm_count;
+    u32 sizeof_count;
+    u32 brace_identifier_count;
+    u32 statement_expression_count;
+    u32 label_address_count;
     // Delimiter scan verdicts that matching_delimiters_plus_one alone cannot carry:
     // closers that matched nothing (mismatched or excess) plus openers still
     // unmatched at the end of the stream. Zero means the whole stream is

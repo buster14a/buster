@@ -51,10 +51,13 @@ struct CIrSsaSimplifyWork
 #if BUSTER_INCLUDE_TESTS
 // A synthetic simplification input. Parameter p lives in parameter_blocks[p],
 // and each block's list keeps ascending parameter order. Its incoming values
-// are incoming_values[incoming_offsets[p] .. incoming_offsets[p + 1]).
-// `replacements` is the initial forest over value_count values (forwarded
-// parameters point away from themselves); `memory_parameters`, when present,
-// marks parameters whose owner stays in memory.
+// are incoming_values[incoming_offsets[p] .. incoming_offsets[p + 1]), and
+// incoming_predecessors, when present, names each edge's source block (block
+// 0 otherwise). `reachable_blocks`, when present, marks the blocks reachable
+// from the entry; without it every block is. `replacements` is the initial
+// forest over value_count values (forwarded parameters point away from
+// themselves); `memory_parameters`, when present, marks parameters whose owner
+// stays in memory.
 typedef struct CTestSsaSimplifyCase CTestSsaSimplifyCase;
 struct CTestSsaSimplifyCase
 {
@@ -62,6 +65,8 @@ struct CTestSsaSimplifyCase
     u32 const* parameter_values;
     u32 const* incoming_offsets;
     u32 const* incoming_values;
+    u32 const* incoming_predecessors;
+    u8 const* reachable_blocks;
     u32 const* replacements;
     u8 const* memory_parameters;
     u32 value_count;
@@ -93,4 +98,42 @@ BUSTER_F_DECL bool c_test_ext80_big_add(CIrExt80Big* left, CIrExt80Big const* ri
 BUSTER_F_DECL bool c_test_ext80_big_multiply(CIrExt80Big const* left, CIrExt80Big const* right, CIrExt80Big* product_out);
 BUSTER_F_DECL bool c_test_ext80_parse_rational_literal(String8 spelling, CIrExt80Big* numerator_out, CIrExt80Big* denominator_out,
                                                        s32* binary_exponent_out);
+
+// Constant-initializer relocations (#1450): one operation is an append of a
+// record at `offset`, or a designated clear of [offset, offset + size).
+typedef struct CTestInitializerRelocationOperation CTestInitializerRelocationOperation;
+struct CTestInitializerRelocationOperation
+{
+    u64 offset;
+    u64 size;
+    u32 symbol;
+    bool clear;
+    u8 reserved[3];
+};
+
+// Both final arrays and where each run stopped (the operation count when it
+// did not): `indexed` went through a designator-machine context and its
+// relocation index, `reference` through the whole-array compaction alone.
+typedef struct CTestInitializerRelocationReplay CTestInitializerRelocationReplay;
+struct CTestInitializerRelocationReplay
+{
+    IrGlobalRelocation* indexed;
+    IrGlobalRelocation* reference;
+    u32 indexed_count;
+    u32 reference_count;
+    u32 indexed_stop;
+    u32 reference_stop;
+    u32 indexed_appends;
+    bool index_built;
+    u8 reserved[3];
+    u64 index_bucket_visits;
+    u64 index_group_visits;
+    u64 index_removed_rows;
+    u64 index_compaction_rows;
+    u64 reference_compaction_rows;
+};
+
+BUSTER_F_DECL void c_test_initializer_relocation_replay(Arena* arena, u32 pointer_size, u64 byte_count, u32 capacity,
+                                                        CTestInitializerRelocationOperation const* operations, u32 operation_count,
+                                                        CTestInitializerRelocationReplay* replay);
 #endif
