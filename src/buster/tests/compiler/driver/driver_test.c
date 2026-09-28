@@ -9240,7 +9240,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_elf_section_hea
 // section headers, and one program exercises what placement is for -- a
 // hand-registered `.init_array` and `.preinit_array` entry that must run and
 // a linker set spanning two translation units, bounded by `__start_`/
-// `__stop_` references strong in one unit and weak in the other -- linked by
+// `__stop_` references strong in one unit and weak in the other, and a set
+// of mixed alignments whose `__start_` must name its first member -- linked by
 // this linker, by the host linker, and with the weak-reference unit compiled
 // by the host compiler, including a -fPIC -g build.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_section_attribute(UnitTestArguments* arguments)
@@ -9294,6 +9295,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_section_attribute(UnitTe
                              "__attribute__((section(\"buster_set\"), used)) static int first_member = 3;\n"
                              "int ordinary_between = 100;\n"
                              "__attribute__((section(\"buster_set\"), used)) static int second_member = 4;\n"
+                             "__attribute__((section(\"buster_odd\"), used)) static char odd_member = 1;\n"
+                             "__attribute__((section(\"buster_mixed\"), used)) static char mixed_first = 7;\n"
+                             "__attribute__((section(\"buster_mixed\"), used)) static double mixed_second = 2.0;\n"
+                             "extern char __start_buster_mixed[];\n"
                              "extern int __start_buster_set[];\n"
                              "extern int __stop_buster_set[];\n"
                              "extern int __start_buster_absent[] __attribute__((weak));\n"
@@ -9305,7 +9310,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_section_attribute(UnitTe
                              "    for (int* member = __start_buster_set; member < __stop_buster_set; member += 1) { sum += *member; }\n"
                              "    placed_function();\n"
                              "    return ran == 1 && preinit_saw == 1 && sum == 17 && buster_set_count() == 4 && hooked(placed_data) == 6 &&\n"
-                             "           placed_constant == 6 && placed_zero == 0 && !__start_buster_absent && block_scope() == 0 && ordinary_between == 100 ? 0 : 1;\n"
+                             "           placed_constant == 6 && placed_zero == 0 && !__start_buster_absent && block_scope() == 0 && ordinary_between == 100 &&\n"
+                             "           __start_buster_mixed == &mixed_first && __start_buster_mixed[0] == 7 && mixed_second == 2.0 && odd_member == 1 ? 0 : 1;\n"
                              "}\n");
     String8 member_source = S8("#ifndef BUSTER_SET_BOUND\n"
                                "#define BUSTER_SET_BOUND __attribute__((weak))\n"
