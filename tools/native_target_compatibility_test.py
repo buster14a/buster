@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression for the legacy Clang AVX10 -march=native exception (#1501)."""
+"""Compiler compatibility regressions for Clang native targeting and Linux ASan."""
 
 import os
 from pathlib import Path
@@ -54,6 +54,38 @@ case "$BUSTER_TEST_AVX10_MODE" in
         fi ;;
 esac
 exec "$BUSTER_TEST_REAL_CC" "$@"
+"""
+
+ASAN_WRAPPER = r"""#!/bin/sh
+query=$1
+printf '%s\n' "$query" >> "$BUSTER_TEST_ASAN_QUERY_LOG"
+case "$query" in
+    -print-file-name=libclang_rt.asan-x86_64.so)
+        if [ -n "${BUSTER_TEST_COMPILER_RT:-}" ]; then
+            printf '%s\n' "$BUSTER_TEST_COMPILER_RT"
+        else
+            printf '%s\n' libclang_rt.asan-x86_64.so
+        fi
+        ;;
+    -print-file-name=libclang_rt.asan.so)
+        if [ -n "${BUSTER_TEST_COMPILER_RT_GENERIC:-}" ]; then
+            printf '%s\n' "$BUSTER_TEST_COMPILER_RT_GENERIC"
+        else
+            printf '%s\n' libclang_rt.asan.so
+        fi
+        ;;
+    -print-file-name=libasan.so)
+        if [ -n "${BUSTER_TEST_GCC_ASAN:-}" ]; then
+            printf '%s\n' "$BUSTER_TEST_GCC_ASAN"
+        else
+            printf '%s\n' libasan.so
+        fi
+        ;;
+    *)
+        printf 'unexpected query: %s\n' "$query" >&2
+        exit 2
+        ;;
+esac
 """
 
 
@@ -119,6 +151,95 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(optional < call < optional_end)
         module_code = "\n".join(line for line in MODULE.read_text().splitlines() if not line.lstrip().startswith("#"))
         self.assertNotIn("BUSTER_CHECK_OPTIONAL_WARNINGS", module_code)
+
+
+@unittest.skipUnless(CMAKE and os.name == "posix", "cmake and POSIX sh are required")
+class LinuxAsanRuntimeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        text = CMAKELISTS.read_text()
+        start = text.index('set(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME "")')
+        end = text.index("\nset(C_COMPILER_MSVC_FAMILIY OFF)", start)
+        cls.block = text[start:end]
+
+    def runtime(self, work, name):
+        path = work / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        return path.resolve()
+
+    def configure(self, clang, compiler_rt=None, compiler_rt_generic=None, gcc_asan=None):
+        with tempfile.TemporaryDirectory() as work:
+            work = Path(work)
+            wrapper = work / "cc-wrapper"
+            wrapper.write_text(ASAN_WRAPPER)
+            wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+            query_log = work / "queries.log"
+            result_file = work / "result.txt"
+            policy = work / "policy.cmake"
+            policy.write_text(textwrap.dedent(f"""
+                set(UNIX ON)
+                set(APPLE OFF)
+                set(BUSTER_SANITIZE ON)
+                set(BUSTER_ZIG_LINUX_ASAN_RUNTIME "")
+                set(C_COMPILER_ZIG OFF)
+                set(C_COMPILER_GNU_FAMILY ON)
+                set(C_COMPILER_CLANG_FAMILY {"ON" if clang else "OFF"})
+                set(C_COMPILER_CLANG {"ON" if clang else "OFF"})
+                set(C_COMPILER_GNU {"OFF" if clang else "ON"})
+                set(CMAKE_SYSTEM_PROCESSOR x86_64)
+                set(CMAKE_C_COMPILER_VERSION {"18.1.3" if clang else "13.3.0"})
+                set(CMAKE_C_COMPILER "{wrapper.as_posix()}")
+                {self.block}
+                file(WRITE "{result_file.as_posix()}"
+                    "${{BUSTER_LINUX_ASAN_PRELOAD_RUNTIME}}\\n${{BUSTER_LINUX_ASAN_PRELOAD_RUNTIME_DIR}}\\n")
+            """))
+            env = dict(os.environ, BUSTER_TEST_ASAN_QUERY_LOG=str(query_log))
+            values = {
+                "BUSTER_TEST_COMPILER_RT": compiler_rt,
+                "BUSTER_TEST_COMPILER_RT_GENERIC": compiler_rt_generic,
+                "BUSTER_TEST_GCC_ASAN": gcc_asan,
+            }
+            for name, value in values.items():
+                if value is None:
+                    env.pop(name, None)
+                else:
+                    env[name] = str(value)
+            result = subprocess.run([CMAKE, "-P", str(policy)], env=env, capture_output=True, text=True)
+            selected = result_file.read_text().splitlines() if result_file.exists() else []
+            queries = query_log.read_text().splitlines() if query_log.exists() else []
+            return result, selected, queries
+
+    def test_clang_selects_bundled_compiler_rt_without_querying_libasan(self):
+        with tempfile.TemporaryDirectory() as work:
+            compiler_rt = self.runtime(Path(work), "clang/libclang_rt.asan-x86_64.so")
+            gcc_asan = self.runtime(Path(work), "gcc/libasan.so")
+            result, selected, queries = self.configure(True, compiler_rt=compiler_rt, gcc_asan=gcc_asan)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(selected, [str(compiler_rt), str(compiler_rt.parent)])
+        self.assertEqual(queries, ["-print-file-name=libclang_rt.asan-x86_64.so"])
+
+    def test_clang_missing_compiler_rt_fails_before_gcc_libasan_fallback(self):
+        with tempfile.TemporaryDirectory() as work:
+            gcc_asan = self.runtime(Path(work), "gcc/libasan.so")
+            result, selected, queries = self.configure(True, gcc_asan=gcc_asan)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(selected, [])
+        self.assertEqual(queries, [
+            "-print-file-name=libclang_rt.asan-x86_64.so",
+            "-print-file-name=libclang_rt.asan.so",
+        ])
+        output = result.stdout + result.stderr
+        self.assertIn("libclang_rt.asan-x86_64.so", output)
+        self.assertIn("libclang-rt-18-dev", output)
+
+    def test_gcc_still_selects_libasan(self):
+        with tempfile.TemporaryDirectory() as work:
+            gcc_asan = self.runtime(Path(work), "gcc/libasan.so")
+            result, selected, queries = self.configure(False, gcc_asan=gcc_asan)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(selected, [str(gcc_asan), str(gcc_asan.parent)])
+        self.assertEqual(queries, ["-print-file-name=libasan.so"])
 
 
 @unittest.skipUnless(CMAKE and HOST_CC and os.name == "posix", "cmake, a host C compiler and POSIX sh are required")
