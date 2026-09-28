@@ -3,6 +3,7 @@ name: Campaign evidence readback
 # Scratch helper for the #880 campaign. It copies a retained Actions artifact
 # of this public repository onto an orphan scratch branch so the coordinating
 # session (which cannot reach the artifact blob host) can fetch it with git.
+# The request (run id, artifact name, target branch) is readback-request.json.
 on:
   push:
     branches: [codex/880-evidence-readback]
@@ -16,24 +17,43 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Read request
+        id: request
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, re
+          r = json.load(open("readback-request.json"))
+          assert re.fullmatch(r"[1-9][0-9]{0,19}", r["run_id"])
+          assert re.fullmatch(r"[A-Za-z0-9._-]{1,128}", r["artifact"])
+          assert re.fullmatch(r"codex/880-evidence-[a-z0-9-]{1,64}", r["branch"])
+          print(f"run_id={r['run_id']}\nartifact={r['artifact']}\nbranch={r['branch']}")
+          PY
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: issue1162-exact-systemd-slice
-          run-id: 36373171892
+          name: ${{ steps.request.outputs.artifact }}
+          run-id: ${{ steps.request.outputs.run_id }}
           github-token: ${{ github.token }}
-          path: a23
+          path: payload
       - name: Publish to orphan scratch branch
         shell: bash
         env:
           TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          BRANCH: ${{ steps.request.outputs.branch }}
+          RUN: ${{ steps.request.outputs.run_id }}
+          NAME: ${{ steps.request.outputs.artifact }}
         run: |
           set -euo pipefail
-          cd a23
+          cd payload
           git init -q -b data
           git config user.name "github-actions[bot]"
           git config user.email "41898099+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -q -m "Attempt 24 artifact 10950445985 (run 36373171892), sha256 a2a3515fa995d83266d992b04d0484174646d9f3f00dcd7cb4a5c63722095466"
-          git push -q "https://x-access-token:${TOKEN}@github.com/${REPO}.git" data:refs/heads/codex/880-evidence-a24-data
+          git commit -q -m "artifact $NAME from run $RUN"
+          git push -q --force "https://x-access-token:${TOKEN}@github.com/${REPO}.git" "data:refs/heads/$BRANCH"
           git rev-parse HEAD
