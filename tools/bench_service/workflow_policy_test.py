@@ -114,7 +114,20 @@ DOCUMENTATION_REQUIREMENTS = {
         "The retired audit workflow must not be restored",
         "BENCH_SERVICE_DISPATCH_ENABLED` is exactly `true",
     ),
+    ADMISSION_GUIDE: (
+        "### Dispatch gate",
+        "### Settings transition",
+        "must use **Re-run all jobs**",
+    ),
+    OPERATOR_PACKET: (
+        "**Step 1:**",
+        "**Step 2:**",
+    ),
 }
+
+# The superseded contract required davidgmbb's approval with self-review
+# prevention, which blocked the maintainer's own dispatches.
+SUPERSEDED_CONTRACT = ("self-review", "prevent_self_review", "pending environment")
 
 
 def main() -> int:
@@ -132,6 +145,14 @@ def main() -> int:
         for marker in markers:
             if marker not in text:
                 errors.append(f"{path.relative_to(ROOT)} is missing policy marker: {marker}")
+
+    for path in (ADMISSION_GUIDE, OPERATOR_PACKET, BENCHMARKING, DEPLOYMENT):
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            for phrase in SUPERSEDED_CONTRACT:
+                if phrase in text:
+                    errors.append(
+                        f"{path.relative_to(ROOT)} restates the manual-approval contract: {phrase}")
 
     if BENCHMARKING.is_file():
         text = BENCHMARKING.read_text(encoding="utf-8")
@@ -287,7 +308,8 @@ def main() -> int:
     ]
     if permission_declarations != ["permissions: {}", "    permissions:"]:
         errors.append("dispatch workflow must grant no GITHUB_TOKEN permissions beyond authorize")
-    if not contains_block(authorize, ("    permissions:", "      actions: read", "    timeout-minutes: 5")):
+    authorize_permissions = ("    permissions:", "      actions: read", "    timeout-minutes: 5")
+    if not contains_block(authorize, authorize_permissions):
         errors.append("authorize job must be granted exactly actions: read")
 
     for line in AUTHORIZE_LINES:
