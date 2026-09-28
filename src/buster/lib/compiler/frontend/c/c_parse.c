@@ -19992,6 +19992,11 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
     CParseInitializerDiagnostic diagnostic = {0};
     u64 mark = machine->scratch_arena->position;
     u32* openers = 0;
+    // A parenthesized operand's updates are checked once, with the outermost
+    // operand that contains them. A `sizeof` nested inside that operand still
+    // needs its own type-name check: `sizeof (sizeof (long + 1))` passed while
+    // the walk jumped from each outer operand straight to its `)`.
+    u32 walked_end = start;
     for (u32 index = start; !diagnostic.message.length && index + 1 < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
@@ -20001,13 +20006,16 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
         bool grouped = c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
         u32 close = grouped ? c_parse_matching_delimiter_indexed(result, preprocess, index + 1) : end;
         if (grouped && close >= end) continue;
+        bool nested = index < walked_end;
         u32 operand_start = grouped ? index + 2 : index + 1;
         u32 operand_end = grouped ? close : c_parse_update_prefix_operand_end(result, preprocess, operand_start, end);
         if (grouped && operand_start < close)
         {
             u32 cursor = operand_start;
             if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACE))
-                diagnostic = (CParseInitializerDiagnostic){.message = S8("invalid sizeof operand"), .token = index};
+            {
+                if (!nested) diagnostic = (CParseInitializerDiagnostic){.message = S8("invalid sizeof operand"), .token = index};
+            }
             else
             {
                 CScopeId operand_scope = c_parse_scope_for_token(result, scope, index);
@@ -20022,7 +20030,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
                     diagnostic = (CParseInitializerDiagnostic){.message = S8("expected ')' after type name"), .token = cursor};
             }
         }
-        for (u32 update = operand_start; !diagnostic.message.length && update < operand_end; update += 1)
+        for (u32 update = operand_start; !nested && !diagnostic.message.length && update < operand_end; update += 1)
         {
             CToken current = preprocess.tokens[update];
             if (!c_token_is_punctuator(&current, C_PUNCTUATOR_PLUS_PLUS) && !c_token_is_punctuator(&current, C_PUNCTUATOR_MINUS_MINUS)) continue;
@@ -20055,7 +20063,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
             if (typed && !c_parse_update_operand_modifiable(result, preprocess, place_start, place_end, type))
                 diagnostic = (CParseInitializerDiagnostic){.message = S8("increment or decrement operand is not a modifiable place"), .token = update};
         }
-        if (grouped) index = close;
+        if (grouped && !nested) walked_end = close;
     }
     arena_set_position(machine->scratch_arena, mark);
     return diagnostic;

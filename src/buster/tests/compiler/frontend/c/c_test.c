@@ -11930,6 +11930,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(Unit
         {S8("sizeof (++(item ? item : values[0]))"), false},
         {S8("sizeof ((0, ++42))"), false},
         {S8("sizeof (item ? ++42 : 0)"), false},
+        {S8("sizeof (sizeof (++42))"), false},
         {S8("sizeof no_link(++42)"), false},
         {S8("sizeof values[++42]"), false},
         {S8("sizeof ((const int){1}++)"), false},
@@ -12020,9 +12021,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(Unit
 }
 
 // A type name inside a `sizeof`, `_Alignof`, `typeof` or `typeof_unqual`
-// operand ends at that operand's `)`. A typeof type name followed by an
-// operator was sized as if the type were a value, and a typedef written on
-// one declared nothing without a diagnostic (#1535). A type name in its own
+// operand ends at that operand's `)`, including an operand nested in another.
+// A typeof type name followed by an operator was sized as if the type were a
+// value, and a typedef written on one declared nothing without a diagnostic
+// (#1535). A type name in its own
 // cast parentheses is still a cast, and a local that shadows a typedef still
 // makes its operand an expression. `diagnosed` starts at the token the
 // diagnostic names: after `*` that is the operand, since `T *` is a type name.
@@ -12043,6 +12045,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_name_operand_trailer(UnitTestArgu
         {S8("long probe(void) { return sizeof (typeof (typeof (object) + 1)); }"), S8("+ 1)")},
         {S8("long probe(void) { return sizeof (long + 1); }"), S8("+ 1)")},
         {S8("typedef long alias; long probe(void) { return sizeof (alias * 2); }"), S8("2)")},
+        {S8("long probe(void) { return sizeof (sizeof (long + 1)); }"), S8("+ 1))")},
+        {S8("long probe(void) { long a[2] = {0}; return sizeof (a[_Alignof (typeof (object) * 2)]); }"), S8("2)])")},
         {S8("typedef typeof (typeof (object) + 1) t;"), S8("+ 1)")},
         {S8("typedef typeof (typeof (object) * 2) t;"), S8("2)")},
         {S8("typedef typeof (typeof (object) - 1) t;"), S8("- 1)")},
@@ -12058,6 +12062,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_name_operand_trailer(UnitTestArgu
         {S8("long probe(void) { return sizeof (typeof (object)) + 1; }"), {0}},
         {S8("long probe(void) { return sizeof (typeof (object + 1)) + sizeof (typeof (&object)); }"), {0}},
         {S8("long probe(void) { return sizeof (typeof (object) *) + sizeof (typeof (object)[2]) + sizeof (int (*)(void)); }"), {0}},
+        {S8("long probe(void) { return sizeof (sizeof (long) + 1) + sizeof (sizeof ((typeof (object)) + 1)); }"), {0}},
+        {S8("int probe(int *pointer) { return sizeof (sizeof (++*pointer)); }"), {0}},
         {S8("typedef typeof ((long) + 1) t; t value;"), {0}},
         {S8("typedef typeof (typeof (object) *) t; t value;"), {0}},
         {S8("typedef typeof_unqual (typeof (object) const *) t; t value;"), {0}},
