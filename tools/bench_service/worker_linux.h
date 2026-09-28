@@ -90,6 +90,7 @@ typedef struct BqWorkerObserved
     bool syscall_architectures_native;
     bool syscall_filter_system_service;
     bool syscall_error_number_eperm;
+    bool capability_sets_empty;
     bool security_properties_valid;
     bool paths_valid;
     char inaccessible_paths[BQ_PATH_CAP * 2 + 2];
