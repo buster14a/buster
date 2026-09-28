@@ -2970,8 +2970,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_signal(BqWorkerBackend* backend, char
     return BQ_OK;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_test_worker_join(BqWorkerBackend* backend, int* status, u64 deadline)
+BUSTER_GLOBAL_LOCAL BqError bq_test_worker_join(BqWorkerBackend* backend, int* status, u64 deadline, bool cancellable)
 {
+    (void)cancellable;
     BqWorkerFake* fake = backend->context;
     BqWorkerFixture* fixture = (BqWorkerFixture*)((char*)fake - offsetof(BqWorkerFixture, fake));
     BQ_CHECK(bq_test_worker_probe_locked(fixture->lease));
@@ -4900,6 +4901,88 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_preparing_recovery(u32 new_boot)
     }
 }
 
+/* #880 attempt P: a signal cancellation whose cleanup failed left a durable
+ * CANCEL, published cancelled evidence and a cleanup-failed failure record.
+ * Recovery must finish that job cancelled against the published record
+ * (mode 0), and must fail closed without replacing foreign outcome bytes
+ * (mode 1). Before the fix, recovery chose interrupted, which the queue
+ * rejects for a cancelled job and the published record contradicts. */
+BUSTER_GLOBAL_LOCAL void bq_test_worker_cancelled_recovery(u32 mode)
+{
+    BqWorkerFixture fixture;
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_EXECUTION_FAILED, false))
+    {
+        fixture.config.production_path = true;
+        u32 inaccessible_root_length = (u32)strlen(fixture.root);
+        u32 inaccessible_lease_length = (u32)strlen(fixture.lease);
+        BQ_CHECK(inaccessible_root_length + 1 + inaccessible_lease_length <
+                 sizeof(fixture.fake.observed.inaccessible_paths));
+        memcpy(fixture.fake.observed.inaccessible_paths, fixture.root, inaccessible_root_length);
+        fixture.fake.observed.inaccessible_paths[inaccessible_root_length] = ' ';
+        memcpy(fixture.fake.observed.inaccessible_paths + inaccessible_root_length + 1, fixture.lease,
+               inaccessible_lease_length + 1);
+        BqQueue* queue = &fixture.material.queue.queue;
+        BqRequest request = bq_test_real_request(110 + mode);
+        u64 id = 0, token = 0;
+        BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK &&
+                 bq_materialize(queue, fixture.config.installed_root, fixture.config.workspace_root, &id, &token) == BQ_OK);
+        BqJob* job = bq_job(&queue->state, id);
+        BQ_CHECK(job && job->phase == BQ_PREPARING && bq_test_worker_bind(&fixture, job));
+        BqWorkerFinalization finalization = {.config = &fixture.config, .result_directory = -1};
+        BQ_CHECK(job && bq_worker_result_open(&fixture.config, job, &finalization, true) == BQ_OK);
+        char prepare[BQ_PATH_CAP + 96], outcome_path[BQ_PATH_CAP + 96];
+        snprintf(prepare, sizeof(prepare), "%.200s/validate-buster-v1.prepare.manifest", finalization.result_root);
+        snprintf(outcome_path, sizeof(outcome_path), "%.200s/validate-buster-v1.outcome", finalization.result_root);
+        BQ_CHECK(bq_test_write_path(prepare, "schema=1\nstage=prepare\nprocess-result=running\n", 0400));
+        BQ_CHECK(job && bq_cancel(queue, id) == BQ_OK);
+        job = bq_job(&queue->state, id);
+        BQ_CHECK(job && job->cancel_requested && job->phase == BQ_PREPARING);
+        if (mode == 0)
+        {
+            BQ_CHECK(job && bq_worker_result_evidence(job, BQ_CANCELLED, BQ_WORKER_CANCEL_SIGNAL, &finalization) == BQ_OK &&
+                     bq_worker_result_failure_artifacts(job, BQ_CANCELLED, BQ_WORKER_CANCEL_SIGNAL,
+                                                        &finalization) == BQ_OK);
+        }
+        else
+        {
+            BQ_CHECK(bq_test_write_path(outcome_path, "schema=1\nrecipe=validate-buster-v1\nstatus=cancelled\n"
+                                                      "error=planted\njob-id=0\nattempt-token=0\n", 0400));
+        }
+        BQ_CHECK(job && bq_failure_write(queue, job, BQ_CLEANUP_FAILED) == BQ_OK);
+        char before[256] = {0};
+        int outcome_fd = open(outcome_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        ssize_t before_size = outcome_fd >= 0 ? read(outcome_fd, before, sizeof(before) - 1) : -1;
+        if (outcome_fd >= 0) close(outcome_fd);
+        if (finalization.result_directory >= 0)
+        {
+            close(finalization.result_directory);
+            finalization.result_directory = -1;
+        }
+        bq_close(queue);
+        BQ_CHECK(bq_open(queue, fixture.material.queue.path) == BQ_OK && queue->needs_reconciliation);
+        BqError recovered = bq_worker_run(queue, &fixture.config, &id);
+        job = bq_job(&queue->state, id);
+        if (mode == 0)
+        {
+            BQ_CHECK(recovered == BQ_OK && job && job->phase == BQ_FINISHED && job->outcome == BQ_CANCELLED &&
+                     job->result_bound && bq_worker_result_binding_validate(job) == BQ_OK &&
+                     !queue->state.active_id && !queue->needs_reconciliation &&
+                     !bq_test_worker_probe_locked(fixture.lease));
+        }
+        else
+        {
+            BQ_CHECK(recovered != BQ_OK && job && job->phase == BQ_PREPARING && queue->state.active_id == id &&
+                     queue->needs_reconciliation);
+        }
+        char after[256] = {0};
+        outcome_fd = open(outcome_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        ssize_t after_size = outcome_fd >= 0 ? read(outcome_fd, after, sizeof(after) - 1) : -1;
+        if (outcome_fd >= 0) close(outcome_fd);
+        BQ_CHECK(before_size > 0 && before_size == after_size && !memcmp(before, after, (size_t)before_size));
+        bq_test_worker_end(&fixture);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_test_recipe_driver_run(char const* driver, char* const arguments[])
 {
     pid_t child = driver && driver[0] == '/' ? fork() : -1;
@@ -5162,6 +5245,8 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_failure_bundle_coverage();
     bq_test_worker_preparing_recovery(0);
     bq_test_worker_preparing_recovery(1);
+    bq_test_worker_cancelled_recovery(0);
+    bq_test_worker_cancelled_recovery(1);
     bq_test_large_source_manifest();
     bq_test_recipe_materialized_bridge(argc > 2 ? argv[2] : NULL);
 #endif
