@@ -2093,6 +2093,10 @@ FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions 
                 {
                     result.kind = OS_FILE_KIND_LINK;
                 }
+                else if (S_ISCHR(stats.st_mode) || S_ISFIFO(stats.st_mode))
+                {
+                    result.kind = OS_FILE_KIND_STREAM;
+                }
                 else
                 {
                     result.kind = OS_FILE_KIND_OTHER;
