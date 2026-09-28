@@ -4856,7 +4856,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 eh_frame_header_size = eh_frame_table.count ? 12 + (u64)eh_frame_table.count * 8 : 0;
     has_thread_local_data =
         object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length != 0 || object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size != 0;
-    u32 program_header_count = ELF_BASE_PROGRAM_HEADER_COUNT + has_thread_local_data + (eh_frame_header_size != 0);
+    u32 program_header_count = (u32)ELF_BASE_PROGRAM_HEADER_COUNT + (u32)has_thread_local_data + (u32)(eh_frame_header_size != 0);
     u64 header_end = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
     u64 image_base = ELF_IMAGE_BASE;
