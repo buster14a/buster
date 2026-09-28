@@ -1,0 +1,20 @@
+BROKER_PRIVATE_PAYLOAD path=/var/lib/buster-bench/workspaces/results/job-1-attempt-2/payload verified=yes
+BROKER_PROBE_IDENTITY name=buster-bench-candidate uid=65001 gid=65001 groups=65001 verified=yes
+BROKER_PRIVATE_PAYLOAD_ACCESS identity=buster-bench-candidate read/write/rw_denied=yes
+BROKER_PROBE_IDENTITY name=buster-github-runner uid=65002 gid=65002 groups=65002 verified=yes
+BROKER_PRIVATE_PAYLOAD_ACCESS identity=buster-github-runner read/write/rw_denied=yes
+BROKER_PROBE_IDENTITY name=root uid=0 gid=0 groups=0 verified=yes
+BROKER_SOCKET_FIXTURE path=/run/buster-bench-systemd-broker/control.sock verified=yes
+BROKER_PROBE_IDENTITY name=root uid=0 gid=0 groups=0 verified=yes
+BROKER_PROBE_IDENTITY name=buster-bench uid=65000 gid=65000 groups=65000,65001 verified=yes
+BROKER_ROOT_PEER_REJECTION sent=176 send_errno=0 received=12 kind=3 length=4 status=126 verified=yes
+BROKER_PROBE_IDENTITY name=buster-bench-candidate uid=65001 gid=65001 groups=65001 verified=yes
+BROKER_SOCKET_DAC path=/proc/self/bq-broker-missing.sock socket_errno=0 connect=-1 errno=2 authorization_denied=no
+BROKER_SOCKET_DAC path=/run/buster-bench-systemd-broker/control.sock socket_errno=0 connect=-1 errno=13 authorization_denied=yes
+BROKER_PROBE_IDENTITY name=buster-github-runner uid=65002 gid=65002 groups=65002 verified=yes
+BROKER_SOCKET_DAC path=/proc/self/bq-broker-missing.sock socket_errno=0 connect=-1 errno=2 authorization_denied=no
+BROKER_SOCKET_DAC path=/run/buster-bench-systemd-broker/control.sock socket_errno=0 connect=-1 errno=13 authorization_denied=yes
+BROKER_PROBE_IDENTITY name=buster-bench uid=65000 gid=65000 groups=65000,65001 verified=yes
+BROKER_PROBE_IDENTITY name=buster-bench uid=65000 gid=65000 groups=65000,65001 verified=yes
+BROKER_PROBE_IDENTITY name=buster-bench uid=65000 gid=65000 groups=65000,65001 verified=yes
+BROKER_PROBE_IDENTITY name=root uid=0 gid=0 groups=0 verified=yes

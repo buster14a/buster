@@ -1,0 +1,6 @@
+MainPID=714
+ControlGroup=/system.slice/buster-bench.service
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+ActiveState=active

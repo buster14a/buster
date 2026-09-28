@@ -1,0 +1,13 @@
+{
+  "attempt": 2,
+  "instance_record": {
+    "bytes": 544,
+    "sha256": "070d13474dc77809b240f12b9b22c1c27283ed0d415b773be1fecb4564c95fbf"
+  },
+  "job": 1,
+  "request_sha256": "c20c844e2f93b24d68959fcf75af6a43a416691ad5850c433e440ad171f8359d",
+  "worker_record": {
+    "bytes": 232,
+    "sha256": "2adc9be6d62b0ab0abbc6796e8a15edd65b51863220b733586fc524005d24faa"
+  }
+}

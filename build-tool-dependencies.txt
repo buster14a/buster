@@ -1,0 +1,38 @@
+tool=clang path=/usr/bin/clang resolved=/usr/lib/llvm-18/bin/clang
+8ef402d453d1ba4902e4ee0f0f847f6cfa01400c95aa43c24e97818b9c0e3f45  /usr/bin/clang
+	linux-vdso.so.1 (0x00007f21b1344000)
+	libclang-cpp.so.18.1 => /lib/x86_64-linux-gnu/libclang-cpp.so.18.1 (0x00007f21ad400000)
+	libLLVM.so.18.1 => /lib/x86_64-linux-gnu/libLLVM.so.18.1 (0x00007f21a5c00000)
+	libstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007f21a5800000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f21a5400000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f21b1226000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f21b1346000)
+	libffi.so.8 => /lib/x86_64-linux-gnu/libffi.so.8 (0x00007f21b1218000)
+	libedit.so.2 => /lib/x86_64-linux-gnu/libedit.so.2 (0x00007f21b11de000)
+	libz.so.1 => /lib/x86_64-linux-gnu/libz.so.1 (0x00007f21ad3e4000)
+	libzstd.so.1 => /lib/x86_64-linux-gnu/libzstd.so.1 (0x00007f21ad32a000)
+	libtinfo.so.6 => /lib/x86_64-linux-gnu/libtinfo.so.6 (0x00007f21ad2f6000)
+	libxml2.so.2 => /lib/x86_64-linux-gnu/libxml2.so.2 (0x00007f21a561e000)
+	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f21ad2c8000)
+	libbsd.so.0 => /lib/x86_64-linux-gnu/libbsd.so.0 (0x00007f21ad2b2000)
+	libicuuc.so.74 => /lib/x86_64-linux-gnu/libicuuc.so.74 (0x00007f21a5000000)
+	liblzma.so.5 => /lib/x86_64-linux-gnu/liblzma.so.5 (0x00007f21ad280000)
+	libmd.so.0 => /lib/x86_64-linux-gnu/libmd.so.0 (0x00007f21ad271000)
+	libicudata.so.74 => /lib/x86_64-linux-gnu/libicudata.so.74 (0x00007f21a3200000)
+tool=cmake path=/usr/local/bin/cmake resolved=/usr/local/bin/cmake
+c4b3b237dc7a013590db9e90f70fca2dfdedde09521e920d3339569ea364230a  /usr/local/bin/cmake
+	linux-vdso.so.1 (0x00007f183ab96000)
+	libdl.so.2 => /lib/x86_64-linux-gnu/libdl.so.2 (0x00007f183ab7f000)
+	librt.so.1 => /lib/x86_64-linux-gnu/librt.so.1 (0x00007f183ab7a000)
+	libpthread.so.0 => /lib/x86_64-linux-gnu/libpthread.so.0 (0x00007f183ab75000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f183aa8c000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f183a800000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f183ab98000)
+tool=ninja path=/usr/local/bin/ninja resolved=/usr/local/bin/ninja
+607e668f90dd6cd82e1a42ae572647ad1b1fd43063964295b9547836d8c15d99  /usr/local/bin/ninja
+	linux-vdso.so.1 (0x00007f32bb1d0000)
+	libstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007f32bae00000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f32bb0d5000)
+	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f32bb0a7000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f32baa00000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f32bb1d2000)

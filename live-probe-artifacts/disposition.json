@@ -1,0 +1,120 @@
+{
+  "active_lease_snapshot": {
+    "boot_id": "0c632bb7-ca73-4d37-8ab8-2ab227d86f0b",
+    "descriptors_scanned": 10,
+    "disposition": "PASSIVE_ACTIVE_LEASE_SNAPSHOT",
+    "lease": {
+      "device": 48,
+      "gid": 65000,
+      "inode": 9439048,
+      "links": 1,
+      "mode": 416,
+      "uid": 65000
+    },
+    "lease_path": "/var/lib/buster-bench/lease/host.lock",
+    "limitation": "one bounded readback; matching inode and /proc/locks do not prove the same open-file description or continuous coordinator ownership",
+    "matching_proc_locks": [
+      {
+        "access": "WRITE",
+        "class": "ADVISORY",
+        "end": "EOF",
+        "raw": "7: FLOCK  ADVISORY  WRITE 714 00:30:9439048 0 EOF",
+        "reported_pid": 714,
+        "start": 0,
+        "type": "FLOCK",
+        "waiting": false
+      }
+    ],
+    "matching_service_descriptors": [
+      {
+        "device": 48,
+        "fd_number": 9,
+        "fdinfo_bytes": 103,
+        "gid": 65000,
+        "inode": 9439048,
+        "links": 1,
+        "mode": 416,
+        "readlink": "/var/lib/buster-bench/lease/host.lock",
+        "uid": 65000
+      }
+    ],
+    "root_receipt": {
+      "device": 48,
+      "gid": 0,
+      "inode": 9439049,
+      "links": 1,
+      "mode": 292,
+      "size": 24,
+      "uid": 0
+    },
+    "service_cgroup": "/system.slice/buster-bench.service",
+    "service_invocation": "4fffe7e6f3354aec8c5b5058dbd048f8",
+    "service_main_pid": 714,
+    "service_starttime_ticks": 13344
+  },
+  "attempt": 2,
+  "base_build": {
+    "cgroup": "/buster.slice/buster-bench.slice/buster-bench-1-2-base-build.service",
+    "device": 30,
+    "inode": 10327,
+    "invocation": "a63e947ec7bb497a92d256f96be2b804",
+    "main_pid": 838,
+    "process_starttime_ticks": 13591
+  },
+  "base_build_workspace_artifact": "base-build-workspace.json",
+  "broker_capture_coverage": {
+    "captures": [
+      {
+        "cgroup_capture": true,
+        "process_capture": true,
+        "process_capture_reason": null,
+        "unit": "buster-bench-systemd-broker@0-760-65000.service"
+      },
+      {
+        "cgroup_capture": true,
+        "process_capture": true,
+        "process_capture_reason": null,
+        "unit": "buster-bench-systemd-broker@3-831-65000.service"
+      },
+      {
+        "cgroup_capture": false,
+        "process_capture": false,
+        "process_capture_reason": "unavailable: MainPID is zero",
+        "unit": "buster-bench-systemd-broker@5-856-0.service"
+      },
+      {
+        "cgroup_capture": false,
+        "process_capture": false,
+        "process_capture_reason": "unavailable: MainPID is zero",
+        "unit": "buster-bench-systemd-broker@6-881-65000.service"
+      },
+      {
+        "cgroup_capture": false,
+        "process_capture": false,
+        "process_capture_reason": "unavailable: MainPID is zero",
+        "unit": "buster-bench-systemd-broker@7-892-65000.service"
+      }
+    ],
+    "limitation": "only instances still listed after the live probe are captured; exited instances are not inferred",
+    "listed_units": [
+      "buster-bench-systemd-broker@0-760-65000.service",
+      "buster-bench-systemd-broker@3-831-65000.service",
+      "buster-bench-systemd-broker@5-856-0.service",
+      "buster-bench-systemd-broker@6-881-65000.service",
+      "buster-bench-systemd-broker@7-892-65000.service"
+    ]
+  },
+  "disposition": "LIVE_PROBE_PASS",
+  "full_acceptance": "pending",
+  "instance_sha256": "070d13474dc77809b240f12b9b22c1c27283ed0d415b773be1fecb4564c95fbf",
+  "job": 1,
+  "live_test_exit": 0,
+  "outer_invocation": "10b84622413340da91afe840f41f20f7",
+  "payload_absent_after_cleanup": true,
+  "payload_device": 48,
+  "payload_inode": 9440184,
+  "process_group_clean": true,
+  "request_sha256": "c20c844e2f93b24d68959fcf75af6a43a416691ad5850c433e440ad171f8359d",
+  "valid": true,
+  "worker_sha256": "2adc9be6d62b0ab0abbc6796e8a15edd65b51863220b733586fc524005d24faa"
+}

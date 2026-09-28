@@ -1,0 +1,27 @@
+commit 425b8b5ac571a3320681f0394de61a82cbc42e5f
+tree 7d29660ab3b68ef86a23b816cc02d031e691287a
+parent a2422bd4865e9761dacd4503310735bca86fcf24
+parent afc6e8ed8c4a2ed73b16812e92372c22856f7638
+author David <davidgmbb@gmail.com> 1790572826 +0000
+committer GitHub <noreply@github.com> 1790572826 +0000
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ wsFcBAABCAAQBQJqufkaCRC1aQ7uu5UhlAAA6nkQAK2El8D0zaaNKqWV8DzE7vBW
+ KABZ0HMEB7/m2HYlHZJgbBDm1jpfAgWBA4Sl+3ZcUuRP8FnkCyftubJLQjNBdUnM
+ 51N4+Uvbvf1mjZMSN8Y4kM40z7iVgAGXGcPZvRINiJA/Eqt5dEXJNBenYPmay9YH
+ mxtVgAmUHOKbJ8vFVSaULlC2zDLdokYFgCZTnPr9CKSviA2Q8yUVJXhZcV18tNJj
+ G3QCwuvgZu3FN3iE6KtXOOGnUTrRRCePFSNfBp6DGKm5rm+NUtqPaZvLuQfRki33
+ zL0J0qA49Msh3jw5kBGu+Q//qpq0/D04KiX7ktfUWix/gkdz2h48SFTOOGUYIBER
+ zDQKlo0t24y2sK5FyDYwbxWUqUMlAmeMNmVqT3bnGwzJA7TMxx4wToc3J+dAAj/S
+ 0NASh8j791cLkKMXC/jYAQTl/Tdnfz7BNv9hHCpkhWU5JEqmK/jo5PWMouyJXPKB
+ FAbgzNk8FMyOjVqJ86KUsC4TbeuLemWAoCo35RT+VMT/5d2F0RJxmmGgpM84kMIC
+ Hm/P92LQCJbtMi6btW5qGPOuEQj7rViTm8rpzQTUa2aBXeFvGypygUYdUAA33zXM
+ 2FBXquLTrEhtSM1pBaBsnNl082yAmf/PpJmOKZwQGerIrC2ncSvRLns4yBDSKZM+
+ z3KsVm87EJ1oyJwkb3Ju
+ =zXti
+ -----END PGP SIGNATURE-----
+ 
+
+    Merge pull request #1675 from buster14a/codex/880-service-slice
+    
+    bench: #880 live service slice with the #1162 same-PID broker entry gate
