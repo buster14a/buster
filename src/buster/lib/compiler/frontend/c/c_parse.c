@@ -16222,8 +16222,10 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         // the call resolves to nothing. Register it there the way a file-scope
         // declaration of the same function would, unless one already is.
         CType* declared_type = type.value < result->type_count ? &result->types[type.value] : 0;
-        if (!is_typedef && declared_type && declared_type->kind == C_TYPE_FUNCTION &&
-            result->declaration_count < result->declaration_capacity && result->entity_count + 1 < result->entity_capacity)
+        // C17 6.2.2p5: without a storage-class specifier the declarator links
+        // as if it were written `extern`, so it declares no automatic object.
+        bool declares_function = !is_typedef && declared_type && declared_type->kind == C_TYPE_FUNCTION;
+        if (declares_function && result->declaration_count < result->declaration_capacity && result->entity_count + 1 < result->entity_capacity)
         {
             String8 function_name = c_token_spelling(preprocess.spelling_base, name);
             u32 function_symbol = c_parse_token_symbol(result, preprocess.spelling_base, name);
@@ -16306,7 +16308,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             .is_thread_local = is_thread_local,
             .is_constexpr = is_constexpr,
             .is_register = is_register,
-            .is_extern = is_extern,
+            .is_extern = is_extern || declares_function,
         };
         CEntity* local_entity = &result->entities[entity.value];
         if (cleanup.count)

@@ -35005,7 +35005,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
     IrType* local_type_value = ir_type_from_id(&builder->program->types, local_type);
     IrType* variable_element = variable_length_array ? ir_type_from_id(&builder->program->types, variable_element_type) : 0;
     CToken name = builder->preprocess.tokens[name_index];
-    bool local_extern = false;
+    bool local_extern = local_entity->is_extern;
     bool local_static = local_entity->is_static_storage;
     bool local_thread_local = local_entity->is_thread_local;
     for (u32 token_index = start; token_index < end; token_index += 1)
@@ -39124,7 +39124,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                                                         : 0;
                     return false;
                 }
-                bool local_extern = false;
+                bool local_extern = builder->parse.entities[entity.value].is_extern;
                 bool static_storage = builder->parse.entities[entity.value].is_static_storage;
                 bool local_thread_local = builder->parse.entities[entity.value].is_thread_local;
                 for (u32 specifier = name_index; specifier > builder->parse.declarations[builder->declaration_index].body_start; specifier -= 1)
