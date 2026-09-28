@@ -13138,6 +13138,88 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unevaluated_call_arity_diagnostics(Uni
     return result;
 }
 
+// Constant expressions outside function bodies -- array bounds, enum values,
+// static initializers and _Static_assert -- are syntax-checked before they are
+// folded, so a malformed one is diagnosed instead of being accepted.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_expression_syntax(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u32 column;
+    } cases[] = {
+        {S8("int a[sizeof(1 +)];"), 17},
+        {S8("long object; int a[sizeof(typeof(object) + 1)];"), 42},
+        {S8("struct S { int a[sizeof(long + 1)]; };"), 30},
+        {S8("void f(int a[sizeof(long + 1)]);"), 26},
+        {S8("int a[sizeof(int x)];"), 18},
+        {S8("int a[1 +];"), 10},
+        {S8("long object; long x = sizeof(typeof(object) + 1);"), 45},
+        {S8("long object; _Static_assert(sizeof(typeof(object) + 1) == 8, \"\");"), 51},
+        {S8("enum { E = sizeof(long + 1) };"), 24},
+        {S8("struct S { int a[1 +]; };"), 21},
+        {S8("void f(void) { int a[1 +]; }"), 25},
+        {S8("void f(int a[static 1 +]);"), 24},
+        {S8("int a[(int)];"), 12},
+        {S8("enum { E = 1 + };"), 16},
+        {S8("_Static_assert(1 +, \"\");"), 19},
+        {S8("int a[1 1];"), 9},
+        {S8("int a[sizeof(int) sizeof(int)];"), 19},
+        {S8("int a[sizeof(int)[0]];"), 18},
+        {S8("int a[sizeof()];"), 14},
+        {S8("int a[()];"), 8},
+        {S8("int a[1 x];"), 9},
+        {S8("enum { E = 1 2 };"), 14},
+        {S8("_Static_assert(1 1, \"\");"), 18},
+        {S8("int x = (1 2);"), 12},
+        {S8("int a[_Alignof(int)(1)];"), 20},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, cases[case_index].source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                 .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parsed = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && parsed.diagnostic_count != 0, cases[case_index].source);
+        if (parsed.diagnostic_count)
+        {
+            String8 message = parsed.diagnostics[0].message;
+            BUSTER_TEST_RAW(arguments, string_ends_with_sequence(message, S8("expected expression")) ||
+                                       string_ends_with_sequence(message, S8("expected operator")) ||
+                                       string_ends_with_sequence(message, S8("expected ')' after type name")), cases[case_index].source);
+            BUSTER_TEST_RAW(arguments, parsed.diagnostics[0].location.line == 1 && parsed.diagnostics[0].location.column == cases[case_index].column,
+                            cases[case_index].source);
+        }
+        scratch_end(temporary);
+    }
+    String8 valid[] = {
+        S8("typedef int T; struct P { int x; }; enum { A = 4, B = sizeof(long) + 1, C = _Alignof(struct P), D = A ? 1 : 2 };"
+           " int a1[sizeof(long) + 1]; int a2[sizeof((long) + 1)]; int a3[sizeof(T[3]) / sizeof(T)]; int a4[(T)3 + -1];"
+           " int a5[sizeof(int*) * 2]; int a6[sizeof(struct P*)]; int a7[__builtin_offsetof(struct P, x) + 1];"
+           " int a8[sizeof(const volatile int)]; int a9[sizeof(int[2][3])]; int a10[(A > 1) ? A : 1]; int a11[sizeof \"ab\" \"c\"];"
+           " int a12[_Generic(1, int: 2, default: 3)]; int a13[sizeof(__typeof__(a1))]; int a14[sizeof(int (*)[4])];"
+           " int a15[sizeof((struct P){1})]; int a16[sizeof(int (*)(void))]; int a17[1 ? : 2];"
+           " void f1(int n, int a[static 4], int b[const n], int c[*], int d[const static 2]); void f2(int n, int a[n][n + 1]);"
+           " long x = sizeof(long) + 1; _Static_assert(sizeof(long) + 1 > 4, \"\"); struct S { int m[A + 1]; char c[sizeof(struct P) * 2]; };"
+           " int g(void) { int n = 3; int v[n + 1]; int w[({ 2; })]; return (int)(sizeof v + sizeof w); }"),
+    };
+    for (u32 valid_index = 0; valid_index < BUSTER_ARRAY_LENGTH(valid); valid_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, valid[valid_index],
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                 .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parsed = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && parsed.diagnostic_count == 0, valid[valid_index]);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // A sizeof operand is unevaluated, but every update still requires a
 // modifiable real or pointer place. The same constraint must be reported by
 // syntax-only and by either canonical-IR lowering form.
@@ -25019,6 +25101,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);
+    BUSTER_TEST_FIXTURE(arguments, c_test_constant_expression_syntax);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_statement_expression_operand);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_vla_evaluation);
     BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
