@@ -7417,9 +7417,219 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
     Arena* arena = temporary.arena;
     String8 directory = buster_test_temporary_path(arena, S8("buster-position-independent-images"), S8(""));
     os_make_directory(directory);
+    // The fixtures are written into the scratch directory rather than checked
+    // in under tests/, whose byte inventory the native-retirement support
+    // contract freezes (docs/native-retirement-census.md).
+    String8 shared_library_source = S8(
+        "// A shared library that reaches data every way a library can: its own\n"
+        "// exported data (which an executable may copy-relocate), static data, a\n"
+        "// constant table of pointers, thread-local storage, an initializer array,\n"
+        "// and definitions in the executable that loads it.\n"
+        "int puts(const char* text);\n"
+        "\n"
+        "int shared_counter = 40;\n"
+        "int shared_table[4] = {1, 2, 3, 4};\n"
+        "static int shared_hidden = 2;\n"
+        "static const char* const shared_names[] = {\"alpha\", \"beta\"};\n"
+        "int* shared_counter_pointer = &shared_counter;\n"
+        "_Thread_local int shared_thread_value = 5;\n"
+        "\n"
+        "extern int application_value;\n"
+        "int application_callback(int value);\n"
+        "\n"
+        "__attribute__((constructor)) static void shared_constructor(void)\n"
+        "{\n"
+        "    shared_counter += 1;\n"
+        "}\n"
+        "\n"
+        "__attribute__((destructor)) static void shared_destructor(void)\n"
+        "{\n"
+        "    puts(\"shared destructor\");\n"
+        "}\n"
+        "\n"
+        "int shared_add(int value)\n"
+        "{\n"
+        "    shared_thread_value += 1;\n"
+        "    return value + shared_counter + shared_hidden + shared_thread_value;\n"
+        "}\n"
+        "\n"
+        "int* shared_counter_address(void)\n"
+        "{\n"
+        "    return &shared_counter;\n"
+        "}\n"
+        "\n"
+        "const char* shared_name(int index)\n"
+        "{\n"
+        "    return shared_names[index];\n"
+        "}\n"
+        "\n"
+        "int shared_read_application(void)\n"
+        "{\n"
+        "    return application_value;\n"
+        "}\n"
+        "\n"
+        "int shared_call_application(int value)\n"
+        "{\n"
+        "    return application_callback(value) + 1;\n"
+        "}\n"
+        "\n"
+        "int (*shared_application_function(void))(int)\n"
+        "{\n"
+        "    return application_callback;\n"
+        "}\n"
+    );
+    String8 shared_main_source = S8(
+        "// Links against basic_c_elf_shared_library.c's library.  Each check sets one\n"
+        "// bit of the exit status; the address of main is printed so two runs of a\n"
+        "// position-independent build can be compared.\n"
+        "int printf(const char* format, ...);\n"
+        "int strcmp(const char* left, const char* right);\n"
+        "\n"
+        "extern int shared_counter;\n"
+        "extern int shared_table[4];\n"
+        "extern int* shared_counter_pointer;\n"
+        "int shared_add(int value);\n"
+        "int* shared_counter_address(void);\n"
+        "const char* shared_name(int index);\n"
+        "int shared_read_application(void);\n"
+        "int shared_call_application(int value);\n"
+        "int (*shared_application_function(void))(int);\n"
+        "\n"
+        "int application_value = 1000;\n"
+        "\n"
+        "int application_callback(int value)\n"
+        "{\n"
+        "    return value * 2;\n"
+        "}\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    int failed = shared_counter != 41;\n"
+        "    failed |= (shared_counter_address() != &shared_counter) << 1;\n"
+        "    failed |= (shared_counter_pointer != &shared_counter) << 2;\n"
+        "    shared_counter += 1;\n"
+        "    failed |= (shared_add(1) != 1 + 42 + 2 + 6) << 3;\n"
+        "    failed |= (shared_table[3] != 4) << 4;\n"
+        "    failed |= (strcmp(shared_name(1), \"beta\") != 0) << 5;\n"
+        "    application_value += 1;\n"
+        "    failed |= (shared_read_application() != 1001) << 6;\n"
+        "    failed |= (shared_call_application(5) != 11) << 7;\n"
+        "    failed |= (shared_application_function() != application_callback) << 8;\n"
+        "    printf(\"main at %p\\n\", (void*)main);\n"
+        "    return failed;\n"
+        "}\n"
+    );
+    String8 shared_dlopen_source = S8(
+        "// Loads basic_c_elf_shared_library.c's library at run time: the library's\n"
+        "// thread-local block is then allocated dynamically, and the references it\n"
+        "// makes into this executable resolve only through -rdynamic exports.\n"
+        "#include <dlfcn.h>\n"
+        "\n"
+        "int application_value = 7;\n"
+        "\n"
+        "int application_callback(int value)\n"
+        "{\n"
+        "    return value + 1;\n"
+        "}\n"
+        "\n"
+        "int main(int argc, char** argv)\n"
+        "{\n"
+        "    int failed = argc < 2;\n"
+        "    void* library = failed ? 0 : dlopen(argv[1], RTLD_NOW);\n"
+        "    failed |= (library == 0) << 1;\n"
+        "    if (library)\n"
+        "    {\n"
+        "        int (*add)(int) = (int (*)(int))dlsym(library, \"shared_add\");\n"
+        "        int (*read_application)(void) = (int (*)(void))dlsym(library, \"shared_read_application\");\n"
+        "        int (*call_application)(int) = (int (*)(int))dlsym(library, \"shared_call_application\");\n"
+        "        int* counter = (int*)dlsym(library, \"shared_counter\");\n"
+        "        failed |= (!add || !read_application || !call_application || !counter) << 2;\n"
+        "        failed |= (!failed && (*counter != 41 || add(1) != 1 + 41 + 2 + 6)) << 3;\n"
+        "        failed |= (!failed && (read_application() != 7 || call_application(3) != 5)) << 4;\n"
+        "        failed |= dlclose(library) << 5;\n"
+        "    }\n"
+        "    return failed;\n"
+        "}\n"
+    );
+    String8 non_pic_reference_source = S8(
+        "// Compiled with -fno-pic, the read below is a rel32 to data another module\n"
+        "// defines, which a position-independent image cannot hold.\n"
+        "extern int non_pic_external;\n"
+        "\n"
+        "int non_pic_read(void)\n"
+        "{\n"
+        "    return non_pic_external;\n"
+        "}\n"
+    );
+    String8 python_extension_source = S8(
+        "// A CPython extension module: the shared object `import` loads, whose every\n"
+        "// reference into the interpreter is left for the loader to bind.\n"
+        "#define PY_SSIZE_T_CLEAN\n"
+        "#include <Python.h>\n"
+        "\n"
+        "static int buster_extension_calls;\n"
+        "\n"
+        "static PyObject* buster_extension_add(PyObject* self, PyObject* arguments)\n"
+        "{\n"
+        "    long left;\n"
+        "    long right;\n"
+        "    (void)self;\n"
+        "    if (!PyArg_ParseTuple(arguments, \"ll\", &left, &right)) return NULL;\n"
+        "    buster_extension_calls += 1;\n"
+        "    return PyLong_FromLong(left + right);\n"
+        "}\n"
+        "\n"
+        "static PyObject* buster_extension_greet(PyObject* self, PyObject* arguments)\n"
+        "{\n"
+        "    const char* name;\n"
+        "    (void)self;\n"
+        "    if (!PyArg_ParseTuple(arguments, \"s\", &name)) return NULL;\n"
+        "    return PyUnicode_FromFormat(\"hello, %s (%d)\", name, buster_extension_calls);\n"
+        "}\n"
+        "\n"
+        "static PyObject* buster_extension_fail(PyObject* self, PyObject* arguments)\n"
+        "{\n"
+        "    (void)self;\n"
+        "    (void)arguments;\n"
+        "    PyErr_SetString(PyExc_ValueError, \"refused\");\n"
+        "    return NULL;\n"
+        "}\n"
+        "\n"
+        "static PyMethodDef buster_extension_methods[] = {\n"
+        "    {\"add\", buster_extension_add, METH_VARARGS, \"Add two integers.\"},\n"
+        "    {\"greet\", buster_extension_greet, METH_VARARGS, \"Greet by name.\"},\n"
+        "    {\"fail\", buster_extension_fail, METH_NOARGS, \"Raise ValueError.\"},\n"
+        "    {NULL, NULL, 0, NULL},\n"
+        "};\n"
+        "\n"
+        "static struct PyModuleDef buster_extension_module = {\n"
+        "    PyModuleDef_HEAD_INIT, \"busterpic\", \"A Buster-built extension.\", -1, buster_extension_methods,\n"
+        "};\n"
+        "\n"
+        "PyMODINIT_FUNC PyInit_busterpic(void)\n"
+        "{\n"
+        "    PyObject* module = PyModule_Create(&buster_extension_module);\n"
+        "    if (module && PyModule_AddIntConstant(module, \"answer\", 42) != 0)\n"
+        "    {\n"
+        "        Py_DECREF(module);\n"
+        "        module = NULL;\n"
+        "    }\n"
+        "    return module;\n"
+        "}\n"
+    );
+    String8 shared_library_path = string_format_z(arena, S8("{S8}/basic_c_elf_shared_library.c"), directory);
+    BUSTER_TEST(arguments, file_write(shared_library_path, BUSTER_SLICE_TO_BYTE_SLICE(shared_library_source)));
+    String8 shared_main_path = string_format_z(arena, S8("{S8}/basic_c_elf_shared_main.c"), directory);
+    BUSTER_TEST(arguments, file_write(shared_main_path, BUSTER_SLICE_TO_BYTE_SLICE(shared_main_source)));
+    String8 shared_dlopen_path = string_format_z(arena, S8("{S8}/basic_c_elf_shared_dlopen.c"), directory);
+    BUSTER_TEST(arguments, file_write(shared_dlopen_path, BUSTER_SLICE_TO_BYTE_SLICE(shared_dlopen_source)));
+    String8 non_pic_reference_path = string_format_z(arena, S8("{S8}/basic_c_elf_non_pic_reference.c"), directory);
+    BUSTER_TEST(arguments, file_write(non_pic_reference_path, BUSTER_SLICE_TO_BYTE_SLICE(non_pic_reference_source)));
+    String8 python_extension_path = string_format_z(arena, S8("{S8}/basic_c_elf_python_extension.c"), directory);
+    BUSTER_TEST(arguments, file_write(python_extension_path, BUSTER_SLICE_TO_BYTE_SLICE(python_extension_source)));
     String8 library_path = string_format_z(arena, S8("{S8}/libbustershared.so"), directory);
     String8 library_command[] = {S8("-g0"), S8("-shared"), S8("-fPIC"), S8("-Wl,-soname,libbustershared.so"), S8("-o"), library_path,
-                                 S8("tests/basic_c_elf_shared_library.c")};
+                                 shared_library_path};
     CompilerDriverResult library = compiler_driver_execute_invocation(
         arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(library_command)));
     BUSTER_TEST(arguments, library.error == COMPILER_DRIVER_ERROR_NONE);
@@ -7439,7 +7649,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
             main_paths[variant] = string_format_z(arena, S8("{S8}/shared-main-{u32}"), directory, variant);
             if (variant < 2)
             {
-                String8 command[] = {S8("-g0"), variant ? S8("-pie") : S8("-no-pie"), S8("-o"), main_paths[variant], S8("tests/basic_c_elf_shared_main.c"),
+                String8 command[] = {S8("-g0"), variant ? S8("-pie") : S8("-no-pie"), S8("-o"), main_paths[variant], shared_main_path,
                                      S8("-L"), directory, S8("-lbustershared")};
                 CompilerDriverResult linked = compiler_driver_execute_invocation(
                     arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
@@ -7448,7 +7658,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
             }
             else
             {
-                String8 command[] = {variant == 2 ? S8("-pie") : S8("-no-pie"), S8("-o"), main_paths[variant], S8("tests/basic_c_elf_shared_main.c"),
+                String8 command[] = {variant == 2 ? S8("-pie") : S8("-no-pie"), S8("-o"), main_paths[variant], shared_main_path,
                                      S8("-L"), directory, S8("-lbustershared")};
                 main_built[variant] = compiler_driver_test_image_host_compile(arena, command, BUSTER_ARRAY_LENGTH(command));
             }
@@ -7487,7 +7697,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
         // Loaded at run time instead: dynamic TLS, and the library's
         // references into the program resolved through -rdynamic.
         String8 loader_path = string_format_z(arena, S8("{S8}/shared-dlopen"), directory);
-        String8 loader_command[] = {S8("-g0"), S8("-pie"), S8("-rdynamic"), S8("-o"), loader_path, S8("tests/basic_c_elf_shared_dlopen.c"), S8("-ldl")};
+        String8 loader_command[] = {S8("-g0"), S8("-pie"), S8("-rdynamic"), S8("-o"), loader_path, shared_dlopen_path, S8("-ldl")};
         CompilerDriverResult loader = compiler_driver_execute_invocation(
             arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(loader_command)));
         BUSTER_TEST(arguments, loader.error == COMPILER_DRIVER_ERROR_NONE);
@@ -7502,7 +7712,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
         String8 host_library_directory = string_format_z(arena, S8("{S8}/host"), directory);
         os_make_directory(host_library_directory);
         String8 host_library_path = string_format_z(arena, S8("{S8}/libbustershared.so"), host_library_directory);
-        String8 host_library_command[] = {S8("-fPIC"), S8("-shared"), S8("-o"), host_library_path, S8("tests/basic_c_elf_shared_library.c")};
+        String8 host_library_command[] = {S8("-fPIC"), S8("-shared"), S8("-o"), host_library_path, shared_library_path};
         bool host_library = compiler_driver_test_image_host_compile(arena, host_library_command, BUSTER_ARRAY_LENGTH(host_library_command));
         BUSTER_TEST(arguments, host_library);
         String8 host_output = {0};
@@ -7540,7 +7750,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
     // An object compiled for a fixed address reads imported data with a
     // rel32, which a shared object cannot hold.
     String8 non_pic_object = string_format_z(arena, S8("{S8}/non-pic.o"), directory);
-    String8 non_pic_compile[] = {S8("-g0"), S8("-fno-pic"), S8("-c"), S8("-o"), non_pic_object, S8("tests/basic_c_elf_non_pic_reference.c")};
+    String8 non_pic_compile[] = {S8("-g0"), S8("-fno-pic"), S8("-c"), S8("-o"), non_pic_object, non_pic_reference_path};
     CompilerDriverResult non_pic = compiler_driver_execute_invocation(
         arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(non_pic_compile)));
     BUSTER_TEST(arguments, non_pic.error == COMPILER_DRIVER_ERROR_NONE);
@@ -7566,7 +7776,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
     {
         String8 extension_path = string_format_z(arena, S8("{S8}/busterpic.so"), directory);
         String8 extension_command[] = {S8("-g0"), S8("-shared"), S8("-fPIC"), S8("-isystem"), include_output, S8("-o"), extension_path,
-                                       S8("tests/basic_c_elf_python_extension.c")};
+                                       python_extension_path};
         CompilerDriverResult extension = compiler_driver_execute_invocation(
             arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(extension_command)));
         if (extension.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("Python extension build: {S8}\n"), extension.diagnostic);

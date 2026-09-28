@@ -6107,16 +6107,16 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_classify(LinkElfPicImage* image, bool expo
         else if (symbol->section < OBJECT_SECTION_COUNT && !object_section_kind_is_debug((ObjectSectionKind)symbol->section) &&
                  link_elf_loaded_section_index(symbol->section))
         {
-            bool thread_local = link_elf_symbol_is_thread_local(symbol);
+            bool is_thread_local = link_elf_symbol_is_thread_local(symbol);
             bool exportable = (symbol->global || symbol->weak) && !symbol->hidden && symbol->name.length && symbol->name.length < UINT32_MAX &&
                               (symbol->kind == OBJECT_SYMBOL_FUNCTION || symbol->kind == OBJECT_SYMBOL_DATA);
             // An executable exports what --export-dynamic or a requested
             // library's reference asks for, under the fixed-address writer's
             // rule of no thread-local exports; a library exports those too.
             bool exported = exportable && (image->shared || ((export_dynamic || link_elf_symbol_referenced_by_library(image->exports, symbol->name)) &&
-                                                             !thread_local));
+                                                             !is_thread_local));
             symbol_class = (u8)((exported ? LINK_ELF_PIC_SYMBOL_EXPORTED : 0) |
-                                (exported && image->shared && !thread_local ? LINK_ELF_PIC_SYMBOL_PREEMPTIBLE : 0));
+                                (exported && image->shared && !is_thread_local ? LINK_ELF_PIC_SYMBOL_PREEMPTIBLE : 0));
         }
         image->classes[index] = symbol_class;
         image->dynamic_indices[index] = UINT32_MAX;
@@ -6178,7 +6178,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
         bool debug = valid && object_section_kind_is_debug((ObjectSectionKind)relocation->section);
         ObjectSymbol* symbol = valid ? object->symbols + relocation->symbol : 0;
         u8 symbol_class = valid ? image->classes[relocation->symbol] : 0;
-        bool thread_local = valid && link_elf_symbol_is_thread_local(symbol);
+        bool is_thread_local = valid && link_elf_symbol_is_thread_local(symbol);
         bool bound_elsewhere = (symbol_class & (LINK_ELF_PIC_SYMBOL_IMPORTED | LINK_ELF_PIC_SYMBOL_PREEMPTIBLE)) != 0;
         if (!valid)
         {
@@ -6201,7 +6201,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
                 }
                 else
                 {
-                    valid = !(symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) && !thread_local &&
+                    valid = !(symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) && !is_thread_local &&
                             !((symbol_class & LINK_ELF_PIC_SYMBOL_PREEMPTIBLE) && symbol->kind == OBJECT_SYMBOL_DATA &&
                               relocation->kind == OBJECT_RELOCATION_X86_64_PC32);
                 }
@@ -6211,7 +6211,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
             case OBJECT_RELOCATION_X86_64_GOTPCRELX:
             case OBJECT_RELOCATION_X86_64_REX_GOTPCRELX:
             case OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX:
-                valid = !thread_local;
+                valid = !is_thread_local;
                 if (valid && !bound_elsewhere && !(symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) &&
                     link_x86_got_reference_relaxes_to_pc32(relocation, object->sections[relocation->section].data))
                 {
@@ -6231,7 +6231,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
                 break;
             case OBJECT_RELOCATION_ABSOLUTE64:
                 // Only storage the loader may write before RELRO seals it.
-                valid = !thread_local && (relocation->section == OBJECT_SECTION_DATA || relocation->section == OBJECT_SECTION_READ_ONLY_DATA ||
+                valid = !is_thread_local && (relocation->section == OBJECT_SECTION_DATA || relocation->section == OBJECT_SECTION_READ_ONLY_DATA ||
                                           relocation->section == OBJECT_SECTION_INIT_ARRAY || relocation->section == OBJECT_SECTION_FINI_ARRAY ||
                                           relocation->section == OBJECT_SECTION_THREAD_LOCAL_DATA);
                 image->dynamic_relocation_count += valid && (bound_elsewhere || !(symbol_class & LINK_ELF_PIC_SYMBOL_ZERO));
@@ -6243,7 +6243,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
                 action = LINK_ELF_PIC_ACTION_ABSOLUTE32_ZERO;
                 break;
             case OBJECT_RELOCATION_X86_64_TPOFF32:
-                valid = !image->shared && thread_local;
+                valid = !image->shared && is_thread_local;
                 action = LINK_ELF_PIC_ACTION_LOCAL_EXEC;
                 break;
             case OBJECT_RELOCATION_X86_64_GOTTPOFF:
@@ -6251,7 +6251,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
             {
                 bool general_dynamic = relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD;
                 u32* slots = general_dynamic ? image->dynamic_tls_indices : image->static_tls_indices;
-                valid = thread_local;
+                valid = is_thread_local;
                 action = image->shared ? LINK_ELF_PIC_ACTION_TLS_SLOT : LINK_ELF_PIC_ACTION_TLS_RELAX;
                 if (valid && image->shared && slots[relocation->symbol] == UINT32_MAX)
                 {
@@ -6793,8 +6793,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
             u32 symbol_index = image.dynamic_symbols[dynamic];
             ObjectSymbol* symbol = object->symbols + symbol_index;
             u64 entry = dynamic_symbol_offset + (u64)dynamic * ELF_SYMBOL_SIZE;
-            bool thread_local = link_elf_symbol_is_thread_local(symbol) || symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES;
-            u8 type = thread_local ? 6 : symbol->kind == OBJECT_SYMBOL_FUNCTION ? 2 : 1;
+            bool is_thread_local = link_elf_symbol_is_thread_local(symbol) || symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES;
+            u8 type = is_thread_local ? 6 : symbol->kind == OBJECT_SYMBOL_FUNCTION ? 2 : 1;
             link_write_u32(bytes, entry, (u32)(dynamic_name_cursor - dynamic_string_offset));
             memcpy(bytes + dynamic_name_cursor, symbol->name.pointer, symbol->name.length);
             dynamic_name_cursor += symbol->name.length + 1;
