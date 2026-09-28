@@ -13043,6 +13043,145 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(Unit
     return result;
 }
 
+// GNU C lets a statement expression share the parentheses of sizeof,
+// _Alignof and __alignof__: `sizeof({ int q = f(); q; })` is the size of the
+// trailing expression statement's type and, like any sizeof operand, is not
+// evaluated. Syntax-only and both lowering forms must accept the same operands
+// and fold the same value, while a brace group that is not a statement
+// expression stays an invalid operand.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_statement_expression_operand(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 expression;
+        String8 message;
+        u64 value;
+        bool valid;
+        bool syntax_valid;
+    } cases[] = {
+        {S8("sizeof({ int q = f(); q; })"), {0}, 4, true, true},
+        {S8("_Alignof({ double d = f(); d; })"), {0}, 8, true, true},
+        {S8("__alignof__({ char c = f(); c; })"), {0}, 1, true, true},
+        {S8("sizeof ({ int q = f(); q; }) + 1"), {0}, 4, true, true},
+        {S8("sizeof({ struct Wide w = {0}; (void)f(); w; })"), {0}, 16, true, true},
+        {S8("sizeof({ char buffer[8]; (void)f(); buffer; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof(({ double d = f(); d; }))"), {0}, 8, true, true},
+        // A variable-length array declared in the body decays like any other
+        // array; a tail that cannot be typed is diagnosed, never guessed int.
+        {S8("sizeof({ int a[n]; a; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ double a[n][3]; a; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ int a[n]; a + 0; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ int a[n]; (void)f(); a; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof(({ int a[n]; a; }))"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ int a[n][4]; a[0]; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ double a[n]; a[0]; })"), {0}, 8, true, true},
+        {S8("sizeof({ int a[4][n]; a[0]; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ int a[4][n]; a[0][0]; })"), {0}, 4, true, true},
+        // A pointer to a variable-length array is followed through its C type.
+        {S8("sizeof({ int (*p)[n] = 0; p; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ char (*p)[n] = 0; *p; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ char (*p)[n] = 0; p[0]; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ short (*p)[n] = 0; p[0][1]; })"), {0}, 2, true, true},
+        {S8("sizeof({ short (*p)[n] = 0; **p; })"), {0}, 2, true, true},
+        {S8("_Alignof({ int (*p)[n] = 0; *p; })"), {0}, _Alignof(void*), true, true},
+        {S8("sizeof({ int (*p)[n] = 0; p + 1; })"), S8("variably modified array"), 0, false, true},
+        // An incomplete array object with a sized element decays in the tail.
+        {S8("sizeof({ ext[0]; })"), {0}, 4, true, true},
+        {S8("sizeof(({ ext[0]; }))"), {0}, 4, true, true},
+        {S8("sizeof({ ext; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof(({ ext; }))"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ (void)f(); ext; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({ *ext; })"), {0}, 4, true, true},
+        {S8("sizeof({ ext + 1; })"), {0}, sizeof(void*), true, true},
+        {S8("sizeof({1})"), S8("invalid sizeof operand"), 0, false, false},
+        {S8("_Alignof({1})"), S8("invalid sizeof operand"), 0, false, false},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            String8 source = string_format(temporary.arena,
+                S8("int f(void); extern int ext[]; struct Wide {{ double x; double y; }};"
+                   " long probe(int n) {{ (void)n; return (long)({S8}); }}"), cases[case_index].expression);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                     .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, source);
+            BUSTER_TEST_RAW(arguments, (semantic.diagnostic_count == 0) == cases[case_index].syntax_valid, source);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("sizeof-statement-expression.c"), tokens, syntax,
+                                                            target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, (lowered.diagnostic_count == 0 && lowered.program != 0) == cases[case_index].valid, source);
+            if (!cases[case_index].syntax_valid && semantic.diagnostic_count)
+            {
+                BUSTER_TEST_RAW(arguments, string_ends_with_sequence(semantic.diagnostics[0].message, cases[case_index].message), source);
+            }
+            if (!cases[case_index].valid && lowered.diagnostic_count)
+            {
+                BUSTER_TEST_RAW(arguments, string_ends_with_sequence(lowered.diagnostics[0].message, cases[case_index].message), source);
+            }
+            if (cases[case_index].valid && lowered.program)
+            {
+                IrModule* module = lowered.program->modules;
+                bool folded = false;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    IrFunction* function = module->functions + function_index;
+                    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                    {
+                        IrInstruction* instruction = &function->instructions[instruction_index];
+                        BUSTER_TEST_RAW(arguments, instruction->opcode != IR_OPCODE_CALL, source);
+                        folded |= instruction->opcode == IR_OPCODE_CONSTANT_INTEGER && instruction->immediate_count &&
+                                  instruction->immediates[0] == cases[case_index].value;
+                    }
+                }
+                BUSTER_TEST_RAW(arguments, folded, source);
+            }
+            scratch_end(temporary);
+        }
+    }
+    struct
+    {
+        String8 source;
+        u64 value;
+    } outer[] = {
+        {S8("long probe(int n) { int (*p)[n] = 0; return (long)sizeof({ *p; }); }"), sizeof(void*)},
+        {S8("long probe(int n) { char (*p)[n] = 0; return (long)sizeof({ *p; }); }"), sizeof(void*)},
+        {S8("long probe(int n) { short (*p)[n] = 0; return (long)sizeof({ (*p)[0]; }) + (long)sizeof({ p[0][0]; }); }"), 2},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(outer); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, outer[case_index].source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                 .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("sizeof-statement-expression.c"), tokens, syntax,
+                                                        target_native, (CIRLowerOptions){0});
+        bool folded = false;
+        if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program != 0))
+        {
+            IrModule* module = lowered.program->modules;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = &function->instructions[instruction_index];
+                    folded |= instruction->opcode == IR_OPCODE_CONSTANT_INTEGER && instruction->immediate_count &&
+                              instruction->immediates[0] == outer[case_index].value;
+                }
+            }
+        }
+        BUSTER_TEST_RAW(arguments, folded, outer[case_index].source);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // This narrow semantic seam has C bindings/types as inputs, not a canonical
 // program. It is not an assertion that syntax-only as a whole is IR-free.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_named_call_arity_without_ir(UnitTestArguments* arguments)
@@ -24464,6 +24603,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);
+    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_statement_expression_operand);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_vla_evaluation);
     BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_frame_bounds);

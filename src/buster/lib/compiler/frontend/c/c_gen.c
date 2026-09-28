@@ -2703,6 +2703,9 @@ struct CIntegerIrBuilder
     // sizeof/_Alignof lowering clears both fields before each operand.
     String8 sizeof_operand_constraint;
     u32 sizeof_operand_constraint_token;
+    // Nonzero while a sizeof operand resolves a statement-expression tail,
+    // where every array operand is evaluated and so decays.
+    u32 sizeof_statement_expression_tail_depth;
     u32 declaration_index;
     CIntegerIrLocal* locals;
     // The entity of `locals[i]`, kept beside the table rather than read out of
@@ -26047,6 +26050,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder
 BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 start, u32 end);
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, u32 remaining_depth, bool promote_bit_fields);
+BUSTER_C_INTERNAL bool c_ir_statement_expression_tail(CIntegerIrBuilder* builder, u32 open, u32 close, u32* start_out, u32* end_out);
 
 BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_operand_decay(CIntegerIrBuilder* builder, IrTypeId type)
 {
@@ -26061,6 +26065,26 @@ BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_operand_decay(CIntegerIrBuilder* builder,
         result = type;
     }
 
+    return result;
+}
+
+// An unlowered local of variable-length array type has no IR array type, but
+// every use a sizeof operand can make of it inside a statement expression --
+// the tail, subscripts, dereference, arithmetic -- sees it decayed to a
+// pointer to its element. Only an element with a mapped type is modelled; a
+// variably modified element stays unresolved.
+BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_unlowered_array_decay(CIntegerIrBuilder* builder, CTypeId c_type)
+{
+    IrTypeId result = IR_TYPE_ID_INVALID;
+    CType* record = &builder->parse.types[c_type.value];
+    if (record->kind == C_TYPE_ARRAY && record->element_type.value < builder->parse.type_count)
+    {
+        IrTypeId element = builder->c_type_ir_map[record->element_type.value];
+        if (element.value != IR_ID_UNDERLYING_INVALID)
+        {
+            result = c_ir_add_pointer_type(builder->program, builder->pointer_types, element);
+        }
+    }
     return result;
 }
 
@@ -26251,12 +26275,25 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
         CTypeId declared = builder->parse.entities[entity.value].type;
         type = declared.value < builder->parse.type_count ? builder->c_type_ir_map[declared.value] : IR_TYPE_ID_INVALID;
     }
-    else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT)
+    // A local with no lowered storage yet -- one declared inside an unevaluated
+    // statement expression -- still has its declared type.
+    else if (entity.value < builder->parse.entity_count &&
+             (builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT || builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL))
     {
         CTypeId c_type = builder->parse.entities[entity.value].type;
         if (c_type.value < builder->parse.type_count)
         {
             type = builder->c_type_ir_map[c_type.value];
+            // An array object whose type never mapped -- `extern int v[];` --
+            // decays the same way under a postfix operator or anywhere in a
+            // statement-expression tail; as a bare operand it is the unsized
+            // array the callers diagnose.
+            if (type.value == IR_ID_UNDERLYING_INVALID &&
+                (builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL || chain_start < end ||
+                 builder->sizeof_statement_expression_tail_depth))
+            {
+                type = c_ir_sizeof_unlowered_array_decay(builder, c_type);
+            }
         }
     }
     if (type.value == IR_ID_UNDERLYING_INVALID && chain_start < end &&
@@ -26359,7 +26396,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     while (trimmed)
     {
         trimmed = false;
-        while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        while (start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+               !c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACE) &&
                c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
         {
             start += 1;
@@ -26785,6 +26823,28 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
         {
             return false;
         }
+        // A GNU statement expression `({ ...; tail; })` has the type of its
+        // trailing expression statement after array decay, and void without one.
+        if (start + 2 < close && c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACE) &&
+            c_ir_matching_delimiter_cached(builder, start + 1, close, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == close - 1)
+        {
+            u32 tail_start = 0;
+            u32 tail_end = 0;
+            IrTypeId tail_type = builder->void_type;
+            if (c_ir_statement_expression_tail(builder, start + 1, close - 1, &tail_start, &tail_end))
+            {
+                builder->sizeof_statement_expression_tail_depth += 1;
+                bool tail_resolved = c_ir_sizeof_operand_type_attempt_depth(builder, tail_start, tail_end, &tail_type, remaining_depth, true);
+                builder->sizeof_statement_expression_tail_depth -= 1;
+                if (!tail_resolved)
+                {
+                    return false;
+                }
+                tail_type = c_ir_sizeof_operand_decay(builder, tail_type);
+            }
+            *type_out = tail_type;
+            return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
+        }
         IrTypeId cast_type = IR_TYPE_ID_INVALID;
         bool named = c_ir_query_group_type_name(builder, start, close, &cast_type);
         if (builder->queries->has_request)
@@ -26914,8 +26974,25 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     return false;
 }
 
+// `sizeof({ ...; tail; })` shares the operator's parentheses with the GNU
+// statement expression, so an operand range that is exactly a brace group is
+// widened to the `({ ... })` it spells.
+BUSTER_C_INTERNAL void c_ir_sizeof_statement_expression_operand(CIntegerIrBuilder* builder, u32* start, u32* end)
+{
+    if (*start > 0 && *start < *end && *end < builder->preprocess.token_count &&
+        c_token_is_punctuator(&builder->preprocess.tokens[*start], C_PUNCTUATOR_LEFT_BRACE) &&
+        c_token_is_punctuator(&builder->preprocess.tokens[*start - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        c_token_is_punctuator(&builder->preprocess.tokens[*end], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+        c_ir_matching_delimiter_cached(builder, *start, *end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == *end - 1)
+    {
+        *start -= 1;
+        *end += 1;
+    }
+}
+
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out)
 {
+    c_ir_sizeof_statement_expression_operand(builder, &start, &end);
     return c_ir_sizeof_operand_type_attempt_depth(builder, start, end, type_out, 64, false);
 }
 
@@ -27029,18 +27106,152 @@ BUSTER_C_INTERNAL u32 c_ir_sizeof_operand_alignment(IrType* value)
 // An `extern char v[];` some later declaration completes is not one of them:
 // the redeclaration merge adopts the completing type, so it maps and the
 // guard never sees it.
-BUSTER_C_INTERNAL bool c_ir_sizeof_operand_is_unmapped_array_object(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_sizeof_token_is_unmapped_array(CIntegerIrBuilder* builder, u32 index, bool allow_local)
 {
     bool result = false;
-    if (start + 1 == end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+    if (builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
     {
-        CEntityId entity = c_ir_identifier_entity_or_lookup(builder, start);
-        if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT &&
+        CEntityId entity = c_ir_identifier_entity_or_lookup(builder, index);
+        CEntityKind kind = entity.value < builder->parse.entity_count ? builder->parse.entities[entity.value].kind : C_ENTITY_OBJECT;
+        if (entity.value < builder->parse.entity_count && (kind == C_ENTITY_OBJECT || (allow_local && kind == C_ENTITY_LOCAL)) &&
             !c_ir_find_local_by_entity(builder, entity))
         {
             CTypeId c_type = builder->parse.entities[entity.value].type;
             CType* record = c_type.value < builder->parse.type_count ? &builder->parse.types[c_type.value] : 0;
             result = record && record->kind == C_TYPE_ARRAY && builder->c_type_ir_map[c_type.value].value == IR_ID_UNDERLYING_INVALID;
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_ir_sizeof_operand_is_unmapped_array_object(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    return start + 1 == end && c_ir_sizeof_token_is_unmapped_array(builder, start, false);
+}
+
+// Whether a statement-expression operand's tail names an unlowered array
+// object or local with no IR type whose element has none either -- a
+// variably modified element, say. The resolvers above could not type the tail, and the prediction
+// would guess int for it, so such an operand is diagnosed instead.
+BUSTER_C_INTERNAL bool c_ir_sizeof_statement_expression_tail_range(CIntegerIrBuilder* builder, u32 start, u32 end, u32* tail_start, u32* tail_end);
+BUSTER_C_INTERNAL bool c_ir_sizeof_token_is_unmapped_pointer(CIntegerIrBuilder* builder, u32 index);
+
+BUSTER_C_INTERNAL bool c_ir_sizeof_statement_expression_names_unmapped_array(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool result = false;
+    u32 tail_start = 0;
+    u32 tail_end = 0;
+    if (c_ir_sizeof_statement_expression_tail_range(builder, start, end, &tail_start, &tail_end))
+    {
+        for (u32 index = tail_start; index < tail_end && !result; index += 1)
+        {
+            result = (c_ir_sizeof_token_is_unmapped_array(builder, index, true) &&
+                      c_ir_sizeof_unlowered_array_decay(builder, builder->parse.entities[c_ir_identifier_entity_or_lookup(builder, index).value].type).value ==
+                          IR_ID_UNDERLYING_INVALID) ||
+                     c_ir_sizeof_token_is_unmapped_pointer(builder, index);
+        }
+    }
+    return result;
+}
+
+// Whether the identifier at `index` names an object or local of pointer type
+// with no IR type: a pointer to a variably modified type.
+BUSTER_C_INTERNAL bool c_ir_sizeof_token_is_unmapped_pointer(CIntegerIrBuilder* builder, u32 index)
+{
+    bool result = false;
+    if (builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
+    {
+        CEntityId entity = c_ir_identifier_entity_or_lookup(builder, index);
+        if (entity.value < builder->parse.entity_count &&
+            (builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT || builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL))
+        {
+            CTypeId c_type = builder->parse.entities[entity.value].type;
+            result = c_type.value < builder->parse.type_count && builder->parse.types[c_type.value].kind == C_TYPE_POINTER &&
+                     builder->c_type_ir_map[c_type.value].value == IR_ID_UNDERLYING_INVALID;
+        }
+    }
+    return result;
+}
+
+// The range of the trailing expression of a statement-expression operand
+// `({ ...; tail; })`, possibly parenthesized again; false for any other shape.
+BUSTER_C_INTERNAL bool c_ir_sizeof_statement_expression_tail_range(CIntegerIrBuilder* builder, u32 start, u32 end, u32* tail_start, u32* tail_end)
+{
+    c_ir_sizeof_statement_expression_operand(builder, &start, &end);
+    while (start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           !c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACE) &&
+           c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
+    {
+        start += 1;
+        end -= 1;
+    }
+    return start + 3 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACE) &&
+           c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1 &&
+           c_ir_matching_delimiter_cached(builder, start + 1, end - 1, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 2 &&
+           c_ir_statement_expression_tail(builder, start + 1, end - 2, tail_start, tail_end);
+}
+
+// The type of a statement-expression tail `*...v[...]...` whose object `v`
+// has a variably modified type with no IR type, followed through the C types:
+// each `*` or subscript steps to the pointee or element, and a pointer or
+// array result is a pointer once the tail's value decays. Invalid for any
+// other tail, or one whose result has no IR type either.
+BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_statement_expression_variably_modified_tail_type(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    IrTypeId result = IR_TYPE_ID_INVALID;
+    u32 tail_start = 0;
+    u32 tail_end = 0;
+    if (c_ir_sizeof_statement_expression_tail_range(builder, start, end, &tail_start, &tail_end))
+    {
+        // A `*` and a subscript each step one level, so only their count and
+        // balanced grouping parentheses matter: `(*p)[0]` is `p[0][0]`.
+        u32 index = tail_start;
+        u32 steps = 0;
+        u32 open_groups = 0;
+        while (index < tail_end && (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_STAR) ||
+                                    c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS)))
+        {
+            bool star = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_STAR);
+            steps += star;
+            open_groups += !star;
+            index += 1;
+        }
+        CEntityId entity = index < tail_end && builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER
+                               ? c_ir_identifier_entity_or_lookup(builder, index) : C_ENTITY_ID_INVALID;
+        CTypeId c_type = entity.value < builder->parse.entity_count ? builder->parse.entities[entity.value].type : C_TYPE_ID_INVALID;
+        bool valid = c_type.value < builder->parse.type_count && builder->c_type_ir_map[c_type.value].value == IR_ID_UNDERLYING_INVALID &&
+                     (builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT || builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL);
+        index += 1;
+        while (valid && index < tail_end)
+        {
+            if (open_groups && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                open_groups -= 1;
+                index += 1;
+            }
+            else
+            {
+                u32 close = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET)
+                                ? c_ir_matching_delimiter_cached(builder, index, tail_end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET)
+                                : UINT32_MAX;
+                valid = close < tail_end;
+                steps += 1;
+                index = close + 1;
+            }
+        }
+        valid &= !open_groups;
+        for (u32 step = 0; valid && step < steps; step += 1)
+        {
+            CType* record = &builder->parse.types[c_type.value];
+            valid = (record->kind == C_TYPE_POINTER || record->kind == C_TYPE_ARRAY) && record->element_type.value < builder->parse.type_count;
+            c_type = valid ? record->element_type : c_type;
+        }
+        if (valid)
+        {
+            CTypeKind kind = builder->parse.types[c_type.value].kind;
+            result = kind == C_TYPE_POINTER || kind == C_TYPE_ARRAY ? c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type)
+                                                                    : builder->c_type_ir_map[c_type.value];
         }
     }
     return result;
@@ -27083,6 +27294,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
     {
         return false;
     }
+    c_ir_sizeof_statement_expression_operand(builder, &start, &end);
     u32 expression_start = start;
     u32 expression_end = end;
     u32 dereference_count = 0;
@@ -27102,7 +27314,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
             start += 1;
             normalized = true;
         }
-        if (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        if (start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+            !c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACE))
         {
             u32 close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             if (close == end - 1)
@@ -28385,7 +28598,17 @@ c_ir_expression_core_loop:
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                IrTypeId expression_type = c_ir_sizeof_operand_is_unmapped_array_object(builder, operand_start, operand_end)
+                IrTypeId variably_modified_tail = c_ir_sizeof_statement_expression_variably_modified_tail_type(builder, operand_start, operand_end);
+                if (variably_modified_tail.value == IR_ID_UNDERLYING_INVALID &&
+                    c_ir_sizeof_statement_expression_names_unmapped_array(builder, operand_start, operand_end))
+                {
+                    builder->failure_message = S8("statement expression result type is unresolved: its tail names a variably modified array");
+                    builder->failure_token_index = operand_start;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                IrTypeId expression_type = variably_modified_tail.value != IR_ID_UNDERLYING_INVALID ? variably_modified_tail
+                                           : c_ir_sizeof_operand_is_unmapped_array_object(builder, operand_start, operand_end)
                                                ? IR_TYPE_ID_INVALID
                                                : c_ir_predict_expression_type(builder, operand_start, operand_end);
                 IrType* expression = ir_type_from_id(&builder->program->types, expression_type);

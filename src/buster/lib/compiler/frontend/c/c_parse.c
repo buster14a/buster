@@ -20610,7 +20610,21 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
         {
             u32 cursor = operand_start;
             if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACE))
-                diagnostic = (CParseInitializerDiagnostic){.message = S8("invalid sizeof operand"), .token = index};
+            {
+                u32 body_start = 0;
+                u32 body_end = 0;
+                u32 group_end = 0;
+                // `sizeof({ ...; tail; })` shares the operator's parentheses with
+                // a GNU statement expression; any other brace group is invalid.
+                bool statement_expression =
+                    c_parse_statement_expression_at(preprocess, index + 1, end, &body_start, &body_end, &group_end) && group_end == close &&
+                    (body_start == body_end || c_token_is_punctuator(&preprocess.tokens[body_end - 1], C_PUNCTUATOR_SEMICOLON) ||
+                     c_token_is_punctuator(&preprocess.tokens[body_end - 1], C_PUNCTUATOR_RIGHT_BRACE));
+                if (!statement_expression)
+                {
+                    diagnostic = (CParseInitializerDiagnostic){.message = S8("invalid sizeof operand"), .token = index};
+                }
+            }
             else
             {
                 CScopeId operand_scope = c_parse_scope_for_token(result, scope, index);
