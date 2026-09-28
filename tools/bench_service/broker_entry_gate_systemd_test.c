@@ -467,6 +467,11 @@ static bool bqeg_nsswitch_merge(void)
     return ok;
 }
 
+/* Bound but deliberately not listening: glibc's nscd client in PID1, the
+ * executor and systemctl gets ECONNREFUSED and falls back to the local files,
+ * so the socket unit starts and the unit activates. A listening socket that
+ * never answers instead stalls or fails their NSS lookups before the gate runs,
+ * which cannot show the gate's own refusal. The gate only checks existence. */
 static bool bqeg_nscd_socket(void)
 {
     struct sockaddr_un address = {.sun_family = AF_UNIX};
@@ -476,8 +481,7 @@ static bool bqeg_nscd_socket(void)
     memcpy(address.sun_path, path, sizeof(path));
     ok = ok && bqeg_nscd >= 0 &&
          bind(bqeg_nscd, (struct sockaddr*)&address,
-              offsetof(struct sockaddr_un, sun_path) + sizeof(path)) == 0 &&
-         listen(bqeg_nscd, 1) == 0;
+              offsetof(struct sockaddr_un, sun_path) + sizeof(path)) == 0;
     return ok;
 }
 
