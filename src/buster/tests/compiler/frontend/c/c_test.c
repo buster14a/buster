@@ -16136,6 +16136,64 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
         BUSTER_TEST(arguments, ir_validate_canonical_module(alignas_typedef_ir.program, alignas_typedef_module).error == IR_VALIDATION_NONE);
     }
     scratch_end(alignas_typedef_temporary);
+    // The alignment request may sit on either side of a `__typeof__ ( ... )`
+    // or `_Atomic ( T )` specifier at every scope (#1658); the specifier parse
+    // used to stop at it and drop the member's aggregate or the object.
+    TemporalArena alignas_typeof_temporary = scratch_begin(0, 0);
+    CPreprocessResult alignas_typeof_tokens = c_preprocess(alignas_typeof_temporary.arena,
+                                                           S8("struct Leading { char c; _Alignas(16) __typeof__(int) m; };"
+                                                              " struct Trailing { char c; __typeof__(int) _Alignas(16) m; };"
+                                                              " struct AtomicLeading { char c; _Alignas(16) const _Atomic(int) m; };"
+                                                              " struct AtomicTrailing { char c; _Atomic(int) __attribute__((aligned(16))) m; };"
+                                                              " struct Leading leading; struct Trailing trailing;"
+                                                              " struct AtomicLeading atomic_leading; struct AtomicTrailing atomic_trailing;"
+                                                              " _Alignas(64) __typeof__(int) global_leading;"
+                                                              " __typeof__(int) _Alignas(64) global_trailing;"
+                                                              " _Atomic(int) _Alignas(64) global_atomic;"
+                                                              " int main(void) {"
+                                                              " _Alignas(32) __typeof__(int) local_leading = 1;"
+                                                              " __typeof__(int) _Alignas(64) local_trailing = 2;"
+                                                              " int* p = &local_leading; int* q = &local_trailing;"
+                                                              " return *p + *q + global_leading + global_trailing + leading.m + trailing.m;"
+                                                              " }\n"),
+                                                           (CPreprocessOptions){0});
+    CParseResult alignas_typeof_parse = c_parse(alignas_typeof_temporary.arena, alignas_typeof_tokens);
+    CIRLowerResult alignas_typeof_ir = c_lower_to_ir_with_options(alignas_typeof_temporary.arena, S8("alignas-typeof.c"), alignas_typeof_tokens, alignas_typeof_parse,
+                                                                  target_native, (CIRLowerOptions){.disable_direct_ssa = true});
+    BUSTER_TEST(arguments, alignas_typeof_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, alignas_typeof_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, alignas_typeof_ir.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, alignas_typeof_ir.program != 0))
+    {
+        IrModule* alignas_typeof_module = &alignas_typeof_ir.program->modules[0];
+        u32 aligned_global_count = 0;
+        u32 aligned_member_global_count = 0;
+        bool found_local_32 = false;
+        bool found_local_64 = false;
+        for (u32 global_index = 0; global_index < alignas_typeof_module->global_count; global_index += 1)
+        {
+            IrGlobal* global = alignas_typeof_module->globals + global_index;
+            aligned_global_count += global->alignment == 64;
+            IrType* type = ir_type_from_id(&alignas_typeof_ir.program->types, global->type);
+            aligned_member_global_count += type->kind == IR_TYPE_STRUCT && type->layout.alignment == 16 && type->layout.size == 32 &&
+                                           type->field_count == 2 && type->fields[1].offset == 16;
+        }
+        for (u32 function_index = 0; function_index < alignas_typeof_module->function_count; function_index += 1)
+        {
+            IrFunction* function = alignas_typeof_module->functions + function_index;
+            for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+            {
+                found_local_32 |= function->values[value_index].alignment == 32;
+                found_local_64 |= function->values[value_index].alignment == 64;
+            }
+        }
+        BUSTER_TEST(arguments, aligned_global_count == 3);
+        BUSTER_TEST(arguments, aligned_member_global_count == 4);
+        BUSTER_TEST(arguments, found_local_32);
+        BUSTER_TEST(arguments, found_local_64);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(alignas_typeof_ir.program, alignas_typeof_module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(alignas_typeof_temporary);
     TemporalArena invalid_alignas_temporary = scratch_begin(0, 0);
     CPreprocessResult invalid_alignas_tokens = c_preprocess(invalid_alignas_temporary.arena, S8("_Alignas(3) int value;\n"), (CPreprocessOptions){0});
     CParseResult invalid_alignas_parse = c_parse(invalid_alignas_temporary.arena, invalid_alignas_tokens);

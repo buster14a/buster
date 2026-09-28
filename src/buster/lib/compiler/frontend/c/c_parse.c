@@ -9920,6 +9920,29 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     }
 }
 
+// The declaration-specifier words that may follow a `typeof ( ... )` or
+// `_Atomic ( T )` specifier before the declarator: qualifiers (and, for
+// `_Atomic ( T )`, the rest of the declaration prefix), alignment specifiers
+// and attributes. The alignment and attribute requests are left in the range
+// the declaration and member paths collect them from.
+BUSTER_C_INTERNAL u32 c_type_parse_specifier_suffix_end(CPreprocessResult preprocess, u32 index, u32 end, CType* qualifiers, bool declaration_prefix)
+{
+    bool advanced = true;
+    while (index < end && advanced)
+    {
+        u32 next = c_parse_skip_attributes(preprocess, c_parse_skip_alignment_specifiers(preprocess, index, end), end);
+        if (next == index && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
+            (declaration_prefix ? c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[index], qualifiers)
+                                : c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[index], qualifiers)))
+        {
+            next = index + 1;
+        }
+        advanced = next != index;
+        index = next;
+    }
+    return index;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
@@ -9947,15 +9970,21 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
         // aggregate copy where the program asked for an atomic store (#761).
         // `const struct S` and `volatile struct S` ride this same run and
         // always have.
+        // Alignment specifiers ride the same run; the declaration and member
+        // paths collect them from the token range.
         while (specifier_index < frame->end && preprocess.tokens[specifier_index].kind == C_TOKEN_IDENTIFIER &&
                !c_parse_atomic_type_specifier_at(preprocess, specifier_index, frame->end))
         {
-            if (!c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[specifier_index], &frame->qualifiers))
+            u32 alignment_end = c_parse_skip_alignment_specifiers(preprocess, specifier_index, frame->end);
+            if (alignment_end == specifier_index)
             {
-                break;
+                if (!c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[specifier_index], &frame->qualifiers))
+                {
+                    break;
+                }
+                alignment_end = specifier_index + 1;
             }
-            specifier_index += 1;
-            specifier_index = c_parse_skip_attributes(preprocess, specifier_index, frame->end);
+            specifier_index = c_parse_skip_attributes(preprocess, alignment_end, frame->end);
         }
         bool is_typeof =
             specifier_index + 2 < frame->end && preprocess.tokens[specifier_index].kind == C_TOKEN_IDENTIFIER &&
@@ -10110,12 +10139,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
         {
             type = c_parse_unqualified_type(result, type);
         }
-        u32 suffix = frame->close;
-        while (suffix < frame->end && preprocess.tokens[suffix].kind == C_TOKEN_IDENTIFIER &&
-               c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[suffix], &frame->qualifiers))
-        {
-            suffix += 1;
-        }
+        u32 suffix = c_type_parse_specifier_suffix_end(preprocess, frame->close, frame->end, &frame->qualifiers, false);
         if (frame->qualifiers.is_const || frame->qualifiers.is_volatile || frame->qualifiers.is_restrict || frame->qualifiers.is_atomic)
         {
             type = c_parse_add_qualified_type(result, type, frame->qualifiers);
@@ -10139,12 +10163,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
         return;
     }
     frame->qualifiers.is_atomic = true;
-    u32 suffix = frame->close;
-    while (suffix < frame->end && preprocess.tokens[suffix].kind == C_TOKEN_IDENTIFIER &&
-           c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[suffix], &frame->qualifiers))
-    {
-        suffix += 1;
-    }
+    u32 suffix = c_type_parse_specifier_suffix_end(preprocess, frame->close, frame->end, &frame->qualifiers, true);
     type = c_parse_add_qualified_type(result, type, frame->qualifiers);
     c_type_parse_frame_complete(machine, type, suffix, true);
 }
