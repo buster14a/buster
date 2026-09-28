@@ -5483,6 +5483,194 @@ BUSTER_C_INTERNAL String8 c_parse_token_range_text(Arena* arena, CPreprocessResu
     };
 }
 
+// Whether a type name that ends at `cursor`, short of its operand's `)`, is
+// malformed there. An opening parenthesis may begin an abstract function
+// declarator (`int (*)(void)`) and a reserved or qualifier word may still be
+// part of the type, so only other tokens prove the `)` missing.
+BUSTER_C_INTERNAL bool c_parse_type_name_trailer_invalid(CPreprocessResult preprocess, CToken token)
+{
+    bool invalid = true;
+    if (token.kind == C_TOKEN_PUNCTUATOR)
+    {
+        invalid = !c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS);
+    }
+    else if (token.kind == C_TOKEN_IDENTIFIER)
+    {
+        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        CType qualifiers = {0};
+        bool reserved = spelling.length >= 2 && spelling.pointer[0] == '_' &&
+                        (spelling.pointer[1] == '_' || (spelling.pointer[1] >= 'A' && spelling.pointer[1] <= 'Z'));
+        invalid = !reserved && !c_parse_type_qualifier_word_token(preprocess, token, &qualifiers);
+    }
+    return invalid;
+}
+
+// The first token at which [start, end) stops being one C expression. One
+// left-to-right walk alternates between wanting an operand and wanting an
+// operator, with a stack of the open `(`, `[` and `?`. A parenthesized type
+// name -- a cast, a compound literal, or a sizeof/_Alignof operand -- must end
+// at its `)`. Call arguments, compound-literal initializers and statement
+// expressions are skipped whole, and a shape the walk does not model ends it
+// without a diagnostic, so it rejects only what no expression can spell.
+BUSTER_C_INTERNAL String8 c_parse_expression_syntax_error(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                          CScopeId scope, u32 start, u32 end, u32* error_token)
+{
+    String8 message = {0};
+    u64 mark = machine->scratch_arena->position;
+    u8* open = arena_allocate(machine->scratch_arena, u8, end - start + 1);
+    u32 open_count = 0;
+    bool operand = true;
+    bool size_operand = false;
+    bool stop = start >= end || end > preprocess.token_count;
+    for (u32 index = start; !stop && !message.length && index < end;)
+    {
+        CToken token = preprocess.tokens[index];
+        u32 next = index + 1;
+        bool size_word = false;
+        if (operand && (token.kind == C_TOKEN_PREPROCESSING_NUMBER || token.kind == C_TOKEN_CHARACTER_LITERAL || token.kind == C_TOKEN_STRING_LITERAL))
+        {
+            while (token.kind == C_TOKEN_STRING_LITERAL && next < end && preprocess.tokens[next].kind == C_TOKEN_STRING_LITERAL)
+            {
+                next += 1;
+            }
+            operand = false;
+        }
+        else if (operand && token.kind == C_TOKEN_IDENTIFIER)
+        {
+            String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+            size_word = c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SIZEOF) || c_parse_alignof_word(spelling) ||
+                        string_equal(spelling, S8("alignof"));
+            bool prefix = size_word || string_equal(spelling, S8("__extension__")) || string_equal(spelling, S8("__real__")) ||
+                          string_equal(spelling, S8("__imag__"));
+            if (!prefix && next < end && c_token_is_punctuator(&preprocess.tokens[next], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                u32 close = c_parse_matching_delimiter_indexed(result, preprocess, next);
+                stop = close >= end;
+                next = close + 1;
+            }
+            operand = prefix;
+        }
+        else if (operand && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
+            stop = close >= end || index + 1 >= close;
+            if (!stop && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACE))
+            {
+                next = close + 1;
+                operand = false;
+            }
+            else if (!stop)
+            {
+                CScopeId operand_scope = result->scope_children_offsets ? c_parse_scope_for_token(result, scope, index) : scope;
+                CToken first = preprocess.tokens[index + 1];
+                CEntityId entity = C_ENTITY_ID_INVALID;
+                if (first.kind == C_TOKEN_IDENTIFIER)
+                {
+                    u32 use = c_parse_identifier_use_index(result, index + 1);
+                    entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
+                                                            : c_parse_lookup_entity_token(result, preprocess.spelling_base, operand_scope, &first);
+                }
+                bool names_value = entity.value < result->entity_count && result->entities[entity.value].kind != C_ENTITY_TYPEDEF;
+                u32 cursor = index + 1;
+                CTypeId type = names_value ? C_TYPE_ID_INVALID
+                                           : c_parse_scalar_type_in_scope(machine, result, preprocess, operand_scope, index + 1, close, &cursor);
+                if (type.value < result->type_count)
+                {
+                    type = c_parse_pointer_chain(result, preprocess, type, &cursor, close);
+                    c_parse_array_suffixes(result, preprocess, type, &cursor, close);
+                    if (cursor < close && c_parse_type_name_trailer_invalid(preprocess, preprocess.tokens[cursor]))
+                    {
+                        message = S8("expected ')' after type name");
+                        *error_token = cursor;
+                    }
+                    next = close + 1;
+                    if (next < end && c_token_is_punctuator(&preprocess.tokens[next], C_PUNCTUATOR_LEFT_BRACE))
+                    {
+                        u32 brace = c_parse_matching_delimiter_indexed(result, preprocess, next);
+                        stop = brace >= end;
+                        next = brace + 1;
+                        operand = false;
+                    }
+                    else
+                    {
+                        operand = !size_operand;
+                    }
+                }
+                else
+                {
+                    open[open_count++] = '(';
+                }
+            }
+        }
+        else if (operand)
+        {
+            u64 prefixes = C_PUNCTUATOR_BIT(C_PUNCTUATOR_PLUS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_MINUS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_STAR) |
+                           C_PUNCTUATOR_BIT(C_PUNCTUATOR_AMPERSAND) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_EXCLAMATION) |
+                           C_PUNCTUATOR_BIT(C_PUNCTUATOR_TILDE) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_PLUS_PLUS) |
+                           C_PUNCTUATOR_BIT(C_PUNCTUATOR_MINUS_MINUS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_AMPERSAND_AMPERSAND);
+            bool prefix = token.kind == C_TOKEN_PUNCTUATOR && (prefixes & C_PUNCTUATOR_BIT(token.punctuator)) != 0;
+            if (!prefix && token.kind == C_TOKEN_PUNCTUATOR && !c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) &&
+                !c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                message = S8("expected expression");
+                *error_token = index;
+            }
+            stop = !prefix && !message.length;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS))
+        {
+            operand = false;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) && next < end &&
+                 c_token_is_punctuator(&preprocess.tokens[next], C_PUNCTUATOR_COLON))
+        {
+            next += 1;
+            operand = true;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            open[open_count++] = c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) ? '?' : '[';
+            operand = true;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                 c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            u8 expected = c_token_is_punctuator(&token, C_PUNCTUATOR_COLON) ? '?' : c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ? '(' : '[';
+            stop = !open_count || open[open_count - 1] != expected;
+            open_count -= !stop;
+            operand = expected == '?';
+        }
+        else if (c_parse_expression_operator_precedence(token))
+        {
+            operand = true;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
+            stop = close >= end;
+            next = close + 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_DOT) || c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW))
+        {
+            stop = next >= end || preprocess.tokens[next].kind != C_TOKEN_IDENTIFIER;
+            next += 1;
+        }
+        else
+        {
+            stop = true;
+        }
+        size_operand = size_word;
+        index = next;
+    }
+    if (!stop && !message.length && operand && !open_count && end < preprocess.token_count)
+    {
+        message = S8("expected expression");
+        *error_token = end;
+    }
+    arena_set_position(machine->scratch_arena, mark);
+    return message;
+}
+
 BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                      CDeclaration declaration, CScopeId scope)
 {
@@ -5507,9 +5695,23 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
         }
     }
     deferred |= c_parse_static_assert_has_unresolved_array(preprocess, result, declaration, scope);
-    if (deferred)
+    u32 syntax_start = 0;
+    u32 syntax_end = 0;
+    u32 syntax_token = 0;
+    String8 syntax_error = machine && c_parse_static_assert_expression_range(preprocess, declaration, &syntax_start, &syntax_end)
+                               ? c_parse_expression_syntax_error(machine, result, preprocess, scope, syntax_start, syntax_end, &syntax_token)
+                               : (String8){0};
+    if (syntax_error.length)
+    {
+        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[syntax_token]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                           syntax_error);
+    }
+    else if (deferred)
     {
         c_parse_defer_static_assert(preprocess, result, declaration, scope);
+    }
+    if (syntax_error.length || deferred)
+    {
         return;
     }
     CToken first = preprocess.tokens[declaration.token_start];
@@ -11913,11 +12115,20 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                 bool previous_members_active = machine->enum_constant_members_active;
                 machine->enum_constant_member_start = aggregate->enum_member_start;
                 machine->enum_constant_members_active = true;
-                integer_constant = c_parse_typed_integer_constant(machine, temporary.arena, preprocess, result,
-                                                                  frame->scope, expression_start, token_index);
+                u32 syntax_token = 0;
+                String8 syntax_error = c_parse_expression_syntax_error(machine, result, preprocess, frame->scope, expression_start, token_index,
+                                                                       &syntax_token);
+                integer_constant = syntax_error.length ? (CIntegerConstant){0}
+                                                       : c_parse_typed_integer_constant(machine, temporary.arena, preprocess, result,
+                                                                                        frame->scope, expression_start, token_index);
                 machine->enum_constant_member_start = previous_member_start;
                 machine->enum_constant_members_active = previous_members_active;
-                if (!integer_constant.valid)
+                if (syntax_error.length)
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[syntax_token]),
+                                       C_DIAGNOSTIC_EXPECTED_DECLARATION, syntax_error);
+                }
+                else if (!integer_constant.valid)
                 {
                     c_parse_diagnostic(
                         result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_INVALID_CONSTEXPR,
@@ -20627,7 +20838,13 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
             }
             else
             {
-                CParseInitializerDiagnostic shape = c_parse_validate_initializer_shape(machine, result, preprocess, scope, declaration.type, start, end);
+                CParseInitializerDiagnostic shape = {0};
+                if (!braced)
+                {
+                    shape.message = c_parse_expression_syntax_error(machine, result, preprocess, scope, start, end, &shape.token);
+                }
+                if (!shape.message.length)
+                    shape = c_parse_validate_initializer_shape(machine, result, preprocess, scope, declaration.type, start, end);
                 if (!shape.message.length)
                     shape = c_parse_validate_static_scalar(machine, result, preprocess, scope, declaration.type, start, end, declaration.is_constexpr);
                 if (!shape.message.length) shape = c_parse_validate_compound_literals(machine, result, preprocess, scope, start, end, true, 0);
@@ -22831,10 +23048,40 @@ BUSTER_C_INTERNAL void c_parse_validate_alignment_redeclarations(CTypeParseMachi
     }
 }
 
+// Every recorded array bound is one expression once its `static` and
+// qualifier words are set aside; `[]` and `[*]` have none to check.
+BUSTER_C_INTERNAL void c_parse_validate_array_bound_syntax(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess)
+{
+    u32 bound_count = result->array_bound_count;
+    bool reported = false;
+    for (u32 bound_index = 0; bound_index < bound_count && !reported; bound_index += 1)
+    {
+        CArrayBound bound = result->array_bounds[bound_index];
+        u32 start = bound.token_start;
+        u32 end = BUSTER_MIN((u32)preprocess.token_count, bound.token_start + bound.token_count);
+        CType qualifiers = {0};
+        while (start < end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+               (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("static")) ||
+                c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[start], &qualifiers)))
+        {
+            start += 1;
+        }
+        u32 token = 0;
+        String8 message =
+            bound.is_star ? (String8){0} : c_parse_expression_syntax_error(machine, result, preprocess, (CScopeId){.value = 0}, start, end, &token);
+        if (message.length)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[token]), C_DIAGNOSTIC_EXPECTED_DECLARATION, message);
+            reported = true;
+        }
+    }
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                                CPreprocessResult preprocess)
 {
     c_parse_index_declarations(result, arena);
+    c_parse_validate_array_bound_syntax(machine, result, preprocess);
     CTypeId scalar_types[C_TYPE_COUNT];
     memset(scalar_types, 0xff, sizeof(scalar_types));
     result->expression_scalar_types = scalar_types;
