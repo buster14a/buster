@@ -1,0 +1,71 @@
+--------------------------------------------------------------------------------
+23,662,666,466 (100.0%)  PROGRAM TOTALS
+
+--------------------------------------------------------------------------------
+Ir                    file:function
+--------------------------------------------------------------------------------
+944,053,298 ( 3.99%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_type_parse_machine_run
+824,613,928 ( 3.48%)  src/buster/lib/compiler/codegen/register_allocator_fast.c:machine_fast_close_live_ranges
+759,214,804 ( 3.21%)  src/buster/lib/compiler/frontend/c/c_source.c:c_lex_dispatch
+718,608,755 ( 3.04%)  ./string/../sysdeps/x86_64/multiarch/memset-vec-unaligned-erms.S:__memset_avx2_unaligned_erms [/usr/lib/x86_64-linux-gnu/libc.so.6]
+699,577,537 ( 2.96%)  src/buster/lib/compiler/codegen/register_allocator_fast.c:machine_fast_placement_build_prepassed
+689,803,512 ( 2.92%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_validate_lowering_constraints
+628,807,419 ( 2.66%)  src/buster/lib/simd.h:c_ir_count_string_literal_range_for_target
+613,903,932 ( 2.59%)  src/buster/lib/compiler/codegen/codegen.c:codegen_record_machine_locations
+562,975,226 ( 2.38%)  ./string/../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:__memcpy_avx_unaligned_erms [/usr/lib/x86_64-linux-gnu/libc.so.6]
+538,149,416 ( 2.27%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_ssa_finish
+476,014,548 ( 2.01%)  src/buster/lib/simd.h:c_ir_decode_quoted
+418,396,713 ( 1.77%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_expression_type_query
+410,396,149 ( 1.73%)  src/buster/lib/compiler/codegen/register_allocator_fast.c:machine_fast_prepass_build
+388,117,031 ( 1.64%)  src/buster/lib/compiler/codegen/machine_x86_64.c:machine_select_canonical_function_x86_64
+369,773,119 ( 1.56%)  src/buster/lib/compiler/codegen/machine_x86_64.c:machine_encode_x86_64
+341,911,949 ( 1.44%)  src/buster/lib/compiler/codegen/machine.c:machine_debug_values_build
+301,322,635 ( 1.27%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_type_layout_core
+270,337,568 ( 1.14%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_expression_leaf_without_cast
+265,437,556 ( 1.12%)  src/buster/lib/compiler/frontend/c/c_source.c:c_preprocess
+254,834,420 ( 1.08%)  src/buster/lib/compiler/ir/ir.c:ir_validate_function_blocks
+247,071,107 ( 1.04%)  src/buster/lib/compiler/frontend/c/c_source.c:c_conditional_number
+241,010,833 ( 1.02%)  src/buster/lib/compiler/ir/ir_promote.c:ir_rewrite_compact
+223,424,073 ( 0.94%)  src/buster/lib/compiler/ir/ir_fast.c:ir_prepare_canonical_module
+217,263,886 ( 0.92%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_lower_expression_core_step
+214,170,765 ( 0.91%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_infer_initializer_array_count_core
+212,445,009 ( 0.90%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_constant_initializer_bytes
+212,434,076 ( 0.90%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_lower_to_ir_with_options
+210,298,968 ( 0.89%)  src/buster/lib/compiler/ir/ir_cfg.c:ir_cfg_publish_instruction_rows
+209,341,701 ( 0.88%)  src/buster/lib/compiler/codegen/machine_x86_64.c:machine_x64_emit_exact_recipe
+208,440,138 ( 0.88%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_ast
+184,926,107 ( 0.78%)  src/buster/lib/compiler/ir/ir.c:ir_validate_canonical_module
+178,429,130 ( 0.75%)  src/buster/lib/compiler/codegen/machine.c:machine_function_compact_virtual_registers
+176,765,878 ( 0.75%)  src/buster/lib/integer.c:machine_fast_close_live_ranges
+169,419,250 ( 0.72%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_semantic_integer_literal_kind
+168,251,363 ( 0.71%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_bind_block_statements
+156,986,835 ( 0.66%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_prepare_control_expressions_step
+145,992,100 ( 0.62%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_lower_expression_step
+145,514,003 ( 0.61%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_lower_body_advance
+134,572,098 ( 0.57%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_lookup_entity_symbol
+130,221,997 ( 0.55%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_prepare_calls_step
+130,139,597 ( 0.55%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_scope_for_token
+129,551,731 ( 0.55%)  src/buster/lib/compiler/codegen/machine.c:machine_function_split_parameter_edges
+126,243,682 ( 0.53%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_ssa_slot
+124,643,439 ( 0.53%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_analyze_semantics_core
+124,265,072 ( 0.53%)  src/buster/lib/target.c:c_parse_builtin_type_layout
+117,216,666 ( 0.50%)  src/buster/lib/compiler/debug/debug.c:debug_model_build
+116,893,676 ( 0.49%)  src/buster/lib/compiler/codegen/machine.c:machine_builder_classify_instruction_mutability
+116,252,475 ( 0.49%)  src/buster/lib/compiler/frontend/c/c_internal.h:c_parse_validate_lowering_constraints
+112,806,393 ( 0.48%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_emit_prepared_call_step
+112,370,967 ( 0.47%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_initializer_designator
+109,622,661 ( 0.46%)  src/buster/lib/compiler/ir/ir_promote.c:ir_promote_function
+109,268,950 ( 0.46%)  src/buster/lib/compiler/frontend/c/c_source.c:c_preprocess_expand
+104,849,714 ( 0.44%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_root_conditional
+104,212,042 ( 0.44%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_incompatible_aggregate_value
+ 91,228,160 ( 0.39%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_lower_logical_value_step
+ 90,580,097 ( 0.38%)  src/buster/lib/compiler/frontend/c/c_source.c:c_symbol_intern
+ 90,034,159 ( 0.38%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_position_index_build
+ 89,704,596 ( 0.38%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_decode_escape
+ 89,119,186 ( 0.38%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_builtin_type_layout
+ 88,596,437 ( 0.37%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_ssa_current
+ 88,349,511 ( 0.37%)  src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_query_execute
+ 87,770,278 ( 0.37%)  src/buster/lib/compiler/codegen/machine_schedule.c:machine_schedule_frame_access
+ 82,958,395 ( 0.35%)  src/buster/lib/compiler/codegen/machine.c:codegen_record_machine_locations
+ 81,643,160 ( 0.35%)  src/buster/lib/compiler/codegen/machine.c:machine_opcode_rows_once
+ 81,403,735 ( 0.34%)  src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_validate_sizeof_operands

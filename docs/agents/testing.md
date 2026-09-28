@@ -7,6 +7,16 @@
 - All tests run inside the `ide` executable; there is no external unit-test
   framework. From the repository root, run `ide test --verbose=1 --ci=1` or
   build the `test_all` target.
+- `ide test --module=<name>[,<name>...]` runs only the named modules. A name
+  is a `TestDescriptor.name` from `test_descriptors` in
+  `src/buster/tests/test.c`, such as `object_tests`, and must match exactly.
+  Unknown or empty names fail before any module runs and print the names
+  registered for the target. A named table audit runs even under
+  `BUSTER_TEST_TABLE_AUDITS=0`. Modules at or after the parallel aarch64 group
+  still get that group's table prewarm, but no state a skipped earlier module
+  would have left behind. The summary reads
+  `[N/N] Unit tests (k of M modules selected)`. Without `--module`, every
+  module runs, as in CI and `test_all`.
 - The bootstrap wrappers have a controlled platform test at
   `python3 tests/bootstrap_wrapper_test.py -v`. It supplies a fake TCC and
   driver, and covers cold/warm reuse, dependency and compiler invalidation,
@@ -244,6 +254,17 @@ with only the external build and throughput programs stubbed, followed by the
 fixed no-argument recipe suite. These tests are fake-backend and
 stubbed-external evidence; privileged live-systemd and deployment
 qualification remain explicit operator gates and are not covered here.
+`./build.sh bench_service_broker self-test` also compiles the opt-in
+`systemd-broker-live-test` probe. Run that probe only in a provisioned,
+disposable real-systemd container while an exact outer unit holds the lease;
+it exercises the constrained socket instance and positive/negative private
+state requests. The broker self-test also runs the probe's unprivileged
+identity-policy controls. Opt-in `--isolation-only JOB ATTEMPT` checks actual
+account groups and non-destructive private-file/traversal denial without
+manager calls; it is not live broker evidence. `service-tests
+--cleanup-identity-only` needs disposable root-capable infrastructure and the
+three fixed accounts, and tests the real cleanup helper under the service UID.
+See `tools/bench_service/deploy/SYSTEMD_BROKER.md` for both gates.
 
 ## Configured external compiler fixtures
 

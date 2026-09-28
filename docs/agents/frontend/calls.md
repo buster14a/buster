@@ -125,6 +125,23 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   including when a narrower right operand needs promotion. Their original
   place retains volatile load/store effects and the separate atomic update
   path; `c_test_qualified_compound_values` checks both frontend forms.
+- **A redeclaration's return type is the one of the function it joins.** Each
+  declarator builds its own C function types, and each maps to its own IR
+  function type (they are not interned by structure), so `int (*f(int))(int)`
+  spelled on a prototype and again on the definition names two distinct
+  pointer types. The `IrFunction` keeps the type of the declaration that
+  registered it, and the validator checks RETURN rows and direct call results
+  against that type. The registration loop in `c_lower_to_ir_with_options`
+  therefore gives every later declaration that joins the function the
+  registered return type, much as `c_ir_function_signature` already copies
+  the canonical parameter types. Without it `-fverify-codegen` rejected the
+  unit and the default path silently declined FAST for all of SQLite, through
+  `sqlite3OsDlSym` (#1601, #1602); a typedef'd return type is one C type in
+  every declaration and never diverged.
+  `compiler_driver_test_function_pointer_return_redeclarations` covers plain,
+  static, qualified and two-level returns. An unprototyped declaration
+  followed by its prototyped definition with a function-pointer return still
+  fails `-fverify-codegen` at its call sites (#1327).
 - A by-value parameter's local copy retains its type's natural alignment.
   `c_ir_emit_parameter` must pass the resolved layout alignment to
   `c_ir_emit_local`, just as an ordinary declaration does. Rounding a slot's
