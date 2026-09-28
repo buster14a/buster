@@ -58,6 +58,12 @@ READBACK_PATHS = {
 READBACK_MODES = {"gate": 0o100755, "broker": 0o100755, "receipt": 0o100444}
 UNIT_SUCCESS_MESSAGE_ID = "7ad2d189f7e94e70a38c781354912448"
 ENTRY_MARKER = "BQ-BROKER-ENTRY-V1"
+# systemd names a unit's journal stream after its ExecStart file, not after
+# anything the process writes; every PASS and broker record must carry it,
+# which independently shows the gate was the unit's executable.
+STREAM_IDENTIFIER = "buster-bench-broker-entry-gate"
+MANAGER_INTERFACE = "org.freedesktop.systemd1.Manager"
+PROPERTIES_INTERFACE = "org.freedesktop.DBus.Properties"
 _N = r"(0|[1-9][0-9]*)"
 _S = r"(0|-?[1-9][0-9]*)"
 _TUPLE = rf"{_N}:{_N}:{_S}:{_S}:{_N}:{_S}:{_N}"
@@ -79,7 +85,13 @@ def _canonical_tuple(text: str, label: str) -> str:
 
 
 def parse_pass(message: str) -> dict[str, Any]:
-    """Parse one exact gate PASS line; the grammar has no optional fields."""
+    """Parse one exact gate PASS line; the grammar has no optional fields.
+
+    The `uid/gid/groups/caps/nnp/seccomp/mounts/fd0` tokens are the gate's
+    fixed assertion, printed only after its checks passed; they are not
+    measured values. Credentials are enforced by the gate before PASS and
+    independently read from `/proc/self/status` in the broker diagnostic.
+    """
     require(isinstance(message, str) and len(message) < 4096 and "\n" not in message,
             "gate PASS is not one bounded text line")
     match = PASS_RE.fullmatch(message)
@@ -109,7 +121,14 @@ def collect_passes(records: list[dict[str, Any]], expected_boot: str) -> dict[tu
     passes: dict[tuple[str, str, str, int], dict[str, Any]] = {}
     for number, record in enumerate(records, 1):
         message = record.get("MESSAGE")
-        text = message if isinstance(message, str) else json.dumps(message)
+        if isinstance(message, list):
+            # journalctl renders non-UTF-8 or binary messages as byte arrays.
+            try:
+                text = bytes(message).decode("latin-1")
+            except (TypeError, ValueError):
+                text = ENTRY_MARKER
+        else:
+            text = message if isinstance(message, str) else json.dumps(message)
         if ENTRY_MARKER not in text:
             continue
         require(isinstance(message, str) and message.startswith(ENTRY_MARKER + " PASS "),
@@ -117,6 +136,8 @@ def collect_passes(records: list[dict[str, Any]], expected_boot: str) -> dict[tu
         require("_LINE_BREAK" not in record, f"gate PASS record {number} was split by journald")
         require(base._field_text(record, "_TRANSPORT", "gate transport") == "stdout",
                 f"gate PASS record {number} is not a unit stream record")
+        require(record.get("SYSLOG_IDENTIFIER") == STREAM_IDENTIFIER,
+                f"gate PASS record {number} is not on the entry gate's journal stream")
         boot = base._field_text(record, "_BOOT_ID", "gate boot ID")
         require(boot == expected_boot, f"gate PASS record {number} has the wrong boot")
         unit = base._field_text(record, "_SYSTEMD_UNIT", "gate unit")
@@ -255,6 +276,8 @@ def join_activations(passes: dict[tuple[str, str, str, int], dict[str, Any]],
                 f"gate PASS and broker start ticks differ: not the same process start for {unit}")
         require(record["stream_id"] == diagnostic["stream_id"],
                 f"gate PASS and broker diagnostic use different journal streams for {unit}")
+        require(diagnostic.get("identifiers") == {STREAM_IDENTIFIER},
+                f"broker records for {unit} are not on the entry gate's journal stream")
         require(record["record_number"] < min(diagnostic["record_numbers"]),
                 f"gate PASS does not precede the broker's first record for {unit}")
         socket = sequence["socket"]
@@ -296,6 +319,10 @@ def join_activations(passes: dict[tuple[str, str, str, int], dict[str, Any]],
             require(observed["removed"] == 0 and retained is not None and
                     retained["InvocationID"] == invocation and retained["ExecMainPID"] == str(pid),
                     f"retained failed lifecycle does not name the gated invocation and PID for {unit}")
+            exit_us = int(retained["ExecMainExitTimestampMonotonic"])
+            require(exit_us <= failure["exit"]["monotonic_us"] <= failure["failure"]["monotonic_us"] and
+                    failure["failure"]["monotonic_us"] * 1000 <= int(retained["query_started_monotonic_ns"]),
+                    f"retained failed show, process exit and PID 1 failure are out of order for {unit}")
         rows.append({"unit": unit, "invocation_id": invocation, "pid": pid, "start_ticks": record["ticks"],
                      "socket_inode": socket["ino"], "gate_record": record["record_number"],
                      "first_broker_record": min(diagnostic["record_numbers"]),
@@ -306,7 +333,8 @@ def join_activations(passes: dict[tuple[str, str, str, int], dict[str, Any]],
 
 
 RETAINED_KEYS = ("Id", "InvocationID", "ExecMainPID", "ExecMainCode", "ExecMainStatus",
-                 "Result", "ActiveState", "SubState", "LoadState")
+                 "Result", "ActiveState", "SubState", "LoadState",
+                 "ExecMainStartTimestampMonotonic", "ExecMainExitTimestampMonotonic")
 
 
 def _retained_properties(observer_fd: int, unit: str, terminal: Any) -> dict[str, str]:
@@ -318,6 +346,10 @@ def _retained_properties(observer_fd: int, unit: str, terminal: Any) -> dict[str
     require(isinstance(ref, dict) and ref.get("exit") == 0 and ref.get("timed_out") is False,
             f"retained failed raw show is incomplete for {unit}")
     raw = base._safe_ref(observer_fd, ref, "retained failed show", 256 * 1024)
+    stderr = base._safe_ref(observer_fd, terminal.get("raw_stderr"), "retained failed stderr", 32 * 1024)
+    require(not stderr, f"retained failed query wrote diagnostics for {unit}")
+    started_ns = terminal.get("started_monotonic_ns")
+    require(type(started_ns) is int and started_ns > 0, f"retained failed query has no start time for {unit}")
     properties: dict[str, str] = {}
     for line in raw.decode("utf-8", "strict").splitlines():
         name, sep, value = line.partition("=")
@@ -329,22 +361,35 @@ def _retained_properties(observer_fd: int, unit: str, terminal: Any) -> dict[str
     require(set(properties) == set(RETAINED_KEYS) and
             all(properties[key] == value for key, value in fixed.items()),
             f"retained failed show does not describe the exact failed broker for {unit}")
+    start_us = base.canonical_uint(properties["ExecMainStartTimestampMonotonic"], "retained start", (1 << 64) - 1, False)
+    exit_us = base.canonical_uint(properties["ExecMainExitTimestampMonotonic"], "retained exit", (1 << 64) - 1, False)
+    require(start_us <= exit_us and exit_us * 1000 <= started_ns,
+            f"retained failed show was queried before the exit it reports for {unit}")
+    properties["query_started_monotonic_ns"] = str(started_ns)
     return properties
 
 
-def observer_lifecycles(observer_fd: int, expected: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    ready, events, summary = base._observer_documents(observer_fd, expected)
-    base._validate_template_metadata(ready, events, summary)
+def lifecycles_from_events(events: list[dict[str, Any]], summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Exact manager-signal lifecycle per unit; retained terminals are bound later."""
     require(summary.get("event_stream_complete") is True and summary.get("event_loss_detected") is False and
             summary.get("stop_seen") is True and summary.get("global_incomplete_reasons") == [],
             "observer manager signal stream is incomplete")
+    sender = summary.get("manager_sender")
     units: dict[str, dict[str, Any]] = {}
+    previous_ns = 0
     for event in events:
         unit = event.get("unit")
         member = event.get("member")
         require(isinstance(unit, str) and member in ("UnitNew", "UnitRemoved", "PropertiesChanged"),
                 f"observer event {event.get('seq')} is not a broker lifecycle signal")
         base.parse_broker_unit(unit, f"observer event {event.get('seq')} unit")
+        interface = PROPERTIES_INTERFACE if member == "PropertiesChanged" else MANAGER_INTERFACE
+        require(event.get("sender") == sender and event.get("interface") == interface and
+                event.get("object_path") == base._unit_object_path(unit),
+                f"observer event {event.get('seq')} is not the manager's signal for {unit}")
+        require(type(event.get("monotonic_ns")) is int and event["monotonic_ns"] >= previous_ns,
+                f"observer event {event.get('seq')} is out of time order")
+        previous_ns = event["monotonic_ns"]
         require(event.get("generation") == 1, f"observer saw several lifecycle generations of {unit}")
         row = units.setdefault(unit, {"new": 0, "removed": 0, "main_pids": set(), "retained": None,
                                       "first_seq": event["seq"]})
@@ -353,26 +398,44 @@ def observer_lifecycles(observer_fd: int, expected: dict[str, Any]) -> tuple[dic
                     f"observer lifecycle of {unit} does not start with exactly one UnitNew")
             row["new"] = 1
         elif member == "UnitRemoved":
-            require(row["removed"] == 0, f"observer saw {unit} removed twice")
+            require(row["new"] == 1 and row["removed"] == 0, f"observer saw {unit} removed out of order")
             row["removed"] = 1
         else:
-            require(row["removed"] == 0, f"observer saw {unit} change after removal")
+            require(row["new"] == 1 and row["removed"] == 0,
+                    f"observer saw {unit} change outside its lifecycle")
+            interface_name = event.get("unit_interface")
+            require(interface_name in ("org.freedesktop.systemd1.Unit", "org.freedesktop.systemd1.Service"),
+                    f"observer property signal for {unit} is not a unit or service interface")
             pids = event.get("main_pids")
-            require(isinstance(pids, list) and all(type(value) is int and value >= 0 for value in pids),
+            require(isinstance(pids, list) and all(type(value) is int and value >= 0 for value in pids) and
+                    (interface_name == "org.freedesktop.systemd1.Service" or not pids),
                     f"observer MainPID values are malformed for {unit}")
             row["main_pids"].update(value for value in pids if value > 0)
     summary_units = summary.get("units")
-    require(isinstance(summary_units, list), "observer summary lacks its unit rows")
-    for summary_row in summary_units:
-        require(isinstance(summary_row, dict) and summary_row.get("unit") in units,
-                "observer summary names a unit without lifecycle signals")
+    require(isinstance(summary_units, list) and
+            [row.get("unit") if isinstance(row, dict) else None for row in summary_units].count(None) == 0,
+            "observer summary lacks its unit rows")
+    names = [row["unit"] for row in summary_units]
+    require(len(names) == len(set(names)) and set(names) == set(units),
+            "observer summary and signal populations differ or repeat a unit")
+    for row in summary_units:
+        require(row.get("generation") == 1 and row.get("boot_id") == summary.get("boot_id"),
+                f"observer summary row for {row['unit']} is not the single signalled generation")
+    for unit, row in units.items():
+        require(row["new"] == 1, f"observer lacks UnitNew for {unit}")
+    return units
+
+
+def observer_lifecycles(observer_fd: int, expected: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    ready, events, summary = base._observer_documents(observer_fd, expected)
+    base._validate_template_metadata(ready, events, summary)
+    units = lifecycles_from_events(events, summary)
+    for summary_row in summary["units"]:
         terminal = summary_row.get("retained_failed_terminal")
         if terminal is not None:
             unit = summary_row["unit"]
             units[unit]["retained"] = _retained_properties(observer_fd, unit, terminal)
-    require(len(summary_units) == len(units), "observer summary and signal populations differ")
     for unit, row in units.items():
-        require(row["new"] == 1, f"observer lacks UnitNew for {unit}")
         require((row["removed"] == 1) != (row["retained"] is not None),
                 f"observer lifecycle of {unit} was neither removed nor retained failed")
     return units, summary
@@ -433,6 +496,9 @@ def main() -> int:
         records = base._validate_journal_capture(base.read_absolute_file(args.journal_jsonl, base.MAX_FILE),
                                                  expected)
         diagnostics = base.collect_diagnostics(records, expected["boot_id"])
+        for diagnostic_entry in diagnostics.values():
+            diagnostic_entry["identifiers"] = {records[number - 1].get("SYSLOG_IDENTIFIER")
+                                               for number in diagnostic_entry["record_numbers"]}
         result["diagnostic_counts"] = base.validate_diagnostic_request_set(diagnostics, expected)
         profiles = base._validate_diagnostic_profiles(diagnostics, expected)
         passes = collect_passes(records, expected["boot_id"])
@@ -491,6 +557,7 @@ def _fixture() -> dict[str, Any]:
                        "gid": 65000, "groups": (65001, 65000), "record_number": 10 * index + 1,
                        "stream_id": stream, "unit": unit}
         diagnostics[key] = {"stream_id": stream, "record_numbers": [10 * index + 2, 10 * index + 3],
+                            "identifiers": {STREAM_IDENTIFIER},
                             "sequence": {"start_ticks": ticks, "stat": {},
                                          "socket": {"dev": 8, "ino": 500 + index, "mode": 0o140777},
                                          "exe": {"path": BROKER_PATH, "dev": broker_dev, "ino": broker_ino},
@@ -503,10 +570,12 @@ def _fixture() -> dict[str, Any]:
             success[(boot, unit, invocation)] = 10 * index + 5
             observer[unit] = {"new": 1, "removed": 1, "main_pids": {pid}, "retained": None}
         else:
-            failed[(boot, unit, invocation)] = {"exit": {"code": "exited", "status": "1"},
-                                                "failure": {"result": "exit-code"}}
+            failed[(boot, unit, invocation)] = {"exit": {"code": "exited", "status": "1", "monotonic_us": 2000},
+                                                "failure": {"result": "exit-code", "monotonic_us": 2001}}
             observer[unit] = {"new": 1, "removed": 0, "main_pids": {pid},
-                              "retained": {"InvocationID": invocation, "ExecMainPID": str(pid)}}
+                              "retained": {"InvocationID": invocation, "ExecMainPID": str(pid),
+                                           "ExecMainExitTimestampMonotonic": "1999",
+                                           "query_started_monotonic_ns": "3000000"}}
     return {"passes": passes, "diagnostics": diagnostics, "profiles": profiles, "manager_rows": manager,
             "failed_rows": failed, "success_rows": success, "observer_units": observer,
             "readback": readback, "expected": expected, "entry": entry}
@@ -595,8 +664,15 @@ def self_test() -> int:
             lambda f: f["diagnostics"][first]["sequence"]["outcome"].update(broker_exit=1))
     rejects("missing PID1 terminal", lambda f: f["success_rows"].clear())
     rejects("double PID1 terminal", lambda f: f["failed_rows"].__setitem__(
-        (first[0], first[1], first[2]), {"exit": {"code": "exited", "status": "1"},
-                                         "failure": {"result": "exit-code"}}))
+        (first[0], first[1], first[2]), {"exit": {"code": "exited", "status": "1", "monotonic_us": 1},
+                                         "failure": {"result": "exit-code", "monotonic_us": 2}}))
+    rejects("broker off the gate stream", lambda f: f["diagnostics"][first].update(
+        identifiers={"buster-bench-systemd-broker"}))
+    rejects("mixed stream identifiers", lambda f: f["diagnostics"][first]["identifiers"].add("sh"))
+    rejects("retained queried before exit", lambda f: f["observer_units"][second[1]]["retained"].update(
+        query_started_monotonic_ns="1000"))
+    rejects("PID1 failure precedes exit", lambda f: f["observer_units"][second[1]]["retained"].update(
+        ExecMainExitTimestampMonotonic="2500"))
     rejects("failure with success exit",
             lambda f: f["diagnostics"][second]["sequence"]["outcome"].update(broker_exit=0))
     rejects("retained other invocation",
@@ -638,8 +714,110 @@ def self_test() -> int:
             checks += 1
         else:
             raise AssertionError(f"accepted readback {name}.{field}")
+    checks += _journal_and_observer_self_test(good)
     print(f"BROKER_ENTRY_EVIDENCE_SELF_TEST checks={checks} failures=0 fixtures-only-not-live-proof")
     return 0
+
+
+def _journal_and_observer_self_test(good: dict[str, Any]) -> int:
+    import copy
+    import tempfile
+    checks = 0
+    boot = good["expected"]["boot_id"]
+
+    def expect_error(label: str, call) -> None:
+        nonlocal checks
+        try:
+            call()
+        except EvidenceError:
+            checks += 1
+            return
+        raise AssertionError(f"accepted: {label}")
+
+    key = sorted(good["passes"])[0]
+    record = {"MESSAGE": _pass_line(good, key), "_TRANSPORT": "stdout", "_BOOT_ID": boot,
+              "_SYSTEMD_UNIT": key[1], "_SYSTEMD_INVOCATION_ID": key[2], "_PID": str(key[3]),
+              "_STREAM_ID": "7" * 32, "SYSLOG_IDENTIFIER": STREAM_IDENTIFIER}
+    passes = collect_passes([record], boot)
+    assert list(passes) == [key] and passes[key]["record_number"] == 1
+    checks += 1
+    for label, change in (("wrong trusted PID", {"_PID": "1"}),
+                          ("wrong invocation", {"_SYSTEMD_INVOCATION_ID": "f" * 32}),
+                          ("journal transport", {"_TRANSPORT": "journal"}),
+                          ("wrong boot", {"_BOOT_ID": "0" * 32}),
+                          ("non-broker unit", {"_SYSTEMD_UNIT": "sshd.service"}),
+                          ("other stream identifier", {"SYSLOG_IDENTIFIER": "buster-bench-systemd-broker"}),
+                          ("split line", {"_LINE_BREAK": "line-max"}),
+                          ("marker inside other text", {"MESSAGE": "note " + record["MESSAGE"]}),
+                          ("marker in byte array", {"MESSAGE": list(b"x BQ-BROKER-ENTRY-V1 PASS")})):
+        changed = dict(record)
+        changed.update(change)
+        expect_error(label, lambda changed=changed: collect_passes([changed], boot))
+    expect_error("duplicate PASS", lambda: collect_passes([record, dict(record)], boot))
+    success = {"MESSAGE_ID": UNIT_SUCCESS_MESSAGE_ID, "UNIT": key[1], "_PID": "1", "_TRANSPORT": "journal",
+               "_BOOT_ID": boot, "INVOCATION_ID": key[2]}
+    assert collect_success_terminals([success], boot) == {(boot, key[1], key[2]): 1}
+    checks += 1
+    expect_error("success not from PID1", lambda: collect_success_terminals([dict(success, _PID="2")], boot))
+    expect_error("duplicate success", lambda: collect_success_terminals([success, dict(success)], boot))
+
+    unit = key[1]
+    path = base._unit_object_path(unit)
+    def event(seq: int, member: str, **extra: Any) -> dict[str, Any]:
+        row = {"seq": seq, "unit": unit, "member": member, "generation": 1, "sender": ":1.0",
+               "object_path": path, "monotonic_ns": 100 + seq,
+               "interface": PROPERTIES_INTERFACE if member == "PropertiesChanged" else MANAGER_INTERFACE}
+        if member == "PropertiesChanged":
+            row.update(unit_interface="org.freedesktop.systemd1.Service", main_pids=[0, key[3]])
+        row.update(extra)
+        return row
+    events = [event(1, "UnitNew"), event(2, "PropertiesChanged"),
+              event(3, "PropertiesChanged", unit_interface="org.freedesktop.systemd1.Unit", main_pids=[]),
+              event(4, "UnitRemoved")]
+    summary = {"event_stream_complete": True, "event_loss_detected": False, "stop_seen": True,
+               "global_incomplete_reasons": [], "manager_sender": ":1.0", "boot_id": boot,
+               "units": [{"unit": unit, "generation": 1, "boot_id": boot}]}
+    units = lifecycles_from_events(events, summary)
+    assert units[unit]["main_pids"] == {key[3]} and units[unit]["removed"] == 1
+    checks += 1
+    for label, mutate in (
+            ("event loss", lambda e, s: s.update(event_loss_detected=True)),
+            ("no stop", lambda e, s: s.update(stop_seen=False)),
+            ("foreign sender", lambda e, s: e[1].update(sender=":1.99")),
+            ("wrong interface", lambda e, s: e[0].update(interface=PROPERTIES_INTERFACE)),
+            ("wrong object path", lambda e, s: e[1].update(object_path="/org/freedesktop/systemd1/unit/x")),
+            ("second generation", lambda e, s: e[3].update(generation=2)),
+            ("change after removal", lambda e, s: e.append(event(5, "PropertiesChanged"))),
+            ("removed twice", lambda e, s: e.append(event(5, "UnitRemoved"))),
+            ("properties before UnitNew", lambda e, s: e.insert(0, event(0, "PropertiesChanged"))),
+            ("time reversal", lambda e, s: e[3].update(monotonic_ns=1)),
+            ("duplicate summary row", lambda e, s: s["units"].append(dict(s["units"][0]))),
+            ("summary without signals", lambda e, s: s["units"].append(
+                {"unit": "buster-bench-systemd-broker@9-1-65000.service", "generation": 1, "boot_id": boot})),
+            ("other signal member", lambda e, s: e.append(event(5, "JobNew"))),
+            ("MainPID on the unit interface", lambda e, s: e[2].update(main_pids=[key[3]])),
+            ("foreign property interface", lambda e, s: e[1].update(unit_interface="org.freedesktop.systemd1.Socket"))):
+        changed_events, changed_summary = copy.deepcopy(events), copy.deepcopy(summary)
+        mutate(changed_events, changed_summary)
+        expect_error(label, lambda e=changed_events, s=changed_summary: lifecycles_from_events(e, s))
+
+    with tempfile.TemporaryDirectory() as directory:
+        document = {"schema": READBACK_SCHEMA, "files": good["readback"]}
+        before, after = Path(directory, "before.json"), Path(directory, "after.json")
+        before.write_text(json.dumps(document))
+        after.write_text(json.dumps(document))
+        entry = {"gate_sha256": good["readback"]["gate"]["sha256"],
+                 "broker_sha256": good["readback"]["broker"]["sha256"],
+                 "readbacks": [str(before), str(after)]}
+        assert load_readbacks(entry) == good["readback"]
+        checks += 1
+        changed = copy.deepcopy(document)
+        changed["files"]["group"]["sha256"] = "d" * 64
+        after.write_text(json.dumps(changed))
+        expect_error("readback changed during run", lambda: load_readbacks(entry))
+        after.write_text(json.dumps(document))
+        expect_error("gate bytes differ from payload", lambda: load_readbacks(dict(entry, gate_sha256="c" * 64)))
+    return checks
 
 
 if __name__ == "__main__":

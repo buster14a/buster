@@ -532,7 +532,7 @@ kill -0 "$broker_observer_pid"
 entry_readback() {
   # Root readback outside every broker unit: exact tuples and bytes that each
   # gate PASS must repeat. Taken before activation and after the job finishes.
-  sudo docker exec -i "$guest" python3 - <<'ENTRY_READBACK' >"$evidence/entry-readback-$1.json"
+  sudo docker exec -i "$guest" python3 - <<'ENTRY_READBACK' >"$evidence/entry-readback-$1.json" || return 1
 import hashlib, json, os
 paths = {"gate": "/usr/local/libexec/buster-bench-broker-entry-gate",
          "broker": "/usr/local/libexec/buster-bench-systemd-broker",
@@ -784,7 +784,9 @@ digest = lambda name: hashlib.sha256((payload / "binaries" / name).read_bytes())
     "readbacks": [str(root / "entry-readback-before.json"), str(root / "entry-readback-after.json")]},
     sort_keys=True) + "\n")
 ENTRY_INPUTS
-  if python3 "$broker_entry_helper" --journal-jsonl "$evidence/broker-journal.jsonl" \
+  # The observer exits 1 when a racing /proc capture is incomplete; that is
+  # retained, not required. A timeout-killed observer (124) is not complete.
+  if [[ "$broker_observer_status" =~ ^[01]$ ]] && python3 "$broker_entry_helper" --journal-jsonl "$evidence/broker-journal.jsonl" \
     --observer-dir "$evidence/broker-observer-artifacts" --expected-json "$evidence/broker-expected.json" \
     --entry-expected-json "$evidence/broker-entry-expected.json" \
     --overlap-jsonl "$evidence/broker-overlap.jsonl" >"$evidence/broker-entry-reconciliation.json" \
