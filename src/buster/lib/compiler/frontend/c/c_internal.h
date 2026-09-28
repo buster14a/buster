@@ -281,6 +281,12 @@ BUSTER_C_EXTERN void c_parse_position_index_ensure(CParseResult* result, CPrepro
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                     String8 name, u32 token_index);
 BUSTER_C_EXTERN bool c_parse_result_reserve_types(CParseResult* result, u32 additional);
+BUSTER_C_EXTERN CTypeId c_parse_aggregate_unique(CParseResult* result, CTypeKind kind, String8 tag, bool* decided);
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+#define C_AGGREGATE_TAG_SEARCH_COUNT(lookup) do { if (lookup) { (lookup)->lowering_search_type_count += 1; } } while (0)
+#else
+#define C_AGGREGATE_TAG_SEARCH_COUNT(lookup) ((void)0)
+#endif
 BUSTER_C_EXTERN void c_type_parse_rollback(CTypeParseMachine* machine, CParseResult* result,
                                              CParseResult checkpoint, u32 mutation_mark);
 BUSTER_C_EXTERN bool c_initializer_consume_separator(CToken* tokens, u32 limit, u32* cursor, u64 next_index);
@@ -291,6 +297,15 @@ BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_token(CParseResult* result, char
                                                        CScopeId scope, CToken const* token);
 BUSTER_C_EXTERN CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index);
 BUSTER_C_EXTERN u32 c_parse_scope_distance(CParseResult* result, CScopeId candidate, CScopeId scope);
+BUSTER_C_EXTERN u32 c_parse_definition_scan_start(CParseResult const* result, u32 definition_start);
+// CDefinitionIndex diagnostic counts, kept out of ordinary compilers and timing
+// builds and out of the canonical-construction census: parse-only runs
+// construct no IR, and tests pin that their construction counters stay still.
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+#define C_DEFINITION_INDEX_COUNT(index, field, amount) do { if (index) { (index)->field += (amount); } } while (0)
+#else
+#define C_DEFINITION_INDEX_COUNT(index, field, amount) ((void)0)
+#endif
 BUSTER_C_EXTERN bool c_token_spelling_equal(char8 const* spelling_base, CToken token, String8 spelling);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);

@@ -33,6 +33,7 @@
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance
 //   uefi_boot_*                                 pinned firmware boot gate
+//   tools/source_size.c                         source-size report and ratchet
 //   process_arguments, main                      command dispatch
 
 #define BUSTER_UNITY_BUILD 1
@@ -94,6 +95,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_GENERATE,
     BUILD_COMMAND_BUILD,
     BUILD_COMMAND_CLANG_ANALYZE,
+    BUILD_COMMAND_OPTNONE_AUDIT,
     BUILD_COMMAND_CMAKE_PROFILE_SUMMARY,
     BUILD_COMMAND_NINJA_LOG_SUMMARY,
     BUILD_COMMAND_TIME_TRACE_SUMMARY,
@@ -128,6 +130,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_GPU_TOOLCHAINS,
     BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS,
     BUILD_COMMAND_TEST_UEFI,
+    BUILD_COMMAND_SOURCE_SIZE,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST,
@@ -6346,6 +6349,7 @@ BUSTER_GLOBAL_LOCAL String8 clang_analyze_compile_commands_path(Arena* arena, St
 }
 
 #include "tools/clang_analyze.c"
+#include "tools/optnone_audit.c"
 
 BUSTER_GLOBAL_LOCAL void clang_analyze_command_add(Arena* arena, String8 build_directory, CmakeBuildOptions options)
 {
@@ -22899,6 +22903,68 @@ BUSTER_GLOBAL_LOCAL ProcessResult release_build_parallelism_tests(void)
     return PROCESS_RESULT_SUCCESS;
 }
 
+// Commands that parse their own arguments and run before the ordinary option
+// loop. The shared generic argument diagnostic must not follow their failures.
+BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
+{
+    bool result = false;
+    switch (command)
+    {
+        case BUILD_COMMAND_MATRIX_PHASE_RUN:
+        case BUILD_COMMAND_PRODUCTION_PROFILE:
+        case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
+        case BUILD_COMMAND_CLANG_ANALYZE:
+        case BUILD_COMMAND_OPTNONE_AUDIT:
+        case BUILD_COMMAND_TEST_DIFFERENTIAL:
+        case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
+        case BUILD_COMMAND_TEST_UEFI:
+        case BUILD_COMMAND_SOURCE_SIZE:
+        case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
+        {
+            result = true;
+        }
+        break;
+        default:
+        {
+        }
+        break;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
+{
+    typedef struct BuildCommandArgumentOwnershipTest BuildCommandArgumentOwnershipTest;
+    struct BuildCommandArgumentOwnershipTest
+    {
+        BuildCommand command;
+        bool owns_arguments;
+    };
+
+    BuildCommandArgumentOwnershipTest tests[] = {
+        {.command = BUILD_COMMAND_TEST_UEFI, .owns_arguments = true},
+        {.command = BUILD_COMMAND_CLANG_ANALYZE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
+        {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
+        {.command = BUILD_COMMAND_SOURCE_SIZE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_BUILD, .owns_arguments = false},
+        {.command = BUILD_COMMAND_GENERATE, .owns_arguments = false},
+        {.command = BUILD_COMMAND_TEST_ALL_COMBINATIONS, .owns_arguments = false},
+    };
+
+    ProcessResult result = PROCESS_RESULT_SUCCESS;
+    for (u32 test_i = 0; test_i < BUSTER_ARRAY_LENGTH(tests); test_i += 1)
+    {
+        BuildCommandArgumentOwnershipTest test = tests[test_i];
+        if (build_command_owns_arguments(test.command) != test.owns_arguments)
+        {
+            string_print(S8("error: build command argument ownership test {u32} failed\n"), test_i);
+            result = PROCESS_RESULT_FAILED;
+        }
+    }
+    return result;
+}
+
 typedef struct MatrixTestCombination MatrixTestCombination;
 struct MatrixTestCombination
 {
@@ -24197,9 +24263,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
     MatrixTestTree linux_trees[5] = {
         {.build_directory = S8("linux-debug")},
         {.build_directory = S8("linux-canonical"), .unity_only = 1},
-        {0},
-        {0},
-        {0},
+        {.build_directory = {0}},
+        {.build_directory = {0}},
+        {.build_directory = {0}},
     };
     matrix_superbuild_allocate_jobs(linux_trees, BUSTER_ARRAY_LENGTH(linux_trees), 16);
     u32 expected_linux_unity[] = {0, 1, 0, 0, 0};
@@ -24216,12 +24282,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
     }
 
     MatrixTestTree windows_trees[6] = {
-        {0},
-        {0},
+        {.build_directory = {0}},
+        {.build_directory = {0}},
         {.build_directory = S8("windows-canonical"), .unity_only = 1},
-        {0},
-        {0},
-        {0},
+        {.build_directory = {0}},
+        {.build_directory = {0}},
+        {.build_directory = {0}},
     };
     matrix_superbuild_allocate_jobs(windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4);
     u32 expected_windows_unity[] = {0, 0, 1, 0, 0, 0};
@@ -24560,7 +24626,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     }
     if (owns_preflight)
     {
-        if (!clang_analyze_self_test(arena))
+        if (build_command_argument_ownership_tests() != PROCESS_RESULT_SUCCESS)
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        if (!clang_analyze_self_test(arena) || !optnone_audit_self_test(arena))
         {
             return PROCESS_RESULT_FAILED;
         }
@@ -25012,6 +25082,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         if (coverage_obligations.unity_analysis_scheduled && combination.compiler == BUILD_COMPILER_CLANG && !combination.sanitize && combination.options.optimize)
         {
             clang_analyze_command_add(arena, combination.build_directory, combination.options);
+            optnone_audit_command_add(arena, combination.build_directory, combination.options);
         }
     }
     if (coverage_obligations.self_host_scheduled)
@@ -39072,6 +39143,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 }
 
 #include "tools/production_profile.c"
+#include "tools/source_size.c"
 
 ProcessResult process_arguments(void)
 {
@@ -39097,6 +39169,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_GENERATE] = S8_INITIALIZER("generate"),
         [BUILD_COMMAND_BUILD] = S8_INITIALIZER("build"),
         [BUILD_COMMAND_CLANG_ANALYZE] = S8_INITIALIZER("clang_analyze"),
+        [BUILD_COMMAND_OPTNONE_AUDIT] = S8_INITIALIZER("optnone_audit"),
         [BUILD_COMMAND_CMAKE_PROFILE_SUMMARY] = S8_INITIALIZER("cmake_profile_summary"),
         [BUILD_COMMAND_NINJA_LOG_SUMMARY] = S8_INITIALIZER("ninja_log_summary"),
         [BUILD_COMMAND_TIME_TRACE_SUMMARY] = S8_INITIALIZER("time_trace_summary"),
@@ -39131,6 +39204,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_GPU_TOOLCHAINS] = S8_INITIALIZER("test_gpu_toolchains"),
         [BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS] = S8_INITIALIZER("native_retirement_census"),
         [BUILD_COMMAND_TEST_UEFI] = S8_INITIALIZER("test_uefi"),
+        [BUILD_COMMAND_SOURCE_SIZE] = S8_INITIALIZER("source_size"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
         [BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST] = S8_INITIALIZER("coverage_manifest_self_test"),
@@ -39215,48 +39289,24 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     TestMuslOptions test_musl_options = {0};
     TestCpythonOptions test_cpython_options = {0};
 
-    if (command == BUILD_COMMAND_MATRIX_PHASE_RUN)
+    bool command_owns_arguments = build_command_owns_arguments(command);
+    if (command_owns_arguments)
     {
-        result = matrix_phase_run(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
-        argument_i = arguments.length;
-    }
-    else if (command == BUILD_COMMAND_PRODUCTION_PROFILE)
-    {
-        result = production_profile_main(
-            arena,
-            (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i},
-            arguments.pointer[0]);
-        argument_i = arguments.length;
-    }
-    else if (command == BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST)
-    {
-        result = production_profile_self_test(arena);
-        argument_i = arguments.length;
-    }
-    else if (command == BUILD_COMMAND_CLANG_ANALYZE)
-    {
-        result = clang_analyze_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
-        argument_i = arguments.length;
-    }
-    else if (command == BUILD_COMMAND_TEST_DIFFERENTIAL)
-    {
-        result = differential_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
-        argument_i = arguments.length;
-    }
-    else if (command == BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS)
-    {
-        result = native_retirement_census_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
-        argument_i = arguments.length;
-    }
-    else if (command == BUILD_COMMAND_TEST_UEFI)
-    {
-        result = uefi_boot_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i}, arguments.pointer[0]);
-        argument_i = arguments.length;
-    }
-
-    if (command == BUILD_COMMAND_TEST_GPU_TOOLCHAINS)
-    {
-        result = gpu_tools_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
+        SliceString8 owned_arguments = {.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i};
+        switch (command)
+        {
+            case BUILD_COMMAND_MATRIX_PHASE_RUN: result = matrix_phase_run(arena, owned_arguments); break;
+            case BUILD_COMMAND_PRODUCTION_PROFILE: result = production_profile_main(arena, owned_arguments, arguments.pointer[0]); break;
+            case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST: result = production_profile_self_test(arena); break;
+            case BUILD_COMMAND_CLANG_ANALYZE: result = clang_analyze_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_OPTNONE_AUDIT: result = optnone_audit_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_TEST_DIFFERENTIAL: result = differential_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS: result = native_retirement_census_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_TEST_UEFI: result = uefi_boot_main(arena, owned_arguments, arguments.pointer[0]); break;
+            case BUILD_COMMAND_SOURCE_SIZE: result = source_size_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_TEST_GPU_TOOLCHAINS: result = gpu_tools_main(arena, owned_arguments); break;
+            default: BUSTER_UNREACHABLE(); break;
+        }
         argument_i = arguments.length;
     }
 
@@ -40119,13 +40169,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
 
     // Every parse-failure path above leaves argument_i on the offending
     // argument; report it here so no failure exits silently with code 1.
-    // Differential execution has already emitted its own usage or result.
-    if (result != PROCESS_RESULT_SUCCESS &&
-        command != BUILD_COMMAND_PRODUCTION_PROFILE &&
-        command != BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST &&
-        command != BUILD_COMMAND_TEST_DIFFERENTIAL &&
-        command != BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS &&
-        command != BUILD_COMMAND_TEST_GPU_TOOLCHAINS)
+    // Commands that own their arguments have already reported their failure.
+    if (result != PROCESS_RESULT_SUCCESS && !command_owns_arguments)
     {
         if (argument_i < arguments.length)
         {
@@ -40248,8 +40293,9 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         }
         break;
         case BUILD_COMMAND_CLANG_ANALYZE:
+        case BUILD_COMMAND_OPTNONE_AUDIT:
         {
-            // Already executed by the analyzer-specific argument parser.
+            // Already executed by the command-specific argument parser.
         }
         break;
         case BUILD_COMMAND_CMAKE_PROFILE_SUMMARY:
@@ -40430,6 +40476,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
+        case BUILD_COMMAND_SOURCE_SIZE:
         {
             // Executed before the ordinary build-option parser.
         }
