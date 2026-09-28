@@ -1,0 +1,28 @@
+name: Repair issue 1725 validation harness
+
+on:
+  push:
+    branches: [codex/1725-source-diagnostics]
+    paths: ['.github/workflows/repair-1725.yml']
+
+permissions: {}
+
+jobs:
+  repair:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Correct the temporary validation harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/file_delete(comma_path)/os_file_delete(comma_path)/' .github/workflows/inspect-1725.yml
+          grep --fixed-strings --quiet 'os_file_delete(comma_path)' .github/workflows/inspect-1725.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/workflows/inspect-1725.yml
+          git commit -m 'ci: correct issue 1725 regression cleanup'
+          git push
