@@ -112,7 +112,9 @@ struct BqWorkerBackend
     BqError (*start)(BqWorkerBackend*, char const* const*, u32);
     BqError (*observe)(BqWorkerBackend*, char const*, BqWorkerObserved*, u64);
     BqError (*signal)(BqWorkerBackend*, char const*, char const*, u64);
-    BqError (*join)(BqWorkerBackend*, int*, u64);
+    /* The final flag makes a pending worker cancellation interrupt the wait.
+     * Cleanup joins pass false: they run after the outer unit is proven empty. */
+    BqError (*join)(BqWorkerBackend*, int*, u64, bool);
     BqError (*cleanup_launcher)(BqWorkerBackend*, u64);
     BqError (*delay)(BqWorkerBackend*, u32);
     u64 (*clock)(BqWorkerBackend*);
