@@ -12719,6 +12719,42 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+    {
+        // typeof over a block-scope object or parameter that shadows a
+        // file-scope typedef names the object, not the typedef (#1669).
+        TemporalArena typeof_shadow_temporary = scratch_begin(&arguments->arena, 1);
+        String8 typeof_shadow_path = buster_test_temporary_path(typeof_shadow_temporary.arena, S8("buster-c-typeof-shadowed-typedef"),
+#if BUSTER_WINDOWS
+                                                                S8(".exe")
+#else
+                                                                S8("")
+#endif
+        );
+        String8 typeof_shadow_command_line[] = {
+            S8("-std=gnu23"), S8("-o"), typeof_shadow_path, S8("tests/basic_c_typeof_shadowed_typedef.c"),
+        };
+        CompilerDriverResult typeof_shadow = compiler_driver_execute_invocation(
+            typeof_shadow_temporary.arena,
+            compiler_driver_parse_arguments(typeof_shadow_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(typeof_shadow_command_line)));
+        if (typeof_shadow.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("typeof shadowed typedef fixture failed: {S8}\n"), typeof_shadow.diagnostic);
+        }
+        BUSTER_TEST(arguments, typeof_shadow.error == COMPILER_DRIVER_ERROR_NONE);
+        if (typeof_shadow.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 typeof_shadow_run_arguments[] = {typeof_shadow_path};
+            ProcessSpawnResult typeof_shadow_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(typeof_shadow_run_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+            BUSTER_TEST(arguments, typeof_shadow_spawn.handle != 0);
+            if (typeof_shadow_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(typeof_shadow_temporary.arena, typeof_shadow_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(typeof_shadow_temporary);
+    }
     // Three CPython-found lowering shapes, each compiled and run with its
     // answers checked: a flexible array member initialized at static
     // storage (dictobject's empty keys), `++*s++` (dtoa's digit strip), and
