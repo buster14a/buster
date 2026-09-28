@@ -15749,6 +15749,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vectors(UnitTestArguments* ar
 // _Alignof, or a cast -- belong to that type name: they bind no identifiers,
 // `vector_size` builds the vector both at compile time and in lowering, and
 // the ignored `aligned`/`packed` keep the scalar layout, as clang answers.
+// A `vector_size` argument binds block-scope names, and a typeof operand's
+// attributes shape the operand's type exactly once.
 BUSTER_GLOBAL_LOCAL String8 const c_test_type_name_attribute_source = S8_INITIALIZER(
     "typedef int Int4 __attribute__((vector_size(16)));\n"
     "enum { LANES = 16 };\n"
@@ -15758,6 +15760,8 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_type_name_attribute_source = S8_INITIAL
     "_Static_assert(_Alignof(int __attribute__((aligned(16)))) == 4, \"aligned alignment\");\n"
     "_Static_assert(sizeof(int __attribute__((packed))) == 4, \"packed size\");\n"
     "_Static_assert(sizeof(short __attribute__((vector_size(LANES / 2)))) == 8, \"constant vector size\");\n"
+    "_Static_assert(sizeof(typeof(int __attribute__((vector_size(16))))) == 16, \"typeof vector size\");\n"
+    "_Static_assert(_Alignof(typeof(int __attribute__((vector_size(16))))) == 16, \"typeof vector alignment\");\n"
     "enum { VECTOR_BYTES = sizeof(int __attribute__((vector_size(32)))) };\n"
     "_Static_assert(VECTOR_BYTES == 32, \"enumerator vector size\");\n"
     "static long long pair[2] = {5, 6};\n"
@@ -15775,6 +15779,15 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_type_name_attribute_source = S8_INITIAL
     "    failures |= sizeof(int __attribute__((vector_size(16))) *) != sizeof(void *);\n"
     "    failures |= (int)(long __attribute__((aligned(16))))7 != 7;\n"
     "    failures |= sum[3] != 8 || bits[0] != 5 || bits[2] != 6;\n"
+    "    int lane = 0;\n"
+    "    _Static_assert(sizeof(typeof(int __attribute__((vector_size(16))))) == 16, \"block typeof vector size\");\n"
+    "    typedef typeof(int __attribute__((vector_size(16)))) Lanes;\n"
+    "    typeof(int __attribute__((vector_size(16)))) cast = (typeof(int __attribute__((vector_size(16)))))value;\n"
+    "    failures |= sizeof(char __attribute__((vector_size(sizeof(lane) * 4)))) != 16;\n"
+    "    failures |= _Alignof(char __attribute__((vector_size(sizeof(lane) * 4)))) != 16;\n"
+    "    failures |= sizeof(typeof(int __attribute__((vector_size(16))))) != 16;\n"
+    "    failures |= _Alignof(typeof(int __attribute__((vector_size(16))))) != 16;\n"
+    "    failures |= sizeof(Lanes) != 16 || sizeof(cast) != 16 || cast[2] != 3;\n"
     "    return failures;\n"
     "}\n"
 );

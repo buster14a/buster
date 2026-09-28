@@ -23657,6 +23657,13 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
             // `(map)->key`) needs the full expression type walker.  Unlike
             // lowering, typeof does not evaluate the operand, so this query
             // is side-effect free and preserves array/function types.
+            // A type-name operand -- `typeof(int __attribute__((vector_size(16))))`
+            // -- reads through the type-name reader, which applies the
+            // attributes a type name carries.
+            if (type.value == IR_ID_UNDERLYING_INVALID)
+            {
+                type = c_ir_group_type_name(builder, index + 1, close);
+            }
             if (type.value == IR_ID_UNDERLYING_INVALID)
             {
                 c_ir_sizeof_operand_type_attempt(builder, index + 2, close, &type);
@@ -23812,7 +23819,9 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
             index = attribute_end != index ? attribute_end : index + (qualifier_run ? 1u : 0u);
         }
         IrTypeId vector_type = IR_TYPE_ID_INVALID;
-        type = c_ir_type_name_vector_attribute(builder, type, start, index, &vector_type) ? vector_type : IR_TYPE_ID_INVALID;
+        type = c_ir_type_name_vector_attribute(builder, type, c_parse_type_name_attribute_start(builder->preprocess, start, index), index, &vector_type)
+                   ? vector_type
+                   : IR_TYPE_ID_INVALID;
     }
     if (type.value != IR_ID_UNDERLYING_INVALID)
     {
