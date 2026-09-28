@@ -34631,7 +34631,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
     IrType* local_type_value = ir_type_from_id(&builder->program->types, local_type);
     IrType* variable_element = variable_length_array ? ir_type_from_id(&builder->program->types, variable_element_type) : 0;
     CToken name = builder->preprocess.tokens[name_index];
-    bool local_extern = false;
+    bool local_extern = local_entity->is_extern;
     bool local_static = local_entity->is_static_storage;
     bool local_thread_local = local_entity->is_thread_local;
     for (u32 token_index = start; token_index < end; token_index += 1)
