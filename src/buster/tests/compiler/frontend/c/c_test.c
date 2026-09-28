@@ -22557,6 +22557,71 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_trailing_token_diagnostics(
     return result;
 }
 
+// A typeof operand that is neither a type name nor an expression is reported
+// at the operand in every context, including prototype parameters (#1662).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_invalid_operand_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 message;
+        u32 column;
+    } invalid[] = {
+        {S8("int f(__typeof__(int junk) *p);\n"), S8("expected ')' after type name"), 22},
+        {S8("int f(__typeof__(1 +) p);\n"), S8("expected expression"), 21},
+        {S8("int f(__typeof__(int junk) *p) { return p != 0; }\n"), S8("expected ')' after type name"), 22},
+        {S8("void f(__typeof__(int junk) *p); void h(void) { f(0); }\n"), S8("expected ')' after type name"), 23},
+        {S8("void f(int (*cb)(__typeof__(int junk)));\n"), S8("expected ')' after type name"), 33},
+        {S8("int g(void) { __typeof__(int junk) l; return 0; }\n"), S8("expected ')' after type name"), 30},
+        {S8("int g(void) { __typeof__(1 +) l; return 0; }\n"), S8("expected expression"), 29},
+        {S8("typedef __typeof__(int junk) T;\n"), S8("expected ')' after type name"), 24},
+        {S8("typedef __typeof__(1 +) T;\n"), S8("expected expression"), 23},
+        {S8("__typeof__(int *junk) v;\n"), S8("expected ')' after type name"), 17},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[case_index].source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        u32 reported = 0;
+        bool located = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = parse.diagnostics[diagnostic_index];
+            if (diagnostic.kind == C_DIAGNOSTIC_EXPECTED_DECLARATION && string_equal(diagnostic.message, invalid[case_index].message))
+            {
+                reported += 1;
+                located = diagnostic.location.line == 1 && diagnostic.location.column == invalid[case_index].column;
+            }
+        }
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, invalid[case_index].source);
+        BUSTER_TEST_RAW(arguments, reported == 1 && located, invalid[case_index].source);
+        scratch_end(temporary);
+    }
+
+    String8 valid[] = {
+        S8("int f(__typeof__(int) p, __typeof__(int *) q, __typeof__(int [3]) r);\nvoid h(void) { f(0, 0, 0); }\n"),
+        S8("int f(__typeof__((int)1) p);\nvoid h(void) { f(0); }\n"),
+        S8("int x, y; int f(__typeof__(x * y) p);\nvoid h(void) { f(0); }\n"),
+        S8("int g(void) { int x = 1; __typeof__(x * 2) l = x; return (int)(__typeof__((int)1))l; }\n"),
+        S8("typedef __typeof__(1 + 2) T; T v;\n"),
+        S8("void f(int n, __typeof__(n) m);\n"),
+        S8("void f(__typeof__(int (*)(void)) p);\n"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, valid[case_index],
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, valid[case_index]);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -24072,6 +24137,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
     BUSTER_TEST_FIXTURE(arguments, c_test_unknown_type_name_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_trailing_token_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_typeof_invalid_operand_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_post_tag_declaration_specifiers);
     BUSTER_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);

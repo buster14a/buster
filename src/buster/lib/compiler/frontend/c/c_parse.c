@@ -9920,6 +9920,45 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     }
 }
 
+// A typeof operand is read first as a type name, then as an expression; this
+// reports one that is neither. The type attempt's rollback rewound the
+// diagnostic count past what that attempt raised, so when the expression read
+// raised nothing, a report from inside the type name (a struct member,
+// `_Atomic()`) is kept by restoring the count to `frame->pending_index`.
+// Otherwise a type name that stopped at `frame->index` before the operand's
+// `)` (`int junk`) is missing that `)`, and an operand whose last token cannot
+// end an expression (`1 +`) is missing its expression. A leftover opening
+// delimiter may begin an abstract declarator the scalar parse does not model
+// (`int (*)(void)`), and an operand that only names something the lookup
+// cannot see is left to its uses; neither is reported here.
+BUSTER_C_INTERNAL void c_type_parse_typeof_operand_diagnostic(CTypeParseFrame* frame)
+{
+    CParseResult* result = frame->result;
+    CPreprocessResult preprocess = frame->preprocess;
+    u32 operand_end = frame->close - 1;
+    if (result->diagnostic_count == frame->checkpoint.diagnostic_count)
+    {
+        if (frame->pending_index > result->diagnostic_count)
+        {
+            result->diagnostic_count = frame->pending_index;
+        }
+        else if (frame->index < operand_end)
+        {
+            CToken leftover = preprocess.tokens[frame->index];
+            if (!c_token_is_punctuator(&leftover, C_PUNCTUATOR_LEFT_PARENTHESIS) && !c_token_is_punctuator(&leftover, C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, leftover), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                                   S8("expected ')' after type name"));
+            }
+        }
+        else if (!c_parse_expression_token_ends_operand(preprocess.tokens[operand_end - 1]))
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[operand_end]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                               S8("expected expression"));
+        }
+    }
+}
+
 BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
@@ -10085,6 +10124,8 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
     {
         if (frame->stage == C_TYPE_PARSE_STAGE_CHILD && (type.value == C_ID_UNDERLYING_INVALID || type_index != operand_end))
         {
+            frame->index = type.value != C_ID_UNDERLYING_INVALID ? type_index : operand_end;
+            frame->pending_index = result->diagnostic_count;
             c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
             frame->stage = C_TYPE_PARSE_STAGE_FALLBACK;
             if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
@@ -10103,6 +10144,10 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
         }
         if (type.value == C_ID_UNDERLYING_INVALID)
         {
+            if (frame->stage == C_TYPE_PARSE_STAGE_FALLBACK)
+            {
+                c_type_parse_typeof_operand_diagnostic(frame);
+            }
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->specifier_index, false);
             return;
         }
