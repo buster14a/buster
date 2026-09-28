@@ -1,0 +1,8 @@
+MainPID=0
+Result=success
+ControlGroup=
+Id=buster-bench-1-2.service
+LoadState=not-found
+ActiveState=inactive
+InvocationID=
+CollectMode=inactive

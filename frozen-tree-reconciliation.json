@@ -1,0 +1,90 @@
+{
+  "causes": [],
+  "components": {
+    "independent_timing_consistency": true,
+    "producer_graph_order_reviewed": true,
+    "publication_ordering": {
+      "basis": "reviewed build.c no-replace/fsync receipt before durable successful stage manifest; exact source scan before throughput start and matched independent tree maps",
+      "passed": true,
+      "reason": null,
+      "source_review": "https://github.com/buster14a/buster/pull/1739"
+    },
+    "stages": {
+      "base-build": {
+        "full_independent_map_equality": true,
+        "source_receipt_integrity": true,
+        "source_scan_before_throughput": true,
+        "stage_graph_chronology": true,
+        "successful_stage_manifest": true
+      },
+      "candidate-build": {
+        "full_independent_map_equality": true,
+        "source_receipt_integrity": true,
+        "source_scan_before_throughput": true,
+        "stage_graph_chronology": true,
+        "successful_stage_manifest": true
+      }
+    },
+    "structural_live_observation": true
+  },
+  "identity": {
+    "attempt": 2,
+    "baseline": "ade6ac4b6ecb21f30b61b656439bac476c145e2f",
+    "boot_id": "956f5399-01ff-488a-bedb-f9a724156ac8",
+    "job": 1,
+    "subject": "d0c8ce2c452623b79190da18a428842aab19ad7d"
+  },
+  "independent_inventory_before_throughput": false,
+  "original_observation_causes": [
+    "candidate-build inventory not complete before exact throughput start"
+  ],
+  "original_observation_verdict": "OBSERVATION_INCONCLUSIVE",
+  "original_timing_causes": [
+    "candidate-build inventory not complete before exact throughput start"
+  ],
+  "provenance": {
+    "external_observer": "independent stage-observation.json and full inventory JSON",
+    "integrated_build_blob_caller_verified": "a016a487b745357883a5cd76c9c2712485c01d7c",
+    "integrated_source_commit_caller_verified": "d0c8ce2c452623b79190da18a428842aab19ad7d",
+    "integrated_source_tree_caller_verified": "5c479a7a741dd07f8a9fa8fc6ff3eac4df28635d",
+    "offline_limit": "Git commit/tree relationship and live-systemd provenance are caller-verified, not independently queried here",
+    "producer_child_head": "b65ce53e32cc921fdf68ad13e499417260d6f73a",
+    "producer_child_tree": "2b26253cd1849a8bb50687ede056f3f9d764837b",
+    "producer_source_review": "https://github.com/buster14a/buster/pull/1481#issuecomment-5847791034",
+    "reviewed_composite_source": "https://github.com/buster14a/buster/pull/1482#issuecomment-5847817058",
+    "reviewed_producer_build_blob": "1ea24b90629a2c771c3d0e7d3d517b042ddb4c35",
+    "selected_source_order_review": "https://github.com/buster14a/buster/pull/1739",
+    "source_receipts": "caller-provided private self-report paths; harness must bind them to the actual replay"
+  },
+  "stage_evidence": {
+    "base-build": {
+      "binary_sha256": "aff3a1b5205d595bd987f68802004803240d252fdbb606b7b056e1176b327beb",
+      "external_complete_monotonic_us": 484338203,
+      "external_finished_before_throughput": true,
+      "external_inventory_sha256": "a88dc7c5cb762c54d86837852d1a97e04a008c5c73d1d1247b1a761661c9d477",
+      "external_partial_ledger_bytes": 19704,
+      "manifest_sha256": "59bf464b47f0b454de616577c092b32f161b137bb98df59fbac8898b27878abb",
+      "node_count": 84,
+      "node_lines_sha256": "babbc0d3c9dbf21f326ff0ce09c1f01b3f0719183dde329185de57731e664893",
+      "passed": true,
+      "source_receipt_sha256": "76fa7408751b3a8388238e64e2a1d6d7d2f7a9d23941b1e8af28ceea98bc5ae9",
+      "source_scan_complete_monotonic_us": 484190220
+    },
+    "candidate-build": {
+      "binary_sha256": "a6e5c01baa0469e24c4e156bdecf29dbb98b9d338d1642e22f4d4ac1c99b18f6",
+      "external_complete_monotonic_us": 607417055,
+      "external_finished_before_throughput": false,
+      "external_inventory_sha256": "61a448be40ad941b787d99fc64390a87363ddfde447903e03305208367ea1ae5",
+      "external_partial_ledger_bytes": 681,
+      "manifest_sha256": "971eac78c466e3212e5a78ed5695195bc1fbf709435740704810f71d8baa3166",
+      "node_count": 3,
+      "node_lines_sha256": "a38d46ff0d38730676adf4b5ec5227a5fdc039f7716d8103cbe315737ff1c5e2",
+      "passed": true,
+      "source_receipt_sha256": "30adbd59a1f4eb0449b4b322e57f3c4b56449b6fa19e629f965992d0458daf5e",
+      "source_scan_complete_monotonic_us": 607253189
+    }
+  },
+  "stage_observation_sha256": "4bdbbe1b98a0088b3653297fcf1c1ce12605c32c34162ce48cec74d28f4a7fa3",
+  "throughput_exec_main_start_monotonic_us": 607302114,
+  "verdict": "OFFLINE_EVIDENCE_RECONCILED"
+}

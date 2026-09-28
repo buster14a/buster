@@ -1,0 +1,13 @@
+{
+  "attempt": 2,
+  "boot_id": "956f5399-01ff-488a-bedb-f9a724156ac8",
+  "instance_record_bytes": 544,
+  "instance_record_sha256": "225e1b471feba01ae52bddcf2976ba13a68fb428a529a06a4ab847033414ffdf",
+  "job": 1,
+  "outer_cgroup": "/buster.slice/buster-bench.slice/buster-bench-1-2.service",
+  "outer_invocation": "f0441bf19fa04ad89fd01b33b830b630",
+  "outer_unit": "buster-bench-1-2.service",
+  "request_sha256": "e58cb3a147133989722fb8c23494b2a852216328747e8c549d2d79a491af74c5",
+  "worker_record_bytes": 232,
+  "worker_record_sha256": "a7c3a4746f6b1a78736917d7e944e544ac33431544e2e0261fc7a16f5477a3a8"
+}

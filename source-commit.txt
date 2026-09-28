@@ -1,0 +1,27 @@
+commit d0c8ce2c452623b79190da18a428842aab19ad7d
+tree 5c479a7a741dd07f8a9fa8fc6ff3eac4df28635d
+parent 79a8761e07717725b9d5e4cad4cab62275db4f6a
+parent 3a120b22291413485a66c0fd68535ba132e6f995
+author David <davidgmbb@gmail.com> 1790600577 +0000
+committer GitHub <noreply@github.com> 1790600577 +0000
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ wsFcBAABCAAQBQJqumWBCRC1aQ7uu5UhlAAAm9oQAAhP9LKeMMJdutA3aBl4+Fi8
+ A/60QsmKyrR9RI203GGBCUtMmiGByQMlax3ZBhh2Fms+qltwVk+kOk823K34nz/S
+ W7TBkUwJPi+IC7IaDCOCfwARtuT++RJ5pfUIO33QGizo/c09eTqOtsEcjaKixfJI
+ VzpdESwMLY/UBnuguvZE+Rp0k1P9naa53Rc/A3WLlOGL362vBH3zb/d6jv0QMvwn
+ 9eWmq9lpm77v37jqWCjSPtgw6oFNq3INbTwtVOo39BCzfJrw5ed/pQcA+Z0Cwxog
+ 7hdHS05sf6t0QNN9ASE4VOXGwrEpyiy/YVaqm0tkUrJQejV1Ml5LzYtFZQrhERrG
+ bLUbKpCtjPIOjsT8TPMdz/BCJL1xWJ0vOl+SuCWFHTL5W8oHriCYCChKtF2N2dDp
+ MyzgAzpqyNX4pLzf6/pK9OU5h/iESc5RLn9jr6+1NM6sZSolLUEQe33GV1JOtvp5
+ VN3dyN1Yp4e4DwzakxnpbihSbcI47zUBdivpBdJUPDS75orbjmTEY69iYvlchLCt
+ u8Xk69dzi2igTPrsARozQo5PNSdZ2mE6iYOibTxTuJjcYFOSdSBuda/GgqodMY+T
+ iLfP9cByNiKF29m16xCxroEM36tivwVdJrDYQdNHKRgQxrguEMncZVvcmIJMyuyj
+ 9KVQM8TDMBSdNJT8w8LX
+ =rTlR
+ -----END PGP SIGNATURE-----
+ 
+
+    Merge pull request #1741 from buster14a/codex/880-native-compat-uninit
+    
+    cmake: read CMAKE_REQUIRED_FLAGS only when defined in the AVX10 probe
