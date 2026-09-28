@@ -4077,6 +4077,12 @@ BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, C
     return valid;
 }
 
+BUSTER_C_INTERNAL bool c_parse_complex_part_token(CPreprocessResult preprocess, CToken token)
+{
+    String8 spelling = token.kind == C_TOKEN_IDENTIFIER ? c_token_spelling(preprocess.spelling_base, token) : (String8){0};
+    return string_equal(spelling, S8("__real__")) || string_equal(spelling, S8("__imag__"));
+}
+
 BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     Arena* arena = frame->arena;
@@ -4148,13 +4154,26 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         CParseExpressionTypeTask* task = tasks + task_count - 1;
         if (!task->state)
         {
-            while (task->start < task->end && c_token_is_punctuator(&preprocess.tokens[task->start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-                   c_parse_matching_delimiter_indexed(result, preprocess, task->start) ==
-                       task->end - 1)
+            // `__extension__` binds as a unary prefix and keeps its operand's
+            // type, so dropping it cannot change what the operand types as.
+            bool stripped = true;
+            while (stripped && task->start < task->end)
             {
-                task->start += 1;
-                task->end -= 1;
-                task->operators_checked = false;
+                stripped = false;
+                if (c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[task->start], C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+                {
+                    task->start += 1;
+                    task->operators_checked = false;
+                    stripped = true;
+                }
+                else if (c_token_is_punctuator(&preprocess.tokens[task->start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                         c_parse_matching_delimiter_indexed(result, preprocess, task->start) == task->end - 1)
+                {
+                    task->start += 1;
+                    task->end -= 1;
+                    task->operators_checked = false;
+                    stripped = true;
+                }
             }
             if (task->start >= task->end)
             {
@@ -4254,8 +4273,9 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 bool prefix_update = index == task->start + 1 &&
                     (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS_MINUS));
                 bool prefix_word = index > task->start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
-                    c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1],
-                        C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF));
+                    (c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1],
+                         C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF) | C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)) ||
+                     c_parse_complex_part_token(preprocess, preprocess.tokens[index - 1]));
                 bool binary = precedence && index > task->start && index + 1 < task->end && index - 1 != cast_prefix_close &&
                               !prefix_update && !prefix_word && c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]);
                 bool right_associative = precedence == 2;
@@ -4328,6 +4348,22 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     .start = task->start + 1,
                     .end = task->end,
                     .operators_checked = task->operators_checked,
+                };
+                continue;
+            }
+            if (c_parse_complex_part_token(preprocess, first))
+            {
+                task->operation = C_PARSE_EXPRESSION_TYPE_COMPLEX_PART;
+                task->state = 1;
+                if (task_count >= capacity)
+                {
+                    last = C_TYPE_ID_INVALID;
+                    break;
+                }
+                tasks[task_count++] = (CParseExpressionTypeTask){
+                    .start = task->start + 1,
+                    .end = task->end,
+                    .operators_checked = true,
                 };
                 continue;
             }
@@ -4432,6 +4468,22 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             {
                 machine->expression_constraint = S8("could not lower logical expression core");
                 machine->expression_constraint_token = task->end;
+            }
+            task_count -= 1;
+            continue;
+        }
+        if (task->operation == C_PARSE_EXPRESSION_TYPE_COMPLEX_PART)
+        {
+            // GNU `__real__`/`__imag__` yield a complex operand's element
+            // type and leave a real arithmetic operand's type unpromoted.
+            CTypeKind kind = last.value < result->type_count ? result->types[last.value].kind : C_TYPE_INVALID;
+            if (c_type_kind_is_complex(kind))
+            {
+                last = c_parse_expression_scalar_type(result, c_type_kind_complex_element(kind));
+            }
+            else if (!c_parse_expression_real_kind(kind))
+            {
+                last = C_TYPE_ID_INVALID;
             }
             task_count -= 1;
             continue;
@@ -4648,6 +4700,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         case C_PARSE_EXPRESSION_TYPE_LOGICAL_NOT:
         case C_PARSE_EXPRESSION_TYPE_INDIRECTION:
         case C_PARSE_EXPRESSION_TYPE_ADDRESS_OF:
+        case C_PARSE_EXPRESSION_TYPE_COMPLEX_PART:
         {
             last = C_TYPE_ID_INVALID;
         }
@@ -9766,6 +9819,24 @@ BUSTER_C_INTERNAL bool c_parse_member_alignment_run(CParseResult* result, u32 se
     return valid;
 }
 
+// Abandons a member segment, and with it the aggregate: the range frame and the
+// root query fail in turn, and the root rolls the whole attempt back. The
+// segment's own rollback restores the result by value, so it would also rewind
+// the diagnostic count and drop the one word the program hears about why its
+// definition is gone -- a child's `_Atomic requires a type name`, or the
+// trailing-token report below -- leaving the aggregate silently undefined
+// (#1534). The count is carried over the rollback the way
+// c_type_parse_root_finish carries it over the root's; the type, member and
+// alignment records still go.
+BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_fail(CTypeParseMachine* machine, CTypeParseFrame* frame)
+{
+    CParseResult* result = frame->result;
+    u32 diagnostic_count = result->diagnostic_count;
+    c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+    result->diagnostic_count = diagnostic_count;
+    c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+}
+
 BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
@@ -9792,8 +9863,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     {
         if (!machine->result_valid)
         {
-            c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
-            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            c_type_parse_aggregate_segment_fail(machine, frame);
             return;
         }
         frame->alignment_start = machine->result_index;
@@ -9801,8 +9871,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         u32 type_start = c_parse_skip_attributes(preprocess, frame->start, frame->end);
         if (type_start >= frame->end)
         {
-            c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
-            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            c_type_parse_aggregate_segment_fail(machine, frame);
             return;
         }
         frame->first = preprocess.tokens[type_start];
@@ -9817,8 +9886,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                                                   .kind = C_TYPE_PARSE_FRAME_SCALAR,
                                               }))
         {
-            c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
-            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            c_type_parse_aggregate_segment_fail(machine, frame);
         }
         return;
     }
@@ -9826,8 +9894,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     {
         if (!machine->result_valid)
         {
-            c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
-            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            c_type_parse_aggregate_segment_fail(machine, frame);
             return;
         }
         frame->base_type = machine->result_type;
@@ -10105,6 +10172,338 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     }
 }
 
+BUSTER_C_INTERNAL bool c_parse_token_is_keyword_or_reserved(CPreprocessResult preprocess, CToken token)
+{
+    bool result = false;
+    if (token.kind == C_TOKEN_IDENTIFIER)
+    {
+        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        result = (spelling.length >= 2 && spelling.pointer[0] == '_' &&
+                  (spelling.pointer[1] == '_' || (spelling.pointer[1] >= 'A' && spelling.pointer[1] <= 'Z'))) ||
+                 c_declaration_keyword_for_dialect_token(preprocess, token);
+    }
+    return result;
+}
+
+// Where a type name read from `start` stops short of `end`: the first token
+// past its specifiers and abstract declarator, `end` when it reaches it, or
+// UINT32_MAX when `start` does not begin a type name. An opening parenthesis
+// may begin a function declarator the walk does not model (`int (*)(void)`),
+// so it counts as reaching `end`.
+BUSTER_C_INTERNAL u32 c_parse_type_name_stop(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end)
+{
+    u32 index = start;
+    u32 stop = UINT32_MAX;
+    CTypeId base = c_parse_machineless_base_type(result, preprocess, scope, start, end, &index);
+    if (base.value != C_ID_UNDERLYING_INVALID)
+    {
+        stop = index;
+        while (stop < end)
+        {
+            CToken token = preprocess.tokens[stop];
+            CType qualifiers = {0};
+            u32 close = UINT32_MAX;
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                stop = end;
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_STAR) ||
+                     (token.kind == C_TOKEN_IDENTIFIER && c_parse_type_qualifier_word_token(preprocess, token, &qualifiers)))
+            {
+                stop += 1;
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) &&
+                     (close = c_parse_matching_delimiter_indexed(result, preprocess, stop)) < end)
+            {
+                stop = close + 1;
+            }
+            else
+            {
+                // A keyword or reserved identifier may continue the type name
+                // in a way the walk does not model (`unsigned _BitInt(8)`,
+                // `int *_Nonnull`, `__attribute__`), so it does not show where
+                // the type name stops.
+                if (c_parse_token_is_keyword_or_reserved(preprocess, token))
+                {
+                    stop = UINT32_MAX;
+                }
+                break;
+            }
+        }
+    }
+    return stop;
+}
+
+BUSTER_C_INTERNAL bool c_parse_token_is_prefix_operator(CToken token)
+{
+    return c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS) ||
+           c_token_is_punctuator(&token, C_PUNCTUATOR_EXCLAMATION) || c_token_is_punctuator(&token, C_PUNCTUATOR_TILDE) ||
+           c_token_is_punctuator(&token, C_PUNCTUATOR_STAR) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND) ||
+           c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS) ||
+           c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND);
+}
+
+// A syntax walk over an expression operand in [start, end), alternating
+// between wanting an operand and having one. It reports only what is wrong
+// in any reading -- two operands with no operator between them (`1 2`), an
+// operator or closer where an operand belongs (`(1 +)`), a type name that
+// stops before its `)` (`sizeof(int junk)`), a missing operand at the end --
+// and gives up without a word on anything it does not model (a type keyword
+// outside a type-name group, a brace, an unusual punctuator), since the
+// expression parser that ran before it already accepted or refused the
+// operand on its own terms. Returns whether it found an error, with its
+// token and message.
+BUSTER_C_INTERNAL bool c_parse_expression_syntax_error(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
+                                                       u32* error_index, String8* message)
+{
+    bool expect_operand = true;
+    bool found = false;
+    bool modeled = true;
+    u32 index = start;
+    while (index < end && !found && modeled)
+    {
+        CToken token = preprocess.tokens[index];
+        u32 next = index + 1;
+        bool next_is_parenthesis = next < end && c_token_is_punctuator(&preprocess.tokens[next], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        if (expect_operand)
+        {
+            if (token.kind == C_TOKEN_IDENTIFIER)
+            {
+                String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+                if (c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_SIZEOF_KEYWORDS))
+                {
+                    u32 close = next_is_parenthesis ? c_parse_matching_delimiter_indexed(result, preprocess, next) : UINT32_MAX;
+                    u32 stop = close < end ? c_parse_type_name_stop(result, preprocess, scope, next + 1, close) : UINT32_MAX;
+                    if (stop == UINT32_MAX)
+                    {
+                        modeled = !next_is_parenthesis || close < end;
+                    }
+                    else if (stop < close)
+                    {
+                        found = true;
+                        *error_index = stop;
+                        *message = S8("expected ')' after type name");
+                    }
+                    else
+                    {
+                        next = close + 1;
+                        expect_operand = false;
+                    }
+                }
+                else if (c_token_in_well_known_set(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)) ||
+                         string_equal(spelling, S8("__real__")) || string_equal(spelling, S8("__imag__")))
+                {
+                }
+                else if (next_is_parenthesis && (c_token_in_well_known_set(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(BUILTIN_OFFSETOF)) ||
+                                                 string_starts_with_sequence(spelling, S8("__builtin_")) || string_equal(spelling, S8("_Generic"))))
+                {
+                    u32 close = c_parse_matching_delimiter_indexed(result, preprocess, next);
+                    modeled = close < end;
+                    next = close + 1;
+                    expect_operand = false;
+                }
+                else if (c_declaration_keyword_for_dialect_token(preprocess, token))
+                {
+                    modeled = false;
+                }
+                else
+                {
+                    expect_operand = false;
+                }
+            }
+            else if (token.kind == C_TOKEN_PREPROCESSING_NUMBER || token.kind == C_TOKEN_CHARACTER_LITERAL || token.kind == C_TOKEN_STRING_LITERAL)
+            {
+                expect_operand = false;
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
+                if (close >= end)
+                {
+                    modeled = false;
+                }
+                else if (next < close && c_token_is_punctuator(&preprocess.tokens[next], C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    next = close + 1;
+                    expect_operand = false;
+                }
+                else
+                {
+                    u32 stop = c_parse_type_name_stop(result, preprocess, scope, next, close);
+                    if (stop == UINT32_MAX)
+                    {
+                    }
+                    else if (stop < close)
+                    {
+                        found = true;
+                        *error_index = stop;
+                        *message = S8("expected ')' after type name");
+                    }
+                    else
+                    {
+                        next = close + 1;
+                        if (next < end && c_token_is_punctuator(&preprocess.tokens[next], C_PUNCTUATOR_LEFT_BRACE))
+                        {
+                            u32 brace_close = c_parse_matching_delimiter_indexed(result, preprocess, next);
+                            modeled = brace_close < end;
+                            next = brace_close + 1;
+                            expect_operand = false;
+                        }
+                    }
+                }
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON) && index > start &&
+                     c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_QUESTION))
+            {
+            }
+            else if (c_parse_token_is_prefix_operator(token))
+            {
+            }
+            else if (c_parse_expression_operator_precedence(token) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                     c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) ||
+                     c_token_is_punctuator(&token, C_PUNCTUATOR_COLON) || c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
+            {
+                found = true;
+                *error_index = index;
+                *message = S8("expected expression");
+            }
+            else
+            {
+                modeled = false;
+            }
+        }
+        else
+        {
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
+                modeled = close < end;
+                if (close == next)
+                {
+                    next = close + 1;
+                }
+                else
+                {
+                    expect_operand = true;
+                }
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_DOT) || c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW))
+            {
+                if (next < end && preprocess.tokens[next].kind == C_TOKEN_IDENTIFIER)
+                {
+                    next += 1;
+                }
+                else
+                {
+                    found = true;
+                    *error_index = next;
+                    *message = S8("expected identifier");
+                }
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                     c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS) ||
+                     (token.kind == C_TOKEN_STRING_LITERAL && preprocess.tokens[index - 1].kind == C_TOKEN_STRING_LITERAL))
+            {
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) ||
+                     c_token_is_punctuator(&token, C_PUNCTUATOR_COLON) || c_parse_expression_operator_precedence(token))
+            {
+                expect_operand = true;
+            }
+            else if (c_parse_token_is_keyword_or_reserved(preprocess, token))
+            {
+                // `_BitInt(8) unsigned`: the operand read so far may have been
+                // the start of a type name the walk does not model.
+                modeled = false;
+            }
+            else if (token.kind == C_TOKEN_IDENTIFIER || token.kind == C_TOKEN_PREPROCESSING_NUMBER || token.kind == C_TOKEN_CHARACTER_LITERAL ||
+                     token.kind == C_TOKEN_STRING_LITERAL)
+            {
+                found = true;
+                *error_index = index;
+                *message = S8("expected ')'");
+            }
+            else
+            {
+                modeled = false;
+            }
+        }
+        index = next;
+    }
+    if (!found && modeled && expect_operand)
+    {
+        found = true;
+        *error_index = end;
+        *message = S8("expected expression");
+    }
+    return found;
+}
+
+// A typeof operand is read first as a type name, then as an expression, and
+// this settles whether what those reads made of it stands; `operand_valid` is
+// the expression read's verdict. The type attempt's rollback rewound the
+// diagnostic count past what that attempt raised, so when the expression read
+// raised nothing, a report from inside the type name (a struct member,
+// `_Atomic()`) is kept by restoring the count to `frame->pending_index`.
+// Otherwise the operand is walked as an expression: the expression read
+// types a malformed operand such as `1 2` or `(1 +)` from the tokens it
+// understands, so its verdict alone cannot refuse it. An operand the walk
+// passes but the read refused is a type name that stopped at `frame->index`
+// before the operand's `)` (`int junk`, missing that `)`), or one whose type
+// name failed outright with nothing said. A leftover opening delimiter may
+// begin an abstract declarator the scalar parse does not model
+// (`int (*)(void)`), and an operand that only names something the lookup
+// cannot see is left to its uses; neither is reported here. A leading
+// `__extension__` is an expression prefix, not the start of a type name.
+// Returns whether the operand is refused.
+BUSTER_C_INTERNAL bool c_type_parse_typeof_operand_refused(CTypeParseFrame* frame, bool operand_valid)
+{
+    CParseResult* result = frame->result;
+    CPreprocessResult preprocess = frame->preprocess;
+    u32 operand_start = frame->specifier_index + 2;
+    u32 operand_end = frame->close - 1;
+    bool refused = !operand_valid;
+    if (result->diagnostic_count == frame->checkpoint.diagnostic_count)
+    {
+        u32 error_index = 0;
+        String8 message = {0};
+        if (frame->pending_index > result->diagnostic_count)
+        {
+            result->diagnostic_count = frame->pending_index;
+            refused = true;
+        }
+        else if (c_parse_expression_syntax_error(result, preprocess, frame->scope, operand_start, operand_end, &error_index, &message))
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[error_index]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                               message);
+            refused = true;
+        }
+        else if (!operand_valid && frame->index < operand_end)
+        {
+            CToken leftover = preprocess.tokens[frame->index];
+            if (!c_token_is_punctuator(&leftover, C_PUNCTUATOR_LEFT_PARENTHESIS) && !c_token_is_punctuator(&leftover, C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, leftover), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                                   S8("expected ')' after type name"));
+            }
+        }
+        else if (!operand_valid)
+        {
+            u32 first = operand_start;
+            while (first < operand_end && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[first], C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+            {
+                first += 1;
+            }
+            if (first < operand_end && c_parse_type_word_for_dialect_token(preprocess, preprocess.tokens[first]))
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[first]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                                   S8("invalid type name"));
+            }
+        }
+    }
+    return refused;
+}
+
 // The declaration-specifier words that may follow a `typeof ( ... )` or
 // `_Atomic ( T )` specifier before the declarator: qualifiers (and, for
 // `_Atomic ( T )`, the rest of the declaration prefix), alignment specifiers
@@ -10305,6 +10704,8 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
     {
         if (frame->stage == C_TYPE_PARSE_STAGE_CHILD && (type.value == C_ID_UNDERLYING_INVALID || type_index != operand_end))
         {
+            frame->index = type.value != C_ID_UNDERLYING_INVALID ? type_index : operand_end;
+            frame->pending_index = result->diagnostic_count;
             c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
             frame->stage = C_TYPE_PARSE_STAGE_FALLBACK;
             if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
@@ -10320,6 +10721,10 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
                 c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->specifier_index, false);
             }
             return;
+        }
+        if (frame->stage == C_TYPE_PARSE_STAGE_FALLBACK && c_type_parse_typeof_operand_refused(frame, type.value != C_ID_UNDERLYING_INVALID))
+        {
+            type = C_TYPE_ID_INVALID;
         }
         if (type.value == C_ID_UNDERLYING_INVALID)
         {

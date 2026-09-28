@@ -701,6 +701,7 @@ typedef enum CParseExpressionTypeOperation
     C_PARSE_EXPRESSION_TYPE_LOGICAL_NOT,
     C_PARSE_EXPRESSION_TYPE_INDIRECTION,
     C_PARSE_EXPRESSION_TYPE_ADDRESS_OF,
+    C_PARSE_EXPRESSION_TYPE_COMPLEX_PART,
 } CParseExpressionTypeOperation;
 
 typedef enum CTypeParseFrameKind
