@@ -2998,6 +2998,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fresh_binding_publication(UnitTestArgu
     return result;
 }
 
+// A function declared through a function typedef opens a function scope like
+// any prototype, but brings no `(` to the token census: `F f0, f1, f2;` is
+// three function scopes and no parenthesis. A unit of such declarations with
+// few parentheses outgrew the scope table and failed validation.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_typedef_scopes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    u32 generated_count = 64;
+    u64 source_capacity = BUSTER_KB(8);
+    char8* source_buffer = arena_allocate(temporary.arena, char8, source_capacity);
+    u64 source_length = 0;
+    // One file-scope declarator list, single file-scope declarations, and
+    // single block-scope declarations; only `F` and `main` bring a `(`.
+    c_test_append_source(source_buffer, source_capacity, &source_length, S8("typedef int F(void);\nF "));
+    for (u32 index = 0; index < generated_count; index += 1)
+    {
+        c_test_append_source(source_buffer, source_capacity, &source_length,
+                             string_format(temporary.arena, S8("{S8}list_{u32}"), index ? S8(", ") : S8(""), index));
+    }
+    c_test_append_source(source_buffer, source_capacity, &source_length, S8(";\n"));
+    for (u32 index = 0; index < generated_count; index += 1)
+    {
+        c_test_append_source(source_buffer, source_capacity, &source_length, string_format(temporary.arena, S8("F single_{u32};\n"), index));
+    }
+    c_test_append_source(source_buffer, source_capacity, &source_length, S8("int main(void)\n{\n"));
+    for (u32 index = 0; index < generated_count; index += 1)
+    {
+        c_test_append_source(source_buffer, source_capacity, &source_length, string_format(temporary.arena, S8("F local_{u32};\n"), index));
+    }
+    c_test_append_source(source_buffer, source_capacity, &source_length, S8("return 0;\n}\n"));
+    String8 sources[] = {
+        S8("typedef void Handler(int);\nHandler on_open, on_close, on_error;\nint main(void) { return 0; }\n"),
+        S8("typedef int F(void); F f0, f1, f2; int main(void) { return 0; }\n"),
+        S8("typedef void H(int);\nint main(void) { H a, b, c; return 0; }\n"),
+        {
+            .pointer = source_buffer,
+            .length = source_length,
+        },
+    };
+    u32 function_counts[] = {4, 4, 4, generated_count * 3 + 1};
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, sources[source_index], S8("function-typedef-scopes.c"), target_native, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.scope_count <= parse.scope_capacity);
+        u32 function_count = 0;
+        for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+        {
+            CDeclaration declaration = parse.declarations[declaration_index];
+            if (declaration.kind == C_DECLARATION_FUNCTION)
+            {
+                function_count += 1;
+                BUSTER_TEST(arguments, declaration.scope.value != 0 && declaration.scope.value < parse.scope_count);
+            }
+        }
+        BUSTER_TEST(arguments, function_count == function_counts[source_index]);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_growth(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23964,6 +24031,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_parse_storage_growth);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_fresh_binding_publication);
+    BUSTER_TEST_FIXTURE(arguments, c_test_function_typedef_scopes);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_growth);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_tag_scope_typedef_identity);
