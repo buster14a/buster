@@ -106,7 +106,17 @@ if any(r["name"] == "buster-zen5-9700x" or
     sys.exit("benchmark runner is still registered at repository scope")
 PY
 
-# Preserve the exact main branch deployment restriction before changing review.
+# Without a required reviewer, the workflow's authorize and submit gates are
+# the actor restriction. Live main must carry exactly this reviewed workflow.
+gh api -H "X-GitHub-Api-Version: $api_version" -H "Accept: application/vnd.github.raw+json" \
+  "repos/$repo/contents/.github/workflows/9700x-service-dispatch.yml?ref=main" >"$tmp/dispatch.yml"
+if ! cmp -s "$root/.github/workflows/9700x-service-dispatch.yml" "$tmp/dispatch.yml"; then
+  printf 'main dispatch workflow differs from this reviewed checkout\n' >&2
+  exit 1
+fi
+python3 -B "$root/tools/bench_service/workflow_policy_test.py"
+
+# The environment keeps exactly the main deployment branch and no manual review.
 branch_policies="$(gh api -H "X-GitHub-Api-Version: $api_version" \
   "repos/$repo/environments/benchmark-9700x/deployment-branch-policies?per_page=100" \
   --jq 'if .total_count == 1 and .branch_policies[0].name == "main" and .branch_policies[0].type == "branch" then "present" else "invalid" end')"
@@ -115,8 +125,9 @@ if [[ "$branch_policies" != present ]]; then
   exit 1
 fi
 
-# The requester policy is a pre-existing administrator control. Apps can start
-# a run, but only an administrator may approve its protected-environment job.
+# The requester policy is a pre-existing administrator control. Other listed
+# requesters can start a run, but the workflow's authorize and submit gates
+# skip it before the self-hosted runner; only davidgmbb (39247043) proceeds.
 # Never create or change the requester policy as a side effect of installation.
 policy_id="$(python3 - "$actor_policy" <<'PY'
 import json
@@ -137,20 +148,21 @@ python3 "$root/tools/bench_service/deploy/verify_github_actor_policy.py" \
   "$actor_policy" "$tmp/actor-policy.json" "$repo"
 
 gh api -H "X-GitHub-Api-Version: $api_version" \
-  "repos/$repo/collaborators/davidgmbb/permission" >"$tmp/reviewer-permission.json"
-python3 - "$tmp/reviewer-permission.json" <<'PY'
+  "repos/$repo/collaborators/davidgmbb/permission" >"$tmp/admin-permission.json"
+python3 - "$tmp/admin-permission.json" <<'PY'
 import json
 import sys
 
 permission = json.load(open(sys.argv[1], encoding="utf-8"))
 user = permission.get("user") or {}
 if permission.get("permission") != "admin" or user.get("login") != "davidgmbb" or user.get("id") != 39247043:
-    sys.exit("required benchmark reviewer must still be the reviewed repository administrator")
+    sys.exit("sole benchmark dispatcher must still be the reviewed repository administrator")
 PY
 
-# The existing main ruleset governs edits. Connector requests remain pending
-# until the reviewed administrator releases the protected environment job.
-# Re-read the environment and requester policy; never install or replace them.
+# The existing main ruleset governs edits to the workflow gate. The environment
+# must add no required reviewer or wait timer: the gate, not an approval,
+# admits only davidgmbb. Re-read the environment and requester policy; never
+# install or replace them.
 gh api -H "X-GitHub-Api-Version: $api_version" \
   "repos/$repo/environments/benchmark-9700x" >"$tmp/installed-environment.json"
 gh api -H "X-GitHub-Api-Version: $api_version" \
@@ -162,17 +174,17 @@ gh api -H "X-GitHub-Api-Version: $api_version" \
 python3 "$root/tools/bench_service/deploy/verify_github_actor_policy.py" \
   "$actor_policy" "$tmp/installed-actor-policy.json" "$repo"
 gh api -H "X-GitHub-Api-Version: $api_version" \
-  "repos/$repo/collaborators/davidgmbb/permission" >"$tmp/reviewer-permission.json"
-python3 - "$tmp/reviewer-permission.json" <<'PY'
+  "repos/$repo/collaborators/davidgmbb/permission" >"$tmp/admin-permission.json"
+python3 - "$tmp/admin-permission.json" <<'PY'
 import json
 import sys
 
 permission = json.load(open(sys.argv[1], encoding="utf-8"))
 user = permission.get("user") or {}
 if permission.get("permission") != "admin" or user.get("login") != "davidgmbb" or user.get("id") != 39247043:
-    sys.exit("required benchmark reviewer lost repository administrator permission")
+    sys.exit("sole benchmark dispatcher lost repository administrator permission")
 PY
 python3 "$root/tools/bench_service/deploy/verify_github_admission.py" \
   "$tmp/installed-environment.json" "$tmp/installed-branches.json" \
   "$tmp/installed-variable.json"
-printf 'Existing main ruleset, connector requester policy, administrator reviewer and restricted runner group verified; BENCH_SERVICE_DISPATCH_ENABLED read back false\n'
+printf 'Existing main ruleset, requester policy, davidgmbb administrator permission, main-only environment without manual approval and restricted runner group verified; BENCH_SERVICE_DISPATCH_ENABLED read back false\n'
