@@ -24,8 +24,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_write_failures(UnitT
     String8 output = buster_test_temporary_path(arguments->arena, S8("diagnostic-write-output"), S8(".bin"));
     BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
     String8 actions[] = {S8("-E"), S8("-S"), S8("-c"), S8("-O0")};
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"),
-                       S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     OsFileTestStep failures[] = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345},
                                  {OS_FILE_TEST_FLUSH, OS_FILE_TEST_ERROR, 12345},
                                  {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456},
@@ -47,14 +47,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_write_failures(UnitT
                 ByteSlice preserved = file_read(scratch.arena, output, (FileReadOptions){0});
                 BUSTER_TEST(arguments, preserved.length == sentinel.length && memory_compare(preserved.pointer, sentinel.pointer, sentinel.length));
                 BUSTER_TEST_RAW(arguments, compiled.error == (action == 3 ? COMPILER_DRIVER_ERROR_LINK : COMPILER_DRIVER_ERROR_FILE_WRITE),
-                                string_format(scratch.arena, S8("write failure action={u32} mode={u32}: {S8}"), action, mode, compiled.diagnostic));
+                    string_format(scratch.arena, S8("write failure action={u32} mode={u32}: {S8}"), action, mode, compiled.diagnostic));
                 BUSTER_TEST(arguments, compiled.diagnostic_count == 1);
                 if (compiled.diagnostic_count == 1)
                 {
                     BUSTER_STRING_TEST(arguments, compiled.diagnostics[0].code, action == 3 ? S8("link.file-write") : S8("driver.file-write"));
                 }
-                if (action != 3)
-                    BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, output) < compiled.diagnostic.length);
+                if (action != 3) BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, output) < compiled.diagnostic.length);
                 scratch_end(scratch);
             }
         }
@@ -66,9 +65,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_write_failures(UnitT
     String8 invalid_output = string_format_z(arguments->arena, S8("{S8}/output.i"), missing_parent);
     String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-E"), input, S8("-o"), invalid_output};
     ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), (SliceString8){0}, (SliceString8){0},
-                                                (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                                                      .use_process_environment = 1,
-                                                                      .search_path = 1});
+        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .use_process_environment = 1, .search_path = 1});
     BUSTER_TEST(arguments, child.handle != 0);
     if (child.handle)
     {
@@ -92,8 +89,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_read_failures(UnitTe
     String8 output = buster_test_temporary_path(arguments->arena, S8("diagnostic-read-output"), S8(".bin"));
     BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
     String8 make_object[] = {S8("-c"), S8("-target"), S8("x86_64-unknown-linux"), input, S8("-o"), object};
-    CompilerDriverResult control = compiler_driver_execute_invocation(
-        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(make_object)));
+    CompilerDriverResult control = compiler_driver_execute_invocation(arguments->arena,
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(make_object)));
     BUSTER_TEST(arguments, control.error == COMPILER_DRIVER_ERROR_NONE);
     String8 paths[] = {input, object};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(paths); index += 1)
@@ -101,8 +98,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_read_failures(UnitTe
         // Exercise the real production fallback after mapping is unavailable.
         // The transfer/size/close failure then passes through the same driver
         // input path used on non-mappable files and restricted platforms.
-        OsFileTestStep script[] = {
-            {OS_FILE_TEST_MAP, OS_FILE_TEST_ERROR, 1}, {OS_FILE_TEST_READ, OS_FILE_TEST_LIMIT, 7}, {OS_FILE_TEST_READ, OS_FILE_TEST_ERROR, 12345}};
+        OsFileTestStep script[] = {{OS_FILE_TEST_MAP, OS_FILE_TEST_ERROR, 1},
+                                  {OS_FILE_TEST_READ, OS_FILE_TEST_LIMIT, 7},
+                                  {OS_FILE_TEST_READ, OS_FILE_TEST_ERROR, 12345}};
 #if BUSTER_ANDROID || BUSTER_IOS
         u32 first = 1;
 #else
@@ -115,8 +113,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_read_failures(UnitTe
         BUSTER_TEST(arguments, os_file_test_end() == 3 - first);
         BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_FILE_READ);
         BUSTER_TEST(arguments, compiled.diagnostic_count == 1);
-        if (compiled.diagnostic_count == 1)
-            BUSTER_STRING_TEST(arguments, compiled.diagnostics[0].code, S8("driver.file-read"));
+        if (compiled.diagnostic_count == 1) BUSTER_STRING_TEST(arguments, compiled.diagnostics[0].code, S8("driver.file-read"));
         BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, paths[index]) < compiled.diagnostic.length);
     }
     BUSTER_TEST(arguments, os_file_delete(input));
@@ -167,9 +164,7 @@ UnitTestResult compiler_diagnostic_tests(UnitTestArguments* arguments)
             .message = string_duplicate_arena(temporary.arena, S8("duplicate definition"), false),
             .symbol = string_duplicate_arena(temporary.arena, S8("value"), false),
             .primary = {.path = S8("mapped.h"), .original_path = S8("physical.h"), .position = {.line = 90, .column = 7}},
-            .notes = &note,
-            .note_count = 1,
-            .backend = &backend,
+            .notes = &note, .note_count = 1, .backend = &backend,
         };
         copy = compiler_diagnostic_copy(arguments->arena, original);
         BUSTER_TEST(arguments, copy.message.pointer != original.message.pointer && copy.notes != original.notes && copy.backend != original.backend);
@@ -181,25 +176,19 @@ UnitTestResult compiler_diagnostic_tests(UnitTestArguments* arguments)
         scratch_end(temporary);
     }
     BUSTER_STRING_TEST(arguments, compiler_diagnostic_render(arguments->arena, copy),
-                       S8("mapped.h:90:7: duplicate definition\nprior.h:3:2: note: previous declaration"));
+        S8("mapped.h:90:7: duplicate definition\nprior.h:3:2: note: previous declaration"));
     BUSTER_STRING_TEST(arguments, copy.backend->reason, S8("specific reason"));
     BUSTER_STRING_TEST(arguments, copy.symbol, S8("value"));
     BUSTER_STRING_TEST(arguments, copy.primary.original_path, S8("physical.h"));
     BUSTER_TEST(arguments, copy.backend->operation_id == UINT32_MAX);
-    BUSTER_STRING_TEST(arguments,
-                       compiler_diagnostic_render(arguments->arena, (CompilerDiagnostic){.message = S8("unlocated"), .severity = COMPILER_DIAGNOSTIC_WARNING}),
-                       S8("warning: unlocated"));
+    BUSTER_STRING_TEST(arguments, compiler_diagnostic_render(arguments->arena,
+        (CompilerDiagnostic){.message = S8("unlocated"), .severity = COMPILER_DIAGNOSTIC_WARNING}), S8("warning: unlocated"));
 
     IrSourceCheckpoint checkpoint = {.offset = 10, .line = 3, .column = 2};
     u32 checkpoint_offset = 0;
     IrSourceRegion regions[] = {
-        {.start = 0,
-         .source = 7,
-         .checkpoints = &checkpoint,
-         .checkpoint_offsets = &checkpoint_offset,
-         .checkpoint_count = 1,
-         .line_delta = 100,
-         .origin_plus_one = 3},
+        {.start = 0, .source = 7, .checkpoints = &checkpoint, .checkpoint_offsets = &checkpoint_offset,
+         .checkpoint_count = 1, .line_delta = 100, .origin_plus_one = 3},
         {.start = 20, .kind = IR_SOURCE_REGION_STAMP, .stamp = {.source = 7, .line = 103, .column = 6}, .origin_plus_one = 5},
     };
     IrSourceRegionKey keys[] = {{.start = 0, .source = 7}, {.start = 20, .source = 7}};
@@ -223,8 +212,7 @@ UnitTestResult compiler_diagnostic_tests(UnitTestArguments* arguments)
     u64 header_name_offset = 0;
     for (u64 index = 0; index < header_path.length; index += 1)
     {
-        if (header_path.pointer[index] == '/' || header_path.pointer[index] == '\\')
-            header_name_offset = index + 1;
+        if (header_path.pointer[index] == '/' || header_path.pointer[index] == '\\') header_name_offset = index + 1;
     }
     String8 header_name = {.pointer = header_path.pointer + header_name_offset, .length = header_path.length - header_name_offset};
     String8 source = string_format(arguments->arena, S8("#warning first warning\n#include \"{S8}\"\n"), header_name);
@@ -255,16 +243,15 @@ UnitTestResult compiler_diagnostic_tests(UnitTestArguments* arguments)
     String8 first_path = buster_test_temporary_path(arguments->arena, S8("diagnostic-first"), S8(".c"));
     BUSTER_TEST(arguments, file_write(first_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("#warning earlier input\nint first;\n"))));
     String8 multiple_command[] = {S8("-fsyntax-only"), S8("-target"), S8("x86_64-unknown-linux"), first_path, input_path};
-    CompilerDriverResult multiple = compiler_driver_execute_invocation(
-        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(multiple_command)));
+    CompilerDriverResult multiple = compiler_driver_execute_invocation(arguments->arena,
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(multiple_command)));
     BUSTER_TEST(arguments, multiple.error == COMPILER_DRIVER_ERROR_ANALYSIS && multiple.diagnostic_count == 3);
     if (multiple.diagnostic_count == 3)
     {
         BUSTER_STRING_TEST(arguments, multiple.diagnostics[0].primary.path, first_path);
         BUSTER_STRING_TEST(arguments, multiple.diagnostics[1].primary.path, input_path);
         BUSTER_STRING_TEST(arguments, multiple.diagnostics[2].primary.original_path, header_path);
-        BUSTER_TEST(arguments,
-                    string_starts_with_sequence(compiler_diagnostic_render(arguments->arena, multiple.diagnostics[2]), S8("logical-header.h:201:33:")));
+        BUSTER_TEST(arguments, string_starts_with_sequence(compiler_diagnostic_render(arguments->arena, multiple.diagnostics[2]), S8("logical-header.h:201:33:")));
     }
 
     header = S8("#line 700 \"directive-only.h\"\n#warning header warning\n#error header error\n");
@@ -330,8 +317,8 @@ UnitTestResult compiler_diagnostic_tests(UnitTestArguments* arguments)
     assembly = S8(".text\naese v0.16b, v1.16b\n");
     BUSTER_TEST(arguments, file_write(assembly_path, BUSTER_SLICE_TO_BYTE_SLICE(assembly)));
     String8 feature_command[] = {S8("-fsyntax-only"), S8("-target"), S8("aarch64-unknown-linux"), S8("-mattr=-aes"), assembly_path};
-    CompilerDriverResult feature = compiler_driver_execute_invocation(
-        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(feature_command)));
+    CompilerDriverResult feature = compiler_driver_execute_invocation(arguments->arena,
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(feature_command)));
     BUSTER_TEST(arguments, feature.error != COMPILER_DRIVER_ERROR_NONE && feature.diagnostic_count == 1);
     if (feature.diagnostic_count == 1)
     {
