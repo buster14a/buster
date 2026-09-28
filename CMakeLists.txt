@@ -353,20 +353,34 @@ if (BUSTER_FUZZ_AVAILABLE)
         message(FATAL_ERROR "Unsupported fuzz runtime architecture: ${CMAKE_SYSTEM_PROCESSOR}")
     endif()
 
+    # Distribution packages suffix the runtime with its architecture; upstream
+    # LLVM releases use the per-target runtime directory with unsuffixed names.
     if (WIN32)
-        set(BUSTER_FUZZ_RUNTIME_NAME "clang_rt.fuzzer_no_main-${BUSTER_FUZZ_RUNTIME_ARCH}.lib")
+        set(BUSTER_FUZZ_RUNTIME_NAMES
+            "clang_rt.fuzzer_no_main-${BUSTER_FUZZ_RUNTIME_ARCH}.lib"
+            "clang_rt.fuzzer_no_main.lib"
+        )
     else()
-        set(BUSTER_FUZZ_RUNTIME_NAME "libclang_rt.fuzzer_no_main-${BUSTER_FUZZ_RUNTIME_ARCH}.a")
+        set(BUSTER_FUZZ_RUNTIME_NAMES
+            "libclang_rt.fuzzer_no_main-${BUSTER_FUZZ_RUNTIME_ARCH}.a"
+            "libclang_rt.fuzzer_no_main.a"
+        )
     endif()
 
-    execute_process(
-        COMMAND "${CMAKE_C_COMPILER}" "--print-file-name=${BUSTER_FUZZ_RUNTIME_NAME}"
-        OUTPUT_VARIABLE BUSTER_FUZZ_NO_MAIN_RUNTIME
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        RESULT_VARIABLE BUSTER_FUZZ_RUNTIME_RESULT
-    )
-    if (NOT BUSTER_FUZZ_RUNTIME_RESULT EQUAL 0 OR NOT IS_ABSOLUTE "${BUSTER_FUZZ_NO_MAIN_RUNTIME}" OR NOT EXISTS "${BUSTER_FUZZ_NO_MAIN_RUNTIME}")
-        message(FATAL_ERROR "Could not find the Clang no-main fuzz runtime '${BUSTER_FUZZ_RUNTIME_NAME}': ${BUSTER_FUZZ_NO_MAIN_RUNTIME}")
+    foreach(runtime_name IN LISTS BUSTER_FUZZ_RUNTIME_NAMES)
+        execute_process(
+            COMMAND "${CMAKE_C_COMPILER}" "--print-file-name=${runtime_name}"
+            OUTPUT_VARIABLE BUSTER_FUZZ_RUNTIME_CANDIDATE
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE BUSTER_FUZZ_RUNTIME_RESULT
+        )
+        if (BUSTER_FUZZ_RUNTIME_RESULT EQUAL 0 AND IS_ABSOLUTE "${BUSTER_FUZZ_RUNTIME_CANDIDATE}" AND EXISTS "${BUSTER_FUZZ_RUNTIME_CANDIDATE}")
+            set(BUSTER_FUZZ_NO_MAIN_RUNTIME "${BUSTER_FUZZ_RUNTIME_CANDIDATE}")
+            break()
+        endif()
+    endforeach()
+    if (NOT BUSTER_FUZZ_NO_MAIN_RUNTIME)
+        message(FATAL_ERROR "Could not find the Clang no-main fuzz runtime (tried ${BUSTER_FUZZ_RUNTIME_NAMES})")
     endif()
 endif()
 
