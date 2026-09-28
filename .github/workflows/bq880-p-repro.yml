@@ -39,7 +39,6 @@ jobs:
         shell: bash
         env:
           BQ_P_REPRO: "1"
-          BQ_P_REPRO_UPGRADE: bf9efa7de89ee13ede1ecec8fb97e21ee14f9626
         run: bash .github/scripts/issue1162_exact_systemd_slice.sh
       - name: Retain all isolated diagnostics
         if: always()
