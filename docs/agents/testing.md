@@ -7,6 +7,16 @@
 - All tests run inside the `ide` executable; there is no external unit-test
   framework. From the repository root, run `ide test --verbose=1 --ci=1` or
   build the `test_all` target.
+- `ide test --module=<name>[,<name>...]` runs only the named modules. A name
+  is a `TestDescriptor.name` from `test_descriptors` in
+  `src/buster/tests/test.c`, such as `object_tests`, and must match exactly.
+  Unknown or empty names fail before any module runs and print the names
+  registered for the target. A named table audit runs even under
+  `BUSTER_TEST_TABLE_AUDITS=0`. Modules at or after the parallel aarch64 group
+  still get that group's table prewarm, but no state a skipped earlier module
+  would have left behind. The summary reads
+  `[N/N] Unit tests (k of M modules selected)`. Without `--module`, every
+  module runs, as in CI and `test_all`.
 - The bootstrap wrappers have a controlled platform test at
   `python3 tests/bootstrap_wrapper_test.py -v`. It supplies a fake TCC and
   driver, and covers cold/warm reuse, dependency and compiler invalidation,

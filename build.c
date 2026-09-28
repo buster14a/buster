@@ -33,6 +33,7 @@
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance
 //   uefi_boot_*                                 pinned firmware boot gate
+//   tools/source_size.c                         source-size report and ratchet
 //   process_arguments, main                      command dispatch
 
 #define BUSTER_UNITY_BUILD 1
@@ -128,6 +129,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_GPU_TOOLCHAINS,
     BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS,
     BUILD_COMMAND_TEST_UEFI,
+    BUILD_COMMAND_SOURCE_SIZE,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST,
@@ -40018,6 +40020,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 }
 
 #include "tools/production_profile.c"
+#include "tools/source_size.c"
 
 ProcessResult process_arguments(void)
 {
@@ -40078,6 +40081,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_GPU_TOOLCHAINS] = S8_INITIALIZER("test_gpu_toolchains"),
         [BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS] = S8_INITIALIZER("native_retirement_census"),
         [BUILD_COMMAND_TEST_UEFI] = S8_INITIALIZER("test_uefi"),
+        [BUILD_COMMAND_SOURCE_SIZE] = S8_INITIALIZER("source_size"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
         [BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST] = S8_INITIALIZER("coverage_manifest_self_test"),
@@ -40203,6 +40207,11 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     else if (command == BUILD_COMMAND_TEST_UEFI)
     {
         result = uefi_boot_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i}, arguments.pointer[0]);
+        argument_i = arguments.length;
+    }
+    else if (command == BUILD_COMMAND_SOURCE_SIZE)
+    {
+        result = source_size_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
         argument_i = arguments.length;
     }
 
@@ -41077,6 +41086,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         command != BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST &&
         command != BUILD_COMMAND_TEST_DIFFERENTIAL &&
         command != BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS &&
+        command != BUILD_COMMAND_SOURCE_SIZE &&
         command != BUILD_COMMAND_TEST_GPU_TOOLCHAINS)
     {
         if (argument_i < arguments.length)
@@ -41383,6 +41393,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
+        case BUILD_COMMAND_SOURCE_SIZE:
         {
             // Executed before the ordinary build-option parser.
         }

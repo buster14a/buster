@@ -96,3 +96,24 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: ./build.sh bench_service_recipe_self_test
+
+      # Measures the revision GitHub validates (PR merge, merge-group or pushed
+      # commit) against its first parent; see docs/source-size.md. The public
+      # repository serves those two commits without credentials.
+      - name: Source-size report and change ratchet
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh source_size --self-test
+          git fetch --no-tags --no-recurse-submodules --depth=2 origin "$GITHUB_SHA"
+          report="$RUNNER_TEMP/source-size.txt"
+          status=0
+          ./build.sh source_size --rev "$GITHUB_SHA" --base "$GITHUB_SHA^1" >"$report" 2>&1 || status=$?
+          cat "$report"
+          {
+            printf '### Source size\n\n```text\n'
+            cat "$report"
+            printf '```\n'
+          } >>"$GITHUB_STEP_SUMMARY"
+          exit "$status"
