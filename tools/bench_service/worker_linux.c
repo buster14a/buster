@@ -4183,8 +4183,15 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
         int installed = bq_open_absolute_directory(config->installed_root);
         int workspaces = bq_open_absolute_directory(config->workspace_root);
         error = installed >= 0 && workspaces >= 0 ?
-                bq_retirement_preparation_ready(queue, job, installed, workspaces, preparation_sha256) :
+                bq_retirement_preparation_ready(bq_retirement_queue_store(queue), job, installed, workspaces,
+                                                preparation_sha256) :
                 BQ_CONFIGURATION_MISMATCH;
+        /* The worker unit cannot reach the queue; give it the exact verified
+         * record and request. The recipe gate below still rejects this job
+         * before any launch, so nothing consumes the export yet. */
+        if (error == BQ_OK)
+            error = bq_retirement_preparation_export(bq_retirement_queue_store(queue), job, workspaces,
+                                                     preparation_sha256);
         if (installed >= 0 && close(installed) != 0 && error == BQ_OK) error = BQ_CONFIGURATION_MISMATCH;
         if (workspaces >= 0 && close(workspaces) != 0 && error == BQ_OK) error = BQ_CONFIGURATION_MISMATCH;
     }

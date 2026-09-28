@@ -137,8 +137,10 @@ following links beneath the verified root and hashes the held descriptor. It
 rechecks the complete bundle, whose identity binds every file inode, and
 requires the name still to resolve to the held inode. The inventory's
 `clang_sha256` must equal that digest. The returned policy owns the decoded
-rows and the held Clang descriptor for a later `producer_begin`; release it on
-every path.
+rows, the held Clang descriptor and the held descriptor of the installed
+inventory file it decoded, for a later `producer_begin`, which rehashes that
+held inventory rather than reopening its name. Both descriptors are
+close-on-exec, read-only and at least 3. Release the policy on every path.
 
 The checked-in blocked profile has none of the reference pins, so the public
 importer fails closed today, and nothing in the worker calls it. Real pin
@@ -153,6 +155,68 @@ transitively.
 The fixture in `retirement_prepare_tests.c` exercises the importer through its
 `BQ_RETIREMENT_CORRECTNESS_TEST_ONLY` seam
 `bq_retirement_reference_policy_import_pinned` with a synthetic profile.
+
+## Worker-unit handoff (#1020)
+
+The lane-B caller will run in the service binary's `worker-unit`, inside the
+outer transient unit as `buster-bench`. There the installed tree is read-only,
+the attempt workspace is writable, and the queue and lease are inaccessible,
+so the unit cannot read the queue's `preparation-<job>` record. The A record
+functions (`bq_retirement_preparation_record`, `_ready` and `_import`) now
+take a `BqRetirementStore`, a borrowed directory descriptor that holds the
+record. The coordinator passes `bq_retirement_queue_store(queue)`, which is
+the queue directory; the unit passes the export described below. Record
+reads and writes keep the existing no-follow, single-link, owner and
+read-only checks.
+
+After `bq_retirement_preparation_ready` returns the record digest, the
+supervisor calls `bq_retirement_preparation_export` on the retirement path
+only; smoke is unchanged. The export rereads the queue record and requires its
+SHA-256 to equal that digest. It checks the attempt's `.identity` seal, then
+creates `job-<id>-attempt-<token>/retirement/` with the inherited-group
+directory helper (mode `02700`). It writes `preparation-<id>`, the exact
+record bytes, and `request-<id>`, the canonical request bytes that the
+record's `request=` digest names. Each file is created with `O_EXCL`, mode
+`0400` and a single link, and each is fsynced. The directory is then sealed to
+`0500` and fsynced, as is the attempt. Nothing is replaced: a second export
+fails. A partial export fails the attempt before launch and is removed with
+the workspace. The exported copy carries no authority of its own.
+
+`retirement_unit.c` holds the unit side. `bq_retirement_unit_store_open`
+opens the export without following links. `bq_retirement_unit_prepare` takes
+that store, the workspace root, the installed root, the job and attempt
+numbers, and the preparation digest carried by the authenticated lease
+handoff. It performs these steps in order:
+
+1. It reads `request-<id>` and requires five nonempty length-prefixed fields
+   that exactly fill the file. Then it rebuilds the job and its request
+   digest.
+2. It checks that the store is this attempt's sealed `retirement` directory,
+   by device and inode through the workspace root and after the attempt's
+   `.identity` seal. The directory must be owned by the service, have mode
+   `0500`, and contain exactly `preparation-<id>` and `request-<id>` as
+   owner-read-only, single-link regular files.
+3. It re-imports A through `bq_retirement_preparation_import` against that
+   store. This rereads the record, checks its canonical bytes for this job,
+   token and request, rechecks the installed inventory and both materialized
+   source trees, and requires the record digest to equal the handoff digest.
+4. It runs `bq_retirement_toolchain_verify` with the profile.
+5. It imports the pinned reference policy with the imported preparation and
+   the verified toolchain.
+
+The returned `BqRetirementUnitPrepared` owns the policy's held Clang and
+inventory descriptors. It must stay in place and be released with
+`bq_retirement_unit_release`. A second prepare into a live object is refused.
+
+The public wrapper uses the compiled profile and the fixed toolchain root.
+With the blocked profile it fails with `BQ_RECIPE_MISMATCH` at the A
+inventory pin. `bq_worker_unit` does not call it: the recipe stays
+unadmitted, and the `worker-unit` recipe check and the supervisor's recipe-name
+gate still reject the job before any child launches. The supervisor's export
+therefore runs only on a path that is still rejected. The unit authenticates
+file contents, not the inodes the coordinator wrote. A byte-identical
+replacement by the same service identity carries the same lease-authenticated
+digest, so the unit does not treat it differently.
 
 ## Capacity derivation
 
@@ -387,4 +451,17 @@ real A fixture's subjects and toolchain bundle. It checks a successful import,
 refusal to overwrite a live policy and each missing or mismatched pin. It also
 checks commit, tree, manifest, support, census-row and toolchain-manifest
 mismatches, a writable template file and a byte-equal `bin/clang` inode
-replacement. The public importer must fail on the blocked profile.
+replacement. The public importer must fail on the blocked profile. It also
+checks that the policy holds a close-on-exec, read-only inventory descriptor
+whose release resets it.
+The worker-unit fixture uses the same A job and a synthetic profile with the
+reference pins. On the export side it checks that a wrong digest creates
+nothing, that a second export is refused, and that the sealed directory's
+bytes equal the queue record and request. On the unit side, a successful
+prepare must yield the handoff digest, the A identities, the toolchain and a
+held inventory whose hash equals the pin. The unit must refuse each of these
+cases: a live object, the blocked profile, a profile without reference pins,
+a mismatched handoff digest, another attempt token, a tampered record, a
+tampered request, a writable file or directory, an extra file, an extra hard
+link, a symlinked record and a replaced directory. The fixture counts
+`/proc/self/fd` entries before and after to show that no descriptor leaks.

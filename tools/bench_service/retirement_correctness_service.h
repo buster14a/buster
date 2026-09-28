@@ -16,8 +16,10 @@
 #include "retirement_reference_template.h"
 
 /* #1020 installed reference policy: decoded template and inventory plus the
- * held bin/clang. plan.template and plan.rows point into this object, so it
- * must stay in place until release. Zero-initialize before import. */
+ * held bin/clang and the held installed inventory file whose bytes were
+ * decoded; both are CLOEXEC, read-only and at least 3, as producer_begin
+ * requires. plan.template and plan.rows point into this object, so it must
+ * stay in place until release. Zero-initialize before import. */
 typedef struct BqRetirementReferencePolicy
 {
     BqRetirementOracleTemplate template;
@@ -29,6 +31,7 @@ typedef struct BqRetirementReferencePolicy
     char template_sha256[SHA256_HEX_CAPACITY], inventory_sha256[SHA256_HEX_CAPACITY];
     char toolchain_manifest_sha256[SHA256_HEX_CAPACITY];
     int clang;
+    int inventory;
     u32 owned;
 } BqRetirementReferencePolicy;
 

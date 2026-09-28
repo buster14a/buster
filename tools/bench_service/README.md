@@ -475,7 +475,12 @@ is rejected by request validation and `worker-unit`. Its private build-driver
 parser accepts the lease-bound preparation digest, phase descriptor and deadline
 but deliberately builds no timed-child graph. This prevents the one-pair
 smoke recipe from being relabelled as a retirement result while preserving a
-machine-visible identity for the future admitted implementation.
+machine-visible identity for the future admitted implementation. Because the
+unit cannot reach the queue, the supervisor exports the verified preparation
+record and the request into a sealed `retirement/` directory of the attempt
+workspace. The unit-side importer in `retirement_unit.c` is compiled but not
+yet called; see
+[RETIREMENT_PREPARATION.md](RETIREMENT_PREPARATION.md#worker-unit-handoff-1020).
 
 The request digest is SHA-256 of `BQ-request-v1` followed by the canonical
 request bytes, not an in-memory C structure with padding.

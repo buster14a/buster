@@ -87,8 +87,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_begin_pinned(BqQueue* qu
     BqRetirementPreparation prepared = {0};
     if (result == BQ_OK)
         result = bq_retirement_profile_sha(profile, S8("build-driver-sha256="), expected) ?
-                 bq_retirement_preparation_import_pinned(queue, job, installed, workspaces,
-                     profile, preparation_sha256, &prepared) : BQ_RECIPE_MISMATCH;
+                 bq_retirement_preparation_import_pinned(bq_retirement_queue_store(queue), job, installed,
+                     workspaces, profile, preparation_sha256, &prepared) : BQ_RECIPE_MISMATCH;
     if (result == BQ_OK)
     {
         struct stat current = {0}, supplied = {0};
@@ -847,8 +847,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_observed_pinned
     if (result == BQ_OK)
     {
         BqRetirementPreparation reread = {0};
-        result = bq_retirement_preparation_import_pinned(queue, job, installed, workspaces,
-                   profile, build->preparation_sha256, &reread);
+        result = bq_retirement_preparation_import_pinned(bq_retirement_queue_store(queue), job, installed,
+                   workspaces, profile, build->preparation_sha256, &reread);
     }
     if (result == BQ_OK && !(current & 1u))
         result = bq_retirement_build_generated_root(build, process, candidate_uid) ?

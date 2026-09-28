@@ -65,14 +65,14 @@ static BqError bq_retirement_campaign_service_bind_pinned(BqQueue* queue,
     {
         held_started = true;
         *held = (BqRetirementHeldBinaries){.descriptors = {-1, -1}};
-        result = bq_retirement_preparation_ready_pinned(queue, job, installed, workspaces,
-            profile, preparation_sha256, &prepared);
+        result = bq_retirement_preparation_ready_pinned(bq_retirement_queue_store(queue), job, installed,
+            workspaces, profile, preparation_sha256, &prepared);
     }
     if (result == BQ_OK)
     {
         BqRetirementPreparation imported = {0};
-        result = bq_retirement_preparation_import_pinned(queue, job, installed, workspaces,
-            profile, preparation_sha256, &imported);
+        result = bq_retirement_preparation_import_pinned(bq_retirement_queue_store(queue), job, installed,
+            workspaces, profile, preparation_sha256, &imported);
         if (result == BQ_OK)
         {
             prepared = imported;

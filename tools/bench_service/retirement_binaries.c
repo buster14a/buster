@@ -156,8 +156,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_binaries_observe(BqQueue* queue, BqJob
 {
     *observed = (BqRetirementBinaries){0};
     BqRetirementPreparation prepared = {0};
-    BqError result = bq_retirement_preparation_import_pinned(queue, job, installed, workspaces,
-                                                               profile, preparation_sha256, &prepared);
+    BqError result = bq_retirement_preparation_import_pinned(bq_retirement_queue_store(queue), job, installed,
+                                                               workspaces, profile, preparation_sha256, &prepared);
     int attempt = -1, directory = -1;
     if (result == BQ_OK)
     {
@@ -187,8 +187,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_binaries_observe(BqQueue* queue, BqJob
     if (result == BQ_OK)
     {
         BqRetirementPreparation repeated = {0};
-        result = bq_retirement_preparation_import_pinned(queue, job, installed, workspaces,
-                                                          profile, preparation_sha256, &repeated);
+        result = bq_retirement_preparation_import_pinned(bq_retirement_queue_store(queue), job, installed,
+                                                          workspaces, profile, preparation_sha256, &repeated);
         if (result == BQ_OK && (memcmp(prepared.inventory_sha256, repeated.inventory_sha256, SHA256_HEX_CAPACITY) ||
             memcmp(prepared.subjects[0].installed_identity_sha256,
                    repeated.subjects[0].installed_identity_sha256, SHA256_HEX_CAPACITY) ||

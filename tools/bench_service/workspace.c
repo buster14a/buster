@@ -857,9 +857,12 @@ BUSTER_GLOBAL_LOCAL bool bq_record_name(char result[48], char const* prefix, u64
     return ok;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_record_read(BqQueue* queue, char const* name, u8* bytes, u32 capacity, u32* size)
+/* Records live in a directory, not necessarily the queue: the retirement
+ * preparation store (retirement_prepare.h) reads the same format from an
+ * exported per-attempt directory that the worker unit can reach. */
+BUSTER_GLOBAL_LOCAL BqError bq_record_read_at(int directory, char const* name, u8* bytes, u32 capacity, u32* size)
 {
-    int fd = openat(queue->directory_fd, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    int fd = openat(directory, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     BqError error = BQ_NOT_FOUND;
     if (fd >= 0)
     {
@@ -876,15 +879,21 @@ BUSTER_GLOBAL_LOCAL BqError bq_record_read(BqQueue* queue, char const* name, u8*
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_record_write_mode(BqQueue* queue, char const* name, u8 const* bytes,
-                                                  u32 size, bool existing_ok, mode_t mode)
+BUSTER_GLOBAL_LOCAL BqError bq_record_read(BqQueue* queue, char const* name, u8* bytes, u32 capacity, u32* size)
 {
-    int fd = openat(queue->directory_fd, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400);
+    BqError error = bq_record_read_at(queue->directory_fd, name, bytes, capacity, size);
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_record_write_mode_at(int directory, char const* name, u8 const* bytes,
+                                                     u32 size, bool existing_ok, mode_t mode)
+{
+    int fd = openat(directory, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400);
     BqError error = BQ_IO;
     if (fd >= 0)
     {
         if (bq_write_all(fd, bytes, size) && fchmod(fd, mode) == 0 &&
-            fsync(fd) == 0 && fsync(queue->directory_fd) == 0)
+            fsync(fd) == 0 && fsync(directory) == 0)
         {
             error = BQ_OK;
         }
@@ -894,16 +903,23 @@ BUSTER_GLOBAL_LOCAL BqError bq_record_write_mode(BqQueue* queue, char const* nam
     {
         u8 actual[640];
         u32 actual_size = 0;
-        error = bq_record_read(queue, name, actual, sizeof(actual), &actual_size);
+        error = bq_record_read_at(directory, name, actual, sizeof(actual), &actual_size);
         struct stat info = {0};
         if (error == BQ_OK &&
-            (fstatat(queue->directory_fd, name, &info, AT_SYMLINK_NOFOLLOW) != 0 ||
+            (fstatat(directory, name, &info, AT_SYMLINK_NOFOLLOW) != 0 ||
              (info.st_mode & 07777) != mode)) error = BQ_CORRUPT;
         if (error == BQ_OK && (actual_size != size || memcmp(actual, bytes, size)))
         {
             error = BQ_CORRUPT;
         }
     }
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_record_write_mode(BqQueue* queue, char const* name, u8 const* bytes,
+                                                  u32 size, bool existing_ok, mode_t mode)
+{
+    BqError error = bq_record_write_mode_at(queue->directory_fd, name, bytes, size, existing_ok, mode);
     return error;
 }
 
@@ -1309,8 +1325,8 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
     {
         error = BQ_WORKSPACE_MISMATCH;
     }
-    if (retirement_started && !bq_retirement_preparation_record(queue, job, &preparation,
-                                                                error, completed_subjects))
+    if (retirement_started && !bq_retirement_preparation_record(bq_retirement_queue_store(queue), job,
+                                                                &preparation, error, completed_subjects))
     {
         error = BQ_CONFIGURATION_MISMATCH;
     }

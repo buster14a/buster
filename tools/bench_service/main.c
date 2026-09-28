@@ -19,7 +19,8 @@
  * producer is compiled for its canonical inventory encoder, which the pinned
  * reference-policy importer re-runs; without
  * BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED the adapter never accepts its
- * token, so this unit still launches no reference child. */
+ * token, so this unit still launches no reference child. The worker-unit
+ * side of the A handoff is compiled but not yet called by bq_worker_unit. */
 #include "retirement_correctness.c"
 #include "retirement_correctness_service.c"
 #include "retirement_artifact_service.c"
@@ -27,6 +28,7 @@
 #include "retirement_oracle_authority.c"
 #include "retirement_reference_producer.c"
 #include "retirement_reference_template.c"
+#include "retirement_unit.c"
 #endif
 #include "worker_linux.c"
 #include "export.c"
