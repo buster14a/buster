@@ -50405,6 +50405,17 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             .location = deferred.location,
         };
         u32 declaration_end = deferred.token_start + deferred.token_count;
+        // A name the parse left unbound -- one in a member assertion --
+        // resolves in the innermost scope enclosing it, not at file scope.
+        CScopeId assertion_scope = c_parse_scope_for_token(&parse, deferred.scope, deferred.token_start);
+        for (u32 token_index = deferred.token_start; token_index < declaration_end && token_index < preprocess.token_count; token_index += 1)
+        {
+            if (preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && !token_entities_plus_one[token_index])
+            {
+                CEntityId entity = c_parse_lookup_entity_token(&parse, preprocess.spelling_base, assertion_scope, &preprocess.tokens[token_index]);
+                token_entities_plus_one[token_index] = entity.value + 1;
+            }
+        }
         u32 expression_start = 0;
         u32 expression_end = 0;
         CIrConstantValue assertion = {0};

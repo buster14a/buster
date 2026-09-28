@@ -1374,6 +1374,9 @@ BUSTER_C_INTERNAL CTypeId c_parse_parenthesized_declaration_type(CTypeParseMachi
                                                                    CTypeId base, u32 declarator_start, u32 name_index, u32 suffix_end, bool has_name);
 BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult preprocess, u32 declarator_start, u32 end, u32* name_index);
 
+BUSTER_C_INTERNAL void c_parse_diagnose_unknown_type_name(CParseResult* result, CPreprocessResult preprocess, u32 token_index, bool parameter,
+                                                          u32 segment_start, u32 segment_end);
+
 BUSTER_C_INTERNAL bool c_parse_type_word(String8 spelling);
 
 BUSTER_C_SHARED bool c_parse_type_word_for_dialect(String8 spelling, CPreprocessDialect dialect);
@@ -10040,22 +10043,46 @@ BUSTER_C_INTERNAL bool c_parse_member_alignment_run(CParseResult* result, u32 se
     return valid;
 }
 
-// Abandons a member segment, and with it the aggregate: the range frame and the
-// root query fail in turn, and the root rolls the whole attempt back. The
-// segment's own rollback restores the result by value, so it would also rewind
-// the diagnostic count and drop the one word the program hears about why its
-// definition is gone -- a child's `_Atomic requires a type name`, or the
-// trailing-token report below -- leaving the aggregate silently undefined
-// (#1534). The count is carried over the rollback the way
-// c_type_parse_root_finish carries it over the root's; the type, member and
-// alignment records still go.
-BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_fail(CTypeParseMachine* machine, CTypeParseFrame* frame)
+// Abandons a member segment, and with it the aggregate. The rollback restores
+// the result by value, which would also rewind the diagnostic count, so the
+// reports appended since `diagnostic_start` are carried over it the way
+// c_type_parse_root_finish carries them over the root's. A definition parsed
+// again, once per declarator of `struct S { int *; } a, b;`, reaches the same
+// reports; one that repeats a standing diagnostic is dropped.
+BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_fail(CTypeParseMachine* machine, CTypeParseFrame* frame, u32 diagnostic_start)
 {
     CParseResult* result = frame->result;
-    u32 diagnostic_count = result->diagnostic_count;
+    u32 diagnostic_count = diagnostic_start;
+    for (u32 index = diagnostic_start; index < result->diagnostic_count; index += 1)
+    {
+        CDiagnostic diagnostic = result->diagnostics[index];
+        bool repeated = false;
+        for (u32 previous = 0; previous < diagnostic_start && !repeated; previous += 1)
+        {
+            CDiagnostic standing = result->diagnostics[previous];
+            repeated = standing.kind == diagnostic.kind && standing.location.offset == diagnostic.location.offset &&
+                       standing.location.file == diagnostic.location.file && standing.location.map_offset == diagnostic.location.map_offset &&
+                       string_equal(standing.message, diagnostic.message);
+        }
+        if (!repeated)
+        {
+            result->diagnostics[diagnostic_count++] = diagnostic;
+        }
+    }
     c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
     result->diagnostic_count = diagnostic_count;
     c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+}
+
+// A declarator with no name where one is required -- `int *;`, `int [3];`,
+// `int , a;`, `int a, ;` -- reported at the token clang names.
+BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_expected_member_name(CTypeParseMachine* machine, CTypeParseFrame* frame, u32 token_index)
+{
+    CParseResult* result = frame->result;
+    u32 diagnostic_start = result->diagnostic_count;
+    c_parse_diagnostic(result, c_preprocess_token_location(&frame->preprocess, frame->preprocess.tokens[token_index]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                       S8("expected member name or ';' after declaration specifiers"));
+    c_type_parse_aggregate_segment_fail(machine, frame, diagnostic_start);
 }
 
 BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
@@ -10064,6 +10091,61 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     CPreprocessResult preprocess = frame->preprocess;
     if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
     {
+        // A member _Static_assert declares no member. It is checked with the
+        // file's deferred assertions, once the translation unit's types are
+        // known, so an operand naming a later complete type still evaluates.
+        u32 assertion_start = c_parse_skip_attributes(preprocess, frame->start, frame->end);
+        if (assertion_start < frame->end && preprocess.tokens[assertion_start].kind == C_TOKEN_IDENTIFIER &&
+            c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[assertion_start], C_SYMBOL_WELL_KNOWN_STATIC_ASSERT))
+        {
+            // The assertion ends at its closing parenthesis; anything between
+            // it and the member ';' is not part of any declaration.
+            u32 assertion_end = frame->end;
+            u32 depth = 0;
+            for (u32 index = assertion_start + 1; index < frame->end && assertion_end == frame->end; index += 1)
+            {
+                CToken token = preprocess.tokens[index];
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    depth += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && depth)
+                {
+                    depth -= 1;
+                    if (!depth)
+                    {
+                        assertion_end = index + 1;
+                    }
+                }
+            }
+            // A definition parsed once per declarator reaches it again.
+            bool deferred = false;
+            for (u32 index = 0; index < result->deferred_static_assert_count && !deferred; index += 1)
+            {
+                deferred = result->deferred_static_asserts[index].token_start == assertion_start;
+            }
+            if (assertion_end < frame->end)
+            {
+                CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[assertion_end]);
+                for (u32 index = 0; index < result->diagnostic_count && !deferred; index += 1)
+                {
+                    CDiagnostic standing = result->diagnostics[index];
+                    deferred = standing.location.offset == location.offset && standing.location.file == location.file &&
+                               standing.location.map_offset == location.map_offset;
+                }
+                if (!deferred)
+                {
+                    c_parse_diagnostic(result, location, C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("expected ';' after '_Static_assert'"));
+                }
+            }
+            else if (!deferred)
+            {
+                c_parse_defer_static_assert(preprocess, result,
+                                            (CDeclaration){.token_start = assertion_start, .token_count = frame->end - assertion_start}, frame->scope);
+            }
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->end, true);
+            return;
+        }
         frame->checkpoint = *result;
         frame->mutation_mark = machine->mutation_count;
         frame->stage = C_TYPE_PARSE_STAGE_CHILD;
@@ -10084,7 +10166,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     {
         if (!machine->result_valid)
         {
-            c_type_parse_aggregate_segment_fail(machine, frame);
+            c_type_parse_aggregate_segment_fail(machine, frame, frame->checkpoint.diagnostic_count);
             return;
         }
         frame->alignment_start = machine->result_index;
@@ -10092,7 +10174,9 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         u32 type_start = c_parse_skip_attributes(preprocess, frame->start, frame->end);
         if (type_start >= frame->end)
         {
-            c_type_parse_aggregate_segment_fail(machine, frame);
+            // `__attribute__((packed));` declares nothing; clang only warns.
+            c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->end, true);
             return;
         }
         frame->first = preprocess.tokens[type_start];
@@ -10107,7 +10191,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                                                   .kind = C_TYPE_PARSE_FRAME_SCALAR,
                                               }))
         {
-            c_type_parse_aggregate_segment_fail(machine, frame);
+            c_type_parse_aggregate_segment_fail(machine, frame, frame->checkpoint.diagnostic_count);
         }
         return;
     }
@@ -10115,7 +10199,15 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     {
         if (!machine->result_valid)
         {
-            c_type_parse_aggregate_segment_fail(machine, frame);
+            u32 diagnostic_start = result->diagnostic_count;
+            u32 type_name = c_parse_skip_attributes(preprocess, frame->start, frame->end);
+            while (type_name < frame->end && preprocess.tokens[type_name].kind == C_TOKEN_IDENTIFIER &&
+                   c_parse_type_word_for_dialect_token(preprocess, preprocess.tokens[type_name]))
+            {
+                type_name = c_parse_skip_attributes(preprocess, type_name + 1, frame->end);
+            }
+            c_parse_diagnose_unknown_type_name(result, preprocess, type_name, false, frame->start, frame->end);
+            c_type_parse_aggregate_segment_fail(machine, frame, diagnostic_start);
             return;
         }
         frame->base_type = machine->result_type;
@@ -10140,6 +10232,12 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                 .alignment_start = frame->alignment_start,
                 .alignment_count = frame->alignment_count,
             };
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->end, true);
+            return;
+        }
+        if (frame->declarator_start == frame->end)
+        {
+            // `int;` declares nothing and adds no member; clang only warns.
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->end, true);
             return;
         }
@@ -10196,8 +10294,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
             }
             if (frame->declarator_start == frame->declarator_end)
             {
-                c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
-                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                c_type_parse_aggregate_segment_expected_member_name(machine, frame, frame->declarator_start);
                 return;
             }
             // The segment head skips the attributes shared by the whole
@@ -10219,10 +10316,72 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                 u32 declarator_end = c_parse_trailing_attribute_start(preprocess, declarator, frame->declarator_end);
                 declarator_end = BUSTER_MIN(declarator_end, c_parse_bit_field_colon(preprocess, declarator, declarator_end));
                 u32 name_index = 0;
-                if (!c_parse_parenthesized_declarator_name(preprocess, declarator, declarator_end, &name_index))
+                bool has_name = c_parse_parenthesized_declarator_name(preprocess, declarator, declarator_end, &name_index);
+                if (has_name)
                 {
-                    c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
-                    c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                    // The name scan takes the first identifier after the
+                    // pointers, which may be a qualifier or an attribute
+                    // rather than a name: `int (* __attribute__((unused)))(void);`.
+                    String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[name_index]);
+                    CType ignored = {0};
+                    has_name = !c_parse_type_qualifier_word(spelling, &ignored) && c_parse_skip_attributes(preprocess, name_index, declarator_end) == name_index;
+                }
+                if (!has_name)
+                {
+                    // Walk the prefix the name would follow -- groups,
+                    // pointers, their qualifiers and attributes -- so the
+                    // diagnostic lands where Clang reports the missing name:
+                    // `int (*const)(void);` points at the `)`.
+                    u32 missing_name = declarator;
+                    bool pointer_qualifiers = false;
+                    for (;;)
+                    {
+                        u32 after_attributes = c_parse_skip_attributes(preprocess, missing_name, declarator_end);
+                        if (after_attributes != missing_name)
+                        {
+                            missing_name = after_attributes;
+                            continue;
+                        }
+                        if (missing_name >= declarator_end)
+                        {
+                            break;
+                        }
+                        CToken token = preprocess.tokens[missing_name];
+                        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_STAR))
+                        {
+                            pointer_qualifiers = c_token_is_punctuator(&token, C_PUNCTUATOR_STAR);
+                            missing_name += 1;
+                            continue;
+                        }
+                        if (pointer_qualifiers && token.kind == C_TOKEN_IDENTIFIER)
+                        {
+                            String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+                            CType ignored = {0};
+                            if (c_parse_type_qualifier_word(spelling, &ignored) || string_equal(spelling, S8("_Nonnull")) ||
+                                string_equal(spelling, S8("_Nullable")) || string_equal(spelling, S8("_Null_unspecified")))
+                            {
+                                missing_name += 1;
+                                continue;
+                            }
+                        }
+                        break;
+                    }
+                    CType missing_qualifier = {0};
+                    if (missing_name < declarator_end && preprocess.tokens[missing_name].kind == C_TOKEN_IDENTIFIER &&
+                        !c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[missing_name]), &missing_qualifier))
+                    {
+                        // A name is there, but behind decorations the
+                        // parenthesized declarator parse does not take --
+                        // `int (* __attribute__((unused)) p)(void);`.
+                        u32 diagnostic_start = result->diagnostic_count;
+                        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[missing_name]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                           S8("unsupported attribute in a parenthesized member declarator"));
+                        c_type_parse_aggregate_segment_fail(machine, frame, diagnostic_start);
+                    }
+                    else
+                    {
+                        c_type_parse_aggregate_segment_expected_member_name(machine, frame, missing_name);
+                    }
                     return;
                 }
                 frame->name = preprocess.tokens[name_index];
@@ -10253,8 +10412,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     }
     else if (!name.length && (declarator >= frame->declarator_end || !c_token_is_punctuator(&preprocess.tokens[declarator], C_PUNCTUATOR_COLON)))
     {
-        c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
-        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        c_type_parse_aggregate_segment_expected_member_name(machine, frame, declarator);
         return;
     }
     bool is_bit_field = false;
@@ -10278,8 +10436,10 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         bit_width_token_count = c_parse_trailing_attribute_start(preprocess, declarator, frame->declarator_end) - declarator;
         if (!bit_width_token_count)
         {
-            c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
-            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            u32 diagnostic_start = result->diagnostic_count;
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[declarator]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                               S8("expected a bit-field width"));
+            c_type_parse_aggregate_segment_fail(machine, frame, diagnostic_start);
             return;
         }
         if (bit_width_token_count == 1 && preprocess.tokens[declarator].kind == C_TOKEN_PREPROCESSING_NUMBER)
@@ -10387,7 +10547,11 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     };
     frame->declarator_start = frame->declarator_end < frame->end ? frame->declarator_end + 1 : frame->end;
     frame->stage = C_TYPE_PARSE_STAGE_FINISH;
-    if (frame->declarator_start == frame->end)
+    if (frame->declarator_end + 1 == frame->end)
+    {
+        c_type_parse_aggregate_segment_expected_member_name(machine, frame, frame->end);
+    }
+    else if (frame->declarator_start == frame->end)
     {
         c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->end, true);
     }
@@ -22465,6 +22629,9 @@ BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* m
     for (u32 index = 0; index < result->deferred_static_assert_count; index += 1)
     {
         CDeferredStaticAssert assertion = result->deferred_static_asserts[index];
+        // A member assertion is deferred from its aggregate's scope; the
+        // innermost block enclosing it is where its names bind.
+        assertion.scope = c_parse_scope_for_token(result, assertion.scope, assertion.token_start);
         CDeclaration declaration = {.token_start = assertion.token_start, .token_count = assertion.token_count};
         u32 start = 0;
         u32 end = 0;
