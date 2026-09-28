@@ -1435,12 +1435,24 @@ BUSTER_C_INTERNAL bool c_ir_noreturn_spelling(String8 spelling)
     return c_attribute_noreturn_word(spelling) || string_equal(spelling, S8("_Noreturn"));
 }
 
-/* Whether an attribute in [start, end) marks the declaration noreturn. The
-   reserved spellings `_Noreturn` and `__noreturn__` mean it wherever they
-   appear in a declaration; the bare `noreturn` is an ordinary identifier, so
+typedef enum CIrAttributeMarker
+{
+    C_IR_ATTRIBUTE_MARKER_NORETURN,
+    C_IR_ATTRIBUTE_MARKER_GNU_INLINE,
+} CIrAttributeMarker;
+
+BUSTER_C_INTERNAL bool c_ir_attribute_marker_spelling(String8 spelling, CIrAttributeMarker marker)
+{
+    return marker == C_IR_ATTRIBUTE_MARKER_NORETURN ? c_ir_noreturn_spelling(spelling)
+                                                    : string_equal(spelling, S8("gnu_inline")) || string_equal(spelling, S8("__gnu_inline__"));
+}
+
+/* Whether an attribute in [start, end) carries `marker`. The reserved
+   noreturn spellings `_Noreturn` and `__noreturn__` mean it wherever they
+   appear in a declaration; every other spelling is an ordinary identifier, so
    it is only read inside a GNU `__attribute__`/`__declspec` list or a C23
    `[[...]]` list, where nothing else can be spelled that way. */
-BUSTER_C_SHARED bool c_ir_noreturn_marker_in_range(CPreprocessResult preprocess, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_attribute_marker_in_range(CPreprocessResult preprocess, u32 start, u32 end, CIrAttributeMarker marker)
 {
     bool result = false;
     u32 index = start;
@@ -1452,7 +1464,7 @@ BUSTER_C_SHARED bool c_ir_noreturn_marker_in_range(CPreprocessResult preprocess,
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
             String8 spelling = c_token_spelling(preprocess.spelling_base, token);
-            if (string_equal(spelling, S8("_Noreturn")) || string_equal(spelling, S8("__noreturn__")))
+            if (marker == C_IR_ATTRIBUTE_MARKER_NORETURN && (string_equal(spelling, S8("_Noreturn")) || string_equal(spelling, S8("__noreturn__"))))
             {
                 result = true;
             }
@@ -1496,15 +1508,49 @@ BUSTER_C_SHARED bool c_ir_noreturn_marker_in_range(CPreprocessResult preprocess,
             list_end = scan < end ? scan : end;
             index = list_end;
         }
-        for (u32 marker = list_start; marker < list_end && !result; marker += 1)
+        for (u32 marker_index = list_start; marker_index < list_end && !result; marker_index += 1)
         {
-            result = preprocess.tokens[marker].kind == C_TOKEN_IDENTIFIER &&
-                     c_ir_noreturn_spelling(c_token_spelling(preprocess.spelling_base, preprocess.tokens[marker]));
+            result = preprocess.tokens[marker_index].kind == C_TOKEN_IDENTIFIER &&
+                     c_ir_attribute_marker_spelling(c_token_spelling(preprocess.spelling_base, preprocess.tokens[marker_index]), marker);
         }
         index += 1;
     }
 
     return result;
+}
+
+BUSTER_C_SHARED bool c_ir_noreturn_marker_in_range(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    return c_ir_attribute_marker_in_range(preprocess, start, end, C_IR_ATTRIBUTE_MARKER_NORETURN);
+}
+
+/* Whether a function declaration follows GNU inline semantics: -std=gnu89
+   applies them to every function, and `__attribute__((gnu_inline))` to the
+   declaration it is written on. Under them an `extern inline` definition only
+   supplies a body for inlining, and a plain `inline` one is an external
+   definition, the reverse of C99 6.7.4p7. */
+BUSTER_C_SHARED bool c_ir_declaration_has_gnu_inline_semantics(CPreprocessResult preprocess, CDeclaration declaration)
+{
+    u32 limit = preprocess.token_count < UINT32_MAX ? (u32)preprocess.token_count : UINT32_MAX;
+    u32 end = declaration.body_token_count ? declaration.body_start : declaration.token_start + declaration.token_count;
+    end = end < limit ? end : limit;
+
+    return preprocess.dialect == C_PREPROCESS_DIALECT_GNU89 ||
+           c_ir_attribute_marker_in_range(preprocess, declaration.token_start, end, C_IR_ATTRIBUTE_MARKER_GNU_INLINE);
+}
+
+/* Whether a function definition is GNU inline-only: `extern inline` under GNU
+   inline semantics. It emits no symbol, so the unit may still give the
+   external definition, which is the one every call binds to. */
+BUSTER_C_SHARED bool c_ir_declaration_is_gnu_inline_only(CPreprocessResult preprocess, CDeclaration declaration)
+{
+    u64 inline_words = C_SYMBOL_WELL_KNOWN_BIT(INLINE) | C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU) | C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU_ALT);
+    u64 specifiers = declaration.kind == C_DECLARATION_FUNCTION && declaration.is_definition
+                         ? c_declaration_well_known_set(preprocess, declaration, inline_words | C_SYMBOL_WELL_KNOWN_BIT(EXTERN) | C_SYMBOL_WELL_KNOWN_BIT(STATIC))
+                         : 0;
+
+    return (specifiers & inline_words) && (specifiers & C_SYMBOL_WELL_KNOWN_BIT(EXTERN)) && !(specifiers & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) &&
+           c_ir_declaration_has_gnu_inline_semantics(preprocess, declaration);
 }
 
 /* The punctuators that end a declarator, and so prove that what precedes them
@@ -14874,7 +14920,8 @@ BUSTER_C_INTERNAL bool c_ir_signature_call_supported(CIntegerIrBuilder* builder,
    branching expression -- `? :`, `&&`, `||`, and a lowered branch condition --
    created a merge block its arm is expected to reach. Buster's own
    BUSTER_CHECK puts a noreturn call in a conditional operand, so this is not
-   a hypothetical shape. */
+   a hypothetical shape. A body statement that consumes the value -- a return,
+   an initializer, a switch controller -- emits its rows after the call too. */
 BUSTER_C_INTERNAL bool c_ir_lowering_resumes_after_call(CIntegerIrBuilder* builder)
 {
     bool result = false;
@@ -14902,7 +14949,13 @@ BUSTER_C_INTERNAL bool c_ir_lowering_resumes_after_call(CIntegerIrBuilder* build
             result = true;
             break;
         case C_IR_LOWER_FRAME_BODY:
-            result = frame->as.body.state && frame->as.body.state->statement_expression_mode;
+            if (frame->as.body.state)
+            {
+                CIrLowerBodyContinuation continuation = frame->as.body.state->continuation;
+                result = frame->as.body.state->statement_expression_mode ||
+                         (continuation != C_IR_LOWER_BODY_CONTINUE_NONE && continuation != C_IR_LOWER_BODY_CONTINUE_STATEMENT &&
+                          continuation != C_IR_LOWER_BODY_CONTINUE_CONDITION_TASK);
+            }
             break;
         default:
             break;
@@ -50694,7 +50747,8 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     // an inline definition, which provides no external definition.  Emitting
     // one anyway drags its whole reference set into the object file; MSVC's
     // <immintrin.h> alone would import __isa_inverted through an unused
-    // __check_isa_support.
+    // __check_isa_support.  Under GNU inline semantics a plain `inline`
+    // declaration is external instead.
     bool* entity_external_definition = arena_allocate(arena, bool, parse.entity_count);
     memset(entity_external_definition, 0, sizeof(*entity_external_definition) * parse.entity_count);
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
@@ -50713,7 +50767,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         }
         bool inline_specified = (specifiers & (C_SYMBOL_WELL_KNOWN_BIT(INLINE) | C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU) |
                                                C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU_ALT))) != 0;
-        if (!inline_specified || (specifiers & C_SYMBOL_WELL_KNOWN_BIT(EXTERN)))
+        if (!inline_specified || (specifiers & C_SYMBOL_WELL_KNOWN_BIT(EXTERN)) || c_ir_declaration_has_gnu_inline_semantics(preprocess, declaration))
         {
             entity_external_definition[declaration.entity.value] = true;
         }
@@ -50721,6 +50775,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
+        declaration.is_definition &= !declaration.is_gnu_inline_only;
         if (declaration.kind != C_DECLARATION_FUNCTION || !declaration.is_definition)
         {
             continue;
@@ -50807,6 +50862,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
+        declaration.is_definition &= !declaration.is_gnu_inline_only;
         if (declaration.kind != C_DECLARATION_FUNCTION)
         {
             continue;
@@ -50864,6 +50920,20 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         if (existing_function)
         {
             declaration_functions[declaration_index] = existing_function;
+            // Each declarator builds its own C function types, and each of
+            // those maps to its own IR function type, so a return type that
+            // contains one -- `int (*f(int))(int)` spelled on a prototype and
+            // again on the definition -- names a different pointer type in
+            // each declaration. The function keeps the type of the declaration
+            // that registered it, and the validator checks RETURN rows and
+            // direct call results against that type's return, so this
+            // declaration's signature takes the same return type. A typedef'd
+            // return type is one C type in every declaration and already did.
+            IrType* registered_type = ir_type_from_id(&program->types, existing_function->canonical_type);
+            if (registered_type && registered_type->kind == IR_TYPE_FUNCTION && ir_type_from_id(&program->types, registered_type->return_type))
+            {
+                signatures[declaration_index].return_type = registered_type->return_type;
+            }
             if (declaration.is_definition)
             {
                 IrSymbol* symbol = ir_symbol_from_id(&program->symbols, existing_function->symbol);
@@ -50954,6 +51024,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
+        declaration.is_definition &= !declaration.is_gnu_inline_only;
         IrFunction* function = declaration_functions[declaration_index];
         if (!function || !declaration.is_definition)
         {
@@ -51403,6 +51474,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
+        declaration.is_definition &= !declaration.is_gnu_inline_only;
         IrFunction* function = declaration_functions[declaration_index];
         if (declaration.kind != C_DECLARATION_FUNCTION || !declaration.is_definition || !function || function->state != IR_FUNCTION_LOWERED ||
             declaration.entity.value >= parse.entity_count)

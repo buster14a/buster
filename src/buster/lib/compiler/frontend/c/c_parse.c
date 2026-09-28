@@ -4958,6 +4958,14 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                             cast = c_parse_pointer_chain(result, preprocess, cast, &type_index, close);
                             if (cast.value < result->type_count && type_index == close) cast_prefix_close = close;
                         }
+                        // A type name the machineless reader does not cover --
+                        // `(typeof (x))` -- still marks a cast: a parenthesized
+                        // expression cannot begin with a type-name start word.
+                        else if (index + 1 < close && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER &&
+                                 c_parse_type_name_start_word_token(preprocess, preprocess.tokens[index + 1]))
+                        {
+                            cast_prefix_close = close;
+                        }
                     }
                     index = close;
                     continue;
@@ -6445,6 +6453,7 @@ BUSTER_C_SHARED bool c_parse_type_is_noreturn(CParseResult const* result, CTypeI
 
 BUSTER_C_SHARED bool c_ir_noreturn_marker_in_range(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_SHARED bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, CDeclaration declaration);
+BUSTER_C_SHARED bool c_ir_declaration_is_gnu_inline_only(CPreprocessResult preprocess, CDeclaration declaration);
 BUSTER_C_SHARED u32 c_ir_declarator_list_specifier_end(CPreprocessResult preprocess, u32 start, u32 end);
 
 /* The function type a declarator arrives at, following only the derivations a
@@ -8879,6 +8888,33 @@ BUSTER_C_INTERNAL u32 c_parse_trailing_attribute_start(CPreprocessResult preproc
     return end;
 }
 
+// The `:` that opens a member declarator's bit-field width, or `end` when the
+// declarator has none. Only a colon outside every group counts, so a
+// parenthesized declarator such as `int (x) : 3` splits at the width while the
+// groups and attribute lists before it stay whole.
+BUSTER_C_INTERNAL u32 c_parse_bit_field_colon(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u32 colon = end;
+    u32 depth = 0;
+    for (u32 index = start; index < end && colon == end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            depth += 1;
+        }
+        else if ((c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET)) && depth)
+        {
+            depth -= 1;
+        }
+        else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+        {
+            colon = index;
+        }
+    }
+    return colon;
+}
+
 // The three aggregate introducers as one membership test, for the specifier
 // scans that ask "does an aggregate head start here" per identifier token.
 #define C_PARSE_AGGREGATE_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM))
@@ -10556,7 +10592,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
             return;
         }
         declarator_type = machine->result_type;
-        declarator = frame->declarator_end;
+        declarator = c_parse_bit_field_colon(preprocess, frame->declarator_start, frame->declarator_end);
         name = frame->name;
         frame->stage = C_TYPE_PARSE_STAGE_FINISH;
     }
@@ -10612,6 +10648,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                 // frame->declarator_end, which is where the trimmed tokens
                 // end, so the list needs no second pass.
                 u32 declarator_end = c_parse_trailing_attribute_start(preprocess, declarator, frame->declarator_end);
+                declarator_end = BUSTER_MIN(declarator_end, c_parse_bit_field_colon(preprocess, declarator, declarator_end));
                 u32 name_index = 0;
                 if (!c_parse_parenthesized_declarator_name(preprocess, declarator, declarator_end, &name_index))
                 {
@@ -10678,20 +10715,19 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         }
         if (bit_width_token_count == 1 && preprocess.tokens[declarator].kind == C_TOKEN_PREPROCESSING_NUMBER)
         {
-            String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[declarator]);
+            u64 mark = machine->scratch_arena->position;
+            CPreprocessResult evaluation = {
+                .diagnostics = arena_allocate(machine->scratch_arena, CDiagnostic, 2),
+                .target = preprocess.target,
+                .dialect = preprocess.dialect,
+            };
             u64 width = 0;
-            for (u64 index = 0; index < spelling.length; index += 1)
+            if (c_integer_expression_evaluate(machine->scratch_arena, preprocess.spelling_base, preprocess.tokens + declarator, 1, 65536, &evaluation, &width) &&
+                !evaluation.diagnostic_count && width <= UINT32_MAX)
             {
-                char8 digit = spelling.pointer[index];
-                if (digit < '0' || digit > '9' || width > (UINT32_MAX - (u32)(digit - '0')) / 10)
-                {
-                    c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
-                    c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
-                    return;
-                }
-                width = width * 10 + (u32)(digit - '0');
+                bit_width = (u32)width;
             }
-            bit_width = (u32)width;
+            arena_set_position(machine->scratch_arena, mark);
         }
         is_bit_field = true;
         declarator = frame->declarator_end;
@@ -10788,6 +10824,29 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     }
 }
 
+// The declaration-specifier words that may follow a `typeof ( ... )` or
+// `_Atomic ( T )` specifier before the declarator: qualifiers (and, for
+// `_Atomic ( T )`, the rest of the declaration prefix), alignment specifiers
+// and attributes. The alignment and attribute requests are left in the range
+// the declaration and member paths collect them from.
+BUSTER_C_INTERNAL u32 c_type_parse_specifier_suffix_end(CPreprocessResult preprocess, u32 index, u32 end, CType* qualifiers, bool declaration_prefix)
+{
+    bool advanced = true;
+    while (index < end && advanced)
+    {
+        u32 next = c_parse_skip_attributes(preprocess, c_parse_skip_alignment_specifiers(preprocess, index, end), end);
+        if (next == index && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
+            (declaration_prefix ? c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[index], qualifiers)
+                                : c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[index], qualifiers)))
+        {
+            next = index + 1;
+        }
+        advanced = next != index;
+        index = next;
+    }
+    return index;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
@@ -10815,15 +10874,21 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
         // aggregate copy where the program asked for an atomic store (#761).
         // `const struct S` and `volatile struct S` ride this same run and
         // always have.
+        // Alignment specifiers ride the same run; the declaration and member
+        // paths collect them from the token range.
         while (specifier_index < frame->end && preprocess.tokens[specifier_index].kind == C_TOKEN_IDENTIFIER &&
                !c_parse_atomic_type_specifier_at(preprocess, specifier_index, frame->end))
         {
-            if (!c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[specifier_index], &frame->qualifiers))
+            u32 alignment_end = c_parse_skip_alignment_specifiers(preprocess, specifier_index, frame->end);
+            if (alignment_end == specifier_index)
             {
-                break;
+                if (!c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[specifier_index], &frame->qualifiers))
+                {
+                    break;
+                }
+                alignment_end = specifier_index + 1;
             }
-            specifier_index += 1;
-            specifier_index = c_parse_skip_attributes(preprocess, specifier_index, frame->end);
+            specifier_index = c_parse_skip_attributes(preprocess, alignment_end, frame->end);
         }
         bool is_typeof =
             specifier_index + 2 < frame->end && preprocess.tokens[specifier_index].kind == C_TOKEN_IDENTIFIER &&
@@ -10978,12 +11043,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
         {
             type = c_parse_unqualified_type(result, type);
         }
-        u32 suffix = frame->close;
-        while (suffix < frame->end && preprocess.tokens[suffix].kind == C_TOKEN_IDENTIFIER &&
-               c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[suffix], &frame->qualifiers))
-        {
-            suffix += 1;
-        }
+        u32 suffix = c_type_parse_specifier_suffix_end(preprocess, frame->close, frame->end, &frame->qualifiers, false);
         if (frame->qualifiers.is_const || frame->qualifiers.is_volatile || frame->qualifiers.is_restrict || frame->qualifiers.is_atomic)
         {
             type = c_parse_add_qualified_type(result, type, frame->qualifiers);
@@ -11007,12 +11067,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
         return;
     }
     frame->qualifiers.is_atomic = true;
-    u32 suffix = frame->close;
-    while (suffix < frame->end && preprocess.tokens[suffix].kind == C_TOKEN_IDENTIFIER &&
-           c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[suffix], &frame->qualifiers))
-    {
-        suffix += 1;
-    }
+    u32 suffix = c_type_parse_specifier_suffix_end(preprocess, frame->close, frame->end, &frame->qualifiers, true);
     type = c_parse_add_qualified_type(result, type, frame->qualifiers);
     c_type_parse_frame_complete(machine, type, suffix, true);
 }
@@ -22368,7 +22423,7 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_widths(CTypeParseMachine* mach
         {
             c_parse_diagnostic(result, member.location, C_DIAGNOSTIC_INVALID_ALIGNMENT, alignment_message);
         }
-        if (member.is_bit_field && member.name.length)
+        if (member.is_bit_field)
         {
             u64 mark = machine->scratch_arena->position;
             CParseConstant width = {.integer = member.bit_width, .valid = true};
@@ -22378,7 +22433,12 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_widths(CTypeParseMachine* mach
                 width = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope,
                                                member.bit_width_token_start, member.bit_width_token_start + member.bit_width_token_count);
             }
-            if (width.valid && !width.is_float && !width.integer)
+            if (width.valid && width.is_float)
+            {
+                c_parse_diagnostic(result, member.location, C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH,
+                                   S8("bit-field width is not an integer constant expression"));
+            }
+            else if (width.valid && !width.integer && member.name.length)
             {
                 c_parse_diagnostic(result, member.location, C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH,
                                    string_format(arena, S8("named bit-field '{S8}' has zero width"), member.name));
@@ -24212,6 +24272,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         {
             continue;
         }
+        declaration->is_gnu_inline_only = kind == C_DECLARATION_FUNCTION && declaration->is_definition &&
+                                          c_ir_declaration_is_gnu_inline_only(preprocess, *declaration);
         CEntity* existing = 0;
         u32 existing_index = C_ID_UNDERLYING_INVALID;
         CEntity* conflicting = 0;
@@ -24294,13 +24356,15 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             declaration->entity = (CEntityId){
                 .value = existing_index,
             };
-            if (existing->is_definition && declaration->is_definition)
+            if (existing->is_definition && declaration->is_definition &&
+                !(existing->definition_is_gnu_inline_only && !declaration->is_gnu_inline_only))
             {
                 c_parse_diagnostic(&result, declaration->location, C_DIAGNOSTIC_REDEFINITION, S8("redefinition"));
             }
-            else
+            else if (declaration->is_definition)
             {
-                existing->is_definition |= declaration->is_definition;
+                existing->is_definition = true;
+                existing->definition_is_gnu_inline_only = declaration->is_gnu_inline_only;
             }
             // The composite of `char pad[]` and `char pad[5]` is the complete
             // array (C11 6.2.7p3): a redeclaration that completes an entity
@@ -24384,6 +24448,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             .is_static_storage = is_static_storage,
             .is_thread_local = is_thread_local,
             .is_constexpr = declaration->is_constexpr,
+            .definition_is_gnu_inline_only = declaration->is_gnu_inline_only,
         };
         // The name is that token's spelling, so its interned id is the
         // entity's; a declaration without a name token interns the empty
