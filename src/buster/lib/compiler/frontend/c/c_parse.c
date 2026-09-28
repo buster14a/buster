@@ -10527,6 +10527,110 @@ BUSTER_C_INTERNAL u32 c_type_parse_specifier_suffix_end(CPreprocessResult prepro
     return index;
 }
 
+// Nesting the malformed typeof operand scan follows; a deeper operand is left
+// undiagnosed rather than misreported.
+#define C_PARSE_TYPEOF_OPERAND_SCAN_DEPTH 64
+
+// Is this the keyword of an operator whose parenthesized operand may be
+// either a type name or an expression?
+BUSTER_C_INTERNAL bool c_parse_token_takes_operand_group(CPreprocessResult preprocess, CToken token)
+{
+    bool result = false;
+    if (token.kind == C_TOKEN_IDENTIFIER)
+    {
+        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        result = c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_SIZEOF_KEYWORDS) || string_equal(spelling, S8("typeof")) ||
+                 string_equal(spelling, S8("__typeof__")) || string_equal(spelling, S8("__typeof")) || string_equal(spelling, S8("typeof_unqual")) ||
+                 string_equal(spelling, S8("__typeof_unqual__")) || string_equal(spelling, S8("__typeof_unqual"));
+    }
+    return result;
+}
+
+// Can the operand in [start, close) only be an expression? A type name starts
+// with an identifier that does not name a value; an unknown identifier may be
+// a type Buster does not model, so only a value name, a literal, a
+// punctuator or an empty operand commit to an expression.
+BUSTER_C_INTERNAL bool c_parse_operand_group_is_expression(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 close)
+{
+    bool expression = true;
+    if (start < close && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+    {
+        CEntityId entity = c_parse_lookup_entity_at(result, preprocess, scope, c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), start);
+        expression = entity.value < result->entity_count && result->entities[entity.value].kind != C_ENTITY_TYPEDEF;
+    }
+    return expression;
+}
+
+// The token where a typeof operand in [start, end) is syntactically not an
+// expression -- the closing delimiter of an expression that ends without an
+// operand, as in `(1 +)` or `()` -- or UINT32_MAX. Only groups that must hold
+// an expression are checked: the operand itself when it cannot start a type
+// name, a parenthesized operand in operand position, a subscript, and the
+// operand of a nested typeof, sizeof or alignof. A group that may hold a type
+// name, a call's arguments or a braced body is left unchecked, so a valid
+// operand Buster cannot type is never reported as a syntax error.
+BUSTER_C_INTERNAL u32 c_parse_typeof_operand_malformed_token(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end)
+{
+    bool checked[C_PARSE_TYPEOF_OPERAND_SCAN_DEPTH];
+    checked[0] = c_parse_operand_group_is_expression(result, preprocess, scope, start, end);
+    u32 depth = 1;
+    bool operand = false;
+    u32 malformed = UINT32_MAX;
+    for (u32 index = start; index <= end && depth && malformed == UINT32_MAX; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        bool parenthesis = index < end && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS);
+        bool bracket = index < end && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET);
+        bool brace = index < end && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE);
+        bool closes = index == end || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                      c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE);
+        if (parenthesis || bracket || brace)
+        {
+            if (depth == C_PARSE_TYPEOF_OPERAND_SCAN_DEPTH)
+            {
+                depth = 0;
+            }
+            else
+            {
+                bool keyword_operand = parenthesis && index > start && c_parse_token_takes_operand_group(preprocess, preprocess.tokens[index - 1]);
+                bool operand_group = keyword_operand || (parenthesis && !operand && checked[depth - 1]);
+                u32 close = operand_group ? c_parse_matching_delimiter_indexed(result, preprocess, index) : UINT32_MAX;
+                checked[depth] = operand_group ? close < end && c_parse_operand_group_is_expression(result, preprocess, scope, index + 1, close)
+                                               : bracket && operand && checked[depth - 1];
+                depth += 1;
+                operand = false;
+            }
+        }
+        else if (closes)
+        {
+            if (index == end && depth != 1)
+            {
+                depth = 0;
+            }
+            else
+            {
+                if (checked[depth - 1] && !operand)
+                {
+                    malformed = index;
+                }
+                depth -= 1;
+                operand = true;
+            }
+        }
+        else if (token.kind == C_TOKEN_IDENTIFIER || token.kind == C_TOKEN_PREPROCESSING_NUMBER || token.kind == C_TOKEN_CHARACTER_LITERAL ||
+                 token.kind == C_TOKEN_STRING_LITERAL)
+        {
+            operand = true;
+        }
+        else if (token.kind == C_TOKEN_PUNCTUATOR && !c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) &&
+                 !c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS))
+        {
+            operand = false;
+        }
+    }
+    return malformed;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
@@ -10623,6 +10727,11 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
             {
                 c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[specifier_index]), C_DIAGNOSTIC_INVALID_ATOMIC_TYPE,
                                    S8("_Atomic requires a type name"));
+            }
+            else if (!depth)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[close - 1]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                                   S8("expected expression"));
             }
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
             return;
@@ -10728,6 +10837,25 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
         }
         if (type.value == C_ID_UNDERLYING_INVALID)
         {
+            // Neither a type name nor an expression. A syntactically
+            // malformed operand is a syntax error at its offending token. One
+            // that may begin a type name is reported at the operand without
+            // claiming invalid syntax; a well-formed expression's semantic
+            // failure is left to the declaration's later uses.
+            if (frame->stage == C_TYPE_PARSE_STAGE_FALLBACK && result->diagnostic_count == frame->checkpoint.diagnostic_count)
+            {
+                u32 malformed = c_parse_typeof_operand_malformed_token(result, preprocess, frame->scope, operand_start, operand_end);
+                if (malformed != UINT32_MAX)
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[malformed]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                                       S8("expected expression"));
+                }
+                else if (!c_parse_operand_group_is_expression(result, preprocess, frame->scope, operand_start, operand_end))
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[operand_start]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                       S8("cannot determine the type of this typeof operand"));
+                }
+            }
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->specifier_index, false);
             return;
         }
