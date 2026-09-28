@@ -4482,6 +4482,62 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_nonconstant(UnitTestAr
     return result;
 }
 
+// A non-constant static assertion quotes its whole controlling expression.
+// The quote once stopped at the first `,` or `)` at any depth (#1573), so a
+// parenthesized operand or a call printed truncated and unbalanced. Tokens
+// keep their source adjacency; a comment, line break or macro boundary reads
+// as one space. A `_Generic` assertion is deferred and its diagnostic, which
+// quotes nothing, is pinned unchanged.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_nonconstant_quote(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 message;
+    } cases[] = {
+        {S8("int value;\n_Static_assert(value, \"simple\");\n"),
+         S8("static assertion expression is not an integer constant expression: value")},
+        {S8("int value;\n_Static_assert((value + 1) != 0, \"parenthesized\");\n"),
+         S8("static assertion expression is not an integer constant expression: (value + 1) != 0")},
+        {S8("int pair(int, int);\n_Static_assert(pair(1, 2), \"call\");\n"),
+         S8("static assertion expression is not an integer constant expression: pair(1, 2)")},
+        {S8("int pair(int, int);\n_Static_assert((1 << 32) != 0 && pair(1, 2), \"both\");\n"),
+         S8("static assertion expression is not an integer constant expression: (1 << 32) != 0 && pair(1, 2)")},
+        {S8("int pair(int, int);\n_Static_assert(pair(1, 2));\n"),
+         S8("static assertion expression is not an integer constant expression: pair(1, 2)")},
+        {S8("int local(int n) { _Static_assert((n + 1) * 2, \"local\"); return n; }\n"),
+         S8("static assertion expression is not an integer constant expression: (n + 1) * 2")},
+        {S8("int pair(int, int);\n_Static_assert(pair(/* first */ 1,\n    2) + pair( 3 , 4 ), \"layout\");\n"),
+         S8("static assertion expression is not an integer constant expression: pair( 1, 2) + pair( 3 , 4 )")},
+        {S8("#define NEGATIVE -1\nint pair(int, int);\n_Static_assert(pair(-NEGATIVE, 2), \"macro\");\n"),
+         S8("static assertion expression is not an integer constant expression: pair(- - 1 , 2)")},
+        {S8("int pair(int, int);\n_Static_assert(_Generic(0, int: pair(1, 2), default: 0), \"generic\");\n"),
+         S8("static assertion expression is not an integer constant expression")},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                                                (CPreprocessOptions){
+                                                    .target = target_native,
+                                                    .data_layout = target_data_layout(target_native),
+                                                });
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CIRLowerResult analysis = c_analyze(temporary.arena, S8("static-assert-quote.c"), tokens, syntax, target_native);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+        BUSTER_TEST_RAW(arguments, analysis.diagnostic_count == 1, cases[case_index].source);
+        if (analysis.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, analysis.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT);
+            BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, cases[case_index].message);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_tls(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -24063,6 +24119,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_false);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_nonconstant);
+
+    BUSTER_TEST_FIXTURE(arguments, c_test_static_assert_nonconstant_quote);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_local_tls);
 
