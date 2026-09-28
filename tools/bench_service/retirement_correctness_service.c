@@ -6,6 +6,10 @@
  * fails closed before acquiring binaries or beginning correctness because
  * full validator, configuration, command, #509, and oracle authority is not
  * yet imported.
+ * bq_retirement_reference_policy_import (end of file) reads the installed,
+ * profile-pinned #1020 reference template and inventory, joins them to A,
+ * the support/census/toolchain pins and a held bin/clang; its synthetic-
+ * profile seam is bq_retirement_reference_policy_import_pinned.
  */
 #include "retirement_correctness_service.h"
 #include <stdlib.h>
@@ -2295,5 +2299,177 @@ BqError bq_retirement_correctness_begin_service(BqQueue* queue, BqJob const* job
     free(eligibility.classification);
     free(eligibility.skip_proof_sha256);
     if (result != BQ_OK && fresh) gate->failed = 1;
+    return result;
+}
+
+/* #1020 installed reference policy importer. The template and inventory sit
+ * beside the A inventory under the immutable installed root; this code names
+ * them, never a request. Each file's SHA-256 must equal its own compiled
+ * profile pin (a missing key fails closed), both decoders must round-trip
+ * canonically, and the template must join A's imported subjects, the support,
+ * census-row and toolchain-manifest pins and a freshly held bin/clang. No
+ * #508 per-row configuration_sha256 serializer exists yet, so template
+ * configuration digests stay reviewed assertions that authority_begin only
+ * compares with B's declared rows; this importer does not replace that. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_reference_read_installed(int recipes, char const* name,
+    u32 cap, u8** output, u32* length, char digest[SHA256_HEX_CAPACITY])
+{
+    int file = openat(recipes, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    struct stat before = {0}, after = {0};
+    bool ok = file >= 0 && fstat(file, &before) == 0 && S_ISREG(before.st_mode) &&
+              before.st_nlink == 1 && (before.st_uid == 0 || before.st_uid == geteuid()) &&
+              !(before.st_mode & 0222) && before.st_size > 0 && (u64)before.st_size <= cap;
+    u8* bytes = ok ? malloc((size_t)before.st_size) : NULL;
+    ok = ok && bytes != NULL && bq_read_file(file, bytes, (u32)before.st_size, length) &&
+         fstat(file, &after) == 0 && before.st_dev == after.st_dev &&
+         before.st_ino == after.st_ino && before.st_size == after.st_size &&
+         before.st_mode == after.st_mode && before.st_uid == after.st_uid &&
+         after.st_nlink == 1 && before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
+         before.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
+         before.st_ctim.tv_sec == after.st_ctim.tv_sec &&
+         before.st_ctim.tv_nsec == after.st_ctim.tv_nsec;
+    if (file >= 0 && close(file) != 0) ok = false;
+    if (ok) bq_digest(bytes, *length, (char8*)digest);
+    else
+    {
+        free(bytes);
+        bytes = NULL;
+        *length = 0;
+    }
+    *output = bytes;
+    return ok;
+}
+
+bool bq_retirement_reference_policy_release(BqRetirementReferencePolicy* policy)
+{
+    bool ok = policy != NULL;
+    if (policy && policy->owned)
+    {
+        if (policy->clang >= 0 && close(policy->clang) != 0) ok = false;
+        free(policy->template_rows);
+        free(policy->plan_rows);
+        free(policy->text);
+    }
+    if (policy) *policy = (BqRetirementReferencePolicy){.clang = -1};
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_reference_policy_import_profile(int installed, String8 profile,
+    BqRetirementPreparation const* preparation, BqRetirementToolchain const* toolchain,
+    BqRetirementReferencePolicy* policy)
+{
+    bool fresh = policy && !policy->owned;
+    char template_pin[SHA256_HEX_CAPACITY] = {0}, inventory_pin[SHA256_HEX_CAPACITY] = {0};
+    char support_pin[SHA256_HEX_CAPACITY] = {0}, census_pin[SHA256_HEX_CAPACITY] = {0};
+    char toolchain_pin[SHA256_HEX_CAPACITY] = {0}, clang_sha256[SHA256_HEX_CAPACITY] = {0};
+    char toolchain_identity[SHA256_HEX_CAPACITY] = {0};
+    BqError result = fresh && preparation && toolchain &&
+        bq_retirement_profile_sha(profile, S8("reference-template-sha256="), template_pin) &&
+        bq_retirement_profile_sha(profile, S8("reference-inventory-sha256="), inventory_pin) &&
+        bq_retirement_profile_sha(profile, S8("support-declaration-sha256="), support_pin) &&
+        bq_retirement_profile_sha(profile, S8("census-rows-sha256="), census_pin) &&
+        bq_retirement_profile_sha(profile, S8("toolchain-manifest-sha256="), toolchain_pin) ?
+        BQ_OK : BQ_RECIPE_MISMATCH;
+    BqRetirementReferencePolicy imported = {.clang = -1, .owned = 1};
+    u8* template_bytes = NULL;
+    u8* inventory_bytes = NULL;
+    u32 template_length = 0, inventory_length = 0;
+    int recipes = result == BQ_OK ?
+        openat(installed, "recipes", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    if (result == BQ_OK)
+        result = recipes >= 0 && bq_owned_directory(recipes, false, true) &&
+            bq_retirement_reference_read_installed(recipes,
+                "native-retirement-performance-v1.reference-template",
+                BQ_RETIREMENT_REFERENCE_TEMPLATE_CAP, &template_bytes, &template_length,
+                imported.template_sha256) &&
+            bq_retirement_reference_read_installed(recipes,
+                "native-retirement-performance-v1.reference-inventory",
+                BQ_RETIREMENT_REFERENCE_INVENTORY_CAP, &inventory_bytes, &inventory_length,
+                imported.inventory_sha256) ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    if (recipes >= 0 && close(recipes) != 0 && result == BQ_OK) result = BQ_CONFIGURATION_MISMATCH;
+    if (result == BQ_OK)
+        result = !memcmp(imported.template_sha256, template_pin, SHA256_HEX_CAPACITY) &&
+            !memcmp(imported.inventory_sha256, inventory_pin, SHA256_HEX_CAPACITY) ?
+            BQ_OK : BQ_RECIPE_MISMATCH;
+    /* Every encoded template row takes at least ROW_MIN bytes, so this slot
+     * count covers any decodable file without trusting its count field. */
+    u32 template_slots = template_length / BQ_RETIREMENT_REFERENCE_TEMPLATE_ROW_MIN;
+    if (template_slots > BQ_RETIREMENT_CORRECTNESS_ROWS_CAP) template_slots = BQ_RETIREMENT_CORRECTNESS_ROWS_CAP;
+    imported.template_rows = result == BQ_OK ? calloc(template_slots, sizeof(*imported.template_rows)) : NULL;
+    char decoded_sha256[SHA256_HEX_CAPACITY] = {0};
+    if (result == BQ_OK)
+        result = imported.template_rows && bq_retirement_reference_template_decode(template_bytes,
+            template_length, imported.template_rows, template_slots, &imported.template,
+            decoded_sha256) && !memcmp(decoded_sha256, template_pin, SHA256_HEX_CAPACITY) ?
+            BQ_OK : BQ_RECIPE_MISMATCH;
+    imported.plan_rows = result == BQ_OK ?
+        calloc(imported.template.reference_count, sizeof(*imported.plan_rows)) : NULL;
+    imported.text = result == BQ_OK ? malloc(inventory_length) : NULL;
+    if (result == BQ_OK)
+        result = imported.plan_rows && imported.text &&
+            bq_retirement_reference_inventory_decode(inventory_bytes, inventory_length,
+                &imported.template, imported.plan_rows, imported.template.reference_count,
+                imported.text, inventory_length, &imported.plan, imported.source,
+                toolchain_identity, decoded_sha256) &&
+            !memcmp(decoded_sha256, inventory_pin, SHA256_HEX_CAPACITY) ? BQ_OK : BQ_RECIPE_MISMATCH;
+    for (u32 side = 0; result == BQ_OK && side < 2; side += 1)
+    {
+        BqRetirementSource const* subject = preparation->subjects + side;
+        result = !strcmp(imported.template.source_commit[side], subject->commit) &&
+            !strcmp(imported.template.source_tree[side], subject->tree) &&
+            !memcmp(imported.template.source_sha256[side], subject->manifest_sha256,
+                    SHA256_HEX_CAPACITY) ? BQ_OK : BQ_SOURCE_MISMATCH;
+    }
+    /* The toolchain identity is the reviewed manifest pin, not the per-job
+     * inode identity that retirement_toolchain.c derives for one attempt. */
+    if (result == BQ_OK)
+        result = !memcmp(imported.template.support_sha256, support_pin, SHA256_HEX_CAPACITY) &&
+            !memcmp(imported.template.census_sha256, census_pin, SHA256_HEX_CAPACITY) &&
+            !memcmp(imported.template.toolchain_identity_sha256, toolchain_pin, SHA256_HEX_CAPACITY) &&
+            !memcmp(toolchain_identity, toolchain_pin, SHA256_HEX_CAPACITY) ?
+            BQ_OK : BQ_RECIPE_MISMATCH;
+    if (result == BQ_OK)
+        result = !memcmp(toolchain->manifest_sha256, toolchain_pin, SHA256_HEX_CAPACITY) &&
+            bq_retirement_toolchain_hold_clang(toolchain, &imported.clang, clang_sha256) &&
+            !memcmp(clang_sha256, imported.plan.clang_sha256, SHA256_HEX_CAPACITY) ?
+            BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    free(template_bytes);
+    free(inventory_bytes);
+    if (result == BQ_OK)
+    {
+        memcpy(imported.toolchain_manifest_sha256, toolchain_pin, SHA256_HEX_CAPACITY);
+        *policy = imported;
+        /* Rebind interior pointers to the caller's object. */
+        policy->template.references = policy->template_rows;
+        policy->plan.template = &policy->template;
+        policy->plan.rows = policy->plan_rows;
+    }
+    else
+    {
+        bq_retirement_reference_policy_release(&imported);
+        if (fresh) *policy = (BqRetirementReferencePolicy){.clang = -1};
+    }
+    return result;
+}
+
+#if defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
+/* Test seam: a synthetic compiled profile stands in for the reviewed pins. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_reference_policy_import_pinned(int installed, String8 profile,
+    BqRetirementPreparation const* preparation, BqRetirementToolchain const* toolchain,
+    BqRetirementReferencePolicy* policy)
+{
+    BqError result = bq_retirement_reference_policy_import_profile(installed, profile, preparation,
+        toolchain, policy);
+    return result;
+}
+#endif
+
+BqError bq_retirement_reference_policy_import(int installed,
+    BqRetirementPreparation const* preparation, BqRetirementToolchain const* toolchain,
+    BqRetirementReferencePolicy* policy)
+{
+    String8 profile = bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
+    BqError result = bq_retirement_reference_policy_import_profile(installed, profile, preparation,
+        toolchain, policy);
     return result;
 }

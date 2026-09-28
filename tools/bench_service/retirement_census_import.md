@@ -81,11 +81,23 @@ checked while read. The same compiled profile independently pins the support
 declaration used to derive the subject population, source digests, and compile
 obligations.
 
+The installed #1020 reference template also carries a `census_sha256` value.
+`bq_retirement_reference_policy_import` requires it to equal the same
+`census-rows-sha256` pin and its `support_sha256` to equal
+`support-declaration-sha256`. Its own file and the reference inventory are
+pinned separately by `reference-template-sha256` and
+`reference-inventory-sha256` (see
+[RETIREMENT_PREPARATION.md](RETIREMENT_PREPARATION.md#installed-reference-policy-1020)).
+That join ties the reference policy to the pinned census bytes. It does not
+derive any per-row `configuration_sha256`, because the #508 serializer for
+that identity is not yet approved.
+
 The production profile
 `profiles/native-retirement-performance-v1.blocked` currently lacks the raw
-input/row pins and all validator manifest/report/applicability/skip and source
-applicability-ledger pins, so the production entry fails closed before build
-import. The current census attempt used the #923 test-merge tree and failed its
+input/row pins, both reference-policy pins and all validator
+manifest/report/applicability/skip and source applicability-ledger pins. The
+production entry therefore fails closed before build import, and the
+reference-policy importer fails at its first missing pin. The current census attempt used the #923 test-merge tree and failed its
 candidate gate, so it does not establish current source-head pins. No
 current-source full census artifact has established these exact pins. The checked-in support
 declaration currently contains 411 subjects, which project to 78,912 object

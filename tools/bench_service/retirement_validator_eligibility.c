@@ -11,6 +11,7 @@ int main(int argc, char** argv)
 {
     BUSTER_UNUSED(bq_retirement_support_projection);
     BUSTER_UNUSED(bq_retirement_correctness_begin_service_built_pinned);
+    BUSTER_UNUSED(bq_retirement_reference_policy_import_pinned);
     bool ok = argc == 10;
     int descriptors[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
     int profile_file = -1;

@@ -19,5 +19,9 @@ typedef struct BqRetirementToolchain
 BUSTER_F_DECL BqError bq_retirement_toolchain_verify(int installed, String8 profile,
     char const* fixed_root, BqRetirementToolchain* observed);
 BUSTER_F_DECL bool bq_retirement_toolchain_recheck(BqRetirementToolchain const* expected);
+/* Returns a CLOEXEC read-only descriptor for the verified bundle's bin/clang
+ * and its content SHA-256; the caller closes it. Fails on inode replacement. */
+BUSTER_F_DECL bool bq_retirement_toolchain_hold_clang(BqRetirementToolchain const* verified,
+    int* held, char digest[SHA256_HEX_CAPACITY]);
 
 #endif

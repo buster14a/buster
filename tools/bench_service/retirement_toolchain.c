@@ -1,13 +1,48 @@
 /* Private #1018 tool input boundary. This verifies the exact pinned, closed
  * bundle selected by the fixed build environment; it cannot prove that a
  * child used only these files until the #923 sandbox binds the same root and
- * excludes ambient compiler, linker, resource and SDK paths. */
+ * excludes ambient compiler, linker, resource and SDK paths.
+ * Map: bq_retirement_toolchain_scan walks and hashes the manifest closure;
+ * bq_retirement_toolchain_verify binds it to the profile pin and fixed root;
+ * bq_retirement_toolchain_recheck repeats the scan against held identities;
+ * bq_retirement_toolchain_hold_clang returns a held, hashed bin/clang. */
 #include "retirement_toolchain.h"
 
 #define BQ_RETIREMENT_TOOLCHAIN_MANIFEST_CAP (512u * 1024u)
 #define BQ_RETIREMENT_TOOLCHAIN_FILE_CAP (512ull * 1024ull * 1024ull)
 #define BQ_RETIREMENT_TOOLCHAIN_TOTAL_CAP (2ull * 1024ull * 1024ull * 1024ull)
 #define BQ_RETIREMENT_TOOLCHAIN_FILE_COUNT 4096u
+
+/* Hash exactly st_size bytes by pread, then require unchanged metadata. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_toolchain_file_sha(int file, struct stat const* first,
+    char actual[SHA256_HEX_CAPACITY])
+{
+    Sha256 hash;
+    sha256_init(&hash);
+    u8 buffer[64u * 1024u];
+    u64 done = 0;
+    bool ok = first->st_size >= 0;
+    while (ok && done < (u64)first->st_size)
+    {
+        size_t wanted = (u64)sizeof(buffer) < (u64)first->st_size - done ?
+                        sizeof(buffer) : (size_t)((u64)first->st_size - done);
+        ssize_t count = pread(file, buffer, wanted, (off_t)done);
+        if (count < 0 && errno == EINTR) continue;
+        ok = count > 0 && (u64)count <= (u64)first->st_size - done;
+        if (ok)
+        {
+            sha256_add(&hash, buffer, (u64)count);
+            done += (u64)count;
+        }
+    }
+    sha256_finish_hex(&hash, (char8*)actual);
+    struct stat after = {0};
+    ok = ok && fstat(file, &after) == 0 &&
+         first->st_dev == after.st_dev && first->st_ino == after.st_ino &&
+         first->st_size == after.st_size && first->st_mode == after.st_mode &&
+         first->st_mtime == after.st_mtime;
+    return ok;
+}
 
 BUSTER_GLOBAL_LOCAL bool bq_retirement_toolchain_scan(int root, String8 pinned,
     BqRetirementToolchain* observed)
@@ -80,7 +115,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_toolchain_scan(int root, String8 pinned,
             }
         }
         int file = ok ? bq_open_source_file(root, path) : -1;
-        struct stat first = {0}, after = {0}, named_info = {0};
+        struct stat first = {0}, named_info = {0};
         ok = ok && file >= 0 && fstat(file, &first) == 0 && S_ISREG(first.st_mode) &&
              first.st_nlink == 1 && (first.st_uid == 0 || first.st_uid == geteuid()) &&
              !(first.st_mode & 0222) && (first.st_mode & S_IROTH) && first.st_size >= 0 &&
@@ -88,29 +123,9 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_toolchain_scan(int root, String8 pinned,
              (u64)first.st_size <= BQ_RETIREMENT_TOOLCHAIN_TOTAL_CAP - observed->bytes;
         if (ok)
         {
-            Sha256 hash;
-            sha256_init(&hash);
-            u8 buffer[64u * 1024u];
-            u64 done = 0;
-            while (ok && done < (u64)first.st_size)
-            {
-                size_t wanted = (u64)sizeof(buffer) < (u64)first.st_size - done ?
-                                sizeof(buffer) : (size_t)((u64)first.st_size - done);
-                ssize_t count = pread(file, buffer, wanted, (off_t)done);
-                if (count < 0 && errno == EINTR) continue;
-                ok = count > 0 && (u64)count <= (u64)first.st_size - done;
-                if (ok)
-                {
-                    sha256_add(&hash, buffer, (u64)count);
-                    done += (u64)count;
-                }
-            }
             char actual[SHA256_HEX_CAPACITY];
-            sha256_finish_hex(&hash, (char8*)actual);
-            ok = ok && !memcmp(actual, digest.pointer, 64) && fstat(file, &after) == 0 &&
-                 first.st_dev == after.st_dev && first.st_ino == after.st_ino &&
-                 first.st_size == after.st_size && first.st_mode == after.st_mode &&
-                 first.st_mtime == after.st_mtime;
+            ok = bq_retirement_toolchain_file_sha(file, &first, actual) &&
+                 !memcmp(actual, digest.pointer, 64);
         }
         int named = ok ? bq_open_source_file(root, path) : -1;
         ok = ok && named >= 0 && fstat(named, &named_info) == 0 &&
@@ -199,5 +214,49 @@ bool bq_retirement_toolchain_recheck(BqRetirementToolchain const* expected)
         !memcmp(expected->identity_sha256, current.identity_sha256, SHA256_HEX_CAPACITY) &&
         expected->entries == current.entries && expected->bytes == current.bytes;
     if (root >= 0 && close(root) != 0) ok = false;
+    return ok;
+}
+
+/* #1020 reference producer input: hold the exact verified bin/clang inode.
+ * The held descriptor is hashed first; the complete bundle recheck then
+ * proves that inode is still the manifest's bin/clang (the identity binds
+ * every file inode), and the name must still resolve to the held file. */
+bool bq_retirement_toolchain_hold_clang(BqRetirementToolchain const* verified,
+    int* held, char digest[SHA256_HEX_CAPACITY])
+{
+    if (held) *held = -1;
+    if (digest) digest[0] = 0;
+    int root = verified && held && digest && verified->root[0] ?
+        bq_open_absolute_directory(string_from_pointer(verified->root)) : -1;
+    int file = root >= 0 && bq_owned_directory(root, false, true) ?
+        bq_open_source_file(root, S8("bin/clang")) : -1;
+    struct stat first = {0}, named = {0};
+    char actual[SHA256_HEX_CAPACITY] = {0};
+    bool ok = file >= 0 && fstat(file, &first) == 0 && S_ISREG(first.st_mode) &&
+              first.st_nlink == 1 && (first.st_uid == 0 || first.st_uid == geteuid()) &&
+              !(first.st_mode & 0222) && (first.st_mode & S_IROTH) &&
+              (first.st_mode & (S_IXUSR | S_IXOTH)) == (S_IXUSR | S_IXOTH) &&
+              first.st_size > 0 && (u64)first.st_size <= BQ_RETIREMENT_TOOLCHAIN_FILE_CAP &&
+              bq_retirement_toolchain_file_sha(file, &first, actual) &&
+              bq_retirement_toolchain_recheck(verified);
+    int reopened = ok ? bq_open_source_file(root, S8("bin/clang")) : -1;
+    ok = ok && reopened >= 0 && fstat(reopened, &named) == 0 &&
+         named.st_dev == first.st_dev && named.st_ino == first.st_ino;
+    if (reopened >= 0 && close(reopened) != 0) ok = false;
+    if (root >= 0 && close(root) != 0) ok = false;
+    /* Producer and oracle descriptor checks reserve the standard streams. */
+    if (ok && file < 3)
+    {
+        int promoted = fcntl(file, F_DUPFD_CLOEXEC, 3);
+        close(file);
+        file = promoted;
+        ok = file >= 3;
+    }
+    if (ok)
+    {
+        *held = file;
+        memcpy(digest, actual, SHA256_HEX_CAPACITY);
+    }
+    else if (file >= 0) close(file);
     return ok;
 }
