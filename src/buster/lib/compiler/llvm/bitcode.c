@@ -1,5 +1,7 @@
 #include <buster/lib/compiler/llvm/bitcode.h>
 
+#include <buster/lib/string.h>
+
 // Direct canonical-IR serialization: llvm_bc_build_types preserves storage
 // layout, llvm_bc_plan_function assigns SSA ids, and llvm_bc_emit_module writes
 // the records. LLVM's bitstream is LSB-first. The writer intentionally emits

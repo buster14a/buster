@@ -4979,6 +4979,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unneeded_prototyped_definitions(UnitTe
     UnitTestResult result = {0};
     BUSTER_UNUSED(arguments);
     TemporalArena temporary = scratch_begin(0, 0);
+    // The section attribute is placed only in ELF objects and refused for
+    // COFF and Mach-O (issue 1276), so the unit is lowered for ELF on the
+    // native architecture whatever the host's object format.
+    Target target = {.cpu_arch = target_native.cpu_arch, .os = OPERATING_SYSTEM_LINUX};
     CPreprocessResult tokens = c_preprocess(temporary.arena,
                                             S8("static int unneeded_static(void);\n"
                                                "static int unneeded_static(void) { return 1; }\n"
@@ -4998,11 +5002,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unneeded_prototyped_definitions(UnitTe
                                                " { return section_callee() + section_callee_prototyped(); }\n"
                                                "static int section_callee_prototyped(void) { return 6; }\n"),
                                             (CPreprocessOptions){
-                                                .target = target_native,
-                                                .data_layout = target_data_layout(target_native),
+                                                .target = target,
+                                                .data_layout = target_data_layout(target),
                                             });
     CParseResult parse = c_parse(temporary.arena, tokens);
-    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("unneeded-prototyped-definitions.c"), tokens, parse, target_native);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("unneeded-prototyped-definitions.c"), tokens, parse, target);
     BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
