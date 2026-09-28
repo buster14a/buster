@@ -1235,6 +1235,9 @@ struct CParseResult
     // scope when it is present.
     u32* scope_children_offsets;
     u32* scope_children;
+    // Shared declaration buckets preserve source order for redeclared callees.
+    u32* declarations_by_entity_offsets;
+    u32* declarations_by_entity;
     CDiagnostic* diagnostics;
     CDeferredStaticAssert* deferred_static_asserts;
     // The function types a declarator spelled `noreturn` on: the attribute
@@ -1296,7 +1299,7 @@ struct CParseResult
     u32 type_alignment_capacity;
     u32 bfloat16_builtin_call_count;
     u32 bfloat16_builtin_call_capacity;
-    // True only after the semantic model completed all validation passes.
+    // True only after the selected analysis entry point completed its passes.
     // Resource-limit exits can otherwise look like a successful empty model.
     bool analysis_complete;
 };
