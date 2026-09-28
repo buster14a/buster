@@ -1,5 +1,6 @@
 // Block-scope function declarators without a storage-class specifier link like
-// their `extern` forms and must not become stack objects in the bitcode.
+// their `extern` forms and must not become stack objects in the bitcode; taking
+// their address references the file-scope function symbol.
 long add(long a, long b)
 {
     return a + b;
@@ -40,7 +41,33 @@ static int mixed(void)
     return (int)add(x, 3L) - 5;
 }
 
+static int address_extern(void)
+{
+    extern long add(long, long);
+    long (*fp)(long, long) = add;
+    return (int)fp(1L, 3L) - 4;
+}
+
+static int address_plain(void)
+{
+    long add(long, long);
+    long (*fp)(long, long) = add;
+    return (int)fp(1L, 3L) - 4;
+}
+
+static int address_of_later(void)
+{
+    extern long later(long, long);
+    long (*fp)(long, long) = &later;
+    return (int)fp(7L, 3L) - 4;
+}
+
+long later(long a, long b)
+{
+    return a - b;
+}
+
 int main(void)
 {
-    return prototyped() | unprototyped() | unreferenced() | list() | mixed();
+    return prototyped() | unprototyped() | unreferenced() | list() | mixed() | address_extern() | address_plain() | address_of_later();
 }
