@@ -207,7 +207,8 @@ drives an emulated x64 toolchain host at an arm64 target.
 That shell also puts Visual Studio's own x64 clang ahead of the image's
 standalone LLVM, which on the AArch64 runner emits x86-64 objects against the
 shell's arm64 import libraries — every link then fails on `strlen` and
-`__imp_GetCommandLineW`. `C:\Program Files\LLVM\bin` is therefore prepended
+`__imp_GetCommandLineW`. The latest stable LLVM installed by
+[`tools/ci_llvm.py`](ci-llvm.md) (`BUSTER_CI_LLVM_BIN`) is therefore prepended
 after the shell is entered, and the step asserts clang's default target
 matches the runner rather than letting a wall of unresolved externals explain
 it a minute later.
