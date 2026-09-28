@@ -26,6 +26,7 @@
 #define BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED 1
 #include "retirement_oracle_authority.c"
 #include "retirement_reference_producer.c"
+#include "retirement_reference_template.c"
 
 static unsigned assertions, failures;
 #define CHECK(expression) do { \
@@ -122,6 +123,10 @@ static bool fixture_init(ReferenceFixture* fixture)
     fixture->directory = fixture->source_roots[0] =
         fixture->source_roots[1] = fixture->output = fixture->inventory =
         fixture->clang = fixture->cancellation[0] = fixture->cancellation[1] = -1;
+    /* Release closes held producer descriptors; a never-begun producer must
+     * not name the standard streams. */
+    fixture->producer.source_file = fixture->producer.binary_file =
+        fixture->producer.receipt_file = -1;
     strcpy(fixture->root, "/tmp/bq-reference-producer-XXXXXX");
     bool ok = mkdtemp(fixture->root) != NULL;
     fixture->directory = ok ? open(fixture->root,
@@ -382,9 +387,230 @@ static void test_fail_closed(void)
     fixture_release(&replaced);
 }
 
+static void put_u32(uint8_t* bytes, uint32_t value)
+{
+    for (unsigned i = 0; i < 4; i += 1) bytes[i] = (uint8_t)(value >> (i * 8));
+}
+
+/* Canonical inventory bytes through the producer's own writer, which only
+ * accepts a fresh single-link file; read the exact bytes back. */
+static bool inventory_bytes(int directory, BqRetirementReferencePlan const* plan,
+    BqRetirementReferenceSourceIdentity const* source, char const toolchain[65],
+    uint8_t* bytes, uint64_t capacity, uint64_t* length)
+{
+    char digest[65] = {0};
+    struct stat info = {0};
+    int writer = openat(directory, "codec-inventory",
+        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    bool ok = writer >= 3 && bq_retirement_reference_inventory_encode(plan, source,
+        toolchain, writer, digest) && fstat(writer, &info) == 0 &&
+        info.st_size > 0 && (uint64_t)info.st_size <= capacity;
+    if (writer >= 0 && close(writer) != 0) ok = false;
+    int reader = ok ? openat(directory, "codec-inventory",
+        O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = ok && reader >= 3 && pread(reader, bytes, (size_t)info.st_size, 0) == info.st_size;
+    if (reader >= 0 && close(reader) != 0) ok = false;
+    if (writer >= 0 && unlinkat(directory, "codec-inventory", 0) != 0) ok = false;
+    *length = ok ? (uint64_t)info.st_size : 0;
+    return ok;
+}
+
+static bool template_accepts(uint8_t const* bytes, uint64_t length, uint32_t slots,
+    char digest[65])
+{
+    BqRetirementOracleTemplateRow rows[4];
+    BqRetirementOracleTemplate decoded;
+    bool ok = bq_retirement_reference_template_decode(bytes, length, rows, slots,
+        &decoded, digest);
+    return ok;
+}
+
+static bool inventory_accepts(uint8_t const* bytes, uint64_t length,
+    BqRetirementOracleTemplate const* template, uint64_t text_capacity, char digest[65])
+{
+    BqRetirementReferencePlanRow rows[4];
+    char text[4096];
+    BqRetirementReferencePlan plan;
+    BqRetirementReferenceSourceIdentity source[2];
+    char toolchain[65];
+    bool ok = text_capacity <= sizeof(text) &&
+        bq_retirement_reference_inventory_decode(bytes, length, template, rows, 4,
+            text, text_capacity, &plan, source, toolchain, digest);
+    return ok;
+}
+
+/* Offsets follow the documented streams: template header 592 bytes (row 0
+ * starts there); inventory count at 517 and row 0 at 521. */
+static void test_codec(void)
+{
+    ReferenceFixture fixture;
+    CHECK(fixture_init(&fixture));
+    if (fixture.inventory >= 3)
+    {
+        uint8_t template[4096], mutated[4097];
+        uint64_t template_length = 0;
+        char digest[65] = {0};
+        CHECK(bq_retirement_reference_template_write(&fixture.template, template,
+            sizeof(template), &template_length) && template_length == 592u + 285u);
+        BqRetirementOracleTemplateRow rows[4];
+        BqRetirementOracleTemplate decoded;
+        CHECK(bq_retirement_reference_template_decode(template, template_length, rows, 4,
+                &decoded, digest) && !strcmp(digest, fixture.template_sha256) &&
+            decoded.references == rows && decoded.reference_count == 1 &&
+            decoded.population_rows == 2 && rows[0].row == 1 &&
+            !strcmp(rows[0].output_name, "oracle-output") &&
+            !strcmp(rows[0].build_command_sha256, fixture.approved.build_command_sha256) &&
+            !strcmp(decoded.source_tree[1], fixture.template.source_tree[1]));
+        CHECK(!template_accepts(template, template_length, 0, digest));
+        CHECK(!template_accepts(template, template_length - 1, 4, digest));
+        memcpy(mutated, template, template_length);
+        mutated[template_length] = 0;
+        CHECK(!template_accepts(mutated, template_length + 1, 4, digest));
+        mutated[0] ^= 1;
+        CHECK(!template_accepts(mutated, template_length, 4, digest));
+        memcpy(mutated, template, template_length);
+        put_u32(mutated + 588, UINT32_MAX);
+        CHECK(!template_accepts(mutated, template_length, 4, digest));
+        put_u32(mutated + 588, 0);
+        CHECK(!template_accepts(mutated, template_length, 4, digest));
+        memcpy(mutated, template, template_length);
+        mutated[32] = 'G';
+        CHECK(!template_accepts(mutated, template_length, 4, digest));
+        memcpy(mutated, template, template_length);
+        put_u32(mutated + 592, 2);
+        CHECK(!template_accepts(mutated, template_length, 4, digest));
+        memcpy(mutated, template, template_length);
+        put_u32(mutated + 600, 2);
+        CHECK(!template_accepts(mutated, template_length, 4, digest));
+        memcpy(mutated, template, template_length);
+        mutated[592 + 12 + 256 + 4] = '/';
+        CHECK(!template_accepts(mutated, template_length, 4, digest));
+        /* A flipped digest byte can decode, but only as a different pin. */
+        memcpy(mutated, template, template_length);
+        mutated[448] = mutated[448] == '0' ? '1' : '0';
+        CHECK(!template_accepts(mutated, template_length, 4, digest) ||
+            strcmp(digest, fixture.template_sha256));
+
+        BqRetirementOracleTemplateRow pair[2] = {fixture.approved, fixture.approved};
+        BqRetirementReferencePlanRow pair_rows[2] = {fixture.plan_row, fixture.plan_row};
+        BqRetirementOracleTemplate two = fixture.template;
+        two.population_rows = 3;
+        two.reference_count = 2;
+        two.references = pair;
+        pair[1].row = pair_rows[1].row = 2;
+        CHECK(bq_ref_plan_row(&pair_rows[1], &pair[1], pair[1].build_command_sha256));
+        uint8_t pair_template[4096];
+        uint64_t pair_length = 0;
+        CHECK(bq_retirement_reference_template_write(&two, pair_template,
+                sizeof(pair_template), &pair_length) &&
+            template_accepts(pair_template, pair_length, 4, digest));
+        put_u32(pair_template + 592, 2);
+        put_u32(pair_template + 592 + 285, 1);
+        CHECK(!template_accepts(pair_template, pair_length, 4, digest));
+
+        uint8_t inventory[4096];
+        struct stat info = {0};
+        CHECK(fstat(fixture.inventory, &info) == 0 && info.st_size > 521 &&
+            (uint64_t)info.st_size < sizeof(inventory) &&
+            pread(fixture.inventory, inventory, (size_t)info.st_size, 0) == info.st_size);
+        uint64_t inventory_length = (uint64_t)info.st_size;
+        BqRetirementReferencePlanRow plan_rows[2];
+        char text[4096], toolchain[65] = {0};
+        BqRetirementReferencePlan plan;
+        BqRetirementReferenceSourceIdentity source[2];
+        CHECK(bq_retirement_reference_inventory_decode(inventory, inventory_length,
+                &decoded, plan_rows, 2, text, sizeof(text), &plan, source, toolchain,
+                digest) && !strcmp(digest, fixture.inventory_sha256) &&
+            plan.template == &decoded && plan.rows == plan_rows && plan.count == 1 &&
+            !strcmp(plan.clang_sha256, fixture.plan.clang_sha256) &&
+            plan_rows[0].row == 1 && plan_rows[0].source_side == 0 &&
+            !strcmp(plan_rows[0].source_path, "reference.c") &&
+            plan_rows[0].flag_count == 3 && !strcmp(plan_rows[0].flags[1], fixture.flags[1]) &&
+            plan_rows[0].build_environment_count == 3 &&
+            !strcmp(plan_rows[0].build_environment[2], "PATH=/usr/bin") &&
+            plan_rows[0].runtime_argument_count == 1 &&
+            plan_rows[0].runtime_environment_count == 2 &&
+            !strcmp(source[1].tree, fixture.source[1].tree) &&
+            !strcmp(toolchain, fixture.template.toolchain_identity_sha256));
+        CHECK(!inventory_accepts(inventory, inventory_length - 1, &decoded, 4096, digest));
+        CHECK(!inventory_accepts(inventory, inventory_length, &decoded, 4, digest));
+        memcpy(mutated, inventory, inventory_length);
+        mutated[inventory_length] = 0;
+        CHECK(!inventory_accepts(mutated, inventory_length + 1, &decoded, 4096, digest));
+        mutated[0] ^= 1;
+        CHECK(!inventory_accepts(mutated, inventory_length, &decoded, 4096, digest));
+        memcpy(mutated, inventory, inventory_length);
+        mutated[40] = mutated[40] == '0' ? '1' : '0';
+        CHECK(!inventory_accepts(mutated, inventory_length, &decoded, 4096, digest));
+        uint32_t const counts[] = {0, 2, UINT32_MAX};
+        for (unsigned i = 0; i < 3; i += 1)
+        {
+            memcpy(mutated, inventory, inventory_length);
+            put_u32(mutated + 517, counts[i]);
+            CHECK(!inventory_accepts(mutated, inventory_length, &decoded, 4096, digest));
+        }
+        uint32_t const flag_counts[] = {BQ_RETIREMENT_REFERENCE_FLAGS_CAP + 1u, UINT32_MAX};
+        for (unsigned i = 0; i < 2; i += 1)
+        {
+            memcpy(mutated, inventory, inventory_length);
+            put_u32(mutated + 608, flag_counts[i]);
+            CHECK(!inventory_accepts(mutated, inventory_length, &decoded, 4096, digest));
+        }
+        for (uint32_t side = 1; side < 3; side += 1)
+        {
+            memcpy(mutated, inventory, inventory_length);
+            put_u32(mutated + 525, side);
+            CHECK(!inventory_accepts(mutated, inventory_length, &decoded, 4096, digest));
+        }
+        memcpy(mutated, inventory, inventory_length);
+        put_u32(mutated + 521, 0);
+        CHECK(!inventory_accepts(mutated, inventory_length, &decoded, 4096, digest));
+        memcpy(mutated, inventory, inventory_length);
+        memcpy(mutated + 533, "../", 3);
+        CHECK(!inventory_accepts(mutated, inventory_length, &decoded, 4096, digest));
+        memcpy(mutated, inventory, inventory_length);
+        mutated[533] = '/';
+        CHECK(!inventory_accepts(mutated, inventory_length, &decoded, 4096, digest));
+        memcpy(mutated, inventory, inventory_length);
+        mutated[460] = mutated[460] == '0' ? '1' : '0';
+        CHECK(!inventory_accepts(mutated, inventory_length, &decoded, 4096, digest) ||
+            strcmp(digest, fixture.inventory_sha256));
+        /* The embedded template hash binds the inventory to one template. */
+        BqRetirementOracleTemplateRow renamed = fixture.approved;
+        BqRetirementOracleTemplate other = fixture.template;
+        strcpy(renamed.output_name, "other-output");
+        other.references = &renamed;
+        CHECK(!inventory_accepts(inventory, inventory_length, &other, 4096, digest));
+
+        BqRetirementReferencePlan pair_plan = fixture.plan;
+        pair_plan.template = &two;
+        pair_plan.rows = pair_rows;
+        pair_plan.count = 2;
+        uint8_t pair_inventory[4096];
+        uint64_t pair_inventory_length = 0;
+        CHECK(inventory_bytes(fixture.directory, &pair_plan, fixture.source,
+                two.toolchain_identity_sha256, pair_inventory, sizeof(pair_inventory),
+                &pair_inventory_length) &&
+            inventory_accepts(pair_inventory, pair_inventory_length, &two, 4096, digest));
+        uint64_t row_bytes = 4u + 4u + 4u + strlen(fixture.plan_row.source_path) + 64u + 4u * 4u;
+        for (unsigned i = 0; i < fixture.plan_row.flag_count; i += 1)
+            row_bytes += 4u + strlen(fixture.plan_row.flags[i]);
+        for (unsigned i = 0; i < fixture.plan_row.build_environment_count; i += 1)
+            row_bytes += 4u + strlen(fixture.plan_row.build_environment[i]);
+        for (unsigned i = 0; i < fixture.plan_row.runtime_environment_count; i += 1)
+            row_bytes += 4u + strlen(fixture.plan_row.runtime_environment[i]);
+        CHECK(521u + 2u * row_bytes == pair_inventory_length);
+        put_u32(pair_inventory + 521, 2);
+        put_u32(pair_inventory + 521 + row_bytes, 1);
+        CHECK(!inventory_accepts(pair_inventory, pair_inventory_length, &two, 4096, digest));
+    }
+    fixture_release(&fixture);
+}
+
 int main(void)
 {
     test_fail_closed();
+    test_codec();
     ReferenceFixture fixture;
     CHECK(fixture_init(&fixture));
     if (fixture.inventory >= 3)

@@ -2020,6 +2020,193 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
     if (queue_path[0] && ok) bq_prep_test_cleanup(queue_path);
 }
 
+BUSTER_GLOBAL_LOCAL void bq_prep_test_flip_pin(char* profile, char const* key)
+{
+    char* pin = strstr(profile, key);
+    BQ_PREP_CHECK(pin != NULL);
+    if (pin)
+    {
+        pin += strlen(key);
+        *pin = *pin == 'a' ? 'b' : 'a';
+    }
+}
+
+/* #1020 installed reference policy on the real A fixture. The synthetic
+ * profile adds reference-template/-inventory and census-row pins beside the
+ * fixture's support, inventory and toolchain pins; the checked-in blocked
+ * profile has none of them and must fail closed. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_reference_policy(int installed, char const* installed_path,
+    char const* workspaces_path, BqRetirementPreparation const* preparation, char const* profile)
+{
+    char recipes[512], template_path[576], inventory_path[576], toolchain_root[BQ_RETIREMENT_TOOLCHAIN_PATH_CAP];
+    int length = snprintf(recipes, sizeof(recipes), "%s/recipes", installed_path);
+    bool ok = length > 0 && (size_t)length < sizeof(recipes);
+    length = snprintf(template_path, sizeof(template_path),
+                      "%s/native-retirement-performance-v1.reference-template", recipes);
+    ok = ok && length > 0 && (size_t)length < sizeof(template_path);
+    length = snprintf(inventory_path, sizeof(inventory_path),
+                      "%s/native-retirement-performance-v1.reference-inventory", recipes);
+    ok = ok && length > 0 && (size_t)length < sizeof(inventory_path);
+    length = snprintf(toolchain_root, sizeof(toolchain_root),
+                      "%s/toolchain/native-retirement-performance-v1", installed_path);
+    ok = ok && length > 0 && (size_t)length < sizeof(toolchain_root);
+    BqRetirementToolchain checked = {0};
+    ok = ok && bq_retirement_toolchain_verify(installed, string_from_pointer(profile), toolchain_root,
+                                              &checked) == BQ_OK;
+    BQ_PREP_CHECK(ok);
+    char clang_sha256[SHA256_HEX_CAPACITY] = {0}, held_sha256[SHA256_HEX_CAPACITY] = {0};
+    bq_digest("fixture only\n", 13, (char8*)clang_sha256);
+    int held = -1;
+    BQ_PREP_CHECK(bq_retirement_toolchain_hold_clang(&checked, &held, held_sha256) && held >= 3 &&
+                  !strcmp(held_sha256, clang_sha256) && (fcntl(held, F_GETFD) & FD_CLOEXEC));
+    if (held >= 0) close(held);
+
+    BqRetirementOracleTemplateRow approved = {.row = 1, .census_row = 0, .target = 1};
+    bq_digest("int a;\n", 7, (char8*)approved.source_sha256);
+    memset(approved.configuration_sha256, '5', 64);
+    strcpy(approved.output_name, "oracle-output");
+    BqRetirementOracleTemplate template = {.population_rows = 2, .object_rows = 1, .native_target = 1,
+                                           .reference_count = 1, .references = &approved};
+    BqRetirementReferenceSourceIdentity source[2] = {0};
+    for (u32 side = 0; side < 2; side += 1)
+    {
+        memcpy(source[side].commit, preparation->subjects[side].commit, 40);
+        memcpy(source[side].tree, preparation->subjects[side].tree, 40);
+        memcpy(source[side].manifest_sha256, preparation->subjects[side].manifest_sha256, 64);
+        memcpy(template.source_commit[side], source[side].commit, 41);
+        memcpy(template.source_tree[side], source[side].tree, 41);
+        memcpy(template.source_sha256[side], source[side].manifest_sha256, 65);
+    }
+    memset(template.census_sha256, '3', 64);
+    memset(template.population_sha256, '4', 64);
+    ok = ok && bq_retirement_profile_sha(string_from_pointer(profile), S8("support-declaration-sha256="),
+                                         template.support_sha256) &&
+         bq_retirement_profile_sha(string_from_pointer(profile), S8("toolchain-manifest-sha256="),
+                                   template.toolchain_identity_sha256);
+    BqRetirementReferencePlanRow row = {.row = 1, .source_side = 0, .flag_count = 1,
+                                        .build_environment_count = 1, .runtime_argument_count = 1,
+                                        .runtime_environment_count = 1};
+    strcpy(row.source_path, "src/main.c");
+    memcpy(row.source_sha256, approved.source_sha256, 65);
+    row.flags[0] = "-std=c11";
+    row.build_environment[0] = "LC_ALL=C";
+    row.runtime_environment[0] = "LC_ALL=C";
+    BqRetirementReferencePlan plan = {.template = &template, .rows = &row, .count = 1};
+    memcpy(plan.clang_sha256, clang_sha256, 65);
+    u8 template_bytes[2048];
+    u64 template_length = 0;
+    char template_sha256[SHA256_HEX_CAPACITY] = {0}, inventory_sha256[SHA256_HEX_CAPACITY] = {0};
+    ok = ok && bq_ref_plan_row(&row, &approved, approved.build_command_sha256) &&
+         bq_ref_runtime_command(&row, approved.logical_command_sha256) &&
+         bq_retirement_oracle_template_hash(&template, template_sha256) &&
+         bq_retirement_reference_template_write(&template, template_bytes, sizeof(template_bytes),
+                                                &template_length) &&
+         chmod(recipes, 0700) == 0 &&
+         bq_prep_test_write_bytes(template_path, (char const*)template_bytes, (u32)template_length);
+    int writer = ok ? open(inventory_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    ok = ok && writer >= 3 && bq_retirement_reference_inventory_encode(&plan, source,
+             template.toolchain_identity_sha256, writer, inventory_sha256) && fchmod(writer, 0400) == 0;
+    if (writer >= 0 && close(writer) != 0) ok = false;
+    ok = ok && chmod(recipes, 0500) == 0;
+    char pinned[1024];
+    length = ok ? snprintf(pinned, sizeof(pinned),
+                           "%sreference-template-sha256=%s\nreference-inventory-sha256=%s\n"
+                           "census-rows-sha256=%.64s\n", profile, template_sha256, inventory_sha256,
+                           template.census_sha256) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(pinned);
+    BQ_PREP_CHECK(ok);
+
+    BqRetirementReferencePolicy policy = {0};
+    BQ_PREP_CHECK(ok && bq_retirement_reference_policy_import_pinned(installed, string_from_pointer(pinned),
+                  preparation, &checked, &policy) == BQ_OK && policy.owned && policy.clang >= 3 &&
+                  !strcmp(policy.template_sha256, template_sha256) &&
+                  !strcmp(policy.inventory_sha256, inventory_sha256) &&
+                  !strcmp(policy.toolchain_manifest_sha256, checked.manifest_sha256) &&
+                  policy.template.references == policy.template_rows &&
+                  policy.plan.template == &policy.template && policy.plan.rows == policy.plan_rows &&
+                  policy.plan.count == 1 && !strcmp(policy.plan_rows[0].source_path, "src/main.c") &&
+                  !strcmp(policy.plan_rows[0].flags[0], "-std=c11") &&
+                  !strcmp(policy.template_rows[0].build_command_sha256, approved.build_command_sha256) &&
+                  !strcmp(policy.source[1].commit, preparation->subjects[1].commit) &&
+                  !strcmp(policy.plan.clang_sha256, clang_sha256));
+    BqRetirementReferencePolicy live = policy;
+    BQ_PREP_CHECK(bq_retirement_reference_policy_import_pinned(installed, string_from_pointer(pinned),
+                  preparation, &checked, &policy) == BQ_RECIPE_MISMATCH && policy.clang == live.clang);
+    BQ_PREP_CHECK(bq_retirement_reference_policy_release(&policy) && !policy.owned && policy.clang == -1);
+
+    /* The checked-in blocked profile has no reference pins. */
+    char absent[SHA256_HEX_CAPACITY] = {0};
+    String8 blocked = bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
+    BQ_PREP_CHECK(!bq_retirement_profile_sha(blocked, S8("reference-template-sha256="), absent) &&
+                  !bq_retirement_profile_sha(blocked, S8("reference-inventory-sha256="), absent));
+    BQ_PREP_CHECK(bq_retirement_reference_policy_import(installed, preparation, &checked, &policy) ==
+                  BQ_RECIPE_MISMATCH && !policy.owned && policy.clang == -1);
+
+    char variant[1024];
+    char const* missing[] = {"reference-template-sha256=", "reference-inventory-sha256=",
+                             "census-rows-sha256="};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(missing); index += 1)
+    {
+        memcpy(variant, pinned, sizeof(variant));
+        char* line = strstr(variant, missing[index]);
+        char* end = line ? strchr(line, '\n') : NULL;
+        if (end) memmove(line, end + 1, strlen(end + 1) + 1);
+        BQ_PREP_CHECK(end && bq_retirement_reference_policy_import_pinned(installed,
+                      string_from_pointer(variant), preparation, &checked, &policy) == BQ_RECIPE_MISMATCH &&
+                      !policy.owned);
+    }
+    char const* flipped[] = {"reference-template-sha256=", "reference-inventory-sha256=",
+                             "support-declaration-sha256=", "census-rows-sha256=",
+                             "toolchain-manifest-sha256="};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(flipped); index += 1)
+    {
+        memcpy(variant, pinned, sizeof(variant));
+        bq_prep_test_flip_pin(variant, flipped[index]);
+        BQ_PREP_CHECK(bq_retirement_reference_policy_import_pinned(installed, string_from_pointer(variant),
+                      preparation, &checked, &policy) == BQ_RECIPE_MISMATCH && !policy.owned);
+    }
+    for (u32 field = 0; field < 3; field += 1)
+    {
+        BqRetirementPreparation changed = *preparation;
+        char* value = field == 0 ? changed.subjects[0].commit : field == 1 ? changed.subjects[1].tree :
+                      changed.subjects[0].manifest_sha256;
+        value[0] = value[0] == 'e' ? 'f' : 'e';
+        BQ_PREP_CHECK(bq_retirement_reference_policy_import_pinned(installed, string_from_pointer(pinned),
+                      &changed, &checked, &policy) == BQ_SOURCE_MISMATCH && !policy.owned);
+    }
+    BqRetirementToolchain other = checked;
+    other.manifest_sha256[0] = other.manifest_sha256[0] == 'a' ? 'b' : 'a';
+    BQ_PREP_CHECK(bq_retirement_reference_policy_import_pinned(installed, string_from_pointer(pinned),
+                  preparation, &other, &policy) == BQ_CONFIGURATION_MISMATCH && !policy.owned);
+    BQ_PREP_CHECK(chmod(template_path, 0600) == 0 &&
+                  bq_retirement_reference_policy_import_pinned(installed, string_from_pointer(pinned),
+                      preparation, &checked, &policy) == BQ_CONFIGURATION_MISMATCH &&
+                  chmod(template_path, 0400) == 0);
+
+    /* A byte-equal clang inode replacement keeps every digest but breaks the
+     * held bundle identity; restoring the original inode passes again. */
+    char tool_bin[528], clang_path[544], saved[512];
+    int bin_length = snprintf(tool_bin, sizeof(tool_bin), "%s/bin", toolchain_root);
+    int clang_length = snprintf(clang_path, sizeof(clang_path), "%s/clang", tool_bin);
+    int saved_length = snprintf(saved, sizeof(saved), "%s/reference-held-clang", workspaces_path);
+    bool replaced = bin_length > 0 && (size_t)bin_length < sizeof(tool_bin) &&
+                    clang_length > 0 && (size_t)clang_length < sizeof(clang_path) &&
+                    saved_length > 0 && (size_t)saved_length < sizeof(saved) &&
+                    chmod(tool_bin, 0700) == 0 && rename(clang_path, saved) == 0 &&
+                    bq_prep_test_write(clang_path, "fixture only\n") && chmod(clang_path, 0555) == 0 &&
+                    chmod(tool_bin, 0555) == 0;
+    BQ_PREP_CHECK(replaced && !bq_retirement_toolchain_hold_clang(&checked, &held, held_sha256) && held == -1 &&
+                  bq_retirement_reference_policy_import_pinned(installed, string_from_pointer(pinned),
+                      preparation, &checked, &policy) == BQ_CONFIGURATION_MISMATCH && !policy.owned);
+    BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 && unlink(clang_path) == 0 && rename(saved, clang_path) == 0 &&
+                  chmod(tool_bin, 0555) == 0 &&
+                  bq_retirement_reference_policy_import_pinned(installed, string_from_pointer(pinned),
+                      preparation, &checked, &policy) == BQ_OK &&
+                  bq_retirement_reference_policy_release(&policy));
+    BQ_PREP_CHECK(chmod(recipes, 0700) == 0 && unlink(template_path) == 0 && unlink(inventory_path) == 0 &&
+                  chmod(recipes, 0500) == 0);
+}
+
 #include "retirement_campaign_service_tests.h"
 
 int main(void)
@@ -2038,6 +2225,7 @@ int main(void)
         BqRetirementPreparation preparation = {0};
         String8 pinned = string_from_pointer(profile);
         BQ_PREP_CHECK(bq_retirement_preflight_pinned(input, output, &request, pinned, &preparation) == BQ_OK);
+        bq_prep_test_reference_policy(input, installed, workspaces, &preparation, profile);
         BqRetirementSource verified_base = preparation.subjects[0];
         BQ_PREP_CHECK(preparation.subjects[0].entries == 1 && preparation.subjects[1].entries == 1 &&
                       preparation.source_reservation_bytes > BQ_RETIREMENT_COPY_OVERHEAD);

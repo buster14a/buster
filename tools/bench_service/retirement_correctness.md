@@ -177,13 +177,37 @@ used by the miniature fixture is compiled only under
 admitted installed template or authenticated independent build receipts.
 `retirement_reference_producer.{h,c}` is the pinned independent reference build
 issuer. The adapter consults its one-use token only when a translation unit
-defines `BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED`; the service binary does not,
-so its compiled adapter keeps `issued = false` and launches no reference child.
+defines `BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED`. The service binary now
+compiles the producer so that the reference-policy importer can re-run its
+canonical inventory encoder. It still does not define that macro, so its
+compiled adapter keeps `issued = false` and launches no reference child.
 Existing private test registration compiles the adapter through the correctness
 test translation unit, and `retirement_reference_producer_tests.c` links the
 producer privately; `bench_service self-test` (and `--sanitize`) builds and runs
 both. The real-child fixtures prove bounded mechanics and
 mutation rejection, not a full-corpus oracle run, #509 proof or recipe admission.
+
+`producer_begin` still compares the installed template and inventory digests
+that its caller passes. `retirement_reference_template.{h,c}` and
+`bq_retirement_reference_policy_import` are the start of the installed side of
+that boundary. The importer reads
+`recipes/native-retirement-performance-v1.reference-template` and
+`.reference-inventory` beneath the held installed root and requires their
+SHA-256 values to equal the compiled profile keys `reference-template-sha256=`
+and `reference-inventory-sha256=`. It decodes both through bounded canonical
+round-trip decoders and joins the template to A's imported subjects and to
+the support, census-row and toolchain-manifest pins. It also checks the
+inventory's `clang_sha256` against a freshly held, bundle-rechecked
+`bin/clang` descriptor. A future worker caller must pass the importer's
+digests, decoded plan and held Clang to `producer_begin` instead of computing
+its own. The
+checked-in blocked profile lacks both reference pins, so the public importer
+fails closed and no worker path calls it. Real reviewed pin values, a producer
+caller in the worker and an approved #508 per-row `configuration_sha256`
+serializer all remain open. Until that serializer exists, template
+configuration digests are reviewed assertions compared only with B's declared
+rows. [RETIREMENT_PREPARATION.md](RETIREMENT_PREPARATION.md#installed-reference-policy-1020)
+describes the file formats and joins.
 
 Before `row`, the service derives exact compiler and applicable runtime command
 hashes (argv, cwd and environment) independently from the admitted oracle

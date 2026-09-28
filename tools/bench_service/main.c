@@ -15,12 +15,18 @@
 #ifdef __linux__
 /* Keep the private B adapters in the installed service translation unit.
  * Their production importer remains fail-closed until independent policy,
- * semantic receipts and the reference-build producer are connected. */
+ * semantic receipts and the reference-build producer are connected. The
+ * producer is compiled for its canonical inventory encoder, which the pinned
+ * reference-policy importer re-runs; without
+ * BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED the adapter never accepts its
+ * token, so this unit still launches no reference child. */
 #include "retirement_correctness.c"
 #include "retirement_correctness_service.c"
 #include "retirement_artifact_service.c"
 #include "retirement_correctness_oracle.c"
 #include "retirement_oracle_authority.c"
+#include "retirement_reference_producer.c"
+#include "retirement_reference_template.c"
 #endif
 #include "worker_linux.c"
 #include "export.c"

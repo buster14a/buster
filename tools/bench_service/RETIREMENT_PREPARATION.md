@@ -93,6 +93,64 @@ The supervisor's absolute deadline starts at lease acquisition and is retained
 across this readback and final result validation; readback never starts a new
 execution budget.
 
+## Installed reference policy (#1020)
+
+The independent reference producer takes its template and inventory from two
+more operator-installed files beside the A inventory, never from a request or
+a caller-computed digest:
+
+- `recipes/native-retirement-performance-v1.reference-template`
+- `recipes/native-retirement-performance-v1.reference-inventory`
+
+Each must be a mode-read-only, single-link regular file owned by root or the
+service user, read through an `O_NOFOLLOW` descriptor whose metadata must not
+change while it is read. Their whole-file SHA-256 values must equal the
+compiled profile keys `reference-template-sha256=` and
+`reference-inventory-sha256=`; a missing key fails closed with
+`BQ_RECIPE_MISMATCH`. The template file is exactly the byte stream hashed by
+`bq_retirement_oracle_template_hash`, so its file SHA-256 is the template hash
+the oracle authority checks. Its fields have fixed widths or explicit
+little-endian counts and length prefixes, so it needs no extra framing. The
+inventory file is the existing V1 stream written by
+`bq_retirement_reference_inventory_encode`, whose header embeds that template
+hash. `retirement_reference_template.{h,c}` decodes both with bounded,
+length-prefixed parsing and strict row order. It rejects trailing bytes,
+impossible counts, a wrong domain, a side outside the two held roots and a
+mismatched reference count or embedded template hash. It then re-derives the
+canonical digest through the existing hash/encoder, which also re-applies the
+source-path (`..`, absolute), side-0 and command-hash policy, and requires
+it to equal the SHA-256 of the input. `bq_retirement_reference_template_write` emits the
+template stream for installers and fixtures; neither writer installs a pin.
+
+`bq_retirement_reference_policy_import` (in
+`retirement_correctness_service.c`) always uses the compiled
+native-retirement profile. After both pins and decodes it joins the template's
+commit, tree and source manifest digest for each side to A's imported
+`BqRetirementPreparation` subjects. It checks `support_sha256` against
+`support-declaration-sha256=`, `census_sha256` against
+`census-rows-sha256=` and the template and inventory toolchain identity
+against `toolchain-manifest-sha256=`. That toolchain identity is the reviewed
+manifest pin, not the per-job inode `identity_sha256` from
+`retirement_toolchain.c`. The verified toolchain must carry the same manifest
+digest. `bq_retirement_toolchain_hold_clang` then opens `bin/clang` without
+following links beneath the verified root and hashes the held descriptor. It
+rechecks the complete bundle, whose identity binds every file inode, and
+requires the name still to resolve to the held inode. The inventory's
+`clang_sha256` must equal that digest. The returned policy owns the decoded
+rows and the held Clang descriptor for a later `producer_begin`; release it on
+every path.
+
+The checked-in blocked profile has none of the reference pins, so the public
+importer fails closed today, and nothing in the worker calls it. Real pin
+values still need a reviewed installed template and inventory. Each template
+row's `configuration_sha256` is still a reviewed assertion that
+`bq_retirement_oracle_authority_begin` compares only with B's declared rows.
+The approved #508 per-row configuration serializer that would derive it
+independently does not exist yet, and this importer does not invent one.
+The fixture in `retirement_prepare_tests.c` exercises the importer through its
+`BQ_RETIREMENT_CORRECTNESS_TEST_ONLY` seam
+`bq_retirement_reference_policy_import_pinned` with a synthetic profile.
+
 ## Capacity derivation
 
 At the inspected #923 head `ffdc9213e74128df5e759c76d52897eddfe4cd7e`,
@@ -321,3 +379,9 @@ It swaps the configured directory after both generate stages and checks that
 the corresponding build never starts. A candidate generate that succeeds
 without replacing the baseline configured root, or produces a root owned by
 the wrong identity, also fails before build.
+The reference-policy fixture installs a template and inventory built for the
+real A fixture's subjects and toolchain bundle. It checks a successful import,
+refusal to overwrite a live policy and each missing or mismatched pin. It also
+checks commit, tree, manifest, support, census-row and toolchain-manifest
+mismatches, a writable template file and a byte-equal `bin/clang` inode
+replacement. The public importer must fail on the blocked profile.
