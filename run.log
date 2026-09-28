@@ -1,0 +1,1787 @@
+LIVE_PROBE_LEASE_SELF_TEST checks=13 failures=0 scope=own-temporary-file
+LIVE_PROBE_SELF_TEST checks=88 failures=0 orchestration=temporary-fixture-not-live-proof
+STAGE_OBSERVER_SELF_TEST checks=35 failures=0 fixtures-only-not-live-proof
+WORKSPACE_OBSERVER_SELF_TEST checks=25 failures=0 fixtures-only-not-live-proof
+MANAGER_DENIAL_SELF_TEST checks=56 failures=0 fixtures-only-not-live-proof
+BROKER_OBSERVER_SELF_TEST checks=192 failures=0 fixtures-only-no-live-bus
+issue1162 broker evidence self-test: 182 checks passed
+BROKER_ENTRY_EVIDENCE_SELF_TEST checks=101 failures=0 fixtures-only-not-live-proof
+FROZEN_TREE_EVIDENCE_SELF_TEST build_blob=1ea24b90629a2c771c3d0e7d3d517b042ddb4c35 checks=46 failures=0 fixtures-only-not-hosted-proof
+FROZEN_TREE_EVIDENCE_SELF_TEST build_blob=a016a487b745357883a5cd76c9c2712485c01d7c checks=46 failures=0 fixtures-only-not-hosted-proof
+PASS namespace-root-before-init-scope
+PASS excluded-cpu
+PASS ancestor-memory-budget
+PASS namespace-pids-budget
+PASS missing-nonroot-controller
+PASS unlimited-memory
+PASS namespace-root-not-in-ancestry
+PASS nonprivate-host-root
+PASS path-traversal
+ANCESTOR_PREFLIGHT_SELF_TEST_PASS cases=9
+SUBJECT_SHA=6a59bc4fc7e8ddf1bf5420e2f0ce3aca648a0a70 BASE_SHA=ade6ac4b6ecb21f30b61b656439bac476c145e2f WORKFLOW_SHA=0ff3e1092f8795e7e26d4fc903a7f4b1e749a1a2 RUN=36449564460
+6a59bc4fc7e8ddf1bf5420e2f0ce3aca648a0a70
+fcd89098f5905e51023fd4ffee9c29ae737eaf6d
+ade6ac4b6ecb21f30b61b656439bac476c145e2f
+4c5306221fdb22fccc929b55e333163742de17d0
+Preparing worktree (detached HEAD 6a59bc4f)
+HEAD is now at 6a59bc4f Merge pull request #1747 from buster14a/codex/880-cancel-cleanup-recovery
+SOURCE_CLOSURE ade6ac4b6ecb21f30b61b656439bac476c145e2f files 375 bytes 42585 sha256 ebf4a4b4e5943dc60dd9fd9d175af643fbe0d0eee72e70e245c688aaabcb3007
+ebf4a4b4e5943dc60dd9fd9d175af643fbe0d0eee72e70e245c688aaabcb3007  /home/runner/work/_temp/issue1162-exact-slice-evidence/source-manifests/ade6ac4b6ecb21f30b61b656439bac476c145e2f.manifest
+SOURCE_CLOSURE 6a59bc4fc7e8ddf1bf5420e2f0ce3aca648a0a70 files 377 bytes 42835 sha256 656e2d91af0ee66e1662efe4de0e361bf757d797ff7dc94d939e670e1bfcba63
+656e2d91af0ee66e1662efe4de0e361bf757d797ff7dc94d939e670e1bfcba63  /home/runner/work/_temp/issue1162-exact-slice-evidence/source-manifests/6a59bc4fc7e8ddf1bf5420e2f0ce3aca648a0a70.manifest
+
+Elf file type is DYN (Position-Independent Executable file)
+Entry point 0x167e0
+There are 14 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  PHDR           0x000040 0x0000000000000040 0x0000000000000040 0x000310 0x000310 R   0x8
+  INTERP         0x000350 0x0000000000000350 0x0000000000000350 0x00001c 0x00001c R   0x1
+      [Requesting program interpreter: /lib64/ld-linux-x86-64.so.2]
+  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x015b28 0x015b28 R   0x1000
+  LOAD           0x016000 0x0000000000016000 0x0000000000016000 0x167f25 0x167f25 R E 0x1000
+  LOAD           0x17e000 0x000000000017e000 0x000000000017e000 0x052c78 0x052c78 R   0x1000
+  LOAD           0x1d1ae0 0x00000000001d1ae0 0x00000000001d1ae0 0x00f280 0x00f658 RW  0x1000
+  DYNAMIC        0x1dcdd0 0x00000000001dcdd0 0x00000000001dcdd0 0x0001e0 0x0001e0 RW  0x8
+  NOTE           0x000370 0x0000000000000370 0x0000000000000370 0x000020 0x000020 R   0x8
+  NOTE           0x000390 0x0000000000000390 0x0000000000000390 0x000044 0x000044 R   0x4
+  TLS            0x1d1ae0 0x00000000001d1ae0 0x00000000001d1ae0 0x000000 0x000018 R   0x8
+  GNU_PROPERTY   0x000370 0x0000000000000370 0x0000000000000370 0x000020 0x000020 R   0x8
+  GNU_EH_FRAME   0x1c1c00 0x00000000001c1c00 0x00000000001c1c00 0x002f84 0x002f84 R   0x4
+  GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x10
+  GNU_RELRO      0x1d1ae0 0x00000000001d1ae0 0x00000000001d1ae0 0x00b520 0x00b520 R   0x1
+
+ Section to Segment mapping:
+  Segment Sections...
+   00     
+   01     .interp 
+   02     .interp .note.gnu.property .note.gnu.build-id .note.ABI-tag .gnu.hash .dynsym .dynstr .gnu.version .gnu.version_r .rela.dyn .rela.plt 
+   03     .init .plt .plt.got .text .fini 
+   04     .rodata .eh_frame_hdr .eh_frame 
+   05     .init_array .fini_array .data.rel.ro .dynamic .got .got.plt .data .bss 
+   06     .dynamic 
+   07     .note.gnu.property 
+   08     .note.gnu.build-id .note.ABI-tag 
+   09     .tbss 
+   10     .note.gnu.property 
+   11     .eh_frame_hdr 
+   12     
+   13     .init_array .fini_array .data.rel.ro .dynamic .got 
+  GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x10
+schema=2 journal=3 legacy-journal=1 executor=supervisor pending=8 jobs=64
+local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1 blocked-recipes=native-retirement-performance-v1
+profile=smoke validity=not-evaluated materialization=read-only workspace=per-attempt
+worker=fixed-systemd-service dispatch=fixed-registry admission=idle-only-atomic retirement=blocked export=1 transport=unix-seqpacket authentication=peer-uid-gid
+storage=private-local-posix-directory
+SGID_SANDBOX_TEST service assertions=4634 failures=0 group=different-primary arch=x86_64
++ /tmp/buster-bench-recipe-scripts-Tdg2BC/driver generate --build-directory /tmp/buster-workspaces-qrA4Ht/job-1-attempt-2/base/build --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-Tdg2BC/driver build --build-directory /tmp/buster-workspaces-qrA4Ht/job-1-attempt-2/base/build --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-Tdg2BC/driver generate --build-directory /tmp/buster-workspaces-qrA4Ht/job-1-attempt-2/candidate/staging --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-Tdg2BC/driver build --build-directory /tmp/buster-workspaces-qrA4Ht/job-1-attempt-2/candidate/staging --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-Tdg2BC/throughput run --baseline /tmp/buster-workspaces-qrA4Ht/job-1-attempt-2/base/build/Release/ide --candidate /tmp/buster-workspaces-qrA4Ht/job-1-attempt-2/candidate/build/Release/ide --output /tmp/buster-workspaces-qrA4Ht/job-1-attempt-2/candidate/staging/throughput-results --baseline-id aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --candidate-id bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb --profile smoke --mode all --pairs 1 --warmups 1 --no-guard
+BENCH_SERVICE_RECIPE_MATERIALIZED_SELF_TEST result=pass
+SGID_SANDBOX_TEST recipe result=pass group=different-primary
+BENCH_SERVICE_RECIPE_PINNED_WALK_TEST result=pass
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-zRUu2Y/workspaces/job-1-attempt-2/base/build --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-zRUu2Y/workspaces/job-1-attempt-2/base/build --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-zRUu2Y/workspaces/job-1-attempt-2/candidate/staging --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-zRUu2Y/workspaces/job-1-attempt-2/candidate/staging --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/throughput run --baseline /tmp/buster-bench-recipe-zRUu2Y/workspaces/job-1-attempt-2/base/build/Release/ide --candidate /tmp/buster-bench-recipe-zRUu2Y/workspaces/job-1-attempt-2/candidate/build/Release/ide --output /tmp/buster-bench-recipe-zRUu2Y/workspaces/job-1-attempt-2/candidate/staging/throughput-results --baseline-id 1111111111111111111111111111111111111111 --candidate-id 2222222222222222222222222222222222222222 --profile smoke --mode all --pairs 1 --warmups 1 --no-guard
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-VGyx1F/workspaces/job-1-attempt-2/base/build --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-VGyx1F/workspaces/job-1-attempt-2/base/build --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-VGyx1F/workspaces/job-1-attempt-2/candidate/staging --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-VGyx1F/workspaces/job-1-attempt-2/candidate/staging --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-1lPIYh/workspaces/job-1-attempt-2/base/build --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-1lPIYh/workspaces/job-1-attempt-2/base/build --config Release -t ide -- -j1
+error: base-build post-stage check failed: frozen-receipt
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-woHLEa/workspaces/job-1-attempt-2/base/build --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-woHLEa/workspaces/job-1-attempt-2/base/build --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-woHLEa/workspaces/job-1-attempt-2/candidate/staging --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-woHLEa/workspaces/job-1-attempt-2/candidate/staging --config Release -t ide -- -j1
+error: candidate-build post-stage check failed: frozen-receipt
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-xx1lZb/workspaces/job-1-attempt-2/base/build --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-xx1lZb/workspaces/job-1-attempt-2/base/build --config Release -t ide -- -j1
+error: base-build post-stage check failed: frozen-receipt
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-ZBJXwV/workspaces/job-1-attempt-2/base/build --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-ZBJXwV/workspaces/job-1-attempt-2/base/build --config Release -t ide -- -j1
+error: base-build post-stage check failed: frozen-receipt
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-yFLDrb/workspaces/job-1-attempt-2/base/build --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-yFLDrb/workspaces/job-1-attempt-2/base/build --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-yFLDrb/workspaces/job-1-attempt-2/candidate/staging --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-yFLDrb/workspaces/job-1-attempt-2/candidate/staging --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/throughput run --baseline /tmp/buster-bench-recipe-yFLDrb/workspaces/job-1-attempt-2/base/build/Release/ide --candidate /tmp/buster-bench-recipe-yFLDrb/workspaces/job-1-attempt-2/candidate/build/Release/ide --output /tmp/buster-bench-recipe-yFLDrb/workspaces/job-1-attempt-2/candidate/staging/throughput-results --baseline-id 1111111111111111111111111111111111111111 --candidate-id 2222222222222222222222222222222222222222 --profile smoke --mode all --pairs 1 --warmups 1 --no-guard
+/tmp/buster-bench-recipe-scripts-vc7OJk/throughput: 14: cannot create /tmp/buster-bench-recipe-yFLDrb/workspaces/job-1-attempt-2/candidate/build/Release/ide: Permission denied
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-tgOvZz/workspaces/job-1-attempt-2/base/build --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-tgOvZz/workspaces/job-1-attempt-2/base/build --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-tgOvZz/workspaces/job-1-attempt-2/candidate/staging --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-tgOvZz/workspaces/job-1-attempt-2/candidate/staging --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/throughput run --baseline /tmp/buster-bench-recipe-tgOvZz/workspaces/job-1-attempt-2/base/build/Release/ide --candidate /tmp/buster-bench-recipe-tgOvZz/workspaces/job-1-attempt-2/candidate/build/Release/ide --output /tmp/buster-bench-recipe-tgOvZz/workspaces/job-1-attempt-2/candidate/staging/throughput-results --baseline-id 1111111111111111111111111111111111111111 --candidate-id 2222222222222222222222222222222222222222 --profile smoke --mode all --pairs 1 --warmups 1 --no-guard
+/tmp/buster-bench-recipe-scripts-vc7OJk/throughput: 13: cannot create /tmp/buster-bench-recipe-tgOvZz/workspaces/job-1-attempt-2/base/build/Release/ide: Permission denied
+error: fixed recipe could not establish its durable running manifest
+error: invalid fixed validate-buster-v1 recipe identity or path
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-qlpCe3/workspaces/job-1-attempt-2/base/build --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-qlpCe3/workspaces/job-1-attempt-2/base/build --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-qlpCe3/workspaces/job-1-attempt-2/candidate/staging --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-qlpCe3/workspaces/job-1-attempt-2/candidate/staging --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/throughput run --baseline /tmp/buster-bench-recipe-qlpCe3/workspaces/job-1-attempt-2/base/build/Release/ide --candidate /tmp/buster-bench-recipe-qlpCe3/workspaces/job-1-attempt-2/candidate/build/Release/ide --output /tmp/buster-bench-recipe-qlpCe3/workspaces/job-1-attempt-2/candidate/staging/throughput-results --baseline-id 1111111111111111111111111111111111111111 --candidate-id 2222222222222222222222222222222222222222 --profile smoke --mode all --pairs 1 --warmups 1 --no-guard
+error: throughput post-stage check failed: bundle-index
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-vmRmUP/workspaces/job-1-attempt-2/base/build --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-vmRmUP/workspaces/job-1-attempt-2/base/build --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-vmRmUP/workspaces/job-1-attempt-2/candidate/staging --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-vmRmUP/workspaces/job-1-attempt-2/candidate/staging --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/throughput run --baseline /tmp/buster-bench-recipe-vmRmUP/workspaces/job-1-attempt-2/base/build/Release/ide --candidate /tmp/buster-bench-recipe-vmRmUP/workspaces/job-1-attempt-2/candidate/build/Release/ide --output /tmp/buster-bench-recipe-vmRmUP/workspaces/job-1-attempt-2/candidate/staging/throughput-results --baseline-id 1111111111111111111111111111111111111111 --candidate-id 2222222222222222222222222222222222222222 --profile smoke --mode all --pairs 1 --warmups 1 --no-guard
+error: throughput post-stage check failed: promote-throughput
+error: fixed recipe could not establish its durable running manifest
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-8HvAlR/workspaces/job-1-attempt-2/base/build --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-8HvAlR/workspaces/job-1-attempt-2/base/build --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-8HvAlR/workspaces/job-1-attempt-2/candidate/staging --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-8HvAlR/workspaces/job-1-attempt-2/candidate/staging --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/throughput run --baseline /tmp/buster-bench-recipe-8HvAlR/workspaces/job-1-attempt-2/base/build/Release/ide --candidate /tmp/buster-bench-recipe-8HvAlR/workspaces/job-1-attempt-2/candidate/build/Release/ide --output /tmp/buster-bench-recipe-8HvAlR/workspaces/job-1-attempt-2/candidate/staging/throughput-results --baseline-id 1111111111111111111111111111111111111111 --candidate-id 2222222222222222222222222222222222222222 --profile smoke --mode all --pairs 1 --warmups 1 --no-guard
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-M4a8fa/workspaces/job-1-attempt-2/base/build --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-M4a8fa/workspaces/job-1-attempt-2/base/build --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver generate --build-directory /tmp/buster-bench-recipe-M4a8fa/workspaces/job-1-attempt-2/candidate/staging --config Release --cc clang --no-include-tests --no-developer-targets --no-check-optional-warnings --no-fuzz --no-sanitize --no-time-trace --no-instrument --no-lto
++ /tmp/buster-bench-recipe-scripts-vc7OJk/driver build --build-directory /tmp/buster-bench-recipe-M4a8fa/workspaces/job-1-attempt-2/candidate/staging --config Release -t ide -- -j1
++ /tmp/buster-bench-recipe-scripts-vc7OJk/throughput run --baseline /tmp/buster-bench-recipe-M4a8fa/workspaces/job-1-attempt-2/base/build/Release/ide --candidate /tmp/buster-bench-recipe-M4a8fa/workspaces/job-1-attempt-2/candidate/build/Release/ide --output /tmp/buster-bench-recipe-M4a8fa/workspaces/job-1-attempt-2/candidate/staging/throughput-results --baseline-id 1111111111111111111111111111111111111111 --candidate-id 2222222222222222222222222222222222222222 --profile smoke --mode all --pairs 1 --warmups 1 --no-guard
+BENCH_SERVICE_RECIPE_SELF_TEST cases=19 result=pass
+BENCH_SERVICE_SELF_TEST assertions=26021 failures=0 storage=posix-real-journal executor=fake-plus-supervisor-fixed-recipe-handoff
+BUSTER_SYSTEMD_BROKER_SELF_TEST checks=146 result=pass
+BQ_CREDENTIAL_GATE_SELF_TEST checks=9 result=pass
+service result=126 execs=1 expected=1
+candidate result=126 execs=1 expected=1
+throughput result=126 execs=1 expected=1
+pid1_added_service result=126 execs=0 expected=0
+pid1_omitted_group result=126 execs=0 expected=0
+pid1_oversized_set result=126 execs=0 expected=0
+pid1_changed_uid result=126 execs=0 expected=0
+pid1_root result=126 execs=0 expected=0
+pid1_changed_gid result=126 execs=0 expected=0
+duplicate_pin result=126 execs=0 expected=0
+root_pin result=126 execs=0 expected=0
+trailing_comma result=126 execs=0 expected=0
+wrong_program result=126 execs=0 expected=0
+wrong_operation result=126 execs=0 expected=0
+Bq static ELF probe result=pass
+BQ_BROKER_ENTRY_TEST checks=344 failures=0 result=pass
+clean_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=1 manager_execs=0
+clean_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=1 manager_execs=0
+changed_service_uid_start op=1 signal=0 ids=65003:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+changed_service_uid_cont op=2 signal=3 ids=65003:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+changed_service_gid_start op=1 signal=0 ids=65000:65003,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+changed_service_gid_cont op=2 signal=3 ids=65000:65003,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+changed_candidate_uid_start op=1 signal=0 ids=65000:65000,65003:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+changed_candidate_uid_cont op=2 signal=3 ids=65000:65000,65003:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+changed_candidate_gid_start op=1 signal=0 ids=65000:65000,65001:65003,65002:65002 receipt_reads=2 state=0 manager_execs=0
+changed_candidate_gid_cont op=2 signal=3 ids=65000:65000,65001:65003,65002:65002 receipt_reads=2 state=0 manager_execs=0
+changed_runner_uid_start op=1 signal=0 ids=65000:65000,65001:65001,65003:65002 receipt_reads=2 state=0 manager_execs=0
+changed_runner_uid_cont op=2 signal=3 ids=65000:65000,65001:65001,65003:65002 receipt_reads=2 state=0 manager_execs=0
+changed_runner_gid_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65003 receipt_reads=2 state=0 manager_execs=0
+changed_runner_gid_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65003 receipt_reads=2 state=0 manager_execs=0
+missing_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=0 manager_execs=0
+missing_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=0 manager_execs=0
+mismatched_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+mismatched_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+crlf_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+crlf_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+leading_zero_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+leading_zero_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+truncated_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+truncated_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+duplicate_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+duplicate_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+extra_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+extra_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+file_owner_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=0 manager_execs=0
+file_owner_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=0 manager_execs=0
+file_mode_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=0 manager_execs=0
+file_mode_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=0 manager_execs=0
+file_link_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=0 manager_execs=0
+file_link_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=0 manager_execs=0
+file_type_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=0 manager_execs=0
+file_type_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=0 manager_execs=0
+file_oversize_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=0 manager_execs=0
+file_oversize_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=0 manager_execs=0
+directory_owner_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=0 manager_execs=0
+directory_owner_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=0 manager_execs=0
+directory_mode_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=0 manager_execs=0
+directory_mode_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=0 manager_execs=0
+after_inode_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+after_inode_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+after_mtime_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+after_mtime_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+after_ctime_start op=1 signal=0 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+after_ctime_cont op=2 signal=3 ids=65000:65000,65001:65001,65002:65002 receipt_reads=2 state=0 manager_execs=0
+missing_term_cleanup op=2 signal=1 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=1 manager_execs=0
+missing_kill_cleanup op=2 signal=2 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=1 manager_execs=0
+mismatched_term_cleanup op=2 signal=1 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=1 manager_execs=0
+mismatched_kill_cleanup op=2 signal=2 ids=65000:65000,65001:65001,65002:65002 receipt_reads=0 state=1 manager_execs=0
+BROKER_SOCKET_FIXTURE path=/proc/self/bq-broker-missing.sock verified=no
+BROKER_PRIVATE_PAYLOAD path=/proc/self/bq-broker-missing-payload verified=no
+BROKER_IDENTITY_SELF_TEST checks=34 failures=0
+valid op=1 service_extra=65001 candidate_extra=65001 runner_extra=65002 list_failure=0 queries=3 protected_path_checked=1
+service_missing_candidate op=1 service_extra=65000 candidate_extra=65001 runner_extra=65002 list_failure=0 queries=1 protected_path_checked=0
+service_root op=1 service_extra=0 candidate_extra=65001 runner_extra=65002 list_failure=0 queries=1 protected_path_checked=0
+service_foreign op=1 service_extra=65003 candidate_extra=65001 runner_extra=65002 list_failure=0 queries=1 protected_path_checked=0
+candidate_service op=1 service_extra=65001 candidate_extra=65000 runner_extra=65002 list_failure=0 queries=2 protected_path_checked=0
+candidate_root op=1 service_extra=65001 candidate_extra=0 runner_extra=65002 list_failure=0 queries=2 protected_path_checked=0
+candidate_foreign op=1 service_extra=65001 candidate_extra=65003 runner_extra=65002 list_failure=0 queries=2 protected_path_checked=0
+runner_service op=1 service_extra=65001 candidate_extra=65001 runner_extra=65000 list_failure=0 queries=3 protected_path_checked=0
+runner_root op=1 service_extra=65001 candidate_extra=65001 runner_extra=0 list_failure=0 queries=3 protected_path_checked=0
+runner_candidate op=1 service_extra=65001 candidate_extra=65001 runner_extra=65001 list_failure=0 queries=3 protected_path_checked=0
+runner_foreign op=1 service_extra=65001 candidate_extra=65001 runner_extra=65003 list_failure=0 queries=3 protected_path_checked=0
+nss_oversize op=1 service_extra=65001 candidate_extra=65001 runner_extra=65002 list_failure=1 queries=1 protected_path_checked=0
+nss_failure op=1 service_extra=65001 candidate_extra=65001 runner_extra=65002 list_failure=2 queries=1 protected_path_checked=0
+valid op=2 service_extra=65001 candidate_extra=65001 runner_extra=65002 list_failure=0 queries=3 protected_path_checked=1
+service_missing_candidate op=2 service_extra=65000 candidate_extra=65001 runner_extra=65002 list_failure=0 queries=1 protected_path_checked=0
+service_root op=2 service_extra=0 candidate_extra=65001 runner_extra=65002 list_failure=0 queries=1 protected_path_checked=0
+service_foreign op=2 service_extra=65003 candidate_extra=65001 runner_extra=65002 list_failure=0 queries=1 protected_path_checked=0
+candidate_service op=2 service_extra=65001 candidate_extra=65000 runner_extra=65002 list_failure=0 queries=2 protected_path_checked=0
+candidate_root op=2 service_extra=65001 candidate_extra=0 runner_extra=65002 list_failure=0 queries=2 protected_path_checked=0
+candidate_foreign op=2 service_extra=65001 candidate_extra=65003 runner_extra=65002 list_failure=0 queries=2 protected_path_checked=0
+runner_service op=2 service_extra=65001 candidate_extra=65001 runner_extra=65000 list_failure=0 queries=3 protected_path_checked=0
+runner_root op=2 service_extra=65001 candidate_extra=65001 runner_extra=0 list_failure=0 queries=3 protected_path_checked=0
+runner_candidate op=2 service_extra=65001 candidate_extra=65001 runner_extra=65001 list_failure=0 queries=3 protected_path_checked=0
+runner_foreign op=2 service_extra=65001 candidate_extra=65001 runner_extra=65003 list_failure=0 queries=3 protected_path_checked=0
+nss_oversize op=2 service_extra=65001 candidate_extra=65001 runner_extra=65002 list_failure=1 queries=1 protected_path_checked=0
+nss_failure op=2 service_extra=65001 candidate_extra=65001 runner_extra=65002 list_failure=2 queries=1 protected_path_checked=0
+
+Elf file type is EXEC (Executable file)
+Entry point 0x4016c0
+There are 11 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  LOAD           0x000000 0x0000000000400000 0x0000000000400000 0x000520 0x000520 R   0x1000
+  LOAD           0x001000 0x0000000000401000 0x0000000000401000 0x08091d 0x08091d R E 0x1000
+  LOAD           0x082000 0x0000000000482000 0x0000000000482000 0x027e5c 0x027e5c R   0x1000
+  LOAD           0x0a9f50 0x00000000004aaf50 0x00000000004aaf50 0x005b60 0x00b2d8 RW  0x1000
+  NOTE           0x0002a8 0x00000000004002a8 0x00000000004002a8 0x000020 0x000020 R   0x8
+  NOTE           0x0002c8 0x00000000004002c8 0x00000000004002c8 0x000044 0x000044 R   0x4
+  TLS            0x0a9f50 0x00000000004aaf50 0x00000000004aaf50 0x000018 0x000058 R   0x8
+  GNU_PROPERTY   0x0002a8 0x00000000004002a8 0x00000000004002a8 0x000020 0x000020 R   0x8
+  GNU_EH_FRAME   0x09e440 0x000000000049e440 0x000000000049e440 0x00216c 0x00216c R   0x4
+  GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x10
+  GNU_RELRO      0x0a9f50 0x00000000004aaf50 0x00000000004aaf50 0x0040b0 0x0040b0 R   0x1
+
+ Section to Segment mapping:
+  Segment Sections...
+   00     .note.gnu.property .note.gnu.build-id .note.ABI-tag .rela.plt 
+   01     .init .plt .text .fini 
+   02     .rodata .stapsdt.base rodata.cst32 .eh_frame_hdr .eh_frame .gcc_except_table 
+   03     .tdata .init_array .fini_array .data.rel.ro .got .got.plt .data .bss 
+   04     .note.gnu.property 
+   05     .note.gnu.build-id .note.ABI-tag 
+   06     .tdata .tbss 
+   07     .note.gnu.property 
+   08     .eh_frame_hdr 
+   09     
+   10     .tdata .init_array .fini_array .data.rel.ro .got 
+
+Elf file type is EXEC (Executable file)
+Entry point 0x4016c0
+There are 11 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  LOAD           0x000000 0x0000000000400000 0x0000000000400000 0x000550 0x000550 R   0x1000
+  LOAD           0x001000 0x0000000000401000 0x0000000000401000 0x0844dd 0x0844dd R E 0x1000
+  LOAD           0x086000 0x0000000000486000 0x0000000000486000 0x028884 0x028884 R   0x1000
+  LOAD           0x0aeef0 0x00000000004afef0 0x00000000004afef0 0x005bd8 0x00b358 RW  0x1000
+  NOTE           0x0002a8 0x00000000004002a8 0x00000000004002a8 0x000020 0x000020 R   0x8
+  NOTE           0x0002c8 0x00000000004002c8 0x00000000004002c8 0x000044 0x000044 R   0x4
+  TLS            0x0aeef0 0x00000000004afef0 0x00000000004afef0 0x000018 0x000058 R   0x8
+  GNU_PROPERTY   0x0002a8 0x00000000004002a8 0x00000000004002a8 0x000020 0x000020 R   0x8
+  GNU_EH_FRAME   0x0a29e0 0x00000000004a29e0 0x00000000004a29e0 0x002214 0x002214 R   0x4
+  GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x10
+  GNU_RELRO      0x0aeef0 0x00000000004afef0 0x00000000004afef0 0x004110 0x004110 R   0x1
+
+ Section to Segment mapping:
+  Segment Sections...
+   00     .note.gnu.property .note.gnu.build-id .note.ABI-tag .rela.plt 
+   01     .init .plt .text .fini 
+   02     .rodata .stapsdt.base rodata.cst32 .eh_frame_hdr .eh_frame .gcc_except_table 
+   03     .tdata .init_array .fini_array .data.rel.ro .got .got.plt .data .bss 
+   04     .note.gnu.property 
+   05     .note.gnu.build-id .note.ABI-tag 
+   06     .tdata .tbss 
+   07     .note.gnu.property 
+   08     .eh_frame_hdr 
+   09     
+   10     .tdata .init_array .fini_array .data.rel.ro .got 
+211b93bf48f57236bc0da3dd09629a1cbdfb9264463d925fa778b41926547b26  /home/runner/work/_temp/issue1162-install/cleanup-identity-tests
+ce0810ec05bf39ca0adbde86bb9f31d443d689a1fede1fef232b110226648017  /home/runner/work/_temp/issue1162-install/binaries/buster-bench-broker-entry-gate
+b2dfa49c1e523ccb67f9aeed14b9a6408187fac5d7767bddaceb7d75fd832628  /home/runner/work/_temp/issue1162-install/binaries/buster-bench-build
+49e61a09e60beecbad320cb8468035e6407c1fe3feeb9443c2efac47c0887658  /home/runner/work/_temp/issue1162-install/binaries/buster-bench-credential-gate
+3cddf9cfca043412a7e1d987c7174262e603428ea814935019c9ae4fdca11f80  /home/runner/work/_temp/issue1162-install/binaries/buster-bench-service
+b19ce4f90e2bd2a0aebcedbc5f80442f35e0e6f73119050fe66bea24147e4e7e  /home/runner/work/_temp/issue1162-install/binaries/buster-bench-systemd-broker
+66de98ae53bb2ab948c0d0fd74266255ad1016414062c425d1af41c46f4c61f9  /home/runner/work/_temp/issue1162-install/binaries/buster-bench-throughput
+16faa3332b71aa634b14a3e0ea9b3ce0a3c26eb441ecd8e29fd07956ed176f98  /home/runner/work/_temp/issue1162-install/binaries/systemd-broker-live-test
+63d0eb708748b20223daaafe40bac84521c6a5e408915401afe891224e2dadc7  /home/runner/work/_temp/issue1162-install/units/buster-bench-systemd-broker.socket
+bb0d330c28edf59afdebdb40211c588243d1c6f84414884a38550fe2a2b99167  /home/runner/work/_temp/issue1162-install/units/buster-bench-systemd-broker@.service
+78038b7eef15bd4e34ab376d2f6239dd65e135b2825db3b25421d0b1a3908273  /home/runner/work/_temp/issue1162-install/units/buster-bench.service
+4179b8b2806edb974f35cc6c011cea3b88dce0635663bfa22d4c334a7d07b272  /home/runner/work/_temp/issue1162-install/units/buster-bench.slice
+41c18e1a1296617ce73961680bde8d4f3cb9d69960683e9d2fd5074cd988b8bb  /home/runner/work/_temp/issue1162-install/units/buster-bench.tmpfiles.conf
+50b5133d094a04274e1e9007e55047b2a318e0757676ec5a69fa51f1f4181753  /home/runner/work/_temp/issue1162-install/recipes/validate-buster-v1.recipe
+1f52e29c47d49e917ae73548b96041deec8b830d48e0cfec5c4f9bec16b6fea2  /home/runner/work/buster/buster/.github/scripts/issue1162_live_probe.py
+1f52e29c47d49e917ae73548b96041deec8b830d48e0cfec5c4f9bec16b6fea2  /home/runner/work/_temp/issue1162-install/issue1162_live_probe.py
+137e7ed14189e776e24e506f488e3733ea70961ad2a272f78fe3d65a50513da2  /home/runner/work/buster/buster/.github/scripts/issue1162_stage_observer.py
+137e7ed14189e776e24e506f488e3733ea70961ad2a272f78fe3d65a50513da2  /home/runner/work/_temp/issue1162-install/issue1162_stage_observer.py
+f87af494b9dd4a17a51a4f437bb58177694b4e1afd093282639f094be7c0beb9  /home/runner/work/buster/buster/.github/scripts/issue1162_workspace_observer.py
+f87af494b9dd4a17a51a4f437bb58177694b4e1afd093282639f094be7c0beb9  /home/runner/work/_temp/issue1162-install/issue1162_workspace_observer.py
+9b626b3626570478ef26bee7b279ad1366cdb14e0290182230d0c9615e009162  /home/runner/work/buster/buster/.github/scripts/issue1162_manager_denial_probe.py
+9b626b3626570478ef26bee7b279ad1366cdb14e0290182230d0c9615e009162  /home/runner/work/_temp/issue1162-install/issue1162_manager_denial_probe.py
+6cb2606f68c396f1ae1186d5178ac8cda5e5334e4a351dc7b9d87434afd0a444  /home/runner/work/buster/buster/.github/scripts/issue1162_broker_observer.py
+6cb2606f68c396f1ae1186d5178ac8cda5e5334e4a351dc7b9d87434afd0a444  /home/runner/work/_temp/issue1162-install/issue1162_broker_observer.py
+62df1b48c861f008ac7796023d1caac3158e34775f8b4ade3b2cdb0610db5c5a  /home/runner/work/buster/buster/.github/scripts/issue1162_broker_evidence.py
+80504b47a0dc69b7ddb90813f17176d418191ff7b885c3fb2a43b9ff2e26b595  /home/runner/work/buster/buster/.github/scripts/issue1162_broker_entry_evidence.py
+e24db6e17a9520ae52b844246ff87ff77fb7f31a09e08d95eb9687fa96431b80  /home/runner/work/buster/buster/.github/scripts/issue1162_frozen_tree_evidence.py
+Ubuntu clang version 18.1.3 (1ubuntu1)
+cmake version 3.31.6
+1.13.2
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 405B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4
+#2 DONE 0.4s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/2] FROM docker.io/library/ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4
+#4 resolve docker.io/library/ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4 done
+#4 sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4 424B / 424B done
+#4 sha256:6232b38791000e3818b58d8847b5a8f5612d606929e01156dd8febc423e0f2ef 2.05kB / 2.05kB done
+#4 DONE 0.0s
+
+#5 [2/2] RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv dbus util-linux python3 clang cmake ninja-build binutils build-essential git ca-certificates && rm -rf /var/lib/apt/lists/*
+#5 1.887 Get:1 http://archive.ubuntu.com/ubuntu noble InRelease [256 kB]
+#5 1.887 Get:2 http://security.ubuntu.com/ubuntu noble-security InRelease [126 kB]
+#5 2.357 Get:3 http://archive.ubuntu.com/ubuntu noble-updates InRelease [126 kB]
+#5 2.487 Get:4 http://archive.ubuntu.com/ubuntu noble-backports InRelease [126 kB]
+#5 2.615 Get:5 http://security.ubuntu.com/ubuntu noble-security/main amd64 Packages [1310 kB]
+#5 2.665 Get:6 http://archive.ubuntu.com/ubuntu noble/multiverse amd64 Packages [331 kB]
+#5 2.893 Get:7 http://archive.ubuntu.com/ubuntu noble/restricted amd64 Packages [117 kB]
+#5 2.908 Get:8 http://archive.ubuntu.com/ubuntu noble/universe amd64 Packages [19.3 MB]
+#5 3.266 Get:9 http://security.ubuntu.com/ubuntu noble-security/multiverse amd64 Packages [50.0 kB]
+#5 3.269 Get:10 http://security.ubuntu.com/ubuntu noble-security/universe amd64 Packages [1542 kB]
+#5 3.473 Get:11 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Packages [1934 kB]
+#5 3.781 Get:12 http://archive.ubuntu.com/ubuntu noble/main amd64 Packages [1808 kB]
+#5 3.789 Get:13 http://archive.ubuntu.com/ubuntu noble-updates/multiverse amd64 Packages [56.2 kB]
+#5 3.790 Get:14 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages [1633 kB]
+#5 3.797 Get:15 http://archive.ubuntu.com/ubuntu noble-updates/restricted amd64 Packages [2048 kB]
+#5 3.806 Get:16 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 Packages [2159 kB]
+#5 3.869 Get:17 http://archive.ubuntu.com/ubuntu noble-backports/universe amd64 Packages [36.0 kB]
+#5 3.870 Get:18 http://archive.ubuntu.com/ubuntu noble-backports/main amd64 Packages [49.0 kB]
+#5 3.871 Get:19 http://archive.ubuntu.com/ubuntu noble-backports/multiverse amd64 Packages [671 B]
+#5 4.743 Fetched 33.0 MB in 3s (10.5 MB/s)
+#5 4.743 Reading package lists...
+#5 5.548 Reading package lists...
+#5 6.356 Building dependency tree...
+#5 6.538 Reading state information...
+#5 6.722 util-linux is already the newest version (2.39.3-9ubuntu6.6).
+#5 6.722 The following additional packages will be installed:
+#5 6.722   adduser binutils-common binutils-x86-64-linux-gnu bzip2 clang-18 cmake-data
+#5 6.722   cpp cpp-13 cpp-13-x86-64-linux-gnu cpp-x86-64-linux-gnu dbus-bin dbus-daemon
+#5 6.722   dbus-session-bus-common dbus-system-bus-common dpkg-dev g++ g++-13
+#5 6.722   g++-13-x86-64-linux-gnu g++-x86-64-linux-gnu gcc gcc-13 gcc-13-base
+#5 6.722   gcc-13-x86-64-linux-gnu gcc-x86-64-linux-gnu git-man libapparmor1
+#5 6.722   libarchive13t64 libargon2-1 libasan8 libatomic1 libbinutils libbrotli1
+#5 6.722   libbsd0 libc-dev-bin libc6-dev libcc1-0 libclang-common-18-dev
+#5 6.722   libclang-cpp18 libclang1-18 libcrypt-dev libcryptsetup12 libctf-nobfd0
+#5 6.722   libctf0 libcurl3t64-gnutls libcurl4t64 libdbus-1-3 libdevmapper1.02.1
+#5 6.722   libdpkg-perl libedit2 liberror-perl libexpat1 libfdisk1 libgc1 libgcc-13-dev
+#5 6.722   libgdbm-compat4t64 libgdbm6t64 libgomp1 libgprofng0 libgssapi-krb5-2
+#5 6.722   libhwasan0 libicu74 libisl23 libitm1 libjansson4 libjson-c5 libjsoncpp25
+#5 6.722   libk5crypto3 libkeyutils1 libkmod2 libkrb5-3 libkrb5support0 libldap2
+#5 6.722   libllvm18 liblsan0 libmpc3 libmpfr6 libnghttp2-14 libobjc-13-dev libobjc4
+#5 6.723   libperl5.38t64 libpsl5t64 libpython3-stdlib libpython3.12-minimal
+#5 6.723   libpython3.12-stdlib libquadmath0 libreadline8t64 librhash0 librtmp1
+#5 6.723   libsasl2-2 libsasl2-modules-db libsframe1 libsqlite3-0 libssh-4
+#5 6.723   libstdc++-13-dev libsystemd-shared libtsan2 libubsan1 libuv1t64 libxml2
+#5 6.723   linux-libc-dev llvm-18-linker-tools lto-disabled-list make media-types
+#5 6.723   netbase openssl patch perl perl-base perl-modules-5.38 python3-minimal
+#5 6.723   python3.12 python3.12-minimal readline-common rpcsvc-proto systemd-dev
+#5 6.723   tzdata xz-utils
+#5 6.724 Suggested packages:
+#5 6.724   liblocale-gettext-perl cron quota ecryptfs-utils binutils-doc gprofng-gui
+#5 6.724   bzip2-doc clang-18-doc wasi-libc cmake-doc cmake-format elpa-cmake-mode
+#5 6.724   cpp-doc gcc-13-locales cpp-13-doc default-dbus-session-bus
+#5 6.724   | dbus-session-bus debian-keyring g++-multilib g++-13-multilib gcc-13-doc
+#5 6.724   gcc-multilib manpages-dev autoconf automake libtool flex bison gdb gcc-doc
+#5 6.724   gcc-13-multilib gdb-x86-64-linux-gnu gettext-base git-daemon-run
+#5 6.724   | git-daemon-sysvinit git-doc git-email git-gui gitk gitweb git-cvs
+#5 6.724   git-mediawiki git-svn lrzip glibc-doc gnupg | sq | sqop | pgpainless-cli
+#5 6.724   | sequoia-chameleon-gnupg bzr gdbm-l10n krb5-doc krb5-user libstdc++-13-doc
+#5 6.724   make-doc ed diffutils-doc perl-doc libterm-readline-gnu-perl
+#5 6.724   | libterm-readline-perl-perl libtap-harness-archive-perl python3-doc
+#5 6.724   python3-tk python3-venv python3.12-venv python3.12-doc binfmt-support
+#5 6.724   readline-doc systemd-container systemd-homed systemd-userdbd systemd-boot
+#5 6.724   libfido2-1 libip4tc2 libqrencode4 libtss2-esys-3.0.2-0 libtss2-mu-4.0.1-0
+#5 6.724   libtss2-rc0 libtss2-tcti-device0 polkitd
+#5 6.724 Recommended packages:
+#5 6.724   llvm-18-dev fakeroot gnupg | sq | sqop | pgpainless-cli
+#5 6.724   | sequoia-chameleon-gnupg libalgorithm-merge-perl less ssh-client manpages
+#5 6.724   manpages-dev libc-devtools libclang-rt-18-dev dmsetup libfile-fcntllock-perl
+#5 6.724   liblocale-gettext-perl krb5-locales libldap-common publicsuffix
+#5 6.724   libsasl2-modules networkd-dispatcher systemd-timesyncd | time-daemon
+#5 6.724   systemd-resolved libpam-systemd libnss-systemd
+#5 6.938 The following NEW packages will be installed:
+#5 6.938   adduser binutils binutils-common binutils-x86-64-linux-gnu build-essential
+#5 6.938   bzip2 ca-certificates clang clang-18 cmake cmake-data cpp cpp-13
+#5 6.938   cpp-13-x86-64-linux-gnu cpp-x86-64-linux-gnu dbus dbus-bin dbus-daemon
+#5 6.938   dbus-session-bus-common dbus-system-bus-common dpkg-dev g++ g++-13
+#5 6.938   g++-13-x86-64-linux-gnu g++-x86-64-linux-gnu gcc gcc-13 gcc-13-base
+#5 6.938   gcc-13-x86-64-linux-gnu gcc-x86-64-linux-gnu git git-man libapparmor1
+#5 6.938   libarchive13t64 libargon2-1 libasan8 libatomic1 libbinutils libbrotli1
+#5 6.938   libbsd0 libc-dev-bin libc6-dev libcc1-0 libclang-common-18-dev
+#5 6.938   libclang-cpp18 libclang1-18 libcrypt-dev libcryptsetup12 libctf-nobfd0
+#5 6.938   libctf0 libcurl3t64-gnutls libcurl4t64 libdbus-1-3 libdevmapper1.02.1
+#5 6.938   libdpkg-perl libedit2 liberror-perl libexpat1 libfdisk1 libgc1 libgcc-13-dev
+#5 6.939   libgdbm-compat4t64 libgdbm6t64 libgomp1 libgprofng0 libgssapi-krb5-2
+#5 6.939   libhwasan0 libicu74 libisl23 libitm1 libjansson4 libjson-c5 libjsoncpp25
+#5 6.939   libk5crypto3 libkeyutils1 libkmod2 libkrb5-3 libkrb5support0 libldap2
+#5 6.939   libllvm18 liblsan0 libmpc3 libmpfr6 libnghttp2-14 libobjc-13-dev libobjc4
+#5 6.939   libperl5.38t64 libpsl5t64 libpython3-stdlib libpython3.12-minimal
+#5 6.939   libpython3.12-stdlib libquadmath0 libreadline8t64 librhash0 librtmp1
+#5 6.939   libsasl2-2 libsasl2-modules-db libsframe1 libsqlite3-0 libssh-4
+#5 6.939   libstdc++-13-dev libsystemd-shared libtsan2 libubsan1 libuv1t64 libxml2
+#5 6.939   linux-libc-dev llvm-18-linker-tools lto-disabled-list make media-types
+#5 6.939   netbase ninja-build openssl patch perl perl-modules-5.38 python3
+#5 6.939   python3-minimal python3.12 python3.12-minimal readline-common rpcsvc-proto
+#5 6.940   systemd systemd-dev systemd-sysv tzdata xz-utils
+#5 6.941 The following packages will be upgraded:
+#5 6.941   perl-base
+#5 7.170 1 upgraded, 128 newly installed, 0 to remove and 2 not upgraded.
+#5 7.170 Need to get 181 MB of archives.
+#5 7.170 After this operation, 719 MB of additional disk space will be used.
+#5 7.170 Get:1 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 perl-base amd64 5.38.2-3.2ubuntu0.6 [1826 kB]
+#5 8.144 Get:2 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libpython3.12-minimal amd64 3.12.3-1ubuntu0.17 [839 kB]
+#5 8.191 Get:3 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libexpat1 amd64 2.6.1-2ubuntu0.6 [98.9 kB]
+#5 8.239 Get:4 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 python3.12-minimal amd64 3.12.3-1ubuntu0.17 [2335 kB]
+#5 8.382 Get:5 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 python3-minimal amd64 3.12.3-0ubuntu2.1 [27.4 kB]
+#5 8.383 Get:6 http://archive.ubuntu.com/ubuntu noble/main amd64 media-types all 10.1.0 [27.5 kB]
+#5 8.384 Get:7 http://archive.ubuntu.com/ubuntu noble/main amd64 netbase all 6.4 [13.1 kB]
+#5 8.384 Get:8 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 tzdata all 2026c-0ubuntu0.24.04.1 [280 kB]
+#5 8.397 Get:9 http://archive.ubuntu.com/ubuntu noble/main amd64 readline-common all 8.2-4build1 [56.5 kB]
+#5 8.425 Get:10 http://archive.ubuntu.com/ubuntu noble/main amd64 libreadline8t64 amd64 8.2-4build1 [153 kB]
+#5 8.430 Get:11 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libsqlite3-0 amd64 3.45.1-1ubuntu2.8 [702 kB]
+#5 8.455 Get:12 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libpython3.12-stdlib amd64 3.12.3-1ubuntu0.17 [2071 kB]
+#5 8.537 Get:13 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 python3.12 amd64 3.12.3-1ubuntu0.17 [651 kB]
+#5 8.549 Get:14 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libpython3-stdlib amd64 3.12.3-0ubuntu2.1 [10.1 kB]
+#5 8.549 Get:15 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 python3 amd64 3.12.3-0ubuntu2.1 [23.0 kB]
+#5 8.549 Get:16 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libapparmor1 amd64 4.0.1really4.0.1-0ubuntu0.24.04.8 [51.4 kB]
+#5 8.550 Get:17 http://archive.ubuntu.com/ubuntu noble/main amd64 libargon2-1 amd64 0~20190702+dfsg-4build1 [20.8 kB]
+#5 8.550 Get:18 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libdevmapper1.02.1 amd64 2:1.02.185-3ubuntu3.2 [139 kB]
+#5 8.611 Get:19 http://archive.ubuntu.com/ubuntu noble/main amd64 libjson-c5 amd64 0.17-1build1 [35.3 kB]
+#5 8.612 Get:20 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libcryptsetup12 amd64 2:2.7.0-1ubuntu4.2 [266 kB]
+#5 8.616 Get:21 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libfdisk1 amd64 2.39.3-9ubuntu6.6 [146 kB]
+#5 8.704 Get:22 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libkmod2 amd64 31+20240202-2ubuntu7.2 [51.8 kB]
+#5 8.705 Get:23 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libsystemd-shared amd64 255.4-1ubuntu8.17 [2077 kB]
+#5 8.729 Get:24 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 systemd-dev all 255.4-1ubuntu8.17 [107 kB]
+#5 8.730 Get:25 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 systemd amd64 255.4-1ubuntu8.17 [3475 kB]
+#5 8.818 Get:26 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 systemd-sysv amd64 255.4-1ubuntu8.17 [11.9 kB]
+#5 8.819 Get:27 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 perl-modules-5.38 all 5.38.2-3.2ubuntu0.6 [3110 kB]
+#5 8.898 Get:28 http://archive.ubuntu.com/ubuntu noble/main amd64 libgdbm6t64 amd64 1.23-5.1build1 [34.4 kB]
+#5 8.899 Get:29 http://archive.ubuntu.com/ubuntu noble/main amd64 libgdbm-compat4t64 amd64 1.23-5.1build1 [6710 B]
+#5 8.899 Get:30 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libperl5.38t64 amd64 5.38.2-3.2ubuntu0.6 [4864 kB]
+#5 8.938 Get:31 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 perl amd64 5.38.2-3.2ubuntu0.6 [231 kB]
+#5 8.940 Get:32 http://archive.ubuntu.com/ubuntu noble/main amd64 adduser all 3.137ubuntu1 [101 kB]
+#5 8.941 Get:33 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 openssl amd64 3.0.13-0ubuntu3.15 [1003 kB]
+#5 8.948 Get:34 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 ca-certificates all 20260601~24.04.1 [139 kB]
+#5 8.983 Get:35 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libdbus-1-3 amd64 1.14.10-4ubuntu4.1 [210 kB]
+#5 8.985 Get:36 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 dbus-bin amd64 1.14.10-4ubuntu4.1 [39.3 kB]
+#5 9.077 Get:37 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 dbus-session-bus-common all 1.14.10-4ubuntu4.1 [80.5 kB]
+#5 9.077 Get:38 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 dbus-daemon amd64 1.14.10-4ubuntu4.1 [118 kB]
+#5 9.079 Get:39 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 dbus-system-bus-common all 1.14.10-4ubuntu4.1 [81.6 kB]
+#5 9.079 Get:40 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 dbus amd64 1.14.10-4ubuntu4.1 [24.3 kB]
+#5 9.080 Get:41 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libbsd0 amd64 0.12.1-1build1.1 [41.2 kB]
+#5 9.080 Get:42 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libkrb5support0 amd64 1.20.1-6ubuntu2.10 [34.9 kB]
+#5 9.081 Get:43 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libk5crypto3 amd64 1.20.1-6ubuntu2.10 [81.9 kB]
+#5 9.082 Get:44 http://archive.ubuntu.com/ubuntu noble/main amd64 libkeyutils1 amd64 1.6.3-3build1 [9490 B]
+#5 9.170 Get:45 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libkrb5-3 amd64 1.20.1-6ubuntu2.10 [348 kB]
+#5 9.172 Get:46 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libgssapi-krb5-2 amd64 1.20.1-6ubuntu2.10 [143 kB]
+#5 9.263 Get:47 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libicu74 amd64 74.2-1ubuntu3.1 [10.9 MB]
+#5 9.360 Get:48 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libxml2 amd64 2.9.14+dfsg-1.3ubuntu3.9 [765 kB]
+#5 9.365 Get:49 http://archive.ubuntu.com/ubuntu noble/main amd64 libedit2 amd64 3.1-20230828-1build1 [97.6 kB]
+#5 9.366 Get:50 http://archive.ubuntu.com/ubuntu noble/main amd64 libjansson4 amd64 2.14-2build2 [32.8 kB]
+#5 9.367 Get:51 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libnghttp2-14 amd64 1.59.0-1ubuntu0.4 [74.6 kB]
+#5 9.367 Get:52 http://archive.ubuntu.com/ubuntu noble/main amd64 libpsl5t64 amd64 0.21.2-1.1build1 [57.1 kB]
+#5 9.367 Get:53 http://archive.ubuntu.com/ubuntu noble/main amd64 libuv1t64 amd64 1.48.0-1.1build1 [97.3 kB]
+#5 9.368 Get:54 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 xz-utils amd64 5.6.1+really5.4.5-1ubuntu0.3 [267 kB]
+#5 9.370 Get:55 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 binutils-common amd64 2.42-4ubuntu2.10 [240 kB]
+#5 9.372 Get:56 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libsframe1 amd64 2.42-4ubuntu2.10 [15.7 kB]
+#5 9.455 Get:57 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libbinutils amd64 2.42-4ubuntu2.10 [577 kB]
+#5 9.548 Get:58 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libctf-nobfd0 amd64 2.42-4ubuntu2.10 [98.0 kB]
+#5 9.550 Get:59 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libctf0 amd64 2.42-4ubuntu2.10 [94.5 kB]
+#5 9.550 Get:60 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libgprofng0 amd64 2.42-4ubuntu2.10 [849 kB]
+#5 9.556 Get:61 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 binutils-x86-64-linux-gnu amd64 2.42-4ubuntu2.10 [2463 kB]
+#5 9.570 Get:62 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 binutils amd64 2.42-4ubuntu2.10 [18.2 kB]
+#5 9.572 Get:63 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libc-dev-bin amd64 2.39-0ubuntu8.9 [20.4 kB]
+#5 9.572 Get:64 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 linux-libc-dev amd64 6.8.0-142.142 [1528 kB]
+#5 9.581 Get:65 http://archive.ubuntu.com/ubuntu noble/main amd64 libcrypt-dev amd64 1:4.4.36-4build1 [112 kB]
+#5 9.582 Get:66 http://archive.ubuntu.com/ubuntu noble/main amd64 rpcsvc-proto amd64 1.4.2-0ubuntu7 [67.4 kB]
+#5 9.641 Get:67 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libc6-dev amd64 2.39-0ubuntu8.9 [2126 kB]
+#5 9.735 Get:68 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 gcc-13-base amd64 13.3.0-6ubuntu2~24.04.1 [51.6 kB]
+#5 9.737 Get:69 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libisl23 amd64 0.26-3build1.1 [680 kB]
+#5 9.740 Get:70 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libmpfr6 amd64 4.2.1-1build1.1 [353 kB]
+#5 9.743 Get:71 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libmpc3 amd64 1.3.1-1build1.1 [54.6 kB]
+#5 9.743 Get:72 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 cpp-13-x86-64-linux-gnu amd64 13.3.0-6ubuntu2~24.04.1 [10.7 MB]
+#5 9.806 Get:73 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 cpp-13 amd64 13.3.0-6ubuntu2~24.04.1 [1042 B]
+#5 9.807 Get:74 http://archive.ubuntu.com/ubuntu noble/main amd64 cpp-x86-64-linux-gnu amd64 4:13.2.0-7ubuntu1 [5326 B]
+#5 9.807 Get:75 http://archive.ubuntu.com/ubuntu noble/main amd64 cpp amd64 4:13.2.0-7ubuntu1 [22.4 kB]
+#5 9.807 Get:76 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libcc1-0 amd64 14.2.0-4ubuntu2~24.04.1 [48.0 kB]
+#5 9.829 Get:77 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libgomp1 amd64 14.2.0-4ubuntu2~24.04.1 [148 kB]
+#5 9.922 Get:78 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libitm1 amd64 14.2.0-4ubuntu2~24.04.1 [29.7 kB]
+#5 9.923 Get:79 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libatomic1 amd64 14.2.0-4ubuntu2~24.04.1 [10.5 kB]
+#5 9.923 Get:80 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libasan8 amd64 14.2.0-4ubuntu2~24.04.1 [3027 kB]
+#5 9.942 Get:81 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 liblsan0 amd64 14.2.0-4ubuntu2~24.04.1 [1322 kB]
+#5 9.951 Get:82 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libtsan2 amd64 14.2.0-4ubuntu2~24.04.1 [2772 kB]
+#5 9.967 Get:83 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libubsan1 amd64 14.2.0-4ubuntu2~24.04.1 [1184 kB]
+#5 9.975 Get:84 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libhwasan0 amd64 14.2.0-4ubuntu2~24.04.1 [1641 kB]
+#5 9.984 Get:85 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libquadmath0 amd64 14.2.0-4ubuntu2~24.04.1 [153 kB]
+#5 9.986 Get:86 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libgcc-13-dev amd64 13.3.0-6ubuntu2~24.04.1 [2681 kB]
+#5 10.02 Get:87 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 gcc-13-x86-64-linux-gnu amd64 13.3.0-6ubuntu2~24.04.1 [21.1 MB]
+#5 10.21 Get:88 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 gcc-13 amd64 13.3.0-6ubuntu2~24.04.1 [494 kB]
+#5 10.21 Get:89 http://archive.ubuntu.com/ubuntu noble/main amd64 gcc-x86-64-linux-gnu amd64 4:13.2.0-7ubuntu1 [1212 B]
+#5 10.21 Get:90 http://archive.ubuntu.com/ubuntu noble/main amd64 gcc amd64 4:13.2.0-7ubuntu1 [5018 B]
+#5 10.21 Get:91 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libstdc++-13-dev amd64 13.3.0-6ubuntu2~24.04.1 [2420 kB]
+#5 10.23 Get:92 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 g++-13-x86-64-linux-gnu amd64 13.3.0-6ubuntu2~24.04.1 [12.2 MB]
+#5 10.30 Get:93 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 g++-13 amd64 13.3.0-6ubuntu2~24.04.1 [16.0 kB]
+#5 10.30 Get:94 http://archive.ubuntu.com/ubuntu noble/main amd64 g++-x86-64-linux-gnu amd64 4:13.2.0-7ubuntu1 [964 B]
+#5 10.30 Get:95 http://archive.ubuntu.com/ubuntu noble/main amd64 g++ amd64 4:13.2.0-7ubuntu1 [1100 B]
+#5 10.30 Get:96 http://archive.ubuntu.com/ubuntu noble/main amd64 make amd64 4.3-4.1build2 [180 kB]
+#5 10.30 Get:97 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libdpkg-perl all 1.22.6ubuntu6.6 [268 kB]
+#5 10.40 Get:98 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 bzip2 amd64 1.0.8-5.1ubuntu0.1 [34.6 kB]
+#5 10.40 Get:99 http://archive.ubuntu.com/ubuntu noble/main amd64 patch amd64 2.7.6-7build3 [104 kB]
+#5 10.40 Get:100 http://archive.ubuntu.com/ubuntu noble/main amd64 lto-disabled-list all 47 [12.4 kB]
+#5 10.40 Get:101 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 dpkg-dev all 1.22.6ubuntu6.6 [1074 kB]
+#5 10.46 Get:102 http://archive.ubuntu.com/ubuntu noble/main amd64 build-essential amd64 12.10ubuntu1 [4928 B]
+#5 10.48 Get:103 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libllvm18 amd64 1:18.1.3-1ubuntu1 [27.5 MB]
+#5 10.98 Get:104 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libclang-cpp18 amd64 1:18.1.3-1ubuntu1 [13.5 MB]
+#5 11.06 Get:105 http://archive.ubuntu.com/ubuntu noble/main amd64 libgc1 amd64 1:8.2.6-1build1 [90.3 kB]
+#5 11.06 Get:106 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 libobjc4 amd64 14.2.0-4ubuntu2~24.04.1 [47.1 kB]
+#5 11.06 Get:107 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 libobjc-13-dev amd64 13.3.0-6ubuntu2~24.04.1 [194 kB]
+#5 11.07 Get:108 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 libclang-common-18-dev amd64 1:18.1.3-1ubuntu1 [736 kB]
+#5 11.07 Get:109 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 llvm-18-linker-tools amd64 1:18.1.3-1ubuntu1 [1314 kB]
+#5 11.08 Get:110 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libclang1-18 amd64 1:18.1.3-1ubuntu1 [7803 kB]
+#5 11.13 Get:111 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 clang-18 amd64 1:18.1.3-1ubuntu1 [80.0 kB]
+#5 11.13 Get:112 http://archive.ubuntu.com/ubuntu noble/universe amd64 clang amd64 1:18.0-59~exp2 [5846 B]
+#5 11.13 Get:113 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libarchive13t64 amd64 3.7.2-2ubuntu0.8 [383 kB]
+#5 11.13 Get:114 http://archive.ubuntu.com/ubuntu noble/main amd64 libbrotli1 amd64 1.1.0-2build2 [331 kB]
+#5 11.13 Get:115 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libsasl2-modules-db amd64 2.1.28+dfsg1-5ubuntu3.1 [20.4 kB]
+#5 11.13 Get:116 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libsasl2-2 amd64 2.1.28+dfsg1-5ubuntu3.1 [53.2 kB]
+#5 11.13 Get:117 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libldap2 amd64 2.6.10+dfsg-0ubuntu0.24.04.1 [198 kB]
+#5 11.13 Get:118 http://archive.ubuntu.com/ubuntu noble/main amd64 librtmp1 amd64 2.4+20151223.gitfa8646d.1-2build7 [56.3 kB]
+#5 11.14 Get:119 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libssh-4 amd64 0.10.6-2ubuntu0.5 [191 kB]
+#5 11.15 Get:120 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libcurl4t64 amd64 8.5.0-2ubuntu10.15 [343 kB]
+#5 11.18 Get:121 http://archive.ubuntu.com/ubuntu noble/main amd64 libjsoncpp25 amd64 1.9.5-6build1 [82.8 kB]
+#5 11.18 Get:122 http://archive.ubuntu.com/ubuntu noble/main amd64 librhash0 amd64 1.4.3-3build1 [129 kB]
+#5 11.18 Get:123 http://archive.ubuntu.com/ubuntu noble/main amd64 cmake-data all 3.28.3-1build7 [2155 kB]
+#5 11.19 Get:124 http://archive.ubuntu.com/ubuntu noble/main amd64 cmake amd64 3.28.3-1build7 [11.2 MB]
+#5 11.26 Get:125 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libcurl3t64-gnutls amd64 8.5.0-2ubuntu10.15 [336 kB]
+#5 11.26 Get:126 http://archive.ubuntu.com/ubuntu noble/main amd64 liberror-perl all 0.17029-2 [25.6 kB]
+#5 11.26 Get:127 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 git-man all 1:2.43.0-1ubuntu7.3 [1100 kB]
+#5 11.27 Get:128 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 git amd64 1:2.43.0-1ubuntu7.3 [3680 kB]
+#5 11.29 Get:129 http://archive.ubuntu.com/ubuntu noble/universe amd64 ninja-build amd64 1.11.1-2 [129 kB]
+#5 12.10 debconf: delaying package configuration, since apt-utils is not installed
+#5 12.23 Fetched 181 MB in 4s (41.8 MB/s)
+#5 12.36 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 4381 files and directories currently installed.)
+#5 12.65 Preparing to unpack .../perl-base_5.38.2-3.2ubuntu0.6_amd64.deb ...
+#5 12.69 Unpacking perl-base (5.38.2-3.2ubuntu0.6) over (5.38.2-3.2ubuntu0.4) ...
+#5 13.90 Setting up perl-base (5.38.2-3.2ubuntu0.6) ...
+#5 13.91 Selecting previously unselected package libpython3.12-minimal:amd64.
+#5 13.91 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 4381 files and directories currently installed.)
+#5 13.92 Preparing to unpack .../libpython3.12-minimal_3.12.3-1ubuntu0.17_amd64.deb ...
+#5 13.92 Unpacking libpython3.12-minimal:amd64 (3.12.3-1ubuntu0.17) ...
+#5 13.99 Selecting previously unselected package libexpat1:amd64.
+#5 13.99 Preparing to unpack .../libexpat1_2.6.1-2ubuntu0.6_amd64.deb ...
+#5 13.99 Unpacking libexpat1:amd64 (2.6.1-2ubuntu0.6) ...
+#5 14.01 Selecting previously unselected package python3.12-minimal.
+#5 14.01 Preparing to unpack .../python3.12-minimal_3.12.3-1ubuntu0.17_amd64.deb ...
+#5 14.05 Unpacking python3.12-minimal (3.12.3-1ubuntu0.17) ...
+#5 14.09 Setting up libpython3.12-minimal:amd64 (3.12.3-1ubuntu0.17) ...
+#5 14.10 Setting up libexpat1:amd64 (2.6.1-2ubuntu0.6) ...
+#5 14.10 Setting up python3.12-minimal (3.12.3-1ubuntu0.17) ...
+#5 14.89 Selecting previously unselected package python3-minimal.
+#5 14.89 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 4700 files and directories currently installed.)
+#5 14.90 Preparing to unpack .../0-python3-minimal_3.12.3-0ubuntu2.1_amd64.deb ...
+#5 14.90 Unpacking python3-minimal (3.12.3-0ubuntu2.1) ...
+#5 14.91 Selecting previously unselected package media-types.
+#5 14.91 Preparing to unpack .../1-media-types_10.1.0_all.deb ...
+#5 14.91 Unpacking media-types (10.1.0) ...
+#5 14.93 Selecting previously unselected package netbase.
+#5 14.93 Preparing to unpack .../2-netbase_6.4_all.deb ...
+#5 14.93 Unpacking netbase (6.4) ...
+#5 14.94 Selecting previously unselected package tzdata.
+#5 14.94 Preparing to unpack .../3-tzdata_2026c-0ubuntu0.24.04.1_all.deb ...
+#5 14.94 Unpacking tzdata (2026c-0ubuntu0.24.04.1) ...
+#5 15.03 Selecting previously unselected package readline-common.
+#5 15.03 Preparing to unpack .../4-readline-common_8.2-4build1_all.deb ...
+#5 15.03 Unpacking readline-common (8.2-4build1) ...
+#5 15.05 Selecting previously unselected package libreadline8t64:amd64.
+#5 15.05 Preparing to unpack .../5-libreadline8t64_8.2-4build1_amd64.deb ...
+#5 15.06 Adding 'diversion of /lib/x86_64-linux-gnu/libhistory.so.8 to /lib/x86_64-linux-gnu/libhistory.so.8.usr-is-merged by libreadline8t64'
+#5 15.07 Adding 'diversion of /lib/x86_64-linux-gnu/libhistory.so.8.2 to /lib/x86_64-linux-gnu/libhistory.so.8.2.usr-is-merged by libreadline8t64'
+#5 15.07 Adding 'diversion of /lib/x86_64-linux-gnu/libreadline.so.8 to /lib/x86_64-linux-gnu/libreadline.so.8.usr-is-merged by libreadline8t64'
+#5 15.07 Adding 'diversion of /lib/x86_64-linux-gnu/libreadline.so.8.2 to /lib/x86_64-linux-gnu/libreadline.so.8.2.usr-is-merged by libreadline8t64'
+#5 15.07 Unpacking libreadline8t64:amd64 (8.2-4build1) ...
+#5 15.09 Selecting previously unselected package libsqlite3-0:amd64.
+#5 15.09 Preparing to unpack .../6-libsqlite3-0_3.45.1-1ubuntu2.8_amd64.deb ...
+#5 15.09 Unpacking libsqlite3-0:amd64 (3.45.1-1ubuntu2.8) ...
+#5 15.11 Selecting previously unselected package libpython3.12-stdlib:amd64.
+#5 15.11 Preparing to unpack .../7-libpython3.12-stdlib_3.12.3-1ubuntu0.17_amd64.deb ...
+#5 15.11 Unpacking libpython3.12-stdlib:amd64 (3.12.3-1ubuntu0.17) ...
+#5 15.21 Selecting previously unselected package python3.12.
+#5 15.21 Preparing to unpack .../8-python3.12_3.12.3-1ubuntu0.17_amd64.deb ...
+#5 15.21 Unpacking python3.12 (3.12.3-1ubuntu0.17) ...
+#5 15.23 Selecting previously unselected package libpython3-stdlib:amd64.
+#5 15.23 Preparing to unpack .../9-libpython3-stdlib_3.12.3-0ubuntu2.1_amd64.deb ...
+#5 15.23 Unpacking libpython3-stdlib:amd64 (3.12.3-0ubuntu2.1) ...
+#5 15.25 Setting up python3-minimal (3.12.3-0ubuntu2.1) ...
+#5 15.38 Selecting previously unselected package python3.
+#5 15.38 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 5706 files and directories currently installed.)
+#5 15.38 Preparing to unpack .../00-python3_3.12.3-0ubuntu2.1_amd64.deb ...
+#5 15.42 Unpacking python3 (3.12.3-0ubuntu2.1) ...
+#5 15.44 Selecting previously unselected package libapparmor1:amd64.
+#5 15.44 Preparing to unpack .../01-libapparmor1_4.0.1really4.0.1-0ubuntu0.24.04.8_amd64.deb ...
+#5 15.44 Unpacking libapparmor1:amd64 (4.0.1really4.0.1-0ubuntu0.24.04.8) ...
+#5 15.45 Selecting previously unselected package libargon2-1:amd64.
+#5 15.45 Preparing to unpack .../02-libargon2-1_0~20190702+dfsg-4build1_amd64.deb ...
+#5 15.45 Unpacking libargon2-1:amd64 (0~20190702+dfsg-4build1) ...
+#5 15.46 Selecting previously unselected package libdevmapper1.02.1:amd64.
+#5 15.46 Preparing to unpack .../03-libdevmapper1.02.1_2%3a1.02.185-3ubuntu3.2_amd64.deb ...
+#5 15.47 Unpacking libdevmapper1.02.1:amd64 (2:1.02.185-3ubuntu3.2) ...
+#5 15.48 Selecting previously unselected package libjson-c5:amd64.
+#5 15.48 Preparing to unpack .../04-libjson-c5_0.17-1build1_amd64.deb ...
+#5 15.48 Unpacking libjson-c5:amd64 (0.17-1build1) ...
+#5 15.49 Selecting previously unselected package libcryptsetup12:amd64.
+#5 15.49 Preparing to unpack .../05-libcryptsetup12_2%3a2.7.0-1ubuntu4.2_amd64.deb ...
+#5 15.49 Unpacking libcryptsetup12:amd64 (2:2.7.0-1ubuntu4.2) ...
+#5 15.51 Selecting previously unselected package libfdisk1:amd64.
+#5 15.51 Preparing to unpack .../06-libfdisk1_2.39.3-9ubuntu6.6_amd64.deb ...
+#5 15.51 Unpacking libfdisk1:amd64 (2.39.3-9ubuntu6.6) ...
+#5 15.52 Selecting previously unselected package libkmod2:amd64.
+#5 15.53 Preparing to unpack .../07-libkmod2_31+20240202-2ubuntu7.2_amd64.deb ...
+#5 15.53 Unpacking libkmod2:amd64 (31+20240202-2ubuntu7.2) ...
+#5 15.54 Selecting previously unselected package libsystemd-shared:amd64.
+#5 15.54 Preparing to unpack .../08-libsystemd-shared_255.4-1ubuntu8.17_amd64.deb ...
+#5 15.54 Unpacking libsystemd-shared:amd64 (255.4-1ubuntu8.17) ...
+#5 15.57 Selecting previously unselected package systemd-dev.
+#5 15.58 Preparing to unpack .../09-systemd-dev_255.4-1ubuntu8.17_all.deb ...
+#5 15.58 Unpacking systemd-dev (255.4-1ubuntu8.17) ...
+#5 15.60 Selecting previously unselected package systemd.
+#5 15.60 Preparing to unpack .../10-systemd_255.4-1ubuntu8.17_amd64.deb ...
+#5 15.61 Unpacking systemd (255.4-1ubuntu8.17) ...
+#5 15.83 Setting up libapparmor1:amd64 (4.0.1really4.0.1-0ubuntu0.24.04.8) ...
+#5 15.83 Setting up libargon2-1:amd64 (0~20190702+dfsg-4build1) ...
+#5 15.83 Setting up libdevmapper1.02.1:amd64 (2:1.02.185-3ubuntu3.2) ...
+#5 15.83 Setting up libjson-c5:amd64 (0.17-1build1) ...
+#5 15.83 Setting up libcryptsetup12:amd64 (2:2.7.0-1ubuntu4.2) ...
+#5 15.83 Setting up libfdisk1:amd64 (2.39.3-9ubuntu6.6) ...
+#5 15.84 Setting up libkmod2:amd64 (31+20240202-2ubuntu7.2) ...
+#5 15.84 Setting up libsystemd-shared:amd64 (255.4-1ubuntu8.17) ...
+#5 15.84 Setting up systemd-dev (255.4-1ubuntu8.17) ...
+#5 15.84 Setting up systemd (255.4-1ubuntu8.17) ...
+#5 15.97 Created symlink /etc/systemd/system/getty.target.wants/getty@tty1.service → /usr/lib/systemd/system/getty@.service.
+#5 15.97 Created symlink /etc/systemd/system/multi-user.target.wants/remote-fs.target → /usr/lib/systemd/system/remote-fs.target.
+#5 15.97 Created symlink /etc/systemd/system/sysinit.target.wants/systemd-pstore.service → /usr/lib/systemd/system/systemd-pstore.service.
+#5 16.01 Initializing machine ID from random generator.
+#5 16.08 /usr/lib/tmpfiles.d/systemd-network.conf:10: Failed to resolve user 'systemd-network': No such process
+#5 16.08 /usr/lib/tmpfiles.d/systemd-network.conf:11: Failed to resolve user 'systemd-network': No such process
+#5 16.08 /usr/lib/tmpfiles.d/systemd-network.conf:12: Failed to resolve user 'systemd-network': No such process
+#5 16.08 /usr/lib/tmpfiles.d/systemd-network.conf:13: Failed to resolve user 'systemd-network': No such process
+#5 16.08 /usr/lib/tmpfiles.d/systemd.conf:22: Failed to resolve group 'systemd-journal': No such process
+#5 16.08 /usr/lib/tmpfiles.d/systemd.conf:23: Failed to resolve group 'systemd-journal': No such process
+#5 16.08 /usr/lib/tmpfiles.d/systemd.conf:28: Failed to resolve group 'systemd-journal': No such process
+#5 16.08 /usr/lib/tmpfiles.d/systemd.conf:29: Failed to resolve group 'systemd-journal': No such process
+#5 16.08 /usr/lib/tmpfiles.d/systemd.conf:30: Failed to resolve group 'systemd-journal': No such process
+#5 16.09 Creating group 'systemd-journal' with GID 999.
+#5 16.09 Creating group 'systemd-network' with GID 998.
+#5 16.09 Creating user 'systemd-network' (systemd Network Management) with UID 998 and GID 998.
+#5 16.12 Selecting previously unselected package systemd-sysv.
+#5 16.12 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 6756 files and directories currently installed.)
+#5 16.13 Preparing to unpack .../0-systemd-sysv_255.4-1ubuntu8.17_amd64.deb ...
+#5 16.13 Unpacking systemd-sysv (255.4-1ubuntu8.17) ...
+#5 16.14 Selecting previously unselected package perl-modules-5.38.
+#5 16.15 Preparing to unpack .../1-perl-modules-5.38_5.38.2-3.2ubuntu0.6_all.deb ...
+#5 16.15 Unpacking perl-modules-5.38 (5.38.2-3.2ubuntu0.6) ...
+#5 16.41 Selecting previously unselected package libgdbm6t64:amd64.
+#5 16.41 Preparing to unpack .../2-libgdbm6t64_1.23-5.1build1_amd64.deb ...
+#5 16.41 Unpacking libgdbm6t64:amd64 (1.23-5.1build1) ...
+#5 16.42 Selecting previously unselected package libgdbm-compat4t64:amd64.
+#5 16.42 Preparing to unpack .../3-libgdbm-compat4t64_1.23-5.1build1_amd64.deb ...
+#5 16.42 Unpacking libgdbm-compat4t64:amd64 (1.23-5.1build1) ...
+#5 16.43 Selecting previously unselected package libperl5.38t64:amd64.
+#5 16.43 Preparing to unpack .../4-libperl5.38t64_5.38.2-3.2ubuntu0.6_amd64.deb ...
+#5 16.44 Unpacking libperl5.38t64:amd64 (5.38.2-3.2ubuntu0.6) ...
+#5 16.60 Selecting previously unselected package perl.
+#5 16.60 Preparing to unpack .../5-perl_5.38.2-3.2ubuntu0.6_amd64.deb ...
+#5 16.61 Unpacking perl (5.38.2-3.2ubuntu0.6) ...
+#5 16.63 Selecting previously unselected package adduser.
+#5 16.63 Preparing to unpack .../6-adduser_3.137ubuntu1_all.deb ...
+#5 16.63 Unpacking adduser (3.137ubuntu1) ...
+#5 16.68 Setting up adduser (3.137ubuntu1) ...
+#5 16.70 Selecting previously unselected package openssl.
+#5 16.70 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 8834 files and directories currently installed.)
+#5 16.71 Preparing to unpack .../00-openssl_3.0.13-0ubuntu3.15_amd64.deb ...
+#5 16.71 Unpacking openssl (3.0.13-0ubuntu3.15) ...
+#5 16.75 Selecting previously unselected package ca-certificates.
+#5 16.75 Preparing to unpack .../01-ca-certificates_20260601~24.04.1_all.deb ...
+#5 16.75 Unpacking ca-certificates (20260601~24.04.1) ...
+#5 16.78 Selecting previously unselected package libdbus-1-3:amd64.
+#5 16.78 Preparing to unpack .../02-libdbus-1-3_1.14.10-4ubuntu4.1_amd64.deb ...
+#5 16.78 Unpacking libdbus-1-3:amd64 (1.14.10-4ubuntu4.1) ...
+#5 16.80 Selecting previously unselected package dbus-bin.
+#5 16.80 Preparing to unpack .../03-dbus-bin_1.14.10-4ubuntu4.1_amd64.deb ...
+#5 16.80 Unpacking dbus-bin (1.14.10-4ubuntu4.1) ...
+#5 16.82 Selecting previously unselected package dbus-session-bus-common.
+#5 16.82 Preparing to unpack .../04-dbus-session-bus-common_1.14.10-4ubuntu4.1_all.deb ...
+#5 16.82 Unpacking dbus-session-bus-common (1.14.10-4ubuntu4.1) ...
+#5 16.83 Selecting previously unselected package dbus-daemon.
+#5 16.83 Preparing to unpack .../05-dbus-daemon_1.14.10-4ubuntu4.1_amd64.deb ...
+#5 16.83 Unpacking dbus-daemon (1.14.10-4ubuntu4.1) ...
+#5 16.85 Selecting previously unselected package dbus-system-bus-common.
+#5 16.85 Preparing to unpack .../06-dbus-system-bus-common_1.14.10-4ubuntu4.1_all.deb ...
+#5 16.85 Unpacking dbus-system-bus-common (1.14.10-4ubuntu4.1) ...
+#5 16.86 Selecting previously unselected package dbus.
+#5 16.86 Preparing to unpack .../07-dbus_1.14.10-4ubuntu4.1_amd64.deb ...
+#5 16.87 Unpacking dbus (1.14.10-4ubuntu4.1) ...
+#5 16.88 Selecting previously unselected package libbsd0:amd64.
+#5 16.88 Preparing to unpack .../08-libbsd0_0.12.1-1build1.1_amd64.deb ...
+#5 16.88 Unpacking libbsd0:amd64 (0.12.1-1build1.1) ...
+#5 16.90 Selecting previously unselected package libkrb5support0:amd64.
+#5 16.90 Preparing to unpack .../09-libkrb5support0_1.20.1-6ubuntu2.10_amd64.deb ...
+#5 16.90 Unpacking libkrb5support0:amd64 (1.20.1-6ubuntu2.10) ...
+#5 16.91 Selecting previously unselected package libk5crypto3:amd64.
+#5 16.91 Preparing to unpack .../10-libk5crypto3_1.20.1-6ubuntu2.10_amd64.deb ...
+#5 16.91 Unpacking libk5crypto3:amd64 (1.20.1-6ubuntu2.10) ...
+#5 16.93 Selecting previously unselected package libkeyutils1:amd64.
+#5 16.93 Preparing to unpack .../11-libkeyutils1_1.6.3-3build1_amd64.deb ...
+#5 16.93 Unpacking libkeyutils1:amd64 (1.6.3-3build1) ...
+#5 16.94 Selecting previously unselected package libkrb5-3:amd64.
+#5 16.94 Preparing to unpack .../12-libkrb5-3_1.20.1-6ubuntu2.10_amd64.deb ...
+#5 16.94 Unpacking libkrb5-3:amd64 (1.20.1-6ubuntu2.10) ...
+#5 16.96 Selecting previously unselected package libgssapi-krb5-2:amd64.
+#5 16.96 Preparing to unpack .../13-libgssapi-krb5-2_1.20.1-6ubuntu2.10_amd64.deb ...
+#5 16.96 Unpacking libgssapi-krb5-2:amd64 (1.20.1-6ubuntu2.10) ...
+#5 16.97 Selecting previously unselected package libicu74:amd64.
+#5 16.98 Preparing to unpack .../14-libicu74_74.2-1ubuntu3.1_amd64.deb ...
+#5 16.98 Unpacking libicu74:amd64 (74.2-1ubuntu3.1) ...
+#5 17.12 Selecting previously unselected package libxml2:amd64.
+#5 17.12 Preparing to unpack .../15-libxml2_2.9.14+dfsg-1.3ubuntu3.9_amd64.deb ...
+#5 17.12 Unpacking libxml2:amd64 (2.9.14+dfsg-1.3ubuntu3.9) ...
+#5 17.14 Selecting previously unselected package libedit2:amd64.
+#5 17.14 Preparing to unpack .../16-libedit2_3.1-20230828-1build1_amd64.deb ...
+#5 17.14 Unpacking libedit2:amd64 (3.1-20230828-1build1) ...
+#5 17.16 Selecting previously unselected package libjansson4:amd64.
+#5 17.16 Preparing to unpack .../17-libjansson4_2.14-2build2_amd64.deb ...
+#5 17.16 Unpacking libjansson4:amd64 (2.14-2build2) ...
+#5 17.17 Selecting previously unselected package libnghttp2-14:amd64.
+#5 17.17 Preparing to unpack .../18-libnghttp2-14_1.59.0-1ubuntu0.4_amd64.deb ...
+#5 17.17 Unpacking libnghttp2-14:amd64 (1.59.0-1ubuntu0.4) ...
+#5 17.19 Selecting previously unselected package libpsl5t64:amd64.
+#5 17.19 Preparing to unpack .../19-libpsl5t64_0.21.2-1.1build1_amd64.deb ...
+#5 17.19 Unpacking libpsl5t64:amd64 (0.21.2-1.1build1) ...
+#5 17.20 Selecting previously unselected package libuv1t64:amd64.
+#5 17.20 Preparing to unpack .../20-libuv1t64_1.48.0-1.1build1_amd64.deb ...
+#5 17.20 Unpacking libuv1t64:amd64 (1.48.0-1.1build1) ...
+#5 17.22 Selecting previously unselected package xz-utils.
+#5 17.22 Preparing to unpack .../21-xz-utils_5.6.1+really5.4.5-1ubuntu0.3_amd64.deb ...
+#5 17.22 Unpacking xz-utils (5.6.1+really5.4.5-1ubuntu0.3) ...
+#5 17.26 Selecting previously unselected package binutils-common:amd64.
+#5 17.27 Preparing to unpack .../22-binutils-common_2.42-4ubuntu2.10_amd64.deb ...
+#5 17.27 Unpacking binutils-common:amd64 (2.42-4ubuntu2.10) ...
+#5 17.28 Selecting previously unselected package libsframe1:amd64.
+#5 17.28 Preparing to unpack .../23-libsframe1_2.42-4ubuntu2.10_amd64.deb ...
+#5 17.28 Unpacking libsframe1:amd64 (2.42-4ubuntu2.10) ...
+#5 17.30 Selecting previously unselected package libbinutils:amd64.
+#5 17.30 Preparing to unpack .../24-libbinutils_2.42-4ubuntu2.10_amd64.deb ...
+#5 17.30 Unpacking libbinutils:amd64 (2.42-4ubuntu2.10) ...
+#5 17.32 Selecting previously unselected package libctf-nobfd0:amd64.
+#5 17.32 Preparing to unpack .../25-libctf-nobfd0_2.42-4ubuntu2.10_amd64.deb ...
+#5 17.32 Unpacking libctf-nobfd0:amd64 (2.42-4ubuntu2.10) ...
+#5 17.33 Selecting previously unselected package libctf0:amd64.
+#5 17.34 Preparing to unpack .../26-libctf0_2.42-4ubuntu2.10_amd64.deb ...
+#5 17.34 Unpacking libctf0:amd64 (2.42-4ubuntu2.10) ...
+#5 17.35 Selecting previously unselected package libgprofng0:amd64.
+#5 17.35 Preparing to unpack .../27-libgprofng0_2.42-4ubuntu2.10_amd64.deb ...
+#5 17.35 Unpacking libgprofng0:amd64 (2.42-4ubuntu2.10) ...
+#5 17.38 Selecting previously unselected package binutils-x86-64-linux-gnu.
+#5 17.38 Preparing to unpack .../28-binutils-x86-64-linux-gnu_2.42-4ubuntu2.10_amd64.deb ...
+#5 17.38 Unpacking binutils-x86-64-linux-gnu (2.42-4ubuntu2.10) ...
+#5 17.45 Selecting previously unselected package binutils.
+#5 17.45 Preparing to unpack .../29-binutils_2.42-4ubuntu2.10_amd64.deb ...
+#5 17.45 Unpacking binutils (2.42-4ubuntu2.10) ...
+#5 17.47 Selecting previously unselected package libc-dev-bin.
+#5 17.47 Preparing to unpack .../30-libc-dev-bin_2.39-0ubuntu8.9_amd64.deb ...
+#5 17.47 Unpacking libc-dev-bin (2.39-0ubuntu8.9) ...
+#5 17.48 Selecting previously unselected package linux-libc-dev:amd64.
+#5 17.48 Preparing to unpack .../31-linux-libc-dev_6.8.0-142.142_amd64.deb ...
+#5 17.48 Unpacking linux-libc-dev:amd64 (6.8.0-142.142) ...
+#5 17.67 Selecting previously unselected package libcrypt-dev:amd64.
+#5 17.67 Preparing to unpack .../32-libcrypt-dev_1%3a4.4.36-4build1_amd64.deb ...
+#5 17.67 Unpacking libcrypt-dev:amd64 (1:4.4.36-4build1) ...
+#5 17.69 Selecting previously unselected package rpcsvc-proto.
+#5 17.69 Preparing to unpack .../33-rpcsvc-proto_1.4.2-0ubuntu7_amd64.deb ...
+#5 17.69 Unpacking rpcsvc-proto (1.4.2-0ubuntu7) ...
+#5 17.70 Selecting previously unselected package libc6-dev:amd64.
+#5 17.71 Preparing to unpack .../34-libc6-dev_2.39-0ubuntu8.9_amd64.deb ...
+#5 17.71 Unpacking libc6-dev:amd64 (2.39-0ubuntu8.9) ...
+#5 17.84 Selecting previously unselected package gcc-13-base:amd64.
+#5 17.84 Preparing to unpack .../35-gcc-13-base_13.3.0-6ubuntu2~24.04.1_amd64.deb ...
+#5 17.84 Unpacking gcc-13-base:amd64 (13.3.0-6ubuntu2~24.04.1) ...
+#5 17.85 Selecting previously unselected package libisl23:amd64.
+#5 17.86 Preparing to unpack .../36-libisl23_0.26-3build1.1_amd64.deb ...
+#5 17.86 Unpacking libisl23:amd64 (0.26-3build1.1) ...
+#5 17.88 Selecting previously unselected package libmpfr6:amd64.
+#5 17.88 Preparing to unpack .../37-libmpfr6_4.2.1-1build1.1_amd64.deb ...
+#5 17.88 Unpacking libmpfr6:amd64 (4.2.1-1build1.1) ...
+#5 17.90 Selecting previously unselected package libmpc3:amd64.
+#5 17.90 Preparing to unpack .../38-libmpc3_1.3.1-1build1.1_amd64.deb ...
+#5 17.90 Unpacking libmpc3:amd64 (1.3.1-1build1.1) ...
+#5 17.91 Selecting previously unselected package cpp-13-x86-64-linux-gnu.
+#5 17.91 Preparing to unpack .../39-cpp-13-x86-64-linux-gnu_13.3.0-6ubuntu2~24.04.1_amd64.deb ...
+#5 17.91 Unpacking cpp-13-x86-64-linux-gnu (13.3.0-6ubuntu2~24.04.1) ...
+#5 18.04 Selecting previously unselected package cpp-13.
+#5 18.04 Preparing to unpack .../40-cpp-13_13.3.0-6ubuntu2~24.04.1_amd64.deb ...
+#5 18.05 Unpacking cpp-13 (13.3.0-6ubuntu2~24.04.1) ...
+#5 18.06 Selecting previously unselected package cpp-x86-64-linux-gnu.
+#5 18.06 Preparing to unpack .../41-cpp-x86-64-linux-gnu_4%3a13.2.0-7ubuntu1_amd64.deb ...
+#5 18.06 Unpacking cpp-x86-64-linux-gnu (4:13.2.0-7ubuntu1) ...
+#5 18.07 Selecting previously unselected package cpp.
+#5 18.07 Preparing to unpack .../42-cpp_4%3a13.2.0-7ubuntu1_amd64.deb ...
+#5 18.08 Unpacking cpp (4:13.2.0-7ubuntu1) ...
+#5 18.09 Selecting previously unselected package libcc1-0:amd64.
+#5 18.09 Preparing to unpack .../43-libcc1-0_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#5 18.10 Unpacking libcc1-0:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 18.11 Selecting previously unselected package libgomp1:amd64.
+#5 18.11 Preparing to unpack .../44-libgomp1_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#5 18.11 Unpacking libgomp1:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 18.13 Selecting previously unselected package libitm1:amd64.
+#5 18.13 Preparing to unpack .../45-libitm1_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#5 18.13 Unpacking libitm1:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 18.14 Selecting previously unselected package libatomic1:amd64.
+#5 18.14 Preparing to unpack .../46-libatomic1_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#5 18.14 Unpacking libatomic1:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 18.15 Selecting previously unselected package libasan8:amd64.
+#5 18.16 Preparing to unpack .../47-libasan8_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#5 18.16 Unpacking libasan8:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 18.21 Selecting previously unselected package liblsan0:amd64.
+#5 18.21 Preparing to unpack .../48-liblsan0_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#5 18.21 Unpacking liblsan0:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 18.24 Selecting previously unselected package libtsan2:amd64.
+#5 18.24 Preparing to unpack .../49-libtsan2_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#5 18.24 Unpacking libtsan2:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 18.29 Selecting previously unselected package libubsan1:amd64.
+#5 18.29 Preparing to unpack .../50-libubsan1_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#5 18.29 Unpacking libubsan1:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 18.32 Selecting previously unselected package libhwasan0:amd64.
+#5 18.32 Preparing to unpack .../51-libhwasan0_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#5 18.32 Unpacking libhwasan0:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 18.35 Selecting previously unselected package libquadmath0:amd64.
+#5 18.35 Preparing to unpack .../52-libquadmath0_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#5 18.35 Unpacking libquadmath0:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 18.37 Selecting previously unselected package libgcc-13-dev:amd64.
+#5 18.37 Preparing to unpack .../53-libgcc-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb ...
+#5 18.37 Unpacking libgcc-13-dev:amd64 (13.3.0-6ubuntu2~24.04.1) ...
+#5 18.45 Selecting previously unselected package gcc-13-x86-64-linux-gnu.
+#5 18.46 Preparing to unpack .../54-gcc-13-x86-64-linux-gnu_13.3.0-6ubuntu2~24.04.1_amd64.deb ...
+#5 18.46 Unpacking gcc-13-x86-64-linux-gnu (13.3.0-6ubuntu2~24.04.1) ...
+#5 18.70 Selecting previously unselected package gcc-13.
+#5 18.70 Preparing to unpack .../55-gcc-13_13.3.0-6ubuntu2~24.04.1_amd64.deb ...
+#5 18.70 Unpacking gcc-13 (13.3.0-6ubuntu2~24.04.1) ...
+#5 18.72 Selecting previously unselected package gcc-x86-64-linux-gnu.
+#5 18.72 Preparing to unpack .../56-gcc-x86-64-linux-gnu_4%3a13.2.0-7ubuntu1_amd64.deb ...
+#5 18.72 Unpacking gcc-x86-64-linux-gnu (4:13.2.0-7ubuntu1) ...
+#5 18.73 Selecting previously unselected package gcc.
+#5 18.74 Preparing to unpack .../57-gcc_4%3a13.2.0-7ubuntu1_amd64.deb ...
+#5 18.74 Unpacking gcc (4:13.2.0-7ubuntu1) ...
+#5 18.75 Selecting previously unselected package libstdc++-13-dev:amd64.
+#5 18.75 Preparing to unpack .../58-libstdc++-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb ...
+#5 18.75 Unpacking libstdc++-13-dev:amd64 (13.3.0-6ubuntu2~24.04.1) ...
+#5 18.95 Selecting previously unselected package g++-13-x86-64-linux-gnu.
+#5 18.95 Preparing to unpack .../59-g++-13-x86-64-linux-gnu_13.3.0-6ubuntu2~24.04.1_amd64.deb ...
+#5 18.95 Unpacking g++-13-x86-64-linux-gnu (13.3.0-6ubuntu2~24.04.1) ...
+#5 19.10 Selecting previously unselected package g++-13.
+#5 19.10 Preparing to unpack .../60-g++-13_13.3.0-6ubuntu2~24.04.1_amd64.deb ...
+#5 19.10 Unpacking g++-13 (13.3.0-6ubuntu2~24.04.1) ...
+#5 19.13 Selecting previously unselected package g++-x86-64-linux-gnu.
+#5 19.13 Preparing to unpack .../61-g++-x86-64-linux-gnu_4%3a13.2.0-7ubuntu1_amd64.deb ...
+#5 19.13 Unpacking g++-x86-64-linux-gnu (4:13.2.0-7ubuntu1) ...
+#5 19.14 Selecting previously unselected package g++.
+#5 19.14 Preparing to unpack .../62-g++_4%3a13.2.0-7ubuntu1_amd64.deb ...
+#5 19.14 Unpacking g++ (4:13.2.0-7ubuntu1) ...
+#5 19.16 Selecting previously unselected package make.
+#5 19.16 Preparing to unpack .../63-make_4.3-4.1build2_amd64.deb ...
+#5 19.16 Unpacking make (4.3-4.1build2) ...
+#5 19.17 Selecting previously unselected package libdpkg-perl.
+#5 19.17 Preparing to unpack .../64-libdpkg-perl_1.22.6ubuntu6.6_all.deb ...
+#5 19.17 Unpacking libdpkg-perl (1.22.6ubuntu6.6) ...
+#5 19.21 Selecting previously unselected package bzip2.
+#5 19.21 Preparing to unpack .../65-bzip2_1.0.8-5.1ubuntu0.1_amd64.deb ...
+#5 19.21 Unpacking bzip2 (1.0.8-5.1ubuntu0.1) ...
+#5 19.22 Selecting previously unselected package patch.
+#5 19.22 Preparing to unpack .../66-patch_2.7.6-7build3_amd64.deb ...
+#5 19.22 Unpacking patch (2.7.6-7build3) ...
+#5 19.24 Selecting previously unselected package lto-disabled-list.
+#5 19.24 Preparing to unpack .../67-lto-disabled-list_47_all.deb ...
+#5 19.24 Unpacking lto-disabled-list (47) ...
+#5 19.25 Selecting previously unselected package dpkg-dev.
+#5 19.25 Preparing to unpack .../68-dpkg-dev_1.22.6ubuntu6.6_all.deb ...
+#5 19.25 Unpacking dpkg-dev (1.22.6ubuntu6.6) ...
+#5 19.33 Selecting previously unselected package build-essential.
+#5 19.33 Preparing to unpack .../69-build-essential_12.10ubuntu1_amd64.deb ...
+#5 19.34 Unpacking build-essential (12.10ubuntu1) ...
+#5 19.35 Selecting previously unselected package libllvm18:amd64.
+#5 19.35 Preparing to unpack .../70-libllvm18_1%3a18.1.3-1ubuntu1_amd64.deb ...
+#5 19.35 Unpacking libllvm18:amd64 (1:18.1.3-1ubuntu1) ...
+#5 19.76 Selecting previously unselected package libclang-cpp18.
+#5 19.76 Preparing to unpack .../71-libclang-cpp18_1%3a18.1.3-1ubuntu1_amd64.deb ...
+#5 19.76 Unpacking libclang-cpp18 (1:18.1.3-1ubuntu1) ...
+#5 19.98 Selecting previously unselected package libgc1:amd64.
+#5 19.98 Preparing to unpack .../72-libgc1_1%3a8.2.6-1build1_amd64.deb ...
+#5 19.98 Unpacking libgc1:amd64 (1:8.2.6-1build1) ...
+#5 20.00 Selecting previously unselected package libobjc4:amd64.
+#5 20.00 Preparing to unpack .../73-libobjc4_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#5 20.00 Unpacking libobjc4:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 20.01 Selecting previously unselected package libobjc-13-dev:amd64.
+#5 20.02 Preparing to unpack .../74-libobjc-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb ...
+#5 20.02 Unpacking libobjc-13-dev:amd64 (13.3.0-6ubuntu2~24.04.1) ...
+#5 20.03 Selecting previously unselected package libclang-common-18-dev:amd64.
+#5 20.04 Preparing to unpack .../75-libclang-common-18-dev_1%3a18.1.3-1ubuntu1_amd64.deb ...
+#5 20.04 Unpacking libclang-common-18-dev:amd64 (1:18.1.3-1ubuntu1) ...
+#5 20.12 Selecting previously unselected package llvm-18-linker-tools.
+#5 20.13 Preparing to unpack .../76-llvm-18-linker-tools_1%3a18.1.3-1ubuntu1_amd64.deb ...
+#5 20.13 Unpacking llvm-18-linker-tools (1:18.1.3-1ubuntu1) ...
+#5 20.16 Selecting previously unselected package libclang1-18.
+#5 20.16 Preparing to unpack .../77-libclang1-18_1%3a18.1.3-1ubuntu1_amd64.deb ...
+#5 20.16 Unpacking libclang1-18 (1:18.1.3-1ubuntu1) ...
+#5 20.28 Selecting previously unselected package clang-18.
+#5 20.28 Preparing to unpack .../78-clang-18_1%3a18.1.3-1ubuntu1_amd64.deb ...
+#5 20.29 Unpacking clang-18 (1:18.1.3-1ubuntu1) ...
+#5 20.30 Selecting previously unselected package clang.
+#5 20.30 Preparing to unpack .../79-clang_1%3a18.0-59~exp2_amd64.deb ...
+#5 20.30 Unpacking clang (1:18.0-59~exp2) ...
+#5 20.32 Selecting previously unselected package libarchive13t64:amd64.
+#5 20.32 Preparing to unpack .../80-libarchive13t64_3.7.2-2ubuntu0.8_amd64.deb ...
+#5 20.32 Unpacking libarchive13t64:amd64 (3.7.2-2ubuntu0.8) ...
+#5 20.34 Selecting previously unselected package libbrotli1:amd64.
+#5 20.34 Preparing to unpack .../81-libbrotli1_1.1.0-2build2_amd64.deb ...
+#5 20.34 Unpacking libbrotli1:amd64 (1.1.0-2build2) ...
+#5 20.36 Selecting previously unselected package libsasl2-modules-db:amd64.
+#5 20.36 Preparing to unpack .../82-libsasl2-modules-db_2.1.28+dfsg1-5ubuntu3.1_amd64.deb ...
+#5 20.36 Unpacking libsasl2-modules-db:amd64 (2.1.28+dfsg1-5ubuntu3.1) ...
+#5 20.37 Selecting previously unselected package libsasl2-2:amd64.
+#5 20.37 Preparing to unpack .../83-libsasl2-2_2.1.28+dfsg1-5ubuntu3.1_amd64.deb ...
+#5 20.37 Unpacking libsasl2-2:amd64 (2.1.28+dfsg1-5ubuntu3.1) ...
+#5 20.41 Selecting previously unselected package libldap2:amd64.
+#5 20.41 Preparing to unpack .../84-libldap2_2.6.10+dfsg-0ubuntu0.24.04.1_amd64.deb ...
+#5 20.41 Unpacking libldap2:amd64 (2.6.10+dfsg-0ubuntu0.24.04.1) ...
+#5 20.42 Selecting previously unselected package librtmp1:amd64.
+#5 20.43 Preparing to unpack .../85-librtmp1_2.4+20151223.gitfa8646d.1-2build7_amd64.deb ...
+#5 20.43 Unpacking librtmp1:amd64 (2.4+20151223.gitfa8646d.1-2build7) ...
+#5 20.44 Selecting previously unselected package libssh-4:amd64.
+#5 20.44 Preparing to unpack .../86-libssh-4_0.10.6-2ubuntu0.5_amd64.deb ...
+#5 20.44 Unpacking libssh-4:amd64 (0.10.6-2ubuntu0.5) ...
+#5 20.46 Selecting previously unselected package libcurl4t64:amd64.
+#5 20.46 Preparing to unpack .../87-libcurl4t64_8.5.0-2ubuntu10.15_amd64.deb ...
+#5 20.46 Unpacking libcurl4t64:amd64 (8.5.0-2ubuntu10.15) ...
+#5 20.47 Selecting previously unselected package libjsoncpp25:amd64.
+#5 20.48 Preparing to unpack .../88-libjsoncpp25_1.9.5-6build1_amd64.deb ...
+#5 20.48 Unpacking libjsoncpp25:amd64 (1.9.5-6build1) ...
+#5 20.49 Selecting previously unselected package librhash0:amd64.
+#5 20.49 Preparing to unpack .../89-librhash0_1.4.3-3build1_amd64.deb ...
+#5 20.49 Unpacking librhash0:amd64 (1.4.3-3build1) ...
+#5 20.51 Selecting previously unselected package cmake-data.
+#5 20.51 Preparing to unpack .../90-cmake-data_3.28.3-1build7_all.deb ...
+#5 20.51 Unpacking cmake-data (3.28.3-1build7) ...
+#5 21.04 Selecting previously unselected package cmake.
+#5 21.04 Preparing to unpack .../91-cmake_3.28.3-1build7_amd64.deb ...
+#5 21.04 Unpacking cmake (3.28.3-1build7) ...
+#5 21.19 Selecting previously unselected package libcurl3t64-gnutls:amd64.
+#5 21.19 Preparing to unpack .../92-libcurl3t64-gnutls_8.5.0-2ubuntu10.15_amd64.deb ...
+#5 21.19 Unpacking libcurl3t64-gnutls:amd64 (8.5.0-2ubuntu10.15) ...
+#5 21.21 Selecting previously unselected package liberror-perl.
+#5 21.21 Preparing to unpack .../93-liberror-perl_0.17029-2_all.deb ...
+#5 21.21 Unpacking liberror-perl (0.17029-2) ...
+#5 21.22 Selecting previously unselected package git-man.
+#5 21.23 Preparing to unpack .../94-git-man_1%3a2.43.0-1ubuntu7.3_all.deb ...
+#5 21.23 Unpacking git-man (1:2.43.0-1ubuntu7.3) ...
+#5 21.25 Selecting previously unselected package git.
+#5 21.25 Preparing to unpack .../95-git_1%3a2.43.0-1ubuntu7.3_amd64.deb ...
+#5 21.26 Unpacking git (1:2.43.0-1ubuntu7.3) ...
+#5 21.38 Selecting previously unselected package ninja-build.
+#5 21.39 Preparing to unpack .../96-ninja-build_1.11.1-2_amd64.deb ...
+#5 21.39 Unpacking ninja-build (1.11.1-2) ...
+#5 21.41 Setting up media-types (10.1.0) ...
+#5 21.41 Setting up systemd-sysv (255.4-1ubuntu8.17) ...
+#5 21.43 Setting up libkeyutils1:amd64 (1.6.3-3build1) ...
+#5 21.43 Setting up lto-disabled-list (47) ...
+#5 21.44 Setting up libgdbm6t64:amd64 (1.23-5.1build1) ...
+#5 21.44 Setting up libgdbm-compat4t64:amd64 (1.23-5.1build1) ...
+#5 21.44 Setting up libbrotli1:amd64 (1.1.0-2build2) ...
+#5 21.44 Setting up libsqlite3-0:amd64 (3.45.1-1ubuntu2.8) ...
+#5 21.44 Setting up libuv1t64:amd64 (1.48.0-1.1build1) ...
+#5 21.44 Setting up binutils-common:amd64 (2.42-4ubuntu2.10) ...
+#5 21.45 Setting up libpsl5t64:amd64 (0.21.2-1.1build1) ...
+#5 21.45 Setting up libnghttp2-14:amd64 (1.59.0-1ubuntu0.4) ...
+#5 21.45 Setting up linux-libc-dev:amd64 (6.8.0-142.142) ...
+#5 21.45 Setting up libctf-nobfd0:amd64 (2.42-4ubuntu2.10) ...
+#5 21.45 Setting up libgomp1:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 21.46 Setting up bzip2 (1.0.8-5.1ubuntu0.1) ...
+#5 21.46 Setting up libsframe1:amd64 (2.42-4ubuntu2.10) ...
+#5 21.46 Setting up ninja-build (1.11.1-2) ...
+#5 21.46 Setting up libjansson4:amd64 (2.14-2build2) ...
+#5 21.46 Setting up libkrb5support0:amd64 (1.20.1-6ubuntu2.10) ...
+#5 21.46 Setting up libsasl2-modules-db:amd64 (2.1.28+dfsg1-5ubuntu3.1) ...
+#5 21.47 Setting up tzdata (2026c-0ubuntu0.24.04.1) ...
+#5 21.61 
+#5 21.61 Current default time zone: 'Etc/UTC'
+#5 21.62 Local time is now:      Mon Sep 28 16:15:49 UTC 2026.
+#5 21.62 Universal Time is now:  Mon Sep 28 16:15:49 UTC 2026.
+#5 21.62 Run 'dpkg-reconfigure tzdata' if you wish to change it.
+#5 21.62 
+#5 21.63 Setting up rpcsvc-proto (1.4.2-0ubuntu7) ...
+#5 21.63 Setting up gcc-13-base:amd64 (13.3.0-6ubuntu2~24.04.1) ...
+#5 21.64 Setting up make (4.3-4.1build2) ...
+#5 21.64 Setting up libmpfr6:amd64 (4.2.1-1build1.1) ...
+#5 21.64 Setting up librtmp1:amd64 (2.4+20151223.gitfa8646d.1-2build7) ...
+#5 21.64 Setting up libdbus-1-3:amd64 (1.14.10-4ubuntu4.1) ...
+#5 21.64 Setting up xz-utils (5.6.1+really5.4.5-1ubuntu0.3) ...
+#5 21.70 update-alternatives: using /usr/bin/xz to provide /usr/bin/lzma (lzma) in auto mode
+#5 21.70 update-alternatives: warning: skip creation of /usr/share/man/man1/lzma.1.gz because associated file /usr/share/man/man1/xz.1.gz (of link group lzma) doesn't exist
+#5 21.70 update-alternatives: warning: skip creation of /usr/share/man/man1/unlzma.1.gz because associated file /usr/share/man/man1/unxz.1.gz (of link group lzma) doesn't exist
+#5 21.70 update-alternatives: warning: skip creation of /usr/share/man/man1/lzcat.1.gz because associated file /usr/share/man/man1/xzcat.1.gz (of link group lzma) doesn't exist
+#5 21.70 update-alternatives: warning: skip creation of /usr/share/man/man1/lzmore.1.gz because associated file /usr/share/man/man1/xzmore.1.gz (of link group lzma) doesn't exist
+#5 21.70 update-alternatives: warning: skip creation of /usr/share/man/man1/lzless.1.gz because associated file /usr/share/man/man1/xzless.1.gz (of link group lzma) doesn't exist
+#5 21.70 update-alternatives: warning: skip creation of /usr/share/man/man1/lzdiff.1.gz because associated file /usr/share/man/man1/xzdiff.1.gz (of link group lzma) doesn't exist
+#5 21.70 update-alternatives: warning: skip creation of /usr/share/man/man1/lzcmp.1.gz because associated file /usr/share/man/man1/xzcmp.1.gz (of link group lzma) doesn't exist
+#5 21.70 update-alternatives: warning: skip creation of /usr/share/man/man1/lzgrep.1.gz because associated file /usr/share/man/man1/xzgrep.1.gz (of link group lzma) doesn't exist
+#5 21.70 update-alternatives: warning: skip creation of /usr/share/man/man1/lzegrep.1.gz because associated file /usr/share/man/man1/xzegrep.1.gz (of link group lzma) doesn't exist
+#5 21.70 update-alternatives: warning: skip creation of /usr/share/man/man1/lzfgrep.1.gz because associated file /usr/share/man/man1/xzfgrep.1.gz (of link group lzma) doesn't exist
+#5 21.71 Setting up perl-modules-5.38 (5.38.2-3.2ubuntu0.6) ...
+#5 21.71 Setting up libquadmath0:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 21.71 Setting up libmpc3:amd64 (1.3.1-1build1.1) ...
+#5 21.71 Setting up libatomic1:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 21.71 Setting up patch (2.7.6-7build3) ...
+#5 21.71 Setting up libjsoncpp25:amd64 (1.9.5-6build1) ...
+#5 21.72 Setting up libclang-common-18-dev:amd64 (1:18.1.3-1ubuntu1) ...
+#5 21.72 Setting up libk5crypto3:amd64 (1.20.1-6ubuntu2.10) ...
+#5 21.72 Setting up libgc1:amd64 (1:8.2.6-1build1) ...
+#5 21.72 Setting up libsasl2-2:amd64 (2.1.28+dfsg1-5ubuntu3.1) ...
+#5 21.72 Setting up libubsan1:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 21.73 Setting up libicu74:amd64 (74.2-1ubuntu3.1) ...
+#5 21.73 Setting up libhwasan0:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 21.73 Setting up librhash0:amd64 (1.4.3-3build1) ...
+#5 21.73 Setting up libcrypt-dev:amd64 (1:4.4.36-4build1) ...
+#5 21.74 Setting up dbus-session-bus-common (1.14.10-4ubuntu4.1) ...
+#5 21.74 Setting up libasan8:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 21.74 Setting up git-man (1:2.43.0-1ubuntu7.3) ...
+#5 21.74 Setting up netbase (6.4) ...
+#5 21.75 Setting up cmake-data (3.28.3-1build7) ...
+#5 21.75 Setting up libkrb5-3:amd64 (1.20.1-6ubuntu2.10) ...
+#5 21.75 Setting up libperl5.38t64:amd64 (5.38.2-3.2ubuntu0.6) ...
+#5 21.76 Setting up libtsan2:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 21.76 Setting up libbinutils:amd64 (2.42-4ubuntu2.10) ...
+#5 21.76 Setting up dbus-system-bus-common (1.14.10-4ubuntu4.1) ...
+#5 21.90 Setting up libisl23:amd64 (0.26-3build1.1) ...
+#5 21.90 Setting up libc-dev-bin (2.39-0ubuntu8.9) ...
+#5 21.90 Setting up openssl (3.0.13-0ubuntu3.15) ...
+#5 21.90 Setting up libbsd0:amd64 (0.12.1-1build1.1) ...
+#5 21.91 Setting up readline-common (8.2-4build1) ...
+#5 21.93 Setting up libxml2:amd64 (2.9.14+dfsg-1.3ubuntu3.9) ...
+#5 21.93 Setting up libcc1-0:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 21.93 Setting up libldap2:amd64 (2.6.10+dfsg-0ubuntu0.24.04.1) ...
+#5 21.93 Setting up dbus-bin (1.14.10-4ubuntu4.1) ...
+#5 21.93 Setting up liblsan0:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 21.94 Setting up libitm1:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 21.94 Setting up libctf0:amd64 (2.42-4ubuntu2.10) ...
+#5 21.94 Setting up cpp-13-x86-64-linux-gnu (13.3.0-6ubuntu2~24.04.1) ...
+#5 21.94 Setting up libedit2:amd64 (3.1-20230828-1build1) ...
+#5 21.94 Setting up libobjc4:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#5 21.95 Setting up dbus-daemon (1.14.10-4ubuntu4.1) ...
+#5 21.95 Setting up ca-certificates (20260601~24.04.1) ...
+#5 22.42 Updating certificates in /etc/ssl/certs...
+#5 23.12 121 added, 0 removed; done.
+#5 23.13 Setting up perl (5.38.2-3.2ubuntu0.6) ...
+#5 23.14 Setting up libgprofng0:amd64 (2.42-4ubuntu2.10) ...
+#5 23.14 Setting up dbus (1.14.10-4ubuntu4.1) ...
+#5 23.19 Setting up libgssapi-krb5-2:amd64 (1.20.1-6ubuntu2.10) ...
+#5 23.19 Setting up libdpkg-perl (1.22.6ubuntu6.6) ...
+#5 23.19 Setting up libssh-4:amd64 (0.10.6-2ubuntu0.5) ...
+#5 23.19 Setting up libreadline8t64:amd64 (8.2-4build1) ...
+#5 23.20 Setting up libgcc-13-dev:amd64 (13.3.0-6ubuntu2~24.04.1) ...
+#5 23.20 Setting up libc6-dev:amd64 (2.39-0ubuntu8.9) ...
+#5 23.22 Setting up libarchive13t64:amd64 (3.7.2-2ubuntu0.8) ...
+#5 23.22 Setting up libobjc-13-dev:amd64 (13.3.0-6ubuntu2~24.04.1) ...
+#5 23.22 Setting up libstdc++-13-dev:amd64 (13.3.0-6ubuntu2~24.04.1) ...
+#5 23.22 Setting up libllvm18:amd64 (1:18.1.3-1ubuntu1) ...
+#5 23.23 Setting up binutils-x86-64-linux-gnu (2.42-4ubuntu2.10) ...
+#5 23.23 Setting up cpp-x86-64-linux-gnu (4:13.2.0-7ubuntu1) ...
+#5 23.23 Setting up libclang1-18 (1:18.1.3-1ubuntu1) ...
+#5 23.23 Setting up libpython3.12-stdlib:amd64 (3.12.3-1ubuntu0.17) ...
+#5 23.23 Setting up cpp-13 (13.3.0-6ubuntu2~24.04.1) ...
+#5 23.23 Setting up libcurl4t64:amd64 (8.5.0-2ubuntu10.15) ...
+#5 23.24 Setting up gcc-13-x86-64-linux-gnu (13.3.0-6ubuntu2~24.04.1) ...
+#5 23.24 Setting up python3.12 (3.12.3-1ubuntu0.17) ...
+#5 24.05 Setting up libcurl3t64-gnutls:amd64 (8.5.0-2ubuntu10.15) ...
+#5 24.06 Setting up binutils (2.42-4ubuntu2.10) ...
+#5 24.06 Setting up dpkg-dev (1.22.6ubuntu6.6) ...
+#5 24.06 Setting up liberror-perl (0.17029-2) ...
+#5 24.06 Setting up gcc-13 (13.3.0-6ubuntu2~24.04.1) ...
+#5 24.06 Setting up git (1:2.43.0-1ubuntu7.3) ...
+#5 24.07 Setting up llvm-18-linker-tools (1:18.1.3-1ubuntu1) ...
+#5 24.07 Setting up cpp (4:13.2.0-7ubuntu1) ...
+#5 24.08 Setting up cmake (3.28.3-1build7) ...
+#5 24.08 Setting up libclang-cpp18 (1:18.1.3-1ubuntu1) ...
+#5 24.08 Setting up libpython3-stdlib:amd64 (3.12.3-0ubuntu2.1) ...
+#5 24.08 Setting up g++-13-x86-64-linux-gnu (13.3.0-6ubuntu2~24.04.1) ...
+#5 24.09 Setting up gcc-x86-64-linux-gnu (4:13.2.0-7ubuntu1) ...
+#5 24.09 Setting up clang-18 (1:18.1.3-1ubuntu1) ...
+#5 24.09 Setting up python3 (3.12.3-0ubuntu2.1) ...
+#5 24.17 Setting up gcc (4:13.2.0-7ubuntu1) ...
+#5 24.18 Setting up clang (1:18.0-59~exp2) ...
+#5 24.19 Setting up g++-x86-64-linux-gnu (4:13.2.0-7ubuntu1) ...
+#5 24.19 Setting up g++-13 (13.3.0-6ubuntu2~24.04.1) ...
+#5 24.19 Setting up g++ (4:13.2.0-7ubuntu1) ...
+#5 24.20 update-alternatives: using /usr/bin/g++ to provide /usr/bin/c++ (c++) in auto mode
+#5 24.20 update-alternatives: warning: skip creation of /usr/share/man/man1/c++.1.gz because associated file /usr/share/man/man1/g++.1.gz (of link group c++) doesn't exist
+#5 24.20 Setting up build-essential (12.10ubuntu1) ...
+#5 24.20 Processing triggers for libc-bin (2.39-0ubuntu8.9) ...
+#5 24.62 Processing triggers for ca-certificates (20260601~24.04.1) ...
+#5 24.62 Updating certificates in /etc/ssl/certs...
+#5 24.98 0 added, 0 removed; done.
+#5 24.98 Running hooks in /etc/ca-certificates/update.d...
+#5 24.99 done.
+#5 DONE 26.7s
+
+#6 exporting to image
+#6 exporting layers
+#6 exporting layers 3.1s done
+#6 writing image sha256:b5e8bb2d867816fb103a40ea838b5c141bacfa858014e5e6746a75193e5464b7 done
+#6 naming to docker.io/library/issue1162-exact:36449564460 done
+#6 DONE 3.1s
+40cf9858b4879e33220023c9e3383e1db4f398df93516f2c690db82976f0bb0a
+Version=255.4-1ubuntu8.17
+SystemState=running
+{"ancestors": [{"cpuset.cpus.effective": "0-3", "device": 30, "inode": 1, "memory.max": "root-unlimited", "memory.swap.max": "unavailable", "path": "/sys/fs/cgroup", "pids.max": "root-unlimited"}, {"cpuset.cpus.effective": "0-3", "device": 30, "inode": 7839, "memory.max": "max", "memory.swap.max": "max", "path": "/sys/fs/cgroup/docker.slice", "pids.max": "max"}, {"cpuset.cpus.effective": "0-3", "device": 30, "inode": 7925, "memory.max": "max", "memory.swap.max": "max", "path": "/sys/fs/cgroup/docker.slice/docker-40cf9858b4879e33220023c9e3383e1db4f398df93516f2c690db82976f0bb0a.scope", "pids.max": "19151"}], "cgroup": "0::/docker.slice/docker-40cf9858b4879e33220023c9e3383e1db4f398df93516f2c690db82976f0bb0a.scope/init.scope\n", "guest_cgroup_root": {"device": 30, "inode": 7925}, "guest_host_pid": 6647, "start_ticks": "12857"}
+HOST_ANCESTOR_PREFLIGHT_PASS cpu=2 memory_min=8589934592 pids_min=256; service still uninstalled
+useradd warning: buster-bench's uid 65000 outside of the UID_MIN 1000 and UID_MAX 60000 range.
+useradd warning: buster-bench-candidate's uid 65001 outside of the UID_MIN 1000 and UID_MAX 60000 range.
+useradd warning: buster-github-runner's uid 65002 outside of the UID_MIN 1000 and UID_MAX 60000 range.
+8ee5b7c8707c932a28ed17c1ac0e14154505446fb5d57c21ee5487c4744fc188  /etc/buster-bench/systemd-broker-accounts.identity
+BQ-ACCOUNTS-V1
+service-uid=65000
+service-gid=65000
+candidate-uid=65001
+candidate-gid=65001
+runner-uid=65002
+runner-gid=65002
+GUEST_IDENTITIES
+uid=65000(buster-bench) gid=65000(buster-bench) groups=65000(buster-bench),65001(buster-bench-candidate)
+uid=65001(buster-bench-candidate) gid=65001(buster-bench-candidate) groups=65001(buster-bench-candidate)
+uid=65002(buster-github-runner) gid=65002(buster-github-runner) groups=65002(buster-github-runner)
+LEASE_DEVICE=49 LEASE_INODE=9200082 MODE=640 OWNER=65000:65000 LINKS=1
+710 65000:65001 /var/lib/buster-bench
+710 65000:65000 /var/lib/buster-bench/queue
+2710 65000:65001 /var/lib/buster-bench/workspaces
+710 65000:65000 /var/lib/buster-bench/lease
+710 65000:65000 /var/lib/buster-bench/workspaces/results
+555 0:0 /etc/buster-bench
+444 0:0 /etc/buster-bench/systemd-broker-lease.identity
+ce0810ec05bf39ca0adbde86bb9f31d443d689a1fede1fef232b110226648017  /usr/local/libexec/buster-bench-broker-entry-gate
+755 0:0 1 /usr/local/libexec/buster-bench-broker-entry-gate
+b2dfa49c1e523ccb67f9aeed14b9a6408187fac5d7767bddaceb7d75fd832628  /usr/local/libexec/buster-bench-build
+755 0:0 1 /usr/local/libexec/buster-bench-build
+49e61a09e60beecbad320cb8468035e6407c1fe3feeb9443c2efac47c0887658  /usr/local/libexec/buster-bench-credential-gate
+755 0:0 1 /usr/local/libexec/buster-bench-credential-gate
+3cddf9cfca043412a7e1d987c7174262e603428ea814935019c9ae4fdca11f80  /usr/local/libexec/buster-bench-service
+755 0:0 1 /usr/local/libexec/buster-bench-service
+b19ce4f90e2bd2a0aebcedbc5f80442f35e0e6f73119050fe66bea24147e4e7e  /usr/local/libexec/buster-bench-systemd-broker
+755 0:0 1 /usr/local/libexec/buster-bench-systemd-broker
+66de98ae53bb2ab948c0d0fd74266255ad1016414062c425d1af41c46f4c61f9  /usr/local/libexec/buster-bench-throughput
+755 0:0 1 /usr/local/libexec/buster-bench-throughput
+16faa3332b71aa634b14a3e0ea9b3ce0a3c26eb441ecd8e29fd07956ed176f98  /usr/local/libexec/systemd-broker-live-test
+755 0:0 1 /usr/local/libexec/systemd-broker-live-test
+bb0d330c28edf59afdebdb40211c588243d1c6f84414884a38550fe2a2b99167  /etc/systemd/system/buster-bench-systemd-broker@.service
+644 0:0 1 /etc/systemd/system/buster-bench-systemd-broker@.service
+78038b7eef15bd4e34ab376d2f6239dd65e135b2825db3b25421d0b1a3908273  /etc/systemd/system/buster-bench.service
+644 0:0 1 /etc/systemd/system/buster-bench.service
+63d0eb708748b20223daaafe40bac84521c6a5e408915401afe891224e2dadc7  /etc/systemd/system/buster-bench-systemd-broker.socket
+644 0:0 1 /etc/systemd/system/buster-bench-systemd-broker.socket
+4179b8b2806edb974f35cc6c011cea3b88dce0635663bfa22d4c334a7d07b272  /etc/systemd/system/buster-bench.slice
+644 0:0 1 /etc/systemd/system/buster-bench.slice
+50b5133d094a04274e1e9007e55047b2a318e0757676ec5a69fa51f1f4181753  /opt/buster-bench/installed/recipes/validate-buster-v1.recipe
+656e2d91af0ee66e1662efe4de0e361bf757d797ff7dc94d939e670e1bfcba63  /opt/buster-bench/installed/sources/6a59bc4fc7e8ddf1bf5420e2f0ce3aca648a0a70/source.manifest
+ebf4a4b4e5943dc60dd9fd9d175af643fbe0d0eee72e70e245c688aaabcb3007  /opt/buster-bench/installed/sources/ade6ac4b6ecb21f30b61b656439bac476c145e2f/source.manifest
+GUEST_RUNTIME_TOOLCHAIN
+Ubuntu clang version 18.1.3 (1ubuntu1)
+Target: x86_64-pc-linux-gnu
+Thread model: posix
+InstalledDir: /usr/bin
+cmake version 3.28.3
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+1.11.1
+adduser 3.137ubuntu1
+apt 2.8.3
+base-files 13ubuntu10.5
+base-passwd 3.6.3build1
+bash 5.2.21-2ubuntu4
+binutils 2.42-4ubuntu2.10
+binutils-common 2.42-4ubuntu2.10
+binutils-x86-64-linux-gnu 2.42-4ubuntu2.10
+bsdutils 1:2.39.3-9ubuntu6.6
+build-essential 12.10ubuntu1
+bzip2 1.0.8-5.1ubuntu0.1
+ca-certificates 20260601~24.04.1
+clang 1:18.0-59~exp2
+clang-18 1:18.1.3-1ubuntu1
+cmake 3.28.3-1build7
+cmake-data 3.28.3-1build7
+coreutils 9.4-3ubuntu6.3
+cpp 4:13.2.0-7ubuntu1
+cpp-13 13.3.0-6ubuntu2~24.04.1
+cpp-13-x86-64-linux-gnu 13.3.0-6ubuntu2~24.04.1
+cpp-x86-64-linux-gnu 4:13.2.0-7ubuntu1
+dash 0.5.12-6ubuntu5
+dbus 1.14.10-4ubuntu4.1
+dbus-bin 1.14.10-4ubuntu4.1
+dbus-daemon 1.14.10-4ubuntu4.1
+dbus-session-bus-common 1.14.10-4ubuntu4.1
+dbus-system-bus-common 1.14.10-4ubuntu4.1
+debconf 1.5.86ubuntu1
+debianutils 5.17build1
+diffutils 1:3.10-1ubuntu0.1
+dpkg 1.22.6ubuntu6.6
+dpkg-dev 1.22.6ubuntu6.6
+e2fsprogs 1.47.0-2.4~exp1ubuntu4.1
+findutils 4.9.0-5build1
+g++ 4:13.2.0-7ubuntu1
+g++-13 13.3.0-6ubuntu2~24.04.1
+g++-13-x86-64-linux-gnu 13.3.0-6ubuntu2~24.04.1
+g++-x86-64-linux-gnu 4:13.2.0-7ubuntu1
+gcc 4:13.2.0-7ubuntu1
+gcc-13 13.3.0-6ubuntu2~24.04.1
+gcc-13-base 13.3.0-6ubuntu2~24.04.1
+gcc-13-x86-64-linux-gnu 13.3.0-6ubuntu2~24.04.1
+gcc-14-base 14.2.0-4ubuntu2~24.04.1
+gcc-x86-64-linux-gnu 4:13.2.0-7ubuntu1
+git 1:2.43.0-1ubuntu7.3
+git-man 1:2.43.0-1ubuntu7.3
+gpgv 2.4.4-2ubuntu17.6
+grep 3.11-4build1
+gzip 1.12-1ubuntu3.2
+hostname 3.23+nmu2ubuntu2
+init-system-helpers 1.66ubuntu1
+libacl1 2.3.2-1build1.1
+libapparmor1 4.0.1really4.0.1-0ubuntu0.24.04.8
+libapt-pkg6.0t64 2.8.3
+libarchive13t64 3.7.2-2ubuntu0.8
+libargon2-1 0~20190702+dfsg-4build1
+libasan8 14.2.0-4ubuntu2~24.04.1
+libassuan0 2.5.6-1build1
+libatomic1 14.2.0-4ubuntu2~24.04.1
+libattr1 1:2.5.2-1ubuntu0.1
+libaudit-common 1:3.1.2-2.1build1.1
+libaudit1 1:3.1.2-2.1build1.1
+libbinutils 2.42-4ubuntu2.10
+libblkid1 2.39.3-9ubuntu6.6
+libbrotli1 1.1.0-2build2
+libbsd0 0.12.1-1build1.1
+libbz2-1.0 1.0.8-5.1ubuntu0.1
+libc-bin 2.39-0ubuntu8.9
+libc-dev-bin 2.39-0ubuntu8.9
+libc6 2.39-0ubuntu8.9
+libc6-dev 2.39-0ubuntu8.9
+libcap-ng0 0.8.4-2build2
+libcap2 1:2.66-5ubuntu2.4
+libcc1-0 14.2.0-4ubuntu2~24.04.1
+libclang-common-18-dev 1:18.1.3-1ubuntu1
+libclang-cpp18 1:18.1.3-1ubuntu1
+libclang1-18 1:18.1.3-1ubuntu1
+libcom-err2 1.47.0-2.4~exp1ubuntu4.1
+libcrypt-dev 1:4.4.36-4build1
+libcrypt1 1:4.4.36-4build1
+libcryptsetup12 2:2.7.0-1ubuntu4.2
+libctf-nobfd0 2.42-4ubuntu2.10
+libctf0 2.42-4ubuntu2.10
+libcurl3t64-gnutls 8.5.0-2ubuntu10.15
+libcurl4t64 8.5.0-2ubuntu10.15
+libdb5.3t64 5.3.28+dfsg2-7
+libdbus-1-3 1.14.10-4ubuntu4.1
+libdebconfclient0 0.271ubuntu3
+libdevmapper1.02.1 2:1.02.185-3ubuntu3.2
+libdpkg-perl 1.22.6ubuntu6.6
+libedit2 3.1-20230828-1build1
+liberror-perl 0.17029-2
+libexpat1 2.6.1-2ubuntu0.6
+libext2fs2t64 1.47.0-2.4~exp1ubuntu4.1
+libfdisk1 2.39.3-9ubuntu6.6
+libffi8 3.4.6-1build1
+libgc1 1:8.2.6-1build1
+libgcc-13-dev 13.3.0-6ubuntu2~24.04.1
+libgcc-s1 14.2.0-4ubuntu2~24.04.1
+libgcrypt20 1.10.3-2ubuntu0.2
+libgdbm-compat4t64 1.23-5.1build1
+libgdbm6t64 1.23-5.1build1
+libgmp10 2:6.3.0+dfsg-2ubuntu6.1
+libgnutls30t64 3.8.3-1.1ubuntu3.6
+libgomp1 14.2.0-4ubuntu2~24.04.1
+libgpg-error0 1.47-3build2.1
+libgprofng0 2.42-4ubuntu2.10
+libgssapi-krb5-2 1.20.1-6ubuntu2.10
+libhogweed6t64 3.9.1-2.2build1.1
+libhwasan0 14.2.0-4ubuntu2~24.04.1
+libicu74 74.2-1ubuntu3.1
+libidn2-0 2.3.7-2build1.1
+libisl23 0.26-3build1.1
+libitm1 14.2.0-4ubuntu2~24.04.1
+libjansson4 2.14-2build2
+libjson-c5 0.17-1build1
+libjsoncpp25 1.9.5-6build1
+libk5crypto3 1.20.1-6ubuntu2.10
+libkeyutils1 1.6.3-3build1
+libkmod2 31+20240202-2ubuntu7.2
+libkrb5-3 1.20.1-6ubuntu2.10
+libkrb5support0 1.20.1-6ubuntu2.10
+libldap2 2.6.10+dfsg-0ubuntu0.24.04.1
+libllvm18 1:18.1.3-1ubuntu1
+liblsan0 14.2.0-4ubuntu2~24.04.1
+liblz4-1 1.9.4-1build1.1
+liblzma5 5.6.1+really5.4.5-1ubuntu0.3
+libmd0 1.1.0-2build1.1
+libmount1 2.39.3-9ubuntu6.6
+libmpc3 1.3.1-1build1.1
+libmpfr6 4.2.1-1build1.1
+libncursesw6 6.4+20240113-1ubuntu2.2
+libnettle8t64 3.9.1-2.2build1.1
+libnghttp2-14 1.59.0-1ubuntu0.4
+libnpth0t64 1.6-3.1build1
+libobjc-13-dev 13.3.0-6ubuntu2~24.04.1
+libobjc4 14.2.0-4ubuntu2~24.04.1
+libp11-kit0 0.25.3-4ubuntu2.2
+libpam-modules 1.5.3-5ubuntu5.7
+libpam-modules-bin 1.5.3-5ubuntu5.7
+libpam-runtime 1.5.3-5ubuntu5.7
+libpam0g 1.5.3-5ubuntu5.7
+libpcre2-8-0 10.42-4ubuntu2.1
+libperl5.38t64 5.38.2-3.2ubuntu0.6
+libproc2-0 2:4.0.4-4ubuntu3.3
+libpsl5t64 0.21.2-1.1build1
+libpython3-stdlib 3.12.3-0ubuntu2.1
+libpython3.12-minimal 3.12.3-1ubuntu0.17
+libpython3.12-stdlib 3.12.3-1ubuntu0.17
+libquadmath0 14.2.0-4ubuntu2~24.04.1
+libreadline8t64 8.2-4build1
+librhash0 1.4.3-3build1
+librtmp1 2.4+20151223.gitfa8646d.1-2build7
+libsasl2-2 2.1.28+dfsg1-5ubuntu3.1
+libsasl2-modules-db 2.1.28+dfsg1-5ubuntu3.1
+libseccomp2 2.5.5-1ubuntu3.1
+libselinux1 3.5-2ubuntu2.1
+libsemanage-common 3.5-1build5
+libsemanage2 3.5-1build5
+libsepol2 3.5-2build1
+libsframe1 2.42-4ubuntu2.10
+libsmartcols1 2.39.3-9ubuntu6.6
+libsqlite3-0 3.45.1-1ubuntu2.8
+libss2 1.47.0-2.4~exp1ubuntu4.1
+libssh-4 0.10.6-2ubuntu0.5
+libssl3t64 3.0.13-0ubuntu3.15
+libstdc++-13-dev 13.3.0-6ubuntu2~24.04.1
+libstdc++6 14.2.0-4ubuntu2~24.04.1
+libsystemd-shared 255.4-1ubuntu8.17
+libsystemd0 255.4-1ubuntu8.17
+libtasn1-6 4.19.0-3ubuntu0.24.04.2
+libtinfo6 6.4+20240113-1ubuntu2.2
+libtsan2 14.2.0-4ubuntu2~24.04.1
+libubsan1 14.2.0-4ubuntu2~24.04.1
+libudev1 255.4-1ubuntu8.17
+libunistring5 1.1-2build1.1
+libuuid1 2.39.3-9ubuntu6.6
+libuv1t64 1.48.0-1.1build1
+libxml2 2.9.14+dfsg-1.3ubuntu3.9
+libxxhash0 0.8.2-2build1
+libzstd1 1.5.5+dfsg2-2build1.1
+linux-libc-dev 6.8.0-142.142
+llvm-18-linker-tools 1:18.1.3-1ubuntu1
+login 1:4.13+dfsg1-4ubuntu3.2
+logsave 1.47.0-2.4~exp1ubuntu4.1
+lto-disabled-list 47
+make 4.3-4.1build2
+mawk 1.3.4.20240123-1build1
+media-types 10.1.0
+mount 2.39.3-9ubuntu6.6
+ncurses-base 6.4+20240113-1ubuntu2.2
+ncurses-bin 6.4+20240113-1ubuntu2.2
+netbase 6.4
+ninja-build 1.11.1-2
+openssl 3.0.13-0ubuntu3.15
+passwd 1:4.13+dfsg1-4ubuntu3.2
+patch 2.7.6-7build3
+perl 5.38.2-3.2ubuntu0.6
+perl-base 5.38.2-3.2ubuntu0.6
+perl-modules-5.38 5.38.2-3.2ubuntu0.6
+procps 2:4.0.4-4ubuntu3.3
+python3 3.12.3-0ubuntu2.1
+python3-minimal 3.12.3-0ubuntu2.1
+python3.12 3.12.3-1ubuntu0.17
+python3.12-minimal 3.12.3-1ubuntu0.17
+readline-common 8.2-4build1
+rpcsvc-proto 1.4.2-0ubuntu7
+sed 4.9-2ubuntu0.24.04.1
+sensible-utils 0.0.22
+systemd 255.4-1ubuntu8.17
+systemd-dev 255.4-1ubuntu8.17
+systemd-sysv 255.4-1ubuntu8.17
+sysvinit-utils 3.08-6ubuntu3
+tar 1.35+dfsg-3ubuntu0.4
+tzdata 2026c-0ubuntu0.24.04.1
+ubuntu-keyring 2023.11.28.1
+unminimize 0.2.1
+util-linux 2.39.3-9ubuntu6.6
+xz-utils 5.6.1+really5.4.5-1ubuntu0.3
+zlib1g 1:1.3.dfsg-3.1ubuntu2.2
+runtime-executable=/usr/local/libexec/buster-bench-broker-entry-gate resolved=/usr/local/libexec/buster-bench-broker-entry-gate
+ce0810ec05bf39ca0adbde86bb9f31d443d689a1fede1fef232b110226648017  /usr/local/libexec/buster-bench-broker-entry-gate
+
+Elf file type is EXEC (Executable file)
+Entry point 0x4016c0
+There are 11 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  LOAD           0x000000 0x0000000000400000 0x0000000000400000 0x000550 0x000550 R   0x1000
+  LOAD           0x001000 0x0000000000401000 0x0000000000401000 0x0844dd 0x0844dd R E 0x1000
+  LOAD           0x086000 0x0000000000486000 0x0000000000486000 0x028884 0x028884 R   0x1000
+  LOAD           0x0aeef0 0x00000000004afef0 0x00000000004afef0 0x005bd8 0x00b358 RW  0x1000
+  NOTE           0x0002a8 0x00000000004002a8 0x00000000004002a8 0x000020 0x000020 R   0x8
+  NOTE           0x0002c8 0x00000000004002c8 0x00000000004002c8 0x000044 0x000044 R   0x4
+  TLS            0x0aeef0 0x00000000004afef0 0x00000000004afef0 0x000018 0x000058 R   0x8
+  GNU_PROPERTY   0x0002a8 0x00000000004002a8 0x00000000004002a8 0x000020 0x000020 R   0x8
+  GNU_EH_FRAME   0x0a29e0 0x00000000004a29e0 0x00000000004a29e0 0x002214 0x002214 R   0x4
+  GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x10
+  GNU_RELRO      0x0aeef0 0x00000000004afef0 0x00000000004afef0 0x004110 0x004110 R   0x1
+
+ Section to Segment mapping:
+  Segment Sections...
+   00     .note.gnu.property .note.gnu.build-id .note.ABI-tag .rela.plt 
+   01     .init .plt .text .fini 
+   02     .rodata .stapsdt.base rodata.cst32 .eh_frame_hdr .eh_frame .gcc_except_table 
+   03     .tdata .init_array .fini_array .data.rel.ro .got .got.plt .data .bss 
+   04     .note.gnu.property 
+   05     .note.gnu.build-id .note.ABI-tag 
+   06     .tdata .tbss 
+   07     .note.gnu.property 
+   08     .eh_frame_hdr 
+   09     
+   10     .tdata .init_array .fini_array .data.rel.ro .got 
+static-gate: no dynamic loader or shared-library dependencies
+
+runtime-executable=/usr/local/libexec/buster-bench-build resolved=/usr/local/libexec/buster-bench-build
+b2dfa49c1e523ccb67f9aeed14b9a6408187fac5d7767bddaceb7d75fd832628  /usr/local/libexec/buster-bench-build
+	linux-vdso.so.1 (0x00007f453b420000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f453b020000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f453b422000)
+3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf  /lib/x86_64-linux-gnu/libc.so.6
+c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da  /lib64/ld-linux-x86-64.so.2
+runtime-executable=/usr/local/libexec/buster-bench-credential-gate resolved=/usr/local/libexec/buster-bench-credential-gate
+49e61a09e60beecbad320cb8468035e6407c1fe3feeb9443c2efac47c0887658  /usr/local/libexec/buster-bench-credential-gate
+
+Elf file type is EXEC (Executable file)
+Entry point 0x4016c0
+There are 11 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  LOAD           0x000000 0x0000000000400000 0x0000000000400000 0x000520 0x000520 R   0x1000
+  LOAD           0x001000 0x0000000000401000 0x0000000000401000 0x08091d 0x08091d R E 0x1000
+  LOAD           0x082000 0x0000000000482000 0x0000000000482000 0x027e5c 0x027e5c R   0x1000
+  LOAD           0x0a9f50 0x00000000004aaf50 0x00000000004aaf50 0x005b60 0x00b2d8 RW  0x1000
+  NOTE           0x0002a8 0x00000000004002a8 0x00000000004002a8 0x000020 0x000020 R   0x8
+  NOTE           0x0002c8 0x00000000004002c8 0x00000000004002c8 0x000044 0x000044 R   0x4
+  TLS            0x0a9f50 0x00000000004aaf50 0x00000000004aaf50 0x000018 0x000058 R   0x8
+  GNU_PROPERTY   0x0002a8 0x00000000004002a8 0x00000000004002a8 0x000020 0x000020 R   0x8
+  GNU_EH_FRAME   0x09e440 0x000000000049e440 0x000000000049e440 0x00216c 0x00216c R   0x4
+  GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x10
+  GNU_RELRO      0x0a9f50 0x00000000004aaf50 0x00000000004aaf50 0x0040b0 0x0040b0 R   0x1
+
+ Section to Segment mapping:
+  Segment Sections...
+   00     .note.gnu.property .note.gnu.build-id .note.ABI-tag .rela.plt 
+   01     .init .plt .text .fini 
+   02     .rodata .stapsdt.base rodata.cst32 .eh_frame_hdr .eh_frame .gcc_except_table 
+   03     .tdata .init_array .fini_array .data.rel.ro .got .got.plt .data .bss 
+   04     .note.gnu.property 
+   05     .note.gnu.build-id .note.ABI-tag 
+   06     .tdata .tbss 
+   07     .note.gnu.property 
+   08     .eh_frame_hdr 
+   09     
+   10     .tdata .init_array .fini_array .data.rel.ro .got 
+static-gate: no dynamic loader or shared-library dependencies
+
+runtime-executable=/usr/local/libexec/buster-bench-service resolved=/usr/local/libexec/buster-bench-service
+3cddf9cfca043412a7e1d987c7174262e603428ea814935019c9ae4fdca11f80  /usr/local/libexec/buster-bench-service
+	linux-vdso.so.1 (0x00007fa9e2ba1000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007fa9e2a66000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fa9e2853000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007fa9e2ba3000)
+fce00b6f25f459cf4ae0b7fae4257909a1a8a86f9149e7c029a5d617baf1ccd0  /lib/x86_64-linux-gnu/libm.so.6
+3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf  /lib/x86_64-linux-gnu/libc.so.6
+c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da  /lib64/ld-linux-x86-64.so.2
+runtime-executable=/usr/local/libexec/buster-bench-systemd-broker resolved=/usr/local/libexec/buster-bench-systemd-broker
+b19ce4f90e2bd2a0aebcedbc5f80442f35e0e6f73119050fe66bea24147e4e7e  /usr/local/libexec/buster-bench-systemd-broker
+	linux-vdso.so.1 (0x00007f96e27c3000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f96e2564000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f96e27c5000)
+3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf  /lib/x86_64-linux-gnu/libc.so.6
+c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da  /lib64/ld-linux-x86-64.so.2
+runtime-executable=/usr/local/libexec/buster-bench-throughput resolved=/usr/local/libexec/buster-bench-throughput
+66de98ae53bb2ab948c0d0fd74266255ad1016414062c425d1af41c46f4c61f9  /usr/local/libexec/buster-bench-throughput
+	linux-vdso.so.1 (0x00007fe321867000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007fe32173a000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fe321527000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007fe321869000)
+fce00b6f25f459cf4ae0b7fae4257909a1a8a86f9149e7c029a5d617baf1ccd0  /lib/x86_64-linux-gnu/libm.so.6
+3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf  /lib/x86_64-linux-gnu/libc.so.6
+c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da  /lib64/ld-linux-x86-64.so.2
+runtime-executable=/usr/local/libexec/systemd-broker-live-test resolved=/usr/local/libexec/systemd-broker-live-test
+16faa3332b71aa634b14a3e0ea9b3ce0a3c26eb441ecd8e29fd07956ed176f98  /usr/local/libexec/systemd-broker-live-test
+	linux-vdso.so.1 (0x00007fdd691c4000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fdd68f9e000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007fdd691c6000)
+3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf  /lib/x86_64-linux-gnu/libc.so.6
+c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da  /lib64/ld-linux-x86-64.so.2
+runtime-executable=/root/issue1162-install/cleanup-identity-tests resolved=/root/issue1162-install/cleanup-identity-tests
+211b93bf48f57236bc0da3dd09629a1cbdfb9264463d925fa778b41926547b26  /root/issue1162-install/cleanup-identity-tests
+	linux-vdso.so.1 (0x00007f6635b6c000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f66359eb000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f66357d8000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f6635b6e000)
+fce00b6f25f459cf4ae0b7fae4257909a1a8a86f9149e7c029a5d617baf1ccd0  /lib/x86_64-linux-gnu/libm.so.6
+3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf  /lib/x86_64-linux-gnu/libc.so.6
+c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da  /lib64/ld-linux-x86-64.so.2
+runtime-executable=/usr/bin/clang resolved=/usr/lib/llvm-18/bin/clang
+8ef402d453d1ba4902e4ee0f0f847f6cfa01400c95aa43c24e97818b9c0e3f45  /usr/bin/clang
+	linux-vdso.so.1 (0x00007f2c3091a000)
+	libclang-cpp.so.18.1 => /lib/x86_64-linux-gnu/libclang-cpp.so.18.1 (0x00007f2c2cb10000)
+	libLLVM.so.18.1 => /lib/x86_64-linux-gnu/libLLVM.so.18.1 (0x00007f2c25505000)
+	libstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007f2c25287000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f2c25074000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f2c24f8b000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f2c3091c000)
+	libffi.so.8 => /lib/x86_64-linux-gnu/libffi.so.8 (0x00007f2c24f7d000)
+	libedit.so.2 => /lib/x86_64-linux-gnu/libedit.so.2 (0x00007f2c24f43000)
+	libz.so.1 => /lib/x86_64-linux-gnu/libz.so.1 (0x00007f2c24f27000)
+	libzstd.so.1 => /lib/x86_64-linux-gnu/libzstd.so.1 (0x00007f2c24e6d000)
+	libtinfo.so.6 => /lib/x86_64-linux-gnu/libtinfo.so.6 (0x00007f2c24e39000)
+	libxml2.so.2 => /lib/x86_64-linux-gnu/libxml2.so.2 (0x00007f2c24c57000)
+	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f2c24c27000)
+	libbsd.so.0 => /lib/x86_64-linux-gnu/libbsd.so.0 (0x00007f2c24c11000)
+	libicuuc.so.74 => /lib/x86_64-linux-gnu/libicuuc.so.74 (0x00007f2c24a04000)
+	liblzma.so.5 => /lib/x86_64-linux-gnu/liblzma.so.5 (0x00007f2c249d2000)
+	libmd.so.0 => /lib/x86_64-linux-gnu/libmd.so.0 (0x00007f2c249c3000)
+	libicudata.so.74 => /lib/x86_64-linux-gnu/libicudata.so.74 (0x00007f2c22c61000)
+b9592746f7f8ff1156680fb1fad5faf5486df7a67aca8327cc959463416c6718  /lib/x86_64-linux-gnu/libclang-cpp.so.18.1
+5c3a63957e28c15cdf1503892074f032d29b72e36a9824a77dfa87e48a0dafb0  /lib/x86_64-linux-gnu/libLLVM.so.18.1
+1fd75fe70354a416d75aef22bcae68c47bd25d20e2d0568c30b1a9838cf62f11  /lib/x86_64-linux-gnu/libstdc++.so.6
+3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf  /lib/x86_64-linux-gnu/libc.so.6
+fce00b6f25f459cf4ae0b7fae4257909a1a8a86f9149e7c029a5d617baf1ccd0  /lib/x86_64-linux-gnu/libm.so.6
+c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da  /lib64/ld-linux-x86-64.so.2
+00f593fe192f2851b8ce23b25cec2488d769beb5a8f63e8c9e563071e1075153  /lib/x86_64-linux-gnu/libffi.so.8
+195c607216f8581dbf516346ed38f4c73500cac4b84e18eb0a4fd49931e4cd56  /lib/x86_64-linux-gnu/libedit.so.2
+86200da370f20476a2507e9097a789b5ef97269b4ca8d5e164ad82dab9d99892  /lib/x86_64-linux-gnu/libz.so.1
+0a2128bc10841fb29e76d08d945864dfb0b6a66da5df6df5d8299197439e54bb  /lib/x86_64-linux-gnu/libzstd.so.1
+e6089d7bb95eee5b545f3770dd69095b0bca47d26701cad145af429561d16306  /lib/x86_64-linux-gnu/libtinfo.so.6
+ddd3af3f491a9686c82fe1232f1250cec368eb2fbcb1d2725c6ce9401a6dbd3b  /lib/x86_64-linux-gnu/libxml2.so.2
+d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb  /lib/x86_64-linux-gnu/libgcc_s.so.1
+e86cd4f0019f42c2ba5e60602e0edc8694d2948377d98c3654d0f6bddb5254bb  /lib/x86_64-linux-gnu/libbsd.so.0
+7560aadde38e5f4237a47a1ddd5891f9b36768a77a60faae30beee003ac01901  /lib/x86_64-linux-gnu/libicuuc.so.74
+696e868dd0700a19a6d65fc01608ec2d70d3cb91f65710e89180cd2e688f30cb  /lib/x86_64-linux-gnu/liblzma.so.5
+423e18586b6ea740f4465afd64f7a9a4cb7264ed979c8e7256f9085af5345fef  /lib/x86_64-linux-gnu/libmd.so.0
+ddbb3718b8bd9cbd780e5ab08b4503c30a6c4fa0706ebe5d074ed6b596c1714e  /lib/x86_64-linux-gnu/libicudata.so.74
+runtime-executable=/usr/bin/cmake resolved=/usr/bin/cmake
+1c5227af4edd22d8d689def545e18ee458260c0fd579eba2187967f38817e638  /usr/bin/cmake
+	linux-vdso.so.1 (0x00007f6dd905f000)
+	libcurl.so.4 => /lib/x86_64-linux-gnu/libcurl.so.4 (0x00007f6dd843c000)
+	libarchive.so.13 => /lib/x86_64-linux-gnu/libarchive.so.13 (0x00007f6dd836b000)
+	librhash.so.0 => /lib/x86_64-linux-gnu/librhash.so.0 (0x00007f6dd8334000)
+	libuv.so.1 => /lib/x86_64-linux-gnu/libuv.so.1 (0x00007f6dd82ff000)
+	libz.so.1 => /lib/x86_64-linux-gnu/libz.so.1 (0x00007f6dd82e3000)
+	libjsoncpp.so.25 => /lib/x86_64-linux-gnu/libjsoncpp.so.25 (0x00007f6dd82aa000)
+	libstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007f6dd802c000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f6dd7f43000)
+	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f6dd7f15000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f6dd7d02000)
+	libnghttp2.so.14 => /lib/x86_64-linux-gnu/libnghttp2.so.14 (0x00007f6dd7cd7000)
+	libidn2.so.0 => /lib/x86_64-linux-gnu/libidn2.so.0 (0x00007f6dd7cb3000)
+	librtmp.so.1 => /lib/x86_64-linux-gnu/librtmp.so.1 (0x00007f6dd7c95000)
+	libssh.so.4 => /lib/x86_64-linux-gnu/libssh.so.4 (0x00007f6dd7c23000)
+	libpsl.so.5 => /lib/x86_64-linux-gnu/libpsl.so.5 (0x00007f6dd7c0f000)
+	libssl.so.3 => /lib/x86_64-linux-gnu/libssl.so.3 (0x00007f6dd7b65000)
+	libcrypto.so.3 => /lib/x86_64-linux-gnu/libcrypto.so.3 (0x00007f6dd7651000)
+	libgssapi_krb5.so.2 => /lib/x86_64-linux-gnu/libgssapi_krb5.so.2 (0x00007f6dd75fb000)
+	libldap.so.2 => /lib/x86_64-linux-gnu/libldap.so.2 (0x00007f6dd759d000)
+	liblber.so.2 => /lib/x86_64-linux-gnu/liblber.so.2 (0x00007f6dd758d000)
+	libzstd.so.1 => /lib/x86_64-linux-gnu/libzstd.so.1 (0x00007f6dd74d3000)
+	libbrotlidec.so.1 => /lib/x86_64-linux-gnu/libbrotlidec.so.1 (0x00007f6dd74c5000)
+	libnettle.so.8 => /lib/x86_64-linux-gnu/libnettle.so.8 (0x00007f6dd746e000)
+	libacl.so.1 => /lib/x86_64-linux-gnu/libacl.so.1 (0x00007f6dd7464000)
+	liblzma.so.5 => /lib/x86_64-linux-gnu/liblzma.so.5 (0x00007f6dd7432000)
+	liblz4.so.1 => /lib/x86_64-linux-gnu/liblz4.so.1 (0x00007f6dd7410000)
+	libbz2.so.1.0 => /lib/x86_64-linux-gnu/libbz2.so.1.0 (0x00007f6dd73fc000)
+	libxml2.so.2 => /lib/x86_64-linux-gnu/libxml2.so.2 (0x00007f6dd721a000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f6dd9061000)
+	libunistring.so.5 => /lib/x86_64-linux-gnu/libunistring.so.5 (0x00007f6dd706b000)
+	libgnutls.so.30 => /lib/x86_64-linux-gnu/libgnutls.so.30 (0x00007f6dd6e70000)
+	libhogweed.so.6 => /lib/x86_64-linux-gnu/libhogweed.so.6 (0x00007f6dd6e28000)
+	libgmp.so.10 => /lib/x86_64-linux-gnu/libgmp.so.10 (0x00007f6dd6da4000)
+	libkrb5.so.3 => /lib/x86_64-linux-gnu/libkrb5.so.3 (0x00007f6dd6cdb000)
+	libk5crypto.so.3 => /lib/x86_64-linux-gnu/libk5crypto.so.3 (0x00007f6dd6cad000)
+	libcom_err.so.2 => /lib/x86_64-linux-gnu/libcom_err.so.2 (0x00007f6dd6ca7000)
+	libkrb5support.so.0 => /lib/x86_64-linux-gnu/libkrb5support.so.0 (0x00007f6dd6c9a000)
+	libsasl2.so.2 => /lib/x86_64-linux-gnu/libsasl2.so.2 (0x00007f6dd6c80000)
+	libbrotlicommon.so.1 => /lib/x86_64-linux-gnu/libbrotlicommon.so.1 (0x00007f6dd6c5d000)
+	libicuuc.so.74 => /lib/x86_64-linux-gnu/libicuuc.so.74 (0x00007f6dd6a4e000)
+	libp11-kit.so.0 => /lib/x86_64-linux-gnu/libp11-kit.so.0 (0x00007f6dd68aa000)
+	libtasn1.so.6 => /lib/x86_64-linux-gnu/libtasn1.so.6 (0x00007f6dd6894000)
+	libkeyutils.so.1 => /lib/x86_64-linux-gnu/libkeyutils.so.1 (0x00007f6dd688d000)
+	libresolv.so.2 => /lib/x86_64-linux-gnu/libresolv.so.2 (0x00007f6dd687b000)
+	libicudata.so.74 => /lib/x86_64-linux-gnu/libicudata.so.74 (0x00007f6dd4b19000)
+	libffi.so.8 => /lib/x86_64-linux-gnu/libffi.so.8 (0x00007f6dd4b0d000)
+cf6398ebba028cc7dcc5425208bb2da2d0706b885a7c9c4cbac3d453e512c1f6  /lib/x86_64-linux-gnu/libcurl.so.4
+6de6959b1a1d0c4bbe0c8fadc3d410060f579e0cc671c9d3dc9ad20f5de91e47  /lib/x86_64-linux-gnu/libarchive.so.13
+a02aee7fd2f933294f8b7af54c7cc1f35952a966f449cf1a39c670c7beb294c4  /lib/x86_64-linux-gnu/librhash.so.0
+11933a4a53d7cc817afb01610242b59a0e2e1b2bd64589a2203c1f84bbf7083f  /lib/x86_64-linux-gnu/libuv.so.1
+86200da370f20476a2507e9097a789b5ef97269b4ca8d5e164ad82dab9d99892  /lib/x86_64-linux-gnu/libz.so.1
+72527df2ef55a4af661f691e8be0eeece16a8e9bfc9a2a21971d41738e84b67b  /lib/x86_64-linux-gnu/libjsoncpp.so.25
+1fd75fe70354a416d75aef22bcae68c47bd25d20e2d0568c30b1a9838cf62f11  /lib/x86_64-linux-gnu/libstdc++.so.6
+fce00b6f25f459cf4ae0b7fae4257909a1a8a86f9149e7c029a5d617baf1ccd0  /lib/x86_64-linux-gnu/libm.so.6
+d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb  /lib/x86_64-linux-gnu/libgcc_s.so.1
+3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf  /lib/x86_64-linux-gnu/libc.so.6
+46764ab5b6ca7e353a322054f0bee45d9158a27f3e6a82a2fa4447f2ba9ba268  /lib/x86_64-linux-gnu/libnghttp2.so.14
+6e632fd9a3125db60bbc623719bbc17b0470330321c5b1c57f1ff7190e5551ad  /lib/x86_64-linux-gnu/libidn2.so.0
+15a2a75e8c437b9c99971b5ee10278ab110beef1a56d1d9e5d6759ea140e98ac  /lib/x86_64-linux-gnu/librtmp.so.1
+b82bd54edb908605b8142be1a6d242df65501af0e9bb7581cc36ebf4d8a5ecfd  /lib/x86_64-linux-gnu/libssh.so.4
+ae6c5a9aecc249fc66e03c16ec6c4385d09d7e12e0ea7694bb831ab4fee8133c  /lib/x86_64-linux-gnu/libpsl.so.5
+8e49cebd373d90b55f3626da71dd97fe8e95c68dc4c064d8962b27907690736e  /lib/x86_64-linux-gnu/libssl.so.3
+6a66c3ba6b3749aacc9497973fff00f6ba61c703ba7015d0d7ab3fd9510974b6  /lib/x86_64-linux-gnu/libcrypto.so.3
+c7aa00cf51646f7c32f196d329a562bc873ff32906c9caf6554ca489dd657507  /lib/x86_64-linux-gnu/libgssapi_krb5.so.2
+a9829b999c95452eb0a34cc7b5349427b76dbf3e5d5c8672a5ca69e454c1b151  /lib/x86_64-linux-gnu/libldap.so.2
+ddf14275b1fb70ba06510094071adcc1462e675f15ae6cdcadbf40c1dabe5a03  /lib/x86_64-linux-gnu/liblber.so.2
+0a2128bc10841fb29e76d08d945864dfb0b6a66da5df6df5d8299197439e54bb  /lib/x86_64-linux-gnu/libzstd.so.1
+64d8a5019d4c294b89fde1193343ea324bbd8603652554e5545f0a01595fa2c5  /lib/x86_64-linux-gnu/libbrotlidec.so.1
+a245ed916229583d6fe0b07657b3ed945bc148c28cc08b5266295f620d2b91cc  /lib/x86_64-linux-gnu/libnettle.so.8
+1f5247285409ec89990e9fe384d78dfb2ae6ec8e210a2657073babc8d6b7e54f  /lib/x86_64-linux-gnu/libacl.so.1
+696e868dd0700a19a6d65fc01608ec2d70d3cb91f65710e89180cd2e688f30cb  /lib/x86_64-linux-gnu/liblzma.so.5
+40bffd0a098387368b16b992abd5f7cf43c0fa2f05cabe5a6d483719554adfda  /lib/x86_64-linux-gnu/liblz4.so.1
+cc08c9f50a8009ffd6391e0116a100369b11ca9238fa52392c019e6645b122a1  /lib/x86_64-linux-gnu/libbz2.so.1.0
+ddd3af3f491a9686c82fe1232f1250cec368eb2fbcb1d2725c6ce9401a6dbd3b  /lib/x86_64-linux-gnu/libxml2.so.2
+c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da  /lib64/ld-linux-x86-64.so.2
+7bcf825cd449892db5105ad2aed91dcf94a27b796426600c765720c584c54dd1  /lib/x86_64-linux-gnu/libunistring.so.5
+ddbae2995750875c07bc218d12a062d73f8250678f54dedda7e9be5068781c98  /lib/x86_64-linux-gnu/libgnutls.so.30
+c3c606139d4f7776efa4dbd4a6b62e30c916b07a0cafd8c3ef173d6f093607e3  /lib/x86_64-linux-gnu/libhogweed.so.6
+0ccdfb6d6f5c039465f6d002cf7e4c072d48ac6a2cffc8dd6c748dec31592804  /lib/x86_64-linux-gnu/libgmp.so.10
+fad617a72b5839d30143e7db03281279089def6f18788cbb0b7f86385301bf04  /lib/x86_64-linux-gnu/libkrb5.so.3
+b37407fb2930939bf78b47267019cd201a8af1f4b6a3852249c849cf3a985798  /lib/x86_64-linux-gnu/libk5crypto.so.3
+022943b3b11c860b049bce41342f1c2594941b7b401d95dfdf235521099fee08  /lib/x86_64-linux-gnu/libcom_err.so.2
+936bae947a838bd47676a419dfcfb036d0163249215b58ec706ec7d46b7497aa  /lib/x86_64-linux-gnu/libkrb5support.so.0
+a0f410ad093236856eee59c4ff2838dc04d932ea0993400f23ed77d67d85af34  /lib/x86_64-linux-gnu/libsasl2.so.2
+a91ead095d2c80520c55a89057bbe10b031a075340442e63f44b310f93883a1b  /lib/x86_64-linux-gnu/libbrotlicommon.so.1
+7560aadde38e5f4237a47a1ddd5891f9b36768a77a60faae30beee003ac01901  /lib/x86_64-linux-gnu/libicuuc.so.74
+a59efd4792d3343dedea1d26a28f5597abfe3369082deb504c4802a31b014897  /lib/x86_64-linux-gnu/libp11-kit.so.0
+59994414d0cdec4f678ef91eaaafc44b26b00bca507e4cc7978caaf79f584173  /lib/x86_64-linux-gnu/libtasn1.so.6
+f48214417757f18793ed6e180cc14ee1d6f04252a518fc7270e8ca1d0b4260fe  /lib/x86_64-linux-gnu/libkeyutils.so.1
+1d730ea434da5a5595bc6a961d7a9ace83e03703205df9644044b3dca79c362f  /lib/x86_64-linux-gnu/libresolv.so.2
+ddbb3718b8bd9cbd780e5ab08b4503c30a6c4fa0706ebe5d074ed6b596c1714e  /lib/x86_64-linux-gnu/libicudata.so.74
+00f593fe192f2851b8ce23b25cec2488d769beb5a8f63e8c9e563071e1075153  /lib/x86_64-linux-gnu/libffi.so.8
+runtime-executable=/usr/bin/ninja resolved=/usr/bin/ninja
+5965527e09fe2b3787772aa4f711d6a36b393e7f2fcaa744a7a96c5a4ddf59cb  /usr/bin/ninja
+	linux-vdso.so.1 (0x00007f988d597000)
+	libstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007f988d2d1000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f988d0be000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f988cfd5000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f988d599000)
+	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f988cfa7000)
+1fd75fe70354a416d75aef22bcae68c47bd25d20e2d0568c30b1a9838cf62f11  /lib/x86_64-linux-gnu/libstdc++.so.6
+3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf  /lib/x86_64-linux-gnu/libc.so.6
+fce00b6f25f459cf4ae0b7fae4257909a1a8a86f9149e7c029a5d617baf1ccd0  /lib/x86_64-linux-gnu/libm.so.6
+c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da  /lib64/ld-linux-x86-64.so.2
+d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb  /lib/x86_64-linux-gnu/libgcc_s.so.1
+LIVE_PROBE_LEASE_SELF_TEST checks=13 failures=0 scope=own-temporary-file
+LIVE_PROBE_SELF_TEST checks=88 failures=0 orchestration=temporary-fixture-not-live-proof
+STAGE_OBSERVER_SELF_TEST checks=35 failures=0 fixtures-only-not-live-proof
+WORKSPACE_OBSERVER_SELF_TEST checks=25 failures=0 fixtures-only-not-live-proof
+MANAGER_DENIAL_SELF_TEST checks=57 failures=0 fixtures-only-not-live-proof
+BROKER_OBSERVER_SELF_TEST checks=192 failures=0 fixtures-only-no-live-bus
+CLEANUP_IDENTITY case=0 owner=65000 group=65001 mode=0550 expected=removed actual=removed
+CLEANUP_IDENTITY case=1 owner=65001 group=65001 mode=0770 expected=removed actual=removed
+CLEANUP_IDENTITY case=2 owner=65001 group=65001 mode=2770 expected=removed actual=removed
+CLEANUP_IDENTITY case=3 owner=65002 group=65001 mode=0770 expected=refused actual=refused
+CLEANUP_IDENTITY case=4 owner=65002 group=65001 mode=2770 expected=refused actual=refused
+CLEANUP_IDENTITY case=5 owner=65001 group=65001 mode=0750 expected=refused actual=refused
+CLEANUP_IDENTITY case=6 owner=65001 group=65002 mode=0770 expected=refused actual=refused
+CLEANUP_IDENTITY case=7 owner=0 group=65001 mode=0770 expected=refused actual=refused
+CLEANUP_IDENTITY_TEST assertions=43 failures=0
+BARE_ACCOUNT_MANAGER_DENIAL_OBSERVED 
+{"boot_id": "f5d6cb36cf9044f99cf258987a187df4", "boot_id_raw": "f5d6cb36-cf90-44f9-9cf2-58987a187df4", "kind": "READY", "manager_object_reload_possible": true, "manager_sender": ":1.0", "match_ack": true, "observer_pid": 675, "observer_start_ticks": 13595, "population_complete": false, "population_scope": "requires independent trusted PID1 journal reconciliation", "ready_monotonic_ns": 136061654407, "run_attempt": 1, "run_id": "36449564460", "schema": "issue1162-broker-observer-v1", "subscribe_ack": true}
+{"files": {"broker": {"bytes": 266664, "gid": 0, "mode": 33261, "nlink": 1, "path": "/usr/local/libexec/buster-bench-systemd-broker", "sha256": "b19ce4f90e2bd2a0aebcedbc5f80442f35e0e6f73119050fe66bea24147e4e7e", "tuple": "49:9199202:266664:1790612159:492421769:1790612159:493678844", "uid": 0}, "gate": {"bytes": 830456, "gid": 0, "mode": 33261, "nlink": 1, "path": "/usr/local/libexec/buster-bench-broker-entry-gate", "sha256": "ce0810ec05bf39ca0adbde86bb9f31d443d689a1fede1fef232b110226648017", "tuple": "49:9199197:830456:1790612159:490610456:1790612159:493678844", "uid": 0}, "group": {"bytes": 663, "gid": 0, "mode": 33188, "nlink": 1, "path": "/etc/group", "sha256": "0c107fa90f78981aa331b2ea245a3fd15ef43d62ebcc00cfd2f5a8eb839c6078", "tuple": "49:9199195:663:1790612159:456896874:1790612159:456896874", "uid": 0}, "nsswitch": {"bytes": 494, "gid": 0, "mode": 33188, "nlink": 1, "path": "/etc/nsswitch.conf", "sha256": "eec30745bade42a3f3f792e4d4192e57d2bcfe8e472433b1de426fe39a39cddb", "tuple": "49:4016369:494:1659454483:0:1789940096:98869248", "uid": 0}, "passwd": {"bytes": 1245, "gid": 0, "mode": 33188, "nlink": 1, "path": "/etc/passwd", "sha256": "fbb6816ce75b182713657a3945167b92431eaa020b62a5125a8931915aa36966", "tuple": "49:9199198:1245:1790612159:472187959:1790612159:472325457", "uid": 0}, "receipt": {"bytes": 125, "gid": 0, "mode": 33060, "nlink": 1, "path": "/etc/buster-bench/systemd-broker-accounts.identity", "sha256": "8ee5b7c8707c932a28ed17c1ac0e14154505446fb5d57c21ee5487c4744fc188", "tuple": "49:9200084:125:1790612159:654324605:1790612159:656480501", "uid": 0}}, "schema": "issue1162-broker-entry-readback-v1"}
+# /etc/nsswitch.conf
+#
+# Example configuration of GNU Name Service Switch functionality.
+# If you have the `glibc-doc-reference' and `info' packages installed, try:
+# `info libc "Name Service Switch"' for information about this file.
+
+passwd:         files
+group:          files
+shadow:         files
+gshadow:        files
+
+hosts:          files dns
+networks:       files
+
+protocols:      db files
+services:       db files
+ethers:         db files
+rpc:            db files
+
+netgroup:       nis
+MainPID=714
+ControlGroup=/system.slice/buster-bench.service
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+ActiveState=active
+schema=2 journal=3 legacy-journal=1 executor=supervisor pending=8 jobs=64
+local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1 blocked-recipes=native-retirement-performance-v1
+profile=smoke validity=not-evaluated materialization=read-only workspace=per-attempt
+worker=fixed-systemd-service dispatch=fixed-registry admission=idle-only-atomic retirement=blocked export=1 transport=unix-seqpacket authentication=peer-uid-gid
+storage=private-local-posix-directory
+job=1 token=0 sequence=0 phase=queued outcome=none validity=not-evaluated cancel-requested=0 reconciliation=0 pending=0 retained=0 request-sha256=dadc57cb0ac312571972cc767b939e3891ae280a7cb057d53e888ba8d285c2c0 failure=ok
+result-bound=0 statistical-decision=not-evaluated
+JOB=1
+{"active_lease_snapshot": {"boot_id": "f5d6cb36-cf90-44f9-9cf2-58987a187df4", "descriptors_scanned": 10, "disposition": "PASSIVE_ACTIVE_LEASE_SNAPSHOT", "lease": {"device": 49, "gid": 65000, "inode": 9200082, "links": 1, "mode": 416, "uid": 65000}, "lease_path": "/var/lib/buster-bench/lease/host.lock", "limitation": "one bounded readback; matching inode and /proc/locks do not prove the same open-file description or continuous coordinator ownership", "matching_proc_locks": [{"access": "WRITE", "class": "ADVISORY", "end": "EOF", "raw": "14: FLOCK  ADVISORY  WRITE 714 00:31:9200082 0 EOF", "reported_pid": 714, "start": 0, "type": "FLOCK", "waiting": false}], "matching_service_descriptors": [{"device": 49, "fd_number": 9, "fdinfo_bytes": 103, "gid": 65000, "inode": 9200082, "links": 1, "mode": 416, "readlink": "/var/lib/buster-bench/lease/host.lock", "uid": 65000}], "root_receipt": {"device": 49, "gid": 0, "inode": 9200083, "links": 1, "mode": 292, "size": 24, "uid": 0}, "service_cgroup": "/system.slice/buster-bench.service", "service_invocation": "8bbba5e13abf4bcdb63c2e56d606e280", "service_main_pid": 714, "service_starttime_ticks": 13631}, "attempt": 2, "base_build": {"cgroup": "/buster.slice/buster-bench.slice/buster-bench-1-2-base-build.service", "device": 30, "inode": 10166, "invocation": "b8a0172ff9974631be92026cf297d9da", "main_pid": 837, "process_starttime_ticks": 13864}, "base_build_workspace_artifact": "base-build-workspace.json", "broker_capture_coverage": {"captures": [{"cgroup_capture": true, "process_capture": true, "process_capture_reason": null, "unit": "buster-bench-systemd-broker@0-760-65000.service"}, {"cgroup_capture": true, "process_capture": true, "process_capture_reason": null, "unit": "buster-bench-systemd-broker@3-830-65000.service"}, {"cgroup_capture": false, "process_capture": false, "process_capture_reason": "unavailable: MainPID is zero", "unit": "buster-bench-systemd-broker@5-855-0.service"}, {"cgroup_capture": false, "process_capture": false, "process_capture_reason": "unavailable: MainPID is zero", "unit": "buster-bench-systemd-broker@6-879-65000.service"}, {"cgroup_capture": false, "process_capture": false, "process_capture_reason": "unavailable: MainPID is zero", "unit": "buster-bench-systemd-broker@7-890-65000.service"}], "limitation": "only instances still listed after the live probe are captured; exited instances are not inferred", "listed_units": ["buster-bench-systemd-broker@0-760-65000.service", "buster-bench-systemd-broker@3-830-65000.service", "buster-bench-systemd-broker@5-855-0.service", "buster-bench-systemd-broker@6-879-65000.service", "buster-bench-systemd-broker@7-890-65000.service"]}, "disposition": "LIVE_PROBE_PASS", "full_acceptance": "pending", "instance_sha256": "a550806c954e26f5f375feb2c075e2fc7b94b1812e63fb8a85e3210cbca8ca12", "job": 1, "live_test_exit": 0, "outer_invocation": "a28123b0c75544499d185319846d681b", "payload_absent_after_cleanup": true, "payload_device": 49, "payload_inode": 9201235, "process_group_clean": true, "request_sha256": "dadc57cb0ac312571972cc767b939e3891ae280a7cb057d53e888ba8d285c2c0", "valid": true, "worker_sha256": "256309c4d51873b4a9199b8cb6d6f2b663a7620dbd700e71dd6b28b4d05e620e"}
+job=1 token=2 sequence=0 phase=finished outcome=succeeded validity=not-evaluated cancel-requested=0 reconciliation=0 pending=0 retained=0 request-sha256=dadc57cb0ac312571972cc767b939e3891ae280a7cb057d53e888ba8d285c2c0 failure=ok
+result-bound=1 statistical-decision=not-evaluated
+result-root=/var/lib/buster-bench/workspaces/results/job-1-attempt-2
+manifest-sha256=349b7d1ed4ca1039542a8e84699f8953f6cc5786fe541ce637fbb258ad5ab2ff
+bundle-sha256=6304e1117ad3d31a572d196818441c6791a8a2c3312c05b06b242ab805b2d72b
+full-result-sha256=e86c8f4cf2e14460ae80fd8f67c95be8fcb6d7a491353ce86ec65ea06da37deb
+{"attempt": 2, "baseline": "ade6ac4b6ecb21f30b61b656439bac476c145e2f", "boot_id": "f5d6cb36-cf90-44f9-9cf2-58987a187df4", "cgroup_snapshots": [{"filesystem": "cgroup2", "recursive_absence_basis": "all six exact unit cgroup leaves are absent on the recorded cgroup2 slice", "root": "/sys/fs/cgroup", "root_device": 30, "root_inode": 7925, "slice": "/sys/fs/cgroup/buster.slice/buster-bench.slice", "slice_device": 30, "slice_inode": 9758, "snapshot": "before", "units": [{"absent": true, "unit": "buster-bench-1-2.service"}, {"absent": true, "unit": "buster-bench-1-2-base-generate.service"}, {"absent": true, "unit": "buster-bench-1-2-base-build.service"}, {"absent": true, "unit": "buster-bench-1-2-candidate-generate.service"}, {"absent": true, "unit": "buster-bench-1-2-candidate-build.service"}, {"absent": true, "unit": "buster-bench-1-2-throughput.service"}]}, {"filesystem": "cgroup2", "recursive_absence_basis": "all six exact unit cgroup leaves are absent on the recorded cgroup2 slice", "root": "/sys/fs/cgroup", "root_device": 30, "root_inode": 7925, "slice": "/sys/fs/cgroup/buster.slice/buster-bench.slice", "slice_device": 30, "slice_inode": 9758, "snapshot": "after", "units": [{"absent": true, "unit": "buster-bench-1-2.service"}, {"absent": true, "unit": "buster-bench-1-2-base-generate.service"}, {"absent": true, "unit": "buster-bench-1-2-base-build.service"}, {"absent": true, "unit": "buster-bench-1-2-candidate-generate.service"}, {"absent": true, "unit": "buster-bench-1-2-candidate-build.service"}, {"absent": true, "unit": "buster-bench-1-2-throughput.service"}]}], "cleanup_identity": {"attempt_workspace_device": 49, "attempt_workspace_inode": 9200118, "workspaces_device": 49, "workspaces_inode": 9199216}, "cleanup_sha256": "a7a84bd08ab6a7f730a82af466f8761d772470e2c75c28d7f0cefd457a61cfd3", "directory_paths": {"lease_parent": {"device": 49, "gid": 65000, "inode": 9199215, "mode": 456, "uid": 65000}, "lease_receipt_parent": {"device": 49, "gid": 0, "inode": 9199193, "mode": 365, "uid": 0}, "result_leaf": {"device": 49, "gid": 65000, "inode": 9200988, "mode": 448, "uid": 65000}, "results": {"device": 49, "gid": 65000, "inode": 9199217, "mode": 456, "uid": 65000}, "workspaces": {"device": 49, "gid": 65001, "inode": 9199216, "mode": 1480, "uid": 65000}}, "disposition": "TERMINAL_SNAPSHOT_PASS", "instance_sha256": "a550806c954e26f5f375feb2c075e2fc7b94b1812e63fb8a85e3210cbca8ca12", "job": 1, "lease_continuity": "unproven; observations do not establish continuous ownership", "lease_end": {"device": 49, "gid": 65000, "inode": 9200082, "links": 1, "mode": 416, "uid": 65000}, "lease_receipt_identity": {"device": 49, "gid": 0, "inode": 9200083, "links": 1, "mode": 292, "size": 24, "uid": 0}, "lease_start": {"device": 49, "gid": 65000, "inode": 9200082, "links": 1, "mode": 416, "uid": 65000}, "limitations": ["terminal snapshot only", "continuous lease ownership not proven", "full all-stage lifecycle/recovery acceptance remains pending"], "lock_held_by_job": "unproven; no flock or /proc/locks inspection was performed", "request_sha256": "dadc57cb0ac312571972cc767b939e3891ae280a7cb057d53e888ba8d285c2c0", "result_leaf": "/var/lib/buster-bench/workspaces/results/job-1-attempt-2", "result_leaf_device": 49, "result_leaf_inode": 9200988, "subject": "6a59bc4fc7e8ddf1bf5420e2f0ce3aca648a0a70", "systemd_unit_states": [{"active_state": "inactive", "invocation_id": "", "load_state": "not-found", "main_pid": "0", "unit": "buster-bench-1-2.service"}, {"active_state": "inactive", "invocation_id": "", "load_state": "not-found", "main_pid": "0", "unit": "buster-bench-1-2-base-generate.service"}, {"active_state": "inactive", "invocation_id": "", "load_state": "not-found", "main_pid": "0", "unit": "buster-bench-1-2-base-build.service"}, {"active_state": "inactive", "invocation_id": "", "load_state": "not-found", "main_pid": "0", "unit": "buster-bench-1-2-candidate-generate.service"}, {"active_state": "inactive", "invocation_id": "", "load_state": "not-found", "main_pid": "0", "unit": "buster-bench-1-2-candidate-build.service"}, {"active_state": "inactive", "invocation_id": "", "load_state": "not-found", "main_pid": "0", "unit": "buster-bench-1-2-throughput.service"}], "worker_sha256": "256309c4d51873b4a9199b8cb6d6f2b663a7620dbd700e71dd6b28b4d05e620e"}
+export-receipt-sha256=fe3630d98f34157b6797a3333bf6fc21db44355d7a5028c138889e9b4681c7a1
+e7abb20750e3def168324e81025fa35cc10a72edd892226d42ba7f3635c3c14d  /home/runner/work/_temp/issue1162-exact-slice-evidence/result.bqexport
+OBSERVATION_INCONCLUSIVE causes=["candidate-build inventory not complete before exact throughput start"]
+FROZEN_TREE_EVIDENCE verdict=OFFLINE_EVIDENCE_RECONCILED output=/home/runner/work/_temp/issue1162-exact-slice-evidence/frozen-tree-reconciliation.json
+{"files": {"broker": {"bytes": 266664, "gid": 0, "mode": 33261, "nlink": 1, "path": "/usr/local/libexec/buster-bench-systemd-broker", "sha256": "b19ce4f90e2bd2a0aebcedbc5f80442f35e0e6f73119050fe66bea24147e4e7e", "tuple": "49:9199202:266664:1790612159:492421769:1790612159:493678844", "uid": 0}, "gate": {"bytes": 830456, "gid": 0, "mode": 33261, "nlink": 1, "path": "/usr/local/libexec/buster-bench-broker-entry-gate", "sha256": "ce0810ec05bf39ca0adbde86bb9f31d443d689a1fede1fef232b110226648017", "tuple": "49:9199197:830456:1790612159:490610456:1790612159:493678844", "uid": 0}, "group": {"bytes": 663, "gid": 0, "mode": 33188, "nlink": 1, "path": "/etc/group", "sha256": "0c107fa90f78981aa331b2ea245a3fd15ef43d62ebcc00cfd2f5a8eb839c6078", "tuple": "49:9199195:663:1790612159:456896874:1790612159:456896874", "uid": 0}, "nsswitch": {"bytes": 494, "gid": 0, "mode": 33188, "nlink": 1, "path": "/etc/nsswitch.conf", "sha256": "eec30745bade42a3f3f792e4d4192e57d2bcfe8e472433b1de426fe39a39cddb", "tuple": "49:4016369:494:1659454483:0:1789940096:98869248", "uid": 0}, "passwd": {"bytes": 1245, "gid": 0, "mode": 33188, "nlink": 1, "path": "/etc/passwd", "sha256": "fbb6816ce75b182713657a3945167b92431eaa020b62a5125a8931915aa36966", "tuple": "49:9199198:1245:1790612159:472187959:1790612159:472325457", "uid": 0}, "receipt": {"bytes": 125, "gid": 0, "mode": 33060, "nlink": 1, "path": "/etc/buster-bench/systemd-broker-accounts.identity", "sha256": "8ee5b7c8707c932a28ed17c1ac0e14154505446fb5d57c21ee5487c4744fc188", "tuple": "49:9200084:125:1790612159:654324605:1790612159:656480501", "uid": 0}}, "schema": "issue1162-broker-entry-readback-v1"}
+external_consumer_exit=2
+{"activations":[{"first_broker_record":4,"gate_record":3,"invocation_id":"4a206a3c04674d93af10b84afe7e3bb9","outcome":"success","peer_uid":65000,"pid":762,"request_known":true,"socket_inode":28008,"start_ticks":13793,"unit":"buster-bench-systemd-broker@0-760-65000.service"},{"first_broker_record":30,"gate_record":29,"invocation_id":"323bd341b2ac47e18ac60da1122a7175","outcome":"success","peer_uid":65000,"pid":771,"request_known":true,"socket_inode":28758,"start_ticks":13808,"unit":"buster-bench-systemd-broker@1-769-65000.service"},{"first_broker_record":58,"gate_record":57,"invocation_id":"235f7a3b9d8543ba8228d2365733ac28","outcome":"success","peer_uid":65000,"pid":783,"request_known":true,"socket_inode":28054,"start_ticks":13815,"unit":"buster-bench-systemd-broker@2-781-65000.service"},{"first_broker_record":86,"gate_record":85,"invocation_id":"f3b4d3d73f3d4f4eae78a32b991127ce","outcome":"success","peer_uid":65000,"pid":832,"request_known":true,"socket_inode":28833,"start_ticks":13858,"unit":"buster-bench-systemd-broker@3-830-65000.service"},{"first_broker_record":112,"gate_record":111,"invocation_id":"0250d8c2bb8b4e3f89f336db8b9400fe","outcome":"success","peer_uid":65000,"pid":862,"request_known":true,"socket_inode":28173,"start_ticks":13905,"unit":"buster-bench-systemd-broker@4-860-65000.service"},{"first_broker_record":140,"gate_record":139,"invocation_id":"860939dc5c344add9ddf393cf0b353f9","outcome":"exit-code","peer_uid":0,"pid":874,"request_known":false,"socket_inode":27556,"start_ticks":13913,"unit":"buster-bench-systemd-broker@5-855-0.service"},{"first_broker_record":169,"gate_record":168,"invocation_id":"cc6dc012d5d846ffaee53aeb9ac9e8a8","outcome":"exit-code","peer_uid":65000,"pid":885,"request_known":true,"socket_inode":27600,"start_ticks":13920,"unit":"buster-bench-systemd-broker@6-879-65000.service"},{"first_broker_record":198,"gate_record":197,"invocation_id":"9f29c66ede0c425bbbf9654d9fce4e7b","outcome":"exit-code","peer_uid":65000,"pid":897,"request_known":true,"socket_inode":28927,"start_ticks":13927,"unit":"buster-bench-systemd-broker@7-890-65000.service"},{"first_broker_record":229,"gate_record":228,"invocation_id":"d77570d279334b4aa02631b2e93415c5","outcome":"success","peer_uid":65000,"pid":2287,"request_known":true,"socket_inode":37967,"start_ticks":30913,"unit":"buster-bench-systemd-broker@8-2285-65000.service"},{"first_broker_record":257,"gate_record":256,"invocation_id":"c97c60bc0b29464ea41696da1fec09d9","outcome":"success","peer_uid":65000,"pid":2355,"request_known":true,"socket_inode":36752,"start_ticks":30983,"unit":"buster-bench-systemd-broker@9-2350-65000.service"},{"first_broker_record":285,"gate_record":284,"invocation_id":"50c1548570db40beabbe0a24320adf82","outcome":"success","peer_uid":65000,"pid":3717,"request_known":true,"socket_inode":46108,"start_ticks":47693,"unit":"buster-bench-systemd-broker@10-3715-65000.service"}],"diagnostic_counts":{"diagnostic_processes":11,"parsed_requests":10,"root_peer_rejections":1},"entry_complete":true,"error":null,"external":{"activations":11,"activations_with_complete_external_capture":6,"complete_external_captures_checked":9},"schema":"issue1162-broker-entry-result-v1"}
+{"diagnostic_complete":true,"diagnostic_counts":{"diagnostic_processes":11,"parsed_requests":10,"root_peer_rejections":1},"errors":[{"component":"observer","message":"retained-failed terminal identity or completed query is invalid"},{"component":"manager_capture","message":"trusted PID 1 starts and observed manager lifecycles have different populations"},{"component":"external_proc","message":"observer process population is incomplete"},{"component":"overlap","message":"nonempty overlap rows lack independently complete process witnesses"}],"external_counts":null,"external_proc_complete":false,"full_ready":false,"journal_capture_complete":true,"manager_capture_complete":false,"manager_counts":null,"observer_capture_complete":false,"overlap_complete":false,"overlap_counts":null,"overlap_input_supplied":true,"overlap_row_count":2,"overlap_scope":"invalid_or_unreadable","schema":"issue1162-broker-evidence-result-v1"}
+NORMAL_PATH_EXECUTION_PASS source=6a59bc4fc7e8ddf1bf5420e2f0ce3aca648a0a70 job=1 token=2; live, terminal, independent frozen-tree reconciliation, per-activation manager/observer/gate/broker/outcome reconciliation and bare-account manager probes passed; legacy_stage_observer_valid=false remains separately reported; full acceptance pending
+RETAIN original_exit=0
+FINAL original_exit=0 final_exit=0

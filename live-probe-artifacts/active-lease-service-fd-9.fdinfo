@@ -1,0 +1,5 @@
+pos:	0
+flags:	0504002
+mnt_id:	477
+ino:	9200082
+lock:	1: FLOCK  ADVISORY  WRITE 714 00:31:9200082 0 EOF

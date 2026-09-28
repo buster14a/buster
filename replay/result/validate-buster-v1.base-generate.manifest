@@ -1,0 +1,29 @@
+schema=1
+recipe=validate-buster-v1
+status=running
+stage=base-generate
+process-result=success
+job-id=1
+attempt-token=2
+workspace-root=/var/lib/buster-bench/workspaces
+result-root=/var/lib/buster-bench/workspaces/results/job-1-attempt-2
+base-revision=ade6ac4b6ecb21f30b61b656439bac476c145e2f
+candidate-revision=6a59bc4fc7e8ddf1bf5420e2f0ce3aca648a0a70
+driver=/usr/local/libexec/buster-bench-build
+throughput=/usr/local/libexec/buster-bench-throughput
+trusted-source-scope=operator-installed-read-only
+namespace-policy=private-workspace-post-run-identity
+generate-policy=Release clang no-include-tests no-developer-targets no-check-optional-warnings no-fuzz no-sanitize no-time-trace no-instrument no-lto
+build-policy=Release target=ide jobs=1
+throughput-policy=profile=smoke mode=all pairs=1 warmups=1 guard=off
+base-source=/var/lib/buster-bench/workspaces/job-1-attempt-2/base/source
+base-build=/var/lib/buster-bench/workspaces/job-1-attempt-2/base/build
+candidate-source=/var/lib/buster-bench/workspaces/job-1-attempt-2/candidate/source
+candidate-stage-build=/var/lib/buster-bench/workspaces/job-1-attempt-2/candidate/staging
+throughput-output=/var/lib/buster-bench/workspaces/job-1-attempt-2/candidate/staging/throughput-results
+candidate-build=/var/lib/buster-bench/workspaces/job-1-attempt-2/candidate/build
+base-binary=/var/lib/buster-bench/workspaces/job-1-attempt-2/base/build/Release/ide
+candidate-binary=/var/lib/buster-bench/workspaces/job-1-attempt-2/candidate/build/Release/ide
+base-binary-sha256=
+candidate-binary-sha256=
+bundle-sha256=

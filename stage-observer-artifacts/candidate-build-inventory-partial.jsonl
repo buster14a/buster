@@ -1,0 +1,3 @@
+{"ctime_ns": 1790612505268185312, "device": 49, "gid": 65001, "inode": 9200558, "links": 3, "mode": 360, "mtime_ns": 1790612503778195066, "path": ".", "size": 4096, "type": "dir", "uid": 65000}
+{"ctime_ns": 1790612505269185305, "device": 49, "gid": 65001, "inode": 9201166, "links": 2, "mode": 360, "mtime_ns": 1790612504525190428, "path": "Release", "size": 4096, "type": "dir", "uid": 65000}
+{"ctime_ns": 1790612505269185305, "device": 49, "gid": 65001, "inode": 9201167, "links": 1, "mode": 360, "mtime_ns": 1790612504518190471, "path": "Release/ide", "sha256": "b897c020ee58a73b6fa7d82b9b7f83156b1e627d0f51d3abfcef3eb456b06531", "size": 27929608, "type": "file", "uid": 65000}
