@@ -1,0 +1,53 @@
+name: Broker entry gate disposable systemd
+
+on:
+  pull_request:
+    paths:
+      - 'tools/bench_service/broker_entry_gate*.c'
+      - 'src/buster/lib/hash.c'
+      - '.github/scripts/broker_entry_gate_systemd_test.sh'
+      - '.github/workflows/broker-entry-gate-systemd.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/bench_service/broker_entry_gate*.c'
+      - 'src/buster/lib/hash.c'
+      - '.github/scripts/broker_entry_gate_systemd_test.sh'
+      - '.github/workflows/broker-entry-gate-systemd.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: broker-entry-gate-systemd-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  entry:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Exercise the static gate before a synthetic broker in fresh PID1 systemd guest
+        shell: bash
+        run: bash .github/scripts/broker_entry_gate_systemd_test.sh
+      - name: Ensure disposable guest removal
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          guest="bqeg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if sudo docker ps -a --format '{{.Names}}' | grep -Fxq "$guest"; then
+            sudo timeout 30 docker rm --force "$guest"
+          fi
+      - name: Retain proof, failures and cleanup evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: broker-entry-gate-systemd-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/broker-entry-gate-systemd-proof
+          if-no-files-found: error
+          retention-days: 7
