@@ -14874,7 +14874,8 @@ BUSTER_C_INTERNAL bool c_ir_signature_call_supported(CIntegerIrBuilder* builder,
    branching expression -- `? :`, `&&`, `||`, and a lowered branch condition --
    created a merge block its arm is expected to reach. Buster's own
    BUSTER_CHECK puts a noreturn call in a conditional operand, so this is not
-   a hypothetical shape. */
+   a hypothetical shape. A body statement that consumes the value -- a return,
+   an initializer, a switch controller -- emits its rows after the call too. */
 BUSTER_C_INTERNAL bool c_ir_lowering_resumes_after_call(CIntegerIrBuilder* builder)
 {
     bool result = false;
@@ -14902,7 +14903,13 @@ BUSTER_C_INTERNAL bool c_ir_lowering_resumes_after_call(CIntegerIrBuilder* build
             result = true;
             break;
         case C_IR_LOWER_FRAME_BODY:
-            result = frame->as.body.state && frame->as.body.state->statement_expression_mode;
+            if (frame->as.body.state)
+            {
+                CIrLowerBodyContinuation continuation = frame->as.body.state->continuation;
+                result = frame->as.body.state->statement_expression_mode ||
+                         (continuation != C_IR_LOWER_BODY_CONTINUE_NONE && continuation != C_IR_LOWER_BODY_CONTINUE_STATEMENT &&
+                          continuation != C_IR_LOWER_BODY_CONTINUE_CONDITION_TASK);
+            }
             break;
         default:
             break;
