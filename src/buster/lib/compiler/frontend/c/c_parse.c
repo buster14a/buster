@@ -4069,6 +4069,12 @@ BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, C
     return valid;
 }
 
+BUSTER_C_INTERNAL bool c_parse_complex_part_token(CPreprocessResult preprocess, CToken token)
+{
+    String8 spelling = token.kind == C_TOKEN_IDENTIFIER ? c_token_spelling(preprocess.spelling_base, token) : (String8){0};
+    return string_equal(spelling, S8("__real__")) || string_equal(spelling, S8("__imag__"));
+}
+
 BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     Arena* arena = frame->arena;
@@ -4121,13 +4127,26 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         CParseExpressionTypeTask* task = tasks + task_count - 1;
         if (!task->state)
         {
-            while (task->start < task->end && c_token_is_punctuator(&preprocess.tokens[task->start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-                   c_parse_matching_delimiter_indexed(result, preprocess, task->start) ==
-                       task->end - 1)
+            // `__extension__` binds as a unary prefix and keeps its operand's
+            // type, so dropping it cannot change what the operand types as.
+            bool stripped = true;
+            while (stripped && task->start < task->end)
             {
-                task->start += 1;
-                task->end -= 1;
-                task->operators_checked = false;
+                stripped = false;
+                if (c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[task->start], C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+                {
+                    task->start += 1;
+                    task->operators_checked = false;
+                    stripped = true;
+                }
+                else if (c_token_is_punctuator(&preprocess.tokens[task->start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                         c_parse_matching_delimiter_indexed(result, preprocess, task->start) == task->end - 1)
+                {
+                    task->start += 1;
+                    task->end -= 1;
+                    task->operators_checked = false;
+                    stripped = true;
+                }
             }
             if (task->start >= task->end)
             {
@@ -4219,8 +4238,9 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 bool prefix_update = index == task->start + 1 &&
                     (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS_MINUS));
                 bool prefix_word = index > task->start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
-                    c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1],
-                        C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF));
+                    (c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1],
+                         C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF) | C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)) ||
+                     c_parse_complex_part_token(preprocess, preprocess.tokens[index - 1]));
                 bool binary = precedence && index > task->start && index + 1 < task->end && index - 1 != cast_prefix_close &&
                               !prefix_update && !prefix_word && c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]);
                 bool right_associative = precedence == 2;
@@ -4293,6 +4313,22 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     .start = task->start + 1,
                     .end = task->end,
                     .operators_checked = task->operators_checked,
+                };
+                continue;
+            }
+            if (c_parse_complex_part_token(preprocess, first))
+            {
+                task->operation = C_PARSE_EXPRESSION_TYPE_COMPLEX_PART;
+                task->state = 1;
+                if (task_count >= capacity)
+                {
+                    last = C_TYPE_ID_INVALID;
+                    break;
+                }
+                tasks[task_count++] = (CParseExpressionTypeTask){
+                    .start = task->start + 1,
+                    .end = task->end,
+                    .operators_checked = true,
                 };
                 continue;
             }
@@ -4397,6 +4433,22 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             {
                 machine->expression_constraint = S8("could not lower logical expression core");
                 machine->expression_constraint_token = task->end;
+            }
+            task_count -= 1;
+            continue;
+        }
+        if (task->operation == C_PARSE_EXPRESSION_TYPE_COMPLEX_PART)
+        {
+            // GNU `__real__`/`__imag__` yield a complex operand's element
+            // type and leave a real arithmetic operand's type unpromoted.
+            CTypeKind kind = last.value < result->type_count ? result->types[last.value].kind : C_TYPE_INVALID;
+            if (c_type_kind_is_complex(kind))
+            {
+                last = c_parse_expression_scalar_type(result, c_type_kind_complex_element(kind));
+            }
+            else if (!c_parse_expression_real_kind(kind))
+            {
+                last = C_TYPE_ID_INVALID;
             }
             task_count -= 1;
             continue;
@@ -4613,6 +4665,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         case C_PARSE_EXPRESSION_TYPE_LOGICAL_NOT:
         case C_PARSE_EXPRESSION_TYPE_INDIRECTION:
         case C_PARSE_EXPRESSION_TYPE_ADDRESS_OF:
+        case C_PARSE_EXPRESSION_TYPE_COMPLEX_PART:
         {
             last = C_TYPE_ID_INVALID;
         }
@@ -10188,8 +10241,9 @@ BUSTER_C_INTERNAL bool c_parse_expression_syntax_error(CParseResult* result, CPr
 // name failed outright with nothing said. A leftover opening delimiter may
 // begin an abstract declarator the scalar parse does not model
 // (`int (*)(void)`), and an operand that only names something the lookup
-// cannot see is left to its uses; neither is reported here. Returns whether
-// the operand is refused.
+// cannot see is left to its uses; neither is reported here. A leading
+// `__extension__` is an expression prefix, not the start of a type name.
+// Returns whether the operand is refused.
 BUSTER_C_INTERNAL bool c_type_parse_typeof_operand_refused(CTypeParseFrame* frame, bool operand_valid)
 {
     CParseResult* result = frame->result;
@@ -10221,10 +10275,18 @@ BUSTER_C_INTERNAL bool c_type_parse_typeof_operand_refused(CTypeParseFrame* fram
                                    S8("expected ')' after type name"));
             }
         }
-        else if (!operand_valid && c_parse_type_word_for_dialect_token(preprocess, preprocess.tokens[operand_start]))
+        else if (!operand_valid)
         {
-            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[operand_start]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
-                               S8("invalid type name"));
+            u32 first = operand_start;
+            while (first < operand_end && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[first], C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+            {
+                first += 1;
+            }
+            if (first < operand_end && c_parse_type_word_for_dialect_token(preprocess, preprocess.tokens[first]))
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[first]), C_DIAGNOSTIC_EXPECTED_DECLARATION,
+                                   S8("invalid type name"));
+            }
         }
     }
     return refused;

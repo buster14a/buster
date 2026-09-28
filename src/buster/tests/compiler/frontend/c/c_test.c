@@ -22586,6 +22586,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_invalid_operand_diagnostics(Uni
         {S8("typedef __typeof__(1 2) T;\n"), S8("expected ')'"), 22},
         {S8("int g(void) { __typeof__(1 2) l; return 0; }\n"), S8("expected ')'"), 28},
         {S8("int f(__typeof__(1 2) a, __typeof__(int junk) q);\n"), S8("expected ')'"), 20},
+        {S8("int f(__typeof__(__extension__ 1 +) p);\n"), S8("expected expression"), 35},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
     {
@@ -22621,6 +22622,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_invalid_operand_diagnostics(Uni
         S8("struct S { int a; }; int f(__typeof__(((struct S *)0)->a) p, __typeof__(__builtin_offsetof(struct S, a)) q);\n"),
         S8("typedef int T; int f(__typeof__((T)1) a, __typeof__(-(T)1) b, __typeof__(sizeof(int)) c, __typeof__(\"a\" \"b\") d);\n"),
         S8("int g(void) { __typeof__((int[]){1, 2}) y; return (int)sizeof y; }\n"),
+        S8("int x; int f(__typeof__(__extension__ x) p, __typeof__(__extension__ (long)1) q, __typeof__(__extension__ __extension__ 1) r);\n"),
+        S8("int x; int f(__typeof__(__extension__ (x), 1, (long)1) p, __typeof__((x), 1, (long)1) q);\nvoid h(void) { f(0, 0); }\n"),
+        S8("double _Complex z; int f(__typeof__(__real__ z) p, __typeof__(__imag__ (z)) q, __typeof__(__extension__ __real__ z) r);\n"),
+        S8("int x; typedef __typeof__(__extension__ x) T; T v;\n"),
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
     {
