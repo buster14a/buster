@@ -331,7 +331,13 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   8,192 and 16,384 tag boundaries and rollback across growth. With
   `BUSTER_BENCH_ALLOCATIONS=ON`, it also bounds production probes/rehash work
   and requires zero fallback type visits for unique tags;
-  `BUSTER_AGGREGATE_CENSUS=1` prints these diagnostic-only counts.
+  `BUSTER_AGGREGATE_CENSUS=1` prints these diagnostic-only counts. Lowering's
+  tag type names (`c_ir_type_name_prefix`) ask `c_parse_aggregate_unique`
+  first: an unused slot on a complete index means no row, and a live slot
+  not marked `multiple` is the only row, whatever the reference scope. Only
+  duplicated, stale or incomplete keys search the type table (#1467);
+  `c_test_aggregate_unique_search` requires zero lowering search rows for
+  unique tags.
 - Each aggregate initializer context retains a `CIrInitializerRelocationExtent`.
   Before clearing a subobject, it incorporates only relocation records appended
   since the preceding query. Clears wholly outside the occupied extent skip
