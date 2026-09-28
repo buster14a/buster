@@ -8034,8 +8034,8 @@ BUSTER_C_INTERNAL void c_preprocess_undefine_directive(Arena* arena, CSymbolTabl
 
 bool c_preprocess_dialect_is_gnu(CPreprocessDialect dialect)
 {
-    return dialect == C_PREPROCESS_DIALECT_GNU99 || dialect == C_PREPROCESS_DIALECT_GNU11 || dialect == C_PREPROCESS_DIALECT_GNU17 ||
-           dialect == C_PREPROCESS_DIALECT_GNU23;
+    return dialect == C_PREPROCESS_DIALECT_GNU89 || dialect == C_PREPROCESS_DIALECT_GNU99 || dialect == C_PREPROCESS_DIALECT_GNU11 ||
+           dialect == C_PREPROCESS_DIALECT_GNU17 || dialect == C_PREPROCESS_DIALECT_GNU23;
 }
 
 BUSTER_C_INTERNAL String8 c_preprocess_standard_version(CPreprocessDialect dialect)
@@ -8054,6 +8054,7 @@ BUSTER_C_INTERNAL String8 c_preprocess_standard_version(CPreprocessDialect diale
     case C_PREPROCESS_DIALECT_GNU23:
     case C_PREPROCESS_DIALECT_C23:
         return S8("202311L");
+    case C_PREPROCESS_DIALECT_GNU89:
     case C_PREPROCESS_DIALECT_COUNT:
         return (String8){0};
     }
@@ -8274,7 +8275,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .length = 1,
         .kind = C_TOKEN_PREPROCESSING_NUMBER,
     };
-    standard_replacement[1] = c_space_token(space, c_preprocess_standard_version(options.dialect), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+    String8 standard_version = c_preprocess_standard_version(options.dialect);
+    standard_replacement[1] = standard_version.length ? c_space_token(space, standard_version, C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE) : (CToken){0};
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC__"), standard_replacement, 1, 0, 0, false, false);
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__BUSTER__"), standard_replacement, 1, 0, 0, false, false);
     // The GNU version macros are not a dialect switch.  Both reference
@@ -8776,7 +8778,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         hosted_replacement.offset = C_SPELLING_ZERO;
     }
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_HOSTED__"), &hosted_replacement, 1, 0, 0, false, false);
-    c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_VERSION__"), standard_replacement + 1, 1, 0, 0, false, false);
+    // C90 predates __STDC_VERSION__, so gnu89 leaves it undefined as gcc does.
+    if (standard_version.length)
+    {
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_VERSION__"), standard_replacement + 1, 1, 0, 0, false, false);
+    }
     CTokenStream token_stream = {
         .arena = token_arena,
         .shape_arena = token_shape_arena,
