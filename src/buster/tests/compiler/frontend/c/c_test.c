@@ -1893,6 +1893,42 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_scope_function_declaration(UnitT
     return result;
 }
 
+// C11 6.2.1p4: a block-scope function declaration's identifier has block
+// scope, so a file-scope typedef or enumerator of the same spelling is that
+// name again once the block closes (#1715).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_scope_function_declaration_file_scope_name(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("typedef char T;\nlong fn(void) { double T(void); return 0; }\nlong test(void) { T c = 0; return (long)sizeof(c) - 1; }\n"),
+        S8("typedef char T;\nlong test(void) { { double T(void); } T c = 0; return (long)sizeof(c) - 1; }\n"),
+        S8("typedef char T;\nlong fn(void) { double T(void); return (long)T(); }\nlong test(void) { T c = 0; return (long)sizeof(c) - 1; }\n"),
+        S8("enum { T = 7 };\nlong fn(void) { double T(void); return 0; }\nlong test(void) { return T - 7; }\n"),
+    };
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens =
+                c_preprocess(temporary.arena, sources[index], (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0, sources[index]);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("block-function-shadow.c"), tokens, parse, target_native,
+                                                                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, lowered.program && lowered.diagnostic_count == 0, sources[index]);
+            if (lowered.program && !lowered.diagnostic_count)
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                BUSTER_TEST_RAW(arguments, c_test_find_ir_function(module, S8("test")) != 0, sources[index]);
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lexer_rewind_zeroed(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -24808,6 +24844,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
     BUSTER_TEST_FIXTURE(arguments, c_test_vla_row_places);
     BUSTER_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration);
+    BUSTER_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration_file_scope_name);
     BUSTER_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
     BUSTER_TEST_FIXTURE(arguments, c_test_scope_interval_index);
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
