@@ -23081,6 +23081,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_invalid_operand_diagnostics(Uni
         S8("double _Complex z; int f(__typeof__(__real__ z) p, __typeof__(__imag__ (z)) q, __typeof__(__extension__ __real__ z) r);\n"),
         S8("int x; typedef __typeof__(__extension__ x) T; T v;\n"),
         S8("int x; double _Complex z; int g(void) { __typeof__(__extension__ x) l = x; __typeof__(__extension__ (long)1) m = 0; __typeof__(__real__ z) r = 0; __typeof__(__imag__ z) i = 0; return l + (int)m + (int)r + (int)i; }\n"),
+        S8("int x; int f(__typeof__(sizeof(unsigned _BitInt(8)) + x) a, __typeof__(sizeof(signed _BitInt(8)) + x) b, __typeof__(sizeof(_BitInt(8) unsigned) + x) c);\n"),
+        S8("int x; int f(__typeof__(sizeof(int *_Nonnull) + x) a, __typeof__(sizeof(int *_Nullable) + x) b, __typeof__(sizeof(int *__attribute__((aligned(8)))) + x) c);\n"),
+        S8("int *p; int f(__typeof__((int *_Nonnull)p) a, __typeof__((unsigned _BitInt(8))1) b, __typeof__((int *__attribute__((aligned(8))))p) c);\n"),
+        S8("int x; int *p; int g(void) { __typeof__((int *_Nonnull)p) q = p; __typeof__(sizeof(unsigned _BitInt(8)) + x) r = 1; "
+           "__typeof__(sizeof(_BitInt(8) unsigned) + x) s = 2; __typeof__(sizeof(int *__attribute__((aligned(8)))) + x) t = 3; return *q + (int)r + (int)s + (int)t; }\n"),
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
     {

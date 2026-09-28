@@ -10125,6 +10125,19 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     }
 }
 
+BUSTER_C_INTERNAL bool c_parse_token_is_keyword_or_reserved(CPreprocessResult preprocess, CToken token)
+{
+    bool result = false;
+    if (token.kind == C_TOKEN_IDENTIFIER)
+    {
+        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        result = (spelling.length >= 2 && spelling.pointer[0] == '_' &&
+                  (spelling.pointer[1] == '_' || (spelling.pointer[1] >= 'A' && spelling.pointer[1] <= 'Z'))) ||
+                 c_declaration_keyword_for_dialect_token(preprocess, token);
+    }
+    return result;
+}
+
 // Where a type name read from `start` stops short of `end`: the first token
 // past its specifiers and abstract declarator, `end` when it reaches it, or
 // UINT32_MAX when `start` does not begin a type name. An opening parenthesis
@@ -10159,6 +10172,14 @@ BUSTER_C_INTERNAL u32 c_parse_type_name_stop(CParseResult* result, CPreprocessRe
             }
             else
             {
+                // A keyword or reserved identifier may continue the type name
+                // in a way the walk does not model (`unsigned _BitInt(8)`,
+                // `int *_Nonnull`, `__attribute__`), so it does not show where
+                // the type name stops.
+                if (c_parse_token_is_keyword_or_reserved(preprocess, token))
+                {
+                    stop = UINT32_MAX;
+                }
                 break;
             }
         }
@@ -10341,6 +10362,12 @@ BUSTER_C_INTERNAL bool c_parse_expression_syntax_error(CParseResult* result, CPr
                      c_token_is_punctuator(&token, C_PUNCTUATOR_COLON) || c_parse_expression_operator_precedence(token))
             {
                 expect_operand = true;
+            }
+            else if (c_parse_token_is_keyword_or_reserved(preprocess, token))
+            {
+                // `_BitInt(8) unsigned`: the operand read so far may have been
+                // the start of a type name the walk does not model.
+                modeled = false;
             }
             else if (token.kind == C_TOKEN_IDENTIFIER || token.kind == C_TOKEN_PREPROCESSING_NUMBER || token.kind == C_TOKEN_CHARACTER_LITERAL ||
                      token.kind == C_TOKEN_STRING_LITERAL)
