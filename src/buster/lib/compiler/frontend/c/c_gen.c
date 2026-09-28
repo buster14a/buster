@@ -54,26 +54,29 @@
 //   c_ir_scalar_type .. c_ir_add_qualified_type   C type -> IrType mapping
 //                                                 and derived-type interning
 //   c_ir_function_signature                       signatures and ABI limits
-//   c_ir_emit_field_place_from_value              local/scratch member-search frontiers
 //   CIntegerIrBuilder                             per-module lowering state
 //   c_ir_label_metadata_*                         label provenance needed by
 //                                                 computed goto
 //   c_ir_ssa_*                                    sparse sealed-block local SSA
 //                                                 and memory-form fallback
-//   c_ir_emit_local .. c_ir_emit_parameter        place/value emission
+//   c_ir_emit_local                               local place/value emission
 //                                                 primitives
 //   c_ir_atomic_aggregate_bits_*                  aggregate exchange/CAS
 //                                                 representation views
+//   c_ir_complex_compose, c_ir_complex_split      immutable complex construction
+//                                                 and scalar projection
+//   c_ir_emit_field_place_from_value              local/scratch member-search frontiers
+//   c_ir_emit_parameter                           parameter place/value emission
+//                                                 primitives
 //   c_ir_float_parse, c_ir_ieee_from_rational,    literals: exact rational ->
 //   c_ir_ext80_*, c_ir_decode_quoted,             IEEE/x87 conversion, string
 //   c_ir_count_quoted                             and character decoding
-//   c_ir_complex_compose, c_ir_complex_split    immutable complex construction
-//                                                 and scalar projection
-//   c_ir_emit_initializer_capture                exact constructor types and
-//                                                 qualified subobject stores
 //   c_ir_build_function_name_index                call-target resolution
-//   CIrLowerFrameKind .. c_ir_lower_dispatch      the lowering machines
+//   CIrLowerFrameKind                             lowering-machine frame kinds
+//   c_ir_emit_initializer_capture                 exact constructor types and
+//                                                 qualified subobject stores
 //   c_ir_lower_expression_core_step               the expression evaluator
+//   c_ir_lower_dispatch                           lowering-machine dispatch
 //   c_ir_cleanup_*                                __attribute__((cleanup))
 //   c_ir_inline_assembly_*                        GNU inline assembly
 //   c_ir_lower_body_advance                       the statement walker
