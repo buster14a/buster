@@ -1,0 +1,85 @@
+name: Inspect C diagnostic lowering sites
+
+on:
+  push:
+    branches: [codex/1725-source-diagnostics]
+    paths: ['.github/workflows/inspect-1725.yml']
+
+permissions: {}
+
+jobs:
+  inspect:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Print diagnostic sites and nearby helpers
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          targets = {
+              'src/buster/lib/compiler/frontend/c/c_gen.c': [
+                  'bound to C entity',
+                  'cannot convert IR type',
+                  'cannot zero-initialize IR type kind',
+                  'conditional expression predicted incompatible branch types',
+                  'C IR lowering cannot resolve definition',
+                  'c_ir_identifier_entity_or_lookup',
+              ],
+              'src/buster/lib/compiler/frontend/c/c_parse.c': [
+                  'bound to C entity',
+                  'c_parse_lowering_constraint_consider',
+              ],
+              'src/buster/lib/compiler/frontend/c/c.h': [
+                  'typedef enum CEntityKind',
+                  'typedef struct CEntity',
+                  'typedef enum CTypeKind',
+              ],
+          }
+
+          for path, needles in targets.items():
+              lines = Path(path).read_text().splitlines()
+              print(f'===== {path} ({len(lines)} lines) =====')
+              emitted = set()
+              for needle in needles:
+                  matches = [i for i, line in enumerate(lines) if needle in line]
+                  print(f'--- NEEDLE {needle!r}: {len(matches)} match(es) ---')
+                  for i in matches:
+                      lo = max(0, i - 35)
+                      hi = min(len(lines), i + 36)
+                      key = (lo, hi)
+                      if key in emitted:
+                          continue
+                      emitted.add(key)
+                      print(f'@@ {lo + 1}:{hi} @@')
+                      for j in range(lo, hi):
+                          print(f'{j + 1:6}: {lines[j]}')
+
+          for path in ('src/buster/lib/compiler/frontend/c/c_gen.c',
+                       'src/buster/lib/compiler/frontend/c/c_parse.c'):
+              lines = Path(path).read_text().splitlines()
+              print(f'===== helper candidates in {path} =====')
+              for i, line in enumerate(lines):
+                  if any(token in line for token in (
+                      'type_name', 'type_spelling', 'entity_kind_name',
+                      'entity_name', 'format_type', 'render_type')):
+                      if line.lstrip().startswith(('BUSTER_C_INTERNAL', 'static ', 'String8 ', 'const char')):
+                          print(f'{i + 1:6}: {line}')
+
+          print('===== default failure-message assignments carrying numeric ids =====')
+          for path in ('src/buster/lib/compiler/frontend/c/c_gen.c',
+                       'src/buster/lib/compiler/frontend/c/c_parse.c'):
+              lines = Path(path).read_text().splitlines()
+              for i, line in enumerate(lines):
+                  if 'failure_message' in line and ('{u32}' in line or '{u64}' in line or 'entity' in line or 'IR type' in line):
+                      lo = max(0, i - 3)
+                      hi = min(len(lines), i + 6)
+                      print(f'--- {path}:{i + 1} ---')
+                      for j in range(lo, hi):
+                          print(f'{j + 1:6}: {lines[j]}')
+          PY
