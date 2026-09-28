@@ -640,6 +640,26 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   Regressions:
   `c_test_type_specifier_diagnostics` and `compiler_driver_test_type_specifiers`,
   which also verify a refused compilation preserves or never creates the output.
+- A member segment that cannot declare a member abandons its aggregate
+  definition through `c_type_parse_aggregate_segment_fail`, which carries the
+  segment's diagnostics over the rollback and drops one repeating a standing
+  report (each declarator of `} a, b;` parses the definition again). A missing
+  name (`int *;`, `int (*)(void);`, `int (*const)(void);`,
+  `int (* __attribute__((unused)))(void);`, `int , a;`, `int a, ;`) is
+  `C_DIAGNOSTIC_EXPECTED_DECLARATION` at the token Clang names -- the scan
+  steps over groups, pointers, their qualifiers and attributes first -- and a
+  parenthesized name behind decorations the declarator parse does not take is
+  `C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS`; neither rolls back silently. An
+  attribute after `*` is taken: `int (* __attribute__((unused)) p)(void);`
+  declares `p`. An empty
+  bit-field width likewise, and an unknown member type is
+  `C_DIAGNOSTIC_UNKNOWN_TYPE_NAME`. A declaration that declares nothing
+  (`int;`, `__attribute__((packed));`, `enum E { A };`) completes the segment
+  without a member row. A member `_Static_assert` (C23 `static_assert`) also
+  declares no member: the segment defers it to the translation unit's
+  deferred assertions, once per token range however often the definition is
+  parsed. Regression:
+  `c_test_member_declaration_without_declarator_diagnostics` (GitHub #1661).
 
 ## Immutable aggregate and complex construction
 
