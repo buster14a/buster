@@ -631,11 +631,28 @@ PWATCH
   p_capture after-sigterm
   sudo docker exec "$guest" pkill -INT -x strace || true
   sleep 1
+  if [[ -n "${BQ_P_REPRO_UPGRADE:-}" ]]; then
+    # Replace only the service binary with the fix build while the job is stuck,
+    # then let the controlled restart recover it (the planned job-24 disposition).
+    git worktree add --detach "$RUNNER_TEMP/p-upgrade" "$BQ_P_REPRO_UPGRADE"
+    (cd "$RUNNER_TEMP/p-upgrade" && mkdir -p build &&
+     clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o build/buster-bench-build &&
+     build/buster-bench-build bench_service capabilities >/dev/null)
+    git -C "$RUNNER_TEMP/p-upgrade" rev-parse HEAD | tee "$evidence/p-upgrade-commit.txt"
+    sha256sum "$RUNNER_TEMP/p-upgrade/build/bench-service-tools/service" | tee "$evidence/p-upgrade-service-sha256.txt"
+    sudo docker cp "$RUNNER_TEMP/p-upgrade/build/bench-service-tools/service" "$guest:/root/p-upgrade-service"
+    sudo docker exec "$guest" install -o root -g root -m 0755 /root/p-upgrade-service /usr/local/libexec/buster-bench-service
+    sudo docker exec "$guest" sha256sum /usr/local/libexec/buster-bench-service | tee -a "$evidence/p-upgrade-service-sha256.txt"
+  fi
   sudo docker exec "$guest" systemctl start buster-bench.service || true
   newpid="$(sudo docker exec "$guest" systemctl show -p MainPID --value buster-bench.service)"
   echo "P_REPRO restarted MainPID=$newpid"
   sudo docker exec "$guest" timeout 8 strace -f -tt -T -s 256 -o /root/p-strace/recovery -p "$newpid" || true
-  sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway result "$job" >"$evidence/p-result-after-restart.txt" 2>&1 || true
+  for _ in $(seq 1 30); do
+    sudo docker exec "$guest" runuser -u buster-bench -- /usr/local/libexec/buster-bench-service gateway result "$job" >"$evidence/p-result-after-restart.txt" 2>&1 || true
+    if grep -q 'phase=finished' "$evidence/p-result-after-restart.txt"; then break; fi
+    sleep 1
+  done
   cat "$evidence/p-result-after-restart.txt"
   sleep 2
   p_capture after-restart
