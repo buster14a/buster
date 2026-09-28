@@ -23032,6 +23032,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_invalid_operand_diagnostics(Uni
         {S8("typedef __typeof__(int junk) T;\n"), S8("expected ')' after type name"), 24},
         {S8("typedef __typeof__(1 +) T;\n"), S8("expected expression"), 23},
         {S8("__typeof__(int *junk) v;\n"), S8("expected ')' after type name"), 17},
+        {S8("int f(__typeof__(struct { int m junk; }) *p);\n"), S8("invalid type name"), 18},
+        {S8("int f(__typeof__(struct { _Atomic() x; }) *p);\n"), S8("_Atomic requires a type name"), 27},
+        {S8("int f(__typeof__(1 2) a);\n"), S8("expected ')'"), 20},
+        {S8("int f(__typeof__((1 +)) a);\n"), S8("expected expression"), 22},
+        {S8("int f(__typeof__(sizeof(int junk)) a);\n"), S8("expected ')' after type name"), 29},
+        {S8("typedef __typeof__(1 2) T;\n"), S8("expected ')'"), 22},
+        {S8("int g(void) { __typeof__(1 2) l; return 0; }\n"), S8("expected ')'"), 28},
+        {S8("int f(__typeof__(1 2) a, __typeof__(int junk) q);\n"), S8("expected ')'"), 20},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
     {
@@ -23044,7 +23052,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_invalid_operand_diagnostics(Uni
         for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
         {
             CDiagnostic diagnostic = parse.diagnostics[diagnostic_index];
-            if (diagnostic.kind == C_DIAGNOSTIC_EXPECTED_DECLARATION && string_equal(diagnostic.message, invalid[case_index].message))
+            if ((diagnostic.kind == C_DIAGNOSTIC_EXPECTED_DECLARATION || diagnostic.kind == C_DIAGNOSTIC_INVALID_ATOMIC_TYPE) &&
+                string_equal(diagnostic.message, invalid[case_index].message))
             {
                 reported += 1;
                 located = diagnostic.location.line == 1 && diagnostic.location.column == invalid[case_index].column;
@@ -23063,6 +23072,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_invalid_operand_diagnostics(Uni
         S8("typedef __typeof__(1 + 2) T; T v;\n"),
         S8("void f(int n, __typeof__(n) m);\n"),
         S8("void f(__typeof__(int (*)(void)) p);\n"),
+        S8("struct S { int a; }; int f(__typeof__(((struct S *)0)->a) p, __typeof__(__builtin_offsetof(struct S, a)) q);\n"),
+        S8("typedef int T; int f(__typeof__((T)1) a, __typeof__(-(T)1) b, __typeof__(sizeof(int)) c, __typeof__(\"a\" \"b\") d);\n"),
+        S8("int g(void) { __typeof__((int[]){1, 2}) y; return (int)sizeof y; }\n"),
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
     {
