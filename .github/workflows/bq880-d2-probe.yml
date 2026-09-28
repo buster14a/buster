@@ -38,3 +38,48 @@ jobs:
       - name: Journal of the D2 units
         if: always()
         run: sudo journalctl --no-pager -o short-iso -u 'bq880-d2-*' | tail -n 80
+  probe-arch-btrfs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: probe
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: 425b8b5ac571a3320681f0394de61a82cbc42e5f
+          fetch-depth: 0
+          path: src425
+      - name: Build an Arch image with the host toolchain family
+        run: |
+          set -euxo pipefail
+          mkdir img && cat > img/Dockerfile <<'DOCKER'
+          FROM archlinux:latest
+          RUN pacman -Syu --noconfirm clang cmake ninja mold python git btrfs-progs util-linux && pacman -Scc --noconfirm
+          CMD ["/usr/lib/systemd/systemd"]
+          DOCKER
+          sudo docker build -q -t bq880-arch img
+      - name: Start systemd guest and provision it like benchpress
+        run: |
+          set -euxo pipefail
+          sudo docker run -d --name g --privileged --cgroup-parent=docker.slice --cgroupns=private --env container=docker \
+            --tmpfs /tmp --tmpfs /run --tmpfs /run/lock bq880-arch
+          sudo docker cp src425 g:/src425
+          sudo docker cp probe/.github/bq880-d2/bq880_d2.sh g:/bq880_d2.sh
+          x() { sudo docker exec g bash -euxo pipefail -c "$1"; }
+          x 'for i in $(seq 60); do s=$(systemctl is-system-running || true); [ "$s" = running ] || [ "$s" = degraded ] && break; sleep 1; done; systemctl --version | head -1; clang --version | head -1; cmake --version | head -1; mold --version; uname -r'
+          x 'git config --global --add safe.directory "*"; chown -R root:root /src425'
+          x 'groupadd -g 967 buster-bench; groupadd -g 966 buster-bench-candidate; useradd -r -M -s /usr/sbin/nologin -u 967 -g buster-bench -G buster-bench-candidate buster-bench; useradd -r -M -s /usr/sbin/nologin -u 966 -g buster-bench-candidate buster-bench-candidate; id buster-bench'
+          x 'cd /src425 && mkdir -p build && clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o build/buster-bench-build && install -D -m 0755 build/buster-bench-build /usr/local/libexec/buster-bench-build && rm -rf build && git status --porcelain'
+          x 'B=/opt/buster-bench/installed/sources/ade6ac4b6ecb21f30b61b656439bac476c145e2f; mkdir -p $B && git -C /src425 archive ade6ac4b6ecb21f30b61b656439bac476c145e2f src cmake CMakeLists.txt | tar -x -C $B'
+          x 'truncate -s 8G /var/tmp/btrfs.img && mkfs.btrfs -q /var/tmp/btrfs.img && mkdir -p /var/tmp/btr && mount -o loop,noatime,compress=zstd:3,ssd,space_cache=v2 /var/tmp/btrfs.img /var/tmp/btr && findmnt -T /var/tmp/btr'
+      - name: Run D2 on btrfs inside the Arch systemd guest
+        run: sudo docker exec g bash /bq880_d2.sh /src425 /var/tmp/btr/bq880-d2 2>&1 | tee d2-arch.log
+      - name: Run D2 on the guest overlay filesystem (control)
+        if: always()
+        run: sudo docker exec g bash /bq880_d2.sh /src425 /var/tmp/bq880-d2-overlay 2>&1 | tee d2-arch-overlay.log
+      - name: Guest journal of the D2 units
+        if: always()
+        run: sudo docker exec g journalctl --no-pager -o short-iso -u 'bq880-d2-*' | tail -n 120
