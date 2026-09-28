@@ -51,10 +51,13 @@
 //   c_parse_constant_expression_evaluate          shared original-token-range
 //   c_parse_static_assert_evaluate                evaluator and _Static_assert
 //                                                 deferral past unresolved bounds
+//   c_parse_token_range_text,                     the one-line source quote a
+//   c_parse_static_assert_check                   non-constant assertion prints
 //   c_parse_initializer_designator,               initializer shapes and
 //   c_parse_infer_initializer_array_count_core    array-bound inference
 //   c_parse_add_type, c_parse_aggregate_lookup,   type interning and
 //   c_parse_primitive_type                        construction, attributes
+//   c_parse_definition_scan_start                 definition-token index
 //   c_parse_enum_complete, c_parse_enum_successor enum types and full-width values
 //   c_parse_word_bits_compute,                    specifier words answered
 //   c_parse_word_bits_token                       from the interned symbol
@@ -4775,29 +4778,57 @@ BUSTER_C_INTERNAL bool c_parse_expression_place_shape(CParseResult* result, CPre
     return place;
 }
 
+// A parameter keeps its declared array spelling in its entity type, so a
+// type query reports `int a[4]` or `char *argv[]` as an array. C17 6.7.6.3p7
+// adjusts it to a pointer to the element, qualified by what the brackets
+// carry: `int a[const 2]` is a const pointer. The array type's own `const`
+// is what c_ir_mark_local_read_only also keeps read-only for that pointer.
+BUSTER_C_INTERNAL bool c_parse_array_parameter_pointer_is_const(CParseResult* result, CTypeId type)
+{
+    bool is_const = false;
+    if (type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY)
+    {
+        CType array = result->types[type.value];
+        is_const = array.is_const || (array.array_bound < result->array_bound_count && result->array_bounds[array.array_bound].is_const);
+    }
+    return is_const;
+}
+
 // A type query retains the operand's qualifiers and does not evaluate it.
 // The place check is shared with address-of and asm output constraints; a
 // scalar type alone would also describe an enumerator, cast, call or rvalue.
+// An array parameter is the modifiable pointer it is adjusted to unless that
+// pointer is const: `argv++` and `*SK++` are the ordinary spellings (lmdb's
+// `mdb_copy`, mbedtls's `des_setkey`). A local or member array is not
+// adjusted and stays unmodifiable.
 BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CTypeId type)
 {
     bool valid = type.value < result->type_count && c_parse_expression_place_shape(result, preprocess, start, end);
-    if (valid)
-    {
-        CType value = result->types[type.value];
-        valid = !value.is_const && (c_parse_expression_real_kind(value.kind) || value.kind == C_TYPE_POINTER);
-    }
     while (valid && start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
            c_parse_matching_delimiter_indexed(result, preprocess, start) + 1 == end)
     {
         start += 1;
         end -= 1;
     }
-    if (valid && start + 1 == end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+    bool identifier = valid && start + 1 == end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER;
+    CEntityId entity = C_ENTITY_ID_INVALID;
+    if (identifier)
     {
         u32 use = c_parse_identifier_use_index(result, start);
         CScopeId operand_scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, start);
-        CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
-                        : c_parse_lookup_entity_token(result, preprocess.spelling_base, operand_scope, &preprocess.tokens[start]);
+        entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
+                                                : c_parse_lookup_entity_token(result, preprocess.spelling_base, operand_scope, &preprocess.tokens[start]);
+    }
+    if (valid)
+    {
+        CType value = result->types[type.value];
+        bool adjusted_parameter = value.kind == C_TYPE_ARRAY && entity.value < result->entity_count &&
+                                  result->entities[entity.value].kind == C_ENTITY_PARAMETER &&
+                                  !c_parse_array_parameter_pointer_is_const(result, type);
+        valid = !value.is_const && (c_parse_expression_real_kind(value.kind) || value.kind == C_TYPE_POINTER || adjusted_parameter);
+    }
+    if (valid && identifier)
+    {
         valid = entity.value < result->entity_count &&
                 (result->entities[entity.value].kind == C_ENTITY_OBJECT || result->entities[entity.value].kind == C_ENTITY_LOCAL ||
                  result->entities[entity.value].kind == C_ENTITY_PARAMETER) && !result->entities[entity.value].is_constexpr;
@@ -6177,6 +6208,48 @@ BUSTER_C_INTERNAL void c_parse_defer_static_assert(CPreprocessResult preprocess,
     };
 }
 
+// The tokens [start, end) as a diagnostic quotes them: on one line, touching
+// where they touched in the source and otherwise one space apart, so a line
+// break, a comment or a macro boundary reads as the space it stood for. This
+// is the -E printer's adjacency rule (compiler_driver_preprocess_text) with
+// line breaks folded, guarded by the same c_token_requires_separator.
+BUSTER_C_INTERNAL String8 c_parse_token_range_text(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u64 capacity = 1;
+    for (u32 index = start; index < end; index += 1)
+    {
+        capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[index]) + 1;
+    }
+    char8* text = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    CSourceLocation previous_location = {0};
+    CToken previous_token = {0};
+    String8 previous_spelling = {0};
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        CSourceLocation location = c_preprocess_token_location(&preprocess, token);
+        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        if (index != start &&
+            (location.file != previous_location.file || location.line != previous_location.line ||
+             location.column != previous_location.column + previous_spelling.length ||
+             c_token_requires_separator(previous_token, previous_spelling, token, spelling)))
+        {
+            text[length++] = ' ';
+        }
+        memcpy(text + length, spelling.pointer, spelling.length);
+        length += spelling.length;
+        previous_location = location;
+        previous_token = token;
+        previous_spelling = spelling;
+    }
+    text[length] = 0;
+    return (String8){
+        .pointer = text,
+        .length = length,
+    };
+}
+
 BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                      CDeclaration declaration, CScopeId scope)
 {
@@ -6210,7 +6283,8 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
     bool expression_is_integer = true;
     u32 expression_start = 0;
     u32 expression_end = 0;
-    if (machine && c_parse_static_assert_expression_range(preprocess, declaration, &expression_start, &expression_end))
+    bool has_expression = c_parse_static_assert_expression_range(preprocess, declaration, &expression_start, &expression_end);
+    if (machine && has_expression)
     {
         CTypeId expression_type = C_TYPE_ID_INVALID;
         if (c_parse_expression_type_query(machine, arena, preprocess, result, scope, expression_start, expression_end, &expression_type) &&
@@ -6231,29 +6305,14 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
     }
     else if (!evaluated)
     {
-        String8* parts = arena_allocate(arena, String8, declaration.token_count * 2);
-        u32 part_count = 0;
-        for (u32 token_offset = 2; token_offset < declaration.token_count; token_offset += 1)
-        {
-            CToken token = preprocess.tokens[declaration.token_start + token_offset];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-            {
-                break;
-            }
-            if (part_count)
-            {
-                parts[part_count++] = S8(" ");
-            }
-            parts[part_count++] = c_token_spelling(preprocess.spelling_base, token);
-        }
-        String8 expression = string_join_arena(arena,
-                                               (SliceString8){
-                                                   .pointer = parts,
-                                                   .length = part_count,
-                                               },
-                                               false);
+        // Quote the whole controlling expression: the range ends at the
+        // separator comma or closing parenthesis at the assertion's own depth,
+        // not at the first one inside a parenthesized operand or a call.
+        String8 expression = has_expression ? c_parse_token_range_text(arena, preprocess, expression_start, expression_end) : (String8){0};
         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
-                           string_format(arena, S8("static assertion expression is not an integer constant expression: {S8}"), expression));
+                           expression.length
+                               ? string_format(arena, S8("static assertion expression is not an integer constant expression: {S8}"), expression)
+                               : S8("static assertion expression is not an integer constant expression"));
     }
     else if (!value)
     {
@@ -7696,6 +7755,97 @@ BUSTER_C_INTERNAL void c_parse_aggregate_lookup_insert(CParseResult* result, CTy
     }
 }
 
+// Definition-index slot holding `start`, or the empty slot where it belongs.
+BUSTER_C_INTERNAL CDefinitionIndexSlot* c_parse_definition_index_slot(CDefinitionIndex* index, u32 start)
+{
+    u32 mask = index->slot_count - 1;
+    u32 slot_index = (u32)(((u64)start * UINT64_C(0x9E3779B97F4A7C15)) >> 32) & mask;
+    C_DEFINITION_INDEX_COUNT(index, probe_count, 1);
+    while (index->slots[slot_index].start_plus_one && index->slots[slot_index].start_plus_one != start + 1)
+    {
+        C_DEFINITION_INDEX_COUNT(index, probe_count, 1);
+        slot_index = (slot_index + 1) & mask;
+    }
+    return index->slots + slot_index;
+}
+
+BUSTER_C_INTERNAL bool c_parse_definition_index_grow(CParseResult* result)
+{
+    CDefinitionIndex* index = result->definition_index;
+    bool grown = false;
+    if (index->slot_count <= UINT32_MAX / 2)
+    {
+        u32 slot_count = index->slot_count * 2;
+        u64 size = (u64)slot_count * sizeof(CDefinitionIndexSlot);
+        if (c_parse_arena_can_allocate(result->arena, size, BUSTER_ALIGN_OF(CDefinitionIndexSlot)))
+        {
+            CDefinitionIndexSlot* old_slots = index->slots;
+            u32 old_count = index->slot_count;
+            index->slots = arena_allocate_zeroed(result->arena, CDefinitionIndexSlot, slot_count);
+            index->slot_count = slot_count;
+            for (u32 slot_index = 0; slot_index < old_count; slot_index += 1)
+            {
+                CDefinitionIndexSlot slot = old_slots[slot_index];
+                if (slot.start_plus_one)
+                {
+                    *c_parse_definition_index_slot(index, slot.start_plus_one - 1) = slot;
+                }
+            }
+            grown = true;
+        }
+    }
+    return grown;
+}
+
+// `type` now starts its definition at token `start`: keep the lowest such id.
+BUSTER_C_INTERNAL void c_parse_definition_index_record(CParseResult* result, u32 start, CTypeId type)
+{
+    CDefinitionIndex* index = result->definition_index;
+    if (index && !index->incomplete)
+    {
+        CDefinitionIndexSlot* slot = start < UINT32_MAX ? c_parse_definition_index_slot(index, start) : 0;
+        if (!slot)
+        {
+            index->incomplete = true;
+        }
+        else if (slot->start_plus_one)
+        {
+            slot->lowest_type = BUSTER_MIN(slot->lowest_type, type.value);
+        }
+        else
+        {
+            if (index->fill >= index->slot_count / 2)
+            {
+                index->incomplete = !c_parse_definition_index_grow(result);
+                // Growth invalidates the slot pointer, including its empty slot.
+                slot = c_parse_definition_index_slot(index, start);
+            }
+            if (!index->incomplete)
+            {
+                index->fill += 1;
+                *slot = (CDefinitionIndexSlot){.start_plus_one = start + 1, .lowest_type = type.value};
+            }
+        }
+    }
+}
+
+// The first type id a search for rows whose definition starts at token
+// `definition_start` must visit (see CDefinitionIndex): the lowest id ever
+// recorded for it, the type count when it was never recorded, or 0 when the
+// index cannot vouch for an absence.
+BUSTER_C_SHARED u32 c_parse_definition_scan_start(CParseResult const* result, u32 definition_start)
+{
+    CDefinitionIndex* index = result->definition_index;
+    u32 first = 0;
+    C_DEFINITION_INDEX_COUNT(index, search_count, 1);
+    if (index && !index->incomplete && definition_start < UINT32_MAX)
+    {
+        CDefinitionIndexSlot* slot = c_parse_definition_index_slot(index, definition_start);
+        first = slot->start_plus_one ? slot->lowest_type : result->type_count;
+    }
+    return first;
+}
+
 // Builtin identity belongs to the type, so every typedef spelling shares it.
 BUSTER_C_INTERNAL CTypeId c_parse_variable_argument_list_type(CParseResult* result)
 {
@@ -8507,9 +8657,42 @@ BUSTER_C_INTERNAL CTypeId c_parse_aggregate_lookup(CParseResult* result, CTypeKi
     return found;
 }
 
+// The only row a (kind, tag) type name can mean, when the aggregate-tag index
+// vouches for it: every unqualified tagged row enters the index as it is
+// added, and a second live one marks its slot `multiple`, so a complete
+// index's unused slot means no row carries the tag and a single live slot
+// row means no other does. `*decided` stays false -- the caller must search
+// -- for duplicate or stale slots and for an incomplete index.
+BUSTER_C_SHARED CTypeId c_parse_aggregate_unique(CParseResult* result, CTypeKind kind, String8 tag, bool* decided)
+{
+    CTypeId found = C_TYPE_ID_INVALID;
+    CAggregateLookup* lookup = result->aggregate_lookup;
+    *decided = false;
+    if (lookup && !lookup->incomplete && tag.length)
+    {
+        CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, kind, tag);
+        if (!slot->used)
+        {
+            *decided = true;
+        }
+        else if (!slot->multiple && slot->type_index < result->type_count && result->types[slot->type_index].kind == kind &&
+                 !result->types[slot->type_index].has_unqualified_type && string_equal(result->types[slot->type_index].tag, tag))
+        {
+            found = (CTypeId){.value = slot->type_index};
+            *decided = true;
+        }
+    }
+    return found;
+}
+
 #undef C_AGGREGATE_LOOKUP_COUNT
 
 #if BUSTER_INCLUDE_TESTS
+CTypeId c_test_aggregate_unique(CParseResult* result, CTypeKind kind, String8 tag, bool* decided)
+{
+    return c_parse_aggregate_unique(result, kind, tag, decided);
+}
+
 CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType type)
 {
     return c_parse_add_type(result, type);
@@ -8524,6 +8707,16 @@ void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpo
 {
     CTypeParseMachine machine = {0};
     c_type_parse_rollback(&machine, result, checkpoint, 0);
+}
+
+void c_test_definition_index_record(CParseResult* result, u32 definition_start, CTypeId type)
+{
+    c_parse_definition_index_record(result, definition_start, type);
+}
+
+u32 c_test_definition_scan_start(CParseResult const* result, u32 definition_start)
+{
+    return c_parse_definition_scan_start(result, definition_start);
 }
 #endif
 
@@ -10865,8 +11058,10 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
             {
                 open += 1;
             }
-            for (u32 index = 0; index < result->type_count && type.value == C_ID_UNDERLYING_INVALID; index += 1)
+            for (u32 index = c_parse_definition_scan_start(result, open + 1); index < result->type_count && type.value == C_ID_UNDERLYING_INVALID;
+                 index += 1)
             {
+                C_DEFINITION_INDEX_COUNT(result->definition_index, scan_row_count, 1);
                 if (result->types[index].definition_start == open + 1 &&
                     (result->types[index].is_complete || result->types[index].kind == C_TYPE_ENUM))
                 {
@@ -12531,6 +12726,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
     aggregate->member_start = result->member_count;
     aggregate->definition_start = open + 1;
     aggregate->definition_token_count = close - (open + 1);
+    c_parse_definition_index_record(result, open + 1, type);
     if (kind == C_TYPE_ENUM)
     {
         aggregate->enum_member_start = result->enum_member_count;
@@ -12888,6 +13084,7 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
         u32 bound_start = open + 1;
         u32 bound_count = *index - bound_start - 1;
         bool is_static = false;
+        bool is_const = false;
         // `[*]` may carry the same qualifiers and `static` any other array
         // parameter bound may -- `int a[const *]` is what a prototype writes
         // for a definition's `int a[const n]` -- so the star is looked for
@@ -12906,6 +13103,7 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
                 bound_word_index = token_index;
                 bound_word_count += 1;
             }
+            is_const |= bound_qualifiers.is_const;
         }
         bool is_star = bound_word_count == 1 && c_token_is_punctuator(&preprocess.tokens[bound_word_index], C_PUNCTUATOR_STAR);
         if (!c_parse_result_reserve_array_bounds(result, 1))
@@ -12918,6 +13116,7 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
             .token_count = bound_count,
             .is_static = is_static,
             .is_star = is_star,
+            .is_const = is_const,
         };
     }
     for (u32 bound_index = result->array_bound_count; bound_index > first_bound; bound_index -= 1)
@@ -17543,8 +17742,9 @@ BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* mac
             open += 1;
         }
         bool defined = false;
-        for (u32 type_index = 0; type_index < result->type_count && !defined; type_index += 1)
+        for (u32 type_index = c_parse_definition_scan_start(result, open + 1); type_index < result->type_count && !defined; type_index += 1)
         {
+            C_DEFINITION_INDEX_COUNT(result->definition_index, scan_row_count, 1);
             defined = result->types[type_index].definition_start == open + 1;
         }
         if (defined)
@@ -20040,6 +20240,28 @@ BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* m
     return incompatible;
 }
 
+// Whether the identifier in front of the assignment operator at `index` is
+// the whole left operand rather than the tail of a larger unary expression.
+// A member access, indirection or address-of in front of it designates some
+// other object, and so does a prefix update: `--p` is `p -= 1` (C17
+// 6.5.3.1p2), which is not an lvalue (6.5.16p3), so in valid code `--` or
+// `++` there is the operand of an indirection, `*--p = c`, whose
+// destination is the pointee (QuickJS's
+// `js_u64toa`, musl's `vfprintf`, libpng's `png_format_number`). Taking the
+// pointer's type for it converted the character to `char *`.
+BUSTER_C_INTERNAL bool c_parse_assignment_identifier_is_operand(CPreprocessResult preprocess, u32 start, u32 index)
+{
+    bool operand = index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER;
+    if (operand && index > start + 1)
+    {
+        CToken before = preprocess.tokens[index - 2];
+        operand = !c_token_is_punctuator(&before, C_PUNCTUATOR_DOT) && !c_token_is_punctuator(&before, C_PUNCTUATOR_ARROW) &&
+                  !c_token_is_punctuator(&before, C_PUNCTUATOR_STAR) && !c_token_is_punctuator(&before, C_PUNCTUATOR_AMPERSAND) &&
+                  !c_token_is_punctuator(&before, C_PUNCTUATOR_PLUS_PLUS) && !c_token_is_punctuator(&before, C_PUNCTUATOR_MINUS_MINUS);
+    }
+    return operand;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                             CDeclaration const* declaration, u8 const* skipped, u32 first_local, u32 const* next_local, CParseLoweringConstraintDiagnostic* diagnostic)
 {
@@ -20049,17 +20271,9 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
     for (u32 assignment_index = start; assignment_index < end; assignment_index += 1)
     {
         CToken assignment_token = preprocess.tokens[assignment_index];
-        if (!c_token_is_punctuator(&assignment_token, C_PUNCTUATOR_ASSIGN) || assignment_index <= start ||
-            preprocess.tokens[assignment_index - 1].kind != C_TOKEN_IDENTIFIER)
-        {
-            continue;
-        }
-        if (assignment_index > start + 1 &&
-            (c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_DOT) ||
-             c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_ARROW) ||
-             c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_STAR) ||
-             c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_AMPERSAND) ||
-             c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_RIGHT_PARENTHESIS)))
+        if (!c_token_is_punctuator(&assignment_token, C_PUNCTUATOR_ASSIGN) ||
+            !c_parse_assignment_identifier_is_operand(preprocess, start, assignment_index) ||
+            (assignment_index > start + 1 && c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_RIGHT_PARENTHESIS)))
         {
             continue;
         }
@@ -20129,12 +20343,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        bool direct_identifier_assignment = index > start && c_parse_assignment_punctuator(token) &&
-            preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
-            !(index > start + 1 && (c_token_is_punctuator(&preprocess.tokens[index - 2], C_PUNCTUATOR_DOT) ||
-                                    c_token_is_punctuator(&preprocess.tokens[index - 2], C_PUNCTUATOR_ARROW) ||
-                                    c_token_is_punctuator(&preprocess.tokens[index - 2], C_PUNCTUATOR_STAR) ||
-                                    c_token_is_punctuator(&preprocess.tokens[index - 2], C_PUNCTUATOR_AMPERSAND)));
+        bool direct_identifier_assignment = c_parse_assignment_punctuator(token) && c_parse_assignment_identifier_is_operand(preprocess, start, index);
         if ((declaration_tokens[index - start] && !direct_identifier_assignment) ||
             ((skipped && skipped[index - start]) && !direct_identifier_assignment))
         {
@@ -20399,6 +20608,13 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
         {
             CEntityId object = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[root]);
             read_only |= object.value < result->entity_count && result->entities[object.value].is_constexpr;
+            // The operand is the parameter itself, not an element: `a = 0`
+            // or `(a)++` on `int a[const 2]` writes the const pointer.
+            u32 closer = root + 1;
+            while (closer < operand_end && c_token_is_punctuator(&preprocess.tokens[closer], C_PUNCTUATOR_RIGHT_PARENTHESIS)) closer += 1;
+            bool whole_parameter = closer == operand_end && closer - (root + 1) == root - operand_start && object.value < result->entity_count &&
+                                   result->entities[object.value].kind == C_ENTITY_PARAMETER;
+            read_only |= whole_parameter && c_parse_array_parameter_pointer_is_const(result, result->entities[object.value].type);
         }
         if (assignment && assignment_typed && c_parse_incompatible_function_initializer(machine, result, preprocess, scope, assignment_type_id,
                 index + 1, c_parse_constraint_expression_end(result, preprocess, index + 1, end)))
@@ -23769,7 +23985,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     // translation unit fills a handful of them or none at all.
     result.aggregate_attribute_capacity = open_brace_count + 1;
     result.entity_capacity = identifier_count + 1;
-    result.scope_capacity = open_brace_count + open_parenthesis_count + for_count + 1;
+    // The file scope, one scope per `{` (a block or a statement expression's
+    // body), one per `for` clause, and one per C_DECLARATION_FUNCTION row. A
+    // function need not bring a `(` of its own -- `typedef void H(int);
+    // H a, b, c;` declares three, at file or block scope -- but every function
+    // row occupies a declaration slot, so the declaration capacity bounds them.
+    result.scope_capacity = open_brace_count + for_count + result.declaration_capacity + 1;
     result.identifier_use_capacity = identifier_count + 1;
     result.identifier_use_by_token_capacity = token_count + 1;
     result.deferred_static_assert_capacity = token_count + 1;
@@ -23826,6 +24047,14 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             // Reused arena bytes can be dirty; empty slots must be zeroed.
             .slots = arena_allocate_zeroed(arena, CAggregateLookupSlot, aggregate_slot_count),
             .slot_count = aggregate_slot_count,
+        };
+    }
+    {
+        u32 definition_slot_count = 1024;
+        result.definition_index = arena_allocate(arena, CDefinitionIndex, 1);
+        *result.definition_index = (CDefinitionIndex){
+            .slots = arena_allocate_zeroed(arena, CDefinitionIndexSlot, definition_slot_count),
+            .slot_count = definition_slot_count,
         };
     }
     result.position_index = arena_allocate(arena, CTokenPositionIndex, 1);

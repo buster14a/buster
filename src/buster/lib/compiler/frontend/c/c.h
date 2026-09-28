@@ -747,7 +747,10 @@ struct CArrayBound
     bool is_static;
     bool is_star;
     bool has_inferred_count;
-    u8 reserved;
+    // A `const` written inside the brackets. A parameter declared with it is
+    // adjusted to a const pointer (C17 6.7.6.3p7), so `int a[const 2]` is
+    // not modifiable although its elements are.
+    bool is_const;
 };
 
 typedef struct CType CType;
@@ -1165,6 +1168,36 @@ struct CParserResult
     u32 diagnostic_capacity;
 };
 
+// Definition token -> lowest type id ever given that definition_start.
+// c_parse_scalar_type_core_begin is the only writer of definition_start; a
+// row that holds a start later is that row, a younger copy of it, or one of
+// them restored by rollback, so no live row with the start is older than the
+// recorded id. A scan for rows defined at a token may therefore begin at that
+// id, and skip the table when the start was never assigned. Like the
+// aggregate lookup below, the header outlives rollback, recorded ids only
+// ever decrease, and at most half the slots are occupied; an exhausted arena
+// sets `incomplete` and sends every query back to a whole-table scan.
+typedef struct CDefinitionIndexSlot CDefinitionIndexSlot;
+struct CDefinitionIndexSlot
+{
+    u32 start_plus_one;
+    u32 lowest_type;
+};
+
+typedef struct CDefinitionIndex CDefinitionIndex;
+struct CDefinitionIndex
+{
+    CDefinitionIndexSlot* slots;
+    u32 slot_count;
+    u32 fill;
+    bool incomplete;
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+    u64 search_count;
+    u64 probe_count;
+    u64 scan_row_count;
+#endif
+};
+
 // (kind, tag) -> oldest matching aggregate type id. Speculative rollback
 // restores CParseResult wholesale, so this header and its geometrically grown
 // slot arrays live in the unrewound parse arena. Rehash preserves stale and
@@ -1198,6 +1231,9 @@ struct CAggregateLookup
     u64 probe_count;
     u64 rehash_slot_count;
     u64 fallback_type_count;
+    // Rows lowering's tag type-name search visited because the index could
+    // not name the one candidate.
+    u64 lowering_search_type_count;
 #endif
 };
 
@@ -1326,6 +1362,7 @@ struct CParseResult
     CEntityId* typedef_lookup_buckets;
     CEntityId* name_lookup_buckets;
     CAggregateLookup* aggregate_lookup;
+    CDefinitionIndex* definition_index;
     CTokenPositionIndex* position_index;
     // Outside the checkpointed body, like position_index, so a rollback or a
     // by-value operand copy keeps counting into the same record. Null for
@@ -1504,6 +1541,10 @@ BUSTER_F_DECL u32 c_preprocess_pack_alignment(CPreprocessResult const* preproces
 // of the final stream.
 BUSTER_F_DECL CSourceLocation c_lex_token_location(CLexResult* lex, CToken token);
 BUSTER_F_DECL CSourceLocation c_preprocess_token_location(CPreprocessResult const* preprocess, CToken token);
+// Whether printing `current` straight after `previous` would lex as different
+// tokens, so a printer that reproduces source adjacency must still separate
+// them. The -E printer and diagnostics quoting source text share this rule.
+BUSTER_F_DECL bool c_token_requires_separator(CToken previous, String8 previous_spelling, CToken current, String8 current_spelling);
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTokenShape const* c_preprocess_token_shapes(CPreprocessResult const* preprocess)
 {
     CTokenShape const* result = preprocess && preprocess->recovery ? preprocess->recovery->token_shapes : 0;

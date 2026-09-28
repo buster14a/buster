@@ -90,7 +90,9 @@ twice to prove both cold publication and warm reuse. This check does not select
 the dedicated benchmark runner or require privileged installation.
 The same hosted check runs native service tests, their ASan/UBSan variant, and
 the fixed smoke recipe self-test through this TCC-built driver. These use
-temporary fixtures and do not provision or qualify the benchmark host.
+temporary fixtures and do not provision or qualify the benchmark host. It also
+runs the [source-size report and change ratchet](../source-size.md) on the
+validated merge revision against its first parent.
 
 On Linux, distribution TCC 0.9.27 can reject inferred-size arrays containing
 compound literals in shared `string.c`/`os.c` before the driver runs. TinyCC
@@ -117,7 +119,21 @@ shell, CMake, and utility subprocesses.
 ./build.sh test_all_combinations    # the full local matrix CI runs
 ```
 
-Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `bench_throughput`, `bench_throughput_ci`, `generate`, `build` (default), `clang_analyze`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`, `test_cpython`,
+`optnone_audit BUILD_DIRECTORY [--config C]` guards the trusted Clang unity
+`ide`. Its test bodies compile under `#pragma clang optimize off` in
+`src/buster/apps/ide/ide.c` to bound compile memory (#781), and a production
+function must never inherit that: #1376 found 156 of them running at -O0 when
+the region was a `#pragma clang attribute` that also marked declarations. The
+audit replays the database row for `ide.c` through the Clang frontend only
+(LLVM IR, no optimization or code generation; about ten seconds) and fails
+when a function defined outside `src/buster/tests/` carries `optnone`. The
+`optnone_audit` CMake target runs it on the same canonical unsanitized
+optimized Clang tree as `clang_analyze`, in the same superbuild step (the
+direct matrix schedules the command beside `clang_analyze` too). A production
+header that defines functions must be included before the test region, as
+`simd.h` is.
+
+Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `bench_throughput`, `bench_throughput_ci`, `generate`, `build` (default), `clang_analyze`, `optnone_audit`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`, `test_cpython`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
 `test_timing_summary_self_test`, `musl_directory_self_test`,
@@ -127,8 +143,12 @@ Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `benc
 `native_retirement_census`,
 `x86_64_completion_census`,
 `test_all_combinations`,
-`test_all_combinations_ci`, `test_uefi`; `self_host_from_existing` is an internal
+`test_all_combinations_ci`, `test_uefi`, `source_size`; `self_host_from_existing` is an internal
 build-driver worker command used only by the pooled artifact-fanout target.
+
+`source_size` reports the tracked bytes of a revision by category and enforces
+the per-change ratchet on hand-maintained production and build code; see
+[source-size policy](../source-size.md).
 
 `native_retirement_census` freezes the tracked C regression inputs and the full
 native target/allocator/frontend/PIC object matrix before running any selected
@@ -229,7 +249,8 @@ fallback. Compiler invocations default to one worker. The opt-in
 `ide cc -fcompile-jobs=N` native C link path also owns a bounded TU gang;
 callers enabling it must budget compiler workers together with build-level
 concurrency. It does not infer available RAM from virtual arena reservations. Trees are declared longest-first — sanitized Debug,
-sanitized Release, the unity Release tree that also runs `clang_analyze`, trees
+sanitized Release, the unity Release tree that also runs `clang_analyze` and
+`optnone_audit`, trees
 covering two configurations, then the rest — because Ninja admits ready edges
 from a shared pool in declaration order and a fresh CI checkout has no
 `.ninja_log` for its critical-path scheduler to learn from. Set
