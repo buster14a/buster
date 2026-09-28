@@ -7048,6 +7048,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, machine_fast_close_live_ranges_test(arguments->arena));
+    BUSTER_TEST(arguments, machine_fast_close_slot_ranges_test(arguments->arena));
     BUSTER_TEST_FIXTURE(arguments, machine_test_sparse_local_state);
     BUSTER_TEST_FIXTURE(arguments, machine_test_constant_short_circuit);
     BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_line_mark_repair);

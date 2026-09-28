@@ -33,6 +33,7 @@ on:
       - 'tools/native_retirement_contract.py'
       - 'tools/native_retirement_contract_test.py'
       - 'tools/native-retirement-mingw/**'
+      - 'tools/native-retirement-darwin/**'
       - 'src/buster/lib/**'
   push:
     branches: [main]
@@ -57,6 +58,7 @@ on:
       - 'tools/native_retirement_census.c'
       - 'tools/native_retirement_contract.py'
       - 'tools/native-retirement-mingw/**'
+      - 'tools/native-retirement-darwin/**'
       - 'src/buster/lib/**'
   merge_group:
     types: [checks_requested]

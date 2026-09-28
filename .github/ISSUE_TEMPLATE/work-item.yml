@@ -1,0 +1,58 @@
+name: Project or component work
+description: Track a feature, bug, improvement, research question, or maintenance task.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues and PRs first. Reuse the owning issue rather than duplicating a task per consumer.
+        Area IDs and documentation live in [PROJECTS.md](https://github.com/buster14a/buster/blob/main/PROJECTS.md).
+        This form records a proposal, not a priority or implementation commitment. Agents using the API can use the same structure.
+  - type: input
+    id: area
+    attributes:
+      label: Primary area
+      description: Use the stable Area ID from PROJECTS.md, or explain a genuinely new project. Related consumers belong under dependencies.
+      placeholder: foundation
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - Feature
+        - Bug
+        - Improvement
+        - Research
+        - Maintenance
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Observable outcome or problem
+      description: What should a person or another component be able to do? For a bug, distinguish expected and observed behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and exclusions
+      description: Relevant behavior, inputs, platforms or consumers. Keep small tasks small; do not impose compiler acceptance on unrelated projects.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance and validation
+      description: State the smallest objective completion or research stop rule, including tests or evidence needed. Keep unrun checks explicit.
+    validations:
+      required: true
+  - type: textarea
+    id: existing_work
+    attributes:
+      label: Existing work, ownership and dependencies
+      description: Link matching issues, PRs, active branches and real blockers. Preserve owners. Triage uses native sub-issue/dependency relationships where applicable.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Source and evidence
+      description: For defects or research, include the exact revision, relevant paths/symbols, reproduction or source evidence, actual checks, and remaining uncertainty. A feature proposal need not pretend to be a reproduced defect.
