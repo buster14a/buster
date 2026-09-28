@@ -15970,23 +15970,20 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
 // keep their object identity. There is no separate complex opcode or cleanup
 // pass, and native backends keep the existing aggregate representation.
 //
-// Which arithmetic each operator gets is Clang's, checked against
-// `clang -O0 -S -emit-llvm` for every combination rather than derived:
+// Complex arithmetic follows the operator-specific lowering below:
 //   * `+` and `-` are componentwise, and a real operand touches only the real
 //     half (the imaginary half of the promoted real operand is a positive
-//     zero, and Clang carries the other operand's imaginary part through
-//     unchanged rather than adding it).
+//     zero, and the other operand's imaginary part is carried through
+//     unchanged rather than added to it).
 //   * `*` and `/` with a real operand scale or divide both halves.
-//   * `*` and `/` with two complex operands call the compiler runtime --
-//     __mulsc3/__muldc3/__multc3 and __divsc3/__divdc3/__divtc3 -- which is
-//     what Clang emits without -ffast-math or -fcx-limited-range. Those
-//     helpers implement the overflow- and NaN-recovering forms from C11
-//     Annex G, and calling them rather than inlining Smith's algorithm is the
-//     choice made here: it is bit-for-bit what a Clang-built object does, and
-//     the alternative would be a second, subtly different implementation of
-//     the same numerics living in this file.
-//   * `real / complex` also goes to the runtime, with the numerator's
-//     imaginary part passed as a positive zero, again matching Clang.
+//   * `*` and `/` with two complex operands are lowered inline with the
+//     Smith-style arithmetic implemented below: multiplication emits scalar
+//     products and sums, and division selects the stable ratio formula from
+//     the larger divisor component. No compiler runtime helper is involved.
+//   * `real / complex` promotes the numerator with a positive-zero imaginary
+//     half and uses that same inline division path.
+//   * When complex lowering is not active, ordinary integer and real
+//     floating-point division stays on the primitive operator path.
 //   * `==` and `!=` compare both halves.
 //
 // System V x86-64 returns a `long double _Complex` in ST(0)/ST(1) (the psABI's
