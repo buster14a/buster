@@ -11262,6 +11262,76 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
         BUSTER_TEST(arguments, !referenced_inline_only_symbol);
         BUSTER_TEST(arguments, referenced_emitted_symbol);
     }
+    // GNU inline semantics (-std=gnu89, or __attribute__((gnu_inline))): an
+    // `extern inline` definition is inline-only and defines no symbol, so a
+    // later out-of-line definition is the external one; a plain `inline`
+    // definition is external.
+    struct
+    {
+        String8 source;
+        CPreprocessDialect dialect;
+    } gnu_inline_cases[] = {
+        {S8("extern int inline_only_symbol;\n"
+            "extern int emitted_symbol;\n"
+            "extern inline __attribute__((gnu_inline)) int twice(int x) { return x + inline_only_symbol; }\n"
+            "int twice(int x) { return x + emitted_symbol; }\n"
+            "inline __attribute__((__gnu_inline__)) int plain(void) { return emitted_symbol; }\n"
+            "int caller(void) { return twice(3); }\n"),
+         C_PREPROCESS_DIALECT_C17},
+        {S8("extern int inline_only_symbol;\n"
+            "extern int emitted_symbol;\n"
+            "extern inline int twice(int x) { return x + inline_only_symbol; }\n"
+            "int twice(int x) { return x + emitted_symbol; }\n"
+            "inline int plain(void) { return emitted_symbol; }\n"
+            "int caller(void) { return twice(3); }\n"),
+         C_PREPROCESS_DIALECT_GNU89},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(gnu_inline_cases); case_index += 1)
+    {
+        CPreprocessResult gnu_inline_tokens =
+            c_preprocess(scalar_arena, gnu_inline_cases[case_index].source, (CPreprocessOptions){.dialect = gnu_inline_cases[case_index].dialect});
+        CParseResult gnu_inline_parse = c_parse(scalar_arena, gnu_inline_tokens);
+        CIRLowerResult gnu_inline_ir = c_lower_to_ir(scalar_arena, S8("gnu-inline.c"), gnu_inline_tokens, gnu_inline_parse, lp64_target);
+        BUSTER_TEST(arguments, gnu_inline_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, gnu_inline_ir.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, gnu_inline_ir.program != 0))
+        {
+            IrModule* module = &gnu_inline_ir.program->modules[0];
+            u32 twice_count = 0;
+            bool found_plain = false;
+            bool referenced_inline_only_symbol = false;
+            bool referenced_emitted_symbol = false;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = &module->functions[function_index];
+                twice_count += string_equal(function->name, S8("twice")) && function->state == IR_FUNCTION_LOWERED;
+                found_plain |= string_equal(function->name, S8("plain")) && function->state == IR_FUNCTION_LOWERED;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    IrSymbol* symbol = ir_symbol_from_id(&gnu_inline_ir.program->symbols, function->instructions[instruction_index].symbol);
+                    referenced_inline_only_symbol |= symbol && string_equal(symbol->link_name, S8("inline_only_symbol"));
+                    referenced_emitted_symbol |= symbol && string_equal(symbol->link_name, S8("emitted_symbol"));
+                }
+            }
+            BUSTER_TEST(arguments, twice_count == 1);
+            BUSTER_TEST(arguments, found_plain);
+            BUSTER_TEST(arguments, !referenced_inline_only_symbol);
+            BUSTER_TEST(arguments, referenced_emitted_symbol);
+        }
+    }
+    // Without GNU inline semantics both are definitions of the same function.
+    String8 c99_inline_redefinitions[] = {
+        S8("inline int twice(int x) { return x + x; }\n"
+           "int twice(int x) { return 2 * x; }\n"),
+        S8("extern inline int twice(int x) { return x + x; }\n"
+           "int twice(int x) { return 2 * x; }\n"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(c99_inline_redefinitions); case_index += 1)
+    {
+        CPreprocessResult c99_inline_tokens = c_preprocess(scalar_arena, c99_inline_redefinitions[case_index], (CPreprocessOptions){0});
+        CParseResult c99_inline_parse = c_parse(scalar_arena, c99_inline_tokens);
+        BUSTER_TEST(arguments, c99_inline_parse.diagnostic_count == 1 && c99_inline_parse.diagnostics[0].kind == C_DIAGNOSTIC_REDEFINITION);
+    }
     CPreprocessResult typedef_shadow_tokens = c_preprocess(scalar_arena,
                                                            S8("typedef void *id;\n"
                                                               "typedef int TokenId;\n"

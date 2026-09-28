@@ -5678,6 +5678,7 @@ BUSTER_C_SHARED bool c_parse_type_is_noreturn(CParseResult const* result, CTypeI
 
 BUSTER_C_SHARED bool c_ir_noreturn_marker_in_range(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_SHARED bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, CDeclaration declaration);
+BUSTER_C_SHARED bool c_ir_declaration_is_gnu_inline_only(CPreprocessResult preprocess, CDeclaration declaration);
 BUSTER_C_SHARED u32 c_ir_declarator_list_specifier_end(CPreprocessResult preprocess, u32 start, u32 end);
 
 /* The function type a declarator arrives at, following only the derivations a
@@ -23330,6 +23331,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         {
             continue;
         }
+        declaration->is_gnu_inline_only = kind == C_DECLARATION_FUNCTION && declaration->is_definition &&
+                                          c_ir_declaration_is_gnu_inline_only(preprocess, *declaration);
         CEntity* existing = 0;
         u32 existing_index = C_ID_UNDERLYING_INVALID;
         CEntity* conflicting = 0;
@@ -23412,13 +23415,15 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             declaration->entity = (CEntityId){
                 .value = existing_index,
             };
-            if (existing->is_definition && declaration->is_definition)
+            if (existing->is_definition && declaration->is_definition &&
+                !(existing->definition_is_gnu_inline_only && !declaration->is_gnu_inline_only))
             {
                 c_parse_diagnostic(&result, declaration->location, C_DIAGNOSTIC_REDEFINITION, S8("redefinition"));
             }
-            else
+            else if (declaration->is_definition)
             {
-                existing->is_definition |= declaration->is_definition;
+                existing->is_definition = true;
+                existing->definition_is_gnu_inline_only = declaration->is_gnu_inline_only;
             }
             // The composite of `char pad[]` and `char pad[5]` is the complete
             // array (C11 6.2.7p3): a redeclaration that completes an entity
@@ -23502,6 +23507,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             .is_static_storage = is_static_storage,
             .is_thread_local = is_thread_local,
             .is_constexpr = declaration->is_constexpr,
+            .definition_is_gnu_inline_only = declaration->is_gnu_inline_only,
         };
         // The name is that token's spelling, so its interned id is the
         // entity's; a declaration without a name token interns the empty
