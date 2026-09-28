@@ -482,6 +482,63 @@ BUSTER_GLOBAL_LOCAL bool link_initializer_plan_build(Arena* arena, ObjectFile* o
             plan->destructor_count = link_initializer_entries_collect(object, OBJECT_SECTION_FINI_ARRAY, plan->destructors, true);
             ObjectSection* sections = arena_allocate(arena, ObjectSection, object->section_count);
             memcpy(sections, object->sections, (u64)object->section_count * sizeof(*sections));
+            // An array a symbol is defined inside keeps its bytes, appended to
+            // the writable data, so a read through that symbol sees the entries
+            // GNU ld would have laid out; the stub still makes the calls.
+            bool retained[2] = {0};
+            u64 retained_base[2] = {0};
+            for (u32 index = 0; index < object->symbol_count; index += 1)
+            {
+                u32 section = object->symbols[index].section;
+                if ((section == OBJECT_SECTION_INIT_ARRAY || section == OBJECT_SECTION_FINI_ARRAY) && object->sections[section].data.length)
+                {
+                    retained[section - OBJECT_SECTION_INIT_ARRAY] = true;
+                }
+            }
+            if (retained[0] || retained[1])
+            {
+                ObjectSection* data_section = &sections[OBJECT_SECTION_DATA];
+                u64 data_length = BUSTER_MAX(data_section->data.length, data_section->virtual_size);
+                for (u32 slot = 0; slot < 2; slot += 1)
+                {
+                    if (retained[slot])
+                    {
+                        retained_base[slot] = align_forward(data_length, OBJECT_INITIALIZER_ENTRY_SIZE);
+                        data_length = retained_base[slot] + object->sections[OBJECT_SECTION_INIT_ARRAY + slot].data.length;
+                    }
+                }
+                u8* data = arena_allocate_zeroed(arena, u8, data_length);
+                if (data_section->data.length)
+                {
+                    memcpy(data, data_section->data.pointer, data_section->data.length);
+                }
+                for (u32 slot = 0; slot < 2; slot += 1)
+                {
+                    if (retained[slot])
+                    {
+                        ByteSlice array = object->sections[OBJECT_SECTION_INIT_ARRAY + slot].data;
+                        memcpy(data + retained_base[slot], array.pointer, array.length);
+                    }
+                }
+                data_section->data = (ByteSlice){.pointer = data, .length = data_length};
+                if (data_section->virtual_size)
+                {
+                    data_section->virtual_size = data_length;
+                }
+                data_section->alignment = BUSTER_MAX(data_section->alignment, OBJECT_INITIALIZER_ENTRY_SIZE);
+                ObjectSymbol* symbols = arena_allocate(arena, ObjectSymbol, object->symbol_count);
+                memcpy(symbols, object->symbols, (u64)object->symbol_count * sizeof(*symbols));
+                for (u32 index = 0; index < object->symbol_count; index += 1)
+                {
+                    u32 section = symbols[index].section;
+                    if ((section == OBJECT_SECTION_INIT_ARRAY || section == OBJECT_SECTION_FINI_ARRAY) && retained[section - OBJECT_SECTION_INIT_ARRAY])
+                    {
+                        symbols[index].section = OBJECT_SECTION_DATA;
+                        symbols[index].value += retained_base[section - OBJECT_SECTION_INIT_ARRAY];
+                    }
+                }
+                stripped->symbols = symbols;
+            }
             sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice){0};
             sections[OBJECT_SECTION_INIT_ARRAY].virtual_size = 0;
             sections[OBJECT_SECTION_FINI_ARRAY].data = (ByteSlice){0};
@@ -491,10 +548,20 @@ BUSTER_GLOBAL_LOCAL bool link_initializer_plan_build(Arena* arena, ObjectFile* o
             stripped->relocation_count = 0;
             for (u32 index = 0; index < object->relocation_count; index += 1)
             {
-                u32 section = object->relocations[index].section;
-                if (section != OBJECT_SECTION_INIT_ARRAY && section != OBJECT_SECTION_FINI_ARRAY)
+                ObjectRelocation relocation = object->relocations[index];
+                if (relocation.section == OBJECT_SECTION_INIT_ARRAY || relocation.section == OBJECT_SECTION_FINI_ARRAY)
                 {
-                    relocations[stripped->relocation_count++] = object->relocations[index];
+                    u32 slot = relocation.section - OBJECT_SECTION_INIT_ARRAY;
+                    if (retained[slot])
+                    {
+                        relocation.section = OBJECT_SECTION_DATA;
+                        relocation.offset += retained_base[slot];
+                        relocations[stripped->relocation_count++] = relocation;
+                    }
+                }
+                else
+                {
+                    relocations[stripped->relocation_count++] = relocation;
                 }
             }
             stripped->relocations = relocations;
