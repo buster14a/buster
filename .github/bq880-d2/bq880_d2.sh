@@ -96,6 +96,7 @@ echo "D2 generate exit=$rc"
 rc=0; systemd-run --unit=bq880-d2-base-build "${STAGE[@]}" "$DRIVER" build --build-directory "$W/base/build" \
   --config Release -t ide -- -j1 > "$D/build.log" 2>&1 || rc=$?
 echo "D2 build exit=$rc"
+if [ "$rc" != 0 ] || [ ! -f "$W/base/build/Release/ide" ]; then tail -n 30 "$D/generate.log" "$D/build.log"; echo "D2 STOP: stage build failed"; exit 3; fi
 echo "D2 build-root after: $(stat -c '%d %i %a %U:%G' "$W/base/build")"
 tail -n 2 "$D/generate.log" "$D/build.log"
 
