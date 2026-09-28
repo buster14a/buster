@@ -23125,10 +23125,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         String8 gnu_specifier_fixtures[] = {
             S8("tests/basic_c_local_typedef_attribute.c"),
             S8("tests/basic_c_offsetof_subscript.c"),
+            S8("tests/basic_c_leading_gnu_attribute_declaration.c"),
         };
         String8 gnu_specifier_names[] = {
             S8("buster-c-local-typedef-attribute"),
             S8("buster-c-offsetof-subscript"),
+            S8("buster-c-leading-gnu-attribute-declaration"),
         };
         for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(gnu_specifier_fixtures); fixture_index += 1)
         {

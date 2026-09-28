@@ -22713,8 +22713,6 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
         u32 location = entity->declaration_statement_start >= body_start && entity->declaration_statement_start <= start
                            ? entity->declaration_statement_start
                            : start;
-        if (location < preprocess.token_count && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[location]), S8("__attribute__")))
-            c_parse_lowering_constraint_consider(diagnostic, S8("could not lower unbound identifier '__attribute__'"), location, location);
         String8 alignment_message = c_parse_validate_alignment_range(machine, result, preprocess, entity->scope, entity->type,
                                                                       entity->alignment_start, entity->alignment_count, 0);
         c_parse_lowering_constraint_consider_kind(diagnostic, alignment_message, C_DIAGNOSTIC_INVALID_ALIGNMENT, start, location);
