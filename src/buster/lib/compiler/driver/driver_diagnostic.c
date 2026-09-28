@@ -330,6 +330,25 @@ BUSTER_GLOBAL_LOCAL CompilerDiagnosticLocation compiler_driver_backend_location(
     return result;
 }
 
+// The LLVM bitcode, WebAssembly and eBPF emitters report a failure as a fixed
+// message plus the IDs it concerns. When it concerns a function, name that
+// function and point at it, as a native code generation refusal does; a bare
+// message gives no way to find the function in a large translation unit.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_emitter_diagnostic(Arena* arena, IrProgram* program, IrModule* module, IrFunctionId function,
+                                                               IrInstructionId instruction, String8 message)
+{
+    String8 result = message;
+    if (program && module && function.value < module->function_count)
+    {
+        CompilerDiagnostic diagnostic = {
+            .message = string_format(arena, S8("{S8} (in function '{S8}')"), message, module->functions[function.value].name),
+            .primary = compiler_driver_backend_location(program, module, function, instruction),
+        };
+        result = compiler_diagnostic_render(arena, diagnostic);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL CompilerDiagnosticBackend compiler_driver_backend_context(Arena* arena, CompilerDriverInvocation invocation,
                                                                                  IrProgram* program, IrModule* module, CodegenModule code)
 {

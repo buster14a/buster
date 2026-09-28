@@ -2283,6 +2283,19 @@ if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMAN
             COMMENT "Running clang --analyze"
             VERBATIM
         )
+        # See docs/agents/build.md: no production function of the unity ide may
+        # inherit the test region's optnone (#1376).
+        add_custom_target(optnone_audit
+            COMMAND "${BUSTER_CLANG_ANALYZE_DRIVER}"
+                optnone_audit
+                "${CMAKE_BINARY_DIR}"
+                --config "$<CONFIG>"
+                --quiet
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            USES_TERMINAL
+            COMMENT "Auditing optnone in the unity ide"
+            VERBATIM
+        )
     else()
         message(STATUS "clang_analyze target disabled: ${BUSTER_CLANG_ANALYZE_DRIVER} not found")
     endif()
