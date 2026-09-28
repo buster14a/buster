@@ -4192,6 +4192,14 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                             cast = c_parse_pointer_chain(result, preprocess, cast, &type_index, close);
                             if (cast.value < result->type_count && type_index == close) cast_prefix_close = close;
                         }
+                        // A type name the machineless reader does not cover --
+                        // `(typeof (x))` -- still marks a cast: a parenthesized
+                        // expression cannot begin with a type-name start word.
+                        else if (index + 1 < close && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER &&
+                                 c_parse_type_name_start_word_token(preprocess, preprocess.tokens[index + 1]))
+                        {
+                            cast_prefix_close = close;
+                        }
                     }
                     index = close;
                     continue;

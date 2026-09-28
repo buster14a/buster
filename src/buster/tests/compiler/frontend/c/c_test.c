@@ -14402,6 +14402,103 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_type_prediction(UnitTestAr
     return result;
 }
 
+// A `typeof` operand that opens with a cast to a `typeof` type and goes on
+// with an operator that may also be binary: `(typeof (object)) + 1` is a cast
+// of `+1`, not a sum whose left operand is a type name.  The operator scan
+// recognized a cast prefix only through the machineless base-type reader,
+// which has no `typeof`, so it split at the `+` and the declaration it typed
+// declared nothing.  The neighbours at the end resolved before and must keep
+// resolving.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_cast_prefix_operator(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("long object;\n"
+                                               "short narrow;\n"
+                                               "typedef typeof((typeof(object)) + 1) plus;\n"
+                                               "typedef typeof((typeof(object)) - 1) minus;\n"
+                                               "typedef typeof((typeof(object)) + object) plus_object;\n"
+                                               "typedef typeof((typeof(object)) *&object) indirection;\n"
+                                               "typedef typeof_unqual((typeof(object)) - 1) unqual_minus;\n"
+                                               "typedef typeof_unqual((typeof_unqual(object)) *&object) unqual_indirection;\n"
+                                               "typedef __typeof__((__typeof__(object)) + 1) gnu_plus;\n"
+                                               "typedef typeof((const typeof(narrow)) - 1) qualified_minus;\n"
+                                               "typedef typeof((typeof(object) *) + 0) pointer_plus;\n"
+                                               "typedef typeof((typeof(object)) ~1) complement;\n"
+                                               "typedef typeof((typeof(object))1) direct;\n"
+                                               "typedef long L;\n"
+                                               "typedef typeof((L) + 1) typedef_plus;\n"
+                                               "typedef typeof((long) + 1) keyword_plus;\n"
+                                               "plus plus_value;\n"
+                                               "long f(void)\n"
+                                               "{\n"
+                                               "    typeof((typeof(object)) + 1) block_plus = 0;\n"
+                                               "    typeof((typeof(object)) - 1) block_minus = 0;\n"
+                                               "    typeof((typeof(object)) *&object) block_indirection = 0;\n"
+                                               "    typeof_unqual((typeof(object)) + 1) block_unqual_plus = 0;\n"
+                                               "    return block_plus + block_minus + block_indirection + block_unqual_plus + plus_value +\n"
+                                               "           (long)sizeof(typeof((typeof(object)) + 1));\n"
+                                               "}\n"),
+                                            (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    struct
+    {
+        String8 name;
+        CEntityKind entity_kind;
+        CTypeKind kind;
+    } expected[] = {
+        {S8("plus"), C_ENTITY_TYPEDEF, C_TYPE_LONG},
+        {S8("minus"), C_ENTITY_TYPEDEF, C_TYPE_LONG},
+        {S8("plus_object"), C_ENTITY_TYPEDEF, C_TYPE_LONG},
+        {S8("indirection"), C_ENTITY_TYPEDEF, C_TYPE_LONG},
+        {S8("unqual_minus"), C_ENTITY_TYPEDEF, C_TYPE_LONG},
+        {S8("unqual_indirection"), C_ENTITY_TYPEDEF, C_TYPE_LONG},
+        {S8("gnu_plus"), C_ENTITY_TYPEDEF, C_TYPE_LONG},
+        // The cast applies to `-1`, so the result is the unqualified `short`.
+        {S8("qualified_minus"), C_ENTITY_TYPEDEF, C_TYPE_SHORT},
+        {S8("pointer_plus"), C_ENTITY_TYPEDEF, C_TYPE_POINTER},
+        {S8("complement"), C_ENTITY_TYPEDEF, C_TYPE_LONG},
+        {S8("direct"), C_ENTITY_TYPEDEF, C_TYPE_LONG},
+        {S8("typedef_plus"), C_ENTITY_TYPEDEF, C_TYPE_LONG},
+        {S8("keyword_plus"), C_ENTITY_TYPEDEF, C_TYPE_LONG},
+        {S8("plus_value"), C_ENTITY_OBJECT, C_TYPE_LONG},
+        {S8("block_plus"), C_ENTITY_LOCAL, C_TYPE_LONG},
+        {S8("block_minus"), C_ENTITY_LOCAL, C_TYPE_LONG},
+        {S8("block_indirection"), C_ENTITY_LOCAL, C_TYPE_LONG},
+        {S8("block_unqual_plus"), C_ENTITY_LOCAL, C_TYPE_LONG},
+    };
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
+    {
+        CEntityId name = C_ENTITY_ID_INVALID;
+        for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+        {
+            if (parse.entities[entity_index].kind == expected[expected_index].entity_kind &&
+                string_equal(parse.entities[entity_index].name, expected[expected_index].name))
+            {
+                name = (CEntityId){.value = entity_index};
+            }
+        }
+        BUSTER_TEST(arguments, name.value != C_ID_UNDERLYING_INVALID);
+        if (name.value < parse.entity_count)
+        {
+            CType* type = c_type_from_id(&parse, parse.entities[name.value].type);
+            BUSTER_TEST(arguments, type && type->kind == expected[expected_index].kind);
+        }
+    }
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("typeof-cast-prefix-operator.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // `__typeof__` over a dereferenced conditional -- the shape musl's
 // <tgmath.h> selects a type with.  Every name below is a typedef rather than
 // an object because half of the answers are `void`, which is a legal typedef
@@ -24167,6 +24264,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_conditional_type);
+    BUSTER_TEST_FIXTURE(arguments, c_test_typeof_cast_prefix_operator);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
