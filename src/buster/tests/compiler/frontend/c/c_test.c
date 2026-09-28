@@ -12632,9 +12632,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unevaluated_call_arity_diagnostics(Uni
     return result;
 }
 
-// A sizeof operand is unevaluated, but every update still requires a
-// modifiable real or pointer place. The same constraint must be reported by
-// syntax-only and by either canonical-IR lowering form.
+// Constant expressions outside function bodies -- array bounds, enum values,
+// static initializers and _Static_assert -- are syntax-checked before they are
+// folded, so a malformed one is diagnosed instead of being accepted.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_expression_syntax(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -12658,6 +12658,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_expression_syntax(UnitTestArg
         {S8("int a[(int)];"), 12},
         {S8("enum { E = 1 + };"), 16},
         {S8("_Static_assert(1 +, \"\");"), 19},
+        {S8("int a[1 1];"), 9},
+        {S8("int a[sizeof(int) sizeof(int)];"), 19},
+        {S8("int a[sizeof(int)[0]];"), 18},
+        {S8("int a[sizeof()];"), 14},
+        {S8("int a[()];"), 8},
+        {S8("int a[1 x];"), 9},
+        {S8("enum { E = 1 2 };"), 14},
+        {S8("_Static_assert(1 1, \"\");"), 18},
+        {S8("int x = (1 2);"), 12},
+        {S8("int a[_Alignof(int)(1)];"), 20},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {
@@ -12672,6 +12682,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_expression_syntax(UnitTestArg
         {
             String8 message = parsed.diagnostics[0].message;
             BUSTER_TEST_RAW(arguments, string_ends_with_sequence(message, S8("expected expression")) ||
+                                       string_ends_with_sequence(message, S8("expected operator")) ||
                                        string_ends_with_sequence(message, S8("expected ')' after type name")), cases[case_index].source);
             BUSTER_TEST_RAW(arguments, parsed.diagnostics[0].location.line == 1 && parsed.diagnostics[0].location.column == cases[case_index].column,
                             cases[case_index].source);
@@ -12703,6 +12714,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_expression_syntax(UnitTestArg
     return result;
 }
 
+// A sizeof operand is unevaluated, but every update still requires a
+// modifiable real or pointer place. The same constraint must be reported by
+// syntax-only and by either canonical-IR lowering form.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};

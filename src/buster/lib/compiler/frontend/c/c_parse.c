@@ -5521,12 +5521,15 @@ BUSTER_C_INTERNAL String8 c_parse_expression_syntax_error(CTypeParseMachine* mac
     u32 open_count = 0;
     bool operand = true;
     bool size_operand = false;
+    bool type_operand = false;
     bool stop = start >= end || end > preprocess.token_count;
     for (u32 index = start; !stop && !message.length && index < end;)
     {
         CToken token = preprocess.tokens[index];
         u32 next = index + 1;
         bool size_word = false;
+        bool after_type_operand = type_operand;
+        type_operand = false;
         if (operand && (token.kind == C_TOKEN_PREPROCESSING_NUMBER || token.kind == C_TOKEN_CHARACTER_LITERAL || token.kind == C_TOKEN_STRING_LITERAL))
         {
             while (token.kind == C_TOKEN_STRING_LITERAL && next < end && preprocess.tokens[next].kind == C_TOKEN_STRING_LITERAL)
@@ -5553,8 +5556,13 @@ BUSTER_C_INTERNAL String8 c_parse_expression_syntax_error(CTypeParseMachine* mac
         else if (operand && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
-            stop = close >= end || index + 1 >= close;
-            if (!stop && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACE))
+            stop = close >= end;
+            if (!stop && index + 1 == close)
+            {
+                message = S8("expected expression");
+                *error_token = close;
+            }
+            else if (!stop && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACE))
             {
                 next = close + 1;
                 operand = false;
@@ -5594,6 +5602,7 @@ BUSTER_C_INTERNAL String8 c_parse_expression_syntax_error(CTypeParseMachine* mac
                     else
                     {
                         operand = !size_operand;
+                        type_operand = size_operand;
                     }
                 }
                 else
@@ -5616,6 +5625,16 @@ BUSTER_C_INTERNAL String8 c_parse_expression_syntax_error(CTypeParseMachine* mac
                 *error_token = index;
             }
             stop = !prefix && !message.length;
+        }
+        else if (token.kind == C_TOKEN_PREPROCESSING_NUMBER || token.kind == C_TOKEN_CHARACTER_LITERAL ||
+                 token.kind == C_TOKEN_STRING_LITERAL || token.kind == C_TOKEN_IDENTIFIER ||
+                 (after_type_operand &&
+                  (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                   c_token_is_punctuator(&token, C_PUNCTUATOR_DOT) || c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW) ||
+                   c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS))))
+        {
+            message = S8("expected operator");
+            *error_token = index;
         }
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS))
         {
