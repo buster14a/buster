@@ -19298,6 +19298,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parameter_local_alignment(UnitTestArgu
 
 // #1660: an attribute list may follow any `*` of a pointer declarator, before
 // or after its qualifiers, and `aligned` there still aligns the declared object.
+// Block-scope objects and typedefs take the `[[...]]` spelling as well.
 // The initializer of `n` lowers its type name through c_ir_type_name_prefix.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_declarator_attributes(UnitTestArguments* arguments)
 {
@@ -19322,7 +19323,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_declarator_attributes(UnitTest
                         "    int value = 1;\n"
                         "    int * __attribute__((aligned(64))) p = &value;\n"
                         "    int * __attribute__((unused)) * const __attribute__((unused)) pp = &p;\n"
-                        "    return **pp + n;\n"
+                        "    int * [[gnu::aligned(16)]] q = &value;\n"
+                        "    int * [[gnu::unused]] * [[gnu::unused]] const qq = &q;\n"
+                        "    typedef int * [[gnu::aligned(16)]] T;\n"
+                        "    typedef int * [[gnu::unused]] * [[gnu::unused]] const TT;\n"
+                        "    T t = &value;\n"
+                        "    TT tt = &t;\n"
+                        "    return **pp + **qq + **tt + n;\n"
                         "}\n");
     CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
                                                 (CPreprocessOptions){

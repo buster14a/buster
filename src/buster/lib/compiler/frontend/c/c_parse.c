@@ -14336,6 +14336,14 @@ BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(Arena* arena, CParse
     u32 bracket_depth = 0;
     for (u32 token_index = start; token_index < end; token_index += 1)
     {
+        // A C23 attribute list -- `int * [[gnu::aligned(16)]] p;` -- is
+        // bracketed too, but its tokens name attributes, not objects.
+        u32 attribute_end = 0;
+        if (c_parse_c23_attribute_at(preprocess, token_index, end, &attribute_end))
+        {
+            token_index = attribute_end - 1;
+            continue;
+        }
         CToken token = preprocess.tokens[token_index];
         // An array bound may be spelled with offsetof -- SQLite sizes a save
         // buffer as `sizeof(Parse) - offsetof(Parse, sLastToken)` -- and the
