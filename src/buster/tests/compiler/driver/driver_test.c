@@ -17517,8 +17517,24 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // The entry-stub writers call the entries themselves and take the arrays
     // off the image, so a read through the variable has to find the bytes
     // relocated into writable data.  A host compiler places the variables,
-    // so the symbols reach the linker from a foreign ELF object.
+    // so the symbols reach the linker from a foreign ELF object.  `main`
+    // computes the verdict and the `.fini_array` entry reports it, so the
+    // status also proves that entry ran; a status nothing overwrote is 1.
     {
+        String8 array_source = S8(
+            "extern void _exit(int status);\n"
+            "static int sequence;\n"
+            "static int verdict = 1;\n"
+            "static void early(void) { sequence = sequence * 10 + 2; }\n"
+            "static void late(void) { _exit(verdict); }\n"
+            "__attribute__((constructor(101))) static void first(void) { sequence = sequence * 10 + 1; }\n"
+            "__attribute__((section(\".init_array\"), used)) void (*early_entry)(void) = early;\n"
+            "__attribute__((section(\".fini_array\"), used)) void (*late_entry)(void) = late;\n"
+            "int main(void)\n"
+            "{\n"
+            "    verdict = sequence != 12 ? 2 : early_entry != early ? 3 : late_entry != late ? 4 : 0;\n"
+            "    return 1;\n"
+            "}\n");
         String8 hosts[] = {executable_resolve_in_path(arguments->arena, S8("gcc")), executable_resolve_in_path(arguments->arena, S8("clang"))};
         for (u32 host = 0; host < BUSTER_ARRAY_LENGTH(hosts); host += 1)
         {
@@ -17527,10 +17543,15 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 TemporalArena array_temporary = scratch_begin(&arguments->arena, 1);
                 String8 array_object_path = buster_test_temporary_path(array_temporary.arena, S8("buster-c-initializer-array-symbol"), S8(".o"));
                 String8 array_image_path = buster_test_temporary_path(array_temporary.arena, S8("buster-c-initializer-array-symbol"), S8(""));
-                String8 host_command[] = {hosts[host], S8("-O0"), S8("-fPIC"), S8("-c"), S8("-o"), array_object_path, S8("tests/basic_c_initializer_array_symbol.c")};
-                ProcessSpawnResult host_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_command), (SliceString8){0}, (SliceString8){0},
-                                                                 (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
-                bool host_ok = host_spawn.handle && os_process_wait_sync(array_temporary.arena, host_spawn).result == PROCESS_RESULT_SUCCESS;
+                String8 array_source_path = buster_test_temporary_path(array_temporary.arena, S8("buster-c-initializer-array-symbol"), S8(".c"));
+                String8 host_command[] = {hosts[host], S8("-O0"), S8("-fPIC"), S8("-c"), S8("-o"), array_object_path, array_source_path};
+                bool host_ok = file_write(array_source_path, BUSTER_SLICE_TO_BYTE_SLICE(array_source));
+                if (host_ok)
+                {
+                    ProcessSpawnResult host_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_command), (SliceString8){0}, (SliceString8){0},
+                                                                     (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                    host_ok = host_spawn.handle && os_process_wait_sync(array_temporary.arena, host_spawn).result == PROCESS_RESULT_SUCCESS;
+                }
                 BUSTER_TEST(arguments, host_ok);
                 if (host_ok)
                 {
