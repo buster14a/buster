@@ -13020,6 +13020,110 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+    {
+        // typeof over a block-scope object or parameter that shadows a
+        // file-scope typedef names the object, not the typedef; a nearer
+        // block-local typedef still names a type (#1669).
+        TemporalArena typeof_shadow_temporary = scratch_begin(&arguments->arena, 1);
+        String8 typeof_shadow_path = buster_test_temporary_path(typeof_shadow_temporary.arena, S8("buster-c-typeof-shadowed-typedef"),
+#if BUSTER_WINDOWS
+                                                                S8(".exe")
+#else
+                                                                S8("")
+#endif
+        );
+        String8 typeof_shadow_source_path =
+            buster_test_temporary_path(typeof_shadow_temporary.arena, S8("buster-c-typeof-shadowed-typedef"), S8(".c"));
+        String8 typeof_shadow_source = S8(
+            "typedef char T;\n"
+            "\n"
+            "static long local_typeof(void)\n"
+            "{\n"
+            "    long T = 1;\n"
+            "    typeof(T) y = 0x12345;\n"
+            "    return sizeof(y) == sizeof(long) && y == 0x12345 && T == 1;\n"
+            "}\n"
+            "\n"
+            "static long local_gnu_typeof(void)\n"
+            "{\n"
+            "    long T = 2;\n"
+            "    __typeof__(T) y = 0x12345;\n"
+            "    __typeof__(T)* p = &T;\n"
+            "    return sizeof(y) == sizeof(long) && y == 0x12345 && *p == 2;\n"
+            "}\n"
+            "\n"
+            "static long local_typeof_unqual(void)\n"
+            "{\n"
+            "    const long T = 3;\n"
+            "    typeof_unqual(T) y = 0;\n"
+            "    y = 0x12345;\n"
+            "    return sizeof(y) == sizeof(long) && y == 0x12345 && T == 3;\n"
+            "}\n"
+            "\n"
+            "static long parameter_typeof(long T)\n"
+            "{\n"
+            "    typeof(T) y = T;\n"
+            "    __typeof__(T) z = 0x12345;\n"
+            "    return sizeof(y) == sizeof(long) && sizeof(z) == sizeof(long) && z == 0x12345;\n"
+            "}\n"
+            "\n"
+            "static long statement_expression_typeof(void)\n"
+            "{\n"
+            "    long r = ({\n"
+            "        long T = 4;\n"
+            "        typeof(T) y = 0x12345;\n"
+            "        __typeof__(T) z = T;\n"
+            "        typeof_unqual(T) w = 0x6789a;\n"
+            "        sizeof(y) == sizeof(long) && y == 0x12345 && z == 4 && w == 0x6789a;\n"
+            "    });\n"
+            "    return r;\n"
+            "}\n"
+            "\n"
+            "static long block_typedef_typeof(void)\n"
+            "{\n"
+            "    typedef long T;\n"
+            "    long outer = 0;\n"
+            "    {\n"
+            "        typedef char T;\n"
+            "        typeof(T) y = 0;\n"
+            "        outer = (long)sizeof(y);\n"
+            "    }\n"
+            "    typeof(T) wide = 0x12345;\n"
+            "    return outer == 1 && sizeof(wide) == sizeof(long) && wide == 0x12345;\n"
+            "}\n"
+            "\n"
+            "int main(void)\n"
+            "{\n"
+            "    T c = 0;\n"
+            "    return !(local_typeof() && local_gnu_typeof() && local_typeof_unqual() && parameter_typeof(5) && statement_expression_typeof() &&\n"
+            "             block_typedef_typeof() && sizeof(c) == 1);\n"
+            "}\n");
+        BUSTER_TEST(arguments, file_write(typeof_shadow_source_path, BUSTER_SLICE_TO_BYTE_SLICE(typeof_shadow_source)));
+        String8 typeof_shadow_command_line[] = {
+            S8("-std=gnu23"), S8("-o"), typeof_shadow_path, typeof_shadow_source_path,
+        };
+        CompilerDriverResult typeof_shadow = compiler_driver_execute_invocation(
+            typeof_shadow_temporary.arena,
+            compiler_driver_parse_arguments(typeof_shadow_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(typeof_shadow_command_line)));
+        if (typeof_shadow.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("typeof shadowed typedef fixture failed: {S8}\n"), typeof_shadow.diagnostic);
+        }
+        BUSTER_TEST(arguments, typeof_shadow.error == COMPILER_DRIVER_ERROR_NONE);
+        if (typeof_shadow.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 typeof_shadow_run_arguments[] = {typeof_shadow_path};
+            ProcessSpawnResult typeof_shadow_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(typeof_shadow_run_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+            BUSTER_TEST(arguments, typeof_shadow_spawn.handle != 0);
+            if (typeof_shadow_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(typeof_shadow_temporary.arena, typeof_shadow_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(typeof_shadow_temporary);
+    }
     // Three CPython-found lowering shapes, each compiled and run with its
     // answers checked: a flexible array member initialized at static
     // storage (dictobject's empty keys), `++*s++` (dtoa's digit strip), and

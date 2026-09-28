@@ -36574,6 +36574,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_promote_throughput(Arena* arena,
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_cleanup_throughput_temps(Arena* arena,
                                                                         BenchServiceRecipeManifest* manifest);
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_lock_tree(Arena* arena, int directory, bool candidate_visible);
+BUSTER_GLOBAL_LOCAL int bench_service_recipe_reopen_directory(int directory);
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_frozen_receipt(Arena* arena, BenchServiceRecipeManifest* manifest,
                                                              String8 stage);
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_path(String8 path);
@@ -36711,23 +36712,25 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_stage_cleanup(Arena* aren
     BenchServiceRecipeStage* stage = data;
     ProcessResult result = stage->run ? stage->run->result : PROCESS_RESULT_UNKNOWN;
     bool simulated_crash = false;
+    /* Names the first failed post-stage check in the unit journal; the stage
+     * manifest records only process-result=failed. */
+    String8 failed_check = {0};
 #if BUSTER_LINUX
     if (result == PROCESS_RESULT_SUCCESS && string_equal(stage->name, S8("base-build")))
     {
-        if (!bench_service_recipe_binary_digest(stage->manifest->base_build_directory, stage->manifest->base_digest) ||
-            !bench_service_recipe_lock_tree(arena, stage->manifest->base_build_directory, true) ||
-            !bench_service_recipe_frozen_receipt(arena, stage->manifest, stage->name))
-            result = PROCESS_RESULT_FAILED;
+        failed_check = !bench_service_recipe_binary_digest(stage->manifest->base_build_directory,
+                                                           stage->manifest->base_digest) ? S8("binary-digest") :
+                       !bench_service_recipe_lock_tree(arena, stage->manifest->base_build_directory, true) ? S8("lock-tree") :
+                       !bench_service_recipe_frozen_receipt(arena, stage->manifest, stage->name) ? S8("frozen-receipt") : (String8){0};
     }
     else if (result == PROCESS_RESULT_SUCCESS && string_equal(stage->name, S8("candidate-build")))
     {
-        if (!bench_service_recipe_promote_candidate(arena, stage->manifest) ||
-            !bench_service_recipe_lock_tree(arena, stage->manifest->candidate_build_directory, true) ||
-            !bench_service_recipe_prepare_candidate_visibility(arena, stage->manifest) ||
-            !bench_service_recipe_prepare_throughput_output(arena, stage->manifest->candidate_stage_build,
-                                                             stage->manifest->throughput_output) ||
-            !bench_service_recipe_frozen_receipt(arena, stage->manifest, stage->name))
-            result = PROCESS_RESULT_FAILED;
+        failed_check = !bench_service_recipe_promote_candidate(arena, stage->manifest) ? S8("promote-candidate") :
+                       !bench_service_recipe_lock_tree(arena, stage->manifest->candidate_build_directory, true) ? S8("lock-tree") :
+                       !bench_service_recipe_prepare_candidate_visibility(arena, stage->manifest) ? S8("candidate-visibility") :
+                       !bench_service_recipe_prepare_throughput_output(arena, stage->manifest->candidate_stage_build,
+                                                                       stage->manifest->throughput_output) ? S8("throughput-output") :
+                       !bench_service_recipe_frozen_receipt(arena, stage->manifest, stage->name) ? S8("frozen-receipt") : (String8){0};
     }
     else if (result == PROCESS_RESULT_SUCCESS && string_equal(stage->name, S8("throughput")))
     {
@@ -36755,8 +36758,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_stage_cleanup(Arena* aren
             result = PROCESS_RESULT_FAILED;
         }
         bool indexed = promoted && !simulated_crash && bench_service_recipe_bundle_index(arena, stage->manifest);
-        if (!simulated_crash && (!promoted || !indexed))
-            result = PROCESS_RESULT_FAILED;
+        if (!simulated_crash)
+        {
+            failed_check = !stale ? S8("throughput-temporaries") : !tree ? S8("attempt-tree") : !digests ? S8("binary-digests") :
+                           !promoted ? S8("promote-throughput") : !indexed ? S8("bundle-index") : (String8){0};
+        }
+    }
+    if (failed_check.length)
+    {
+        string_print(S8("error: {S8} post-stage check failed: {S8}\n"), stage->name, failed_check);
+        result = PROCESS_RESULT_FAILED;
     }
     if (!simulated_crash && result != PROCESS_RESULT_SUCCESS && stage->manifest && stage->manifest->result_directory >= 0)
     {
@@ -36852,6 +36863,25 @@ BUSTER_GLOBAL_LOCAL int bench_service_recipe_open_directory(String8 path)
         }
     }
     return current;
+}
+
+/* A pinned directory descriptor can predate the entries a later walk must see.
+ * btrfs (Linux 6.5+) fixes a directory's last readdir index when its open file
+ * is created, so walking a dup of a prepare-time descriptor silently omits
+ * everything the stages created; any consumed offset hides entries on every
+ * filesystem. Walks therefore read a fresh open file of the same pinned inode. */
+BUSTER_GLOBAL_LOCAL int bench_service_recipe_reopen_directory(int directory)
+{
+    int result = directory >= 0 ? openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat pinned = {0}, fresh = {0};
+    bool same = result >= 0 && fstat(directory, &pinned) == 0 && fstat(result, &fresh) == 0 &&
+                pinned.st_dev == fresh.st_dev && pinned.st_ino == fresh.st_ino;
+    if (!same && result >= 0)
+    {
+        close(result);
+        result = -1;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_private_directory(int descriptor, bool writable)
@@ -37306,8 +37336,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_throughput_temp_name(char const* n
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_cleanup_throughput_temps(Arena* arena,
                                                                         BenchServiceRecipeManifest* manifest)
 {
-    int parent = manifest && manifest->result_directory >= 0 ?
-                 fcntl(manifest->result_directory, F_DUPFD_CLOEXEC, 3) : -1;
+    int parent = manifest ? bench_service_recipe_reopen_directory(manifest->result_directory) : -1;
     DIR* stream = parent >= 0 ? fdopendir(parent) : NULL;
     bool ok = stream != NULL;
     if (!stream && parent >= 0) close(parent);
@@ -37560,7 +37589,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_lock_tree(Arena* arena, int direct
     struct BenchServiceRecipeLockFrame { DIR* stream; };
     BenchServiceRecipeLockFrame* frames = arena_allocate(arena, BenchServiceRecipeLockFrame,
                                                            BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP);
-    int root = directory >= 0 ? fcntl(directory, F_DUPFD_CLOEXEC, 3) : -1;
+    int root = bench_service_recipe_reopen_directory(directory);
     DIR* stream = root >= 0 ? fdopendir(root) : NULL;
     u32 depth = stream ? 1 : 0;
     bool ok = stream != NULL;
@@ -37947,8 +37976,8 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_frozen_receipt(Arena* arena, Bench
         if (ok) temporary_fd = openat(parent, temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
         ok = ok && temporary_fd >= 0;
     }
-    /* lock_tree consumed a duplicated build-directory OFD's readdir offset.
-     * Open a fresh OFD so the source inventory cannot silently skip entries. */
+    /* Like every walk, read a fresh OFD so the inventory cannot inherit a
+     * consumed or btrfs-stale readdir position (bench_service_recipe_reopen_directory). */
     if (ok) root = openat(build, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     ok = ok && root >= 0 && fstat(root, &root_info) == 0 && S_ISDIR(root_info.st_mode) &&
          bench_service_recipe_receipt_policy(&root_info, true, candidate_gid) &&
@@ -38163,7 +38192,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_sync_tree(Arena* arena, int direct
 {
     BenchServiceRecipeBundleFrame* frames = arena_allocate(arena, BenchServiceRecipeBundleFrame,
                                                             BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP);
-    int root = directory >= 0 ? fcntl(directory, F_DUPFD_CLOEXEC, 3) : -1;
+    int root = bench_service_recipe_reopen_directory(directory);
     DIR* stream = root >= 0 ? fdopendir(root) : NULL;
     bool ok = stream != NULL;
     u32 depth = ok ? 1 : 0;
@@ -39431,6 +39460,80 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_sgid_sandbox_test(Arena* arena)
 }
 #endif
 
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_exhaust_directory(int directory)
+{
+    /* dup shares the open file, so reading it to the end consumes the pinned
+     * descriptor's own readdir position. */
+    int duplicate = directory >= 0 ? dup(directory) : -1;
+    DIR* stream = duplicate >= 0 ? fdopendir(duplicate) : NULL;
+    bool ok = stream != NULL;
+    if (!stream && duplicate >= 0) close(duplicate);
+    while (ok)
+    {
+        errno = 0;
+        struct dirent* entry = readdir(stream);
+        if (!entry)
+        {
+            ok = errno == 0;
+            break;
+        }
+    }
+    if (stream && closedir(stream) != 0) ok = false;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_mode(char const* path, mode_t mode)
+{
+    struct stat info = {0};
+    bool ok = lstat(path, &info) == 0 && (info.st_mode & 07777) == mode;
+    return ok;
+}
+
+/* The post-stage walks run on descriptors pinned before the stages created
+ * anything. btrfs (Linux 6.5+) never lists entries created after a directory's
+ * open file, which reproduced as #880 attempt N2; an exhausted readdir position
+ * hides them portably. Both walks must still reach every entry. */
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_pinned_walk_test(Arena* arena, char const* script_root)
+{
+    char build[BENCH_SERVICE_RECIPE_PATH_CAP], nested[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char data[BENCH_SERVICE_RECIPE_PATH_CAP], nested_data[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char tool[BENCH_SERVICE_RECIPE_PATH_CAP], result[BENCH_SERVICE_RECIPE_PATH_CAP];
+    char stale[BENCH_SERVICE_RECIPE_PATH_CAP], temporary[128] = {0};
+    bool ok = bench_service_recipe_test_child_path(build, script_root, "pinned-build") &&
+              bench_service_recipe_test_child_path(nested, build, "nested") &&
+              bench_service_recipe_test_child_path(data, build, "data") &&
+              bench_service_recipe_test_child_path(nested_data, nested, "data") &&
+              bench_service_recipe_test_child_path(tool, nested, "tool") &&
+              bench_service_recipe_test_child_path(result, script_root, "pinned-result") &&
+              mkdir(build, 0700) == 0 && mkdir(result, 0700) == 0;
+    int build_fd = ok ? open(build, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int result_fd = ok ? open(result, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = ok && build_fd >= 0 && result_fd >= 0 && mkdir(nested, 0700) == 0 &&
+         bench_service_recipe_test_write(data, "data\n", 0600) &&
+         bench_service_recipe_test_write(nested_data, "data\n", 0600) &&
+         bench_service_recipe_test_write(tool, "tool\n", 0700) &&
+         bench_service_recipe_temp_name("throughput", temporary) &&
+         bench_service_recipe_test_child_path(stale, result, temporary) && mkdir(stale, 0700) == 0 &&
+         bench_service_recipe_test_exhaust_directory(build_fd) &&
+         bench_service_recipe_test_exhaust_directory(result_fd);
+    BenchServiceRecipeManifest manifest = {.result_root = string_from_pointer((char8*)result),
+                                           .result_directory = result_fd, .base_build_directory = -1,
+                                           .candidate_build_directory = -1};
+    ok = ok && bench_service_recipe_lock_tree(arena, build_fd, true) &&
+         bench_service_recipe_test_mode(build, 0550) && bench_service_recipe_test_mode(nested, 0550) &&
+         bench_service_recipe_test_mode(data, 0440) && bench_service_recipe_test_mode(nested_data, 0440) &&
+         bench_service_recipe_test_mode(tool, 0550) &&
+         bench_service_recipe_cleanup_throughput_temps(arena, &manifest) && access(stale, F_OK) != 0 && errno == ENOENT;
+    string_print(S8("BENCH_SERVICE_RECIPE_PINNED_WALK_TEST result={S8}\n"), ok ? S8("pass") : S8("fail"));
+    if (build_fd >= 0) close(build_fd);
+    if (result_fd >= 0) close(result_fd);
+    chmod(nested, 0700);
+    chmod(build, 0700);
+    remove_path_recursive(arena, string_from_pointer((char8*)build));
+    remove_path_recursive(arena, string_from_pointer((char8*)result));
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
 {
     char script_root[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
@@ -39444,6 +39547,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
     string_print(S8("SGID_SANDBOX_TEST recipe status=unsupported-architecture\n"));
 #endif
     ok = ok && bench_service_recipe_identity_test(arena);
+    ok = ok && bench_service_recipe_pinned_walk_test(arena, script_root);
+    cases += 1;
     char const* base_revision = "1111111111111111111111111111111111111111";
     char const* candidate_revision = "2222222222222222222222222222222222222222";
     char fail_marker[BENCH_SERVICE_RECIPE_PATH_CAP], tamper_marker[BENCH_SERVICE_RECIPE_PATH_CAP];
