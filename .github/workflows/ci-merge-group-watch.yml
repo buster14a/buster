@@ -1,0 +1,45 @@
+name: Buster CI merge-group watcher
+run-name: >-
+  Merge-group watch ${{ github.event.workflow_run.head_branch }}@${{ github.event.workflow_run.head_sha }}
+  (Buster CI ${{ github.event.workflow_run.id }} attempt ${{ github.event.workflow_run.run_attempt }}; handler ${{ github.sha }})
+
+on:
+  workflow_run:
+    workflows: [Buster CI]
+    types: [in_progress]
+    # The Buster CI merge_group source uses this GitHub queue branch prefix.
+    branches:
+      - 'gh-readonly-queue/main/**'
+
+permissions: {}
+
+# Same key as ci-recovery.yml: never race two handlers for one upstream run.
+concurrency:
+  group: ci-recovery-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  watch-merge-group:
+    if: >-
+      ${{ github.server_url == 'https://github.com' &&
+          vars.GH_ACTIONS_CI_ENABLED == 'true' &&
+          github.event.workflow_run.event == 'merge_group' &&
+          github.event.workflow_run.head_repository.full_name == github.repository }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 305
+    permissions:
+      contents: read
+      actions: write
+      checks: read
+    steps:
+      # workflow_run executes this trusted default-branch revision, not the
+      # merge-group candidate. Never execute candidate bytes or read artifacts.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Cancel a doomed merge group on first required failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/recover-ci.py watch
