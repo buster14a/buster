@@ -1215,7 +1215,7 @@ BUSTER_C_INTERNAL bool c_ir_type_contains_wide_float(IrProgram* program, CIrWide
 // ir_abi_convention_for_target supplies SYSTEMV_X86_64.  Keep the OS check in
 // sync with those two target-model facts rather than treating Android as a
 // generic Linux-like target with a narrower long double.
-BUSTER_C_INTERNAL bool c_ir_target_supports_f80(Target target)
+BUSTER_C_SHARED bool c_ir_target_supports_f80(Target target)
 {
     TargetDataLayout layout = target_data_layout(target);
     bool supported_os = target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID || target.os == OPERATING_SYSTEM_MACOS ||
@@ -7749,7 +7749,13 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
         IrValueId narrowed_source = value;
         String8 runtime = S8("__truncsfhf2");
         IrTypeId runtime_parameter = builder->f32_type;
-        if (source_value->kind == IR_TYPE_FLOAT && source_value->bit_width == 64)
+        if (source_value->kind == IR_TYPE_FLOAT && source_value->bit_width == 80 &&
+            c_ir_target_supports_f80(builder->target))
+        {
+            runtime = S8("__truncxfhf2");
+            runtime_parameter = source_type;
+        }
+        else if (source_value->kind == IR_TYPE_FLOAT && source_value->bit_width == 64)
         {
             runtime = S8("__truncdfhf2");
             runtime_parameter = builder->f64_type;

@@ -3964,7 +3964,7 @@ BUSTER_C_INTERNAL String8 c_parse_scalar_conversion_message(Target target, CType
     else if ((source_pointer && target_float) || (source_float && target_pointer))
         message = S8("cannot convert between a pointer and a floating-point type");
     else if (runtime && to == C_TYPE_FLOAT16 && (from == C_TYPE_LONG_DOUBLE || from == C_TYPE_LONG_DOUBLE_COMPLEX) &&
-             target_data_layout(target).long_double_type.bit_width > 64)
+             target_data_layout(target).long_double_type.bit_width > 64 && !c_ir_target_supports_f80(target))
         message = S8("C IR lowering does not support this runtime conversion to binary16");
     return message;
 }

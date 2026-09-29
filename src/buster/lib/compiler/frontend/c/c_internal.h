@@ -160,6 +160,7 @@ BUSTER_C_EXTERN bool c_parse_vector_size_word(String8 spelling);
 // of the token stream instead of stored in the record.
 BUSTER_C_EXTERN bool c_alignment_specifier_is_standard(CPreprocessResult preprocess, CAlignmentSpecifier specifier);
 BUSTER_C_EXTERN u8 c_parse_token_class_compute(String8 spelling);
+BUSTER_C_EXTERN bool c_ir_target_supports_f80(Target target);
 BUSTER_C_EXTERN bool c_ir_decode_character_value(Arena* arena, char8 const* spelling_base, CToken token, Target target,
                                                    u64* value_out, CTypeKind* kind_out);
 BUSTER_C_EXTERN bool c_ir_tokens_are_string_literals(CPreprocessResult preprocess, u32 start, u32 end);
