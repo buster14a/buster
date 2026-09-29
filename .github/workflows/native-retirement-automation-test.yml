@@ -11,12 +11,14 @@ on:
       - 'tools/native_retirement_controller*.py'
       - 'tools/native_retirement_integration.py'
       - 'tools/native_retirement_merge_gate.py'
-  push:
-    branches: [codex/1791-native-retirement-automation]
+      - 'tools/merge_conflict_preflight.py'
   workflow_dispatch:
 
 permissions:
   contents: read
+concurrency:
+  group: native-retirement-automation-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
