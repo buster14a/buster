@@ -36,7 +36,8 @@ requirements. They take effect only after landing on the default branch.
 
 The separate `.github/workflows/ci-recovery-tests.yml` runs both existing
 offline suites for PR and main changes to the two handlers, their helper and
-test sources. The new workflow-shape tests live in
+test sources. It also runs for `ci.yml` changes, because the watcher's step
+deadline mirrors a `ci.yml` step timeout. The new workflow-shape tests live in
 `.github/scripts/test_ci_recovery_workflows.py` so the frozen native-retirement
 support inventory and tracked `tests/` census stay unchanged. The regression workflow
 has no `workflow_run` trigger and no write credential. This
@@ -135,7 +136,9 @@ the same merge-group head SHA and `merge_group` event. Optional check failures
 do not trigger cancellation; completed or different-head runs are never targeted.
 It keeps watching after Buster CI succeeds and stops only when every required
 check has succeeded. The handler takes no runner-held wait between passes; its
-job has a five-minute timeout. The sweep inspects at most 25 live queue refs.
+job has a five-minute timeout. The only wait inside a pass is the bounded
+step-deadline escalation described below. The sweep inspects at most 25 live
+queue refs.
 
 On `merge_group`, Buster CI's desktop and mobile matrices and the independent
 materializer matrix use native matrix `fail-fast`. The twelve
@@ -154,13 +157,154 @@ controller rather than authorization to continue or fabricate success. The
 watcher is a cost-saving controller, not a required status check; the existing
 eight required checks remain the authority for merge admission.
 
+## Merge-group workflow-tool step deadline
+
+Buster CI run [36571009755](https://github.com/buster14a/buster/actions/runs/36571009755)
+attempt 1 (merge-group candidate `fd1ebb286a90639535e654456084395aa92ab84c`)
+blocked its queue entry on `macOS x86-64 release`. That job's `Workflow tool
+regression tests` step started at 2026-09-29T12:53:23Z and was still
+`in_progress` more than 30 minutes later, despite its 5-minute step timeout.
+The other 23 jobs succeeded. The job log was unavailable (`BlobNotFound`), so
+no cause is established ([#1866](https://github.com/buster14a/buster/issues/1866)).
+The fail-fast path could not help: it reacts only to *completed*
+non-success jobs.
+
+The same trusted watcher therefore applies a narrow deadline in every pass:
+a Buster CI start, a required-workflow completion, the 15-minute sweep, or a
+manual dispatch. It covers only the six desktop Release job names
+(`Linux x86-64 release` … `Windows AArch64 release`) and only their
+`Workflow tool regression tests` step:
+
+| Lanes | Step budget (`ci.yml`) | Grace | Deadline after step start |
+| --- | --- | --- | --- |
+| Linux x86-64, Linux AArch64 | 2 minutes | 10 minutes | 12 minutes |
+| macOS x86-64, macOS AArch64, Windows x86-64, Windows AArch64 | 5 minutes | 10 minutes | 15 minutes |
+
+`WORKFLOW_TOOLS_BUDGET_SECONDS`, `STEP_DEADLINE_GRACE_SECONDS`,
+`FORCE_CANCEL_GRACE_SECONDS` and `STEP_DEADLINE_POLL_SECONDS` in
+`.github/scripts/recover-ci.py` hold the policy. `test_budgets_mirror_the_ci_workflow_step` fails if the budgets drift
+from the step's `timeout-minutes` or the matrix names. The watcher executes
+default-branch code, so a PR that raises that timeout past budget plus grace
+is protected only after the matching watcher budget lands.
+
+The grace is wider than the runner's own timeout cleanup needs. A false
+positive cancels a healthy merge candidate, which must then requeue and run
+all of CI again. That happens when a step finishes near its budget but GitHub
+reports the completion late. A genuine hang costs at most the extra grace.
+A shorter 2-minute grace, giving 4- and 7-minute deadlines, was proposed in
+#1867 and not adopted for this reason.
+
+A step that has passed its deadline is acted on by the next pass. Once the
+other jobs and required workflows have finished, as in the incident, that is
+normally the sweep, up to 15 minutes later plus any scheduling delay.
+
+Elapsed time runs from GitHub's step `started_at`, compared with the
+controller's clock. The job's `started_at` must not follow the step's. Run
+creation, queue time and total workflow age are ignored. A step is a candidate
+only while the run is active and both the job and the step are `in_progress`
+with no conclusion and no `completed_at`. A finished run's stale step metadata
+is never used. The job's `run_id`, `run_attempt` and `head_sha` must match the
+exact merge-group attempt. The job ID and step number must be positive
+integers (not booleans), and the job ID must appear only once. Queued,
+waiting and completed jobs and steps are never candidates. Neither are other
+steps of a release lane, completed policy steps in long healthy jobs, `checks`
+shards, native lanes or other workflows. The watcher already refuses main,
+tag, manual and PR runs, other heads and superseded attempts. A duplicate step
+or job, a mismatched identity, or a missing, naive or unparseable timestamp is
+refused and recorded in that pass, and fail-fast continues. Discovery only
+reads and never raises on this metadata, so malformed step data cannot
+disable fail-fast.
+
+When a step is overdue (strictly past its deadline), the pass:
+
+1. Re-reads the live queue ref, the latest merge-group runs, the jobs of the
+   watched attempt (`actions/runs/{id}/attempts/{attempt}/jobs`), and finally
+   the run itself. It confirms the same ref, run, attempt, head, job, step
+   number and step start are still in progress and overdue. A step that
+   stopped or restarted is recorded as `refused-progressed`. A moved ref,
+   replaced run, new attempt or changed head is recorded as `refused-changed`
+   and nothing is cancelled.
+2. Requests normal cancellation of that exact Buster CI run
+   (`POST actions/runs/{id}/cancel`), after flushing a `cancel-requesting`
+   record. GitHub cannot cancel a single job. When the same pass has already
+   run fail-fast, that fail-fast cancel request is the normal cancellation
+   and is not repeated. Completed job results are retained.
+3. Waits inside the same pass, re-reading as in step 1 every
+   `STEP_DEADLINE_POLL_SECONDS` (20 seconds). If the step stops, the pass
+   records `step-stopped` and ends. If that same step is still in progress
+   after `FORCE_CANCEL_GRACE_SECONDS` (2 minutes), the final re-read is
+   immediately followed by a `force-cancel-requesting` record and **one**
+   call to the documented
+   [force-cancel endpoint](https://docs.github.com/en/rest/actions/workflow-runs#force-cancel-a-workflow-run)
+   (`POST actions/runs/{id}/force-cancel`). A step or run that progressed or
+   completed, or a changed identity, does not permit escalation. Neither does
+   a `409` from the normal cancel. A `409` from either endpoint records
+   `run-already-finished`. Any other HTTP or transport error fails the
+   watcher visibly, and an uncertain POST is never retried.
+4. When the pass did not itself run fail-fast, the cancelled run's
+   completion event, or the next sweep, runs the existing fail-fast. That
+   cancels the rest of the exact-head merge group.
+
+Passes keep no state, so the force-cancel grace has to elapse inside one
+pass. That is why it is 2 minutes rather than a longer cross-probe wait: it
+must leave room for checkout and API reads within the watcher job's
+five-minute timeout. `test_in_pass_grace_fits_the_watcher_timeout` enforces
+that bound. The runner is held only while a revalidated overdue step is being
+stopped.
+
+Nothing is rerun and no success is published. A deterministic failure stays
+failed, and the job's existing `actions: write` permission covers both
+endpoints. Every decision prints one greppable, versioned `STEP_DEADLINE_V1`
+line with the action: `refused`, `refused-progressed`, `refused-changed`,
+`cancel-requesting`, `cancel-requested`, `step-stopped`,
+`force-cancel-requesting`, `force-cancel-requested` or `run-already-finished`. Each line carries the
+exact run, attempt, head, job, step, start timestamp, budget and grace, and
+the deadline and elapsed seconds once the step is overdue. Records are flushed
+before each POST, so an uncertain request still leaves its exact identity
+behind. The job summary repeats these lines even when a later API error fails
+the controller. Records report requests, not verified termination.
+
+Limits:
+
+- Deadlines are not hard wall-clock guarantees. Observer scheduling, API
+  delays, GitHub outages or a failed observer can delay or prevent action.
+  If several merge groups are stuck at once, one sweep may reach its
+  five-minute timeout before handling them all. The next pass repeats the
+  idempotent normal cancel and its own bounded wait.
+- The cancel endpoints are keyed by run ID and have no
+  "only if this attempt still matches" condition. The final reads narrow the
+  rerun and completion race between the last read and the POST, but cannot
+  remove it.
+- Force cancellation can bypass cleanup guarded by `always()`, so artifacts
+  from the stuck runner are not guaranteed. The controller's own records are
+  flushed first for that reason.
+- The deadline path cancels only the stuck Buster CI run. Other required
+  workflows receive the ordinary fail-fast cancellation, never
+  force-cancellation. Successful results are not rewritten.
+- Recovering the interrupted queue candidate is an explicit operator action,
+  not a retry loop. The candidate still lacks successful admission evidence.
+- Protection starts only when this code is on the default branch and a
+  watcher using that revision starts. Controllers that are already running
+  are not changed.
+- This protection does not diagnose why the affected runner did not report the
+  step's own timeout, and it does not replace native reproduction once logs
+  are available.
+
 ## Validation and escalation
 
 Run `python3 tests/ci_recovery_test.py` for ordinary PR recovery,
 `python3 .github/scripts/test_ci_recovery_workflows.py` for workflow selection and
 attribution, then `python3 .github/scripts/test_merge_queue_fail_fast.py` for required-check
 failure, optional-check exclusion, exact-head cancellation, and successful
-completion. These offline tests run for PR changes to the controller files.
+completion. The same suite covers the step deadline: the 2026-09-29 incident,
+each lane's boundary second, a future or finished start, progression and
+replaced jobs or steps between reads, changed attempts, heads and runs before
+either POST, queued/completed jobs, malformed or duplicate metadata, evidence
+ordering, normal cancellation, fail-fast's cancel as the normal cancellation,
+the in-pass force-cancel grace and its fit within the watcher timeout, sweep
+passes, API errors, and budget drift from `ci.yml`. The tests neither sleep
+nor send real cancellation requests.
+These offline tests run for PR changes to the controller files and `ci.yml`.
 They do not prove a live merge-group cancellation; the watcher can execute only
 after its workflow lands on the default branch. Workflow lint covers the YAML.
 After landing, capture an ordinary PR completion, a main push, and a merge-group

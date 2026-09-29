@@ -131,7 +131,8 @@ predecessor and the six gates. It does almost no verification. The
 `merge-queue-reconcile.yml` workflow replaces that wait with short passes:
 
 - **Triggers.** A completed `merge_group` run of any of the six required
-  workflows, a `push` to main (predecessor landing), a 15-minute scheduled sweep
+  workflows or of the rebinding workflow (whose reconstruction job
+  `required_checks` adds for unattested retirement groups, #1893), a `push` to main (predecessor landing), a 15-minute scheduled sweep
   (bounded recovery for missed or coalesced deliveries) and `workflow_dispatch`.
   Every pass enumerates the live `gh-readonly-queue/main/*` refs itself and never
   trusts a delivery payload. Duplicate, out-of-order, missed and coalesced events
@@ -199,8 +200,9 @@ Report admission time in three separate parts:
 - **Build/test queue delay:** runner assignment for the six gates themselves.
 
 This change does not explain or fix host-specific assignment delay (#1805). The
-native-retirement admission producer and optional rebinding transitions are
-tracked in #1818 and #1820, respectively.
+native-retirement admission producer is tracked in #1818. The rebinding
+workflow keeps #1907's in-job predecessor wait; its runner-held wait remains
+tracked in #1811.
 
 ## Exact identities and fail-closed evidence
 
