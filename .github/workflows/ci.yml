@@ -262,6 +262,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
+          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
+            "$BUSTER_CI_PYTHON" tools/ci_runner_resources.py --parent-pid "$$" \
+              --phase workflow-tools --log "$RUNNER_TEMP/buster-ci/resources-workflow-tools.jsonl" &
+            resource_sampler=$!
+            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
+          fi
           workflow_tools_started=$SECONDS
           run_suite() {
             local suite=$1 log=$2 started=$SECONDS status
@@ -293,6 +299,9 @@ jobs:
           run_suite tools/ci_matrix_phases_bridge_test.py matrix-phases-bridge-test.log
           run_suite tools/ci_native_observation_test.py native-observation-test.log
           run_suite tools/github_ci_time_test.py ci-queue-timing-test.log
+          if [[ '${{ matrix.os }}' == macos ]]; then
+            run_suite tools/ci_runner_resources_test.py runner-resources-test.log
+          fi
           printf 'WORKFLOW_TOOLS_END result=success elapsed_seconds=%s at=%s\n' \
             "$((SECONDS - workflow_tools_started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -361,6 +370,12 @@ jobs:
           set -euo pipefail
           # This step also runs without the Release-only preflight steps.
           mkdir -p "$RUNNER_TEMP/buster-ci"
+          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
+            "$BUSTER_CI_PYTHON" tools/ci_runner_resources.py --parent-pid "$$" \
+              --phase install-zig --log "$RUNNER_TEMP/buster-ci/resources-install-zig.jsonl" &
+            resource_sampler=$!
+            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
+          fi
           "$BUSTER_CI_PYTHON" tools/ci_zig.py --target "$ZIG_TARGET" --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig" 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig.log"
 
       # Ordinary mode retains the previous main-push write policy. Prime mode
@@ -456,6 +471,12 @@ jobs:
           set -euo pipefail
           mkdir -p build "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/combinations.log") 2>&1
+          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
+            "$BUSTER_CI_PYTHON" tools/ci_runner_resources.py --parent-pid "$$" \
+              --phase combinations --log "$RUNNER_TEMP/buster-ci/resources-combinations.jsonl" &
+            resource_sampler=$!
+            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
+          fi
           # The superbuild manifest names this exact bootstrap-driver path.
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
           ./build/build test_all_combinations_ci --verbose=1
@@ -723,6 +744,12 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/modes.log") 2>&1
+          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
+            "$BUSTER_CI_PYTHON" tools/ci_runner_resources.py --parent-pid "$$" \
+              --phase native-modes --log "$RUNNER_TEMP/buster-ci/resources-native-modes.jsonl" &
+            resource_sampler=$!
+            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
+          fi
           # generate recreates build/, so the driver and logs must live outside it.
           driver="$RUNNER_TEMP/buster-build"
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py toolchain             --root "$BUSTER_CI_OBSERVATION_ROOT" --compiler clang --cmake cmake --ninja ninja
@@ -873,6 +900,12 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/differential.log") 2>&1
+          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
+            "$BUSTER_CI_PYTHON" tools/ci_runner_resources.py --parent-pid "$$" \
+              --phase native-differential --log "$RUNNER_TEMP/buster-ci/resources-native-differential.jsonl" &
+            resource_sampler=$!
+            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
+          fi
           driver="$RUNNER_TEMP/buster-build"
           if [[ ! -f "$BUSTER_CI_OBSERVATION_ROOT/toolchain.json" ]]; then
             "$BUSTER_CI_PYTHON" tools/ci_native_observation.py toolchain               --root "$BUSTER_CI_OBSERVATION_ROOT" --compiler clang --cmake cmake --ninja ninja
@@ -1083,6 +1116,12 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/ios.log") 2>&1
+          if [[ '${{ matrix.runner }}' == macos-26-intel ]]; then
+            python3 tools/ci_runner_resources.py --parent-pid "$$" \
+              --phase ios-simulator --log "$RUNNER_TEMP/buster-ci/resources-ios-simulator.jsonl" &
+            resource_sampler=$!
+            trap 'kill "$resource_sampler" 2>/dev/null || true; wait "$resource_sampler" 2>/dev/null || true' EXIT
+          fi
           ./ios/test_ci.sh --all
 
       - name: Mobile result and reproduction
