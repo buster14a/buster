@@ -319,6 +319,13 @@ against the frozen `LEGACY_DEPENDENCY_*` constants in
 
 ### Chosen design: post-merge catch-up
 
+Two requirements are part of the decision:
+
+- **No serialization for ordinary PRs.** A bound PR queues and lands like any
+  other PR, pipelined with its neighbours.
+- **Fully automatic.** No human dispatch is needed for ordinary PRs or
+  catch-ups.
+
 1. An `ordinary` candidate that changes only admitted repository sources lands
    through the native merge queue with no writer step. The existing read-only
    `Reconstruct candidate closure ephemerally` job validates its exact group
@@ -327,15 +334,40 @@ against the frozen `LEGACY_DEPENDENCY_*` constants in
    Admission accepts that ephemeral proof in place of a writer attestation.
    Expected values come from the trusted rebinder over source bytes, never
    from census or other candidate output.
+   - The reconstruction runs on the speculative group tree as soon as the
+     group is created. It does not first wait for the predecessor to land
+     (`merge_queue_admission.py wait-base`).
+   - After the predecessor lands, admission repeats only the cheap checks:
+     live identity, and `verify_trusted_policy` extended to the
+     rebinder/authority paths. These prove that no predecessor changed the
+     policy or tools that the reconstruction trusted.
+   - A predecessor that did change them forces a group rebuild, as a
+     policy-changing predecessor does today.
 2. `bootstrap` and `policy` transitions keep the existing pre-integration
    writer path. They change the authority itself and still need the
    old-authority/new-authority check before they land.
 3. After bound candidates land, the single writer publishes one catch-up that
-   contains only the two generated files for current `main`. The catch-up
-   is a generated-only PR from the writer's staging branch through the
-   same native queue. It is admitted only when trusted `main` tools report
-   `rebind.py check` clean on its exact group tree and it has no other delta.
-   The writer gets no direct write path to `main` and no ruleset bypass.
+   contains only the two generated files for current `main`.
+   - **Dispatch.** The existing standing-authorization controller
+     (`native-retirement-automation.yml`, #1791) starts the catch-up. It
+     already runs on `main` pushes, writer completion and a 10-minute
+     schedule. It requests a catch-up whenever the trusted `rebind.py check`
+     on `main` reports the pair stale. Catch-ups are a controller class of
+     their own, with no human dispatch.
+   - **Route to `main`.** The writer publishes a generated-only PR from its
+     staging branch and enqueues it in the same native queue. The writer
+     gets no direct write path to `main` and no ruleset bypass.
+   - **Admission.** A catch-up is admitted when all of these hold:
+     - its generated pair is byte-identical to a trusted reconstruction at
+       its recorded publication base;
+     - that base is an ancestor of the group base;
+     - it has no other delta.
+
+     It does not have to be fresh for the whole group tree. So a bound PR
+     that lands ahead of it cannot make it fail, and it never evicts other
+     groups from the queue. It moves `main` forward to a verified identity,
+     and the controller publishes the next catch-up if sources have moved
+     on since then.
 4. While a catch-up is outstanding, `main` carries a pair that is behind but
    internally consistent: the header still binds the committed snapshot
    bytes. Each landed tree was ephemerally reconstructed before it landed.
@@ -346,8 +378,7 @@ against the frozen `LEGACY_DEPENDENCY_*` constants in
    - acceptance evidence and census runs that need the committed quartet
      must target a revision where `rebind.py check` is clean, which is a
      catch-up or a later revision with no pending source changes;
-   - a catch-up that loses a race to another bound merge simply fails its
-     check and is republished. No feature PR waits on it.
+   - no feature PR waits on a catch-up.
 
 The stale window is one writer run plus one queue CI cycle after the last
 bound merge. Several bound merges share one catch-up. In the sampled history
