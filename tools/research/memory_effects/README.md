@@ -50,3 +50,33 @@ cc -std=c11 -O1 -g -Wall -Wextra -Wpedantic -Werror \
 
 Only a completed run establishes actual counts/results. No local or target
 performance result is claimed by this artifact.
+
+Hosted evidence is preserved in `evidence/hosted-evidence.zip` (SHA-256
+`9704dd93444e666d21bd3b89c8501981fda77567598e9fb280f33827f55dd1e4`).
+Its exact execution revision is `da52c15d64f2428c9d314b81ef4ba563f5589294`,
+tree `1d09e05301e8b2f1ef703acb5df4af844fdf21c1`, on a standard
+`ubuntu-26.04` GitHub runner with Clang 21.1.8 and GCC 15.2.0.
+The ordinary and ASan/UBSan oracle runs each completed with the counts above
+and zero failures. All ten small-subject census compilations succeeded.
+Both pristine compiler-unity inputs completed canonical preparation/census
+but downstream code generation refused baseline `xgetbv` (existing #1487).
+The workflow therefore failed and does not establish successful object output,
+self-hosting, compiler throughput, or performance acceptance.
+
+`run_census.py` instruments only a disposable checkout while building the
+diagnostic compiler, then restores the original driver before compiling the
+input corpus. No canonical rows are rewritten. Its post-preparation counts
+are structural opportunities conditional on the proposed access, lifetime,
+initialization and representation contract; they are not certified legal
+production rewrites. The counter table has sixteen slots; counts for different
+rules are independent. The payload peak is `33V + 5B + 512` bytes per function
+plus arena alignment, where V/B are value/block counts. Existing production
+budgets and invalidation must be honored by any later implementation.
+
+Reproduce the whole untimed hosted diagnostic with
+`python3 tools/research/memory_effects/run_census.py` in a disposable checkout
+of the execution revision. Build policy is delegated to the existing C driver.
+The branch-only workflow from that exact revision is preserved in history;
+it is removed from the final research checkpoint after execution.
+The current report, semantic contract, uncertainty and go/no-go live on the
+existing [optimizer owner #49](https://github.com/buster14a/buster/issues/49).
