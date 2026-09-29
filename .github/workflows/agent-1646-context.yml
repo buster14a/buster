@@ -9,43 +9,42 @@ permissions:
   contents: write
 
 jobs:
-  apply-fix:
+  diagnose-fix:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: codex/1646-static-assert-message
 
-      - name: Apply guarded repair
+      - name: Run guarded repair and capture output
         shell: bash
         run: |
-          set -euo pipefail
+          set +e
           cat .agent/apply-1646.0 .agent/apply-1646.1 .agent/apply-1646.2 .agent/apply-1646.3 .agent/apply-1646.4 \
-            | base64 --decode > /tmp/apply-1646.py
-          python3 -m py_compile /tmp/apply-1646.py
-          python3 /tmp/apply-1646.py
-
-      - name: Verify replacement coverage
-        shell: bash
-        run: |
-          set -euo pipefail
-          if grep -R -n 'static assertion expression is not a true integer constant expression' src/buster; then
-            echo 'obsolete deferred diagnostic remains' >&2
-            exit 1
+            | base64 --decode > /tmp/apply-1646.py 2> .agent/apply-1646.log
+          status=$?
+          if [ "$status" -eq 0 ]; then
+            python3 -m py_compile /tmp/apply-1646.py >> .agent/apply-1646.log 2>&1
+            status=$?
           fi
-          git diff --check
+          if [ "$status" -eq 0 ]; then
+            python3 /tmp/apply-1646.py >> .agent/apply-1646.log 2>&1
+            status=$?
+          fi
+          printf '\nexit_status=%s\nscript_sha256=' "$status" >> .agent/apply-1646.log
+          sha256sum /tmp/apply-1646.py | cut -d' ' -f1 >> .agent/apply-1646.log
+          git restore src/buster/lib/compiler/frontend/c/c_internal.h \
+                      src/buster/lib/compiler/frontend/c/c_parse.c \
+                      src/buster/lib/compiler/frontend/c/c_gen.c \
+                      src/buster/tests/compiler/frontend/c/c_test.c \
+                      src/buster/tests/compiler/driver/driver_fast_test.c
 
-      - name: Commit repair
+      - name: Publish diagnostic
         shell: bash
         run: |
           set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src/buster/lib/compiler/frontend/c/c_internal.h \
-                  src/buster/lib/compiler/frontend/c/c_parse.c \
-                  src/buster/lib/compiler/frontend/c/c_gen.c \
-                  src/buster/tests/compiler/frontend/c/c_test.c \
-                  src/buster/tests/compiler/driver/driver_fast_test.c
-          git diff --cached --check
-          git commit -m 'c: preserve deferred static assertion diagnostics'
+          git add .agent/apply-1646.log
+          git commit -m 'chore: publish issue 1646 repair diagnostic'
           git push origin HEAD:codex/1646-static-assert-message
