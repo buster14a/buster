@@ -570,7 +570,12 @@ static inline int bq_retirement_unit_campaign_post_aa(TpRetirementCampaign const
 /* The imported BQ-RETIREMENT-READY-V1 record (lane B's step 10): the
  * attempt it belongs to, its verified bytes and the fields D binds. The
  * store-based import in retirement_campaign_service.h fills it; the driver's
- * attach requires an owned one. Zero-initialize; release on every path. */
+ * attach requires an owned one. correctness_sha256 is the sealed
+ * correctness gate (BqRetirementCorrectness.sealed_sha256) the unit gate
+ * seal (gate_sha256) covers; checks_authority_sha256 and
+ * check_evidence_sha256 are the #509 required-check authority and the
+ * digest of its run records and logs. Zero-initialize; release on every
+ * path. */
 typedef struct BqRetirementCampaignReady
 {
     BqJob job;
@@ -583,7 +588,8 @@ typedef struct BqRetirementCampaignReady
     char support_sha256[SHA256_HEX_CAPACITY], census_sha256[SHA256_HEX_CAPACITY];
     char population_sha256[SHA256_HEX_CAPACITY], template_sha256[SHA256_HEX_CAPACITY];
     char inventory_sha256[SHA256_HEX_CAPACITY], oracle_attempt_sha256[SHA256_HEX_CAPACITY];
-    char gate_sha256[SHA256_HEX_CAPACITY];
+    char checks_authority_sha256[SHA256_HEX_CAPACITY], check_evidence_sha256[SHA256_HEX_CAPACITY];
+    char correctness_sha256[SHA256_HEX_CAPACITY], gate_sha256[SHA256_HEX_CAPACITY];
 } BqRetirementCampaignReady;
 
 static inline void bq_retirement_campaign_ready_release(BqRetirementCampaignReady* ready)

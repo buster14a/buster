@@ -15,9 +15,11 @@
  *       heavy part: A re-imported, the ready record imported after the
  *       coordinator's own replay (bq_retirement_unit_replay_pinned) re-derives
  *       every field from the store (bq_retirement_campaign_ready_import), the
- *       gate's A and sources matched, the gate joined to the record
- *       (bq_retirement_campaign_ready_gate) and both binaries held again from
- *       the record's digests (bq_retirement_campaign_ready_held);
+ *       unit gate's A and sources matched, lane B's issued unit gate joined to
+ *       the record (bq_retirement_campaign_ready_unit_gate: its seal is the
+ *       record's `gate=`, its correctness seal the record's `correctness=`)
+ *       and both binaries held again from the record's digests
+ *       (bq_retirement_campaign_ready_held);
  *   bq_retirement_campaign_service_bind_unit(_pinned)    under MEASURING, the
  *       cheap part: the record still stands with its imported bytes, the gate
  *       join and held pair recheck, the plan and pre-sample context are
@@ -319,6 +321,9 @@ static inline BqError bq_retirement_campaign_ready_import(BqRetirementCampaignUn
             bq_retirement_unit_ready_value(text, "template=", out->template_sha256) &&
             bq_retirement_unit_ready_value(text, "inventory=", out->inventory_sha256) &&
             bq_retirement_unit_ready_value(text, "oracle-attempt=", out->oracle_attempt_sha256) &&
+            bq_retirement_unit_ready_value(text, "checks-authority=", out->checks_authority_sha256) &&
+            bq_retirement_unit_ready_value(text, "check-evidence=", out->check_evidence_sha256) &&
+            bq_retirement_unit_ready_value(text, "correctness=", out->correctness_sha256) &&
             bq_retirement_unit_ready_value(text, "gate=admitted ", out->gate_sha256) &&
             !strcmp(out->preparation_sha256, prepared->preparation_sha256) &&
             !strcmp(out->template_sha256, prepared->policy.template_sha256) &&
@@ -373,16 +378,18 @@ static inline char const* bq_retirement_campaign_ready_observed(char const* line
     return end;
 }
 
-/* Join the correctness gate the campaign binds to the ready record: A, the
- * support and census digests, both binaries, the population shape and hash,
- * and every reference row's oracle output (strictly increasing rows, no gate
- * row with an oracle the record does not name). The gate's own seal is not
- * yet part of the record: see the interface note in the handoff docs. */
+/* Join the correctness gate the campaign binds to the ready record: the
+ * gate must be ready (its seal recomputes) with exactly the record's
+ * `correctness=` seal, and carry the record's A, support and census digests,
+ * both binaries, the population shape and hash, and every reference row's
+ * oracle output (strictly increasing rows, no gate row with an oracle the
+ * record does not name). */
 static inline BqError bq_retirement_campaign_ready_gate(BqRetirementCampaignReady const* ready,
     BqRetirementCorrectness const* gate)
 {
     char population[SHA256_HEX_CAPACITY] = {0};
     int ok = ready && ready->owned && ready->text && gate && bq_retirement_correctness_ready(gate) &&
+        !strcmp(gate->sealed_sha256, ready->correctness_sha256) &&
         !strcmp(gate->prepared.preparation_sha256, ready->preparation_sha256) &&
         !strcmp(gate->prepared.support_sha256, ready->support_sha256) &&
         !strcmp(gate->prepared.census_sha256, ready->census_sha256) &&
@@ -409,6 +416,21 @@ static inline BqError bq_retirement_campaign_ready_gate(BqRetirementCampaignRead
         claimed += gate->trusted_rows[row].independent_oracle_sha256[0] ? 1u : 0u;
     ok = ok && claimed == ready->observed_rows;
     BqError result = ok ? BQ_OK : BQ_SOURCE_MISMATCH;
+    return result;
+}
+
+/* The unit's issued step 9 gate (lane B's bq_retirement_unit_gate) is the
+ * one the record admits: owned and issued, its seal the record's `gate=`
+ * seal, and its correctness gate joined to the record. The campaign binds
+ * only that correctness gate. */
+static inline BqError bq_retirement_campaign_ready_unit_gate(BqRetirementCampaignReady const* ready,
+    BqRetirementUnitGate const* unit_gate)
+{
+    int issued = ready && ready->owned && unit_gate && unit_gate->owned &&
+        unit_gate->issuer == BQ_RETIREMENT_UNIT_GATE_ISSUED && !strcmp(unit_gate->seal_sha256, ready->gate_sha256) &&
+        !strcmp(unit_gate->authority_sha256, ready->checks_authority_sha256) &&
+        !strcmp(unit_gate->evidence_sha256, ready->check_evidence_sha256);
+    BqError result = issued ? bq_retirement_campaign_ready_gate(ready, &unit_gate->correctness) : BQ_SOURCE_MISMATCH;
     return result;
 }
 
@@ -461,17 +483,18 @@ static inline int bq_retirement_campaign_service_phase(BqPhaseChannel const* pha
 /* The heavy store-based import, run under SETTLING before the untimed
  * batches: A from the sealed export (the request must name the blocked
  * retirement recipe), the ready record through the coordinator replay, the
- * gate's A and sources, the gate joined to the record, and both binaries
- * held again from the record's digests. held and ready must be empty; on
+ * unit gate's A and sources, the unit gate joined to the record
+ * (bq_retirement_campaign_ready_unit_gate), and both binaries held again
+ * from the record's digests. held and ready must be empty; on
  * success both are filled for this attempt (release both). A refusal
  * releases only what this call filled. The channel is checked before and
  * after the import. */
 static inline BqError bq_retirement_campaign_service_import_unit_pinned(BqRetirementCampaignUnitStore const* unit,
     BqPhaseChannel const* phases, int cancellation_fd, uint64_t deadline_ns, uint64_t job_id, uint64_t attempt_token,
     char const preparation_sha256[SHA256_HEX_CAPACITY], char const ready_sha256[SHA256_HEX_CAPACITY],
-    BqRetirementCorrectness const* gate, BqRetirementHeldBinaries* held, BqRetirementCampaignReady* ready)
+    BqRetirementUnitGate const* unit_gate, BqRetirementHeldBinaries* held, BqRetirementCampaignReady* ready)
 {
-    bool fresh = unit && gate && held && !held->owned && ready && !ready->owned;
+    bool fresh = unit && unit_gate && held && !held->owned && ready && !ready->owned;
     BqRetirementUnitPrepared prepared = {.policy = {.clang = -1, .inventory = -1}};
     BqError result = fresh && bq_retirement_campaign_service_phase(phases, BQ_PHASE_SETTLING, job_id, attempt_token,
         cancellation_fd, deadline_ns) ? BQ_OK : BQ_INVALID_TRANSITION;
@@ -484,8 +507,9 @@ static inline BqError bq_retirement_campaign_service_import_unit_pinned(BqRetire
         result = BQ_INVALID_TRANSITION;
     if (result == BQ_OK) result = bq_retirement_campaign_ready_import(unit, &prepared, ready_sha256, ready);
     if (result == BQ_OK)
-        result = bq_retirement_campaign_service_gate_matches(gate, preparation_sha256, &prepared.preparation);
-    if (result == BQ_OK) result = bq_retirement_campaign_ready_gate(ready, gate);
+        result = bq_retirement_campaign_service_gate_matches(&unit_gate->correctness, preparation_sha256,
+                                                             &prepared.preparation);
+    if (result == BQ_OK) result = bq_retirement_campaign_ready_unit_gate(ready, unit_gate);
     if (result == BQ_OK) result = bq_retirement_campaign_ready_held(unit, &prepared, ready, held);
     if (result == BQ_OK && !bq_retirement_campaign_service_phase(phases, BQ_PHASE_SETTLING, job_id, attempt_token,
         cancellation_fd, deadline_ns))
@@ -513,12 +537,12 @@ static inline BqRetirementCampaignUnitStore bq_retirement_campaign_service_unit_
 static inline BqError bq_retirement_campaign_service_import_unit(BqRetirementStore store, int workspaces,
     int installed, BqPhaseChannel const* phases, int cancellation_fd, uint64_t deadline_ns, uint64_t job_id,
     uint64_t attempt_token, char const preparation_sha256[SHA256_HEX_CAPACITY],
-    char const ready_sha256[SHA256_HEX_CAPACITY], BqRetirementCorrectness const* gate, BqRetirementHeldBinaries* held,
-    BqRetirementCampaignReady* ready)
+    char const ready_sha256[SHA256_HEX_CAPACITY], BqRetirementUnitGate const* unit_gate,
+    BqRetirementHeldBinaries* held, BqRetirementCampaignReady* ready)
 {
     BqRetirementCampaignUnitStore unit = bq_retirement_campaign_service_unit_store(store, workspaces, installed);
     BqError result = bq_retirement_campaign_service_import_unit_pinned(&unit, phases, cancellation_fd, deadline_ns,
-        job_id, attempt_token, preparation_sha256, ready_sha256, gate, held, ready);
+        job_id, attempt_token, preparation_sha256, ready_sha256, unit_gate, held, ready);
     return result;
 }
 
@@ -685,7 +709,8 @@ static inline int bq_retirement_campaign_ready_holds(BqRetirementCampaignReady c
 /* The cheap store-based bind under the MEASURING acknowledgement, after the
  * import and the untimed batches. It rechecks the channel, that held and
  * ready are this attempt's import, that the record still stands with its
- * imported bytes, the gate join and held pair, and that the pre-sample
+ * imported bytes, the unit gate join (request->gate must be that unit
+ * gate's own correctness gate) and held pair, and that the pre-sample
  * binding follows the MEASURING acknowledgement; derives the plan and
  * pre-sample context (untimed is the finished untimed record stream) and
  * refuses any caller value that differs; then binds and marks the binding
@@ -694,8 +719,8 @@ static inline int bq_retirement_campaign_ready_holds(BqRetirementCampaignReady c
  * caller's. */
 static inline BqError bq_retirement_campaign_service_bind_unit_pinned(BqRetirementCampaignUnitStore const* unit,
     BqPhaseChannel const* phases, int cancellation_fd, uint64_t deadline_ns, uint64_t job_id, uint64_t attempt_token,
-    TpRetirementShard const* untimed, BqRetirementCampaignRequest const* request, BqRetirementHeldBinaries const* held,
-    BqRetirementCampaignReady const* ready, BqRetirementCampaignBinding* binding)
+    TpRetirementShard const* untimed, BqRetirementUnitGate const* unit_gate, BqRetirementCampaignRequest const* request,
+    BqRetirementHeldBinaries const* held, BqRetirementCampaignReady const* ready, BqRetirementCampaignBinding* binding)
 {
     bool binding_available = binding && !binding->campaign && !binding->held_binaries;
     TpRetirementTranscript const* transcript = request && request->aa ? request->aa->transcript : NULL;
@@ -703,9 +728,10 @@ static inline BqError bq_retirement_campaign_service_bind_unit_pinned(BqRetireme
         cancellation_fd, deadline_ns) && bq_retirement_campaign_service_request_ready(request) && binding_available &&
         ready && ready->owned && ready->job_id == job_id && ready->attempt_token == attempt_token &&
         ready->job.id == job_id && ready->job.token == attempt_token && transcript &&
-        transcript->bound_at_ns > phases->last_time ? BQ_OK : BQ_INVALID_TRANSITION;
+        transcript->bound_at_ns > phases->last_time && unit_gate ? BQ_OK : BQ_INVALID_TRANSITION;
     if (result == BQ_OK && !bq_retirement_campaign_ready_standing(unit, ready)) result = BQ_WORKSPACE_MISMATCH;
-    if (result == BQ_OK) result = bq_retirement_campaign_ready_gate(ready, request->gate);
+    if (result == BQ_OK && request->gate != &unit_gate->correctness) result = BQ_SOURCE_MISMATCH;
+    if (result == BQ_OK) result = bq_retirement_campaign_ready_unit_gate(ready, unit_gate);
     if (result == BQ_OK && !bq_retirement_campaign_ready_holds(ready, held)) result = BQ_SOURCE_MISMATCH;
     BqRetirementUnitCampaignPins pins = {0};
     if (result == BQ_OK && !bq_retirement_unit_campaign_pins(unit->profile, &pins)) result = BQ_RECIPE_MISMATCH;
@@ -732,12 +758,13 @@ static inline BqError bq_retirement_campaign_service_bind_unit_pinned(BqRetireme
 
 static inline BqError bq_retirement_campaign_service_bind_unit(BqRetirementStore store, int workspaces,
     int installed, BqPhaseChannel const* phases, int cancellation_fd, uint64_t deadline_ns, uint64_t job_id,
-    uint64_t attempt_token, TpRetirementShard const* untimed, BqRetirementCampaignRequest const* request,
-    BqRetirementHeldBinaries const* held, BqRetirementCampaignReady const* ready, BqRetirementCampaignBinding* binding)
+    uint64_t attempt_token, TpRetirementShard const* untimed, BqRetirementUnitGate const* unit_gate,
+    BqRetirementCampaignRequest const* request, BqRetirementHeldBinaries const* held,
+    BqRetirementCampaignReady const* ready, BqRetirementCampaignBinding* binding)
 {
     BqRetirementCampaignUnitStore unit = bq_retirement_campaign_service_unit_store(store, workspaces, installed);
     BqError result = bq_retirement_campaign_service_bind_unit_pinned(&unit, phases, cancellation_fd, deadline_ns,
-        job_id, attempt_token, untimed, request, held, ready, binding);
+        job_id, attempt_token, untimed, unit_gate, request, held, ready, binding);
     return result;
 }
 #endif

@@ -3,12 +3,17 @@
  *
  * The attempt is the real unit-oracle fixture (#1020 PR 3/4): prepare, the
  * fixture broker's matched builds, the census projection, the oracle
- * authority and reference producer, then the ready record written through the
- * test-only admitted gate. On that record this file checks the ready import
+ * authority and reference producer, then lane B's step 9 issuer
+ * (bq_retirement_unit_gate_pinned: B's stand-in required checks run in the
+ * unit, this campaign's row evidence joins, the #509 batch authority is
+ * granted by bq_retirement_correctness_authorize) and the ready record written
+ * for that unit gate (bq_prep_campaign_issue). On that record this file
+ * checks the ready import
  * (every field re-derived by the coordinator replay; the template and
  * inventory compared with this attempt's policy), refusals of a mutated,
  * forged, re-addressed, foreign-job or foreign-token record and of a moved
- * reference descriptor, the join of a correctness gate to the record, and the
+ * reference descriptor, the join of the unit gate and its correctness seal to
+ * the record (each field check also alone), and the
  * held re-import from the record's build and binary digests. The heavy
  * import runs under a SETTLING acknowledgement (bq_prep_campaign_imports:
  * each phase and channel refusal, a cancellation, an expired deadline, a
@@ -23,9 +28,9 @@
  * acknowledgement through the import to the first untimed launch of the
  * imported held binary, which fails because the census fixture's matched
  * builds are text files: the failure's coordinates and process facts are the
- * retained evidence. The correctness gate here is built from the projection
- * with synthetic row facts and the #509 batch authority stand-in; it is not a
- * #509 admission, and no timed child runs. */
+ * retained evidence. The row evidence is B's passing test evidence with this
+ * campaign's commands and the required checks are B's stand-ins, so the gate
+ * is not a #509 admission, and no timed child runs. */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_CAMPAIGN_TESTS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_CAMPAIGN_TESTS_H
 
@@ -47,10 +52,13 @@ typedef struct BqPrepCampaignStage
 
 typedef struct BqPrepCampaign
 {
-    BqRetirementCorrectness gate;
+    /* Lane B's issued unit gate; gate is its correctness gate, and rows and
+     * facts are the evidence arrays until it is issued, then the gate's. */
+    BqRetirementUnitGate unit_gate;
+    BqCheckTestEvidence evidence;
+    BqRetirementCorrectness* gate;
     BqRetirementTrustedRow* rows;
     BqRetirementRowFact* facts;
-    uint8_t* assigned;
     TpRetirementBatchInput inputs[BQ_PREP_CAMPAIGN_CAP];
     char fixtures[BQ_PREP_CAMPAIGN_CAP][32], leaves[BQ_PREP_CAMPAIGN_CAP][32];
     TpRetirementBatchContract contract;
@@ -119,12 +127,11 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_release(BqPrepCampaign* campaign)
     for (u32 stage = 0; stage < 2; stage += 1) bq_prep_campaign_stage_close(&campaign->stages[stage]);
     if (campaign->held.owned) bq_retirement_binaries_release(&campaign->held);
     bq_retirement_campaign_ready_release(&campaign->ready);
-    free(campaign->rows);
-    free(campaign->facts);
-    free(campaign->assigned);
+    if (campaign->unit_gate.owned) BQ_PREP_CHECK(bq_retirement_unit_gate_release(&campaign->unit_gate));
+    bq_check_test_evidence_release(&campaign->evidence);
+    campaign->gate = NULL;
     campaign->rows = NULL;
     campaign->facts = NULL;
-    campaign->assigned = NULL;
 }
 
 /* The campaign's commands: per stage [slot * 2 + variant], the timed groups
@@ -165,19 +172,20 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_commands(BqPrepCampaign* campaign)
     return ok;
 }
 
-/* A sealed correctness gate over the projection's own rows (population hash
- * unchanged): every native-target compiler-eligible object row in one frozen
- * object batch group, every other timed row a singleton, runtime for the
- * singleton rows the reference oracle observed. Row facts are synthetic and
- * the #509 batch authority is the test stand-in. */
-BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_gate(BqPrepCampaign* campaign, BqRetirementProjection const* projection)
+/* The row evidence lane B's step 9 issuer joins (bq_retirement_unit_gate),
+ * over the projection's own rows (population hash unchanged): B's passing
+ * test evidence for every row (bq_check_test_evidence), with this campaign's
+ * commands for the timed rows. Every native-target compiler-eligible object
+ * row is in one frozen object batch group, every other timed row a
+ * singleton, runtime for the singleton rows the reference oracle observed.
+ * The issuer then runs the installed stand-in required checks and grants the
+ * #509 batch authority; nothing here writes it. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_evidence(BqPrepCampaign* campaign, BqRetirementProjection const* projection)
 {
     u32 count = projection->prepared.rows;
-    campaign->rows = calloc(count, sizeof(*campaign->rows));
-    campaign->facts = calloc(count, sizeof(*campaign->facts));
-    campaign->assigned = calloc(count, 1);
-    bool ok = campaign->rows && campaign->facts && campaign->assigned;
-    if (ok) memcpy(campaign->rows, projection->rows, (size_t)count * sizeof(*campaign->rows));
+    bool ok = bq_check_test_evidence(projection, &campaign->evidence);
+    campaign->rows = campaign->evidence.rows;
+    campaign->facts = campaign->evidence.facts;
     campaign->environment[0] = "LC_ALL=C";
     campaign->budget = bq_campaign_service_budget();
     static char const artifact[] = "fixture artifact bytes\n";
@@ -254,8 +262,7 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_gate(BqPrepCampaign* campaign, BqRetir
         {
             u32 row = campaign->row_ids[campaign->members[dense]];
             BqRetirementTrustedRow* trusted = &campaign->rows[row];
-            memset(trusted->batch_key_sha256, 'c', 64);
-            if (campaign->kinds[group] != TP_RETIREMENT_GROUP_OBJECT) trusted->batch_key_sha256[0] = 0;
+            memset(trusted->batch_key_sha256, campaign->kinds[group] == TP_RETIREMENT_GROUP_OBJECT ? 'c' : 0, 64);
             for (u32 side = 0; side < 2; side += 1)
             {
                 BqRetirementObservedSide* observed = &campaign->facts[row].side[side];
@@ -266,23 +273,19 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_gate(BqPrepCampaign* campaign, BqRetir
         }
     for (u32 runtime = 0; ok && runtime < campaign->runtime_count; runtime += 1)
         for (u32 side = 0; side < 2; side += 1)
-            memcpy(campaign->facts[campaign->runtime[runtime]].side[side].runtime_command_sha256,
-                   campaign->command_sha[1][(campaign->groups + runtime) * 2 + side], 65);
-    BqRetirementCorrectness* gate = &campaign->gate;
-    gate->prepared = projection->prepared;
-    gate->trusted_rows = campaign->rows;
-    gate->facts = campaign->facts;
-    gate->rows_done = count;
-    gate->eligible_rows = campaign->timed;
+        {
+            char const* command = campaign->command_sha[1][(campaign->groups + runtime) * 2 + side];
+            memcpy(campaign->facts[campaign->runtime[runtime]].side[side].runtime_command_sha256, command, 65);
+            memcpy(campaign->rows[campaign->runtime[runtime]].runtime_command_sha256[side], command, 65);
+        }
     if (ok && campaign->objects)
     {
         campaign->group = (BqRetirementBatchGroup){{campaign->contract, campaign->contract}, {{0}}};
         memcpy(campaign->group.command_sha256[0], campaign->command_sha[1][object_group * 2], 65);
         memcpy(campaign->group.command_sha256[1], campaign->command_sha[1][object_group * 2 + 1], 65);
-        ok = bq_retirement_correctness_batches(gate, &campaign->group, 1, campaign->assigned, count);
-        gate->batch_authority = 1;
     }
-    gate->finished = 1;
+    campaign->evidence.evidence.groups = campaign->objects ? &campaign->group : NULL;
+    campaign->evidence.evidence.group_count = campaign->objects ? 1u : 0u;
     /* The v3 A/A second-command aggregate, one entry per timed group. */
     Sha256 hash;
     sha256_init(&hash);
@@ -300,11 +303,10 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_gate(BqPrepCampaign* campaign, BqRetir
         sha256_add(&hash, &runtime, sizeof(runtime));
         if (runtime) sha256_add(&hash, campaign->command_sha[0][(campaign->groups + runtime_slot++) * 2 + 1], 64);
     }
-    sha256_finish_hex(&hash, gate->prepared.aa_second_commands_sha256);
-    bq_retirement_correctness_seal(gate, gate->sealed_sha256);
+    sha256_finish_hex(&hash, campaign->evidence.evidence.aa_second_commands_sha256);
     campaign->review = (TpRetirementCampaignReview){&campaign->budget, campaign->group_stages, NULL, NULL, NULL,
         campaign->groups, 0};
-    return ok && bq_retirement_correctness_ready(gate);
+    return ok && count == campaign->evidence.evidence.row_count;
 }
 
 /* Fresh A/A and A/B stages for job/token, bound now. */
@@ -325,7 +327,7 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_stages(BqPrepCampaign* campaign, u64 j
         stage->metrics_stream = tmpfile();
         ok = stage->stream && stage->spool && stage->metrics_stream &&
             tp_retirement_execution_init(&stage->execution, seed, campaign->groups, campaign->runtime,
-                campaign->runtime_count, campaign->gate.prepared.rows, 60, stage->workspace,
+                campaign->runtime_count, campaign->gate->prepared.rows, 60, stage->workspace,
                 (size_t)campaign->groups * 3 + campaign->runtime_count) &&
             tp_retirement_transcript_init(&stage->transcript, &stage->execution, label, token, "boot-fixture", 0, bound) &&
             tp_retirement_transcript_begin_shard(&stage->transcript, stage->stream) &&
@@ -342,7 +344,7 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_stages(BqPrepCampaign* campaign, u64 j
 BUSTER_GLOBAL_LOCAL BqRetirementCampaignRequest bq_prep_campaign_request(BqPrepCampaign* campaign)
 {
     size_t slots = (size_t)campaign->groups + campaign->runtime_count;
-    BqRetirementCampaignRequest request = {&campaign->gate, &campaign->campaign, &campaign->plan,
+    BqRetirementCampaignRequest request = {campaign->gate, &campaign->campaign, &campaign->plan,
         &campaign->stages[0].samples, &campaign->stages[1].samples, campaign->commands[0], campaign->commands[1],
         campaign->snapshots, slots * 4, campaign->identities, slots, &campaign->review, campaign->plan_sha,
         campaign->context_sha};
@@ -401,7 +403,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_prep_campaign_import(BqPrepCampaignAttempt* conte
 {
     BqPrepUnitAttempt const* attempt = &context->attempt->attempt;
     BqError result = bq_retirement_campaign_service_import_unit_pinned(&context->unit, phases, cancel, deadline,
-        attempt->job.id, attempt->job.token, attempt->digest, context->ready_sha256, &campaign->gate, &campaign->held,
+        attempt->job.id, attempt->job.token, attempt->digest, context->ready_sha256, &campaign->unit_gate, &campaign->held,
         &campaign->ready);
     return result;
 }
@@ -459,26 +461,26 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_imports(BqPrepCampaignAttempt* context
     {
         BqPhaseChannel phases;
         pid_t peer = bq_prep_campaign_channel(&phases, job, token, 2);
-        char* source = campaign->gate.prepared.source_sha256[1];
+        char* source = campaign->gate->prepared.source_sha256[1];
         char saved = source[0];
         BqError result = BQ_OK;
         if (!trial)
         {
             source[0] = saved == '0' ? '1' : '0';
-            bq_retirement_correctness_seal(&campaign->gate, campaign->gate.sealed_sha256);
+            bq_retirement_correctness_seal(campaign->gate, campaign->gate->sealed_sha256);
             result = bq_prep_campaign_import(context, campaign, &phases, cancel[0], generous);
             source[0] = saved;
-            bq_retirement_correctness_seal(&campaign->gate, campaign->gate.sealed_sha256);
+            bq_retirement_correctness_seal(campaign->gate, campaign->gate->sealed_sha256);
             BQ_PREP_CHECK(result == BQ_SOURCE_MISMATCH);
         }
         else
         {
             result = bq_retirement_campaign_service_import_unit(attempt->store, context->fixture->workspaces_fd,
                 context->fixture->installed_fd, &phases, cancel[0], generous, job, token, attempt->digest,
-                context->ready_sha256, &campaign->gate, &campaign->held, &campaign->ready);
+                context->ready_sha256, &campaign->unit_gate, &campaign->held, &campaign->ready);
             BQ_PREP_CHECK(result != BQ_OK);
         }
-        BQ_PREP_CHECK(bq_prep_campaign_unheld(campaign) && bq_retirement_correctness_ready(&campaign->gate));
+        BQ_PREP_CHECK(bq_prep_campaign_unheld(campaign) && bq_retirement_correctness_ready(campaign->gate));
         bq_prep_campaign_drop(campaign);
         BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
     }
@@ -486,8 +488,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_imports(BqPrepCampaignAttempt* context
 
 /* The ready record's import, its refusals and the gate join. */
 BUSTER_GLOBAL_LOCAL void bq_prep_campaign_ready_cases(BqPrepCampaignAttempt* context, BqPrepCampaign* campaign,
-    BqRetirementUnitOracle const* oracle, BqRetirementUnitGate const* admitted)
+    BqRetirementUnitOracle const* oracle)
 {
+    BqRetirementUnitGate const* admitted = &campaign->unit_gate;
     BqPrepOracleAttempt* success = context->attempt;
     BqRetirementUnitPrepared const* unit = &success->attempt.unit;
     int attempt = success->attempt.attempt;
@@ -502,6 +505,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_ready_cases(BqPrepCampaignAttempt* con
                   !strcmp(ready.binary_sha256[0], success->built.binaries.verified.binary_sha256[0]) &&
                   !strcmp(ready.binary_sha256[1], success->built.binaries.verified.binary_sha256[1]) &&
                   !strcmp(ready.gate_sha256, admitted->seal_sha256) &&
+                  !strcmp(ready.correctness_sha256, admitted->correctness.sealed_sha256) &&
+                  !strcmp(ready.checks_authority_sha256, admitted->authority_sha256) &&
+                  !strcmp(ready.check_evidence_sha256, admitted->evidence_sha256) &&
                   !strcmp(ready.template_sha256, unit->policy.template_sha256) &&
                   !strcmp(ready.inventory_sha256, unit->policy.inventory_sha256) &&
                   !strcmp(ready.population_sha256, success->projection.population_sha256) &&
@@ -554,6 +560,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_ready_cases(BqPrepCampaignAttempt* con
     static BqPrepReadyTamper const tampers[] = {{"job=", 0, BQ_CORRUPT}, {"attempt=", 0, BQ_CORRUPT},
         {"binaries=", 0, BQ_CORRUPT}, {"matched-builds=", 0, BQ_CORRUPT}, {"binary-candidate=", 0, BQ_CORRUPT},
         {"template=", 0, BQ_CORRUPT}, {"inventory=", 0, BQ_CORRUPT}, {"gate=", 1, BQ_RECIPE_MISMATCH},
+        {"correctness=", 0, BQ_RECIPE_MISMATCH}, {"check-evidence=", 0, BQ_CORRUPT},
         {"observed=", 9, BQ_SOURCE_MISMATCH}, {NULL, 4, BQ_SOURCE_MISMATCH}, {NULL, 5, BQ_SOURCE_MISMATCH}};
     for (u32 index = 0; length && index < BUSTER_ARRAY_LENGTH(tampers); index += 1)
     {
@@ -575,11 +582,28 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_ready_cases(BqPrepCampaignAttempt* con
                       !strcmp(digest, context->ready_sha256));
     }
 
-    /* The gate join: the projection's gate joins; a changed A, candidate
-     * binary, support or census digest, row population, reference oracle
-     * output or an extra oracle row does not. */
-    BqRetirementCorrectness* gate = &campaign->gate;
-    BQ_PREP_CHECK(bq_retirement_campaign_ready_gate(&ready, gate) == BQ_OK);
+    /* The gate join: the issued unit gate joins. Its correctness gate must
+     * carry the record's `correctness=` seal; each field check is also
+     * exercised alone, against a record copy naming the resealed gate: a
+     * changed A, candidate binary, support or census digest, row population,
+     * reference oracle output or an extra oracle row does not join. */
+    BqRetirementCorrectness* gate = campaign->gate;
+    BQ_PREP_CHECK(bq_retirement_campaign_ready_gate(&ready, gate) == BQ_OK &&
+                  bq_retirement_campaign_ready_unit_gate(&ready, admitted) == BQ_OK);
+    BqRetirementCampaignReady joined = ready;
+    joined.correctness_sha256[0] = joined.correctness_sha256[0] == '0' ? '1' : '0';
+    BQ_PREP_CHECK(bq_retirement_campaign_ready_gate(&joined, gate) == BQ_SOURCE_MISMATCH);
+    /* The unit gate: unissued, or with another seal, check authority or check
+     * evidence than the record's, never joins. */
+    for (u32 trial = 0; trial < 4; trial += 1)
+    {
+        BqRetirementUnitGate other_gate = *admitted;
+        if (!trial) other_gate.issuer = 0;
+        char* digest = trial == 1 ? other_gate.seal_sha256 : trial == 2 ? other_gate.authority_sha256 :
+            other_gate.evidence_sha256;
+        if (trial) digest[0] = digest[0] == '0' ? '1' : '0';
+        BQ_PREP_CHECK(bq_retirement_campaign_ready_unit_gate(&ready, &other_gate) == BQ_SOURCE_MISMATCH);
+    }
     char* fields[] = {gate->prepared.preparation_sha256, gate->prepared.binary_sha256[1],
                       gate->prepared.support_sha256, gate->prepared.census_sha256,
                       campaign->rows[7].configuration_sha256,
@@ -592,8 +616,11 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_ready_cases(BqPrepCampaignAttempt* con
         if (fields[index][0]) fields[index][0] = fields[index][0] == '0' ? '1' : '0';
         else memset(fields[index], 'a', 64);
         bq_retirement_correctness_seal(gate, gate->sealed_sha256);
+        joined = ready;
+        memcpy(joined.correctness_sha256, gate->sealed_sha256, SHA256_HEX_CAPACITY);
         BQ_PREP_CHECK(bq_retirement_correctness_ready(gate) &&
-                      bq_retirement_campaign_ready_gate(&ready, gate) == BQ_SOURCE_MISMATCH);
+                      bq_retirement_campaign_ready_gate(&ready, gate) == BQ_SOURCE_MISMATCH &&
+                      bq_retirement_campaign_ready_gate(&joined, gate) == BQ_SOURCE_MISMATCH);
         memcpy(fields[index], saved, sizeof(saved));
         bq_retirement_correctness_seal(gate, gate->sealed_sha256);
     }
@@ -637,7 +664,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_timed_rows(BqPrepCampaignAttempt* cont
 {
     TpRetirementTimedRow* rows = calloc(BQ_PREP_CAMPAIGN_CAP, sizeof(*rows));
     unsigned count = 0;
-    BQ_PREP_CHECK(rows && bq_retirement_campaign_service_timed_rows(&context->unit, &campaign->gate, rows,
+    BQ_PREP_CHECK(rows && bq_retirement_campaign_service_timed_rows(&context->unit, campaign->gate, rows,
                   BQ_PREP_CAMPAIGN_CAP, &count) == BQ_OK && count == campaign->timed);
     for (u32 dense = 0; rows && dense < count && dense < campaign->timed; dense += 1)
     {
@@ -655,17 +682,17 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_timed_rows(BqPrepCampaignAttempt* cont
         for (u32 dimension = 0; dimension < TP_RETIREMENT_TIMED_DIMENSIONS; dimension += 1)
             BQ_PREP_CHECK(rows[dense].dimensions[dimension][0] != 0);
     }
-    BQ_PREP_CHECK(rows && bq_retirement_campaign_service_timed_rows(&context->unit, &campaign->gate, rows, count - 1u,
+    BQ_PREP_CHECK(rows && bq_retirement_campaign_service_timed_rows(&context->unit, campaign->gate, rows, count - 1u,
                   &count) == BQ_SOURCE_MISMATCH && !count);
     char* identity = campaign->rows[campaign->row_ids[0]].identity_sha256;
     char saved = identity[0];
     identity[0] = saved == '0' ? '1' : '0';
-    bq_retirement_correctness_seal(&campaign->gate, campaign->gate.sealed_sha256);
-    BQ_PREP_CHECK(rows && bq_retirement_correctness_ready(&campaign->gate) &&
-                  bq_retirement_campaign_service_timed_rows(&context->unit, &campaign->gate, rows, BQ_PREP_CAMPAIGN_CAP,
+    bq_retirement_correctness_seal(campaign->gate, campaign->gate->sealed_sha256);
+    BQ_PREP_CHECK(rows && bq_retirement_correctness_ready(campaign->gate) &&
+                  bq_retirement_campaign_service_timed_rows(&context->unit, campaign->gate, rows, BQ_PREP_CAMPAIGN_CAP,
                   &count) == BQ_SOURCE_MISMATCH && !count);
     identity[0] = saved;
-    bq_retirement_correctness_seal(&campaign->gate, campaign->gate.sealed_sha256);
+    bq_retirement_correctness_seal(campaign->gate, campaign->gate->sealed_sha256);
     char unpinned[5120];
     memcpy(unpinned, context->profile, sizeof(unpinned));
     char* line = strstr(unpinned, "performance-rows-sha256=");
@@ -673,9 +700,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_timed_rows(BqPrepCampaignAttempt* cont
     if (end) memmove(line, end + 1, strlen(end + 1) + 1);
     BqRetirementCampaignUnitStore unit = context->unit;
     unit.profile = string_from_pointer(unpinned);
-    BQ_PREP_CHECK(end && rows && bq_retirement_campaign_service_timed_rows(&unit, &campaign->gate, rows,
+    BQ_PREP_CHECK(end && rows && bq_retirement_campaign_service_timed_rows(&unit, campaign->gate, rows,
                   BQ_PREP_CAMPAIGN_CAP, &count) == BQ_SOURCE_MISMATCH && !count);
-    BQ_PREP_CHECK(rows && bq_retirement_campaign_service_timed_rows(&context->unit, &campaign->gate, rows,
+    BQ_PREP_CHECK(rows && bq_retirement_campaign_service_timed_rows(&context->unit, campaign->gate, rows,
                   BQ_PREP_CAMPAIGN_CAP, &count) == BQ_OK && count == campaign->timed);
     free(rows);
 }
@@ -700,8 +727,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_bind_phases(BqPrepCampaignAttempt* con
         BQ_PREP_CHECK(bq_prep_campaign_stages(campaign, job, token, 7));
         BqRetirementCampaignRequest request = bq_prep_campaign_request(campaign);
         BqError result = bq_retirement_campaign_service_bind_unit_pinned(&context->unit, &phases, cancel[0],
-            trial == 7 ? bq_phase_clock() : generous, job, token, &untimed, &request, &campaign->held,
-            &campaign->ready, &campaign->binding);
+            trial == 7 ? bq_phase_clock() : generous, job, token, &untimed, &campaign->unit_gate, &request,
+            &campaign->held, &campaign->ready, &campaign->binding);
         /* The MEASURING acknowledgement of this job and attempt reaches the
          * plan derivation, which this record stream does not match. */
         BQ_PREP_CHECK(trial == 3 ? result == BQ_RECIPE_MISMATCH : result == BQ_INVALID_TRANSITION);
@@ -716,7 +743,8 @@ enum
 {
     BQ_PREP_CAMPAIGN_BIND, BQ_PREP_CAMPAIGN_LATE, BQ_PREP_CAMPAIGN_READY_JOB, BQ_PREP_CAMPAIGN_READY_TOKEN,
     BQ_PREP_CAMPAIGN_MOVED, BQ_PREP_CAMPAIGN_SWAPPED, BQ_PREP_CAMPAIGN_HELD_DIGEST, BQ_PREP_CAMPAIGN_HELD_PREPARATION,
-    BQ_PREP_CAMPAIGN_OTHER_GATE, BQ_PREP_CAMPAIGN_BLOCKED_PROFILE, BQ_PREP_CAMPAIGN_UNPINNED,
+    BQ_PREP_CAMPAIGN_OTHER_GATE, BQ_PREP_CAMPAIGN_OTHER_UNIT_GATE, BQ_PREP_CAMPAIGN_CALLER_GATE,
+    BQ_PREP_CAMPAIGN_BLOCKED_PROFILE, BQ_PREP_CAMPAIGN_UNPINNED,
     BQ_PREP_CAMPAIGN_PLAN_OVERRIDE, BQ_PREP_CAMPAIGN_CONTEXT_OVERRIDE, BQ_PREP_CAMPAIGN_UNTIMED_OVERRIDE,
     BQ_PREP_CAMPAIGN_MODES
 };
@@ -740,7 +768,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_prep_campaign_bind(BqPrepCampaignAttempt* context
     TpRetirementShard untimed = {640, 4, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
     BqRetirementUnitCampaignPins pins = {0};
     BQ_PREP_CHECK(staged && bq_retirement_unit_campaign_pins(string_from_pointer(context->profile), &pins) &&
-        bq_retirement_unit_campaign_derive(&campaign->gate, &pins, context->ready_sha256, &untimed,
+        bq_retirement_unit_campaign_derive(campaign->gate, &pins, context->ready_sha256, &untimed,
             &campaign->stages[0].samples, &campaign->stages[1].samples, campaign->commands[0], campaign->commands[1],
             2 * ((size_t)campaign->groups + campaign->runtime_count), &campaign->plan, campaign->plan_sha,
             campaign->context_sha));
@@ -778,11 +806,11 @@ BUSTER_GLOBAL_LOCAL BqError bq_prep_campaign_bind(BqPrepCampaignAttempt* context
         if (end) memmove(line, end + 1, strlen(end + 1) + 1);
         unit.profile = string_from_pointer(unpinned);
     }
-    char saved = campaign->gate.prepared.census_sha256[0];
+    char saved = campaign->gate->prepared.census_sha256[0];
     if (mode == BQ_PREP_CAMPAIGN_OTHER_GATE)
     {
-        campaign->gate.prepared.census_sha256[0] = saved == '0' ? '1' : '0';
-        bq_retirement_correctness_seal(&campaign->gate, campaign->gate.sealed_sha256);
+        campaign->gate->prepared.census_sha256[0] = saved == '0' ? '1' : '0';
+        bq_retirement_correctness_seal(campaign->gate, campaign->gate->sealed_sha256);
     }
     /* The binding keeps the held pair it binds: only a refused copy is local. */
     bool changed_held = mode == BQ_PREP_CAMPAIGN_SWAPPED || mode == BQ_PREP_CAMPAIGN_HELD_DIGEST ||
@@ -792,17 +820,25 @@ BUSTER_GLOBAL_LOCAL BqError bq_prep_campaign_bind(BqPrepCampaignAttempt* context
     BqRetirementHeldBinaries const* bound_held = changed_held ? &held : &campaign->held;
     BqRetirementCampaignReady const* bound_ready = changed_ready ? &ready : &campaign->ready;
     BqRetirementCampaignRequest request = bq_prep_campaign_request(campaign);
+    /* Another issued seal than the record's; a correctness gate the caller
+     * holds (an identical copy) rather than the unit gate's own. */
+    BqRetirementUnitGate other_gate = campaign->unit_gate;
+    other_gate.seal_sha256[0] = other_gate.seal_sha256[0] == '0' ? '1' : '0';
+    BqRetirementUnitGate const* unit_gate = mode == BQ_PREP_CAMPAIGN_OTHER_UNIT_GATE ? &other_gate :
+        &campaign->unit_gate;
+    BqRetirementCorrectness copied = campaign->unit_gate.correctness;
+    if (mode == BQ_PREP_CAMPAIGN_CALLER_GATE) request.gate = &copied;
     u64 deadline = bq_phase_clock() + 300000000000ull;
     BqError result = mode == BQ_PREP_CAMPAIGN_BLOCKED_PROFILE ?
         bq_retirement_campaign_service_bind_unit(attempt->store, context->fixture->workspaces_fd,
-            context->fixture->installed_fd, &phases, cancel, deadline, job, token, &untimed, &request, bound_held,
-            bound_ready, &campaign->binding) :
+            context->fixture->installed_fd, &phases, cancel, deadline, job, token, &untimed, unit_gate, &request,
+            bound_held, bound_ready, &campaign->binding) :
         bq_retirement_campaign_service_bind_unit_pinned(&unit, &phases, cancel, deadline, job, token, &untimed,
-            &request, bound_held, bound_ready, &campaign->binding);
+            unit_gate, &request, bound_held, bound_ready, &campaign->binding);
     if (mode == BQ_PREP_CAMPAIGN_OTHER_GATE)
     {
-        campaign->gate.prepared.census_sha256[0] = saved;
-        bq_retirement_correctness_seal(&campaign->gate, campaign->gate.sealed_sha256);
+        campaign->gate->prepared.census_sha256[0] = saved;
+        bq_retirement_correctness_seal(campaign->gate, campaign->gate->sealed_sha256);
     }
     free(moved);
     BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
@@ -813,7 +849,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_binds(BqPrepCampaignAttempt* context, 
 {
     static BqError const expected[BQ_PREP_CAMPAIGN_MODES] = {BQ_OK, BQ_INVALID_TRANSITION, BQ_INVALID_TRANSITION,
         BQ_INVALID_TRANSITION, BQ_WORKSPACE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH,
-        BQ_SOURCE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH,
+        BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH,
         BQ_RECIPE_MISMATCH};
     for (u32 mode = 0; mode < BQ_PREP_CAMPAIGN_MODES; mode += 1)
     {
@@ -947,6 +983,44 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_driver(BqPrepCampaignAttempt* context,
     if (made) bq_prep_test_cleanup(root);
 }
 
+/* Lane B's step 9 and 10 on this attempt: the stand-in required checks are
+ * installed and pinned (as B's own fixtures do), the issuer runs them in the
+ * unit and joins this campaign's row evidence into a sealed correctness gate
+ * with the #509 batch authority, and the ready record is written for it. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_issue(BqPrepOracleFixture* fixture, BqPrepOracleAttempt* success,
+    BqRetirementUnitOracle const* oracle, BqPrepCampaign* campaign, int cancellation_fd,
+    char ready_sha256[SHA256_HEX_CAPACITY])
+{
+    BqRetirementUnitPrepared const* unit = &success->attempt.unit;
+    BqRetirementProjection const* projection = &success->projection;
+    u32 eligible = 0;
+    for (u32 row = 0; row < projection->prepared.rows; row += 1) eligible += projection->rows[row].compiler_eligible;
+    BqCheckTestSpec specs[BQ_CHECK_TEST_CHECKS];
+    bq_check_test_specs(specs, projection->prepared.object_rows, eligible, projection->prepared.native_target);
+    char pin[256] = {0};
+    bool ok = bq_prep_campaign_evidence(campaign, projection) &&
+        bq_check_test_install(fixture->recipes, &unit->preparation, projection, specs, BQ_CHECK_TEST_CHECKS, 0, pin,
+                              sizeof(pin)) && strlen(fixture->profile) + strlen(pin) < sizeof(fixture->profile);
+    if (ok) strcat(fixture->profile, pin);
+    String8 profile = string_from_pointer(fixture->profile);
+    BqError issued = ok ? bq_retirement_unit_gate_pinned(unit, &success->built, projection, oracle,
+        fixture->workspaces_fd, fixture->installed_fd, profile, &campaign->evidence.evidence, cancellation_fd,
+        bq_phase_clock() + 300000000000ull, &campaign->unit_gate) : BQ_BAD_REQUEST;
+    if (ok && issued != BQ_OK) fprintf(stderr, "RETIREMENT_PREP campaign unit gate returned %d\n", (int)issued);
+    BqError written = issued == BQ_OK ? bq_retirement_unit_ready_pinned(unit, &success->built, projection, oracle,
+        &campaign->unit_gate, fixture->workspaces_fd, profile, ready_sha256) : BQ_BAD_REQUEST;
+    if (issued == BQ_OK && written != BQ_OK) fprintf(stderr, "RETIREMENT_PREP campaign ready returned %d\n", (int)written);
+    ok = written == BQ_OK && campaign->unit_gate.issuer == BQ_RETIREMENT_UNIT_GATE_ISSUED &&
+        campaign->unit_gate.correctness.batch_authority == 1;
+    if (ok)
+    {
+        campaign->gate = &campaign->unit_gate.correctness;
+        campaign->rows = campaign->unit_gate.rows;
+        campaign->facts = campaign->unit_gate.facts;
+    }
+    return ok && bq_retirement_correctness_ready(campaign->gate);
+}
+
 BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_campaign(void)
 {
     u32 descriptors = bq_prep_test_open_descriptors();
@@ -963,13 +1037,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_campaign(void)
     BQ_PREP_CHECK(ok);
     if (campaign) campaign->held = (BqRetirementHeldBinaries){.descriptors = {-1, -1}};
     BqRetirementUnitOracle oracle = {0};
-    BqRetirementUnitGate admitted = {0};
     ok = ok && bq_retirement_unit_oracle_pinned(&success->attempt.unit, &success->projection, fixture->workspaces_fd,
             string_from_pointer(fixture->profile), cancel[0], bq_phase_clock() + 300000000000ull, &oracle) == BQ_OK &&
-        bq_retirement_unit_gate_fixture_admit(&success->attempt.unit, &success->projection, &oracle, &admitted) &&
-        bq_retirement_unit_ready(&success->attempt.unit, &success->built, &success->projection, &oracle, &admitted,
-            fixture->workspaces_fd, context->ready_sha256) == BQ_OK &&
-        bq_prep_campaign_gate(campaign, &success->projection);
+        bq_prep_campaign_issue(fixture, success, &oracle, campaign, cancel[0], context->ready_sha256);
     BQ_PREP_CHECK(ok);
     if (ok)
     {
@@ -987,7 +1057,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_campaign(void)
     if (ok)
     {
         bq_prep_campaign_imports(context, campaign, cancel);
-        bq_prep_campaign_ready_cases(context, campaign, &oracle, &admitted);
+        bq_prep_campaign_ready_cases(context, campaign, &oracle);
         bq_prep_campaign_timed_rows(context, campaign);
         /* One import under SETTLING, then every bind on that pair. */
         BqPhaseChannel phases;

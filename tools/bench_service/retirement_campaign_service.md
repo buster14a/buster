@@ -75,11 +75,19 @@ import, and a refusal releases only what the call filled.
    requires the stored bytes to be exactly the record those facts format. The
    record is then reread by its content address and its fields parsed; job,
    attempt, A, template and inventory must be this attempt's.
-3. The shared gate match (A and both source manifests), then
-   `bq_retirement_campaign_ready_gate`: the correctness gate must be ready and
-   carry the record's A, support and census digests, both binaries, row
-   counts, native target and population hash, and exactly the record's
-   reference rows with their oracle outputs.
+3. The caller passes lane B's issued step 9 gate (`BqRetirementUnitGate`
+   from `bq_retirement_unit_gate`), never a correctness gate it built. The
+   shared gate match (A and both source manifests) runs on its correctness
+   gate, then `bq_retirement_campaign_ready_unit_gate`: the unit gate must be
+   owned and issued, its seal the record's `gate=admitted` seal, and its
+   required-check authority and check evidence the record's
+   `checks-authority=` and `check-evidence=`. Then
+   `bq_retirement_campaign_ready_gate`: the correctness gate must be ready,
+   its seal (which covers the #509 batch authority and the authority digest)
+   exactly the record's `correctness=`, and it must carry the record's A,
+   support and census digests, both binaries, row counts, native target and
+   population hash, and exactly the record's reference rows with their oracle
+   outputs.
 4. `bq_retirement_campaign_ready_held` holds both binaries again from the
    record's build and binary record digests through the unit's own build
    import, and hands over only a pair whose digests and A are the record's.
@@ -89,7 +97,9 @@ MEASURING acknowledgement and after the untimed record stream is sealed. It
 rechecks the channel; that the held pair and record are this attempt's import
 (`bq_retirement_campaign_ready_holds`: A, binary digests and descriptor
 identities); that the record still stands at its content address with the
-imported bytes (`bq_retirement_campaign_ready_standing`); the gate join; and
+imported bytes (`bq_retirement_campaign_ready_standing`); that the request's
+gate is the unit gate's own correctness gate and the unit gate still joins;
+and
 that the pre-sample binding time follows the MEASURING acknowledgement. It
 derives the plan, plan digest and pre-sample context itself (below), refuses
 any caller value that differs, binds through the shared tail and marks the
@@ -263,19 +273,18 @@ a changed gate identity and an unpinned profile), and runs the driver from
 SETTLING through the import to the first untimed launch of the imported held
 baseline. The census fixture's matched builds are text files, so that launch
 exits 125 and the driver keeps its coordinates, process facts and log. Its
-gate uses synthetic row facts and the #509 authority stand-in, and no timed
-child runs there. All fixture digests, pins and admissions are test data,
+unit gate is lane B's issuer on this attempt (`bq_prep_campaign_issue`): B's
+stand-in required checks run in the unit and B's passing test evidence,
+carrying this campaign's commands, joins; the bind also refuses another
+unit-gate seal and a caller-held copy of the correctness gate. No timed child
+runs there. All fixture digests, pins and admissions are test data,
 never a verdict.
 
 ## Open interfaces
 
-- The ready record's `gate=admitted` seal is today only the test issuer's
-  digest of the attempt, A, population and oracle attempt, and the fixtures
-  use `bq_retirement_unit_gate_fixture_admit`. D joins the correctness gate to
-  the record field by field, but the record does not yet bind
-  `BqRetirementCorrectness.sealed_sha256`. The production #509 gate issuer
-  (lane B, #1881) should seal it, or provide a verifier D can call; D then
-  requires `gate=` to equal the gate's seal and drops the fixture issuer.
+- Lane B's production issuer has no row-plan producer yet, so
+  `bq_retirement_unit_gate` refuses in production; only the fixtures issue a
+  gate, from test row evidence and stand-in required checks.
 - The untimed batch commands have no frozen, authenticated contract in the
   gate yet; the driver checks them only against the reviewed shapes.
 - The frozen #426 pins and the admission capability (#1021) remain
