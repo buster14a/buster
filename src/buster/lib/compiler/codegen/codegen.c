@@ -9159,6 +9159,82 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_i128_divide(CodegenBuffer* buffer
     return result;
 }
 
+// Exact binary16/32/64 to binary128 widening, matching the MIR frame image
+// built by machine_a64_select_float_to_f128: CLZ normalizes the significand,
+// the exponent is rebiased, and sign and payload travel unchanged. Only a
+// special input reaches FMUL by one, which quiets a signaling NaN and raises
+// invalid; finite inputs are masked to zero first so flush-to-zero cannot
+// observe subnormals. Binary16 is widened to binary32 by FCVT, which is exact
+// and applies the same NaN quieting.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_float_to_f128(CodegenBuffer* buffer, u32 source_offset, u32 result_offset, u32 source_width)
+{
+    bool result = false;
+    if (buffer && (source_width == 16 || source_width == 32 || source_width == 64))
+    {
+        bool loaded = false;
+        if (source_width == 16)
+        {
+            loaded = codegen_canonical_a64_frame_float_memory_operation(buffer, 0, source_offset, 2, false);
+            codegen_emit_u32(buffer, 0x1ee24000); // fcvt s0, h0
+            codegen_emit_u32(buffer, 0x1e260009); // fmov w9, s0
+        }
+        else
+        {
+            loaded = codegen_canonical_a64_frame_memory_operation(buffer, 9, source_offset, source_width / 8, false, false);
+        }
+        bool wide = source_width == 64;
+        u32 fraction_bits = wide ? 52u : 23u;
+        u32 exponent_bits = wide ? 11u : 8u;
+        u32 exponent_mask = (1u << exponent_bits) - 1u;
+        u32 rebias = wide ? 16383u - 1023u : 16383u - 127u;
+        // UBFM Xd, Xn, #immr, #imms encodes UBFX, LSR and LSL.
+        u32 ubfm = 0xd3400000;
+        codegen_emit_u32(buffer, ubfm | ((fraction_bits - 1u) << 10) | (9u << 5) | 10u); // ubfx x10, x9, #0, #F
+        codegen_emit_u32(buffer, ubfm | (fraction_bits << 16) | ((fraction_bits + exponent_bits - 1u) << 10) | (9u << 5) | 11u); // ubfx x11, x9, #F, #W
+        codegen_emit_u32(buffer, 0xf100017f); // cmp x11, #0
+        codegen_emit_u32(buffer, 0x9a9f07ec); // cset x12, ne
+        codegen_emit_u32(buffer, 0xaa0c014c | (fraction_bits << 10)); // orr x12, x10, x12, lsl #F
+        codegen_emit_u32(buffer, 0xdac0118d); // clz x13, x12
+        codegen_emit_u32(buffer, 0x9acd218e); // lsl x14, x12, x13
+        a64_emit_constant_compact(buffer, 10, rebias);
+        codegen_emit_u32(buffer, 0x8b0a016f); // add x15, x11, x10
+        a64_emit_constant_compact(buffer, 10, rebias + 64u - fraction_bits);
+        codegen_emit_u32(buffer, 0xcb0d014a); // sub x10, x10, x13
+        codegen_emit_u32(buffer, 0xf100017f); // cmp x11, #0
+        codegen_emit_u32(buffer, 0x9a8a11ef); // csel x15, x15, x10, ne
+        codegen_emit_u32(buffer, 0xf100019f); // cmp x12, #0
+        codegen_emit_u32(buffer, 0x9a9f11ef); // csel x15, x15, xzr, ne
+        a64_emit_constant_compact(buffer, 10, 0x7fff);
+        codegen_emit_u32(buffer, 0xf100017f | (exponent_mask << 10)); // cmp x11, #E
+        codegen_emit_u32(buffer, 0x9a8f014f); // csel x15, x10, x15, eq
+        codegen_emit_u32(buffer, 0x9a9f012d); // csel x13, x9, xzr, eq
+        if (wide)
+        {
+            codegen_emit_u32(buffer, 0x9e6701a0); // fmov d0, x13
+            codegen_emit_u32(buffer, 0x1e6e1001); // fmov d1, #1.0
+            codegen_emit_u32(buffer, 0x1e610800); // fmul d0, d0, d1
+            codegen_emit_u32(buffer, 0x9e66000d); // fmov x13, d0
+        }
+        else
+        {
+            codegen_emit_u32(buffer, 0x1e2701a0); // fmov s0, w13
+            codegen_emit_u32(buffer, 0x1e2e1001); // fmov s1, #1.0
+            codegen_emit_u32(buffer, 0x1e210800); // fmul s0, s0, s1
+            codegen_emit_u32(buffer, 0x1e26000d); // fmov w13, s0
+        }
+        codegen_emit_u32(buffer, ubfm | ((fraction_bits - 1u) << 16) | ((fraction_bits - 1u) << 10) | (13u << 5) | 13u); // ubfx x13, x13, #F-1, #1
+        codegen_emit_u32(buffer, ubfm | (15u << 16) | (62u << 10) | (14u << 5) | 10u); // ubfx x10, x14, #15, #48
+        codegen_emit_u32(buffer, 0xaa0fc14a); // orr x10, x10, x15, lsl #48
+        codegen_emit_u32(buffer, 0xaa0dbd4a); // orr x10, x10, x13, lsl #47
+        codegen_emit_u32(buffer, ubfm | ((fraction_bits + exponent_bits) << 16) | ((fraction_bits + exponent_bits) << 10) | (9u << 5) | 11u); // ubfx x11, x9, #S, #1
+        codegen_emit_u32(buffer, 0xaa0bfd4a); // orr x10, x10, x11, lsl #63
+        codegen_emit_u32(buffer, ubfm | (15u << 16) | (14u << 10) | (14u << 5) | 9u); // lsl x9, x14, #49
+        result = loaded && codegen_canonical_a64_frame_memory_operation(buffer, 9, result_offset, 8, true, false) &&
+                 codegen_canonical_a64_frame_memory_operation(buffer, 10, result_offset + 8, 8, true, false);
+    }
+    return result;
+}
+
 // Converts an i128 pair in a frame slot to an AArch64 scalar FP value. The
 // halves are converted as an unsigned magnitude, with an integer sticky-bit
 // combine before the final double conversion. Converting the halves
@@ -20827,6 +20903,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 aggregate_parts = 0;
                         bool aggregate = codegen_canonical_integer_aggregate_parts(program, instruction->canonical_type, &aggregate_parts);
                         IrType* loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                        if (!aggregate && loaded_type && loaded_type->kind == IR_TYPE_FLOAT && loaded_type->bit_width == 128 &&
+                            loaded_type->layout.resolved && loaded_type->layout.size == 16)
+                        {
+                            aggregate = true;
+                            aggregate_parts = 2;
+                        }
                         bool indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
                                         definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE ||
                                         (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
@@ -21102,6 +21184,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         bool source_integer128 = source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128;
                         bool target_integer128 = target_type->kind == IR_TYPE_INTEGER && target_type->bit_width == 128;
+                        if (target_type->kind == IR_TYPE_FLOAT && target_type->bit_width == 128 && conversion == IR_CONVERSION_FLOAT_EXTEND)
+                        {
+                            if (source_type->kind != IR_TYPE_FLOAT || source_type->float_format != IR_FLOAT_FORMAT_IEEE ||
+                                !codegen_canonical_a64_float_to_f128(&buffer, value_offsets[instruction->operands[0].value], result_offset,
+                                                                    source_type->bit_width))
+                            {
+                                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
+                            continue;
+                        }
                         if (target_integer128 && source_type->kind == IR_TYPE_FLOAT &&
                             (conversion == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER || conversion == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER))
                         {
