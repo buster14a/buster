@@ -522,9 +522,55 @@ def disposition_inputs(census_rows):
     return expected_object, by_row, reasons
 
 
+# The bytes tools/native_retirement_census.c writes for an unfiltered run:
+# "fixture_filter={S8}\ntarget_filter={S8}\nshard_index={u32}..." with both
+# filters empty.
+UNFILTERED_CENSUS_MANIFEST_LINES = b"\nfixture_filter=\ntarget_filter=\nshard_index="
+
+
 def canonical_json(value):
     return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
             + "\n").encode("utf-8")
+
+
+class CensusManifestPropertiesTests(unittest.TestCase):
+    """#1891: the census manifest's empty filters parse; no other value may be empty."""
+
+    def manifest(self):
+        from native_retirement_contract_test import ContractTests
+        fixture = ContractTests()
+        fixture.setUp()
+        try:
+            return (fixture.shards[0] / "manifest.txt").read_bytes()
+        finally:
+            fixture.tearDown()
+
+    def test_manifest_filters_match_the_census_writer(self):
+        source = (Path(__file__).resolve().parent / "native_retirement_census.c").read_text()
+        self.assertIn('"fixture_filter={S8}\\ntarget_filter={S8}\\nshard_index=', source)
+        self.assertEqual(binding.MANIFEST_OPTIONAL_EMPTY_KEYS, ("fixture_filter", "target_filter"))
+
+    def test_unfiltered_census_manifest_parses(self):
+        data = self.manifest()
+        self.assertIn(UNFILTERED_CENSUS_MANIFEST_LINES, data)
+        properties = binding._properties(data, "manifest")
+        self.assertEqual((properties["fixture_filter"], properties["target_filter"]), ("", ""))
+
+    def test_empty_value_for_any_other_key_is_rejected(self):
+        lines = self.manifest().decode().splitlines()
+        keys = [line.split("=", 1)[0] for line in lines]
+        self.assertGreater(len(keys), 20)
+        for index, key in enumerate(keys):
+            if key in binding.MANIFEST_OPTIONAL_EMPTY_KEYS:
+                continue
+            changed = list(lines)
+            changed[index] = key + "="
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "non-empty string"):
+                binding._properties(("\n".join(changed) + "\n").encode(), "manifest")
+        # A present filter value still has to be a single line.
+        for key in binding.MANIFEST_OPTIONAL_EMPTY_KEYS:
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                binding._properties(f"version=2\n{key}=a\x00b\n".encode(), "manifest")
 
 
 class SupplementDispositionTests(unittest.TestCase):
@@ -538,14 +584,10 @@ class SupplementDispositionTests(unittest.TestCase):
         from native_retirement_contract_test import ContractTests, read_table
         self.fixture = ContractTests()
         self.fixture.setUp()
-        # The binding's manifest parser rejects empty property values, while the
-        # census writes empty fixture_filter/target_filter for an unfiltered
-        # run (reported separately); give this self-test fixture non-empty ones.
+        # An unfiltered census writes both filters empty, exactly as
+        # native_retirement_census.c's manifest writer does (#1891).
         for shard in self.fixture.shards:
-            manifest = shard / "manifest.txt"
-            manifest.write_text(manifest.read_text()
-                                .replace("fixture_filter=\n", "fixture_filter=unfiltered\n")
-                                .replace("target_filter=\n", "target_filter=unfiltered\n"))
+            self.assertIn(UNFILTERED_CENSUS_MANIFEST_LINES, (shard / "manifest.txt").read_bytes())
         # Authenticated skips (census rows 128..143) beside the resolved rows.
         self.fixture.install_applicability({("tests/unit.c", "x86_64-apple-ios",
                                              "platform-inapplicable", "source-registration-test")})
@@ -686,6 +728,15 @@ class SupplementDispositionTests(unittest.TestCase):
         self.assertTrue({1, 2, 3, 5, 6, 7} <= output["compiler_eligible_rows"])
         self.assertEqual(output["eligible_object_row_count"],
                          len(self.rows) - len(self.skips) - len(self.resolved))
+
+    def test_support_output_refuses_a_filtered_census_manifest(self):
+        manifest = self.fixture.shards[0] / "manifest.txt"
+        manifest.write_bytes(manifest.read_bytes().replace(
+            UNFILTERED_CENSUS_MANIFEST_LINES,
+            b"\nfixture_filter=tests/unit.c\ntarget_filter=\nshard_index="))
+        record, row_data = self.support_binding()
+        with self.assertRaisesRegex(ValueError, "manifest is filtered"):
+            self.check_support(record, row_data)
 
     def test_support_output_refuses_an_unpinned_or_different_set(self):
         record, row_data = self.support_binding()

@@ -226,6 +226,9 @@ SUPPORT_DECLARATION_PATH = "docs/native-retirement-support-v1.tsv"
 SUPPORT_DECLARATION_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376669d90e192f5b8"
 NEXT_SUPPORT_DECLARATION_SHA256 = "932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82"
 SUPPORT_DECLARATION_FIELDS = ["path", "role", "compile_obligation", "bytes", "sha256"]
+# Census manifest keys whose value is empty for an unfiltered run (#1891); the
+# production census must leave both empty.
+MANIFEST_OPTIONAL_EMPTY_KEYS = ("fixture_filter", "target_filter")
 INPUT_FIELDS = ["path", "role", "compile_obligation", "bytes", "buster_hash_64",
                 "sha256", "fixture_recipe", "fixture_flags"]
 ROW_FIELDS = ["row", "group", "fixture", "target", "target_abi", "cpu",
@@ -515,7 +518,12 @@ def _support_file(support, role):
 
 
 def _properties(data, name):
-    """Parse the key/value manifest emitted by native_retirement_census."""
+    """Parse the key/value manifest emitted by native_retirement_census.
+
+    Every value is a non-empty single-line string, except the keys in
+    ``MANIFEST_OPTIONAL_EMPTY_KEYS``: the census writes ``fixture_filter=`` and
+    ``target_filter=`` empty for an unfiltered run (#1891).
+    """
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -526,7 +534,8 @@ def _properties(data, name):
         if not separator or not key or key in result:
             _fail(f"{name} has an invalid property at line {line_number}")
         _single_line_string(key, f"{name}.key[{line_number}]")
-        _single_line_string(value, f"{name}.{key}")
+        if value or key not in MANIFEST_OPTIONAL_EMPTY_KEYS:
+            _single_line_string(value, f"{name}.{key}")
         result[key] = value
     if not result:
         _fail(f"{name} is empty")
@@ -2207,6 +2216,10 @@ def _check_support_output(root, binding, row_data, native_target=None):
     missing = required_manifest - set(manifest)
     if missing:
         _fail("#508 manifest omits: " + ", ".join(sorted(missing)))
+    # The production census is unfiltered (the census validator's full-census
+    # rule): a filter key, when written, must be empty.
+    if any(manifest.get(key, "") for key in MANIFEST_OPTIONAL_EMPTY_KEYS):
+        _fail("#508 manifest is filtered, not the complete census")
     if manifest["version"] != "2" or manifest["kind"] != "object-coverage":
         _fail("#508 manifest is not object-census v2")
     if manifest["identity_hash"] != "sha256" or manifest["manifest_only"] != "0":
