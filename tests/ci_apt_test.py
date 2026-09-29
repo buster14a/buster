@@ -241,6 +241,8 @@ class AptInputTests(unittest.TestCase):
         self.assertIn("Validate pinned-input qualification boundary", real)
         self.assertIn("steps.oracle_lua.outcome == 'success'", real)
         self.assertIn("steps.oracle_sqlite.outcome == 'success'", real)
+        self.assertIn("could not lower call to 'sort_comp'", real)
+        self.assertIn("could not lower initializer expression for local 'aBuiltinFunc'", real)
         self.assertNotIn("secrets: inherit", qualification)
         self.assertNotIn("actions: write", qualification)
 
