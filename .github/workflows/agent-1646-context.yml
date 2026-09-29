@@ -16,7 +16,7 @@ jobs:
         with:
           ref: codex/1646-static-assert-message
 
-      - name: Extract exact functions and expectations
+      - name: Extract lowering paths
         shell: bash
         run: |
           python3 <<'PY'
@@ -25,73 +25,43 @@ jobs:
           root = Path('.')
           output = []
 
-          def function(path: Path, name: str) -> None:
+          def emit(path: Path, start: int, end: int) -> None:
               lines = path.read_text(encoding='utf-8').splitlines()
-              candidates = [i for i, line in enumerate(lines) if name in line and '(' in line]
-              hit = next((i for i in candidates if not lines[i].lstrip().startswith('//')), None)
-              if hit is None:
-                  output.append(f'===== NOT FOUND {path}: {name} =====\n')
-                  return
-              start = hit
-              while start > 0 and (';' in lines[start] or lines[start].strip() == '' or lines[start].lstrip().startswith('//')):
-                  start -= 1
-              while start > 0 and not any(marker in lines[start] for marker in ('BUSTER_', 'static ', 'bool ', 'void ', 'String8 ', 'UnitTestResult ')):
-                  start -= 1
-              depth = 0
-              opened = False
-              end = hit
-              for i in range(hit, len(lines)):
-                  depth += lines[i].count('{') - lines[i].count('}')
-                  opened |= '{' in lines[i]
-                  if opened and depth == 0:
-                      end = i + 1
-                      break
-              output.append(f'===== {path.as_posix()}: {name} ({start + 1}-{end}) =====')
+              start = max(0, start)
+              end = min(len(lines), end)
+              output.append(f'===== {path.as_posix()} lines {start + 1}-{end} =====')
               output.extend(f'{i + 1:6}: {lines[i]}' for i in range(start, end))
               output.append('')
 
-          parse = root / 'src/buster/lib/compiler/frontend/c/c_parse.c'
-          c_test = root / 'src/buster/tests/compiler/frontend/c/c_test.c'
-          driver_test = root / 'src/buster/tests/compiler/driver/driver_fast_test.c'
+          gen = root / 'src/buster/lib/compiler/frontend/c/c_gen.c'
+          test = root / 'src/buster/tests/compiler/frontend/c/c_test.c'
 
-          for name in (
-              'c_parse_static_assert_evaluate',
-              'c_parse_static_assert_check',
-              'c_parse_defer_static_assert',
-              'c_parse_validate_deferred_assertions',
+          for start, end in (
+              (38070, 38225),
+              (50370, 50515),
           ):
-              function(parse, name)
+              emit(gen, start, end)
 
-          for name in (
-              'c_test_deferred_assert_positive',
-              'c_test_deferred_assert_false',
-              'c_test_deferred_assert_nonconstant',
-              'c_test_static_assert_nonconstant_quote',
-          ):
-              function(c_test, name)
-
-          function(driver_test, 'compiler_driver_test_local_sizeof_static_asserts')
-
+          gen_lines = gen.read_text(encoding='utf-8').splitlines()
           for needle in (
-              'not a true integer constant expression',
-              'static assertion failed',
-              'C_DIAGNOSTIC_STATIC_ASSERT_FAILED',
-              'C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT',
+              'c_ir_static_assert_expression_range',
+              'failure_message',
+              'C_PARSER_DECLARATION_STATIC_ASSERT',
+              'deferred_static_assert',
           ):
-              output.append(f'===== repository matches: {needle} =====')
-              for path in root.rglob('*'):
-                  if not path.is_file() or '.git' in path.parts or '.agent' in path.parts:
-                      continue
-                  try:
-                      lines = path.read_text(encoding='utf-8').splitlines()
-                  except (UnicodeDecodeError, OSError):
-                      continue
-                  for index, line in enumerate(lines):
-                      if needle in line:
-                          output.append(f'{path.as_posix()}:{index + 1}: {line}')
-              output.append('')
+              hits = [i for i, line in enumerate(gen_lines) if needle in line]
+              output.append(f'===== c_gen.c matches: {needle} ({len(hits)}) =====')
+              for hit in hits:
+                  emit(gen, hit - 30, hit + 55)
 
-          destination = root / '.agent/issue-1646-exact.txt'
+          for start, end in (
+              (10390, 10520),
+              (23520, 23670),
+              (24020, 24150),
+          ):
+              emit(test, start, end)
+
+          destination = root / '.agent/issue-1646-gen.txt'
           destination.parent.mkdir(parents=True, exist_ok=True)
           destination.write_text('\n'.join(output) + '\n', encoding='utf-8')
           print(f'wrote {destination} ({destination.stat().st_size} bytes)')
@@ -102,9 +72,9 @@ jobs:
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add .agent/issue-1646-exact.txt
+          git add .agent/issue-1646-gen.txt
           if git diff --cached --quiet; then
             exit 0
           fi
-          git commit -m "chore: publish exact issue 1646 context"
+          git commit -m "chore: publish issue 1646 lowering context"
           git push origin HEAD:codex/1646-static-assert-message
