@@ -124,7 +124,7 @@ def main() -> int:
             }
             String8 research_name = { .pointer = options.source_path.pointer + research_start,
                                      .length = options.source_path.length - research_start };
-            String8 research_path = string_format(arena, S8("{S8}/{S8}.tsv"), research_capture, research_name);
+            String8 research_path = string_format_z(arena, S8("{S8}/{S8}.tsv"), research_capture, research_name);
             String8 research_record = string_format(arena,
                 S8("tokens={u64}\nvisits={u64}\noversized_visits={u64}\nbytes={u64}\nomit={u64}\nforced={u64}\npost_sum_enabled={u64}\npost_sum={u64}\n"),
                 output_count, research_visits, research_oversized, result.detail->preprocessed.bytes,
