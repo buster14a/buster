@@ -9,6 +9,7 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/tests/compiler/driver/fixtures/wasi_test_data.h>
 #include <buster/tests/compiler/codegen/codegen_test.h>
+#include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/hash.h>
 #include <buster/lib/time.h>
 #include <buster/lib/system_headers.h>
@@ -2963,6 +2964,87 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembler_language(UnitT
         file_map_unmap(object_map);
     }
     scratch_end(temporary);
+    return result;
+}
+
+// A fresh `cc` process fills the x86-64 metadata string lengths one offset at
+// a time on first read and never decodes the coverage rows; this process has
+// prepared every table (the harness prewarms for its gangs).  Both must write
+// the same object bytes, debug information included, and a child that runs
+// the opt-in unit gang -- which prepares every table before its workers
+// start -- must link the same program as the serial child.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lazy_x86_tables(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    buster_x86_metadata_prewarm_all_forms();
+    String8 input = buster_test_temporary_path(arena, S8("lazy-x86-tables"), S8(".c"));
+    String8 local_output = buster_test_temporary_path(arena, S8("lazy-x86-tables-local"), S8(".o"));
+    String8 child_output = buster_test_temporary_path(arena, S8("lazy-x86-tables-child"), S8(".o"));
+    String8 source = S8("typedef unsigned long long u64;\n"
+                        "struct pair { long a; double b; };\n"
+                        "static int counter;\n"
+                        "long double ld_mix(long double a, long double b) { return a * b + a / b; }\n"
+                        "u64 divide(u64 a, u64 b) { return a / b + a % b; }\n"
+                        "int fetch_add(int* p, int v) { return __atomic_fetch_add(p, v, __ATOMIC_SEQ_CST); }\n"
+                        "double pair_sum(struct pair p) { return (double)p.a + p.b; }\n"
+                        "int bump(int x) { counter += x; return counter > 3 ? x << 2 : x >> 1; }\n");
+    ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                   .use_process_environment = 1, .search_path = 1};
+    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=fast")};
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(allocators); mode += 1)
+        {
+            u64 attempt_position = arena->position;
+            String8 local_command[] = {S8("-target"), S8("x86_64-unknown-linux"), allocators[mode], S8("-nostdinc"), S8("-g"), S8("-c"), S8("-o"),
+                                       local_output, input};
+            CompilerDriverResult local = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(local_command)));
+            BUSTER_TEST_RAW(arguments, local.error == COMPILER_DRIVER_ERROR_NONE, local.diagnostic);
+            String8 child_command[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-target"), S8("x86_64-unknown-linux"),
+                                       allocators[mode], S8("-nostdinc"), S8("-g"), S8("-c"), S8("-o"), child_output, input};
+            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_command), (SliceString8){0},
+                                                        (SliceString8){0}, capture);
+            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+            {
+                ProcessWaitResult compiled = os_process_wait_deadline(arena, child, 30000000);
+                BUSTER_TEST_RAW(arguments, !compiled.timed_out && compiled.result == PROCESS_RESULT_SUCCESS,
+                                BYTE_SLICE_TO_STRING(8, compiled.streams[STANDARD_STREAM_ERROR]));
+                String8 local_bytes = BYTE_SLICE_TO_STRING(8, file_read(arena, local_output, (FileReadOptions){0}));
+                String8 child_bytes = BYTE_SLICE_TO_STRING(8, file_read(arena, child_output, (FileReadOptions){0}));
+                BUSTER_TEST_RAW(arguments, local_bytes.length != 0 && string_equal(local_bytes, child_bytes),
+                                string_format(arena, S8("allocator={S8} local={u64} child={u64}"), allocators[mode], local_bytes.length,
+                                              child_bytes.length));
+            }
+            arena_set_position(arena, attempt_position);
+        }
+    }
+    String8 linked[2] = {0};
+    String8 jobs[] = {S8("-fcompile-jobs=1"), S8("-fcompile-jobs=2")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(jobs); index += 1)
+    {
+        String8 program = buster_test_temporary_path(arena, S8("lazy-x86-tables-jobs"), S8(".out"));
+        String8 link_command[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-target"), S8("x86_64-unknown-linux"), jobs[index],
+                                  S8("-nostdinc"), S8("-g0"), S8("-o"), program, S8("tests/basic_c_constructor_order.c"),
+                                  S8("tests/basic_c_constructor_order_second.c")};
+        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link_command), (SliceString8){0}, (SliceString8){0},
+                                                    capture);
+        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+        {
+            ProcessWaitResult waited = os_process_wait_deadline(arena, child, 30000000);
+            BUSTER_TEST_RAW(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS,
+                            BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
+            linked[index] = BYTE_SLICE_TO_STRING(8, file_read(arena, program, (FileReadOptions){0}));
+        }
+    }
+    BUSTER_TEST(arguments, linked[0].length != 0 && string_equal(linked[0], linked[1]));
+    arena_set_position(arena, position);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
     return result;
 }
 
@@ -10389,6 +10471,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_batch);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_include_population);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocessed_c_input);
