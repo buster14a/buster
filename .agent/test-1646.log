@@ -1,96 +1,9 @@
-generate_outcome=success
-test_all_outcome=failure
+generate_outcome=skipped
+test_all_outcome=skipped
 self_host_outcome=skipped
 
 ===== generate tail =====
-BUSTER_BUILD_DIRECTORY: build
-BUSTER_BUILD_CONFIG: Release
-BUSTER_CC: clang
-BUSTER_LINKER: DEFAULT
-+ /usr/local/bin/cmake --warn-uninitialized -Werror=dev -B build -DBUSTER_CI=OFF -DCMAKE_C_COMPILER=clang -DBUSTER_FUZZ_AVAILABLE=OFF -DBUSTER_SANITIZE=OFF -DCMAKE_LINKER_TYPE=DEFAULT -DBUSTER_LTO=OFF -DBUSTER_TIME_TRACE=OFF -DBUSTER_INSTRUMENT=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_LINK_LIBC=ON -DBUSTER_CHECK_OPTIONAL_WARNINGS=ON -DBUSTER_DEVELOPER_TARGETS=ON -DBUSTER_BUILD_DRIVER=/tmp/buster-build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -G Ninja Multi-Config -DCMAKE_DEFAULT_BUILD_TYPE=Release -DCMAKE_CONFIGURATION_TYPES=Debug;Release -DBUSTER_SINGLE_THREADED=OFF -DBUSTER_DEBUG_INFO=OFF
-The --warn-uninitialized option is deprecated.  Use -Wuninitialized instead.
-The error=dev option is deprecated.  Use -Werror=author instead.
--- The C compiler identification is Clang 21.1.8
--- Detecting C compiler ABI info
--- Detecting C compiler ABI info - done
--- Check for working C compiler: /usr/bin/clang - skipped
--- Detecting C compile features
--- Detecting C compile features - done
--- BUSTER_VULKAN_SDK: 
--- BUSTER_SLANGC_EXECUTABLE: BUSTER_SLANGC_EXECUTABLE-NOTFOUND
--- BUSTER_CI: OFF
--- BUSTER_LINK_LIBC: ON
--- BUSTER_OPTIMIZE: configuration-derived
--- BUSTER_UNITY_BUILD: ON
--- BUSTER_INCLUDE_TESTS: ON
--- BUSTER_SANITIZE: OFF
--- BUSTER_SANITIZER_REDUCED_DEBUG: OFF
--- BUSTER_DEBUG_INFO: OFF
--- BUSTER_FRAME_POINTERS: ON
--- BUSTER_TIME_TRACE: OFF
--- BUSTER_INSTRUMENT: OFF
--- BUSTER_FUZZ_AVAILABLE: OFF
--- BUSTER_LTO: OFF
--- BUSTER_PRODUCTION_PROFILE: OFF
--- BUSTER_PGO_GENERATE: 
--- BUSTER_PGO_USE: 
--- BUSTER_PGO_MANIFEST: 
--- BUSTER_PGO_FINGERPRINT: 
--- BUSTER_CHECK_OPTIONAL_WARNINGS: ON
--- BUSTER_DEVELOPER_TARGETS: ON
--- BUSTER_REQUIRE_VULKAN_SDK: ON
--- BUSTER_COMPILE_SHADERS: OFF
--- BUSTER_USE_SLANG_SHADERS: OFF
--- BUSTER_SINGLE_THREADED: OFF
--- CMAKE_HOST_SYSTEM_PROCESSOR: x86_64
--- CMAKE_SYSTEM_PROCESSOR: x86_64
--- CMAKE_GENERATOR: Ninja Multi-Config
--- CMAKE_CONFIGURATION_TYPES: Debug;Release
--- CMAKE_DEFAULT_BUILD_TYPE: Release
--- CMAKE_BUILD_TYPE: 
--- CMAKE_C_COMPILER_ID: Clang
--- CMAKE_LINKER_TYPE: DEFAULT
--- C_COMPILER_ZIG: OFF
--- BUSTER_USE_VULKAN: OFF
--- BUSTER_USE_D3D12: OFF
--- BUSTER_USE_METAL: OFF
--- CMAKE_COLOR_DIAGNOSTICS: ON
--- CMAKE_EXPORT_COMPILE_COMMANDS: ON
--- GDB: gdb_executable-NOTFOUND
--- LLDB: lldb_executable-NOTFOUND
--- Performing Test BUSTER_HAS_C_FLAG__Wexperimental_lifetime_safety
--- Performing Test BUSTER_HAS_C_FLAG__Wexperimental_lifetime_safety - Success
--- Performing Test BUSTER_HAS_C_FLAG__Whigher_precision_for_complex_division
--- Performing Test BUSTER_HAS_C_FLAG__Whigher_precision_for_complex_division - Success
--- Performing Test BUSTER_HAS_C_FLAG__Wimplicit_void_ptr_cast
--- Performing Test BUSTER_HAS_C_FLAG__Wimplicit_void_ptr_cast - Success
--- Performing Test BUSTER_HAS_C_FLAG__Wshift_bool
--- Performing Test BUSTER_HAS_C_FLAG__Wshift_bool - Success
--- Performing Test BUSTER_HAS_C_FLAG__Wthread_safety
--- Performing Test BUSTER_HAS_C_FLAG__Wthread_safety - Success
--- Performing Test BUSTER_HAS_C_FLAG__Wunique_object_duplication
--- Performing Test BUSTER_HAS_C_FLAG__Wunique_object_duplication - Success
--- ide modules: OS;ENTRY_POINT;ARENA;INTEGER;STRING;FLOAT;TRUETYPE;COMPILER_C_FRONTEND;COMPILER_AARCH64_ENCODING;COMPILER_AARCH64_EXACT_BRIDGE;COMPILER_AARCH64_CONTROL_SEMANTICS;COMPILER_AARCH64_SYSTEM_REGISTERS;COMPILER_AARCH64_SEMANTICS;COMPILER_AARCH64_SYSTEM_SEMANTICS;COMPILER_AARCH64_SYNTAX;COMPILER_AARCH64_SEMANTIC_VM;COMPILER_AARCH64_DIRECT_SIMD;COMPILER_AARCH64_COMPLEX_SIMD;COMPILER_AARCH64_MEMORY_SEMANTICS;COMPILER_AARCH64_ALIAS_PROJECTION;COMPILER_ASSEMBLY;COMPILER_ASSEMBLY_UNIT;COMPILER_ASSEMBLY_METADATA;COMPILER_ASSEMBLY_COMPLETION_CENSUS;COMPILER_IR;COMPILER_DIAGNOSTIC;COMPILER_DEBUG;COMPILER_MACHINE;COMPILER_BOOTSTRAP_TRACE;COMPILER_CODEGEN;COMPILER_DWARF;BYTE_WRITER;COMPILER_CODEVIEW;COMPILER_PDB;COMPILER_OBJECT;COMPILER_JIT;COMPILER_LINK;COMPILER_WASM;COMPILER_GPU;COMPILER_LLVM_BITCODE;COMPILER_EBPF;COMPILER_DRIVER;SIMD;FILE;TARGET;TIME;HASH
--- ide files: src/buster/apps/ide/ide.c src/buster/lib/os.c;src/buster/lib/entry_point.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/float.c;src/buster/lib/truetype.c;src/buster/lib/compiler/frontend/c/c_source.c;src/buster/lib/compiler/frontend/c/c_parse.c;src/buster/lib/compiler/frontend/c/c_gen.c;src/buster/lib/compiler/assembly/aarch64_encoding.c;src/buster/lib/compiler/assembly/aarch64_exact_bridge.c;src/buster/lib/compiler/assembly/aarch64_control_semantics.c;src/buster/lib/compiler/assembly/aarch64_system_registers.c;src/buster/lib/compiler/assembly/aarch64_semantics.c;src/buster/lib/compiler/assembly/aarch64_system_semantics.c;src/buster/lib/compiler/assembly/aarch64_syntax.c;src/buster/lib/compiler/assembly/aarch64_semantic_vm.c;src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_memory_semantics.c;src/buster/lib/compiler/assembly/aarch64_alias_projection.c;src/buster/lib/compiler/assembly/assembly.c;src/buster/lib/compiler/assembly/assembly_unit.c;src/buster/lib/compiler/assembly/x86_64_metadata.c;src/buster/lib/compiler/assembly/x86_64_completion_census.c;src/buster/lib/compiler/ir/ir.c;src/buster/lib/compiler/diagnostic.c;src/buster/lib/compiler/debug/debug.c;src/buster/lib/compiler/codegen/machine.c;src/buster/lib/compiler/codegen/bootstrap_trace.c;src/buster/lib/compiler/codegen/codegen.c;src/buster/lib/compiler/dwarf/dwarf.c;src/buster/lib/byte_writer.c;src/buster/lib/compiler/codeview/codeview.c;src/buster/lib/compiler/pdb/pdb.c;src/buster/lib/compiler/object/object.c;src/buster/lib/compiler/jit/jit.c;src/buster/lib/compiler/link/link.c;src/buster/lib/compiler/wasm/wasm.c;src/buster/lib/compiler/gpu/gpu.c;src/buster/lib/compiler/llvm/bitcode.c;src/buster/lib/compiler/ebpf/ebpf.c;src/buster/lib/compiler/driver/driver.c;src/buster/lib/simd.c;src/buster/lib/file.c;src/buster/lib/target.c;src/buster/lib/time.c;src/buster/lib/hash.c;src/buster/lib/x86_64.c
--- No supported debugger found for ide_debug
--- Configuring done (1.0s)
--- Generating done (0.0s)
--- Build files have been written to: /home/runner/work/buster/buster/build
-CMake generation (cc=clang, fuzz_available=OFF, sanitize=OFF) took 1.116956 seconds (1116956000 nanoseconds)
 
 ===== test_all tail =====
-[1/3] Building C object CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o
-FAILED: [code=1] CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o 
-/usr/bin/clang -DBUSTER_BENCH_ALLOCATIONS=0 -DBUSTER_COMPILER_ZIG=0 -DBUSTER_FUZZ_AVAILABLE=0 -DBUSTER_HOST_C_COMPILER=\"/usr/bin/clang\" -DBUSTER_HOST_C_COMPILER_ARG1=\"\" -DBUSTER_HOST_C_COMPILER_ID=\"Clang\" -DBUSTER_HOST_C_COMPILER_MSVC=0 -DBUSTER_HOST_C_RESOURCE_INCLUDE=\"/usr/lib/llvm-21/lib/clang/21/include\" -DBUSTER_INCLUDE_TESTS=1 -DBUSTER_INSTRUMENT=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_LSAN_SUPPORTED=0 -DBUSTER_OPTIMIZE=1 -DBUSTER_SANITIZE=0 -DBUSTER_SINGLE_THREADED=0 -DBUSTER_UNITY_BUILD=1 -DBUSTER_USE_D3D12=0 -DBUSTER_USE_METAL=0 -DBUSTER_USE_SLANG_SHADERS=0 -DBUSTER_USE_VULKAN=0 -DCMAKE_INTDIR=\"Release\" -I/home/runner/work/buster/buster/build/generated -I/home/runner/work/buster/buster/src -O3 -DNDEBUG -fcolor-diagnostics -fwrapv -fno-strict-aliasing -funsigned-char -fno-exceptions -Werror -Wall -Wextra -Wundef -Wconversion -Wstrict-overflow=5 -Woverflow -Wshift-overflow -Walloca -Wbool-operation -Wdouble-promotion -Wformat -Wimplicit -Wimplicit-fallthrough -Winfinite-recursion -Winvalid-utf8 -Wmain -Wmisleading-indentation -Wmissing-braces -Woverlength-strings -Wpacked -Wparentheses -Wpointer-arith -Wpragmas -Wshadow -Wtautological-compare -Wtype-limits -Wuninitialized -Wno-missing-field-initializers -Wno-unused-function -Wpedantic -pedantic -Warray-bounds-pointer-arithmetic -Wassign-enum -Wbool-conversion -Wcomma -Wconditional-uninitialized -Wdangling -Wenum-compare-conditional -Wenum-too-large -Wfixed-point-overflow -Wflag-enum -Wfortify-source -Wfour-char-constants -Wimplicit-fallthrough-per-function -Wimplicit-float-conversion -Wimplicit-int-conversion -Wlinker-warnings -Wloop-analysis -Wnon-power-of-two-alignment -Woption-ignored -Wpragma-pack -Wpragma-pack-suspicious-include -Wpedantic-macros -Wread-only-types -Wredundant-parens -Wreserved-identifier -Wreserved-macro-identifier -Wreserved-module-identifier -Wself-assign -Wself-assign-field -Wshadow-all -Wshadow-field -Wshift-sign-overflow -Wsigned-enum-bitfield -Wtautological-constant-in-range-compare -Wunaligned-access -Wvector-conversion -Wexperimental-lifetime-safety -Whigher-precision-for-complex-division -Wimplicit-void-ptr-cast -Wshift-bool -Wthread-safety -Wunique-object-duplication -ferror-limit=1 -fno-omit-frame-pointer -march=native -MD -MT CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o -MF CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o.d -o CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o -c /home/runner/work/buster/buster/src/buster/apps/ide/ide.c
-In file included from /home/runner/work/buster/buster/src/buster/apps/ide/ide.c:98:
-In file included from /home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c.c:10:
-/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_parse.c:5845:44: error: implicit conversion loses integer precision: 'u64' (aka 'unsigned long') to 'u32' (aka 'unsigned int') [-Werror,-Wshorten-64-to-32]
- 5843 |     u32 declaration_end = declaration.token_start <= preprocess.token_count && declaration.token_count <= preprocess.token_count - declaration.token_start
-      |         ~~~~~~~~~~~~~~~
- 5844 |                               ? declaration.token_start + declaration.token_count
- 5845 |                               : preprocess.token_count;
-      |                                 ~~~~~~~~~~~^~~~~~~~~~~
-1 error generated.
-ninja: build stopped: subcommand failed.
 
 ===== self_host tail =====
