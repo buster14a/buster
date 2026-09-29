@@ -440,6 +440,16 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   ran correctly to their last statement before dying on the brace with SIGILL.
   `tests/basic_c_main_implicit_return.c` pins it under every allocator, and
   exit zero is reachable there only through the closing brace.
+- A noreturn call and `__builtin_unreachable()` share one rule,
+  `c_ir_end_control_flow_after_call`. Inside a branching operand (`? :`, `&&`,
+  `||`, a lowered branch condition) or a consumer that emits rows after the
+  value -- a return, an initializer, a switch controller -- the block stays
+  open, so `return (abort(), 0)` and the optimized `BUSTER_CHECK`'s
+  `(__builtin_unreachable(), 0)` arm reach their consumer or merge. An
+  expression statement ends its block with `IR_OPCODE_UNREACHABLE` after its
+  own rows. `c_test_cast_and_noreturn_operands` pins the shapes with canonical
+  validation, and `c_test_cast_and_noreturn_operand_runtime` runs them under
+  every allocator.
 - `builder->size_type` and `builder->ptrdiff_type` are chosen against the width
   of the scalar type the lowering built, not against `program->data_layout`'s
   own `unsigned long` entry. The two can disagree: the layout comes from the
@@ -640,6 +650,18 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   Regressions:
   `c_test_type_specifier_diagnostics` and `compiler_driver_test_type_specifiers`,
   which also verify a refused compilation preserves or never creates the output.
+- A member declarator followed by a token it cannot absorb
+  (`struct B { int member junk; };`, `int a, b c;`, `int (*fp)(void) junk;`)
+  abandons the aggregate with `C_DIAGNOSTIC_EXPECTED_DECLARATION`, "unexpected
+  token after member declarator", at that token
+  (`c_type_parse_aggregate_segment_trailing_token`). Each declarator of
+  `} a, b;` parses the failed definition again, and
+  `c_type_parse_aggregate_segment_fail` drops the repeated report. The report
+  is withheld where the member path misreads valid source: a decoration
+  keyword taken as the name (`typeof(int) _Alignas(8) m;`) and the width of a
+  parenthesized bit-field name (`int (x) : 3;`). Those segments still fail
+  silently. Regression: `c_test_member_declarator_trailing_token_diagnostics`
+  (GitHub #1534).
 - A member segment that cannot declare a member abandons its aggregate
   definition through `c_type_parse_aggregate_segment_fail`, which carries the
   segment's diagnostics over the rollback and drops one repeating a standing
@@ -648,9 +670,10 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   `int (* __attribute__((unused)))(void);`, `int , a;`, `int a, ;`) is
   `C_DIAGNOSTIC_EXPECTED_DECLARATION` at the token Clang names -- the scan
   steps over groups, pointers, their qualifiers and attributes first -- and a
-  parenthesized name behind an attribute the declarator parse does not take
-  (`int (* __attribute__((unused)) p)(void);`) is
-  `C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS`; neither rolls back silently. An empty
+  parenthesized name behind decorations the declarator parse does not take is
+  `C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS`; neither rolls back silently. An
+  attribute after `*` is taken: `int (* __attribute__((unused)) p)(void);`
+  declares `p`. An empty
   bit-field width likewise, and an unknown member type is
   `C_DIAGNOSTIC_UNKNOWN_TYPE_NAME`. A declaration that declares nothing
   (`int;`, `__attribute__((packed));`, `enum E { A };`) completes the segment

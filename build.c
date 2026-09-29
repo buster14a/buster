@@ -41593,10 +41593,20 @@ BUSTER_GLOBAL_LOCAL ProcessSpawnResult process_run_spawn(Arena* arena, ProcessRu
     if (restore_directory)
     {
 #if BUSTER_WINDOWS
-        SetCurrentDirectoryW(old_directory_buffer);
+        bool restored = SetCurrentDirectoryW(old_directory_buffer) != 0;
 #else
-        chdir(old_directory_buffer);
+        bool restored = chdir(old_directory_buffer) == 0;
 #endif
+        // The working directory is process-wide: every later relative path
+        // (build/..., src/...) would silently resolve against the child's
+        // directory, so a failed restore stops the driver instead of this run.
+        if (!restored)
+        {
+            command_print(run->arguments);
+            string_print(S8("error: could not restore the build driver's working directory after starting the command above in {S8}\n"),
+                         run->working_directory);
+            os_exit(1);
+        }
     }
 
     return spawn;
