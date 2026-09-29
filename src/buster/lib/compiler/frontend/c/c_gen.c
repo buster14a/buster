@@ -15455,8 +15455,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_runtime_call(CIntegerIrBuilder* bu
     IrValueId result = IR_VALUE_ID_INVALID;
     IrSymbolId symbol = IR_SYMBOL_ID_INVALID;
     IrTypeId function_type = IR_TYPE_ID_INVALID;
+    // The x87 entry is newer and returns its half in XMM0 like Clang's Darwin
+    // lowering expects, so only the binary32/binary64 entries take the bridge.
     bool darwin_x64_integer_half_abi = builder->target.cpu_arch == CPU_ARCH_X86_64 &&
-                                       (builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS);
+                                       (builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS) &&
+                                       !string_equal(link_name, S8("__truncxfhf2"));
     IrTypeId runtime_return_type = return_type;
     IrTypeId runtime_parameter_type = parameter_type;
     IrValueId runtime_argument = argument;
