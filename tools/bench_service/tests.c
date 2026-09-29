@@ -2836,8 +2836,15 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_unit_bad_lease_response(u32 mode)
     if (result_directory >= 0) close(result_directory);
     unlink(lease_path);
     rmdir(result_root);
-    /* Empty: the refused unit stopped its keeper, which removed its socket. */
-    if (results_length > 0 && (u32)results_length < sizeof(results)) BQ_CHECK(!ready || rmdir(results) == 0);
+    /* Empty: the refused unit stopped its keeper, which removed its socket
+     * from the keeper directory (created only when a keeper started). */
+    char keeper_directory[BQ_PATH_CAP + 32];
+    if (results_length > 0 && (u32)results_length < sizeof(results) &&
+        snprintf(keeper_directory, sizeof(keeper_directory), "%s/.lease-return", results) > 0)
+    {
+        BQ_CHECK(!ready || mode < 2 || rmdir(keeper_directory) == 0);
+        BQ_CHECK(!ready || rmdir(results) == 0);
+    }
     rmdir(root);
 }
 

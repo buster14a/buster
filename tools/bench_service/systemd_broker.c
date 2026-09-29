@@ -64,6 +64,8 @@
 #define BQ_BROKER_LEASE "/var/lib/buster-bench/lease/host.lock"
 #define BQ_BROKER_LEASE_RECEIPT "/etc/buster-bench/systemd-broker-lease.identity"
 #define BQ_BROKER_WORKSPACES BQ_RETIREMENT_STAGE_WORKSPACE_ROOT
+/* Every unit's lease-keeper socket directory; inaccessible to every stage. */
+#define BQ_BROKER_LEASE_RETURN BQ_BROKER_WORKSPACES "/" BQ_SYSTEMD_LEASE_RETURN_DIRECTORY
 #define BQ_BROKER_CGROUP_SLICE "/buster.slice/buster-bench.slice"
 #define BQ_BROKER_INSTALLED "/opt/buster-bench/installed"
 #define BQ_BROKER_SERVICE "/usr/local/libexec/buster-bench-service"
@@ -539,8 +541,10 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroup
                 bq_broker_add_format(command, "--property=ReadWritePaths=%s", paths.throughput_output);
                 bq_broker_add_format(command, "--working-directory=%s", paths.candidate_source);
             }
-            bq_broker_add_format(command, "--property=InaccessiblePaths=%s %s %s", BQ_BROKER_QUEUE,
-                                 BQ_BROKER_LEASE, paths.result);
+            /* The lease-keeper directory too: a stage running as the service
+             * identity must never receive the lease description (#881-C). */
+            bq_broker_add_format(command, "--property=InaccessiblePaths=%s %s %s %s", BQ_BROKER_QUEUE,
+                                 BQ_BROKER_LEASE, paths.result, BQ_BROKER_LEASE_RETURN);
         }
         bq_broker_add(command, "--property=PrivateNetwork=yes");
         bq_broker_add_gate(command, request, groups);
@@ -2329,7 +2333,8 @@ static unsigned bq_broker_retirement_self_test(BqBrokerStartGroups const* groups
             service ? "--working-directory=" BQ_ATTEMPT "/base/source" :
                       "--working-directory=" BQ_ATTEMPT "/candidate/source",
             "--property=InaccessiblePaths=/var/lib/buster-bench/queue /var/lib/buster-bench/lease/host.lock "
-            "/var/lib/buster-bench/workspaces/results/job-1-attempt-2",
+            "/var/lib/buster-bench/workspaces/results/job-1-attempt-2 "
+            "/var/lib/buster-bench/workspaces/results/.lease-return",
             "--property=PrivateNetwork=yes", "/usr/local/libexec/buster-bench-credential-gate", stage,
             service ? "65000" : "65001", service ? "65000" : "65001", service ? "65000,65001" : "65001", "--",
             "/usr/local/libexec/buster-bench-build", generate ? "generate" : "build", "--build-directory", root,
@@ -2640,6 +2645,30 @@ static unsigned bq_broker_runtime_self_test(BqBrokerStartGroups const* groups, b
                      bq_broker_has_argument(&command, "worker-unit") &&
                      bq_broker_has_argument(&command, "--property=CollectMode=inactive") &&
                      command.relay_milliseconds == UINT64_C(8640000) + BQ_SYSTEMD_RELAY_ALLOWANCE_MILLISECONDS);
+    /* The outer unit keeps its keeper directory reachable; stages do not
+     * (their InaccessiblePaths vectors are pinned in the tests above). */
+    BQ_RUNTIME_CHECK(bq_broker_has_argument(&command, "--property=InaccessiblePaths=/var/lib/buster-bench/queue "
+                                                      "/var/lib/buster-bench/lease/host.lock") &&
+                     !strcmp(BQ_BROKER_LEASE_RETURN, "/var/lib/buster-bench/workspaces/results/.lease-return"));
+    for (uint32_t stage = BQ_BROKER_BASE_GENERATE; stage <= BQ_BROKER_LAST_STAGE; stage += 1)
+    {
+        BqBrokerRequest stage_request = {.magic = BQ_BROKER_MAGIC, .version = BQ_BROKER_VERSION,
+                                         .operation = BQ_BROKER_START, .stage = stage, .job = 1, .attempt = 2,
+                                         .recipe = bq_broker_retirement_stage(stage) ? BQ_BROKER_RECIPE_RETIREMENT :
+                                                                                       BQ_BROKER_RECIPE_SMOKE,
+                                         .runtime_max_usec = bq_broker_retirement_stage(stage) ?
+                                                             BQ_BROKER_TEST_RUNTIME_USEC : 0};
+        memcpy(stage_request.base, base, 41);
+        memcpy(stage_request.candidate, candidate, 41);
+        char expected[600];
+        BQ_RUNTIME_CHECK(bq_broker_command(&stage_request, groups, &command) &&
+                         bq_broker_format(expected, sizeof(expected),
+                                          "--property=InaccessiblePaths=%s %s %s/results/job-1-attempt-2 %s",
+                                          BQ_BROKER_QUEUE, BQ_BROKER_LEASE, BQ_BROKER_WORKSPACES,
+                                          BQ_BROKER_LEASE_RETURN) &&
+                         bq_broker_argument_count(&command, expected) == 1 &&
+                         bq_broker_property_count(&command, "--property=InaccessiblePaths=") == 1);
+    }
     /* The smoke outer is unchanged: no limit argument, the fixed hour. */
     char* smoke_cli[] = {"broker", "start-outer", "1", "2", base, candidate, "8640000000"};
     BQ_RUNTIME_CHECK(bq_broker_cli(6, smoke_cli, &parsed) && parsed.recipe == BQ_BROKER_RECIPE_SMOKE &&
@@ -3003,8 +3032,8 @@ static int bq_broker_self_test(void)
         BQ_BROKER_CHECK(bq_broker_format(unit_option, sizeof(unit_option), "--unit=%s", paths.unit) &&
                         bq_broker_format(parent_option, sizeof(parent_option), "--property=PartOf=%s", paths.parent) &&
                         bq_broker_format(result_option, sizeof(result_option),
-                                         "--property=InaccessiblePaths=%s %s %s", BQ_BROKER_QUEUE,
-                                         BQ_BROKER_LEASE, paths.result));
+                                         "--property=InaccessiblePaths=%s %s %s %s", BQ_BROKER_QUEUE,
+                                         BQ_BROKER_LEASE, paths.result, BQ_BROKER_LEASE_RETURN));
         BQ_BROKER_CHECK(command.count < BQ_BROKER_MAX_ARGS && command.argv[0] &&
                         !strcmp(command.argv[0], BQ_BROKER_RUN) && command.argv[command.count] == NULL);
         unsigned gate_index = 0;

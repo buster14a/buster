@@ -511,9 +511,13 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_retirement_runtime(void)
     starved.values[12] = UINT64_C(60000000000);
     starved.values[0] = UINT64_C(70000000000);
     BQ_CHECK(bq_test_worker_runtime_of(&starved, &runtime) == BQ_RECIPE_MISMATCH && runtime == 0);
+    starved.values[0] = UINT64_C(79000000000);
+    BQ_CHECK(bq_test_worker_runtime_of(&starved, &runtime) == BQ_OK && runtime == UINT64_C(79000000));
+    /* The record covers its 78.8 s floor, but the enforced whole-second
+     * limit (78 s) would not: refused. */
+    starved.values[0] = UINT64_C(78999999999);
+    BQ_CHECK(bq_test_worker_runtime_of(&starved, &runtime) == BQ_RECIPE_MISMATCH);
     starved.values[0] = UINT64_C(78800000000);
-    BQ_CHECK(bq_test_worker_runtime_of(&starved, &runtime) == BQ_OK && runtime == UINT64_C(78000000));
-    starved.values[0] = UINT64_C(78799999999);
     BQ_CHECK(bq_test_worker_runtime_of(&starved, &runtime) == BQ_RECIPE_MISMATCH);
     for (u32 index = 1; index < BUSTER_ARRAY_LENGTH(budget.values); index += 1)
     {
@@ -521,6 +525,25 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_retirement_runtime(void)
         changed.values[index] = 0;
         BQ_CHECK(bq_test_worker_runtime_of(&changed, &runtime) == BQ_RECIPE_MISMATCH);
     }
+    /* One deadline bound joins the coordinator and every downstream consumer:
+     * the longest limit a budget can yield reaches the reference producer's
+     * gate intact, and one second more is refused. The recipe entry
+     * (build.c) and the oracle adapter use the same constant. */
+    _Static_assert(BQ_RETIREMENT_ORACLE_MAX_DEADLINE_NS == BQ_SYSTEMD_RETIREMENT_DEADLINE_MAX_NS,
+                   "oracle deadline bound drifted from the retirement runtime maximum");
+    _Static_assert(BQ_REF_MAX_DEADLINE_NS == BQ_SYSTEMD_RETIREMENT_DEADLINE_MAX_NS,
+                   "reference deadline bound drifted from the retirement runtime maximum");
+    BqTestWorkerBudget longest = budget;
+    longest.values[0] = BQ_SYSTEMD_RETIREMENT_RUNTIME_MAX_USEC * 1000;
+    u64 longest_runtime = 0, longest_deadline = 0, longest_ns = 0;
+    int cancellation[2] = {-1, -1};
+    BQ_CHECK(bq_test_worker_runtime_of(&longest, &longest_runtime) == BQ_OK &&
+             bq_worker_execution_deadline(bq_worker_monotonic_milliseconds(), longest_runtime, &longest_deadline) &&
+             bq_phase_deadline_from_milliseconds(longest_deadline, &longest_ns) &&
+             pipe2(cancellation, O_CLOEXEC) == 0 && bq_ref_deadline(cancellation[0], longest_ns) &&
+             !bq_ref_deadline(cancellation[0], longest_ns + UINT64_C(1000000000)));
+    if (cancellation[0] >= 0) close(cancellation[0]);
+    if (cancellation[1] >= 0) close(cancellation[1]);
     /* The range edges themselves are accepted. */
     u64 const edges[] = {UINT64_C(60999999999), BQ_SYSTEMD_RETIREMENT_RUNTIME_MAX_USEC * 1000};
     u64 const edge_limits[] = {BQ_SYSTEMD_RETIREMENT_RUNTIME_MIN_USEC, BQ_SYSTEMD_RETIREMENT_RUNTIME_MAX_USEC};
@@ -634,6 +657,20 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_keeper(void)
                  (info.st_mode & 077) == 0 && bq_test_worker_probe_locked(lease_path));
         BqWorkerLease reclaimed = {.descriptor = -1};
         if (mode == 0)
+        {
+            /* The keeper listens itself: the coordinator's peer credentials
+             * name the keeper, not the unit process that bound the socket. */
+            int probe = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+            struct ucred peer = {0};
+            socklen_t peer_size = sizeof(peer);
+            BQ_CHECK(probe >= 0 &&
+                     bq_worker_lease_connect(probe, socket_path,
+                         bq_worker_deadline(bq_worker_monotonic_milliseconds(), 5000)) &&
+                     getsockopt(probe, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) == 0 && peer.pid == keeper &&
+                     peer.pid != unit);
+            if (probe >= 0) close(probe);
+        }
+        if (mode == 0)
             BQ_CHECK(bq_worker_lease_reclaim(&config, &identity, &job, lease_path, &reclaimed) == BQ_OK &&
                      reclaimed.descriptor >= 3 && (fcntl(reclaimed.descriptor, F_GETFD) & FD_CLOEXEC));
         /* TERM/KILL closes every unit reference; a second coordinator then
@@ -702,9 +739,68 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_keeper(void)
              bq_worker_lease_keeper_start(root, 7, 9, lease_path, own.descriptor, -1) == -1);
     BQ_CHECK(bq_worker_lease_keeper_stop(local) && lstat(socket_path, &info) != 0 && errno == ENOENT);
     BQ_CHECK(bq_worker_lease_keeper_stop(-1) && bq_worker_lease_keeper_start(root, 7, 9, lease_path, 2, -1) == -1);
+    /* The holder check in adoption: a keeper serving a description of the
+     * same inode that is not the one holding the lock yields nothing. */
+    int stranger = ready ? open(lease_path, O_RDWR | O_CLOEXEC | O_NOFOLLOW) : -1;
+    pid_t impostor = stranger >= 3 ? bq_worker_lease_keeper_start(root, 7, 9, lease_path, stranger, -1) : -1;
+    BQ_CHECK(impostor > 0 && bq_test_worker_probe_locked(lease_path));
+    BQ_CHECK(bq_worker_lease_reclaim(&config, &identity, &job, lease_path, &reclaimed) == BQ_CLEANUP_FAILED &&
+             reclaimed.descriptor < 0 && own.descriptor >= 3);
+    BQ_CHECK(bq_worker_lease_keeper_stop(impostor));
+    if (stranger >= 0) close(stranger);
     bq_worker_lease_release(&own);
-    char results[BQ_PATH_CAP + 16];
-    if (snprintf(results, sizeof(results), "%s/results", root) > 0) rmdir(results);
+    /* A listener that never accepts, with its backlog full: the reclaim
+     * connect gives up at the handoff deadline instead of hanging. */
+    int silent = ready ? socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0) : -1;
+    struct sockaddr_un address = {0};
+    address.sun_family = AF_UNIX;
+    memcpy(address.sun_path, socket_path, strlen(socket_path) + 1);
+    mode_t prior_umask = umask(0077);
+    bool listening = silent >= 0 && bind(silent, (struct sockaddr*)&address, sizeof(address)) == 0 &&
+                     listen(silent, 0) == 0;
+    umask(prior_umask);
+    int fillers[4] = {-1, -1, -1, -1};
+    for (u32 index = 0; listening && index < BUSTER_ARRAY_LENGTH(fillers); index += 1)
+    {
+        fillers[index] = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+        if (fillers[index] >= 0) connect(fillers[index], (struct sockaddr*)&address, sizeof(address));
+    }
+    u64 before = bq_worker_monotonic_milliseconds();
+    BQ_CHECK(listening && bq_worker_lease_reclaim(&config, &identity, &job, lease_path, &reclaimed) ==
+             BQ_CLEANUP_FAILED && reclaimed.descriptor < 0);
+    u64 elapsed = bq_worker_monotonic_milliseconds() - before;
+    BQ_CHECK(elapsed < BQ_WORKER_LEASE_HANDOFF_MILLISECONDS + BQ_TEST_WORKER_BOUND_MILLISECONDS);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fillers); index += 1)
+        if (fillers[index] >= 0) close(fillers[index]);
+    if (silent >= 0) close(silent);
+    unlink(socket_path);
+    /* Peers inside the benchmark slice (a stage or unit) are refused. */
+    BQ_CHECK(bq_worker_keeper_peer_allowed("/system.slice/buster-bench.service") &&
+             bq_worker_keeper_peer_allowed("/user.slice/user-1000.slice/session-1.scope") &&
+             bq_worker_keeper_peer_allowed("/buster.slice/buster-bench.slice2/x.service") &&
+             !bq_worker_keeper_peer_allowed("/buster.slice/buster-bench.slice") &&
+             !bq_worker_keeper_peer_allowed("/buster.slice/buster-bench.slice/buster-bench-7-9.service") &&
+             !bq_worker_keeper_peer_allowed(
+                 "/buster.slice/buster-bench.slice/buster-bench-7-9-retirement-base-build.service") &&
+             !bq_worker_keeper_peer_allowed("relative") && !bq_worker_keeper_peer_allowed(NULL));
+    char own_cgroup[BQ_WORKER_CGROUP_CAP];
+    int pair[2] = {-1, -1};
+    BQ_CHECK(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0 &&
+             bq_worker_peer_cgroup(pair[0], own_cgroup) && own_cgroup[0] == '/' &&
+             bq_worker_peer_cgroup_matches(pair[0], own_cgroup) &&
+             !bq_worker_peer_cgroup_matches(pair[0], "/buster.slice/buster-bench.slice/other.service"));
+    if (pair[0] >= 0) close(pair[0]);
+    if (pair[1] >= 0) close(pair[1]);
+    char results[BQ_PATH_CAP + 16], keeper_directory[BQ_PATH_CAP + 32];
+    if (snprintf(results, sizeof(results), "%s/results", root) > 0 &&
+        snprintf(keeper_directory, sizeof(keeper_directory), "%s/.lease-return", results) > 0)
+    {
+        /* The keeper directory is private and refuses to be a symlink. */
+        BQ_CHECK(lstat(keeper_directory, &info) == 0 && S_ISDIR(info.st_mode) && (info.st_mode & 077) == 0);
+        BQ_CHECK(rmdir(keeper_directory) == 0 && symlink(root, keeper_directory) == 0 &&
+                 !bq_worker_lease_keeper_directory(socket_path) && unlink(keeper_directory) == 0);
+        rmdir(results);
+    }
     unlink(lease_path);
     if (ready) BQ_CHECK(rmdir(root) == 0);
 }

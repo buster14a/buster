@@ -42,12 +42,22 @@
  * refused until this constant is itself reviewed and raised. */
 #define BQ_SYSTEMD_RETIREMENT_RUNTIME_MIN_USEC (UINT64_C(60) * BQ_SYSTEMD_USEC_PER_SECOND)
 #define BQ_SYSTEMD_RETIREMENT_RUNTIME_MAX_USEC (UINT64_C(72) * 3600 * BQ_SYSTEMD_USEC_PER_SECOND)
+/* The one bound every consumer of the retirement execution deadline accepts
+ * as its furthest distance from now: the recipe entry (build.c), the oracle
+ * adapter and the reference producer. It equals the longest unit limit, so a
+ * deadline the coordinator derives is never refused downstream as too far. */
+#define BQ_SYSTEMD_RETIREMENT_DEADLINE_MAX_NS (BQ_SYSTEMD_RETIREMENT_RUNTIME_MAX_USEC * UINT64_C(1000))
 /* The broker relays systemd-run --wait for the unit's limit plus this fixed
  * stop and reporting allowance (the smoke relay is 3,700,000 ms). */
 #define BQ_SYSTEMD_RELAY_ALLOWANCE_MILLISECONDS UINT64_C(100000)
 /* Typed broker CLI verb for the retirement outer unit, whose trailing
  * argument is the limit in microseconds; start-outer stays the smoke form. */
 #define BQ_SYSTEMD_RETIREMENT_OUTER_VERB "start-retirement-outer"
+/* The workspace-relative directory holding each unit's lease-keeper socket
+ * (worker_linux.c, bq_worker_lease_keeper_path). Every stage unit has it in
+ * InaccessiblePaths, so no stage can reach a keeper; the outer unit, whose
+ * keeper creates it before any stage starts, keeps access. */
+#define BQ_SYSTEMD_LEASE_RETURN_DIRECTORY "results/.lease-return"
 /* The recipe name the broker writes into the retirement outer command. */
 #define BQ_SYSTEMD_RETIREMENT_RECIPE "native-retirement-performance-v1"
 

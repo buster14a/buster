@@ -174,7 +174,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_retirement_runtime(String8 profile, String
         }
     }
     u64 usec = ok ? ceiling / UINT64_C(1000000000) * BQ_SYSTEMD_USEC_PER_SECOND : 0;
-    ok = ok && ceiling && fixed <= ceiling && bq_systemd_retirement_runtime_valid(usec);
+    /* The floor applies to the enforced (rounded) limit, not the record. */
+    ok = ok && ceiling && bq_systemd_retirement_runtime_valid(usec) && fixed <= usec * UINT64_C(1000);
     if (runtime_usec) *runtime_usec = ok ? usec : 0;
     return ok ? BQ_OK : BQ_RECIPE_MISMATCH;
 }
@@ -4073,12 +4074,25 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_child_poll_absent(BqWorkerConfig const* co
  * holding the lock (bq_worker_lease_adopt). The recovering coordinator
  * therefore holds the lease before it signals the unit (bq_worker_stop).
  *
- * The socket is `<workspace>/results/.lease-return-<job>-<attempt>`, outside
- * the result root, so no recipe bundle ever lists it. systemd stops the keeper
- * with the unit (KillMode=control-group), PR_SET_PDEATHSIG stops it when the
- * unit process exits outside systemd, and a graceful stop unlinks the socket
- * by identity; a leftover one is purged after the unit is proven empty
- * (bq_worker_lease_keeper_purge). The keeper never acquires a lock itself. */
+ * The socket is `<workspace>/results/.lease-return/<job>-<attempt>`
+ * (BQ_SYSTEMD_LEASE_RETURN_DIRECTORY), outside the result root, so no recipe
+ * bundle lists it, and in a directory every stage unit has in
+ * InaccessiblePaths. Stage units running as the service identity therefore
+ * cannot reach it, and the keeper also refuses any peer whose control group
+ * lies under buster-bench.slice (bq_worker_keeper_peer_allowed), so no stage
+ * or unit can receive the lease description and unlock it. The keeper listens
+ * itself, so the coordinator's peer credentials name the keeper. systemd stops
+ * the keeper with the unit (KillMode=control-group), PR_SET_PDEATHSIG stops it
+ * when the unit process exits outside systemd, and a graceful stop unlinks the
+ * socket by identity; a leftover one is purged after the unit is proven empty
+ * (bq_worker_lease_keeper_purge). The keeper never acquires a lock itself.
+ *
+ * A keeper that died while its unit lives leaves a socket nobody answers
+ * (ECONNREFUSED). That is not treated as "no keeper": the recipe still holds
+ * the lease through its inherited reference, so signalling the unit would
+ * reopen the gap. The job stays quarantined until the unit ends (its RuntimeMax
+ * bounds that) or an operator stops it; the next recovery then finds it empty
+ * and acquires (README.md, "lease keeper"). */
 #define BQ_WORKER_SUN_PATH_CAP sizeof(((struct sockaddr_un*)0)->sun_path)
 
 BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_worker_keeper_stop_signal;
@@ -4094,7 +4108,8 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_lease_keeper_path(String8 workspace_root, u64
 {
     char root[BQ_PATH_CAP + 1];
     bool ok = bq_worker_text(workspace_root, root, sizeof(root)) && root[0] == '/' && job && token;
-    int length = ok ? snprintf(output, BQ_WORKER_SUN_PATH_CAP, "%s/results/.lease-return-%" PRIu64 "-%" PRIu64,
+    int length = ok ? snprintf(output, BQ_WORKER_SUN_PATH_CAP,
+                               "%s/" BQ_SYSTEMD_LEASE_RETURN_DIRECTORY "/%" PRIu64 "-%" PRIu64,
                                root, (uint64_t)job, (uint64_t)token) : -1;
     ok = ok && length > 0 && (size_t)length < BQ_WORKER_SUN_PATH_CAP;
     if (!ok && output) output[0] = 0;
@@ -4181,16 +4196,76 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_lease_receive_descriptor(int client, BqWorker
     return ok;
 }
 
+/* The cgroup-v2 path ("0::" line) of a connected peer. With SO_PEERPIDFD the
+ * peer's pidfd must still name the same live pid after /proc is read, so a
+ * reused pid cannot stand in for the peer; without it, SO_PEERCRED alone. */
+BUSTER_GLOBAL_LOCAL bool bq_worker_peer_cgroup(int descriptor, char output[BQ_WORKER_CGROUP_CAP])
+{
+    struct ucred peer = {0};
+    socklen_t size = sizeof(peer);
+    char path[64], text[BQ_WORKER_CGROUP_CAP * 4];
+    bool ok = getsockopt(descriptor, SOL_SOCKET, SO_PEERCRED, &peer, &size) == 0 && size == sizeof(peer) &&
+              peer.pid > 1 && snprintf(path, sizeof(path), "/proc/%ld/cgroup", (long)peer.pid) > 0 &&
+              bq_worker_read_regular(path, text, sizeof(text));
+    char const* line = ok ? text : NULL;
+    char const* found = NULL;
+    while (line && *line && !found)
+    {
+        char const* end = strchr(line, '\n');
+        if (!strncmp(line, "0::", 3)) found = line + 3;
+        line = end ? end + 1 : NULL;
+    }
+    char const* end = found ? strchr(found, '\n') : NULL;
+    size_t length = found ? (end ? (size_t)(end - found) : strlen(found)) : 0;
+    ok = ok && found && length > 0 && length < BQ_WORKER_CGROUP_CAP && found[0] == '/';
+    if (ok)
+    {
+        memcpy(output, found, length);
+        output[length] = 0;
+    }
+#ifdef SO_PEERPIDFD
+    int pidfd = -1;
+    socklen_t pidfd_size = sizeof(pidfd);
+    bool pidfd_known = ok && getsockopt(descriptor, SOL_SOCKET, SO_PEERPIDFD, &pidfd, &pidfd_size) == 0 &&
+                       pidfd_size == sizeof(pidfd) && pidfd >= 0;
+    if (pidfd_known)
+    {
+        char info_path[64], info[1024];
+        char const* field = snprintf(info_path, sizeof(info_path), "/proc/self/fdinfo/%d", pidfd) > 0 &&
+                            bq_worker_read_regular(info_path, info, sizeof(info)) ? strstr(info, "\nPid:\t") : NULL;
+        long current = field ? strtol(field + 6, NULL, 10) : -1;
+        ok = current == (long)peer.pid;
+    }
+    if (pidfd >= 0) close(pidfd);
+#endif
+    if (!ok && output) output[0] = 0;
+    return ok;
+}
+
+/* A reclaim peer may be any process of the service identity except one in
+ * the benchmark slice: stage units and the unit itself run there. */
+BUSTER_GLOBAL_LOCAL bool bq_worker_keeper_peer_allowed(char const* cgroup)
+{
+    size_t prefix = sizeof(BQ_WORKER_CGROUP_SLICE) - 1;
+    bool inside = cgroup && !strncmp(cgroup, BQ_WORKER_CGROUP_SLICE, prefix) &&
+                  (cgroup[prefix] == 0 || cgroup[prefix] == '/');
+    bool ok = cgroup && cgroup[0] == '/' && !inside;
+    return ok;
+}
+
 /* One reclaim on an accepted connection: the exact request from a same
- * credential peer, the lease descriptor with its identity, then the
- * coordinator's acknowledgement. The keeper keeps its own reference. */
+ * credential peer outside the benchmark slice, the lease descriptor with its
+ * identity, then the coordinator's acknowledgement. The keeper keeps its own
+ * reference. */
 BUSTER_GLOBAL_LOCAL bool bq_worker_lease_keeper_transfer(int client, int lease_fd, char const* lease_path,
                                                          u64 job, u64 token)
 {
     u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), BQ_WORKER_LEASE_HANDOFF_MILLISECONDS);
     struct stat info = {0};
+    char cgroup[BQ_WORKER_CGROUP_CAP];
     BqWorkerLeaseMessage request = {0}, response = {0}, acknowledgement = {0};
-    bool ok = bq_worker_lease_peer_matches(client) && bq_worker_lease_handoff_poll(client, POLLIN, deadline) &&
+    bool ok = bq_worker_lease_peer_matches(client) && bq_worker_peer_cgroup(client, cgroup) &&
+              bq_worker_keeper_peer_allowed(cgroup) && bq_worker_lease_handoff_poll(client, POLLIN, deadline) &&
               recv(client, &request, sizeof(request), MSG_DONTWAIT) == (ssize_t)sizeof(request) &&
               bq_worker_lease_message_matches(&request, BQ_WORKER_LEASE_RECLAIM_REQUEST, lease_path, job, token,
                                               0, 0, "", 0) &&
@@ -4206,9 +4281,11 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_lease_keeper_transfer(int client, int lease_f
     return ok;
 }
 
-/* The keeper process body: report readiness, then serve reclaims until the
- * unit's stop (SIGTERM/SIGINT, or the parent-death signal). Returns its exit
- * status; the socket is unlinked by identity on the way out. */
+/* The keeper process body: listen (so peer credentials name the keeper),
+ * report readiness, then serve reclaims until the unit's stop (SIGTERM/SIGINT,
+ * or the parent-death signal). The stop signals stay blocked except inside
+ * ppoll, so one arriving between the check and the wait still ends it.
+ * Returns its exit status; the socket is unlinked by identity on the way out. */
 BUSTER_GLOBAL_LOCAL int bq_worker_lease_keeper_serve(int listener, int ready, pid_t parent, int lease_fd,
                                                      char const* lease_path, char const* socket_path,
                                                      dev_t device, ino_t inode, u64 job, u64 token)
@@ -4216,19 +4293,20 @@ BUSTER_GLOBAL_LOCAL int bq_worker_lease_keeper_serve(int listener, int ready, pi
     struct sigaction stop = {0};
     stop.sa_handler = bq_worker_keeper_stop_handler;
     sigemptyset(&stop.sa_mask);
-    sigset_t stops;
+    sigset_t stops, waiting_mask;
     bq_worker_keeper_stop_signal = 0;
     bool ok = sigemptyset(&stops) == 0 && sigaddset(&stops, SIGTERM) == 0 && sigaddset(&stops, SIGINT) == 0 &&
+              sigprocmask(SIG_BLOCK, &stops, &waiting_mask) == 0 &&
+              sigdelset(&waiting_mask, SIGTERM) == 0 && sigdelset(&waiting_mask, SIGINT) == 0 &&
               sigaction(SIGTERM, &stop, NULL) == 0 && sigaction(SIGINT, &stop, NULL) == 0 &&
-              sigprocmask(SIG_UNBLOCK, &stops, NULL) == 0 && prctl(PR_SET_PDEATHSIG, SIGTERM) == 0 &&
-              getppid() == parent;
+              prctl(PR_SET_PDEATHSIG, SIGTERM) == 0 && getppid() == parent && listen(listener, 1) == 0;
     u8 state = ok ? 1 : 0;
     ok = write(ready, &state, sizeof(state)) == (ssize_t)sizeof(state) && ok;
     close(ready);
     while (ok && !bq_worker_keeper_stop_signal)
     {
         struct pollfd waiting = {listener, POLLIN, 0};
-        int polled = poll(&waiting, 1, -1);
+        int polled = ppoll(&waiting, 1, NULL, &waiting_mask);
         if (polled < 0 && errno != EINTR) ok = false;
         else if (polled > 0 && (waiting.revents & POLLIN))
         {
@@ -4246,6 +4324,25 @@ BUSTER_GLOBAL_LOCAL int bq_worker_lease_keeper_serve(int listener, int ready, pi
     bool unlinked = bq_worker_lease_keeper_unlink(socket_path, device, inode);
     int status = (ok || bq_worker_keeper_stop_signal) && unlinked ? 0 : 1;
     return status;
+}
+
+/* The keeper directory (the socket path's parent): created private when
+ * absent, and otherwise required to be a private directory of this identity,
+ * reached without following a symlink. */
+BUSTER_GLOBAL_LOCAL bool bq_worker_lease_keeper_directory(char const* socket_path)
+{
+    char directory[BQ_WORKER_SUN_PATH_CAP];
+    size_t length = socket_path ? strlen(socket_path) : 0;
+    bool ok = length > 0 && length < sizeof(directory);
+    if (ok) memcpy(directory, socket_path, length + 1);
+    char* slash = ok ? strrchr(directory, '/') : NULL;
+    ok = slash && slash != directory;
+    if (ok) *slash = 0;
+    if (ok && mkdir(directory, 0700) != 0 && errno != EEXIST) ok = false;
+    int descriptor = ok ? open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = descriptor >= 0 && bq_worker_directory_owner(descriptor, true, false);
+    if (descriptor >= 0) close(descriptor);
+    return ok;
 }
 
 /* Stop a keeper this process started and reap it within the handoff bound. */
@@ -4279,7 +4376,7 @@ BUSTER_GLOBAL_LOCAL pid_t bq_worker_lease_keeper_start(char const* workspace_roo
     struct stat info = {0};
     bool ok = workspace_root && lease_path && lease_fd >= 3 &&
               bq_worker_lease_keeper_path(string_from_pointer(workspace_root), job, token, socket_path) &&
-              pipe2(ready, O_CLOEXEC) == 0;
+              bq_worker_lease_keeper_directory(socket_path) && pipe2(ready, O_CLOEXEC) == 0;
     int listener = ok ? socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0) : -1;
     bool bound = false;
     if (listener >= 0)
@@ -4294,7 +4391,7 @@ BUSTER_GLOBAL_LOCAL pid_t bq_worker_lease_keeper_start(char const* workspace_roo
         umask(prior_umask);
     }
     ok = bound && lstat(socket_path, &info) == 0 && S_ISSOCK(info.st_mode) && info.st_uid == geteuid() &&
-         (info.st_mode & 077) == 0 && listen(listener, 1) == 0;
+         (info.st_mode & 077) == 0;
     pid_t parent = getpid();
     pid_t keeper = ok ? fork() : -1;
     if (keeper == 0)
@@ -4325,15 +4422,41 @@ BUSTER_GLOBAL_LOCAL pid_t bq_worker_lease_keeper_start(char const* workspace_roo
  * keeper inside the exact outer unit's validated control group. */
 BUSTER_GLOBAL_LOCAL bool bq_worker_peer_cgroup_matches(int descriptor, char const* cgroup)
 {
-    struct ucred peer = {0};
-    socklen_t size = sizeof(peer);
-    char path[64], text[BQ_WORKER_CGROUP_CAP + 8], expected[BQ_WORKER_CGROUP_CAP + 8];
-    bool ok = cgroup && cgroup[0] == '/' &&
-              getsockopt(descriptor, SOL_SOCKET, SO_PEERCRED, &peer, &size) == 0 && size == sizeof(peer) &&
-              peer.pid > 1 && snprintf(path, sizeof(path), "/proc/%ld/cgroup", (long)peer.pid) > 0 &&
-              snprintf(expected, sizeof(expected), "0::%s", cgroup) < (int)sizeof(expected) &&
-              bq_worker_read_regular(path, text, sizeof(text)) && !strcmp(text, expected);
+    char actual[BQ_WORKER_CGROUP_CAP];
+    bool ok = cgroup && cgroup[0] == '/' && bq_worker_peer_cgroup(descriptor, actual) && !strcmp(actual, cgroup);
     return ok;
+}
+
+/* Connect a non-blocking socket to `path` by `deadline`. A full backlog
+ * (EAGAIN) is retried until then; nothing waits past it. */
+BUSTER_GLOBAL_LOCAL bool bq_worker_lease_connect(int client, char const* path, u64 deadline)
+{
+    struct sockaddr_un address = {0};
+    size_t length = strlen(path);
+    address.sun_family = AF_UNIX;
+    memcpy(address.sun_path, path, length + 1);
+    socklen_t address_size = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + length + 1);
+    bool connected = false, failed = false;
+    while (!connected && !failed)
+    {
+        int result = connect(client, (struct sockaddr*)&address, address_size);
+        if (result == 0) connected = true;
+        else if (errno == EINPROGRESS)
+        {
+            int pending = 0;
+            socklen_t size = sizeof(pending);
+            connected = bq_worker_lease_handoff_poll(client, POLLOUT, deadline) &&
+                        getsockopt(client, SOL_SOCKET, SO_ERROR, &pending, &size) == 0 && pending == 0;
+            failed = !connected;
+        }
+        else if ((errno == EAGAIN || errno == EINTR) && bq_worker_monotonic_milliseconds() < deadline)
+        {
+            u64 next = bq_worker_deadline(bq_worker_monotonic_milliseconds(), 10);
+            failed = bq_worker_sleep_until(next < deadline ? next : deadline) != BQ_OK;
+        }
+        else failed = true;
+    }
+    return connected;
 }
 
 /* Reclaim the lease reference a live unit's keeper holds. BQ_OK leaves this
@@ -4353,21 +4476,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_reclaim(BqWorkerConfig const* config
     bool present = named && lstat(socket_path, &info) == 0;
     bool absent = named && !present && errno == ENOENT;
     bool ok = present && S_ISSOCK(info.st_mode) && info.st_uid == geteuid() && (info.st_mode & 077) == 0;
-    int client = ok ? socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0) : -1;
-    if (client >= 0)
-    {
-        struct sockaddr_un address = {0};
-        size_t length = strlen(socket_path);
-        address.sun_family = AF_UNIX;
-        memcpy(address.sun_path, socket_path, length + 1);
-        ok = connect(client, (struct sockaddr*)&address,
-                     (socklen_t)(offsetof(struct sockaddr_un, sun_path) + length + 1)) == 0 &&
-             bq_worker_lease_peer_matches(client);
-    }
-    else ok = false;
+    u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), BQ_WORKER_LEASE_HANDOFF_MILLISECONDS);
+    int client = ok ? socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0) : -1;
+    ok = client >= 0 && bq_worker_lease_connect(client, socket_path, deadline) &&
+         bq_worker_lease_peer_matches(client);
     if (ok && config->production_path && !config->backend)
         ok = bq_worker_peer_cgroup_matches(client, identity->cgroup);
-    u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), BQ_WORKER_LEASE_HANDOFF_MILLISECONDS);
     BqWorkerLeaseMessage request = {0}, response = {0}, acknowledgement = {0};
     ok = ok && bq_worker_lease_message_make(&request, BQ_WORKER_LEASE_RECLAIM_REQUEST, lease_path, job->id,
                                             job->token, 0, 0, "", 0) &&

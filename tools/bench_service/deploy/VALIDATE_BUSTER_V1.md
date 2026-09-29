@@ -277,7 +277,7 @@ acknowledgment; never change the key to hide a failed or unknown attempt.
    relevant system journal before each controlled restart. Reopen
    deterministically and reconcile exact boot/unit/invocation/cgroup identities.
    Prove `.lease-handoff`, the lease keeper socket
-   `results/.lease-return-<job>-<attempt>`, the outer and all five stage units,
+   `results/.lease-return/<job>-<attempt>`, the outer and all five stage units,
    recursive cgroups and every descendant process absent before admission or
    lease release. The
    lease must remain continuously owned through that proof. Ambiguity means

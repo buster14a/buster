@@ -89,6 +89,21 @@ A real-systemd slice still has to show a retirement outer and one stage
 reading back the derived `RuntimeMaxUSec`, and a signal accepting it. The
 self-test covers command construction and readback parsing only.
 
+**Upgrade together.** Version 2 changes the request frame for every
+operation, smoke included (176 to 184 bytes), and the broker accepts only
+exactly its own version. Install the service and the broker from the same
+reviewed revision in one step, with dispatch disabled and no live outer or
+stage unit. A mixed pair refuses every start and signal, including cleanup
+signals for units the older pair started, so drain first; do not upgrade
+around a quarantined job.
+
+Every stage unit, smoke and retirement alike, also lists
+`/var/lib/buster-bench/workspaces/results/.lease-return` in
+`InaccessiblePaths`. That directory holds each outer unit's lease-keeper socket
+(see the service README), which the keeper creates before the recipe can start
+any stage; a stage running as `buster-bench` therefore cannot reach it and
+obtain the lease description.
+
 ### Retirement matched-build stages (#1020)
 
 Besides the five smoke stages, the broker has four typed stages for the
@@ -140,7 +155,7 @@ sandbox includes `NoNewPrivileges=yes`, `ProtectSystem=strict`,
 `MemoryDenyWriteExecute=yes`, `RestrictSUIDSGID=yes`, empty capability sets,
 `PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX` and the
 `@system-service` system-call filter. `InaccessiblePaths` covers the queue,
-the lease and the attempt's result directory. Baseline stages have
+the lease, the attempt's result directory and the lease-keeper directory. Baseline stages have
 `ReadOnlyPaths=<attempt>/base/source <attempt>/candidate/source`. Candidate
 stages have `ReadOnlyPaths=<attempt>/base/source <attempt>/base/build
 <attempt>/candidate/source`. The only differences from the smoke stages are
