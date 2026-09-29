@@ -42,7 +42,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `quality` compile the same signatures without machine fallback. Baseline
   targets need no F16C or AVX512-FP16 feature. On x86-64, lowering widens each half through
   `__extendhfsf2`, performs arithmetic in binary32, and rounds immediately back
-  through `__truncsfhf2`; a binary64 source uses `__truncdfhf2`. Darwin x86-64's
+  through `__truncsfhf2`; a binary64 source uses `__truncdfhf2`, and an x87
+  `long double` source (real or complex) uses `__truncxfhf2` with the f80
+  operand in its usual memory position, so it rounds once rather than through
+  binary32. Widening `_Float16` to x87 is exact through `__extendhfsf2`. Other
+  wider-than-64-bit sources (binary128) stay refused. Darwin x86-64's
   compiler-runtime entry points carry the half bits in the integer ABI even
   though ordinary `_Float16` still uses XMM, so lowering bridges those symbols
   through an internal `unsigned short` view. AArch64 uses baseline scalar `FCVT`

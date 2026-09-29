@@ -9363,6 +9363,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_float16_codegen(UnitTest
         "Float16Vector8 float16_vector_divide(Float16Vector8 left, Float16Vector8 right);\n"
         "Float16Vector8 float16_vector_negate(Float16Vector8 value);\n"
         "Float16Mask8 float16_vector_less(Float16Vector8 left, Float16Vector8 right);\n"
+        "#if __LDBL_MANT_DIG__ == 64\n"
+        "_Float16 float16_from_x87(long double value);\n"
+        "_Float16 float16_from_x87_complex(_Complex long double value);\n"
+        "long double float16_to_x87(_Float16 value);\n"
+        "#endif\n"
         "\n");
     String8 float16_callee_body = S8(
         "\n"
@@ -9490,6 +9495,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_float16_codegen(UnitTest
         "{\n"
         "    return left < right;\n"
         "}\n");
+    String8 float16_x87_callee_body = S8(
+        "#if __LDBL_MANT_DIG__ == 64\n"
+        "\n"
+        "_Float16 float16_from_x87(long double value)\n"
+        "{\n"
+        "    return (_Float16)value;\n"
+        "}\n"
+        "\n"
+        "_Float16 float16_from_x87_complex(_Complex long double value)\n"
+        "{\n"
+        "    return (_Float16)value;\n"
+        "}\n"
+        "\n"
+        "long double float16_to_x87(_Float16 value)\n"
+        "{\n"
+        "    return value;\n"
+        "}\n"
+        "#endif\n");
     String8 float16_caller_body = S8(
         "\n"
         "static int float16_same_bits(_Float16 value, unsigned short bits)\n"
@@ -9561,12 +9584,42 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_float16_codegen(UnitTest
         "    if (!status && !float16_vector_same(float16_vector_multiply(left, right), left * right)) status = 21;\n"
         "    if (!status && !float16_vector_same(float16_vector_divide(left, right), left / right)) status = 22;\n"
         "    if (!status && !float16_vector_same(float16_vector_negate(left), -left)) status = 23;\n"
-        "    if (!status && !float16_mask_same(float16_vector_less(left, right), left < right)) status = 24;\n"
+        "    if (!status && !float16_mask_same(float16_vector_less(left, right), left < right)) status = 24;\n");
+    String8 float16_x87_caller_tail = S8(
+        "#if __LDBL_MANT_DIG__ == 64\n"
+        "    // x87 rounds once, directly to binary16 (Clang 18's `__truncxfhf2` bits).\n"
+        "    // 1 + 2^-11 + 2^-40 is just above a tie, but binary32 would first round\n"
+        "    // it onto the tie and then to even 1.0.\n"
+        "    typedef union X87Bits\n"
+        "    {\n"
+        "        long double value;\n"
+        "        struct\n"
+        "        {\n"
+        "            unsigned long long significand;\n"
+        "            unsigned short exponent;\n"
+        "        } parts;\n"
+        "    } X87Bits;\n"
+        "    X87Bits x87_nan = {.parts = {0xc000000000000000ull, 0x7fff}};\n"
+        "    X87Bits x87_negative_nan = {.parts = {0xc000000000000000ull, 0xffff}};\n"
+        "    long double x87_inputs[] = {1.0L + 0x1p-11L, 1.0L + 0x3p-11L, 1.0L + 0x1p-11L + 0x1p-40L, 0x1p-24L, 0x1.8p-24L, 0x1p-25L,\n"
+        "                                0x1.000001p-25L, 0x1.ffcp-15L, 65519.0L, 65520.0L, -1e10L, -0.0L, 0.1L, x87_nan.value,\n"
+        "                                x87_negative_nan.value};\n"
+        "    unsigned short x87_expected[] = {0x3c00, 0x3c02, 0x3c01, 0x0001, 0x0002, 0x0000, 0x0001, 0x0400,\n"
+        "                                     0x7bff, 0x7c00, 0xfc00, 0x8000, 0x2e66, 0x7e00, 0xfe00};\n"
+        "    for (int index = 0; !status && index < (int)(sizeof(x87_expected) / sizeof(x87_expected[0])); index += 1)\n"
+        "    {\n"
+        "        _Complex long double complex_input = x87_inputs[index];\n"
+        "        __imag__ complex_input = 2.0L;\n"
+        "        if (!float16_same_bits(float16_from_x87(x87_inputs[index]), x87_expected[index])) status = 25;\n"
+        "        else if (!float16_same_bits(float16_from_x87_complex(complex_input), x87_expected[index])) status = 26;\n"
+        "    }\n"
+        "    if (!status && (float16_to_x87(subnormal.value) != 0x1p-24L || float16_to_x87(65504.0f16) != 65504.0L)) status = 27;\n"
+        "#endif\n"
         "    return status;\n"
         "}\n");
     String8 source_bodies[] = {
-        string_format(arguments->arena, S8("{S8}{S8}"), float16_shared_source, float16_callee_body),
-        string_format(arguments->arena, S8("{S8}{S8}"), float16_shared_source, float16_caller_body),
+        string_format(arguments->arena, S8("{S8}{S8}{S8}"), float16_shared_source, float16_callee_body, float16_x87_callee_body),
+        string_format(arguments->arena, S8("{S8}{S8}{S8}"), float16_shared_source, float16_caller_body, float16_x87_caller_tail),
     };
     String8 sources[BUSTER_ARRAY_LENGTH(source_bodies)];
     for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(source_bodies); source_index += 1)

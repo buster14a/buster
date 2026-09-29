@@ -7754,6 +7754,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
             runtime = S8("__truncdfhf2");
             runtime_parameter = builder->f64_type;
         }
+        else if (source_value->kind == IR_TYPE_FLOAT && source_value->bit_width == 80 && c_ir_target_supports_f80(builder->target))
+        {
+            // x87 rounds once, directly to binary16, through the libgcc and
+            // compiler-rt entry Clang selects; the f80 operand keeps its
+            // ordinary memory position in the call.
+            runtime = S8("__truncxfhf2");
+            runtime_parameter = source_type;
+        }
         else if (source_type.value != builder->f32_type.value)
         {
             bool source_bfloat16 = source_value->kind == IR_TYPE_FLOAT && source_value->bit_width == 16 &&
