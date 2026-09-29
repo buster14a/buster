@@ -560,6 +560,17 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_attribute_native_binding
 // is one sixteen-byte vector-file part. Lowering transports it directly and
 // carries its arithmetic, comparisons and rounding conversions as compiler-
 // runtime calls; the parser's lowering-constraint mirror asks the same fact.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_target_supports_f80(Target target)
+{
+    TargetDataLayout layout = target_data_layout(target);
+    bool supported_os = target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID || target.os == OPERATING_SYSTEM_MACOS ||
+                         target.os == OPERATING_SYSTEM_IOS;
+    return target.cpu_arch == CPU_ARCH_X86_64 && supported_os &&
+           ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_SYSTEMV_X86_64 &&
+           layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 80 && layout.long_double_type.size == 16 &&
+           layout.long_double_type.alignment == 16;
+}
+
 BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_target_supports_f128_transport(Target target)
 {
     TargetDataLayout layout = target_data_layout(target);

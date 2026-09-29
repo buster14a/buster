@@ -22073,7 +22073,9 @@ BUSTER_C_INTERNAL void c_parse_validate_signature(CTypeParseMachine* machine, CP
         if (!valid) continue;
         CType value = result->types[type.value];
         bool binary128 = value.kind == C_TYPE_LONG_DOUBLE && !value.is_atomic && c_ir_target_supports_f128_transport(preprocess.target);
-        if (index && function.is_variadic && !binary128 && c_parse_type_contains_wide_float(machine, result, preprocess.target, type)) valid = false;
+        bool x87 = value.kind == C_TYPE_LONG_DOUBLE && !value.is_atomic &&
+                   c_ir_target_supports_f80(preprocess.target);
+        if (index && function.is_variadic && !binary128 && !x87 && c_parse_type_contains_wide_float(machine, result, preprocess.target, type)) valid = false;
         if (value.kind == C_TYPE_VECTOR)
         {
             u64 size = 0;

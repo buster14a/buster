@@ -1217,16 +1217,7 @@ BUSTER_C_INTERNAL bool c_ir_type_contains_wide_float(IrProgram* program, CIrWide
 // ir_abi_convention_for_target supplies SYSTEMV_X86_64.  Keep the OS check in
 // sync with those two target-model facts rather than treating Android as a
 // generic Linux-like target with a narrower long double.
-BUSTER_C_INTERNAL bool c_ir_target_supports_f80(Target target)
-{
-    TargetDataLayout layout = target_data_layout(target);
-    bool supported_os = target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID || target.os == OPERATING_SYSTEM_MACOS ||
-                         target.os == OPERATING_SYSTEM_IOS;
-    return target.cpu_arch == CPU_ARCH_X86_64 && supported_os &&
-           ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_SYSTEMV_X86_64 &&
-           layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 80 && layout.long_double_type.size == 16 &&
-           layout.long_double_type.alignment == 16;
-}
+
 
 // A wide value is safe for the canonical x86 backend only when the existing
 // SysV classifier proves the complete value is the two-part x87 return shape.
@@ -1408,7 +1399,9 @@ BUSTER_C_INTERNAL bool c_ir_signature_body_supported(IrProgram* program, CIrWide
         IrType* parameter = ir_type_from_id(&program->types, parameter_types[parameter_index]);
         bool binary128 = parameter && parameter->kind == IR_TYPE_FLOAT && parameter->bit_width == 128 && !parameter->is_atomic &&
                          c_ir_target_supports_f128_transport(target);
-        if (is_variadic && !binary128 && c_ir_type_contains_wide_float(program, wide_float_cache, parameter_types[parameter_index]))
+        bool x87 = parameter && parameter->kind == IR_TYPE_FLOAT && parameter->bit_width == 80 && !parameter->is_atomic &&
+                   c_ir_target_supports_f80(target);
+        if (is_variadic && !binary128 && !x87 && c_ir_type_contains_wide_float(program, wide_float_cache, parameter_types[parameter_index]))
         {
             return false;
         }
