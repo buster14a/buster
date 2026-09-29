@@ -303,7 +303,9 @@ a1-capacity` (functions `a1_export_ledger`, `composer_bounds`) maps every
 scenario of that model onto the export and worker limits. It adds:
 - the lane-E composer's outputs, mirroring `tp_retirement_compose_bounds`
   (#1879): the #615 result-input manifests, the code-record set (at most
-  78,914 rows × 649 bytes), the #619 adapter input (series) and output
+  78,914 rows × 649 bytes), the #619 adapter input (#1880: its series shards
+  of at most 64 MiB each, bounded as `1 + (series - 1) / (64 MiB - 255)`
+  files, and their manifest of 512 + 256 bytes per shard) and output
   (replay), the result bundle, the execution receipt, the retained manifest
   (27 + 4,096 × 320 bytes) and the sealed-result record;
 - the prior sealed-closure files (at least 40, derived from the validator's
@@ -318,24 +320,24 @@ aggregate and slice members are taken at the #619 cap of 80, which can only
 enlarge the adapter bounds. With the declaration's two runtime stage
 singletons:
 
-| Pairs | Per-input metrics bound | Owned files | Entries left | Owned bytes | Bytes left | Adapter input | Verdict |
-|---:|---:|---:|---:|---:|---:|---:|---|
-| 60 | 4 KiB | 470 | 3,583 | 15,909,122,949 | 121,529,830,523 | 406,664,536 | refused (#1880) |
-| 60 | 8 KiB | 910 | 3,143 | 30,605,177,733 | 106,833,775,739 | 406,664,536 | refused (#1880) |
-| 60 | 16 KiB | 1,786 | 2,267 | 59,997,287,301 | 77,441,666,171 | 406,664,536 | refused (#1880) |
-| 254 | 4 KiB | 1,812 | 2,241 | 62,554,729,637 | 74,884,223,835 | 1,710,443,864 | refused (#1880) |
-| 254 | 8 KiB | 3,532 | 521 | 120,274,906,277 | 17,164,047,195 | 1,710,443,864 | refused (#1880) |
-| 254 | 16 KiB | 6,972 | -2,919 | 235,715,259,557 | -98,276,306,085 | 1,710,443,864 | refused (#1880, entries, bytes) |
+| Pairs | Per-input metrics bound | Owned files | Entries left | Owned bytes | Bytes left | Adapter series | Series shards | Verdict |
+|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 60 | 4 KiB | 477 | 3,576 | 15,909,125,253 | 121,529,828,219 | 406,664,536 | 7 | fits |
+| 60 | 8 KiB | 917 | 3,136 | 30,605,180,037 | 106,833,773,435 | 406,664,536 | 7 | fits |
+| 60 | 16 KiB | 1,793 | 2,260 | 59,997,289,605 | 77,441,663,867 | 406,664,536 | 7 | fits |
+| 254 | 4 KiB | 1,838 | 2,215 | 62,554,736,805 | 74,884,216,667 | 1,710,443,864 | 26 | fits |
+| 254 | 8 KiB | 3,558 | 495 | 120,274,913,445 | 17,164,040,027 | 1,710,443,864 | 26 | fits |
+| 254 | 16 KiB | 6,998 | -2,945 | 235,715,266,725 | -98,276,313,253 | 1,710,443,864 | 26 | refused (entries, bytes) |
 
-**No A1 scenario fits today.** The composer writes the #619 adapter input as
-one file of about `8 × cells × 2P` 32-byte ratio lines. At A1 scale that is
-far above the 64 MiB per-file cap, and `tp_retirement_compose_bounds` refuses
-the family before timing. #1880 tracks sharding it; neither cap may be raised.
-The ledger also prints a review-only projection: with #1880's 64 MiB shards
-(7 at 60 pairs, 26 at 254 pairs), every two-runtime scenario except 254 pairs
-at 16 KiB would fit. A scenario with no runtime-eligible row is refused
-anyway, because generated runtime would have no #619 cell. The projection
-never turns a refused scenario into a fitting one.
+**The #619 adapter input is sharded (#1880).** At A1 scale its series of
+about `8 × cells × 2P` 32-byte ratio lines is far above the 64 MiB per-file
+cap as one file, so the composer stores it as greedy whole-line shards of at
+most one store file (7 at 60 pairs, 26 at 254 pairs) beside a manifest, and
+neither cap is raised. Every two-runtime scenario except 254 pairs at 16 KiB
+fits; that one exceeds the entry and byte caps with its metrics shards alone.
+A scenario with no runtime-eligible row is refused, because generated
+runtime would have no #619 cell. The format is described in
+`tools/bench_service/README.md` under the composer.
 
 A full metrics or transcript shard is exactly 67,108,864 bytes, the per-file
 cap; the worker and `bq_export_inventory` reject only a larger file, and

@@ -337,7 +337,10 @@ class ExportReplayTest(unittest.TestCase):
                  "TP_COMPOSE_BUNDLE_BYTES": replay.COMPOSE_BUNDLE_BYTES,
                  "TP_COMPOSE_SEAL_FIXED_BYTES": replay.COMPOSE_SEAL_FIXED_BYTES,
                  "TP_COMPOSE_SEAL_ENTRY_BYTES": replay.COMPOSE_SEAL_ENTRY_BYTES,
-                 "TP_COMPOSE_RETAINED_LINE_BYTES": replay.COMPOSE_RETAINED_LINE_BYTES}
+                 "TP_COMPOSE_RETAINED_LINE_BYTES": replay.COMPOSE_RETAINED_LINE_BYTES,
+                 "TP_COMPOSE_SERIES_LINE_BYTES": replay.COMPOSE_SERIES_LINE_BYTES,
+                 "TP_COMPOSE_SERIES_MANIFEST_FIXED_BYTES": replay.COMPOSE_SERIES_MANIFEST_FIXED_BYTES,
+                 "TP_COMPOSE_SERIES_MANIFEST_LINE_BYTES": replay.COMPOSE_SERIES_MANIFEST_LINE_BYTES}
         for name, value in pairs.items():
             self.assertEqual(c_define(root, "tools/bench_service/retirement_compose.c", name), value, name)
         store = (root / "tools/throughput/retirement_store.h").read_text(encoding="utf-8")
@@ -350,22 +353,30 @@ class ExportReplayTest(unittest.TestCase):
         self.assertEqual(c_define(root, header, "TP_RETIREMENT_COMPOSE_BOOTSTRAP_MEMBERS"),
                          replay.COMPOSE_BOOTSTRAP_MEMBERS)
         self.assertEqual(c_define(root, header, "TP_RETIREMENT_COMPOSE_CELL_MEMBERS"), replay.COMPOSE_CELL_MEMBERS)
+        self.assertEqual(c_define(root, header, "TP_RETIREMENT_COMPOSE_SERIES_SHARDS"), replay.COMPOSE_SERIES_SHARDS)
 
     def test_composer_bounds_mirror_the_composer_refusals(self):
         """The layouts of retirement_compose_tests.c's test_budget_and_settle."""
+        # (#1880) The large family's series exceeds one file and is bounded
+        # as 16 shards instead of being refused.
         large = {"pairs_per_round": 254, "timed_rows": 4000, "runtime_rows": 1, "object_groups": 1}
-        refused = replay.composer_bounds(large, 1, 1)
-        self.assertTrue(any("#1880" in reason for reason in refused["refusals"]))
+        sharded = replay.composer_bounds(large, 1, 1)
+        self.assertEqual(sharded["refusals"], [])
+        self.assertEqual(sharded["outputs"]["adapter_input_series"], 1_042_875_980)
+        self.assertEqual(sharded["series_shards"], 16)
+        self.assertEqual(sharded["files"], 2 + replay.COMPOSE_FIXED_OUTPUTS + 16)
+        self.assertEqual(sharded["outputs"]["adapter_input_manifest"],
+                         replay.COMPOSE_SERIES_MANIFEST_FIXED_BYTES + 16 * replay.COMPOSE_SERIES_MANIFEST_LINE_BYTES)
         small = dict(large, pairs_per_round=60, timed_rows=2)
         bounds = replay.composer_bounds(small, 1, 1)
         self.assertEqual(bounds["refusals"], [])
-        self.assertEqual(bounds["files"], 2 + replay.COMPOSE_FIXED_OUTPUTS)
+        self.assertEqual((bounds["series_shards"], bounds["files"]), (1, 2 + replay.COMPOSE_FIXED_OUTPUTS + 1))
         self.assertEqual(bounds["outputs"]["sealed_result"],
                          replay.COMPOSE_SEAL_FIXED_BYTES + (1 + replay.ENTRY_CAP) * replay.COMPOSE_SEAL_ENTRY_BYTES)
         no_runtime = replay.composer_bounds(dict(small, runtime_rows=0), 1, 1)
         self.assertTrue(any("no cell" in reason for reason in no_runtime["refusals"]))
 
-    def test_a1_ledger_counts_composer_outputs_and_refuses_until_1880(self):
+    def test_a1_ledger_counts_composer_outputs_and_series_shards(self):
         root = Path(replay.__file__).resolve().parents[2]
         report = replay.a1_capacity_report(root, require_committed=False)
         scenarios = report["scenarios"]
@@ -381,28 +392,44 @@ class ExportReplayTest(unittest.TestCase):
                 self.assertLessEqual(ledger["largest_file_bytes"]["untimed_record_file"], replay.FILE_CAP)
                 self.assertEqual(ledger["untimed_record_files"], 1)
                 # Every composer output is counted: manifests, code records,
-                # adapter input and output, bundle, receipt, retained
-                # manifest and seal.
+                # the adapter input's series shards and manifest (#1880),
+                # adapter output, bundle, receipt, retained manifest and seal.
                 self.assertEqual(set(composer["outputs"]), {
-                    "result_input_manifests", "code_records", "adapter_input", "adapter_output",
-                    "result_bundle", "execution_receipt", "retained_manifest", "sealed_result"})
+                    "result_input_manifests", "code_records", "adapter_input_series", "adapter_input_manifest",
+                    "adapter_output", "result_bundle", "execution_receipt", "retained_manifest", "sealed_result"})
                 self.assertEqual(composer["outputs"]["retained_manifest"],
                                  replay.RETAINED_MANIFEST_HEADER_SIZE + replay.ENTRY_CAP * replay.COMPOSE_RETAINED_LINE_BYTES)
                 self.assertEqual(ledger["entries_left_for_projections_logs_and_directories"],
                                  replay.ENTRY_CAP - replay.WORKER_CONTROL_ENTRIES - prior - ledger["owned_files"])
-                # The single-file adapter input exceeds 64 MiB at A1 scale.
-                self.assertGreater(composer["outputs"]["adapter_input"], replay.FILE_CAP)
-                self.assertFalse(ledger["per_file_fits"])
-                self.assertFalse(ledger["fits"])
-                self.assertTrue(any("#1880" in reason for reason in ledger["refusals"]))
+                # (#1880) The series is above 64 MiB at A1 scale, stored as
+                # 7 (60 pairs) or 26 (254 pairs) shards of at most one file.
+                pairs, runtime = ledger["pairs_per_round"], ledger["runtime_rows"]
+                series, shards = {(60, 2): (406_664_536, 7), (254, 2): (1_710_443_864, 26),
+                                  (60, 0): (406_602_576, 7), (254, 0): (1_710_183_248, 26)}[pairs, runtime]
+                self.assertEqual(composer["outputs"]["adapter_input_series"], series)
+                self.assertEqual(composer["series_shards"], shards)
+                self.assertEqual(composer["files"], 2 + replay.COMPOSE_FIXED_OUTPUTS + shards)
+                self.assertEqual(ledger["largest_file_bytes"]["adapter_input_shard"], replay.FILE_CAP)
+                self.assertNotIn("adapter_input_series", ledger["largest_file_bytes"])
+                self.assertTrue(ledger["per_file_fits"])
+                self.assertFalse(any("#1880" in reason or "single-file" in reason for reason in ledger["refusals"]))
                 self.assertTrue(ledger["model_only"])
-        projected = {name: ledger["projection_if_adapter_input_sharded"]["would_fit"]
-                     for name, ledger in scenarios.items()}
-        # Only a projection: with #1880's sharding, every runtime-bearing
-        # scenario but 254 pairs at 16 KiB would fit; runtime-0 never does.
-        self.assertEqual({name for name, value in projected.items() if value},
+        # Every runtime-bearing scenario but 254 pairs at 16 KiB fits; with no
+        # runtime-eligible row generated runtime has no #619 cell.
+        self.assertEqual({name for name, ledger in scenarios.items() if ledger["fits"]},
                          {name for name in scenarios if name.endswith("runtime-2")} -
                          {"pairs-254/per-input-16384/runtime-2"})
+        for name in scenarios:
+            if name.endswith("runtime-0"):
+                self.assertTrue(any("no cell" in reason for reason in scenarios[name]["refusals"]))
+        rows = {name: (ledger["owned_files"], ledger["entries_left_for_projections_logs_and_directories"],
+                       ledger["owned_bytes_upper_bound"])
+                for name, ledger in scenarios.items() if name.endswith("runtime-2")}
+        # Against the single-file ledger: one more file per shard beyond the
+        # first, and the manifest's bytes.
+        self.assertEqual(rows["pairs-60/per-input-4096/runtime-2"], (477, 3576, 15_909_122_949 + 512 + 7 * 256))
+        self.assertEqual(rows["pairs-254/per-input-4096/runtime-2"],
+                         (1838, 2215, 62_554_729_637 + 512 + 26 * 256))
         self.assertEqual(report["six_copy_ceiling"]["logical_six_copy_file_bytes"], 824805176192)
 
     def test_ledger_rejects_oversized_untimed_record_file(self):

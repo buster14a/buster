@@ -143,17 +143,23 @@ COMPOSE_DIMENSIONS = 6
 COMPOSE_BOOTSTRAP_MEMBERS = 80
 COMPOSE_CELL_MEMBERS = 300000
 COMPOSE_PARTITIONS = 3
-# Code records, series (adapter input), replay output, bundle, execution
-# receipt, retained manifest and sealed-result record, besides the
-# result-input manifests.
+# (#1880) The #619 adapter input is a manifest over greedy whole-line series
+# shards of at most one store file: no series line exceeds
+# COMPOSE_SERIES_LINE_BYTES, the manifest has a fixed part and one line per
+# shard, and at most COMPOSE_SERIES_SHARDS shards are allowed.
+COMPOSE_SERIES_LINE_BYTES = 256
+COMPOSE_SERIES_MANIFEST_FIXED_BYTES = 512
+COMPOSE_SERIES_MANIFEST_LINE_BYTES = 256
+COMPOSE_SERIES_SHARDS = 1024
+# Code records, series manifest (the adapter input), replay output, bundle,
+# execution receipt, retained manifest and sealed-result record, besides the
+# result-input manifests and the series shards.
 COMPOSE_FIXED_OUTPUTS = 7
 # TP_RETIREMENT_CODE_RECORD_BYTES_MAX (tools/throughput/retirement_samples.h).
 CODE_RECORD_BYTES_MAX = 649
 SAMPLE_PARTITION_RECORDS = 16777216
 SAMPLE_SHARD_RECORDS = 131072
 ROUNDS = 2
-# The issue that must shard the #619 adapter input before any A1 campaign fits.
-ADAPTER_INPUT_ISSUE = "#1880"
 
 
 def prior_closure_entries():
@@ -194,8 +200,13 @@ def composer_bounds(model, code_rows, prior_entries, bootstrap_members=COMPOSE_B
     slice members depend on the rows' dimension values, which the capacity
     model does not carry, so they are taken at the #619 cap
     (``bootstrap_members``); that only enlarges the series and replay
-    bounds. Returns every output's bytes, the files, the total and the
-    reasons the composer would refuse the scenario before timing.
+    bounds. The series (#1880) is stored as greedy whole-line shards of at
+    most one store file (every shard but the last holds more than
+    ``FILE_CAP - COMPOSE_SERIES_LINE_BYTES`` bytes) plus their manifest, so
+    ``adapter_input_series`` is a total over ``series_shards`` files, not one
+    file. Returns every output's bytes, the files (series shards included),
+    the total and the reasons the composer would refuse the scenario before
+    timing.
     """
     per_unit = ROUNDS * model["pairs_per_round"]
     rows, runtime, objects = model["timed_rows"], model["runtime_rows"], model["object_groups"]
@@ -215,24 +226,27 @@ def composer_bounds(model, code_rows, prior_entries, bootstrap_members=COMPOSE_B
         refusals.append("statistical family exceeds the #619 cell-member cap")
     members = bootstrap_members + sum(cells)
     lines = (COMPOSE_DIMENSIONS + 2) * sum(cells) * per_unit
+    series = COMPOSE_SERIES_HEADER_BYTES + members * (COMPOSE_MEMBER_LINE_BYTES + COMPOSE_SERIES_END_BYTES) + \
+        lines * COMPOSE_RATIO_LINE_BYTES
+    series_shards = 1 + (series - 1) // (FILE_CAP - COMPOSE_SERIES_LINE_BYTES + 1)
+    if series_shards > COMPOSE_SERIES_SHARDS:
+        refusals.append("the #619 series needs more than the composer's series shard cap")
     outputs = {
         "result_input_manifests": manifests,
         "code_records": code_rows * CODE_RECORD_BYTES_MAX,
-        "adapter_input": COMPOSE_SERIES_HEADER_BYTES +
-            members * (COMPOSE_MEMBER_LINE_BYTES + COMPOSE_SERIES_END_BYTES) + lines * COMPOSE_RATIO_LINE_BYTES,
+        "adapter_input_series": series,
+        "adapter_input_manifest": COMPOSE_SERIES_MANIFEST_FIXED_BYTES + series_shards * COMPOSE_SERIES_MANIFEST_LINE_BYTES,
         "adapter_output": COMPOSE_REPLAY_FIXED_BYTES + members * COMPOSE_REPLAY_MEMBER_BYTES,
         "result_bundle": COMPOSE_BUNDLE_BYTES,
         "execution_receipt": STORE_RECEIPT_BYTES,
         "retained_manifest": RETAINED_MANIFEST_HEADER_SIZE + ENTRY_CAP * COMPOSE_RETAINED_LINE_BYTES,
         "sealed_result": COMPOSE_SEAL_FIXED_BYTES + (prior_entries + ENTRY_CAP) * COMPOSE_SEAL_ENTRY_BYTES,
     }
-    if outputs["adapter_input"] > FILE_CAP:
-        refusals.append(f"single-file #619 adapter input exceeds the 64 MiB per-file cap ({ADAPTER_INPUT_ISSUE})")
-    if any(value > FILE_CAP for name, value in outputs.items() if name != "adapter_input"):
+    if any(value > FILE_CAP for name, value in outputs.items() if name != "adapter_input_series"):
         refusals.append("a composer output exceeds the 64 MiB per-file cap")
-    return {"outputs": outputs, "files": manifest_count + COMPOSE_FIXED_OUTPUTS,
-            "total_bytes": sum(outputs.values()), "family_members_upper_bound": members,
-            "refusals": refusals}
+    return {"outputs": outputs, "files": manifest_count + COMPOSE_FIXED_OUTPUTS + series_shards,
+            "series_shards": series_shards, "total_bytes": sum(outputs.values()),
+            "family_members_upper_bound": members, "refusals": refusals}
 
 
 def a1_export_ledger(model, limits, code_rows, prior_entries):
@@ -243,8 +257,9 @@ def a1_export_ledger(model, limits, code_rows, prior_entries):
     stage (transcript, numeric, 64 MiB metrics shards), untimed metrics shards
     and the single untimed batch-record file. This adds the composer's
     outputs (``composer_bounds``: result-input manifests, code records,
-    adapter input and output, result bundle, execution receipt, retained
-    manifest and sealed record), the prior sealed-closure files (``prior_entries``) and the
+    the adapter input's series shards and manifest, adapter output, result
+    bundle, execution receipt, retained manifest and sealed record), the
+    prior sealed-closure files (``prior_entries``) and the
     worker's three control entries. It checks every file kind against the
     per-file cap and reports the entries and bytes left for census
     projections, retained logs and directories. It is a model, not an
@@ -257,7 +272,8 @@ def a1_export_ledger(model, limits, code_rows, prior_entries):
         "numeric_shard": limits["sample_records_per_shard"] * max(
             limits["sample_record_bytes_max"], limits["batch_record_bytes_max"]),
         "untimed_record_file": model["untimed_batches"] * limits["untimed_record_bytes_max"],
-        **composer["outputs"],
+        **{name: value for name, value in composer["outputs"].items() if name != "adapter_input_series"},
+        "adapter_input_shard": min(composer["outputs"]["adapter_input_series"], FILE_CAP),
     }
     owned_files = model["payload_files"] + composer["files"]
     owned_bytes = model["payload_bytes_upper_bound"] + composer["total_bytes"]
@@ -275,10 +291,6 @@ def a1_export_ledger(model, limits, code_rows, prior_entries):
         refusals.append("bytes exceed the 128 GiB store")
     payload_archive = owned_bytes + (owned_files + WORKER_CONTROL_ENTRIES) * (
         ENTRY_HEADER_BYTES + PATH_CAP)
-    # What #1880's proposed 64 MiB sharding of the adapter input would need.
-    # A projection for review only: it never makes this scenario fit.
-    adapter_shards = -(-composer["outputs"]["adapter_input"] // FILE_CAP)
-    other_refusals = [reason for reason in refusals if ADAPTER_INPUT_ISSUE not in reason]
     return {
         "pairs_per_round": model["pairs_per_round"],
         "per_input_metrics_bound_bytes": model["per_input_metrics_bound_bytes"],
@@ -302,13 +314,6 @@ def a1_export_ledger(model, limits, code_rows, prior_entries):
         "payload_only_copies": copy_ledger(payload_archive, owned_bytes),
         "refusals": refusals,
         "fits": not refusals and per_file_fits,
-        "projection_if_adapter_input_sharded": {
-            "issue": ADAPTER_INPUT_ISSUE,
-            "adapter_input_shards": adapter_shards,
-            "entries_left": entries_left - (adapter_shards - 1),
-            "other_refusals": other_refusals,
-            "would_fit": not other_refusals and entries_left - (adapter_shards - 1) >= 0,
-        },
         "model_only": True,
     }
 
