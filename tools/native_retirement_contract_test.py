@@ -185,6 +185,46 @@ class ContractTests(unittest.TestCase):
         return contract.validate_shards(list(reversed(self.shards)), output, require_clean,
                                         require_clean_acceptance)
 
+    def test_ios_subjects_require_the_same_adapter_before_the_pinned_sdk(self):
+        directory = self.shards[0]
+        _fields, rows = read_table(directory / "rows.tsv")
+        fixture = "tests/basic_doom_headless.c"
+        sdk_root = directory / "dependencies/project-include/sdk"
+        adapter = ["-isystem", str(sdk_root / "darwin-adapter")]
+        vendor = ["-isystem", str(sdk_root / "darwin")]
+        manifest = {"project_include_sha256": "a" * 64}
+        selected_adapters = frozenset(("dependencies/project-include/sdk/darwin-adapter/Availability.h",))
+        for target in ("x86_64-apple-ios", "aarch64-apple-ios"):
+            for allocator in ("none", "fast"):
+                with self.subTest(target=target, allocator=allocator):
+                    row = next(dict(item) for item in rows
+                               if item["target"] == target and item["allocator"] == allocator)
+                    row["fixture"] = fixture
+                    path = directory / row["argv_evidence"]
+                    argv = contract.read_argv(path)
+                    argv[argv.index(str(directory / "inputs/tests/unit.c"))] = str(directory / "inputs" / fixture)
+                    includes = argv.index("-I" + str(directory / "inputs/tests"))
+                    argv[includes:includes] = adapter + vendor
+                    project = "-I" + str(directory / "dependencies/project-include")
+                    argv.insert(includes + 5, project)
+                    path.write_bytes(b"\0".join(item.encode() for item in argv) + b"\0")
+                    contract.validate_argv(directory, manifest, row, {fixture: []}, selected_adapters)
+                    # Missing or late overlays must not be accepted for either
+                    # subject, even though the remaining argv is unchanged.
+                    for include_order in (vendor, vendor + adapter):
+                        altered = argv[:includes] + include_order + argv[includes + 4:]
+                        path.write_bytes(b"\0".join(item.encode() for item in altered) + b"\0")
+                        with self.assertRaises(AssertionError):
+                            contract.validate_argv(directory, manifest, row, {fixture: []}, selected_adapters)
+                    # Before policy admission, authenticated old declarations
+                    # select no adapter and must still replay the old argv.
+                    legacy = argv[:includes] + vendor + argv[includes + 4:]
+                    path.write_bytes(b"\0".join(item.encode() for item in legacy) + b"\0")
+                    contract.validate_argv(directory, manifest, row, {fixture: []}, frozenset())
+                    path.write_bytes(b"\0".join(item.encode() for item in argv) + b"\0")
+                    with self.assertRaises(AssertionError):
+                        contract.validate_argv(directory, manifest, row, {fixture: []}, frozenset())
+
     def declare_gaps(self, identities):
         """Install the same authenticated self-test gap ledger in every shard."""
         records = []
