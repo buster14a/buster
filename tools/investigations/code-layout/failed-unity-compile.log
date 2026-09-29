@@ -1,0 +1,48 @@
+cc: error: src/buster/lib/x86_64.c:38:5: C code generation refused: kind=codegen.unsupported-instruction target=x86_64-linux allocator=fast function='xgetbv' opcode=inline-assembly operation=not-applicable
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                355                      391
+bytes on disk                 32.800.363               32.838.303
+physical lines                   423.486                  424.738
+
+bytes scanned                 32.797.911               32.835.843
+  code                        25.628.360   78.1 %      25.648.302   78.1 %
+  comment                      1.991.527    6.1 %       2.006.963    6.1 %
+  whitespace                   5.178.024   15.8 %       5.180.578   15.8 %
+  literals, within code       13.209.164   40.3 %      13.209.437   40.2 %
+
+lines scanned                    422.260                  423.508
+  code, the sLOC                 378.169   89.6 %         379.031   89.5 %
+  comment                         33.357    7.9 %          33.673    8.0 %
+  blank                           12.739    3.0 %          12.824    3.0 %
+  both, counted twice              2.005    0.5 %           2.020    0.5 %
+
+comments                          28.165                   28.240
+tokens                         3.274.318                3.277.658
+spliced-away lines                 1.226    0.3 %           1.230    0.3 %
+
+preprocessed output                      of lexed
+  tokens to the parser         3.646.366  111.2 %
+  their spelling bytes        26.030.438  101.5 %
+  bytes retained              35.961.548  109.5 %
+  macro expansions               136.599
+  #define directives               3.884
+
+files lexed more than once
+         lexes re-read bytes  path
+             5        17.136  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h
+            16        11.280  stddef.h
+            14         5.174  /usr/include/x86_64-linux-gnu/bits/wordsize.h
+             2         2.231  /usr/include/x86_64-linux-gnu/bits/stat.h
+             2         1.109  /usr/include/x86_64-linux-gnu/bits/timesize.h
+             2           970  /usr/include/x86_64-linux-gnu/bits/long-double.h
+             2            32  /usr/include/x86_64-linux-gnu/asm/ioctls.h
+                      37.932  re-read in total
+CODEGEN cpu=baseline vector_bits=128 functions=1031 instructions=233644 values=197792 stack_value_bytes=1228984 stack_frame_bytes=1228984 max_stack_frame_bytes=84696 code_bytes=0 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=0 allocator=fast fallback_functions=1
+CODEGEN_ENCODER exact_attempts=314591 exact_successes=314591 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=13675
+CODEGEN_EMIT machine_code_in_place=3827845 machine_code_copied=0
+CODEGEN_FALLBACK_REASON target=x86_64-linux allocator=fast reason=opcode count=1
+CODEGEN_FALLBACK opcode=37 count=1
+CODEGEN_ALLOCATOR reloads=31626 spills=42884 boundary_spills=15624 boundary_reloads=3524 boundary_copies=3 copies=31820 rematerializations=10970 pins=0 splits=0 scheduled=0 schedule_kept=0
