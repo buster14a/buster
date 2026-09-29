@@ -777,13 +777,16 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
                       errno == ENOENT && fstatat(attempt, reference_path, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
                       (info.st_mode & 0777) == 0700);
 
-    /* A check that passes but leaves a file in A's candidate root (the root
-     * itself read-only again): only the rescan after the last check sees it,
-     * and the gate is not issued. The failed attempt's evidence and work
-     * directories are then removed so the honest gate can run. */
+    /* A check that makes A's candidate root writable and tries to leave a
+     * file in it: the sandbox denies the file (sources are read only), so the
+     * check prints "denied" instead of its pinned output, the root is
+     * read-only again and the gate is not issued. The rescan after the last
+     * check and row stays as a second line. The failed attempt's evidence
+     * and work directories are then removed so the honest gate can run. */
     BqCheckTestSpec planting[BQ_CHECK_TEST_CHECKS];
     memcpy(planting, specs, sizeof(planting));
-    planting[0].script = "chmod u+w \"$4\" && : > \"$4/planted\" && chmod u-w \"$4\" && printf '%s ok\\n' \"$0\"";
+    planting[0].script = "chmod u+w \"$4\" && { if (: > \"$4/planted\") 2> /dev/null; then printf '%s ok\\n' \"$0\"; "
+                         "else printf 'denied\\n'; fi; chmod u-w \"$4\"; }";
     char planting_profile[4096], planting_pin[256] = {0}, attempt_name[64] = {0}, doomed[320];
     memcpy(planting_profile, fixture->profile, sizeof(planting_profile));
     char* pin_line = strstr(planting_profile, "required-checks-sha256=");
@@ -798,22 +801,31 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
     }
     BQ_PREP_CHECK(bq_retirement_unit_gate_pinned(unit, &success->built, projection, oracle, workspaces, installed,
                   string_from_pointer(planting_profile), &observed, cancellation_fd, generous, &gate) ==
-                  BQ_SOURCE_MISMATCH && !gate.owned && bq_prep_test_live_children() == 0);
+                  BQ_RECIPE_MISMATCH && !gate.owned && bq_prep_test_live_children() == 0);
     BQ_PREP_CHECK(bq_workspace_name(attempt_name, unit->job.id, unit->job.token));
     snprintf(doomed, sizeof(doomed), "%s/%s/candidate/source", fixture->workspaces, attempt_name);
     int candidate = open(doomed, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    BQ_PREP_CHECK(candidate >= 0 && fstat(candidate, &info) == 0 && fchmod(candidate, info.st_mode | 0200) == 0 &&
-                  unlinkat(candidate, "planted", 0) == 0 && fchmod(candidate, info.st_mode & 07777) == 0);
+    BQ_PREP_CHECK(candidate >= 0 && fstat(candidate, &info) == 0 && (info.st_mode & 0222) == 0 &&
+                  fstatat(candidate, "planted", &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT);
     if (candidate >= 0) close(candidate);
     snprintf(doomed, sizeof(doomed), "%s/%s/" BQ_RETIREMENT_UNIT_CHECKS_DIRECTORY, fixture->workspaces, attempt_name);
+    char planted_output[SHA256_HEX_CAPACITY] = {0}, planted_denied[SHA256_HEX_CAPACITY] = {0};
+    bq_digest("denied\n", 7, (char8*)planted_denied);
+    int planted_checks = open(doomed, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(planted_checks >= 0 &&
+                  bq_retirement_check_hash_file(planted_checks, "check-output-0000", BQ_RETIREMENT_CHECK_OUTPUT_CAP,
+                                                planted_output) &&
+                  !strcmp(planted_output, planted_denied));
+    if (planted_checks >= 0) close(planted_checks);
     bq_prep_test_cleanup(doomed);
+    /* Only what the failed attempt created: the first check stopped it. */
     snprintf(doomed, sizeof(doomed), "%s/%s/" BQ_RETIREMENT_ROWS_DIRECTORY, fixture->workspaces, attempt_name);
-    bq_prep_test_cleanup(doomed);
+    if (lstat(doomed, &info) == 0) bq_prep_test_cleanup(doomed);
     for (u32 index = 0; index < BQ_CHECK_TEST_CHECKS; index += 1)
     {
         snprintf(doomed, sizeof(doomed), "%s/%s/" BQ_RETIREMENT_BUILD_WORK_DIRECTORY "/check-work-%04u",
                  fixture->workspaces, attempt_name, index);
-        bq_prep_test_cleanup(doomed);
+        if (lstat(doomed, &info) == 0) bq_prep_test_cleanup(doomed);
     }
     char again_pin[256] = {0};
     BQ_PREP_CHECK(bq_check_test_install(fixture->recipes, &unit->preparation, projection, specs, BQ_CHECK_TEST_CHECKS,

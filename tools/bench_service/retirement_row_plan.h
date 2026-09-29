@@ -198,6 +198,16 @@ BUSTER_F_DECL BqError bq_retirement_row_evidence_join(BqRetirementRowPlan const*
     BqRetirementProjection const* projection, BqRetirementRowObserved const* observed, BqRetirementRowJoined* joined);
 BUSTER_F_DECL bool bq_retirement_row_joined_release(BqRetirementRowJoined* joined);
 
+/* The producer runs the native target's (x86_64-linux) executables itself,
+ * as runtime rows and as the stand-in steps' artifacts, so it runs only on
+ * an x86-64 Linux host. Elsewhere it refuses (BQ_CONFIGURATION_MISMATCH)
+ * before any step. */
+#if defined(__x86_64__) && defined(__linux__)
+#define BQ_RETIREMENT_ROW_HOST_NATIVE 1
+#else
+#define BQ_RETIREMENT_ROW_HOST_NATIVE 0
+#endif
+
 /* Everything the producer borrows: the imported plan, the held binaries, A's
  * held roots (base, candidate), the attempt's private retirement-work/
  * directory (the producer creates row-work-<row>-<side> and
@@ -218,7 +228,8 @@ typedef struct BqRetirementRowRun
  * verdict; a failing row is recorded as observed (the gate refuses it). A
  * batch whose metrics do not authenticate against its frozen contract (its
  * pinned statuses, errors and exit status) is BQ_RECIPE_MISMATCH; a held
- * binary that changed is BQ_SOURCE_MISMATCH; a CPU the unit cannot run on is
+ * binary that changed is BQ_SOURCE_MISMATCH; a CPU the unit cannot run on, or
+ * a host that is not x86-64 Linux (BQ_RETIREMENT_ROW_HOST_NATIVE), is
  * BQ_CONFIGURATION_MISMATCH; cancellation, the deadline and a descendant
  * that survives the sweep map as for the check runner. */
 BUSTER_F_DECL BqError bq_retirement_row_produce(BqRetirementRowRun const* run, BqRetirementRowObserved* observed);

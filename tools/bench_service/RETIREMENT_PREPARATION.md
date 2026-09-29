@@ -634,7 +634,20 @@ in a bounded child, with these limits:
 - It runs under the check's `RLIMIT_AS` with no core dumps.
 - Its working directory is a new `retirement-work/check-work-<i>`.
 - It inherits only the held binaries, both source roots, the tools and that
-  directory; a fixture check lists `/proc/self/fd` to prove it.
+  directory; a fixture check probes `/proc/self/fd/<n>` for every number
+  below 256 to prove it.
+- It runs in a Landlock sandbox (`bq_retirement_sandbox`, entered with
+  `bq_retirement_sandbox_enter` just before exec). The sandbox is the one
+  the row steps use: the child may read and execute the system trees, read
+  `/etc` and A's two source roots, execute and read the held binaries and
+  tools, use `/dev/null` and its own work directory, and nothing else. It
+  cannot open `retirement-checks/` (this process writes every capture file),
+  the reference oracle's outputs, the row evidence or another check's or
+  row step's directory. A kernel without Landlock fails every non-hosted
+  check with `BQ_CONFIGURATION_MISMATCH`. A fixture check that tries to read
+  the oracle's output, another check's output and another check's work
+  directory, and to plant a file beside its own, is denied each time. It
+  prints `denied`, so its receipt does not match.
 - It runs under the check's wall bound, the job's absolute deadline and the
   cancellation self-pipe.
 - A hosted check starts no child: its output is the held hosted record.
@@ -646,8 +659,9 @@ Before the child the runner requires that this process has no child at
 all, rehashes both held binaries and every tool, and `fstat`s the binaries,
 tools and hosted record. After the child it requires each of those to be the
 same file with the same device, inode, size, mtime and ctime, and the
-binaries to rehash to the same digests; a same-user modify-and-restore
-therefore fails with `BQ_SOURCE_MISMATCH` even when the bytes match again.
+binaries to rehash to the same digests. The sandbox denies writing a held
+binary, and a same-user mode change and restore (which Landlock does not
+govern) still fails with `BQ_SOURCE_MISMATCH`.
 The sources in the receipt are the digests the caller's scan produced. It
 then writes four files into the attempt's new `retirement-checks/`:
 `check-output-<i>`, `check-log-<i>`, `check-receipt-<i>` and a
@@ -756,7 +770,11 @@ From the plan the importer derives, for the attempt:
 
 ### The row producer
 
-`bq_retirement_row_produce` (in `retirement_row_producer.c`) runs the plan
+`bq_retirement_row_produce` (in `retirement_row_producer.c`) runs only on an
+x86-64 Linux host (`BQ_RETIREMENT_ROW_HOST_NATIVE`), since it executes the
+native target's (x86_64-linux) programs itself. On any other host it refuses
+with `BQ_CONFIGURATION_MISMATCH` before any step, and the fixture's step
+cases are skipped there with that reason reported. It runs the plan
 on the plan's CPU alone (`sched_setaffinity`, restored afterwards). It
 records the affinity and the model of that CPU as `/proc/cpuinfo` names it
 (`model name`; on AArch64 the `CPU implementer`, `variant`, `part` and
@@ -770,7 +788,8 @@ modify-and-restore during a step fails it with `BQ_SOURCE_MISMATCH`.
 
 **Isolation.** Each step runs candidate-derived code: the candidate binary
 compiling, and the program it generated running. Before exec the step
-enters a Landlock sandbox (`bq_retirement_row_sandbox`). It may:
+enters the check runner's Landlock sandbox (`bq_retirement_sandbox`). It
+may:
 
 - read and execute `/usr`, `/lib*`, `/bin` and `/sbin`, and read `/etc`;
 - read A's two source roots;
@@ -902,13 +921,11 @@ or control-status mismatch, and changed row evidence.
 public entry refuses before either directory exists or any child starts.
 Integration must install and pin a reviewed row plan for the real corpus;
 the fixture plan and stand-in compilers prove mechanics only. The row steps
-are isolated with Landlock but still run as the service user. Running them
-as the broker's separate candidate UID, in a unit that cannot read the
-service's workspace at all, needs lane C's broker support for per-row stages
-and is not done. The required checks (`retirement_check_runner.c`) are not
-sandboxed: they are pinned commands whose output must equal a pinned digest,
-but they also run the candidate binary. A per-step cgroup v2 leaf is still
-missing, as for the checks.
+and the required checks are isolated with the same Landlock sandbox but
+still run as the service user. Running them as the broker's separate
+candidate UID, in a unit that cannot read the service's workspace at all,
+needs per-step broker stages (a follow-up on #1021) and is not done. A
+per-step cgroup v2 leaf is still missing.
 
 ## Ready record and coordinator replay (#1020)
 

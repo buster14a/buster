@@ -857,7 +857,7 @@ BUSTER_GLOBAL_LOCAL bool bq_row_test_tamper_later(char const* path, u32 delay_ms
 
 /* The producer with the stand-in compilers on the plan's CPU, each step in
  * its sandbox. */
-BUSTER_GLOBAL_LOCAL void bq_row_test_producer(BqRowTestFixture* fixture)
+BUSTER_GLOBAL_LOCAL void bq_row_test_producer_native(BqRowTestFixture* fixture)
 {
     BqCheckTestFixture* checks = fixture->checks;
     BqRetirementProjection* projection = &checks->projection;
@@ -1016,6 +1016,26 @@ BUSTER_GLOBAL_LOCAL bool bq_row_test_stage_open(BqRowTestStage* stage, char cons
               tp_retirement_metrics_shards_init(&stage->metrics, tag, stage->streams[2]) &&
               tp_retirement_samples_attach_metrics(&stage->samples, &stage->metrics);
     return ok;
+}
+
+/* The producer's cases on an x86-64 Linux host. Elsewhere it must refuse
+ * before any step, and the cases that run steps are skipped, reported. */
+BUSTER_GLOBAL_LOCAL void bq_row_test_producer(BqRowTestFixture* fixture)
+{
+    if (BQ_RETIREMENT_ROW_HOST_NATIVE) bq_row_test_producer_native(fixture);
+    else
+    {
+        BqRetirementRowPlan plan = {0};
+        BqRetirementRowObserved observed = {0};
+        int work = -1;
+        BQ_PREP_CHECK(bq_row_test_compilers(fixture));
+        BQ_PREP_CHECK(bq_row_test_run(fixture, 0, 0, &plan, &observed, &work) == BQ_CONFIGURATION_MISMATCH &&
+                      !observed.owned && bq_check_test_no_children());
+        fprintf(stderr, "RETIREMENT_PREP row producer: host is not x86-64 Linux; the producer refused "
+                "(BQ_CONFIGURATION_MISMATCH) and its step cases are skipped\n");
+        bq_retirement_row_plan_release(&plan);
+        if (work >= 0) close(work);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void bq_row_test_stage_close(BqRowTestStage* stage)
