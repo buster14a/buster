@@ -214,6 +214,13 @@ its exact byte/hash ledger row, and the benchmark-service profile pins. Old
 census/performance evidence remains bound to its original declaration digest;
 the matching manifest and exact declaration bytes are checked together.
 
+For #1790, a second source-only bootstrap preserves both previously reviewed
+support declaration digests and admits exactly
+`52cf1a5ef3744ba5777b729aeed9be5a37f5310368c78d92a76499b08e26965f` for the later desktop artifact-resolution policy change.
+It leaves `tests/ci_tools_test.py`, the support ledger, generated retirement
+bindings and the benchmark-service support pin unchanged. The separate policy
+transition may update those bytes only after this reader bootstrap is trusted.
+
 ### Solo-maintainer authorization
 
 `authorization_mode: solo-maintainer` is explicit owner authorization of one
