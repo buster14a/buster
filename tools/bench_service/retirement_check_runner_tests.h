@@ -11,8 +11,12 @@
  * descendant, cancellation, job deadline, planted evidence) and the
  * correctness half of the issuer (bq_retirement_unit_gate_admit), which must
  * refuse receipts from another job or token, a swapped binary and a missing
- * check. The shell and /usr/bin/true|false prove mechanics only; they are not
- * #509 checks, and no full-corpus or #509 acceptance follows from them.
+ * check. The shell and the two generated stand-in binaries prove mechanics
+ * only; they are not #509 checks, and no full-corpus or #509 acceptance
+ * follows from them. Nothing but the resolved host shell is taken from the
+ * host: /usr/bin/true and /usr/bin/false may be symlinks into one multicall
+ * binary (uutils coreutils), which the no-follow copy refuses and which
+ * would not give two distinct binaries.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_CHECK_RUNNER_TESTS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_CHECK_RUNNER_TESTS_H
@@ -83,7 +87,7 @@ BUSTER_GLOBAL_LOCAL u32 bq_check_test_authority(char* text, BqRetirementProjecti
         int output_length = snprintf(output, sizeof(output), "check-%u ok\n", index);
         bq_digest(output, (u32)output_length, (char8*)output_sha256);
         int line = snprintf(text + used, BQ_CHECK_TEST_AUTHORITY_CAP - (u32)used,
-            "check=%u %s %u %u %s %u 256 %s\nconfiguration=fixture %s %u\nargv=6\narg={{tool:0}}\narg=-c\narg=%s\n"
+            "check=%u %s %u %u %s %u 1024 %s\nconfiguration=fixture %s %u\nargv=6\narg={{tool:0}}\narg=-c\narg=%s\n"
             "arg=check-%u\narg={{binary:%u}}\narg={{source:0}}\nenvironment=3\nenv=LC_ALL=C\nenv=PATH=/usr/bin:/bin\n"
             "env=WORK={{work}}\n", index, spec->kind, spec->target, spec->rows, spec->evidence, spec->timeout,
             output_sha256, spec->kind, spec->target, spec->script, index, spec->binary);
@@ -256,6 +260,19 @@ BUSTER_GLOBAL_LOCAL void bq_check_test_rows(BqCheckTestFixture* fixture)
     }
 }
 
+/* A small executable stand-in with distinct bytes per status: a new,
+ * single-link, owner read-and-execute file. */
+BUSTER_GLOBAL_LOCAL bool bq_check_test_program(char const* path, u32 status)
+{
+    char text[64];
+    int length = snprintf(text, sizeof(text), "#!/bin/sh\nexit %u\n", status);
+    int file = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0700);
+    bool ok = length > 0 && (size_t)length < sizeof(text) && file >= 0 &&
+              bq_write_all(file, (u8 const*)text, (u32)length) && fchmod(file, 0500) == 0 && fsync(file) == 0;
+    if (file >= 0 && close(file) != 0) ok = false;
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_check_test_directory(BqCheckTestFixture* fixture, char const* prefix, int* descriptor)
 {
     char name[48];
@@ -283,14 +300,15 @@ BUSTER_GLOBAL_LOCAL bool bq_check_test_setup(BqCheckTestFixture* fixture)
     ok = ok && fixture->installed_fd >= 3 && fixture->workspaces_fd >= 3 &&
          bq_check_test_directory(fixture, "source-base", &fixture->sources[0]) &&
          bq_check_test_directory(fixture, "source-candidate", &fixture->sources[1]);
+    /* The last setup stage reached, reported on failure. */
+    u32 stage = ok ? 1u : 0u;
     /* The two held matched binaries. */
     BqRetirementPrepared* prepared = &fixture->projection.prepared;
-    char const* programs[2] = {"/usr/bin/true", "/usr/bin/false"};
     for (u32 side = 0; ok && side < 2; side += 1)
     {
         char path[128];
         length = snprintf(path, sizeof(path), "%s/binary-%u", fixture->workspaces, side);
-        ok = length > 0 && (size_t)length < sizeof(path) && bq_prep_test_copy_file(programs[side], path);
+        ok = length > 0 && (size_t)length < sizeof(path) && bq_check_test_program(path, side);
         fixture->held.descriptors[side] = ok ? bq_retirement_check_promote(open(path, O_RDONLY | O_CLOEXEC)) : -1;
         ok = ok && fixture->held.descriptors[side] >= 3 &&
              bq_retirement_oracle_file_hash(fixture->held.descriptors[side], BQ_RETIREMENT_CHECK_TOOL_BYTES_CAP, true,
@@ -298,6 +316,7 @@ BUSTER_GLOBAL_LOCAL bool bq_check_test_setup(BqCheckTestFixture* fixture)
         bq_check_test_digest(prepared->source_sha256[side], "source-manifest", side, 0);
     }
     fixture->held.owned = ok;
+    stage += ok;
     memcpy(fixture->held.verified.source_sha256, prepared->source_sha256, sizeof(prepared->source_sha256));
     memcpy(fixture->held.verified.binary_sha256, prepared->binary_sha256, sizeof(prepared->binary_sha256));
     bq_check_test_digest(prepared->preparation_sha256, "preparation", 0, 0);
@@ -329,8 +348,10 @@ BUSTER_GLOBAL_LOCAL bool bq_check_test_setup(BqCheckTestFixture* fixture)
     }
     bq_request_digest(&fixture->job.request, fixture->job.digest);
     bq_check_test_specs(fixture->specs, BQ_CHECK_TEST_OBJECT_ROWS, BQ_CHECK_TEST_ROWS - 1u);
+    stage += ok;
     ok = ok && bq_check_test_install(fixture->recipes, &fixture->projection, fixture->specs, BQ_CHECK_TEST_CHECKS,
                                      fixture->profile, sizeof(fixture->profile));
+    if (!ok) fprintf(stderr, "RETIREMENT_PREP check fixture setup stopped after stage %u (errno %d)\n", stage, errno);
     return ok;
 }
 
@@ -492,7 +513,7 @@ BUSTER_GLOBAL_LOCAL void bq_check_test_importer(BqCheckTestFixture* fixture)
     BQ_PREP_CHECK(bq_check_test_install(fixture->recipes, &fixture->projection, fixture->specs, BQ_CHECK_TEST_CHECKS,
                                         fixture->profile, sizeof(fixture->profile)) &&
                   chmod(tools, 0700) == 0 && rename(tool, saved) == 0 &&
-                  bq_prep_test_copy_file("/usr/bin/true", tool) && chmod(tools, 0555) == 0);
+                  bq_check_test_program(tool, 0) && chmod(tools, 0555) == 0);
     BQ_PREP_CHECK(bq_check_test_import(fixture, &fixture->job, &fixture->projection, &checks) ==
                   BQ_CONFIGURATION_MISMATCH && !checks.owned);
     BQ_PREP_CHECK(chmod(tools, 0700) == 0 && unlink(tool) == 0 && rename(saved, tool) == 0 && chmod(tools, 0555) == 0 &&
