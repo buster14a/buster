@@ -4190,7 +4190,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_batch_contr
                 u32 started;
                 u32 completed;
                 bool manifest = compiler_driver_test_native_frame_batch_stream(arguments->arena,
-                    (String8){waited.streams[STANDARD_STREAM_OUTPUT].pointer, waited.streams[STANDARD_STREAM_OUTPUT].length},
+                    (String8){(char8*)waited.streams[STANDARD_STREAM_OUTPUT].pointer, waited.streams[STANDARD_STREAM_OUTPUT].length},
                     (SliceString8)BUSTER_ARRAY_TO_SLICE(ids), &started, &completed);
                 bool passed = waited.result == PROCESS_RESULT_SUCCESS && manifest;
                 BUSTER_TEST_RAW(arguments, passed == (fault == 0), faults[fault]);
@@ -4260,6 +4260,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
     u32 native_frame_link_cache_hits = 0;
     u32 native_frame_link_count = 0;
     u32 native_frame_run_count = 0;
+    u32 native_frame_case_count = 0;
+    u32 native_frame_batch_count = 0;
     // Single-lane float vectors retain the established Clang ABI. GCC 13
     // uses a hidden result pointer for those extension types, so it cannot
     // serve as this complete mixed-ABI observer.
@@ -4451,7 +4453,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                 (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
                                           : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE)));
                             bool runtime_eligible = host_observer_available && native_target && executable_cpu && fixture != 3 &&
-                                compiled.error == COMPILER_DRIVER_ERROR_NONE && (observer == UINT32_MAX || host_compiled[observer]);
+                                compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object &&
+                                compiled.codegen_statistics.function_count == function_counts[fixture] &&
+                                compiled.codegen_statistics.fallback_function_count == 0 && (observer == UINT32_MAX || host_compiled[observer]);
                             if (program_flag_get(PROGRAM_FLAG_VERBOSE) || timing)
                             {
                                 arguments->show(arguments, S8("NATIVE_FRAME_VECTOR_COMPILE_V1 target={S8} allocator={u32} frontend={u32} pic={u32} cpu={u32} fixture={u32} error={u32} classification={S8}\n"),
@@ -4459,7 +4463,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                     runtime_eligible ? S8("runtime") : S8("compile-only"));
                             }
                             if (batch_cell) { batch_compiled[batch_index] = runtime_eligible; }
-                            if (runtime_eligible) { native_frame_run_count += 1; }
+                            if (runtime_eligible) { native_frame_case_count += 1; }
                             bool execute_batch = batch_cell && fixture == 9;
                             if (execute_batch)
                             {
@@ -4472,6 +4476,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                             }
                             if (runtime_eligible && (!batch_cell || execute_batch))
                             {
+                                native_frame_run_count += 1;
+                                if (execute_batch) { native_frame_batch_count += 1; }
                                 u32 object_count = execute_batch ? BUSTER_ARRAY_LENGTH(batch_objects) : 1u;
                                 u32 cache_fixture = execute_batch ? batch_fixtures[0] : fixture;
                                 String8 objects[COMPILER_DRIVER_TEST_NATIVE_FRAME_BATCH_CAPACITY] = {0};
@@ -4638,7 +4644,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                         if (execute_batch)
                                         {
                                             TimeDataType parse_start = timing ? timestamp_take() : (TimeDataType){0};
-                                            String8 output = {waited.streams[STANDARD_STREAM_OUTPUT].pointer, waited.streams[STANDARD_STREAM_OUTPUT].length};
+                                            String8 output = {(char8*)waited.streams[STANDARD_STREAM_OUTPUT].pointer, waited.streams[STANDARD_STREAM_OUTPUT].length};
                                             bool manifest_ok = compiler_driver_test_native_frame_batch_stream(temporary.arena, output,
                                                 (SliceString8){.pointer = ids, .length = object_count}, &started, &completed);
                                             run_ok = run_ok && manifest_ok && !waited.timed_out && !waited.capture_failed &&
@@ -4646,7 +4652,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                                 !waited.process_group_reservation_retained && !waited.process_group_ownership_lost &&
                                                 waited.streams[STANDARD_STREAM_ERROR].length == 0;
                                             if (!run_ok) { arguments->show(arguments, S8("NATIVE_FRAME_BATCH_FAILURE stdout={S8} stderr={S8}\n"), output,
-                                                (String8){waited.streams[STANDARD_STREAM_ERROR].pointer, waited.streams[STANDARD_STREAM_ERROR].length}); }
+                                                (String8){(char8*)waited.streams[STANDARD_STREAM_ERROR].pointer, waited.streams[STANDARD_STREAM_ERROR].length}); }
                                             if (timing) { compiler_driver_test_operation_end(&batch_parse_time, parse_start); }
                                         }
                                     }
@@ -4675,6 +4681,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
         arguments->show(arguments,
             S8("NATIVE_FRAME_VECTOR_LINK_CACHE_V1 runs={u32} links={u32} hits={u32} retained={u32}\n"),
             native_frame_run_count, native_frame_link_count, native_frame_link_cache_hits, native_frame_link_cache_count);
+        arguments->show(arguments, S8("NATIVE_FRAME_VECTOR_BATCH_V1 enabled={u32} cases={u32} batches={u32} batch_size={u32} executions={u32}\n"),
+            (u32)batch_enabled, native_frame_case_count, native_frame_batch_count,
+            (u32)COMPILER_DRIVER_TEST_NATIVE_FRAME_BATCH_CAPACITY, native_frame_run_count);
     }
     for (u32 cache_index = 0; cache_index < native_frame_link_cache_count; cache_index += 1)
     {
