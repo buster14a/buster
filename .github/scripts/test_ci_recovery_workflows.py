@@ -46,7 +46,9 @@ class LifecycleWorkflowTests(unittest.TestCase):
             self.assertNotIn("\n  test:\n", workflow)
         self.assertNotIn("workflow_run:", regressions)
         self.assertIn("persist-credentials: false", regressions)
-        for path in ("ci-recovery.yml", "ci-merge-group-watch.yml", "ci-recovery-tests.yml"):
+        # ci.yml owns the step budgets that the watcher's deadline mirrors.
+        for path in ("ci-recovery.yml", "ci-merge-group-watch.yml", "ci-recovery-tests.yml",
+                     "ci.yml"):
             self.assertEqual(regressions.count("'.github/workflows/" + path + "'"), 2)
         for path in (".github/scripts/recover-ci.py", ".github/scripts/test_merge_queue_fail_fast.py",
                      "tests/ci_recovery_test.py", ".github/scripts/test_ci_recovery_workflows.py"):
@@ -69,6 +71,25 @@ class LifecycleWorkflowTests(unittest.TestCase):
         self.assertIn("<code>" + "a" * 40 + "</code>", summary)
         self.assertIn("<code>" + "b" * 40 + "</code>", summary)
         self.assertIn("No action: failed job &lt;test&gt;", summary)
+        self.assertNotIn("Controller records", summary)
+
+    def test_summary_retains_controller_records(self):
+        event = {
+            "action": "in_progress",
+            "workflow_run": {
+                "id": 123, "run_attempt": 1, "event": "merge_group",
+                "head_branch": "gh-readonly-queue/main/pr-1-abc", "head_sha": "a" * 40,
+            },
+        }
+        records = ['STEP_DEADLINE_V1 action=cancel-requested job_name="macOS <x86-64> release"',
+                   "STEP_DEADLINE_V1 action=step-stopped run=123"]
+        summary = recovery.lifecycle_summary(
+            "Buster CI merge-group watcher", "Decision", event, "buster14a/buster",
+            "b" * 40, 234, 1, records)
+        self.assertEqual(summary.count("Controller records"), 1)
+        self.assertIn("- <code>STEP_DEADLINE_V1 action=cancel-requested job_name=&quot;macOS "
+                      "&lt;x86-64&gt; release&quot;</code>\n", summary)
+        self.assertTrue(summary.endswith("- <code>STEP_DEADLINE_V1 action=step-stopped run=123</code>\n"))
 
     def test_sweep_summary_identifies_trusted_handler(self):
         summary = recovery.lifecycle_summary(

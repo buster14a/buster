@@ -74,7 +74,10 @@
   On `merge_group`, desktop and mobile enable matrix fail-fast; the native
   matrix retains `fail-fast: false` under the frozen CI test contract. The trusted
   controller cancels exact-head merge-group runs after a failed Buster CI job
-  or required check from another workflow.
+  or required check from another workflow. It also stops a desktop Release
+  `Workflow tool regression tests` step that is still in progress past its
+  `ci.yml` budget plus grace. That budget table is mirrored in
+  `.github/scripts/recover-ci.py` and checked for drift.
   See `docs/ci-workflow-audit.md` for cache trust boundaries, diagnostics,
   cancellation, coverage details, and reproduction. Every job stays inert
   until its repository variable is set, and skips itself outright on Forgejo.
@@ -413,7 +416,7 @@ process controls, not successful compiler or missing-evidence observations.
 
 The compiler-driver Node oracles use a bounded 30-second deadline on Linux and macOS and a bounded 60-second deadline on Windows. The Windows allowance covers measured hosted-runner startup and execution variance without changing the process-deadline primitive or other platforms.
 
-Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. A process that prints the marker and remains alive is killed at the deadline and fails as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` also locks down launch failure, nonzero exit, incomplete output, stderr output, a true hang, and summary-then-hang behavior.
+Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. The integer oracle's startup shim in `tools/` writes `WASM_NODE_READY startup_ms=<timestamp>` synchronously before loading the frozen semantic oracle, and a successful run must contain that first-line marker. The harness logs it with both attempts when applicable. Only a timeout with no observed stdout or stderr before this marker, successful process-tree cleanup, and no capture failure retries once in a fresh Node process. A second failure remains a failure. A hang after readiness, partial output, nonzero exit, launch failure, and a process that prints the terminal marker but remains alive all fail without retry. The latter is reported as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` exercises each boundary with native child controls.
 
 The Wasm oracle process-policy controls launch a native `ide test` child before
 compiler prewarming. Their short deadlines exercise completion, output, errors

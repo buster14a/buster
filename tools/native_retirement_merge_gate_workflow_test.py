@@ -147,10 +147,25 @@ class AdmissionWorkflowTests(unittest.TestCase):
         self.assertIn("(github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'main'", repository)
         self.assertNotIn("github.event.pull_request.base.sha", repository)
         checkout = repository.index("      - name: Check out the previously trusted rebinder revision")
+        pull_admission = repository.index("      - name: Reject feature-owned generated state")
+        reconstruction = repository.index("      - name: Reconstruct the exact candidate or group state ephemerally")
+        contract = repository.index("      - name: Run independent contract suite")
         wait = repository.index("      - name: Wait for the queued predecessor to land")
-        admission = repository.index("      - name: Reject feature-owned generated state")
-        self.assertLess(checkout, wait)
+        admission = repository.index("      - name: Admit the landed merge group with trusted tools")
+        freshness = repository.index("      - name: Require exact current generated state")
+        # PRs are admitted against live main before the slow reconstruction.
+        # Groups reconstruct speculatively (#1893); only the cheap wait and
+        # the trusted gate run after the predecessor has landed.
+        self.assertLess(checkout, pull_admission)
+        self.assertLess(pull_admission, reconstruction)
+        self.assertLess(reconstruction, contract)
+        self.assertLess(contract, wait)
         self.assertLess(wait, admission)
+        self.assertLess(admission, freshness)
+        self.assertIn("if: ${{ github.event_name == 'pull_request' }}",
+                      repository[pull_admission:reconstruction].split("      - name: Check out pinned", 1)[0])
+        self.assertIn("if: ${{ github.event_name == 'merge_group' }}", repository[admission:freshness])
+        self.assertNotIn("wait-base", repository[reconstruction:wait])
         first_wait = repository[wait:admission]
         self.assertIn("if: ${{ github.event_name == 'merge_group' }}", first_wait)
         self.assertIn("GH_TOKEN: ${{ github.token }}", first_wait)
@@ -158,6 +173,82 @@ class AdmissionWorkflowTests(unittest.TestCase):
         self.assertIn('--trusted-root "$GITHUB_WORKSPACE/trusted"', first_wait)
         self.assertIn('--wait-seconds 18000', first_wait)
         self.assertNotIn("continue-on-error", first_wait)
+
+    @staticmethod
+    def rebind_step(name: str) -> str:
+        workflow = (ROOT / ".github/workflows/native-retirement-rebind.yml").read_text()
+        block = workflow.split("      - name: " + name + "\n", 1)[1].split("      - name:", 1)[0]
+        return textwrap.dedent(block.split("        run: |\n", 1)[1])
+
+    def test_reconstruction_tolerates_only_a_behind_committed_pair(self):
+        script = self.rebind_step("Reconstruct the exact candidate or group state ephemerally")
+        fake = textwrap.dedent("""\
+            import os, pathlib, sys
+            command = sys.argv[1]
+            root = pathlib.Path(sys.argv[sys.argv.index("--repo-root") + 1])
+            header = root / "tools/native_retirement_dependency_binding.generated.h"
+            if command == "refresh":
+                header.write_text("#define FRESH 1\\n")
+                if os.environ.get("SMUGGLE"):
+                    (root / "README.md").write_text("changed by refresh\\n")
+                print("{}")
+                sys.exit(0)
+            fresh = header.read_text() == "#define FRESH 1\\n"
+            print("{}")
+            sys.exit(0 if fresh else int(os.environ.get("STALE_EXIT", "2")))
+            """)
+        cases = (
+            ("push", "2", "", 0, "false", True),
+            ("merge_group", "2", "", 0, "false", False),
+            ("push", "1", "", 1, None, False),
+            ("pull_request", "2", "1", 1, "false", False),
+        )
+        for event, stale_exit, smuggle, code, current, warned in cases:
+            with self.subTest(event=event, stale_exit=stale_exit, smuggle=smuggle), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                candidate = root / "candidate"
+                (candidate / "tools").mkdir(parents=True)
+                (root / "trusted/tools").mkdir(parents=True)
+                git(root, "init", "-q", "-b", "main", str(candidate))
+                (candidate / "README.md").write_text("base\n")
+                (candidate / "tools/native_retirement_dependency_binding.generated.h").write_text("#define OLD 1\n")
+                for tool in (root / "trusted/tools", candidate / "tools"):
+                    (tool / "native_retirement_rebind.py").write_text(fake)
+                git(candidate, "add", ".")
+                git(candidate, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "base")
+                output = root / "output"
+                output.touch()
+                body = script.replace("${{ github.event_name }}", event)
+                result = subprocess.run(
+                    ["bash", "-e", "-o", "pipefail", "-c", body], cwd=root,
+                    env={**os.environ, "GITHUB_WORKSPACE": str(root), "RUNNER_TEMP": str(root),
+                         "GITHUB_OUTPUT": str(output), "STALE_EXIT": stale_exit, "SMUGGLE": smuggle},
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, code, result.stderr + result.stdout)
+                if current is not None:
+                    self.assertIn("committed_current=" + current, output.read_text())
+                self.assertEqual("catch-up is pending" in result.stdout, warned)
+
+    def test_only_catch_up_heads_may_carry_a_behind_pair(self):
+        script = self.rebind_step("Require exact current generated state for attested non-catch-up heads")
+        cases = (
+            ("trusted-integration", "false", "false", 1),
+            ("trusted-integration-merge-group", "false", "false", 1),
+            ("trusted-integration-merge-group", "true", "false", 0),
+            ("trusted-integration", "false", "true", 0),
+            ("ordinary-bound-merge-group", "false", "false", 0),
+            ("ordinary-bound", "false", "false", 0),
+        )
+        for mode, catch_up, current, code in cases:
+            with self.subTest(mode=mode, catch_up=catch_up, current=current):
+                result = subprocess.run(
+                    ["bash", "-e", "-o", "pipefail", "-c", script],
+                    env={**os.environ, "MODE": mode, "CATCH_UP": catch_up, "COMMITTED_CURRENT": current},
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, code, result.stderr)
 
     def history(self, root: Path) -> tuple[Path, Path, Path, str, str]:
         repo = root / "repo"
