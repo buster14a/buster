@@ -562,9 +562,11 @@ class FakeReader:
 
     def pages(self, path, field, **query):
         self.reads.append(path)
-        assert field == "check_runs" and query == {"check_name": gate.CONTEXT, "filter": "all",
-                                                   "app_id": gate.GITHUB_ACTIONS_APP_ID}
-        return [dict(row) for row in self.checks.get(path.split("/")[1], [])]
+        assert field == "check_runs" and query.get("check_name") in (
+            gate.CONTEXT, gate.RETIREMENT_CONTEXT)
+        assert query["filter"] == "all" and query["app_id"] == gate.GITHUB_ACTIONS_APP_ID
+        return [dict(row) for row in self.checks.get(path.split("/")[1], [])
+                if row["name"] == query["check_name"]]
 
 
 class FakeWriter:
@@ -578,7 +580,8 @@ class FakeWriter:
         row.update(body)
         row.update(id=existing["id"] if existing else 900 + len(self.sent), head_sha=head,
                    app={"id": gate.GITHUB_ACTIONS_APP_ID})
-        self.reader.checks[head] = [row]
+        self.reader.checks[head] = [item for item in self.reader.checks.get(head, [])
+                                    if item["name"] != row["name"]] + [row]
         return row
 
 
@@ -679,6 +682,75 @@ class ReconcileTests(unittest.TestCase):
         groups, _ = self.reconcile()
         self.assertEqual(groups[self.g1]["state"], "published")
         self.assertEqual(len(self.writer.sent), 2)
+
+    def native_group(self, native_job):
+        gate.git(self.work, "checkout", "-q", "-b", "native-policy", self.main)
+        path = self.work / gate.RETIREMENT_WORKFLOW
+        path.write_text("name: API migration policy\non:\n  merge_group:\n    types: [checks_requested]\n"
+                        "jobs:\n  policy:\n    name: API migration policy\n" +
+                        ("  native-retirement-admission:\n    name: Native retirement merge admission\n"
+                         if native_job else ""))
+        gate.git(self.work, "add", ".")
+        gate.git(self.work, "commit", "-qm", "native admission producer")
+        pr = gate.git(self.work, "rev-parse", "HEAD")
+        tree = gate.git(self.work, "merge-tree", "--write-tree", self.main, pr)
+        head = gate.git(self.work, "commit-tree", tree, "-p", self.main, "-p", pr,
+                        "-m", "native group")
+        gate.git(self.work, "push", "-q", "-f", str(self.origin), f"{head}:{self.ref1}")
+        self.reader.heads[self.ref1.removeprefix("refs/")] = head
+        return head
+
+    def test_native_check_publishes_only_without_legacy_job(self):
+        head = self.native_group(native_job=False)
+        self.collected = [(self.evidence, []), (self.evidence, [])]
+        with patch.object(gate.time, "sleep", side_effect=AssertionError("no wait")):
+            groups, _ = self.reconcile()
+        native = groups[head]["native"]
+        self.assertEqual((native["owner"], native["state"], native["published"]),
+                         ("reconciler", "admitted", True))
+        self.assertEqual(self.native_calls, 4)
+        sent = [body for _, body in self.writer.sent if body["name"] == gate.RETIREMENT_CONTEXT]
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["external_id"], gate.native_marker(head))
+        self.assertEqual(sent[0]["conclusion"], "success")
+        # Duplicate completion events never reissue a terminal check.
+        self.collected = []
+        groups, _ = self.reconcile()
+        self.assertEqual(groups[head]["native"]["state"], "published")
+        self.assertEqual(len([body for _, body in self.writer.sent
+                              if body["name"] == gate.RETIREMENT_CONTEXT]), 1)
+
+    def test_legacy_native_job_is_shadowed(self):
+        head = self.native_group(native_job=True)
+        self.collected = [(self.evidence, []), (self.evidence, [])]
+        groups, _ = self.reconcile()
+        self.assertEqual(groups[head]["native"]["owner"], "legacy")
+        self.assertFalse(groups[head]["native"]["published"])
+        self.assertTrue(all(body["name"] != gate.RETIREMENT_CONTEXT
+                            for _, body in self.writer.sent))
+
+    def test_native_denial_is_terminal_and_does_not_issue_success(self):
+        head = self.native_group(native_job=False)
+        self.native = {"status": "pending"}
+        self.collected = [(self.evidence, []), (self.evidence, [])]
+        arguments = SimpleNamespace(repo_root=self.trusted, repository="buster14a/buster",
+                                    details_url="https://example.invalid/run")
+        with patch.object(gate, "GitHub", return_value=self.reader), \
+                patch.object(gate, "CheckWriter", return_value=self.writer), \
+                patch.object(gate, "live_ruleset", return_value={"id": gate.RULESET_ID}), \
+                patch.object(gate, "retirement_admission",
+                             side_effect=gate.AdmissionError("publication pending")), \
+                patch.object(gate, "collect", side_effect=iter(self.collected)):
+            report = gate.reconcile(arguments)
+            again = gate.reconcile(arguments)
+        native = next(row for row in report["groups"] if row["head"] == head)["native"]
+        self.assertEqual(native["state"], "rejected")
+        self.assertEqual(next(row for row in again["groups"]
+                              if row["head"] == head)["native"]["state"], "published")
+        native_checks = [body for _, body in self.writer.sent
+                         if body["name"] == gate.RETIREMENT_CONTEXT]
+        self.assertEqual(len(native_checks), 1)
+        self.assertEqual(native_checks[0]["conclusion"], "failure")
 
     def test_predecessor_landing_advances_g2_under_landed_policy_only(self):
         self.collected = []

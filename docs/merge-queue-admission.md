@@ -107,6 +107,20 @@ persisted checkout credentials. GitHub's normal fork approval rules still apply.
 
 ## Event-driven reconciliation (#1807)
 
+The same trusted reconciler is the staged producer for
+`Native retirement merge admission` (#1811). While a group's
+`api-migration-policy.yml` still defines the native-admission job, the
+reconciler shadow-evaluates the native gate and publishes nothing. After a
+separate producer-transition PR moves the PR/main job into its own workflow,
+the reconciler publishes an exact-head check with the marker
+`buster-native-retirement-admission-v1:<head>`. It requires the queued base to
+be live main and the trusted checkout to be that base, then validates the
+native gate and policy twice with intervening identity checks. Pending never
+becomes success; denied or changed publication is terminal failure. The native
+check can finish before the six other workflows because it validates its own
+exact-tree publication contract independently. Activation requires shadow
+validation and a live queue trace before relying on the new producer.
+
 The legacy `merge_group` job holds a hosted Ubuntu runner for up to 310 minutes.
 It spends most of that time in `run_gate`'s 30-second sleep loop waiting for the
 predecessor and the six gates. It does almost no verification. The
