@@ -147,5 +147,283 @@ class MergeQueueFailFastTests(unittest.TestCase):
         self.assertNotIn("ref: ${{ github.event.workflow_run.head_sha }}", workflow)
 
 
+class WatchdogGitHub(FakeGitHub):
+    def __init__(self):
+        super().__init__()
+        self.jobs = [{
+            "id": 109415142502, "run_id": 123, "head_sha": "a" * 40,
+            "name": "macOS x86-64 release", "status": "in_progress", "conclusion": None,
+            "started_at": "2026-09-29T12:53:13Z", "completed_at": None,
+            "steps": [{"number": 4, "name": recovery.WORKFLOW_TOOLS_STEP,
+                       "status": "in_progress", "conclusion": None,
+                       "started_at": "2026-09-29T12:53:23Z", "completed_at": None}],
+        }]
+        self.now = recovery.utc_timestamp("2026-09-29T13:30:00Z")
+        self.forced = []
+        self.sleeps = []
+        self.attempt_reads = 0
+        self.before_attempt_read = lambda: None
+        self.before_run_read = lambda: None
+        self.after_sleep = lambda: None
+        self.accept_cancel = True
+
+    def all(self, path, key=None, **query):
+        if path == "actions/runs/123/attempts/1/jobs":
+            assert key == "jobs" and query == {}
+            self.attempt_reads += 1
+            self.before_attempt_read()
+            result = copy.deepcopy(self.jobs)
+        else:
+            result = super().all(path, key, **query)
+        return result
+
+    def request(self, path, *, method="GET", **query):
+        if path == "actions/runs/123":
+            assert method == "GET" and query == {}
+            self.before_run_read()
+            result = copy.deepcopy(self.runs[0])
+        else:
+            result = super().request(path, method=method, **query)
+        return result
+
+    def cancel(self, run_id, *, force=False):
+        (self.forced if force else self.cancelled).append(run_id)
+        return self.accept_cancel
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+        self.after_sleep()
+
+
+class StepWatchdogTests(unittest.TestCase):
+    def setUp(self):
+        self.api = WatchdogGitHub()
+
+    def watch(self):
+        return recovery.watch(self.api, self.api.event, sleep_fn=self.api.sleep,
+                              now_fn=lambda: self.api.now, max_probes=1)
+
+    def select(self):
+        return recovery.stalled_tool_steps(self.api.runs[0], self.api.jobs, self.api.now)
+
+    def test_incident_requests_normal_then_force_for_only_stuck_buster_run(self):
+        message = self.watch()
+        self.assertEqual(self.api.cancelled, [123])
+        self.assertEqual(self.api.forced, [123])
+        self.assertEqual(self.api.sleeps, [recovery.STEP_CANCEL_GRACE_SECONDS])
+        self.assertEqual(self.api.attempt_reads, 2)
+        for value in ('109415142502', 'macOS x86-64 release', '"attempt": 1',
+                      '"budget_seconds": 300', '"deadline_seconds": 420',
+                      '2026-09-29T12:53:23Z', 'a' * 40, 'terminal result not yet verified'):
+            self.assertIn(value, message)
+
+    def test_all_six_lane_deadline_boundaries(self):
+        started = recovery.utc_timestamp(self.api.jobs[0]["steps"][0]["started_at"])
+        self.assertEqual(len(recovery.WORKFLOW_TOOLS_TIMEOUT_SECONDS), 6)
+        for name, budget in recovery.WORKFLOW_TOOLS_TIMEOUT_SECONDS.items():
+            with self.subTest(lane=name):
+                self.api.jobs[0]["name"] = name
+                self.api.now = started + budget + recovery.STEP_REPORTING_GRACE_SECONDS - 0.01
+                self.assertEqual(self.select(), [])
+                self.api.now += 0.01
+                self.assertEqual(len(self.select()), 1)
+
+    def test_queued_job_is_not_stalled(self):
+        self.api.jobs[0].update(status="queued", started_at=None)
+        self.assertEqual(self.select(), [])
+
+    def test_completed_job_is_not_stalled(self):
+        self.api.jobs[0].update(status="completed", conclusion="success")
+        self.assertEqual(self.select(), [])
+
+    def test_completed_run_does_not_reuse_stale_step_metadata(self):
+        self.api.runs[0].update(status="completed", conclusion="success")
+        self.assertEqual(self.select(), [])
+
+    def test_pending_or_completed_step_is_not_stalled(self):
+        for status in ("pending", "completed"):
+            with self.subTest(status=status):
+                self.api.jobs[0]["steps"][0]["status"] = status
+                self.assertEqual(self.select(), [])
+
+    def test_unrelated_jobs_and_long_build_steps_are_not_budgeted(self):
+        for name in ("Clang analyzer shards", "macOS x86-64 checks", "unknown release"):
+            self.api.jobs[0]["name"] = name
+            self.assertEqual(self.select(), [])
+        self.api.jobs[0]["name"] = "macOS x86-64 release"
+        self.api.jobs[0]["steps"][0]["name"] = "Combination matrix (Linux, macOS)"
+        self.assertEqual(self.select(), [])
+
+    def test_malformed_missing_and_naive_timestamps_fail_closed(self):
+        for value in (None, "", "not-a-dateZ", "2026-09-29T12:53:23", 123):
+            with self.subTest(timestamp=value):
+                self.api.jobs[0]["steps"][0]["started_at"] = value
+                with self.assertRaises(ValueError):
+                    self.watch()
+                self.assertEqual(self.api.cancelled, [])
+
+    def test_future_step_does_not_trigger_deadline(self):
+        self.api.now = recovery.utc_timestamp("2026-09-29T12:53:22Z")
+        self.assertEqual(self.select(), [])
+
+    def test_step_cannot_predate_job(self):
+        self.api.jobs[0]["started_at"] = "2026-09-29T12:53:24Z"
+        with self.assertRaises(ValueError):
+            self.watch()
+        self.assertEqual(self.api.cancelled, [])
+
+    def test_invalid_job_identity_or_terminal_metadata_never_cancels(self):
+        original = copy.deepcopy(self.api.jobs[0])
+        for change in ({"id": None}, {"id": True}, {"run_id": 999}, {"head_sha": "b" * 40},
+                       {"conclusion": "success"}, {"completed_at": "2026-09-29T12:54:00Z"}):
+            with self.subTest(change=change):
+                self.api.jobs[0] = {**original, **change}
+                with self.assertRaises(ValueError):
+                    self.watch()
+                self.assertEqual(self.api.cancelled, [])
+
+    def test_invalid_step_identity_or_terminal_metadata_never_cancels(self):
+        original = copy.deepcopy(self.api.jobs[0]["steps"][0])
+        for change in ({"number": 0}, {"number": True}, {"conclusion": "success"},
+                       {"completed_at": "2026-09-29T12:54:00Z"}):
+            with self.subTest(change=change):
+                self.api.jobs[0]["steps"][0] = {**original, **change}
+                with self.assertRaises(ValueError):
+                    self.watch()
+                self.assertEqual(self.api.cancelled, [])
+
+    def test_duplicate_metadata_is_not_cancellation_authority(self):
+        self.api.jobs.append(copy.deepcopy(self.api.jobs[0]))
+        with self.assertRaises(ValueError):
+            self.watch()
+        self.assertEqual(self.api.cancelled, [])
+
+    def test_step_progress_between_discovery_and_confirmation_prevents_cancel(self):
+        def progress():
+            self.api.jobs[0]["steps"][0].update(status="completed", conclusion="success")
+        self.api.before_attempt_read = progress
+        with self.assertRaises(TimeoutError):
+            self.watch()
+        self.assertEqual(self.api.cancelled, [])
+        self.assertEqual(self.api.forced, [])
+
+    def test_replaced_job_step_or_start_does_not_reuse_discovery_proof(self):
+        def replace_job():
+            self.api.jobs[0]["id"] += 1
+        def replace_step():
+            self.api.jobs[0]["steps"][0]["number"] += 1
+        def replace_start():
+            self.api.jobs[0]["steps"][0]["started_at"] = "2026-09-29T12:53:24Z"
+        for change in (replace_job, replace_step, replace_start):
+            with self.subTest(change=change.__name__):
+                self.api = WatchdogGitHub()
+                self.api.before_attempt_read = change
+                with self.assertRaises(TimeoutError):
+                    self.watch()
+                self.assertEqual(self.api.cancelled, [])
+
+    def test_last_run_read_changed_attempt_prevents_cancel(self):
+        self.api.before_run_read = lambda: self.api.runs[0].update(run_attempt=2)
+        with self.assertRaises(recovery.SkipRecovery):
+            self.watch()
+        self.assertEqual(self.api.cancelled, [])
+
+    def test_last_run_read_completion_prevents_cancel(self):
+        self.api.before_run_read = lambda: self.api.runs[0].update(status="completed", conclusion="success")
+        with self.assertRaises(TimeoutError):
+            self.watch()
+        self.assertEqual(self.api.cancelled, [])
+
+    def test_normal_cancellation_completion_prevents_force(self):
+        self.api.after_sleep = lambda: self.api.runs[0].update(status="completed", conclusion="cancelled")
+        self.assertIn("no force cancellation", self.watch())
+        self.assertEqual(self.api.cancelled, [123])
+        self.assertEqual(self.api.forced, [])
+
+    def test_step_progress_after_normal_cancel_prevents_force(self):
+        self.api.after_sleep = lambda: self.api.jobs[0]["steps"][0].update(status="completed", conclusion="success")
+        self.assertIn("no force cancellation", self.watch())
+        self.assertEqual(self.api.cancelled, [123])
+        self.assertEqual(self.api.forced, [])
+
+    def test_new_attempt_after_normal_cancel_is_not_force_cancelled(self):
+        self.api.after_sleep = lambda: self.api.runs[0].update(run_attempt=2)
+        self.assertIn("identity changed", self.watch())
+        self.assertEqual(self.api.cancelled, [123])
+        self.assertEqual(self.api.forced, [])
+
+    def test_new_run_after_normal_cancel_is_not_force_cancelled(self):
+        self.api.after_sleep = lambda: self.api.runs[0].update(id=999)
+        self.assertIn("identity changed", self.watch())
+        self.assertEqual(self.api.forced, [])
+
+    def test_new_head_after_normal_cancel_is_not_force_cancelled(self):
+        self.api.after_sleep = lambda: self.api.runs[0].update(head_sha="b" * 40)
+        with self.assertRaises(ValueError):
+            self.watch()
+        self.assertEqual(self.api.cancelled, [123])
+        self.assertEqual(self.api.forced, [])
+
+    def test_normal_cancel_conflict_does_not_authorize_force(self):
+        self.api.accept_cancel = False
+        self.assertIn("conflicted", self.watch())
+        self.assertEqual(self.api.forced, [])
+        self.assertEqual(self.api.sleeps, [])
+
+    def test_changed_event_head_and_non_queue_events_never_cancel(self):
+        for field, value in (("head_sha", "b" * 40), ("run_attempt", 2),
+                             ("event", "pull_request"), ("event", "push"),
+                             ("event", "workflow_dispatch"), ("head_branch", "main")):
+            with self.subTest(field=field, value=value):
+                self.api = WatchdogGitHub()
+                self.api.event["workflow_run"][field] = value
+                with self.assertRaises((recovery.SkipRecovery, ValueError, AssertionError)):
+                    self.watch()
+                self.assertEqual(self.api.cancelled, [])
+
+    def test_api_read_error_does_not_authorize_cancellation(self):
+        def fail():
+            raise recovery.urllib.error.HTTPError("test", 503, "unavailable", {}, None)
+        self.api.before_attempt_read = fail
+        with self.assertRaises(recovery.urllib.error.HTTPError):
+            self.watch()
+        self.assertEqual(self.api.cancelled, [])
+
+    def test_force_api_error_propagates_without_retry(self):
+        calls = []
+        def cancel(run_id, *, force=False):
+            calls.append((run_id, force))
+            if force:
+                raise recovery.urllib.error.HTTPError("test", 403, "forbidden", {}, None)
+            return True
+        self.api.cancel = cancel
+        with self.assertRaises(recovery.urllib.error.HTTPError):
+            self.watch()
+        self.assertEqual(calls, [(123, False), (123, True)])
+
+    def test_cancel_http_contract(self):
+        api = recovery.GitHub("buster14a/buster", "test-token-not-used")
+        calls = []
+        def request(path, *, method="GET", **query):
+            calls.append((path, method, query))
+        api.request = request
+        self.assertTrue(api.cancel(123))
+        self.assertTrue(api.cancel(123, force=True))
+        self.assertEqual(calls, [("actions/runs/123/cancel", "POST", {}),
+                                 ("actions/runs/123/force-cancel", "POST", {})])
+        for code in (409, 403, 429, 503):
+            def fail(path, *, method="GET", **query):
+                raise recovery.urllib.error.HTTPError("test", code, "error", {}, None)
+            api.request = fail
+            for force in (False, True):
+                with self.subTest(code=code, force=force):
+                    if code == 409:
+                        self.assertFalse(api.cancel(123, force=force))
+                    else:
+                        with self.assertRaises(recovery.urllib.error.HTTPError):
+                            api.cancel(123, force=force)
+
+
 if __name__ == "__main__":
     unittest.main()

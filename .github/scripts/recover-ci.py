@@ -3,9 +3,12 @@
 
 recover() owns eligibility and the single PR rerun request. watch() observes
 the live required checks for one merge group, plus Buster CI jobs before its
-aggregate finishes. Only the trusted default-branch workflow mutates runs.
+aggregate finishes. The step watchdog bounds stalled workflow-tools jobs from
+this independent observer; see docs/ci-stalled-step-watchdog.md. Only the
+trusted default-branch workflow mutates runs.
 """
 
+from datetime import datetime
 import html
 import json
 import os
@@ -23,6 +26,19 @@ WORKFLOW_PATH = ".github/workflows/ci.yml"
 OPT_OUT_LABEL = "ci-no-retry"
 WATCH_PROBES = 600
 WATCH_SECONDS = 30
+# Match ci.yml's workflow_tools step budget. The independent observer allows
+# two further minutes for timeout cleanup and metadata propagation (#1866).
+WORKFLOW_TOOLS_STEP = "Workflow tool regression tests"
+WORKFLOW_TOOLS_TIMEOUT_SECONDS = {
+    "Linux x86-64 release": 120,
+    "Linux AArch64 release": 120,
+    "macOS x86-64 release": 300,
+    "macOS AArch64 release": 300,
+    "Windows x86-64 release": 300,
+    "Windows AArch64 release": 300,
+}
+STEP_REPORTING_GRACE_SECONDS = 120
+STEP_CANCEL_GRACE_SECONDS = 120
 RULESET_ID = 22537199
 GITHUB_ACTIONS_APP_ID = 15368
 REQUIRED_WORKFLOW_PATHS = {
@@ -72,9 +88,10 @@ class GitHub:
             raise SkipRecovery("Pagination limit reached; inspect manually.")
         return result
 
-    def cancel(self, run_id):
+    def cancel(self, run_id, *, force=False):
+        endpoint = "force-cancel" if force else "cancel"
         try:
-            self.request("actions/runs/" + str(run_id) + "/cancel", method="POST")
+            self.request("actions/runs/" + str(run_id) + "/" + endpoint, method="POST")
             cancelled = True
         except urllib.error.HTTPError as error:
             if error.code != 409:
@@ -228,7 +245,111 @@ def cancel_merge_group_runs(api, head_sha):
     return cancelled
 
 
-def watch(api, event, sleep_fn=time.sleep, max_probes=WATCH_PROBES):
+def stalled_tool_steps(run, jobs, now):
+    """Select only explicitly budgeted running steps; queued time is irrelevant."""
+    stalled = []
+    if run.get("status") == "in_progress" and run.get("conclusion") is None:
+        for job in jobs:
+            budget = WORKFLOW_TOOLS_TIMEOUT_SECONDS.get(job.get("name"))
+            if budget is None or job.get("status") != "in_progress":
+                continue
+            for step in job.get("steps", []):
+                if (step.get("name") != WORKFLOW_TOOLS_STEP or
+                        step.get("status") != "in_progress"):
+                    continue
+                if (type(job.get("id")) is not int or job["id"] <= 0 or
+                        job.get("run_id") != run["id"] or
+                        job.get("head_sha") != run["head_sha"] or
+                        job.get("conclusion") is not None or
+                        job.get("completed_at") is not None or
+                        type(step.get("number")) is not int or step["number"] <= 0 or
+                        step.get("conclusion") is not None or
+                        step.get("completed_at") is not None):
+                    raise ValueError("Invalid running workflow-tools identity.")
+                started = utc_timestamp(step.get("started_at"))
+                job_started = utc_timestamp(job.get("started_at"))
+                if started < job_started:
+                    raise ValueError("Workflow-tools step predates its job.")
+                elapsed = now - started
+                deadline = budget + STEP_REPORTING_GRACE_SECONDS
+                if elapsed >= deadline:
+                    stalled.append({
+                        "run_id": run["id"], "attempt": run["run_attempt"],
+                        "head_sha": run["head_sha"], "job_id": job["id"],
+                        "job": job["name"], "step": step["name"],
+                        "number": step["number"], "started_at": step["started_at"],
+                        "budget_seconds": budget, "deadline_seconds": deadline,
+                        "elapsed_seconds": int(elapsed),
+                    })
+    identities = [stalled_step_identity(step) for step in stalled]
+    if len(identities) != len(set(identities)):
+        raise ValueError("Duplicate running workflow-tools identity.")
+    return stalled
+
+
+def utc_timestamp(value):
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise ValueError("Expected a GitHub UTC start timestamp.")
+    return datetime.fromisoformat(value[:-1] + "+00:00").timestamp()
+
+
+def stalled_step_identity(step):
+    return tuple(step[key] for key in (
+        "run_id", "attempt", "head_sha", "job_id", "job", "step", "number", "started_at"))
+
+
+def confirm_stalled_step(api, event, expected, now_fn):
+    """Never cancel from the discovery snapshot or a previous job attempt."""
+    original = event["workflow_run"]
+    run = latest_group_runs(api, original["head_sha"]).get(WORKFLOW_PATH)
+    if run is None:
+        raise SkipRecovery("Buster CI merge-group run disappeared.")
+    check_watch_run(run, original, event["repository"])
+    confirmed = None
+    if run.get("status") == "in_progress" and run.get("conclusion") is None:
+        path = "actions/runs/" + str(run["id"])
+        jobs = api.all(path + "/attempts/" + str(run["run_attempt"]) + "/jobs", "jobs")
+        matches = [step for step in stalled_tool_steps(run, jobs, now_fn())
+                   if stalled_step_identity(step) == stalled_step_identity(expected)]
+        fresh = api.request(path)
+        check_watch_run(fresh, original, event["repository"])
+        if (matches and fresh.get("status") == "in_progress" and
+                fresh.get("conclusion") is None):
+            confirmed = matches[0]
+    return confirmed
+
+
+def stop_stalled_step(api, event, expected, sleep_fn, now_fn):
+    """Normal cancel, then one bounded, identity-revalidated escalation."""
+    confirmed = confirm_stalled_step(api, event, expected, now_fn)
+    message = None
+    if confirmed is not None:
+        evidence = json.dumps(confirmed, sort_keys=True)
+        # Flush before the write: even a timeout/uncertain API response retains
+        # the triggering identity. Never retry a POST on a transport error.
+        print("CI_STEP_TIMEOUT_V1 " + evidence, flush=True)
+        accepted = api.cancel(confirmed["run_id"])
+        if not accepted:
+            disposition = "normal cancellation conflicted; no force cancellation requested"
+        else:
+            print("CI_STEP_TIMEOUT_CANCEL_V1 normal=requested " + evidence, flush=True)
+            sleep_fn(STEP_CANCEL_GRACE_SECONDS)
+            try:
+                still_stalled = confirm_stalled_step(api, event, confirmed, now_fn)
+                if still_stalled is None:
+                    disposition = "normal cancellation requested; step/run progressed or completed; no force cancellation"
+                elif api.cancel(confirmed["run_id"], force=True):
+                    disposition = "normal and force cancellation requested; terminal result not yet verified"
+                else:
+                    disposition = "normal cancellation requested; force cancellation conflicted"
+            except SkipRecovery as changed:
+                disposition = "normal cancellation requested; no force cancellation: " + str(changed)
+        message = "Merge-group step watchdog: " + evidence + "; " + disposition + "."
+        print("CI_STEP_TIMEOUT_DISPOSITION_V1 " + message, flush=True)
+    return message
+
+
+def watch(api, event, sleep_fn=time.sleep, max_probes=WATCH_PROBES, now_fn=time.time):
     repository = event["repository"]
     original = event["workflow_run"]
     if event.get("action") != "in_progress":
@@ -244,6 +365,11 @@ def watch(api, event, sleep_fn=time.sleep, max_probes=WATCH_PROBES):
             raise SkipRecovery("Buster CI merge-group run was superseded or disappeared.")
         check_watch_run(run, original, repository)
         jobs = api.all(run_path + "/jobs", "jobs", filter="latest")
+        stalled = stalled_tool_steps(run, jobs, now_fn())
+        if stalled:
+            message = stop_stalled_step(api, event, stalled[0], sleep_fn, now_fn)
+            if message is not None:
+                return message
         failed = []
         for job in jobs:
             status = job.get("status")
