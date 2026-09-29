@@ -1577,6 +1577,18 @@ static void test_retirement_statistics(void)
         series.family_index = 0;
         series.metric_index = TP_RETIREMENT_VARIABLE_METRICS;
         CHECK(tp_retirement_assess(&plan, &series, NULL, 0).outcome == TP_RETIREMENT_INVALID);
+        /* A1 appended the batch process pair without moving existing indices. */
+        CHECK(TP_RETIREMENT_WALL_TIME == 0 && TP_RETIREMENT_PEAK_MEMORY == 1 &&
+              TP_RETIREMENT_GENERATED_RUNTIME == 2 && TP_RETIREMENT_BATCH_WALL_TIME == 3 &&
+              TP_RETIREMENT_BATCH_PEAK_RSS == 4 && TP_RETIREMENT_VARIABLE_METRICS == 5);
+        series.metric_index = TP_RETIREMENT_BATCH_WALL_TIME;
+        CHECK(tp_retirement_assess(&plan, &series, NULL, 0).valid);
+        series.metric_index = TP_RETIREMENT_BATCH_PEAK_RSS;
+        CHECK(tp_retirement_assess(&plan, &series, NULL, 0).valid);
+        for (unsigned metric = 0; metric < TP_RETIREMENT_VARIABLE_METRICS; ++metric)
+            for (unsigned other = metric + 1; other < TP_RETIREMENT_VARIABLE_METRICS; ++other)
+                CHECK(tp_retirement_seed(plan.seed, TP_RETIREMENT_SEED_DOMAIN_BOOTSTRAP, metric, 0, 0) !=
+                      tp_retirement_seed(plan.seed, TP_RETIREMENT_SEED_DOMAIN_BOOTSTRAP, other, 0, 0));
         series.metric_index = 0;
         plan.resamples = TP_RETIREMENT_MIN_RESAMPLES - 1;
         CHECK(tp_retirement_assess(&plan, &series, NULL, 0).outcome == TP_RETIREMENT_INVALID);
@@ -1617,6 +1629,79 @@ static void test_retirement_statistics(void)
         CHECK(!tp_retirement_validate(&plan, &series, NULL, 0));
         free(workspace);
     }
+}
+
+/* One aggregate and one exact cell for each of the five variable metrics, in
+ * member order. first_metric is the index written for the first member, so a
+ * caller can present a batch member under another metric's index. */
+static int test_retirement_series(char const* path, unsigned first_metric)
+{
+    static char const* const names[] = {"compiler_batch_peak_rss", "compiler_batch_wall_time",
+                                        "compiler_peak_memory", "compiler_wall_time",
+                                        "generated_runtime"};
+    static unsigned const metrics[] = {TP_RETIREMENT_BATCH_PEAK_RSS, TP_RETIREMENT_BATCH_WALL_TIME,
+                                       TP_RETIREMENT_PEAK_MEMORY, TP_RETIREMENT_WALL_TIME,
+                                       TP_RETIREMENT_GENERATED_RUNTIME};
+    static char const* const cells[] = {"group=0", "group=0", "row=0", "row=0", "row=0"};
+    static char const* const aggregate_limits[] = {"1.02", "1.02", "1.02", "1.02", "1.03"};
+    static char const* const cell_limits[] = {"1.05", "1.05", "1.05", "1.05", "1.03"};
+    FILE* file = fopen(path, "wb");
+    int ok = file != NULL &&
+             fputs("version=1 seed=20260913 bootstrap_members=5 cell_members=5 pairs=60 "
+                   "resamples=100000 frozen=1 members=10\n", file) >= 0;
+    for (unsigned index = 0; ok && index < 5; ++index)
+    {
+        for (unsigned kind = 0; ok && kind < 2; ++kind)
+        {
+            unsigned metric = index == 0 && kind == 0 ? first_metric : metrics[index];
+            ok = kind ? fprintf(file, "member=%s/cell/%s metric=%u kind=1 family=%u cells=1 pairs=60 resamples=0 limit=%s\n",
+                                names[index], cells[index], metric, index, cell_limits[index]) > 0 :
+                        fprintf(file, "member=%s/aggregate metric=%u kind=0 family=%u cells=1 pairs=60 resamples=100000 limit=%s\n",
+                                names[index], metric, index, aggregate_limits[index]) > 0;
+            for (unsigned ratio = 0; ok && ratio < 2 * TP_RETIREMENT_MIN_PAIRS_PER_ROUND; ++ratio)
+                ok = fputs("ratio=1\n", file) >= 0;
+            ok = ok && fputs("end\n", file) >= 0;
+        }
+    }
+    if (file && fclose(file) != 0) ok = 0;
+    return ok;
+}
+
+/* The reviewed retirement-replay adapter consumes the A1 batch series. */
+static void test_retirement_replay(char const* root)
+{
+    char input[TP_PATH_CAP], output[TP_PATH_CAP], result[16384];
+    TpConfig config = {0};
+    CHECK(tp_path(input, root, "retirement-replay-series.txt") &&
+          tp_path(output, root, "retirement-replay-result.json"));
+    config.command = "retirement-replay";
+    config.retirement_input = input;
+    config.output = output;
+    CHECK(test_retirement_series(input, TP_RETIREMENT_BATCH_PEAK_RSS));
+    CHECK(tp_retirement_replay(&config) == 0);
+    FILE* file = fopen(output, "rb");
+    size_t count = file ? fread(result, 1, sizeof(result) - 1, file) : 0;
+    if (file) fclose(file);
+    result[count] = 0;
+    CHECK(count > 0 && count < sizeof(result) - 1);
+    CHECK(strstr(result, "{\"member\":\"compiler_batch_peak_rss/aggregate\",\"metric\":4,\"kind\":0,") != NULL);
+    CHECK(strstr(result, "{\"member\":\"compiler_batch_peak_rss/cell/group=0\",\"metric\":4,\"kind\":1,") != NULL);
+    CHECK(strstr(result, "{\"member\":\"compiler_batch_wall_time/aggregate\",\"metric\":3,\"kind\":0,") != NULL);
+    CHECK(strstr(result, "{\"member\":\"compiler_batch_wall_time/cell/group=0\",\"metric\":3,\"kind\":1,") != NULL);
+    CHECK(strstr(result, "{\"member\":\"compiler_peak_memory/cell/row=0\",\"metric\":1,\"kind\":1,") != NULL);
+    unsigned members = 0, passes = 0;
+    for (char const* cursor = strstr(result, "{\"member\":"); cursor; cursor = strstr(cursor + 1, "{\"member\":"))
+        ++members;
+    for (char const* cursor = strstr(result, "\"outcome\":\"pass\""); cursor; cursor = strstr(cursor + 1, "\"outcome\":\"pass\""))
+        ++passes;
+    CHECK(members == 10 && passes == 10);
+    /* A batch member under another metric's index, or an unknown index, is rejected. */
+    CHECK(test_retirement_series(input, TP_RETIREMENT_WALL_TIME));
+    CHECK(tp_retirement_replay(&config) == 2);
+    CHECK(test_retirement_series(input, TP_RETIREMENT_BATCH_WALL_TIME));
+    CHECK(tp_retirement_replay(&config) == 2);
+    CHECK(test_retirement_series(input, TP_RETIREMENT_VARIABLE_METRICS));
+    CHECK(tp_retirement_replay(&config) == 2);
 }
 
 static void test_retirement_execution(void)
@@ -2271,6 +2356,7 @@ int main(int argc, char** argv)
         test_maximum_jobs(root);
         test_processes(executable, root);
         test_retirement_statistics();
+        test_retirement_replay(root);
         test_retirement_execution();
         test_retirement_records(root);
         test_retirement_samples(root);

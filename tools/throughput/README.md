@@ -567,8 +567,20 @@ provided inside every block statistic, before the predeclared median operation;
 the evidence must publish that block-statistic median for each round and pooled
 scope rather than silently substituting the other nonlinear ordering.
 
-The complete declared family contains all wall-time, RSS and generated-runtime
-overall aggregates, required slices and cells. It is split before measurement
+Amendment A1 of the contract makes five variable metrics, in
+`TpRetirementMetric` index order: per-input compiler wall time (0), per-input
+peak memory (1, formerly process peak RSS at the same index), generated runtime
+(2), and the gated batch process pair appended as batch compiler wall time (3)
+and batch compiler peak RSS (4). Indices are stable because they select the
+bootstrap seed domain. Wall-time and memory cells are timed native-host fixture
+rows; the batch pair's cells are object batch groups; the estimator is the same
+for both. `retirement-replay` binds each member's metric token prefix
+(`compiler_wall_time`, `compiler_peak_memory`, `generated_runtime`,
+`compiler_batch_wall_time`, `compiler_batch_peak_rss`) to its index and rejects
+a member presented under another metric's index.
+
+The complete declared family contains all overall aggregates, required slices
+and cells of those five metrics. It is split before measurement
 into an aggregate/slice bootstrap partition and an exact-cell partition. Each
 partition receives half of family alpha 0.05. Within a partition of `N` members,
 each upper or lower bound in each of the three scopes uses one-sided tail alpha
@@ -580,15 +592,17 @@ bounded bootstrap partition. Resampled statistics use at least 100,000 draws,
 are sorted, and use inverse empirical CDF/type 1: quantile `p` is
 `sorted[ceil(p * resamples) - 1]`, clamped to the available ranks. The bootstrap
 partition is capped at 80 members per scope, which leaves at least 5.208 expected
-draws in each corrected tail at 100,000 resamples. The frozen binding axes have
-at most 25 explicit members per metric (one aggregate, 12 targets, one
-`baseline` CPU, four allocators, two frontends, two PIC modes, and three
-artifact stages), hence at most 75 across the three variable metrics.
+draws in each corrected tail at 100,000 resamples. Under A1 the family is
+derived over the native-host timed projection, so the target dimension has one
+value. The frozen binding axes then have at most 16 explicit members per row
+metric (one aggregate, one target, three CPU profiles, four allocators, two
+frontends, two PIC modes, and three artifact stages) and at most 14 per batch
+metric (object stage only), hence at most 76 across the five variable metrics.
 
 Both `N` values are per-scope cardinalities derived without producer totals.
 For each named scope, bootstrap `N` is the count of that scope's aggregate and
 slice entries in `statistical_family.members`; exact-cell `N` is the sum of that
-scope's three variable-metric `cell_counts`. The immutable binding repeats the
+scope's five variable-metric `cell_counts`. The immutable binding repeats the
 same member identities across all three scopes. If independently derived scope
 counts differ, or either plan count differs from them, version-1 replay is
 invalid. This makes the extra factor of two in `12 * N` unambiguously the two
@@ -606,10 +620,10 @@ inner union bound is distribution-free and costs no more than the declared
 pooled tail allocation. An unattainable finite endpoint is honestly reported as
 zero or infinity. The exact partition supports 300,000 metric cells per scope.
 The current full census replay retains 78,912 canonical rows, of which 72,672
-are compiler eligible and 6,240 are untimed. The 100,000-cell cap therefore
-leaves explicit room for admitted real-workload rows,
-and the 300,000-member cap is exactly three variable metrics for that maximum
-population in each scope. These caps do not reduce resamples or authorize excluding a
+are compiler eligible and 6,240 are untimed. Under A1 only the native-host
+projection (at most 6,576 object rows plus stage rows, and 80 object batch
+groups) enters the family, so the 100,000-cell cap and the 300,000-member cap
+leave wide room for five variable metrics. These caps do not reduce resamples or authorize excluding a
 required cell. The caller derives the bootstrap count from one scope's explicit
 aggregate/slice members and the cell count by summing that scope's
 variable-metric `cell_counts`; a mismatch or a larger final manifest is invalid

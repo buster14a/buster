@@ -2,8 +2,11 @@
  * machine-replayable method for native-retirement-performance-v1 only.
  *
  * A family member is an overall aggregate, a required slice, or a cell for
- * one variable metric. Its input is cell-major [cell][round][pair] paired
- * candidate/baseline ratios. Within a two-pair block the statistic is the
+ * one of the five variable metrics (TpRetirementMetric). A cell is a timed
+ * fixture row, or an object batch group for the batch process metric pair;
+ * the estimator is identical for both. Its input is cell-major
+ * [cell][round][pair] paired candidate/baseline ratios. Within a two-pair
+ * block the statistic is the
  * equal-weight geometric mean over both ratios and every included cell.
  * Round and pooled point estimates are medians of those block statistics.
  *
@@ -58,11 +61,19 @@ typedef enum TpRetirementOutcome
     TP_RETIREMENT_INCONCLUSIVE
 } TpRetirementOutcome;
 
+/* Variable-metric indices are stable evidence coordinates: they select the
+ * bootstrap seed domain, so existing values never move. Amendment A1 renamed
+ * index 1 from process peak RSS to per-input peak memory (same index) and
+ * appended the gated batch process metric pair, whose cells are object batch
+ * groups. The binding validator's STATISTICAL_METRICS uses this order.
+ */
 typedef enum TpRetirementMetric
 {
     TP_RETIREMENT_WALL_TIME,
-    TP_RETIREMENT_PEAK_RSS,
+    TP_RETIREMENT_PEAK_MEMORY,
     TP_RETIREMENT_GENERATED_RUNTIME,
+    TP_RETIREMENT_BATCH_WALL_TIME,
+    TP_RETIREMENT_BATCH_PEAK_RSS,
     TP_RETIREMENT_VARIABLE_METRICS
 } TpRetirementMetric;
 
