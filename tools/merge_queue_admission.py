@@ -76,6 +76,8 @@ POLICY_PATHS = (
     "tools/native_retirement_sdks.py",
     ".github/workflows/merge-queue-admission.yml",
     ".github/workflows/merge-queue-reconcile.yml",
+    ".github/workflows/ci-merge-group-watch.yml",
+    ".github/workflows/ci-recovery.yml",
     ".github/scripts/recover-ci.py",
     ".github/workflows/api-migration-policy.yml",
     ".github/workflows/native-retirement-admission.yml",
