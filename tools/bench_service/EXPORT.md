@@ -144,7 +144,25 @@ result binding. The production Python validator then reconstructs the entire
 population, eligibility/census and transcript-to-sample joins, statistics and
 the publication/replay closure using the external execution receipt digest and
 immutable Git identities. The handoff additionally joins the export's numeric
-job and attempt to the validated execution receipt. A failed, interrupted or
+job and attempt to the validated execution receipt (`authenticated_attempt_join`):
+the receipt names the service's job label `job-JOB`
+(`bq_retirement_campaign_job_label`) and the attempt token, and it must hash
+to the independently supplied execution-receipt digest, so a self-consistent
+forged receipt with recomputed in-bundle descriptors is rejected. The binding
+record's location inside the result is owned by E's result composer; until
+that contract lands the operator names it with `--binding`, and
+`COMPOSER_BINDING_PATH` in the script is the marked hook that will fix it.
+`retirement_export_replay_real_test.py`, run after `bench_throughput self-test`
+with its output directory, drives real A1 output (metrics shards, untimed
+batches, the two-shard execution receipt and numeric samples) through these
+readers and the publication path, including reordered, missing, truncated and
+forged inputs. With the real binding validator the CLI chain stops there,
+because no composer-produced binding exists yet. With a validator test double,
+the CLI's `authenticated_attempt_join` accepts the genuine receipt and refuses
+a wrong attempt or a forged receipt. The archive and the unpacker in that test
+are Python stand-ins. The native `unpack-export` needs a receipt the service
+itself sealed for a finalized service result, and the worker's full-result
+binding; the blocked retirement recipe cannot finalize such a result. A failed, interrupted or
 invalid exported attempt can be unpacked and retained but exits before the
 performance replay. A verified replay reports
 `verified-without-admission`; it cannot admit the recipe or invent a performance
@@ -178,11 +196,14 @@ remove only that uncommitted pending artifact before retrying. A corrupt sealed
 receipt is never replaced automatically.
 
 The sealed file contains a durable receipt, a digest-bound chunk index, and
-original archive bytes. The first read verifies the complete index digest;
-subsequent reads reuse that check only while the exact receipt, inode, size,
-owner, mode and nanosecond timestamps remain unchanged. Every chunk checks
-its own indexed digest and the opened/named inode before replying. A service
-restart verifies the complete index again. The client independently
+original archive bytes. The first read verifies the complete index digest
+and keeps one SHA-256 per 64 KiB index page in memory. Subsequent reads reuse
+that check only while the exact receipt, inode, size, owner, mode and
+nanosecond timestamps remain unchanged, and even then reread the cursor's
+whole index page and require its verified page digest, so a rewrite that
+leaves the timestamps unchanged still fails. Every chunk checks its own
+indexed digest and the opened/named inode before replying. A service restart
+verifies the complete index again. The client independently
 hashes the complete archive. A modified snapshot or partial transfer cannot
 be reported as success. An identical retry, including after daemon restart,
 returns the same receipt and bytes. No cursor, queue event or journal record is
@@ -229,47 +250,15 @@ than truncating a successful archive. Filesystem syscalls still depend on a
 responsive local filesystem; the preparation child provides the outer deadline
 for exhaustive validation and file reads.
 
-For the proposed 60-pair retirement population, 17,441,280 paired numeric
-records across A/A and A/B alone require at least 3,139,430,400 bytes at
-180 bytes per record, before transcripts, manifests, binaries or logs. An
-operator must provision space for every retained copy below. The larger limits
-only remove a transport ceiling; the recipe remains blocked until its complete
-producer, validators and service tests are reviewed.
+### Retirement capacity ledger (A1)
 
-Arithmetic capacity for the historical 78,912-row census and 72,672
-compiler-eligible rows, **not a current trusted support/census population,
-transferred archive or executed retirement run**. Recompute every row count
-from the trusted support/census inputs at the exact attempt before sizing or
-admission:
-
-| Component | Modeled two-stage maximum at 60 pairs | Relevant ceiling |
-|---|---:|---:|
-| Compiler invocations, including warmups | 35,463,936 (17,731,968 per stage) | Transcript: 65,536 records and 64 MiB per shard; at most 902 bytes per line |
-| Additional runtime invocations if every compiler row is runtime eligible | 35,463,936 | Same transcript ceilings |
-| Transcript shards for compiler and runtime at that upper bound | 1,084 (542 per stage) | 2,048 transcript shards per stage; 4,096 bundle entries shared with all files/directories |
-| Paired numeric records | 17,441,280 (8,720,640 per stage) | 16,777,216 records per partition; 16 GiB total #615 input per manifest |
-| Numeric shards at 131,072 records each | 134 (67 per stage) | 64 MiB per published file; at most 415 bytes per line; 2,878 bundle entries remain for controls, binaries, logs and directories |
-| Worst-case transcript plus numeric shard bytes at the proven line widths | 71,215,071,744 bytes (63,976,940,544 transcript, 7,238,131,200 numeric) | Within the 128 GiB indexed-payload ceiling, leaving 66,223,881,728 bytes for all other files |
-
-The line widths are source-proven maxima of the two serializers, and the
-writers reject a wider line, so a full 65,536-record transcript shard is at
-most 59,113,472 bytes and a full 131,072-record numeric shard at most
-54,394,880 bytes, both below the 64 MiB file cap.
-`tp_retirement_campaign_capacity` rejects a campaign whose shard files leave
-fewer than three other store entries or whose worst-case shard payload exceeds
-128 GiB. For the 77,762-row compiler-eligible envelope this admits at most 198
-pairs with no runtime rows and 108 pairs when every row is runtime eligible;
-254 pairs needs 175,875,870,640 and 318,964,171,600 bytes respectively.
-`tp_retirement_campaign_store_preflight` then adds, before any timing, the
-store-owned control files (at least the execution receipt at its 1 MiB bound,
-plus any manifest the store publishes) and the caller's exact external entries
-and byte reservation; `tp_retirement_store_plan` enforces the resulting
-owned-file and owned-byte budget, shards plus controls, at publication. The actual producer must still inventory **every** retained
-file and directory and respect the 64 MiB per-file, 192-byte path, 8 MiB index
-and 1 MiB execution-receipt bounds. These arithmetic figures cannot establish
-that real logs and binaries fit. The existing service tests transfer small
-smoke archives; no full retirement export or clean replay has been completed at
-this point.
+The larger limits only remove a transport ceiling; the recipe remains blocked
+until its complete producer, validators and service tests are reviewed. An
+operator must provision space for every retained copy below. All figures in
+this section are **arithmetic over the checked-in sources, not a trusted
+support/census population, a transferred archive or an executed retirement
+run**. Recompute them from the trusted support/census inputs and the frozen
+plan at the exact attempt before sizing or admission.
 
 (A1, M4) The amended campaign times native-host batch groups instead of rows.
 `tools/throughput/retirement_capacity.py` derives, from the support
@@ -280,8 +269,11 @@ singletons counted from canonical #508 rows when supplied, otherwise at the
 validator's declaration minimum of 2 (one native link, one native self-host;
 6,482 timed rows at most). Per-batch metrics artifacts are byte ranges of
 64 MiB metrics shards (at most `2 * ceil(bytes / 64 MiB)` shards per writer),
-so they no longer need one store entry each. Worst-case payload, excluding the
-caller's external entries and bytes, with a reviewed 4 KiB header per artifact:
+so they no longer need one store entry each. The untimed code-artifact
+batches (two variants times production and reproduction, 3,520 batches) add
+their own metrics shards and one sealed batch-record file. Worst-case store
+payload, excluding the caller's external entries and bytes, with a reviewed
+4 KiB header per artifact:
 
 | Pairs | Per-input metrics bound | Invocations per stage | Metrics artifacts per stage | Payload entries | Payload bytes | Verdict |
 |---:|---:|---:|---:|---:|---:|---|
@@ -300,24 +292,117 @@ measured metrics sizes must satisfy. The same campaign with one store entry
 per metrics artifact would need 166,779 entries at 254 pairs. The
 per-input metrics bound and every time bound are reviewed pins of the campaign
 budget; nothing here admits the recipe.
+`tp_retirement_campaign_store_preflight` then adds, before any timing, the
+store-owned control files (at least the execution receipt at its 1 MiB bound,
+plus any manifest the store publishes) and the caller's exact external entries
+and byte reservation; `tp_retirement_store_plan` enforces the resulting
+owned-file and owned-byte budget, shards plus controls, at publication.
+
+**Export-side ledger.** `python3 tools/bench_service/retirement_export_replay.py
+a1-capacity` (functions `a1_export_ledger`, `composer_bounds`) maps every
+scenario of that model onto the export and worker limits. It adds:
+- the lane-E composer's outputs, mirroring `tp_retirement_compose_bounds`
+  (#1879): the #615 result-input manifests, the code-record set (at most
+  78,914 rows × 649 bytes), the #619 adapter input (series) and output
+  (replay), the result bundle, the execution receipt and the sealed-result
+  record;
+- the prior sealed-closure files (at least 40, derived from the validator's
+  `_all_artifacts` plus `contract.source` and the execution plan; census
+  projections add more);
+- the worker's three control entries (manifest, `BQ-BUNDLE-V1` index,
+  outcome).
+
+It checks each file kind against the 64 MiB per-file cap and reports what is
+left for census projections, retained logs and every directory. The family's
+aggregate and slice members are taken at the #619 cap of 80, which can only
+enlarge the adapter bounds. With the declaration's two runtime stage
+singletons:
+
+| Pairs | Per-input metrics bound | Owned files | Entries left | Owned bytes | Bytes left | Adapter input | Verdict |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 60 | 4 KiB | 469 | 3,584 | 15,907,812,202 | 121,531,141,270 | 406,664,536 | refused (#1880) |
+| 60 | 8 KiB | 909 | 3,144 | 30,603,866,986 | 106,835,086,486 | 406,664,536 | refused (#1880) |
+| 60 | 16 KiB | 1,785 | 2,268 | 59,995,976,554 | 77,442,976,918 | 406,664,536 | refused (#1880) |
+| 254 | 4 KiB | 1,811 | 2,242 | 62,553,418,890 | 74,885,534,582 | 1,710,443,864 | refused (#1880) |
+| 254 | 8 KiB | 3,531 | 522 | 120,273,595,530 | 17,165,357,942 | 1,710,443,864 | refused (#1880) |
+| 254 | 16 KiB | 6,971 | -2,918 | 235,713,948,810 | -98,274,995,338 | 1,710,443,864 | refused (#1880, entries, bytes) |
+
+**No A1 scenario fits today.** The composer writes the #619 adapter input as
+one file of about `8 × cells × 2P` 32-byte ratio lines. At A1 scale that is
+far above the 64 MiB per-file cap, and `tp_retirement_compose_bounds` refuses
+the family before timing. #1880 tracks sharding it; neither cap may be raised.
+The ledger also prints a review-only projection: with #1880's 64 MiB shards
+(7 at 60 pairs, 26 at 254 pairs), every two-runtime scenario except 254 pairs
+at 16 KiB would fit. A scenario with no runtime-eligible row is refused
+anyway, because generated runtime would have no #619 cell. The projection
+never turns a refused scenario into a fitting one.
+
+A full metrics or transcript shard is exactly 67,108,864 bytes, the per-file
+cap; the worker and `bq_export_inventory` reject only a larger file, and
+`bq_test_export_inventory` pins that boundary. The untimed batch-record file
+is at most 3,520 × 747 = 2,629,440 bytes and a numeric shard at most
+131,072 × 330 = 43,253,760 bytes. The export envelope never binds before the
+store: the 128 GiB store ceiling plus a 208-byte header and path for all 4,096
+entries is 137,439,805,440 bytes, below the 137,448,259,584-byte archive cap.
+At 254 pairs and an 8 KiB per-input bound only 522 entries and about 16.0 GiB
+remain for census projections, logs and every directory. A real layout must
+be checked against this ledger before that bound is pinned.
 
 At maximum capacity, reserve six independent copies: retained service result,
 sealed service spool (including its chunk index), gateway download, immutable
 test publication, fresh retrieval and extracted clean replay. The
 128 GiB indexed-payload ceiling yields **824,805,176,192 logical file/transport
 bytes** when both file and archive fields reach their respective ceilings.
-This is a simultaneous upper bound, not a measured storage requirement or
-proof that any producer can fill both ceilings. It excludes directory metadata,
-filesystem allocation, validator temporary space and any separate #510
-publication copy. At the archive ceiling of 137,448,259,584 bytes, the sealed
-spool reserves
-137,582,487,424 bytes including the 1,024-byte receipt and 2,097,294
-64-byte chunk digests. These are reservations, not transferred bytes. The
-reviewed whole-job deadline must also accommodate both stages; the current
-3,600-second smoke-unit limit does not prove this population fits. Export
-preparation, native unpack and independent binding replay have separate 24-hour
-budgets; bound the full end-to-end operator window as the sum of their observed times, not the
-per-operation receipt wait alone.
+The ledger also reports each scenario's owned-file six-copy floor, before the
+prior closure, logs and controls: 721,778,744,380 bytes at 254 pairs and 8 KiB.
+These are simultaneous upper bounds, not measured storage requirements or
+proof that any producer can fill both ceilings. They exclude directory
+metadata, filesystem allocation, validator temporary space and any separate
+#510 publication copy. At the archive ceiling of 137,448,259,584 bytes, the
+sealed spool reserves 137,582,487,424 bytes including the 1,024-byte receipt
+and 2,097,294 64-byte chunk digests. These are reservations, not transferred
+bytes. The reviewed whole-job deadline must also accommodate both stages; the
+current 3,600-second smoke-unit limit does not prove this population fits.
+Export preparation, native unpack and independent binding replay have separate
+24-hour budgets; bound the full end-to-end operator window as the sum of their
+observed times, not the per-operation receipt wait alone. The actual producer
+must still inventory **every** retained file and directory and respect the
+64 MiB per-file, 192-byte path, 8 MiB index and 1 MiB execution-receipt
+bounds. The existing service tests transfer small smoke archives; no full
+retirement export or clean replay has been completed at this point.
+
+#### Superseded: pre-A1 per-row capacity (kept for the record)
+
+**Superseded by Amendment A1** (the #36 decision of 2026-09-29). This model
+timed one process per canonical row on all twelve targets, gave each
+per-invocation metrics artifact no store entry and had no untimed code-byte
+batches. Do not size or admit a campaign from it; use the A1 ledger above.
+
+For the proposed 60-pair retirement population, 17,441,280 paired numeric
+records across A/A and A/B alone require at least 3,139,430,400 bytes at
+180 bytes per record, before transcripts, manifests, binaries or logs.
+
+Arithmetic capacity for the historical 78,912-row census and 72,672
+compiler-eligible rows:
+
+| Component | Modeled two-stage maximum at 60 pairs | Relevant ceiling |
+|---|---:|---:|
+| Compiler invocations, including warmups | 35,463,936 (17,731,968 per stage) | Transcript: 65,536 records and 64 MiB per shard; at most 902 bytes per line |
+| Additional runtime invocations if every compiler row is runtime eligible | 35,463,936 | Same transcript ceilings |
+| Transcript shards for compiler and runtime at that upper bound | 1,084 (542 per stage) | 2,048 transcript shards per stage; 4,096 bundle entries shared with all files/directories |
+| Paired numeric records | 17,441,280 (8,720,640 per stage) | 16,777,216 records per partition; 16 GiB total #615 input per manifest |
+| Numeric shards at 131,072 records each | 134 (67 per stage) | 64 MiB per published file; at most 415 bytes per line; 2,878 bundle entries remain for controls, binaries, logs and directories |
+| Worst-case transcript plus numeric shard bytes at the proven line widths | 71,215,071,744 bytes (63,976,940,544 transcript, 7,238,131,200 numeric) | Within the 128 GiB indexed-payload ceiling, leaving 66,223,881,728 bytes for all other files |
+
+The line widths were the maxima of the pre-A1 serializers, so a full
+65,536-record transcript shard was at most 59,113,472 bytes and a full
+131,072-record numeric shard at most 54,394,880 bytes. At that time
+`tp_retirement_campaign_capacity` admitted at most 198 pairs with no runtime
+rows and 108 pairs when every row of the 77,762-row envelope was runtime
+eligible; 254 pairs needed 175,875,870,640 and 318,964,171,600 bytes
+respectively.
+
+### Export wire format
 
 Export request body:
 

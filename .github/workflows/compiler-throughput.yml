@@ -45,6 +45,7 @@ jobs:
           ./build/build bench_throughput self-test
           python3 -W error::ResourceWarning tools/throughput/retirement_execution_test.py build/throughput-tool-tests
           python3 -W error::ResourceWarning tools/throughput/retirement_capacity_test.py
+          python3 -W error::ResourceWarning tools/bench_service/retirement_export_replay_real_test.py build/throughput-tool-tests
           # Compile the optional reporter without rebuilding the full compiler.
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -DBUSTER_BENCH_ALLOCATIONS=1 build.c -o build/build-census
           BUSTER_ALLOCATION_CENSUS=1 ./build/build-census self_host_audit_self_test 2> build/allocation-census.log

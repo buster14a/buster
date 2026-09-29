@@ -11,15 +11,20 @@
 #define BQ_EXPORT_REPLY_HEADER 112u
 #define BQ_EXPORT_REQUEST_CAP 152u
 #define BQ_EXPORT_BODY_CAP (BQ_EXPORT_REPLY_HEADER + BQ_EXPORT_CHUNK_CAP)
+/* The manifest and outcome control records each have a 32 KiB reservation
+ * beside the bundle index (BQ_WORKER_BUNDLE_CAP) in the archive total. */
+#define BQ_EXPORT_CONTROL_RESERVE (2ull * 32768)
 #define BQ_EXPORT_TOTAL_CAP (BQ_WORKER_BUNDLE_TOTAL_CAP + BQ_WORKER_BUNDLE_CAP + \
-                            2ull * 32768 + BQ_WORKER_BUNDLE_ENTRY_CAP * (16ull + BQ_PATH_CAP))
+                            BQ_EXPORT_CONTROL_RESERVE + BQ_WORKER_BUNDLE_ENTRY_CAP * (16ull + BQ_PATH_CAP))
 #define BQ_EXPORT_RETIREMENT_TOTAL_CAP (BQ_WORKER_RETIREMENT_BUNDLE_TOTAL_CAP + BQ_WORKER_BUNDLE_CAP + \
-                                       2ull * 32768 + BQ_WORKER_BUNDLE_ENTRY_CAP * (16ull + BQ_PATH_CAP))
+                                       BQ_EXPORT_CONTROL_RESERVE + BQ_WORKER_BUNDLE_ENTRY_CAP * (16ull + BQ_PATH_CAP))
 #define BQ_EXPORT_CHUNKS ((BQ_EXPORT_TOTAL_CAP + BQ_EXPORT_CHUNK_CAP - 1) / BQ_EXPORT_CHUNK_CAP)
 #define BQ_EXPORT_INDEX_CAP (BQ_EXPORT_CHUNKS * 64u)
 #define BQ_EXPORT_DATA_OFFSET (BQ_EXPORT_RECEIPT_CAP + BQ_EXPORT_INDEX_CAP)
 #define BQ_EXPORT_RETIREMENT_CHUNKS ((BQ_EXPORT_RETIREMENT_TOTAL_CAP + BQ_EXPORT_CHUNK_CAP - 1) / BQ_EXPORT_CHUNK_CAP)
 #define BQ_EXPORT_RETIREMENT_DATA_OFFSET (BQ_EXPORT_RECEIPT_CAP + BQ_EXPORT_RETIREMENT_CHUNKS * 64u)
+/* The chunk index is verified in 64 KiB pages (1,024 chunk digests each). */
+#define BQ_EXPORT_INDEX_PAGES ((BQ_EXPORT_RETIREMENT_CHUNKS * 64u + BQ_EXPORT_CHUNK_CAP - 1) / BQ_EXPORT_CHUNK_CAP)
 #define BQ_EXPORT_PREPARE_MILLISECONDS 300000u
 #define BQ_EXPORT_RETIREMENT_PREPARE_MILLISECONDS 86400000u
 #define BQ_EXPORT_READ_MILLISECONDS 30000u
@@ -46,13 +51,18 @@ typedef struct BqExportInventory
 
 /* Control requests are dispatched serially by the service. A sealed spool is
  * immutable, but it can be replaced by the trusted service on a later job or
- * after recovery. Reuse the full index check only for the same receipt and
- * exact inode/metadata identity. Every response still checks its own chunk
- * digest and brackets the read with fstat/fstatat. A restart starts cold. */
+ * after recovery. The full index check hashes the whole chunk index against
+ * the receipt and keeps one SHA-256 per 64 KiB index page. It is reused only
+ * for the same receipt and exact inode/metadata identity, and even then the
+ * cursor's whole index page is reread and must equal its verified digest, so
+ * trust never rests on timestamps changing. Every response still checks its
+ * own chunk digest and brackets the read with fstat/fstatat. A restart
+ * starts cold. */
 typedef struct BqExportIndexCache
 {
     struct stat identity;
     char receipt_sha256[SHA256_HEX_CAPACITY];
+    char pages[BQ_EXPORT_INDEX_PAGES][SHA256_HEX_CAPACITY];
     bool valid;
 } BqExportIndexCache;
 
@@ -524,12 +534,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_read(BqQueue* queue, BqJob const* job, u64
     if (error == BQ_OK && !cached)
     {
         sha256_init(&index);
+        /* The page digests below are rewritten during this check. */
+        bq_export_index_cache.valid = false;
 #ifdef BUSTER_BENCH_SERVICE_TEST
         bq_export_index_full_checks += 1;
 #endif
     }
     char expected_chunk[SHA256_HEX_CAPACITY] = {0};
     u64 index_size = ((total + BQ_EXPORT_CHUNK_CAP - 1) / BQ_EXPORT_CHUNK_CAP) * 64;
+    if (error == BQ_OK && index_size > (u64)BQ_EXPORT_INDEX_PAGES * BQ_EXPORT_CHUNK_CAP) error = BQ_EXPORT_CORRUPT;
     for (u64 offset = 0; error == BQ_OK && !cached && offset < index_size;)
     {
         u8 bytes[BQ_EXPORT_CHUNK_CAP];
@@ -538,6 +551,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_read(BqQueue* queue, BqJob const* job, u64
         if (error == BQ_OK)
         {
             sha256_add(&index, bytes, count);
+            bq_digest(bytes, (u32)count, bq_export_index_cache.pages[offset / BQ_EXPORT_CHUNK_CAP]);
             u64 target = cursor == UINT64_MAX ? UINT64_MAX : cursor / BQ_EXPORT_CHUNK_CAP * 64;
             if (target >= offset && target < offset + count) memcpy(expected_chunk, bytes + target - offset, 64);
         }
@@ -545,8 +559,18 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_read(BqQueue* queue, BqJob const* job, u64
     }
     if (error == BQ_OK && cached && cursor != UINT64_MAX)
     {
-        u64 offset = cursor / BQ_EXPORT_CHUNK_CAP * 64;
-        error = bq_export_io(fd, expected_chunk, 64, BQ_EXPORT_RECEIPT_CAP + offset, false, deadline);
+        /* Rehash the cursor's whole index page; a rewritten entry cannot
+         * pass even when the spool's metadata did not change. */
+        u8 bytes[BQ_EXPORT_CHUNK_CAP];
+        u64 entry = cursor / BQ_EXPORT_CHUNK_CAP * 64;
+        u64 page = entry / BQ_EXPORT_CHUNK_CAP * BQ_EXPORT_CHUNK_CAP;
+        u64 count = index_size - page < sizeof(bytes) ? index_size - page : sizeof(bytes);
+        char actual[SHA256_HEX_CAPACITY];
+        error = bq_export_io(fd, bytes, count, BQ_EXPORT_RECEIPT_CAP + page, false, deadline);
+        if (error == BQ_OK) bq_digest(bytes, (u32)count, actual);
+        if (error == BQ_OK && memcmp(actual, bq_export_index_cache.pages[page / BQ_EXPORT_CHUNK_CAP], 64))
+            error = BQ_EXPORT_CORRUPT;
+        if (error == BQ_OK) memcpy(expected_chunk, bytes + entry - page, 64);
     }
     if (error == BQ_OK && !cached)
     {
