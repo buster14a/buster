@@ -132,6 +132,20 @@ class MergeQueueFailFastTests(unittest.TestCase):
             self.watch()
         self.assertEqual(self.api.cancelled, [])
 
+    def test_reconciled_admission_check_is_bound_by_exact_head_marker(self):
+        check = next(row for row in self.api.checks if row["name"] == "Main integration admission")
+        check.update(check_suite={"id": 999999}, status="completed", conclusion="failure",
+                     external_id="buster-merge-queue-admission-v1:" + "b" * 40)
+        with self.assertRaises(TimeoutError):
+            self.watch()
+        self.assertEqual(self.api.cancelled, [])
+        check["external_id"] = "buster-merge-queue-admission-v1:" + "a" * 40
+        self.assertIn("Main integration admission", self.watch())
+        self.assertEqual(self.api.cancelled, [run["id"] for run in self.api.runs])
+        marker = recovery.RECONCILED_CHECK_MARKERS["Main integration admission"]
+        gate = (ROOT / "tools/merge_queue_admission.py").read_text()
+        self.assertIn('SCHEMA = "' + marker.removesuffix(":") + '"', gate)
+
     def test_changed_event_identity_cannot_cancel(self):
         self.api.event["workflow_run"]["workflow_id"] = 999
         with self.assertRaises(recovery.SkipRecovery):

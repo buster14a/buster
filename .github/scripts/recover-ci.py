@@ -34,6 +34,10 @@ REQUIRED_WORKFLOW_PATHS = {
     "Native retirement merge admission": "api-migration-policy.yml",
     "Main integration admission": "merge-queue-admission.yml",
 }
+# The event-driven admission reconciler (#1807) publishes this check through the
+# Checks API, outside any workflow-run check suite. It is bound instead by an
+# exact-head external ID; see check_marker in tools/merge_queue_admission.py.
+RECONCILED_CHECK_MARKERS = {"Main integration admission": "buster-merge-queue-admission-v1:"}
 ACTIVE_RUN_STATUSES = frozenset(("queued", "pending", "waiting", "requested", "in_progress"))
 
 
@@ -205,10 +209,12 @@ def required_check_results(api, head_sha, runs, names):
         if name not in names:
             continue
         required_run = runs.get(".github/workflows/" + REQUIRED_WORKFLOW_PATHS[name])
+        marker = RECONCILED_CHECK_MARKERS.get(name)
+        reconciled = marker is not None and check.get("external_id") == marker + head_sha
         if (check.get("head_sha") != head_sha or
                 check.get("app", {}).get("id") != GITHUB_ACTIONS_APP_ID or
-                required_run is None or
-                check.get("check_suite", {}).get("id") != required_run["check_suite_id"]):
+                (not reconciled and (required_run is None or
+                 check.get("check_suite", {}).get("id") != required_run["check_suite_id"]))):
             continue
         old = selected.get(name)
         if old is None or check["id"] > old["id"]:
