@@ -457,7 +457,7 @@ class BindingTests(unittest.TestCase):
             "admitted": True, "native_only": True,
             "logical_cpu": 3, "native_target": "x86_64-unknown-linux-gnu",
             "baseline_source_commit": "3" * 40, "baseline_source_tree": "4" * 40,
-            "lease_protocol": binding.LEASE_PROTOCOL,
+            "lease_protocol": binding.LEASE_PROTOCOL, "family_sha256": family["sha256"],
         })
 
         # Independent admission and native-oracle records are the source of
@@ -1976,6 +1976,33 @@ class BindingTests(unittest.TestCase):
                 self.write_evidence(root, candidate, candidate_contents)
                 with self.subTest(artifact=artifact_name), \
                         self.assertRaisesRegex(ValueError, "native target"):
+                    binding._check_execution_evidence(root, candidate)
+
+    def test_aa_admission_binds_the_five_metric_family(self):
+        record, contents = self.make_record()
+        with tempfile.TemporaryDirectory(prefix="retirement-aa-family-") as directory:
+            root = Path(directory)
+            self.write_evidence(root, record, contents)
+            binding._check_execution_evidence(root, record)
+        for value in ("e" * 64, "not-a-digest", None):
+            candidate = copy.deepcopy(record)
+            candidate_contents = dict(contents)
+            descriptor = candidate["execution"]["host"]["aa_admission_receipt"]
+            admission = json.loads(candidate_contents[descriptor["path"]].decode())
+            self.assertEqual(admission["family_sha256"],
+                             record["population"]["statistical_family"]["sha256"])
+            if value is None:
+                del admission["family_sha256"]
+            else:
+                admission["family_sha256"] = value
+            data = (json.dumps(admission, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            candidate_contents[descriptor["path"]] = data
+            descriptor.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+            with tempfile.TemporaryDirectory(prefix="retirement-aa-family-") as directory:
+                root = Path(directory)
+                self.write_evidence(root, candidate, candidate_contents)
+                with self.subTest(value=value), self.assertRaisesRegex(
+                        ValueError, "statistical family|family_sha256|missing fields"):
                     binding._check_execution_evidence(root, candidate)
 
     def test_batch_records_bind_the_group_round_pair_population(self):

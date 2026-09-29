@@ -4939,8 +4939,8 @@ def _check_execution_evidence(root, binding):
     admission = _keys(admission, (
         "schema", "version", "machine_id", "profile_id", "profile_version", "service_id",
         "logical_cpu", "native_target", "admitted", "native_only",
-        "baseline_source_commit", "baseline_source_tree", "lease_protocol"),
-        "aa_admission_receipt")
+        "baseline_source_commit", "baseline_source_tree", "lease_protocol",
+        "family_sha256"), "aa_admission_receipt")
     if admission["schema"] != AA_SCHEMA or admission["version"] != 1:
         _fail("A/A admission schema/version is not the admitted #437 receipt")
     if (admission["machine_id"], admission["profile_id"], admission["profile_version"],
@@ -4960,6 +4960,11 @@ def _check_execution_evidence(root, binding):
         _fail("A/A admission baseline does not match the bound direct subject")
     if admission["lease_protocol"] != LEASE_PROTOCOL:
         _fail("A/A admission does not identify the supervisor lease protocol")
+    # (A1) A/A qualifies the five-metric family, batch groups included; an
+    # admission of another family cannot admit this one.
+    _sha(admission["family_sha256"], "aa_admission_receipt.family_sha256")
+    if admission["family_sha256"] != binding["population"]["statistical_family"]["sha256"]:
+        _fail("A/A admission does not bind this binding's statistical family")
     _nonnegative_int(admission["logical_cpu"], "aa_admission_receipt.logical_cpu")
     if admission["native_target"] not in TARGETS:
         _fail("A/A admission native target is not supported")
