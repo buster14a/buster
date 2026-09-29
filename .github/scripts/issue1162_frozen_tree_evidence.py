@@ -23,8 +23,8 @@ PRODUCER_TREE = "2b26253cd1849a8bb50687ede056f3f9d764837b"
 PRODUCER_BUILD_BLOB = "1ea24b90629a2c771c3d0e7d3d517b042ddb4c35"
 PRODUCER_REVIEW = "https://github.com/buster14a/buster/pull/1481#issuecomment-5847791034"
 COMPOSITE_REVIEW = "https://github.com/buster14a/buster/pull/1482#issuecomment-5847817058"
-INTEGRATED_HEAD = "11616f3a099461b95286aba00d46c188a3a139e1"
-INTEGRATED_TREE = "759897b820383d077a0410fd505fb943fc560d0d"
+INTEGRATED_HEAD = "12e6dfe83680bd636e4ed32c2c08a66cf4b4ab57"
+INTEGRATED_TREE = "42fdf0b4f8c960d5d2fdc8d222ef62f36e3d58ab"
 INTEGRATED_BUILD_BLOB = "1f9b3ab8350dbe4c8a2f24e288a72ecf7b949359"
 # build.c blob 1f9b3ab8 changes bench_service_recipe_add and process_run_spawn
 # relative to a016a487 (#1739). No admitted review covers it yet, so the

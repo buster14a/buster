@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Temporary, isolated #1162 validation transport. Never install on a protected host.
 set -Eeuo pipefail
-subject=11616f3a099461b95286aba00d46c188a3a139e1
-subject_tree=759897b820383d077a0410fd505fb943fc560d0d
+subject=12e6dfe83680bd636e4ed32c2c08a66cf4b4ab57
+subject_tree=42fdf0b4f8c960d5d2fdc8d222ef62f36e3d58ab
 subject_build_blob=1f9b3ab8350dbe4c8a2f24e288a72ecf7b949359
 baseline=ade6ac4b6ecb21f30b61b656439bac476c145e2f
 evidence="${RUNNER_TEMP:?}/issue1162-exact-slice-evidence"
@@ -179,7 +179,7 @@ for path in files:
 manifest = ("\n".join(lines) + "\n").encode()
 expected = {
     "ade6ac4b6ecb21f30b61b656439bac476c145e2f": (375, 42585, "ebf4a4b4e5943dc60dd9fd9d175af643fbe0d0eee72e70e245c688aaabcb3007"),
-    "11616f3a099461b95286aba00d46c188a3a139e1": (379, 43099, "2e1709f08d3e34388faa437c8e358ccc5b24a1614302744302c4995aaf24f700"),
+    "12e6dfe83680bd636e4ed32c2c08a66cf4b4ab57": (379, 43099, "d1d4864fe649f63c3f0552558fc261e65ede89aa3d84e1898b7a12d4fafdfa89"),
 }[rev]
 actual = (len(files), len(manifest), hashlib.sha256(manifest).hexdigest())
 print("SOURCE_CLOSURE", rev, "files", actual[0], "bytes", actual[1], "sha256", actual[2], flush=True)
@@ -207,7 +207,7 @@ cat > "$payload/broker-state-probe.c" <<'PROBE'
 int main(int argc, char** argv)
 {
     if (argc != 5) return 2;
-    BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = 1,
+    BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = BQ_BROKER_VERSION,
                                .operation = BQ_BROKER_START, .stage = BQ_BROKER_OUTER,
                                .job = strtoull(argv[1], NULL, 10), .attempt = strtoull(argv[2], NULL, 10)};
     snprintf(request.base, sizeof(request.base), "%s", argv[3]);
@@ -914,6 +914,8 @@ print(" ".join("%s=%s" % kv for kv in r.items()))
 probed = {}
 b1_deadline = min(deadline, time.monotonic() + 600)
 while not probed and time.monotonic() < b1_deadline:
+    if not os.path.isdir(cg):
+        emit(f"K_B1_FAIL outer unit {outer} ended before any stage process was probed"); break
     for stage in STAGES:
         if stage in probed:
             continue
@@ -977,6 +979,7 @@ except OSError as e:
     result["error"] = repr(e)
 print("K_B2_SLICE_PEER " + " ".join("%s=%s" % kv for kv in result.items()), flush=True)
 KPEER
+  sudo docker exec "$guest" install -m 0644 /root/k-peer.py /tmp/k-peer.py
   sudo docker exec -i "$guest" tee /root/k-locks.py >/dev/null <<'KLOCKS'
 import os, sys, time
 st = os.stat("/var/lib/buster-bench/lease/host.lock")
@@ -1053,7 +1056,7 @@ KSTOP
     # directly (no InaccessiblePaths), sends a well-formed reclaim request.
     sudo docker exec "$guest" systemd-run --quiet --wait --collect --pipe --unit="k-slice-peer-$job" \
       --slice=buster-bench.slice --uid=buster-bench --gid=buster-bench \
-      python3 /root/k-peer.py "$job" "$attempt" 2>&1 | tee "$evidence/k-slice-peer.txt" || true
+      python3 /tmp/k-peer.py "$job" "$attempt" 2>&1 | tee "$evidence/k-slice-peer.txt" || true
     sudo docker exec "$guest" sh -c "test -S /var/lib/buster-bench/workspaces/results/.lease-return/$job-$attempt && echo K_B2_KEEPER_STILL_SERVING=yes || echo K_B2_KEEPER_STILL_SERVING=no" | tee -a "$evidence/k-slice-peer.txt" || true
     kstate before-restart
     # (c) the service loses its reference without cleanup (SIGKILL to MainPID),
@@ -1099,6 +1102,10 @@ job = sys.argv[1]; SLICE = "/sys/fs/cgroup/buster.slice/buster-bench.slice"
 end = time.monotonic() + 600
 while time.monotonic() < end:
     names = os.listdir(SLICE) if os.path.isdir(SLICE) else []
+    if any(re.fullmatch(r"buster-bench-%s-[0-9]+\.service" % job, n) for n in names):
+        seen = True
+    elif "seen" in globals():
+        print("K_D_FAIL second job's outer unit ended before a stage was live", flush=True); break
     stage = [n for n in names if re.fullmatch(r"buster-bench-%s-[0-9]+-(base|candidate)-(generate|build)\.service" % job, n)
              and open(f"{SLICE}/{n}/cgroup.procs").read().split()]
     if stage:
