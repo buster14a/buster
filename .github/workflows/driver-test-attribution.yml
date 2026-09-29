@@ -3,6 +3,8 @@ name: Windows driver fixture attribution
 # A diagnostic companion, not a replacement for Buster CI or an acceptance
 # timing sample. No ordinary PR pays for a second Windows combination matrix.
 on:
+  push:
+    branches: ['codex/1885-native-frame-batching']
   workflow_dispatch:
   pull_request:
     paths:
@@ -24,6 +26,7 @@ jobs:
     if: >-
       ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' &&
           (github.event_name == 'workflow_dispatch' ||
+           github.ref == 'refs/heads/codex/1885-native-frame-batching' ||
            github.head_ref == 'diagnostics/708-driver-fixture-timing' ||
            github.head_ref == 'diagnostics/949-driver-operations') }}
     name: Windows x86-64 fixture attribution
@@ -199,4 +202,41 @@ jobs:
           name: driver-attribution-windows-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/
           if-no-files-found: warn
+          retention-days: 14
+
+  linux_census:
+    if: ${{ github.ref == 'refs/heads/codex/1885-native-frame-batching' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Linux native frame census
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Record identity and build the diagnostic compiler
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/frame-census" build
+          git rev-parse HEAD | tee "$RUNNER_TEMP/frame-census/source.txt"
+          git rev-parse HEAD:src | tee -a "$RUNNER_TEMP/frame-census/source.txt"
+          printf '%s\n' "ImageOS=$ImageOS ImageVersion=$ImageVersion" > "$RUNNER_TEMP/frame-census/image.txt"
+          lscpu > "$RUNNER_TEMP/frame-census/cpu.txt"
+          clang --version > "$RUNNER_TEMP/frame-census/clang.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/frame-driver
+          build/frame-driver generate --build-directory build/frame-census --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=ON
+          build/frame-driver build --build-directory build/frame-census --config Release -t ide
+          sha256sum build/frame-census/Release/ide > "$RUNNER_TEMP/frame-census/binary.txt"
+          cp build/frame-census/compile_commands.json "$RUNNER_TEMP/frame-census/"
+      - name: Operation census
+        env:
+          BUSTER_TEST_FIXTURE_TIMING: compiler_driver_tests
+          BUSTER_TEST_JOBS: '1'
+        run: |
+          set -euo pipefail
+          /usr/bin/time -v build/frame-census/Release/ide test --module=compiler_driver_tests --verbose=1 --ci=1 2>&1 | tee "$RUNNER_TEMP/frame-census/census.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: frame-census-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/frame-census/
           retention-days: 14
