@@ -73,6 +73,13 @@ modify queue entries. If publication clears auto-merge in the live repository,
 that intent-preservation behavior must be separately verified before calling
 end-to-end merge progression unattended.
 
+A candidate the writer would refuse (split-required, or one that edits
+integration-owned generated files) is recorded as `blocked` with the refusal
+detail. The controller keeps scanning the other PRs; one refused PR never fails
+the reconcile run. The controller and merge gate share a single
+`native_retirement_integration` module, so the gate's `IntegrationError` is the
+class the controller catches.
+
 The controller submits at most one request per run and leaves an already active
 writer alone. GitHub concurrency serializes the existing writer; the controller's
 ledger, not pending-workflow concurrency slots, carries durable request state.
