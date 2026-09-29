@@ -337,7 +337,9 @@ static uint64_t tp_retirement_samples_ordinal(TpRetirementSamples const* samples
  * API imports partial samples, skips warmups, retries a cell or resumes. */
 /* Attach the stage's metrics shard writer before the first invocation. Every
  * object batch's accepted metrics artifact is appended to it; a stage with no
- * object groups needs none. */
+ * object groups needs none. Its callers (the measured object-batch boundary
+ * and its tests) are Linux-only, so it is too. */
+#ifdef __linux__
 static int tp_retirement_samples_attach_metrics(TpRetirementSamples* samples, TpRetirementMetricsShards* metrics)
 {
     int ok = samples && !samples->failed && !samples->collected && !samples->metrics && samples->object_count &&
@@ -346,6 +348,7 @@ static int tp_retirement_samples_attach_metrics(TpRetirementSamples* samples, Tp
     else tp_retirement_samples_poison(samples);
     return ok;
 }
+#endif
 
 static int tp_retirement_samples_append(TpRetirementSamples* samples,
     TpProcessObservation const* observed, TpProcess const* process, TpRetirementOutput const* output,
