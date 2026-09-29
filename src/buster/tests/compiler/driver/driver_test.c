@@ -1714,6 +1714,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int old(void); int g(void) { char *z=0; void *v=(int *)0; int *p=0; _Bool b=p; int (*fp)(void)=0; char *a=(0); char *c=1-1; return old() + b + (v!=0) + (fp!=0) + (a==c); }\n"), true},
         {S8("int g(void) { int *p=(int *)5; return p != 0; }\n"), true},
         {S8("int g(void) { int values[2]; int *p=values; p += 1; p -= 1; return p == values; }\n"), true},
+        // A pre-updated pointer's store converts to the element, not the
+        // pointer, and an array parameter is the pointer it is adjusted to.
+        {S8("char *g(char *q, int d) { *--q = '0' + d; return q; }\n"), true},
+        {S8("static const char digits[] = \"01\"; char *g(char *e, unsigned n) { *--e = digits[n % 2]; return e; }\n"), true},
+        {S8("int *g(int *d, int s) { *++d = s; return d; }\n"), true},
+        {S8("int g(char **pp, char *s) { char *t = *++pp = s; return t == s; }\n"), true},
+        {S8("int g(int argc, char *argv[]) { for (; argc > 1; argc--, argv++) {} return argv[0] != 0; }\n"), true},
+        {S8("void g(unsigned SK[4], unsigned x) { *SK++ = x; ++SK; SK--; --SK; }\n"), true},
+        {S8("int g(int n, int a[static 2], int b[n], int m[][3]) { a++; b--; m++; return (int)sizeof(a++) + m[0][0]; }\n"), true},
+        {S8("int g(char *q, char *r) { *--q = r; return 0; }\n"), false, false, S8("cannot convert from 'char *' to 'char'")},
+        {S8("int g(const char *q) { *--q = 1; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place")},
+        {S8("int g(void) { int a[2] = {0}; a++; return a[0]; }\n"), false, false, S8("increment or decrement operand is not a modifiable place")},
+        {S8("int g(int *const p) { p++; return 0; }\n"), false, false, S8("increment or decrement operand is not a modifiable place")},
+        // A qualifier inside the brackets qualifies the adjusted pointer.
+        {S8("long g(long v[const 2], long w[restrict 2]) { v[0] = 7; v[1]++; w++; return v[0] + w[0]; }\n"), true},
+        {S8("long g(long v[const 2]) { (v)++; return 0; }\n"), false, false, S8("increment or decrement operand is not a modifiable place")},
+        {S8("long g(long v[static const 2]) { v = 0; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place")},
         {S8("typedef union { void *p; char *c; } U __attribute__((transparent_union)); void consume(U); int g(int *p) { consume(p); return 0; }\n"), true, true},
         {S8("int f(int); int g(void) { return sizeof(f()); }\n"), false},
         {S8("int f(void); int g(void) { return sizeof(f(1)); }\n"), false},
@@ -7419,6 +7436,467 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_link_boundaries(Unit
 }
 #endif
 
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
+// Runs one produced program with `library_directory` on LD_LIBRARY_PATH (and
+// PYTHONPATH, for an interpreter importing from it) and reports whether it
+// exited successfully, handing back what it printed.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_image_run(UnitTestArguments* arguments, Arena* arena, String8 const* command, u64 command_count,
+                                                        String8 library_directory, String8* output)
+{
+    String8 keys[] = {S8("LD_LIBRARY_PATH"), S8("PYTHONPATH")};
+    String8 values[] = {library_directory, library_directory};
+    ProcessSpawnOptions options = {
+        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+        .search_path = true,
+    };
+    ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = (String8*)command, .length = command_count},
+                                                (SliceString8)BUSTER_ARRAY_TO_SLICE(keys), (SliceString8)BUSTER_ARRAY_TO_SLICE(values), options);
+    ProcessWaitResult wait = spawn.handle ? os_process_wait_deadline(arena, spawn, 60000000) : (ProcessWaitResult){0};
+    bool succeeded = spawn.handle && !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS;
+    *output = (String8){.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length};
+    if (!succeeded)
+    {
+        ByteSlice error = wait.streams[STANDARD_STREAM_ERROR];
+        arguments->show(arguments, S8("position-independent image run failed: {S8} status={u32:x} stdout={S8} stderr={S8}\n"), command[0],
+                        wait.platform_status, *output, (String8){.pointer = (char8*)error.pointer, .length = error.length});
+    }
+    return succeeded;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_image_host_compile(Arena* arena, String8 const* tail, u64 tail_count)
+{
+    String8 command[16] = {0};
+    u64 count = 0;
+    command[count++] = S8(BUSTER_HOST_C_COMPILER);
+    if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+    for (u64 index = 0; index < tail_count && count < BUSTER_ARRAY_LENGTH(command); index += 1)
+    {
+        command[count++] = tail[index];
+    }
+    ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                   .use_process_environment = true, .search_path = true};
+    ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0}, capture);
+    return spawn.handle && os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS;
+}
+
+// The ELF type (ET_EXEC 2, ET_DYN 3) and entry point a produced file states.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_image_header(Arena* arena, String8 path, u16* type, u64* entry)
+{
+    FileMapRead image = file_map_read(arena, path, (FileReadOptions){0});
+    bool valid = image.bytes.length >= 64 && memcmp(image.bytes.pointer, "\x7f" "ELF", 4) == 0;
+    if (valid)
+    {
+        memcpy(type, image.bytes.pointer + 16, sizeof(*type));
+        memcpy(entry, image.bytes.pointer + 24, sizeof(*entry));
+    }
+    file_map_unmap(image);
+    return valid;
+}
+
+// `-shared` and `-pie` end to end (issue 1604): Buster's shared object is
+// loaded by the system loader through dlopen, linked by both Buster and the
+// host toolchain's GNU ld -- as a PIE, whose imported data then reaches the
+// library through copy relocations, and as a fixed-address executable --
+// with calls and data crossing the boundary in both directions and the
+// library's initializers and TLS working; Buster's PIE runs at a
+// randomized base; a CPython extension imports; and an object compiled for
+// a fixed address is refused with the reason.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_images(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 directory = buster_test_temporary_path(arena, S8("buster-position-independent-images"), S8(""));
+    os_make_directory(directory);
+    // The fixtures are written into the scratch directory rather than checked
+    // in under tests/, whose byte inventory the native-retirement support
+    // contract freezes (docs/native-retirement-census.md).
+    String8 shared_library_source = S8(
+        "// A shared library that reaches data every way a library can: its own\n"
+        "// exported data (which an executable may copy-relocate), static data, a\n"
+        "// constant table of pointers, thread-local storage, an initializer array,\n"
+        "// and definitions in the executable that loads it.\n"
+        "int puts(const char* text);\n"
+        "\n"
+        "int shared_counter = 40;\n"
+        "int shared_table[4] = {1, 2, 3, 4};\n"
+        "static int shared_hidden = 2;\n"
+        "static const char* const shared_names[] = {\"alpha\", \"beta\"};\n"
+        "int* shared_counter_pointer = &shared_counter;\n"
+        "_Thread_local int shared_thread_value = 5;\n"
+        "\n"
+        "extern int application_value;\n"
+        "int application_callback(int value);\n"
+        "\n"
+        "__attribute__((constructor)) static void shared_constructor(void)\n"
+        "{\n"
+        "    shared_counter += 1;\n"
+        "}\n"
+        "\n"
+        "__attribute__((destructor)) static void shared_destructor(void)\n"
+        "{\n"
+        "    puts(\"shared destructor\");\n"
+        "}\n"
+        "\n"
+        "int shared_add(int value)\n"
+        "{\n"
+        "    shared_thread_value += 1;\n"
+        "    return value + shared_counter + shared_hidden + shared_thread_value;\n"
+        "}\n"
+        "\n"
+        "int* shared_counter_address(void)\n"
+        "{\n"
+        "    return &shared_counter;\n"
+        "}\n"
+        "\n"
+        "const char* shared_name(int index)\n"
+        "{\n"
+        "    return shared_names[index];\n"
+        "}\n"
+        "\n"
+        "int shared_read_application(void)\n"
+        "{\n"
+        "    return application_value;\n"
+        "}\n"
+        "\n"
+        "int shared_call_application(int value)\n"
+        "{\n"
+        "    return application_callback(value) + 1;\n"
+        "}\n"
+        "\n"
+        "int (*shared_application_function(void))(int)\n"
+        "{\n"
+        "    return application_callback;\n"
+        "}\n"
+    );
+    String8 shared_main_source = S8(
+        "// Links against basic_c_elf_shared_library.c's library.  Each check sets one\n"
+        "// bit of the exit status; the address of main is printed so two runs of a\n"
+        "// position-independent build can be compared.\n"
+        "int printf(const char* format, ...);\n"
+        "int strcmp(const char* left, const char* right);\n"
+        "\n"
+        "extern int shared_counter;\n"
+        "extern int shared_table[4];\n"
+        "extern int* shared_counter_pointer;\n"
+        "int shared_add(int value);\n"
+        "int* shared_counter_address(void);\n"
+        "const char* shared_name(int index);\n"
+        "int shared_read_application(void);\n"
+        "int shared_call_application(int value);\n"
+        "int (*shared_application_function(void))(int);\n"
+        "\n"
+        "int application_value = 1000;\n"
+        "\n"
+        "int application_callback(int value)\n"
+        "{\n"
+        "    return value * 2;\n"
+        "}\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    int failed = shared_counter != 41;\n"
+        "    failed |= (shared_counter_address() != &shared_counter) << 1;\n"
+        "    failed |= (shared_counter_pointer != &shared_counter) << 2;\n"
+        "    shared_counter += 1;\n"
+        "    failed |= (shared_add(1) != 1 + 42 + 2 + 6) << 3;\n"
+        "    failed |= (shared_table[3] != 4) << 4;\n"
+        "    failed |= (strcmp(shared_name(1), \"beta\") != 0) << 5;\n"
+        "    application_value += 1;\n"
+        "    failed |= (shared_read_application() != 1001) << 6;\n"
+        "    failed |= (shared_call_application(5) != 11) << 7;\n"
+        "    failed |= (shared_application_function() != application_callback) << 8;\n"
+        "    printf(\"main at %p\\n\", (void*)main);\n"
+        "    return failed;\n"
+        "}\n"
+    );
+    String8 shared_dlopen_source = S8(
+        "// Loads basic_c_elf_shared_library.c's library at run time: the library's\n"
+        "// thread-local block is then allocated dynamically, and the references it\n"
+        "// makes into this executable resolve only through -rdynamic exports.\n"
+        "#include <dlfcn.h>\n"
+        "\n"
+        "int application_value = 7;\n"
+        "\n"
+        "int application_callback(int value)\n"
+        "{\n"
+        "    return value + 1;\n"
+        "}\n"
+        "\n"
+        "int main(int argc, char** argv)\n"
+        "{\n"
+        "    int failed = argc < 2;\n"
+        "    void* library = failed ? 0 : dlopen(argv[1], RTLD_NOW);\n"
+        "    failed |= (library == 0) << 1;\n"
+        "    if (library)\n"
+        "    {\n"
+        "        int (*add)(int) = (int (*)(int))dlsym(library, \"shared_add\");\n"
+        "        int (*read_application)(void) = (int (*)(void))dlsym(library, \"shared_read_application\");\n"
+        "        int (*call_application)(int) = (int (*)(int))dlsym(library, \"shared_call_application\");\n"
+        "        int* counter = (int*)dlsym(library, \"shared_counter\");\n"
+        "        failed |= (!add || !read_application || !call_application || !counter) << 2;\n"
+        "        failed |= (!failed && (*counter != 41 || add(1) != 1 + 41 + 2 + 6)) << 3;\n"
+        "        failed |= (!failed && (read_application() != 7 || call_application(3) != 5)) << 4;\n"
+        "        failed |= dlclose(library) << 5;\n"
+        "    }\n"
+        "    return failed;\n"
+        "}\n"
+    );
+    String8 non_pic_reference_source = S8(
+        "// Compiled with -fno-pic, the read below is a rel32 to data another module\n"
+        "// defines, which a position-independent image cannot hold.\n"
+        "extern int non_pic_external;\n"
+        "\n"
+        "int non_pic_read(void)\n"
+        "{\n"
+        "    return non_pic_external;\n"
+        "}\n"
+    );
+    String8 python_extension_source = S8(
+        "// A CPython extension module: the shared object `import` loads, whose every\n"
+        "// reference into the interpreter is left for the loader to bind.\n"
+        "#define PY_SSIZE_T_CLEAN\n"
+        "#include <Python.h>\n"
+        "\n"
+        "static int buster_extension_calls;\n"
+        "\n"
+        "static PyObject* buster_extension_add(PyObject* self, PyObject* arguments)\n"
+        "{\n"
+        "    long left;\n"
+        "    long right;\n"
+        "    (void)self;\n"
+        "    if (!PyArg_ParseTuple(arguments, \"ll\", &left, &right)) return NULL;\n"
+        "    buster_extension_calls += 1;\n"
+        "    return PyLong_FromLong(left + right);\n"
+        "}\n"
+        "\n"
+        "static PyObject* buster_extension_greet(PyObject* self, PyObject* arguments)\n"
+        "{\n"
+        "    const char* name;\n"
+        "    (void)self;\n"
+        "    if (!PyArg_ParseTuple(arguments, \"s\", &name)) return NULL;\n"
+        "    return PyUnicode_FromFormat(\"hello, %s (%d)\", name, buster_extension_calls);\n"
+        "}\n"
+        "\n"
+        "static PyObject* buster_extension_fail(PyObject* self, PyObject* arguments)\n"
+        "{\n"
+        "    (void)self;\n"
+        "    (void)arguments;\n"
+        "    PyErr_SetString(PyExc_ValueError, \"refused\");\n"
+        "    return NULL;\n"
+        "}\n"
+        "\n"
+        "static PyMethodDef buster_extension_methods[] = {\n"
+        "    {\"add\", buster_extension_add, METH_VARARGS, \"Add two integers.\"},\n"
+        "    {\"greet\", buster_extension_greet, METH_VARARGS, \"Greet by name.\"},\n"
+        "    {\"fail\", buster_extension_fail, METH_NOARGS, \"Raise ValueError.\"},\n"
+        "    {NULL, NULL, 0, NULL},\n"
+        "};\n"
+        "\n"
+        "static struct PyModuleDef buster_extension_module = {\n"
+        "    PyModuleDef_HEAD_INIT, \"busterpic\", \"A Buster-built extension.\", -1, buster_extension_methods,\n"
+        "};\n"
+        "\n"
+        "PyMODINIT_FUNC PyInit_busterpic(void)\n"
+        "{\n"
+        "    PyObject* module = PyModule_Create(&buster_extension_module);\n"
+        "    if (module && PyModule_AddIntConstant(module, \"answer\", 42) != 0)\n"
+        "    {\n"
+        "        Py_DECREF(module);\n"
+        "        module = NULL;\n"
+        "    }\n"
+        "    return module;\n"
+        "}\n"
+    );
+    String8 shared_library_path = string_format_z(arena, S8("{S8}/basic_c_elf_shared_library.c"), directory);
+    BUSTER_TEST(arguments, file_write(shared_library_path, BUSTER_SLICE_TO_BYTE_SLICE(shared_library_source)));
+    String8 shared_main_path = string_format_z(arena, S8("{S8}/basic_c_elf_shared_main.c"), directory);
+    BUSTER_TEST(arguments, file_write(shared_main_path, BUSTER_SLICE_TO_BYTE_SLICE(shared_main_source)));
+    String8 shared_dlopen_path = string_format_z(arena, S8("{S8}/basic_c_elf_shared_dlopen.c"), directory);
+    BUSTER_TEST(arguments, file_write(shared_dlopen_path, BUSTER_SLICE_TO_BYTE_SLICE(shared_dlopen_source)));
+    String8 non_pic_reference_path = string_format_z(arena, S8("{S8}/basic_c_elf_non_pic_reference.c"), directory);
+    BUSTER_TEST(arguments, file_write(non_pic_reference_path, BUSTER_SLICE_TO_BYTE_SLICE(non_pic_reference_source)));
+    String8 python_extension_path = string_format_z(arena, S8("{S8}/basic_c_elf_python_extension.c"), directory);
+    BUSTER_TEST(arguments, file_write(python_extension_path, BUSTER_SLICE_TO_BYTE_SLICE(python_extension_source)));
+    String8 library_path = string_format_z(arena, S8("{S8}/libbustershared.so"), directory);
+    String8 library_command[] = {S8("-g0"), S8("-shared"), S8("-fPIC"), S8("-Wl,-soname,libbustershared.so"), S8("-o"), library_path,
+                                 shared_library_path};
+    CompilerDriverResult library = compiler_driver_execute_invocation(
+        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(library_command)));
+    BUSTER_TEST(arguments, library.error == COMPILER_DRIVER_ERROR_NONE);
+    u16 type = 0;
+    u64 entry = 1;
+    BUSTER_TEST(arguments, library.error == COMPILER_DRIVER_ERROR_NONE && compiler_driver_test_image_header(arena, library_path, &type, &entry) &&
+                               type == 3 && entry == 0);
+    if (library.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        // Buster fixed-address, Buster PIE, host PIE, and a host
+        // fixed-address executable, whose direct references to the library's
+        // exported data become copy relocations the library must follow.
+        String8 main_paths[4] = {0};
+        bool main_built[4] = {0};
+        for (u32 variant = 0; variant < 4; variant += 1)
+        {
+            main_paths[variant] = string_format_z(arena, S8("{S8}/shared-main-{u32}"), directory, variant);
+            if (variant < 2)
+            {
+                String8 command[] = {S8("-g0"), variant ? S8("-pie") : S8("-no-pie"), S8("-o"), main_paths[variant], shared_main_path,
+                                     S8("-L"), directory, S8("-lbustershared")};
+                CompilerDriverResult linked = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                if (linked.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("shared main link: {S8}\n"), linked.diagnostic);
+                main_built[variant] = linked.error == COMPILER_DRIVER_ERROR_NONE;
+            }
+            else
+            {
+                String8 command[] = {variant == 2 ? S8("-pie") : S8("-no-pie"), S8("-o"), main_paths[variant], shared_main_path,
+                                     S8("-L"), directory, S8("-lbustershared")};
+                main_built[variant] = compiler_driver_test_image_host_compile(arena, command, BUSTER_ARRAY_LENGTH(command));
+            }
+            BUSTER_TEST(arguments, main_built[variant]);
+            String8 output = {0};
+            if (main_built[variant] && compiler_driver_test_image_run(arguments, arena, main_paths + variant, 1, directory, &output))
+            {
+                BUSTER_TEST(arguments, string_starts_with_sequence(output, S8("main at ")) &&
+                                           string_ends_with_sequence(output, S8("\nshared destructor\n")));
+            }
+            else
+            {
+                BUSTER_TEST(arguments, false);
+            }
+        }
+        u64 entry_address = 0;
+        BUSTER_TEST(arguments, main_built[0] && compiler_driver_test_image_header(arena, main_paths[0], &type, &entry_address) && type == 2);
+        BUSTER_TEST(arguments, main_built[1] && compiler_driver_test_image_header(arena, main_paths[1], &type, &entry_address) && type == 3 &&
+                                   entry_address != 0);
+        // Two runs of the PIE land at different bases wherever the kernel
+        // randomizes them.
+        String8 randomization_query[] = {S8("/bin/cat"), S8("/proc/sys/kernel/randomize_va_space")};
+        String8 randomization = {0};
+        bool randomized = compiler_driver_test_image_run(arguments, arena, randomization_query, BUSTER_ARRAY_LENGTH(randomization_query), directory,
+                                                         &randomization) &&
+                          randomization.length && randomization.pointer[0] != '0';
+        if (main_built[1] && randomized)
+        {
+            String8 first = {0};
+            String8 second = {0};
+            bool ran = compiler_driver_test_image_run(arguments, arena, main_paths + 1, 1, directory, &first) &&
+                       compiler_driver_test_image_run(arguments, arena, main_paths + 1, 1, directory, &second);
+            BUSTER_TEST(arguments, ran && !string_equal(first, second));
+        }
+
+        // Loaded at run time instead: dynamic TLS, and the library's
+        // references into the program resolved through -rdynamic.
+        String8 loader_path = string_format_z(arena, S8("{S8}/shared-dlopen"), directory);
+        String8 loader_command[] = {S8("-g0"), S8("-pie"), S8("-rdynamic"), S8("-o"), loader_path, shared_dlopen_path, S8("-ldl")};
+        CompilerDriverResult loader = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(loader_command)));
+        BUSTER_TEST(arguments, loader.error == COMPILER_DRIVER_ERROR_NONE);
+        String8 loader_run[] = {loader_path, library_path};
+        String8 loader_output = {0};
+        BUSTER_TEST(arguments, loader.error == COMPILER_DRIVER_ERROR_NONE &&
+                                   compiler_driver_test_image_run(arguments, arena, loader_run, BUSTER_ARRAY_LENGTH(loader_run), directory, &loader_output));
+
+        // The same library source built by the host toolchain, under a PIE
+        // Buster linked against it: Buster's image must not depend on its
+        // own library layout.
+        String8 host_library_directory = string_format_z(arena, S8("{S8}/host"), directory);
+        os_make_directory(host_library_directory);
+        String8 host_library_path = string_format_z(arena, S8("{S8}/libbustershared.so"), host_library_directory);
+        String8 host_library_command[] = {S8("-fPIC"), S8("-shared"), S8("-o"), host_library_path, shared_library_path};
+        bool host_library = compiler_driver_test_image_host_compile(arena, host_library_command, BUSTER_ARRAY_LENGTH(host_library_command));
+        BUSTER_TEST(arguments, host_library);
+        String8 host_output = {0};
+        BUSTER_TEST(arguments, host_library && main_built[1] &&
+                                   compiler_driver_test_image_run(arguments, arena, main_paths + 1, 1, host_library_directory, &host_output));
+    }
+
+    // Constructor, handler and destructor order across a Buster library and
+    // a Buster PIE, which the host-built library fixes for executables.
+    String8 lifecycle_library = string_format_z(arena, S8("{S8}/liblifecycleprobe.so"), directory);
+    String8 lifecycle_library_command[] = {S8("-g0"), S8("-shared"), S8("-o"), lifecycle_library, S8("tests/basic_c_elf_dso_lifecycle.c")};
+    CompilerDriverResult lifecycle = compiler_driver_execute_invocation(
+        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(lifecycle_library_command)));
+    BUSTER_TEST(arguments, lifecycle.error == COMPILER_DRIVER_ERROR_NONE);
+    String8 lifecycle_path = string_format_z(arena, S8("{S8}/lifecycle-pie"), directory);
+    String8 lifecycle_command[] = {S8("-g0"), S8("-fPIE"), S8("-pie"), S8("-o"), lifecycle_path, S8("-L"), directory, S8("-llifecycleprobe"),
+                                   S8("tests/basic_c_elf_dso_lifecycle_main.c"), S8("-DEXECUTABLE_LIFECYCLE")};
+    CompilerDriverResult lifecycle_linked = lifecycle.error == COMPILER_DRIVER_ERROR_NONE
+                                                ? compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(
+                                                                                                arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(lifecycle_command)))
+                                                : lifecycle;
+    BUSTER_TEST(arguments, lifecycle_linked.error == COMPILER_DRIVER_ERROR_NONE);
+    String8 lifecycle_output = {0};
+    if (lifecycle_linked.error == COMPILER_DRIVER_ERROR_NONE &&
+        compiler_driver_test_image_run(arguments, arena, &lifecycle_path, 1, directory, &lifecycle_output))
+    {
+        BUSTER_STRING_TEST(arguments, lifecycle_output,
+                           S8("shared init\nexecutable init\nshared work\nuser handler\nexecutable fini\nshared fini\n"));
+    }
+    else
+    {
+        BUSTER_TEST(arguments, false);
+    }
+
+    // An object compiled for a fixed address reads imported data with a
+    // rel32, which a shared object cannot hold.
+    String8 non_pic_object = string_format_z(arena, S8("{S8}/non-pic.o"), directory);
+    String8 non_pic_compile[] = {S8("-g0"), S8("-fno-pic"), S8("-c"), S8("-o"), non_pic_object, non_pic_reference_path};
+    CompilerDriverResult non_pic = compiler_driver_execute_invocation(
+        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(non_pic_compile)));
+    BUSTER_TEST(arguments, non_pic.error == COMPILER_DRIVER_ERROR_NONE);
+    String8 non_pic_library = string_format_z(arena, S8("{S8}/libnonpic.so"), directory);
+    String8 non_pic_link[] = {S8("-shared"), S8("-o"), non_pic_library, non_pic_object};
+    CompilerDriverResult refused = compiler_driver_execute_invocation(
+        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(non_pic_link)));
+    BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK && refused.native_link.error == LINK_ERROR_RELOCATION);
+    BUSTER_STRING_TEST(arguments, refused.native_link.symbol, S8("non_pic_external"));
+    BUSTER_TEST(arguments, string_ends_with_sequence(refused.diagnostic, S8("needs objects compiled with -fPIC)")));
+
+    // A CPython extension, where the interpreter and its headers exist.
+    String8 python = executable_resolve_in_path(arena, S8("python3"));
+    String8 include_output = {0};
+    String8 include_query[] = {python, S8("-c"), S8("import sysconfig, sys; sys.stdout.write(sysconfig.get_paths()['include'])")};
+    bool python_found = python.length && compiler_driver_test_image_run(arguments, arena, include_query, BUSTER_ARRAY_LENGTH(include_query), directory,
+                                                                          &include_output);
+    String8 python_header = python_found ? string_format_z(arena, S8("{S8}/Python.h"), include_output) : (String8){0};
+    FileMapRead header = python_found ? file_map_read(arena, python_header, (FileReadOptions){0}) : (FileMapRead){0};
+    bool python_available = header.bytes.pointer != 0;
+    file_map_unmap(header);
+    if (python_available)
+    {
+        String8 extension_path = string_format_z(arena, S8("{S8}/busterpic.so"), directory);
+        String8 extension_command[] = {S8("-g0"), S8("-shared"), S8("-fPIC"), S8("-isystem"), include_output, S8("-o"), extension_path,
+                                       python_extension_path};
+        CompilerDriverResult extension = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(extension_command)));
+        if (extension.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("Python extension build: {S8}\n"), extension.diagnostic);
+        BUSTER_TEST(arguments, extension.error == COMPILER_DRIVER_ERROR_NONE);
+        String8 script = S8("import busterpic\n"
+                            "assert busterpic.add(2, 40) == 42 and busterpic.answer == 42\n"
+                            "assert busterpic.greet('world') == 'hello, world (1)'\n"
+                            "try:\n"
+                            "    busterpic.fail()\n"
+                            "    raise SystemExit(1)\n"
+                            "except ValueError as error:\n"
+                            "    assert str(error) == 'refused'\n"
+                            "print('imported')\n");
+        String8 import_command[] = {python, S8("-c"), script};
+        String8 import_output = {0};
+        BUSTER_TEST(arguments, extension.error == COMPILER_DRIVER_ERROR_NONE &&
+                                   compiler_driver_test_image_run(arguments, arena, import_command, BUSTER_ARRAY_LENGTH(import_command), directory,
+                                                                  &import_output) &&
+                                   string_equal(import_output, S8("imported\n")));
+    }
+    else
+    {
+        arguments->show(arguments, S8("Python extension check skipped: python3 or its headers are not installed\n"));
+    }
+    scratch_end(temporary);
+    return result;
+}
+#endif
+
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_unwind_link(UnitTestArguments* arguments)
 {
@@ -7606,28 +8084,75 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pic_argument_policy(Unit
     SliceString8 missing_output = compiler_driver_test_pic_arguments(temporary.arena, S8("gcc"), S8("GNU"), S8(""), S8(""), true);
     BUSTER_TEST(arguments, !missing_compiler.length && !missing_compiler.pointer);
     BUSTER_TEST(arguments, !missing_output.length && !missing_output.pointer);
-    String8 positive_pie_flags[] = {S8("-fPIE"), S8("-fpie")};
-    String8 elf_target[] = {S8("-target"), S8("x86_64-unknown-linux-gnu")};
-    for (u32 flag_index = 0; flag_index < BUSTER_ARRAY_LENGTH(positive_pie_flags); flag_index += 1)
+    // -fPIE/-fpie select the position-independent code model on every
+    // target; the last of the four positive spellings wins, and -fno-pie
+    // cancels only a model a PIE spelling chose.
+    typedef struct PicModelCase PicModelCase;
+    struct PicModelCase
     {
-        String8 command_line[] = {elf_target[0], elf_target[1], positive_pie_flags[flag_index], S8("tests/basic_c_pic.c")};
-        CompilerDriverInvocation rejected_pie = compiler_driver_parse_arguments(
-            temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command_line));
-        BUSTER_TEST(arguments, rejected_pie.error == COMPILER_DRIVER_ERROR_ARGUMENT);
-        String8 diagnostic = flag_index ? S8("unsupported option: -fpie") : S8("unsupported option: -fPIE");
-        BUSTER_STRING_TEST(arguments, rejected_pie.diagnostic, diagnostic);
-    }
-    String8 non_elf_targets[] = {S8("x86_64-macos"), S8("x86_64-windows"), S8("x86_64-uefi"),
-                                 S8("wasm64-unknown-freestanding"), S8("bpfel-unknown-linux")};
-    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(non_elf_targets); target_index += 1)
+        String8 first;
+        String8 second;
+        bool position_independent;
+        u8 reserved[7];
+    };
+    PicModelCase model_cases[] = {
+        {S8("-fPIE"), S8("-g0"), true, {0}},    {S8("-fpie"), S8("-g0"), true, {0}},     {S8("-fPIE"), S8("-fno-pie"), false, {0}},
+        {S8("-fPIC"), S8("-fno-pie"), true, {0}}, {S8("-fpie"), S8("-fno-pic"), false, {0}}, {S8("-fno-pic"), S8("-fPIE"), true, {0}},
+    };
+    String8 model_targets[] = {S8("x86_64-unknown-linux-gnu"), S8("aarch64-linux"), S8("x86_64-macos"), S8("x86_64-windows"), S8("x86_64-uefi")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(model_targets); target_index += 1)
     {
-        for (u32 flag_index = 0; flag_index < BUSTER_ARRAY_LENGTH(positive_pie_flags); flag_index += 1)
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(model_cases); case_index += 1)
         {
-            String8 command_line[] = {S8("-target"), non_elf_targets[target_index], positive_pie_flags[flag_index],
+            String8 command_line[] = {S8("-target"), model_targets[target_index], S8("-c"), model_cases[case_index].first, model_cases[case_index].second,
                                       S8("tests/basic_c_pic.c")};
-            CompilerDriverInvocation accepted_pie = compiler_driver_parse_arguments(
-                temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command_line));
-            BUSTER_TEST(arguments, accepted_pie.error == COMPILER_DRIVER_ERROR_NONE);
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command_line));
+            BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, invocation.position_independent == model_cases[case_index].position_independent);
+            BUSTER_TEST(arguments, invocation.image_kind == NATIVE_IMAGE_EXECUTABLE);
+        }
+    }
+    // -shared and -pie choose the image; -shared outranks -pie in either
+    // order, -no-pie undoes only -pie, and linking either kind compiles its
+    // C inputs position-independent.
+    typedef struct ImageKindCase ImageKindCase;
+    struct ImageKindCase
+    {
+        String8 first;
+        String8 second;
+        NativeImageKind kind;
+    };
+    ImageKindCase image_cases[] = {
+        {S8("-shared"), S8("-g0"), NATIVE_IMAGE_SHARED},  {S8("-pie"), S8("-g0"), NATIVE_IMAGE_PIE},
+        {S8("-pie"), S8("-no-pie"), NATIVE_IMAGE_EXECUTABLE}, {S8("-no-pie"), S8("-pie"), NATIVE_IMAGE_PIE},
+        {S8("-shared"), S8("-pie"), NATIVE_IMAGE_SHARED}, {S8("-pie"), S8("-shared"), NATIVE_IMAGE_SHARED},
+        {S8("-shared"), S8("-no-pie"), NATIVE_IMAGE_SHARED}, {S8("-no-pie"), S8("-g0"), NATIVE_IMAGE_EXECUTABLE},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(image_cases); case_index += 1)
+    {
+        String8 command_line[] = {S8("-target"), S8("x86_64-unknown-linux-gnu"), image_cases[case_index].first, image_cases[case_index].second,
+                                  S8("-o"), S8("output"), S8("tests/basic_c_pic.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command_line));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, invocation.image_kind == image_cases[case_index].kind);
+        BUSTER_TEST(arguments, invocation.position_independent == (image_cases[case_index].kind != NATIVE_IMAGE_EXECUTABLE));
+    }
+    // Only x86-64 Linux has a writer for either image. Elsewhere a link that
+    // asks for one is refused by name, while compiling alone ignores the
+    // link option as GCC does.
+    String8 image_options[] = {S8("-shared"), S8("-pie")};
+    String8 image_targets[] = {S8("aarch64-linux"), S8("x86_64-windows"), S8("x86_64-macos"), S8("x86_64-uefi"), S8("aarch64-linux-android")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(image_targets); target_index += 1)
+    {
+        for (u32 option_index = 0; option_index < BUSTER_ARRAY_LENGTH(image_options); option_index += 1)
+        {
+            String8 link_line[] = {S8("-target"), image_targets[target_index], image_options[option_index], S8("tests/basic_c_pic.c")};
+            CompilerDriverInvocation refused = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_line));
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+            BUSTER_STRING_TEST(arguments, refused.diagnostic, option_index ? S8("unsupported option: -pie") : S8("unsupported option: -shared"));
+            String8 compile_line[] = {S8("-target"), image_targets[target_index], S8("-c"), image_options[option_index], S8("tests/basic_c_pic.c")};
+            CompilerDriverInvocation compiled = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_line));
+            BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
         }
     }
     scratch_end(temporary);
@@ -8677,6 +9202,77 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_has_builtin_targets(Unit
     return result;
 }
 
+// Issue 1603: a prototype followed by a definition nothing reaches left that
+// definition's REJECTED placeholder in the IR. Native code generation skipped
+// it, but the LLVM bitcode, WebAssembly and eBPF emitters refused the unit.
+// The last shape is a definition kept for its section, whose callees were
+// never marked needed: the call to the unprototyped one failed to lower on
+// every target, and the prototyped one was left bodiless -- refused by the
+// LLVM and eBPF emitters, turned into a host import by the WebAssembly one. A
+// refusal that does concern a function must name it and point at it, as a
+// native refusal does.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unneeded_prototyped_definitions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("static int unneeded_static(void);\n"
+                        "static int unneeded_static(void) { return 1; }\n"
+                        "static inline int unneeded_inline(void);\n"
+                        "static inline int unneeded_inline(void) { return 2; }\n"
+                        "inline int unneeded_external_inline(void);\n"
+                        "inline int unneeded_external_inline(void) { return 3; }\n"
+                        "static int unneeded_cycle_a(void);\n"
+                        "static int unneeded_cycle_b(void) { return unneeded_cycle_a(); }\n"
+                        "static int unneeded_cycle_a(void) { return unneeded_cycle_b(); }\n"
+                        "static int needed_static(void);\n"
+                        "int main(void) { return needed_static(); }\n"
+                        "static int needed_static(void) { return 4; }\n"
+                        "static int section_callee(void) { return 5; }\n"
+                        "static int section_callee_prototyped(void);\n"
+                        "__attribute__((section(\".text.kept\"))) static int section_root(void)"
+                        " { return section_callee() + section_callee_prototyped(); }\n"
+                        "static int section_callee_prototyped(void) { return 6; }\n");
+    // The first target is compiled with -emit-llvm; the others select their
+    // direct emitter by target alone.
+    String8 target_names[] = {S8("x86_64-unknown-linux-gnu"), S8("wasm32-unknown-wasi"), S8("bpfel-unknown-linux")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_names); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-unneeded-prototyped"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-unneeded-prototyped"), S8(".out"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 command[] = {S8("-emit-llvm"), S8("-c"), S8("-nostdinc"), S8("-target"), target_names[target_index], S8("-o"), output, input};
+            u32 skipped = target_index != 0;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command + skipped, .length = BUSTER_ARRAY_LENGTH(command) - skipped}));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+            {
+                BUSTER_TEST(arguments, target_index == 0 ? compiled.has_llvm_bitcode : target_index == 1 ? compiled.has_wasm : compiled.has_ebpf);
+                BUSTER_TEST(arguments, file_read(arena, output, (FileReadOptions){0}).length != 0);
+            }
+        }
+        scratch_end(temporary);
+    }
+    String8 refusal_targets[] = {S8("wasm64-unknown-freestanding"), S8("bpfel-unknown-linux")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(refusal_targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 output = buster_test_temporary_path(arena, S8("buster-emitter-refusal"), S8(".out"));
+        String8 command[] = {
+            S8("-c"), S8("-target"), refusal_targets[target_index], S8("-DABI_TEST_MODE=0"), S8("-o"), output, S8("tests/basic_c_llvm_abi_unsupported.c")};
+        CompilerDriverResult refused =
+            compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, refused.error == (target_index == 0 ? COMPILER_DRIVER_ERROR_WASM : COMPILER_DRIVER_ERROR_EBPF));
+        BUSTER_TEST_RAW(arguments, string_starts_with_sequence(refused.diagnostic, S8("tests/basic_c_llvm_abi_unsupported.c:3:")), refused.diagnostic);
+        BUSTER_TEST_RAW(arguments, string_ends_with_sequence(refused.diagnostic, S8(" (in function 'return_pair')")), refused.diagnostic);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // #666: inspect the bytes the selected object writer actually emitted, not
 // just IrSymbol.is_weak (which COFF accepts but cannot serialize). The same
 // guarded fixture must also survive native source/object linking and exit.
@@ -9207,6 +9803,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_write_limits);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unneeded_prototyped_definitions);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_common_storage_option);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
@@ -9255,6 +9852,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_data_scaling);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_link_boundaries);
+#endif
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_position_independent_images);
 #endif
 
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_batches);
@@ -12722,6 +13322,110 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+    {
+        // typeof over a block-scope object or parameter that shadows a
+        // file-scope typedef names the object, not the typedef; a nearer
+        // block-local typedef still names a type (#1669).
+        TemporalArena typeof_shadow_temporary = scratch_begin(&arguments->arena, 1);
+        String8 typeof_shadow_path = buster_test_temporary_path(typeof_shadow_temporary.arena, S8("buster-c-typeof-shadowed-typedef"),
+#if BUSTER_WINDOWS
+                                                                S8(".exe")
+#else
+                                                                S8("")
+#endif
+        );
+        String8 typeof_shadow_source_path =
+            buster_test_temporary_path(typeof_shadow_temporary.arena, S8("buster-c-typeof-shadowed-typedef"), S8(".c"));
+        String8 typeof_shadow_source = S8(
+            "typedef char T;\n"
+            "\n"
+            "static long local_typeof(void)\n"
+            "{\n"
+            "    long T = 1;\n"
+            "    typeof(T) y = 0x12345;\n"
+            "    return sizeof(y) == sizeof(long) && y == 0x12345 && T == 1;\n"
+            "}\n"
+            "\n"
+            "static long local_gnu_typeof(void)\n"
+            "{\n"
+            "    long T = 2;\n"
+            "    __typeof__(T) y = 0x12345;\n"
+            "    __typeof__(T)* p = &T;\n"
+            "    return sizeof(y) == sizeof(long) && y == 0x12345 && *p == 2;\n"
+            "}\n"
+            "\n"
+            "static long local_typeof_unqual(void)\n"
+            "{\n"
+            "    const long T = 3;\n"
+            "    typeof_unqual(T) y = 0;\n"
+            "    y = 0x12345;\n"
+            "    return sizeof(y) == sizeof(long) && y == 0x12345 && T == 3;\n"
+            "}\n"
+            "\n"
+            "static long parameter_typeof(long T)\n"
+            "{\n"
+            "    typeof(T) y = T;\n"
+            "    __typeof__(T) z = 0x12345;\n"
+            "    return sizeof(y) == sizeof(long) && sizeof(z) == sizeof(long) && z == 0x12345;\n"
+            "}\n"
+            "\n"
+            "static long statement_expression_typeof(void)\n"
+            "{\n"
+            "    long r = ({\n"
+            "        long T = 4;\n"
+            "        typeof(T) y = 0x12345;\n"
+            "        __typeof__(T) z = T;\n"
+            "        typeof_unqual(T) w = 0x6789a;\n"
+            "        sizeof(y) == sizeof(long) && y == 0x12345 && z == 4 && w == 0x6789a;\n"
+            "    });\n"
+            "    return r;\n"
+            "}\n"
+            "\n"
+            "static long block_typedef_typeof(void)\n"
+            "{\n"
+            "    typedef long T;\n"
+            "    long outer = 0;\n"
+            "    {\n"
+            "        typedef char T;\n"
+            "        typeof(T) y = 0;\n"
+            "        outer = (long)sizeof(y);\n"
+            "    }\n"
+            "    typeof(T) wide = 0x12345;\n"
+            "    return outer == 1 && sizeof(wide) == sizeof(long) && wide == 0x12345;\n"
+            "}\n"
+            "\n"
+            "int main(void)\n"
+            "{\n"
+            "    T c = 0;\n"
+            "    return !(local_typeof() && local_gnu_typeof() && local_typeof_unqual() && parameter_typeof(5) && statement_expression_typeof() &&\n"
+            "             block_typedef_typeof() && sizeof(c) == 1);\n"
+            "}\n");
+        BUSTER_TEST(arguments, file_write(typeof_shadow_source_path, BUSTER_SLICE_TO_BYTE_SLICE(typeof_shadow_source)));
+        String8 typeof_shadow_command_line[] = {
+            S8("-std=gnu23"), S8("-o"), typeof_shadow_path, typeof_shadow_source_path,
+        };
+        CompilerDriverResult typeof_shadow = compiler_driver_execute_invocation(
+            typeof_shadow_temporary.arena,
+            compiler_driver_parse_arguments(typeof_shadow_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(typeof_shadow_command_line)));
+        if (typeof_shadow.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("typeof shadowed typedef fixture failed: {S8}\n"), typeof_shadow.diagnostic);
+        }
+        BUSTER_TEST(arguments, typeof_shadow.error == COMPILER_DRIVER_ERROR_NONE);
+        if (typeof_shadow.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 typeof_shadow_run_arguments[] = {typeof_shadow_path};
+            ProcessSpawnResult typeof_shadow_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(typeof_shadow_run_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+            BUSTER_TEST(arguments, typeof_shadow_spawn.handle != 0);
+            if (typeof_shadow_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(typeof_shadow_temporary.arena, typeof_shadow_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(typeof_shadow_temporary);
+    }
     // Three CPython-found lowering shapes, each compiled and run with its
     // answers checked: a flexible array member initialized at static
     // storage (dictobject's empty keys), `++*s++` (dtoa's digit strip), and
@@ -16210,6 +16914,187 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(fixture_temporary);
         }
     }
+    // Braced statements ending in `break`, `goto`, `return` or `continue` leave
+    // the block after their closing brace without a predecessor, yet the next
+    // label still receives an edge from it. That dead edge must not keep a
+    // frontend SSA merge alive: SQLite's bytecode interpreter writes nearly
+    // every opcode as `case OP_X: { ... break; }`. The braced and unbraced
+    // interpreters must agree, a genuine fallthrough must still merge both
+    // paths, and dead code after a `break` that reads the locals must change
+    // nothing, under every allocator. The source is written to a temporary
+    // file because a tracked fixture needs a reviewed native-retirement
+    // support identity.
+    String8 dead_continuation_source = S8(
+        "static long braced(unsigned char const* code, long count, long seed)\n"
+        "{\n"
+        "    long acc = seed;\n"
+        "    long mix = 1;\n"
+        "    long carry = 3;\n"
+        "    for (long pc = 0; pc < count; pc += 1)\n"
+        "    {\n"
+        "        switch (code[pc])\n"
+        "        {\n"
+        "        case 0: {\n"
+        "            acc += pc * 3;\n"
+        "            mix ^= acc;\n"
+        "            break;\n"
+        "        }\n"
+        "        case 1: {\n"
+        "            long local = acc * 5 + pc;\n"
+        "            carry += local & 255;\n"
+        "            break;\n"
+        "            acc += 1000;\n"
+        "            carry -= 1000;\n"
+        "        }\n"
+        "        case 2: {\n"
+        "            if (acc & 1)\n"
+        "            {\n"
+        "                acc += carry;\n"
+        "            }\n"
+        "            else\n"
+        "            {\n"
+        "                mix -= carry;\n"
+        "            }\n"
+        "            break;\n"
+        "        }\n"
+        "        case 3: {\n"
+        "            for (long step = 0; step < (pc & 3); step += 1)\n"
+        "            {\n"
+        "                carry += step + mix;\n"
+        "            }\n"
+        "            continue;\n"
+        "        }\n"
+        "        case 4: {\n"
+        "            acc -= 7;\n"
+        "            goto shared;\n"
+        "        }\n"
+        "        shared: {\n"
+        "            mix += acc ^ carry;\n"
+        "            break;\n"
+        "        }\n"
+        "        case 5: {\n"
+        "            if (acc > 1000000)\n"
+        "            {\n"
+        "                return acc + mix + carry;\n"
+        "            }\n"
+        "            acc *= 3;\n"
+        "        }\n"
+        "        // Genuine fallthrough: both the dispatch and case 5 reach this block.\n"
+        "        case 6: {\n"
+        "            acc += 11;\n"
+        "            mix ^= pc;\n"
+        "            break;\n"
+        "        }\n"
+        "        default: {\n"
+        "            return -1;\n"
+        "        }\n"
+        "        }\n"
+        "        acc = acc % 1000003;\n"
+        "        mix = mix % 999983;\n"
+        "    }\n"
+        "    return acc + mix + carry;\n"
+        "}\n"
+        "\n"
+        "static long unbraced(unsigned char const* code, long count, long seed)\n"
+        "{\n"
+        "    long acc = seed;\n"
+        "    long mix = 1;\n"
+        "    long carry = 3;\n"
+        "    for (long pc = 0; pc < count; pc += 1)\n"
+        "    {\n"
+        "        long local;\n"
+        "        switch (code[pc])\n"
+        "        {\n"
+        "        case 0:\n"
+        "            acc += pc * 3;\n"
+        "            mix ^= acc;\n"
+        "            break;\n"
+        "        case 1:\n"
+        "            local = acc * 5 + pc;\n"
+        "            carry += local & 255;\n"
+        "            break;\n"
+        "        case 2:\n"
+        "            if (acc & 1)\n"
+        "            {\n"
+        "                acc += carry;\n"
+        "            }\n"
+        "            else\n"
+        "            {\n"
+        "                mix -= carry;\n"
+        "            }\n"
+        "            break;\n"
+        "        case 3:\n"
+        "            for (long step = 0; step < (pc & 3); step += 1)\n"
+        "            {\n"
+        "                carry += step + mix;\n"
+        "            }\n"
+        "            continue;\n"
+        "        case 4:\n"
+        "            acc -= 7;\n"
+        "            mix += acc ^ carry;\n"
+        "            break;\n"
+        "        case 5:\n"
+        "            if (acc > 1000000)\n"
+        "            {\n"
+        "                return acc + mix + carry;\n"
+        "            }\n"
+        "            acc *= 3;\n"
+        "            acc += 11;\n"
+        "            mix ^= pc;\n"
+        "            break;\n"
+        "        case 6:\n"
+        "            acc += 11;\n"
+        "            mix ^= pc;\n"
+        "            break;\n"
+        "        default:\n"
+        "            return -1;\n"
+        "        }\n"
+        "        acc = acc % 1000003;\n"
+        "        mix = mix % 999983;\n"
+        "    }\n"
+        "    return acc + mix + carry;\n"
+        "}\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    static unsigned char const program[] = {0, 1, 2, 3, 4, 5, 6, 0, 2, 1, 5, 5, 5, 6, 4, 3, 2, 0, 1, 6, 5, 4, 3, 2, 1, 0};\n"
+        "    static unsigned char const invalid[] = {0, 1, 9, 2};\n"
+        "    long count = (long)(sizeof(program) / sizeof(program[0]));\n"
+        "    for (long seed = -3; seed < 40; seed += 7)\n"
+        "    {\n"
+        "        if (braced(program, count, seed) != unbraced(program, count, seed)) return 1;\n"
+        "    }\n"
+        "    if (braced(program, count, 5) != 428719) return 2;\n"
+        "    if (braced(program, 11, 2) != 265) return 3;\n"
+        "    if (braced(invalid, 4, 1) != -1) return 4;\n"
+        "    return 0;\n"
+        "}\n"
+    );
+    for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+    {
+        TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
+        String8 source_path = buster_test_temporary_path(fixture_temporary.arena, S8("buster-c-switch-dead-continuation"), S8(".c"));
+        String8 fixture_path = buster_test_temporary_path(fixture_temporary.arena, S8("buster-c-switch-dead-continuation"), S8(""));
+        BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(dead_continuation_source)));
+        String8 fixture_command_line[] = {
+            c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, source_path,
+        };
+        CompilerDriverResult fixture = compiler_driver_execute_invocation(
+            fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+        BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+        if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 fixture_arguments[] = {fixture_path};
+            ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+            BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+            if (fixture_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(fixture_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(fixture_temporary);
+    }
     // Static scalar conversions and automatic nested string initialization
     // exercise distinct frontend paths and must agree under every allocator.
     String8 c_initializer_regression_paths[] = {
@@ -16401,7 +17286,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
                 String8 fixture_path = buster_test_temporary_path(fixture_temporary.arena, S8("buster-c-flat-aggregate-initializers"), S8(""));
-                String8 source_path = string_format(fixture_temporary.arena, S8("{S8}.c"), fixture_path);
+                String8 source_path = string_format_z(fixture_temporary.arena, S8("{S8}.c"), fixture_path);
                 BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(c_flat_initializer_source)));
                 String8 fixture_command_line[] = {
                     c_flat_initializer_frontends[frontend_index], c_flat_initializer_optimizations[optimization_index],
@@ -16586,6 +17471,377 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     }
                 }
                 scratch_end(fixture_temporary);
+            }
+        }
+    }
+    // Modification destinations: a store through a pre-updated pointer,
+    // `*--q = c`, converts to the pointee (C17 6.5.3.1p2, 6.5.16p3,
+    // 6.5.16.1p2), and `++`/`--` on a parameter declared as an array updates
+    // the pointer it is adjusted to (6.7.6.3p7), unless the brackets make that
+    // pointer const. The constraint pass refused both shapes in every
+    // allocator (QuickJS, zlib, musl, libpng, zstd; sbase, lmdb, mbedtls). The
+    // native-retirement ledger pins tests/ fixture bytes, so the sources are
+    // embedded, each literal below C99's minimum length limit. Each one runs
+    // and checks the objects it wrote; `-O` is given before the allocator
+    // because an optimization level restores the default allocator.
+    String8 c_prefix_pointer_store_parts[] = {
+        S8(
+            "// A store through a pointer that the same expression pre-increments or\n"
+            "// pre-decrements: `*--q = c`. `--q` is `q -= 1` (C17 6.5.3.1p2) and not an\n"
+            "// lvalue (6.5.16p3), so the destination is the object the updated pointer\n"
+            "// designates (6.5.3.2p4), and the right operand converts to that object's\n"
+            "// type (6.5.16.1p2), never to the pointer's. The constraint pass read the\n"
+            "// identifier in front of `=` as the whole destination and refused every one\n"
+            "// of these as a conversion to the pointer type: QuickJS's `js_u64toa`\n"
+            "// (`*--q = '0' + digit`, int to char),\n"
+            "// libpng's `png_format_number` (`*--end = digits[...]`, const char to char),\n"
+            "// zstd's `tr_copy` (`*++d = s`, int to int) and musl's `vfprintf`.\n"
+            "//\n"
+            "// Each shape runs and its objects are checked afterwards, because a store\n"
+            "// that landed on the pointer or on the neighbouring element still compiles.\n"
+            "\n"
+            "struct Pair\n"
+            "{\n"
+            "    int first;\n"
+            "    int second;\n"
+            "};\n"
+            "\n"
+            "static const char digit_table[] = \"0123456789abcdef\";\n"
+            "\n"
+            "// QuickJS: the character is an int expression converted on store.\n"
+            "static char* format_backward(char* q, unsigned long long n, unsigned base)\n"
+            "{\n"
+            "    int digit;\n"
+            "    if (base == 10)\n"
+            "    {\n"
+            "        do\n"
+            "        {\n"
+            "            digit = (int)(n % 10);\n"
+            "            n /= 10;\n"
+            "            *--q = '0' + digit;\n"
+            "        } while (n != 0);\n"
+            "    }\n"
+            "    else\n"
+            "    {\n"
+            "        do\n"
+            "        {\n"
+            "            digit = (int)(n % base);\n"
+            "            n /= base;\n"
+            "            *--q = digit_table[digit];\n"
+            "        } while (n != 0);\n"
+            "    }\n"
+            "    return q;\n"
+            "}\n"
+            "\n"
+            "// zstd: an int store through a pre-incremented cursor into the same array.\n"
+            "static int* copy_forward(int* d, int const* source, int count)\n"
+            "{\n"
+            "    for (int index = 0; index < count; index += 1)\n"
+            "    {\n"
+            "        *++d = source[index];\n"
+            "    }\n"
+            "    return d;\n"
+            "}\n"
+            "\n"
+            "static int text_equal(char const* left, char const* right)\n"
+            "{\n"
+            "    while (*left && *left == *right)\n"
+            "    {\n"
+            "        left += 1;\n"
+            "        right += 1;\n"
+            "    }\n"
+            "    return *left == *right;\n"
+            "}\n"
+            "\n"
+            "static int answer(void)\n"
+            "{\n"
+            "    return 42;\n"
+            "}\n"
+            "\n"
+            "int main(void)\n"
+            "{\n"
+            "    char buffer[32];\n"
+            "    buffer[31] = 0;\n"
+            "    char* text = format_backward(buffer + 31, 1234567890123ull, 10);\n"
+            "    if (!text_equal(text, \"1234567890123\") || text != buffer + 18)\n"
+            "    {\n"
+            "        return 1;\n"
+            "    }\n"
+            "    text = format_backward(buffer + 31, 0xbeefu, 16);\n"
+            "    if (!text_equal(text, \"beef\") || text != buffer + 27)\n"
+            "    {\n"
+            "        return 2;\n"
+            "    }\n"
+            "\n"
+            "    int values[6] = {0, 0, 0, 0, 0, -1};\n"
+            "    int const source[4] = {7, 8, 9, 10};\n"
+            "    int* last = copy_forward(values, source, 4);\n"
+            "    if (last != values + 4 || values[0] != 0 || values[1] != 7 || values[4] != 10 || values[5] != -1)\n"
+            "    {\n"
+            "        return 3;\n"
+            "    }\n"
+            "\n"
+            "    // A chained assignment takes the stored element's value, converted to\n"
+            "    // the element type, not the pointer's.\n"
+            "    unsigned char bytes[3] = {1, 2, 3};\n"
+            "    unsigned char* cursor = bytes + 2;\n"
+            "    int chained = *--cursor = 0x1ff;\n"
+            "    if (chained != 0xff || cursor != bytes + 1 || bytes[0] != 1 || bytes[1] != 0xff || bytes[2] != 3)\n"
+            "    {\n"
+            "        return 4;\n"
+            "    }\n"
+            "\n"
+        ),
+        S8(
+            "    // Floating, pointer, aggregate and function-pointer elements.\n"
+            "    double reals[2] = {0.0, 0.0};\n"
+            "    double* real = reals;\n"
+            "    *++real = 3;\n"
+            "    if (real != reals + 1 || reals[0] != 0.0 || reals[1] != 3.0)\n"
+            "    {\n"
+            "        return 5;\n"
+            "    }\n"
+            "    char* names[3] = {0, 0, 0};\n"
+            "    char** name = names + 3;\n"
+            "    *--name = buffer;\n"
+            "    if (name != names + 2 || names[2] != buffer || names[1] != 0)\n"
+            "    {\n"
+            "        return 6;\n"
+            "    }\n"
+            "    struct Pair pairs[2] = {{0, 0}, {0, 0}};\n"
+            "    struct Pair* pair = pairs;\n"
+            "    struct Pair filled = {5, 6};\n"
+            "    *++pair = filled;\n"
+            "    if (pair != pairs + 1 || pairs[1].first != 5 || pairs[1].second != 6 || pairs[0].first != 0)\n"
+            "    {\n"
+            "        return 7;\n"
+            "    }\n"
+            "    int (*calls[2])(void) = {0, 0};\n"
+            "    int (**call)(void) = calls + 2;\n"
+            "    *--call = answer;\n"
+            "    if (call != calls + 1 || calls[1]() != 42 || calls[0] != 0)\n"
+            "    {\n"
+            "        return 8;\n"
+            "    }\n"
+            "\n"
+            "    // A pre-updated store beside a plain one: both designate elements.\n"
+            "    _Bool flags[2] = {0, 0};\n"
+            "    _Bool* flag = flags;\n"
+            "    *flag = 2;\n"
+            "    *++flag = 5;\n"
+            "    if (flags[0] != 1 || flags[1] != 1)\n"
+            "    {\n"
+            "        return 9;\n"
+            "    }\n"
+            "    return 0;\n"
+            "}\n"
+        ),
+    };
+    String8 c_array_parameter_update_parts[] = {
+        S8(
+            "// C17 6.7.6.3p7: a parameter declared as an array is adjusted to a pointer to\n"
+            "// the element type, so it is a modifiable lvalue and `++`/`--` step it by one\n"
+            "// element (6.5.2.4, 6.5.3.1). The parameter entity keeps its declared array\n"
+            "// spelling, and the constraint pass read that spelling as an array object and\n"
+            "// refused every update as \"not a modifiable place\" -- while `+=` and `= p + 1`\n"
+            "// on the same parameter were accepted. `char *argv[]` with `argv++` is the\n"
+            "// ordinary command-line loop (lmdb's `mdb_copy`, sbase's ARGBEGIN), and\n"
+            "// mbedtls's `des_setkey` writes its key schedule through `uint32_t SK[32]` as\n"
+            "// `*SK++ = ...`.\n"
+            "//\n"
+            "// Every update runs and the element it lands on is checked, including a\n"
+            "// multidimensional parameter whose step is a whole row.\n"
+            "\n"
+            "typedef int Quad[4];\n"
+            "\n"
+            "static int count_options(int argc, char* argv[])\n"
+            "{\n"
+            "    int options = 0;\n"
+            "    for (; argc > 1 && argv[1][0] == '-'; argc--, argv++)\n"
+            "    {\n"
+            "        options += 1;\n"
+            "    }\n"
+            "    return options * 10 + argc;\n"
+            "}\n"
+            "\n"
+            "static void schedule(unsigned int SK[4], unsigned int seed)\n"
+            "{\n"
+            "    for (int index = 0; index < 4; index += 1)\n"
+            "    {\n"
+            "        *SK++ = seed + (unsigned int)index;\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "static int prefix_and_postfix(int values[])\n"
+            "{\n"
+            "    int first = *values++;\n"
+            "    int second = *++values;\n"
+            "    --values;\n"
+            "    int middle = *values--;\n"
+            "    return first * 100 + second * 10 + middle + (values[0] == first ? 1000 : 0);\n"
+            "}\n"
+            "\n"
+            "static int bounded(int values[static 3])\n"
+            "{\n"
+            "    values++;\n"
+            "    return values[1];\n"
+            "}\n"
+            "\n"
+            "static int variable(int n, int values[n])\n"
+            "{\n"
+            "    values += n - 1;\n"
+            "    values--;\n"
+            "    return values[0];\n"
+            "}\n"
+            "\n"
+            "static int rows(int matrix[][3])\n"
+            "{\n"
+            "    matrix++;\n"
+            "    return matrix[0][2];\n"
+            "}\n"
+            "\n"
+            "static int typedef_parameter(Quad quad)\n"
+            "{\n"
+            "    ++quad;\n"
+            "    return quad[0];\n"
+            "}\n"
+            "\n"
+            "static int qualified_elements(const char* names[])\n"
+            "{\n"
+            "    int total = 0;\n"
+            "    while (*names)\n"
+            "    {\n"
+            "        total += (*names)[0];\n"
+            "        (names)++;\n"
+            "    }\n"
+            "    return total;\n"
+            "}\n"
+            "\n"
+            "// `const` inside the brackets makes the pointer const; its elements are not.\n"
+            "static int bracket_const(int values[const 2])\n"
+            "{\n"
+            "    values[1]++;\n"
+            "    return values[0] * 10 + values[1];\n"
+            "}\n"
+            "\n"
+            "static int unevaluated(int values[])\n"
+            "{\n"
+            "    // The operand of sizeof is not evaluated: `values` is not stepped.\n"
+            "    int size = (int)sizeof(values++);\n"
+            "    return size == (int)sizeof(int*) ? values[0] : -1;\n"
+            "}\n"
+            "\n"
+            "int main(void)\n"
+            "{\n"
+            "    char program[] = \"tool\";\n"
+            "    char flag_a[] = \"-a\";\n"
+            "    char flag_b[] = \"-b\";\n"
+            "    char operand[] = \"file\";\n"
+            "    char* argv[] = {program, flag_a, flag_b, operand, 0};\n"
+            "    if (count_options(4, argv) != 22)\n"
+            "    {\n"
+            "        return 1;\n"
+            "    }\n"
+            "\n"
+            "    unsigned int keys[5] = {0, 0, 0, 0, 99};\n"
+            "    schedule(keys, 40);\n"
+            "    if (keys[0] != 40 || keys[3] != 43 || keys[4] != 99)\n"
+            "    {\n"
+            "        return 2;\n"
+            "    }\n"
+            "\n"
+            "    int values[4] = {1, 2, 3, 4};\n"
+            "    if (prefix_and_postfix(values) != 1132)\n"
+            "    {\n"
+            "        return 3;\n"
+            "    }\n"
+            "    if (bounded(values) != 3)\n"
+            "    {\n"
+            "        return 4;\n"
+            "    }\n"
+            "    if (variable(4, values) != 3)\n"
+            "    {\n"
+            "        return 5;\n"
+            "    }\n"
+            "\n"
+            "    int matrix[2][3] = {{1, 2, 3}, {4, 5, 6}};\n"
+        ),
+        S8(
+            "    if (rows(matrix) != 6)\n"
+            "    {\n"
+            "        return 6;\n"
+            "    }\n"
+            "\n"
+            "    Quad quad = {10, 20, 30, 40};\n"
+            "    if (typedef_parameter(quad) != 20)\n"
+            "    {\n"
+            "        return 7;\n"
+            "    }\n"
+            "\n"
+            "    char const* names[] = {\"a\", \"b\", 0};\n"
+            "    if (qualified_elements(names) != 'a' + 'b')\n"
+            "    {\n"
+            "        return 8;\n"
+            "    }\n"
+            "\n"
+            "    if (unevaluated(values) != 1)\n"
+            "    {\n"
+            "        return 9;\n"
+            "    }\n"
+            "\n"
+            "    int pair[2] = {4, 5};\n"
+            "    if (bracket_const(pair) != 46 || pair[1] != 6)\n"
+            "    {\n"
+            "        return 10;\n"
+            "    }\n"
+            "    return 0;\n"
+            "}\n"
+        ),
+    };
+
+    String8 c_modification_destination_sources[] = {
+        string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_prefix_pointer_store_parts), false),
+        string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_array_parameter_update_parts), false),
+    };
+    String8 c_modification_destination_names[] = {S8("buster-c-prefix-pointer-store"), S8("buster-c-array-parameter-update")};
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(c_modification_destination_sources); source_index += 1)
+    {
+        for (u32 frontend_index = 0; frontend_index < BUSTER_ARRAY_LENGTH(c_flat_initializer_frontends); frontend_index += 1)
+        {
+            for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+            {
+                for (u32 optimization_index = 0; optimization_index < BUSTER_ARRAY_LENGTH(c_designator_optimizations); optimization_index += 1)
+                {
+                    TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
+                    String8 fixture_path = buster_test_temporary_path(
+                        fixture_temporary.arena, c_modification_destination_names[source_index],
+                        string_format(fixture_temporary.arena, S8("-{u32}-{u32}-{u32}"), frontend_index, allocator_index, optimization_index));
+                    String8 source_path = string_format_z(fixture_temporary.arena, S8("{S8}.c"), fixture_path);
+                    BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(c_modification_destination_sources[source_index])));
+                    bool native_allocator = !string_equal(c_lz4_regression_allocators[allocator_index], S8("-fregister-allocator=none"));
+                    String8 fixture_command_line[] = {
+                        S8("-std=c17"), c_designator_optimizations[optimization_index], c_flat_initializer_frontends[frontend_index],
+                        c_lz4_regression_allocators[allocator_index], S8("-fverify-codegen"),
+                        native_allocator ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"), S8("-o"), fixture_path, source_path,
+                    };
+                    CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                        fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+                    BUSTER_TEST_RAW(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE,
+                                    string_format(fixture_temporary.arena, S8("{S8} {S8}: {S8}"), c_modification_destination_names[source_index],
+                                                  c_lz4_regression_allocators[allocator_index], fixture.diagnostic));
+                    if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 fixture_arguments[] = {fixture_path};
+                        ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0},
+                                                                            (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                        BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                        if (fixture_spawn.handle)
+                        {
+                            BUSTER_TEST(arguments, os_process_wait_sync(fixture_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                        }
+                    }
+                    scratch_end(fixture_temporary);
+                }
             }
         }
     }

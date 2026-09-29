@@ -102,7 +102,11 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_option_value(String8 argument, Strin
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_set_dialect(CompilerDriverInvocation* invocation, String8 dialect)
 {
-    if (string_equal(dialect, S8("gnu99")) || string_equal(dialect, S8("gnu9x")))
+    if (string_equal(dialect, S8("gnu89")) || string_equal(dialect, S8("gnu90")))
+    {
+        invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_GNU89;
+    }
+    else if (string_equal(dialect, S8("gnu99")) || string_equal(dialect, S8("gnu9x")))
     {
         invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_GNU99;
     }
@@ -161,6 +165,8 @@ BUSTER_GLOBAL_LOCAL CPreprocessDialect compiler_driver_preprocess_dialect(Compil
         return C_PREPROCESS_DIALECT_C17;
     case COMPILER_DRIVER_C_DIALECT_C23:
         return C_PREPROCESS_DIALECT_C23;
+    case COMPILER_DRIVER_C_DIALECT_GNU89:
+        return C_PREPROCESS_DIALECT_GNU89;
     case COMPILER_DRIVER_C_DIALECT_COUNT:
         return C_PREPROCESS_DIALECT_COUNT;
     }
@@ -892,7 +898,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     String8 architecture_option = {0};
     bool options_ended = false;
     bool action_seen = false;
-    String8 position_independent_executable_option = {0};
+    // Whether the code model in force came from -fPIE/-fpie, which is what
+    // -fno-pie cancels; -fno-pie after -fPIC leaves -fPIC's model alone.
+    bool position_independent_executable_model = false;
+    // The -shared or -pie spelling that asked for a position-independent
+    // image, kept for the diagnostic on a target with no writer for one.
+    String8 position_independent_image_option = {0};
     bool common_storage_requested = false;
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
@@ -1577,23 +1588,42 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         // an offset from the thread pointer, and it decides how every other
         // reference to an interposable symbol is spelled: through the GOT for
         // an address and the PLT for a direct call. -fno-pic asks for the
-        // rip-relative forms back. PIE-specific reference selection is not
-        // implemented for x86-64 ELF, so -fPIE/-fpie are rejected there
-        // instead of being silently ignored; other targets keep their prior
-        // accepted no-op behavior.
-        if (string_equal(argument, S8("-fPIC")) || string_equal(argument, S8("-fpic")))
+        // rip-relative forms back. -fPIE/-fpie select the same model: an
+        // executable could bind its own definitions directly, but code that
+        // may be linked into a shared object is also correct in a PIE, and
+        // the position-independent image writer relaxes the GOT loads of
+        // definitions it binds. The last of the four positive spellings wins,
+        // as it does for GCC, and -fno-pie cancels only a PIE model.
+        if (string_equal(argument, S8("-fPIC")) || string_equal(argument, S8("-fpic")) || string_equal(argument, S8("-fPIE")) ||
+            string_equal(argument, S8("-fpie")))
         {
             invocation.position_independent = true;
+            position_independent_executable_model = string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie"));
             continue;
         }
-        if (string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie")))
-        {
-            position_independent_executable_option = argument;
-            continue;
-        }
-        if (string_equal(argument, S8("-fno-pic")))
+        if (string_equal(argument, S8("-fno-pic")) || (string_equal(argument, S8("-fno-pie")) && position_independent_executable_model))
         {
             invocation.position_independent = false;
+            position_independent_executable_model = false;
+            continue;
+        }
+        // The image a link produces. -shared outranks -pie wherever the two
+        // meet, as it does for GCC; -no-pie returns to the fixed-address
+        // executable only from -pie.
+        if (string_equal(argument, S8("-shared")))
+        {
+            invocation.image_kind = NATIVE_IMAGE_SHARED;
+            position_independent_image_option = argument;
+            continue;
+        }
+        if (string_equal(argument, S8("-pie")) || string_equal(argument, S8("-no-pie")))
+        {
+            bool pie = string_equal(argument, S8("-pie"));
+            if (invocation.image_kind != NATIVE_IMAGE_SHARED)
+            {
+                invocation.image_kind = pie ? NATIVE_IMAGE_PIE : NATIVE_IMAGE_EXECUTABLE;
+                position_independent_image_option = pie ? argument : (String8){0};
+            }
             continue;
         }
         // clang's spelling of the flag configure scripts pass the linker as
@@ -1649,10 +1679,23 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     {
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), S8("-fcommon"));
     }
-    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && position_independent_executable_option.length && !invocation.has_gpu_target &&
-        invocation.target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(invocation.target) == OBJECT_FORMAT_ELF64)
+    // Only the x86-64 Linux writer places a position-independent image. The
+    // request is a link option, so a compile-only invocation carrying it in
+    // shared flags is not refused for it, as GCC ignores it there.
+    bool position_independent_image_target =
+        !invocation.has_gpu_target && invocation.target.os == OPERATING_SYSTEM_LINUX && invocation.target.cpu_arch == CPU_ARCH_X86_64;
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.image_kind != NATIVE_IMAGE_EXECUTABLE &&
+        invocation.action == COMPILER_DRIVER_ACTION_LINK && !position_independent_image_target)
     {
-        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), position_independent_executable_option);
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), position_independent_image_option);
+    }
+    // Code linked into a position-independent image in this invocation is
+    // compiled for one: the fixed-address model's absolute and copy-relocated
+    // references are what such an image cannot hold.
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.image_kind != NATIVE_IMAGE_EXECUTABLE &&
+        invocation.action == COMPILER_DRIVER_ACTION_LINK)
+    {
+        invocation.position_independent = true;
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.emit_llvm_bitcode &&
         (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
@@ -2184,6 +2227,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
         bool versioned = version_symbol_size / sizeof(u16) >= symbol_count;
         library->exported_data_symbols = collect_data ? arena_allocate(arena, NativeDynamicDataSymbol, symbol_count) : 0;
         library->versioned_symbols = arena_allocate(arena, NativeDynamicVersionedSymbol, symbol_count);
+        library->referenced_symbols = arena_allocate(arena, String8, symbol_count);
         for (u64 symbol_index = 0; symbol_index < symbol_count; symbol_index += 1)
         {
             u64 symbol = symbol_offset + symbol_index * DRIVER_ELF_SYMBOL_SIZE;
@@ -2198,9 +2242,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             }
             u8 info = bytes.pointer[symbol + 4];
             u8 binding = (u8)(info >> 4);
-            // Defined global or weak entries only: an undefined or local one
-            // names nothing this executable could bind to.
-            if ((binding != 1 && binding != 2) || !section || !name || name >= string_size)
+            // Global or weak entries only: a local one names nothing this
+            // executable could bind to or define for the library.
+            if ((binding != 1 && binding != 2) || !name || name >= string_size)
             {
                 continue;
             }
@@ -2214,6 +2258,13 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
                 continue;
             }
             String8 spelling = {.pointer = (char8*)bytes.pointer + string_offset + name, .length = length};
+            // An undefined entry is a name the library expects some other
+            // module -- possibly this executable -- to define.
+            if (!section)
+            {
+                library->referenced_symbols[library->referenced_symbol_count++] = spelling;
+                continue;
+            }
             u16 version = 0;
             if (versioned)
             {
@@ -2307,6 +2358,8 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
             library->exported_data_symbol_count = 0;
             library->versioned_symbols = 0;
             library->versioned_symbol_count = 0;
+            library->referenced_symbols = 0;
+            library->referenced_symbol_count = 0;
             file_map_unmap(file);
         }
     }
@@ -2633,91 +2686,12 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
 // conditional's size is not information), and adjacency is the previous
 // token's column plus its emitted width reaching the next token's column.
 // Respelling and replacement can make those different coordinate systems
-// coincide accidentally, so compiler_driver_preprocess_requires_separator
-// protects every apparent adjacency. Tokens a macro expansion synthesized
-// share the use site's location, where the column arithmetic does not hold;
-// they keep the single space, which is also what a hand-built result with no
-// recovery map degrades to for every token.
-BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocess_literal_has_prefix(String8 spelling)
-{
-    bool result = spelling.length && spelling.pointer[0] != '\'' && spelling.pointer[0] != '"';
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocess_identifier_is_literal_prefix(String8 spelling)
-{
-    bool result = (spelling.length == 1 &&
-                   (spelling.pointer[0] == 'u' || spelling.pointer[0] == 'U' || spelling.pointer[0] == 'L')) ||
-                  (spelling.length == 2 && spelling.pointer[0] == 'u' && spelling.pointer[1] == '8');
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocess_punctuators_join(CToken previous, String8 current)
-{
-    char8 first = current.length ? current.pointer[0] : 0;
-    bool result = false;
-    switch ((CPunctuator)previous.punctuator)
-    {
-    case C_PUNCTUATOR_PERCENT: result = first == ':' || first == '>'; break;
-    case C_PUNCTUATOR_HASH_DIGRAPH: result = first == '%'; break;
-    case C_PUNCTUATOR_LESS: result = first == '<' || first == '=' || first == ':' || first == '%'; break;
-    case C_PUNCTUATOR_GREATER: result = first == '>' || first == '='; break;
-    case C_PUNCTUATOR_EQUAL:
-    case C_PUNCTUATOR_EXCLAMATION:
-    case C_PUNCTUATOR_STAR:
-    case C_PUNCTUATOR_CARET: result = first == '='; break;
-    case C_PUNCTUATOR_AMPERSAND: result = first == '&' || first == '='; break;
-    case C_PUNCTUATOR_PIPE: result = first == '|' || first == '='; break;
-    case C_PUNCTUATOR_SLASH: result = first == '/' || first == '*' || first == '='; break;
-    case C_PUNCTUATOR_PLUS: result = first == '+' || first == '='; break;
-    case C_PUNCTUATOR_MINUS: result = first == '-' || first == '>' || first == '='; break;
-    case C_PUNCTUATOR_HASH: result = first == '#'; break;
-    case C_PUNCTUATOR_COLON: result = first == '>'; break;
-    case C_PUNCTUATOR_DOT: result = first == '.'; break;
-    case C_PUNCTUATOR_SHIFT_LEFT:
-    case C_PUNCTUATOR_SHIFT_RIGHT: result = first == '='; break;
-    default: break;
-    }
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocess_requires_separator(CToken previous, String8 previous_spelling, CToken current,
-                                                                         String8 current_spelling)
-{
-    bool result = false;
-    if (previous.kind == C_TOKEN_IDENTIFIER)
-    {
-        result = current.kind == C_TOKEN_IDENTIFIER ||
-                 (current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length && current_spelling.pointer[0] != '.');
-        if (!result && (current.kind == C_TOKEN_CHARACTER_LITERAL || current.kind == C_TOKEN_STRING_LITERAL))
-        {
-            result = compiler_driver_preprocess_literal_has_prefix(current_spelling) ||
-                     compiler_driver_preprocess_identifier_is_literal_prefix(previous_spelling);
-        }
-    }
-    else if (previous.kind == C_TOKEN_PREPROCESSING_NUMBER)
-    {
-        result = current.kind == C_TOKEN_IDENTIFIER || current.kind == C_TOKEN_PREPROCESSING_NUMBER ||
-                 current.kind == C_TOKEN_CHARACTER_LITERAL ||
-                 (current.kind == C_TOKEN_STRING_LITERAL && compiler_driver_preprocess_literal_has_prefix(current_spelling));
-        if (!result && current.kind == C_TOKEN_PUNCTUATOR && previous_spelling.length)
-        {
-            char8 last = previous_spelling.pointer[previous_spelling.length - 1];
-            char8 first = current_spelling.length ? current_spelling.pointer[0] : 0;
-            result = first == '.' ||
-                     ((first == '+' || first == '-') &&
-                      (last == 'e' || last == 'E' || last == 'p' || last == 'P'));
-        }
-    }
-    else if (previous.kind == C_TOKEN_PUNCTUATOR)
-    {
-        result = (previous.punctuator == C_PUNCTUATOR_DOT && current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length &&
-                  current_spelling.pointer[0] != '.') ||
-                 (current.kind == C_TOKEN_PUNCTUATOR && compiler_driver_preprocess_punctuators_join(previous, current_spelling));
-    }
-    return result;
-}
-
+// coincide accidentally, so c_token_requires_separator (shared with the
+// frontend's source-quoting diagnostics) protects every apparent adjacency.
+// Tokens a macro expansion synthesized share the use site's location, where
+// the column arithmetic does not hold; they keep the single space, which is
+// also what a hand-built result with no recovery map degrades to for every
+// token.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPreprocessResult preprocess, u64 lookup_offset, CSourceLocation* lookup)
 {
     enum { compiler_driver_preprocess_line_gap_cap = 8 };
@@ -2769,7 +2743,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
                 }
             }
             else if (location.column != previous_end_column ||
-                     compiler_driver_preprocess_requires_separator(previous_token, previous_spelling, token, spelling))
+                     c_token_requires_separator(previous_token, previous_spelling, token, spelling))
             {
                 text[length++] = ' ';
             }
@@ -3006,8 +2980,8 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_llvm_bitcode_path(Arena* are
                                                     });
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_write_llvm_bitcode(Arena* arena, CompilerDriverInvocation invocation, LlvmBitcodeArtifact artifact,
-                                                              CompilerDriverResult* result)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_write_llvm_bitcode(Arena* arena, CompilerDriverInvocation invocation, IrProgram* program, IrModule* module,
+                                                            LlvmBitcodeArtifact artifact, CompilerDriverResult* result)
 {
     if (!result)
     {
@@ -3017,9 +2991,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_llvm_bitcode(Arena* arena, Compil
     if (!llvm_bitcode_artifact_is_valid(artifact))
     {
         result->error = COMPILER_DRIVER_ERROR_LLVM_BITCODE;
-        result->diagnostic = artifact.error.diagnostic.length ? artifact.error.diagnostic
-                             : artifact.error.message.length  ? artifact.error.message
-                                                               : S8("LLVM bitcode emission failed");
+        String8 message = artifact.error.diagnostic.length ? artifact.error.diagnostic
+                          : artifact.error.message.length  ? artifact.error.message
+                                                           : S8("LLVM bitcode emission failed");
+        result->diagnostic = compiler_driver_emitter_diagnostic(arena, program, module, artifact.error.function, artifact.error.instruction, message);
         return false;
     }
     result->has_llvm_bitcode = true;
@@ -3055,8 +3030,8 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_wasm_path(Arena* arena, Stri
                                                       });
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriverInvocation invocation, WasmArtifact artifact,
-                                                     CompilerDriverResult* result)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriverInvocation invocation, IrProgram* program, IrModule* module,
+                                                    WasmArtifact artifact, CompilerDriverResult* result)
 {
     if (!result)
     {
@@ -3067,9 +3042,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriver
     if (artifact.error.code != WASM64_ERROR_NONE)
     {
         result->error = COMPILER_DRIVER_ERROR_WASM;
-        result->diagnostic = artifact.error.diagnostic.length ? artifact.error.diagnostic
-                             : artifact.error.message.length  ? artifact.error.message
-                                                               : S8("WebAssembly code generation failed");
+        String8 message = artifact.error.diagnostic.length ? artifact.error.diagnostic
+                          : artifact.error.message.length  ? artifact.error.message
+                                                           : S8("WebAssembly code generation failed");
+        result->diagnostic = compiler_driver_emitter_diagnostic(arena, program, module, artifact.error.function, artifact.error.instruction, message);
         return false;
     }
     result->has_wasm = true;
@@ -3087,8 +3063,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriver
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriverInvocation invocation, EbpfArtifact artifact,
-                                                     CompilerDriverResult* result)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriverInvocation invocation, IrProgram* program, IrModule* module,
+                                                    EbpfArtifact artifact, CompilerDriverResult* result)
 {
     if (!result)
     {
@@ -3098,9 +3074,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
     if (artifact.error.code != EBPF_ERROR_NONE)
     {
         result->error = COMPILER_DRIVER_ERROR_EBPF;
-        result->diagnostic = artifact.error.diagnostic.length ? artifact.error.diagnostic
-                             : artifact.error.message.length  ? artifact.error.message
-                                                               : S8("eBPF code generation failed");
+        String8 message = artifact.error.diagnostic.length ? artifact.error.diagnostic
+                          : artifact.error.message.length  ? artifact.error.message
+                                                           : S8("eBPF code generation failed");
+        result->diagnostic = compiler_driver_emitter_diagnostic(arena, program, module, artifact.error.function, artifact.error.instruction, message);
         return false;
     }
     result->has_ebpf = true;
@@ -3115,6 +3092,17 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
         return false;
     }
     return true;
+}
+
+// A failed native link names its reason and symbol. A relocation refused in
+// a position-independent image is almost always an object compiled for a
+// fixed address, so the diagnostic says what the image needs instead.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena, CompilerDriverInvocation invocation, NativeExecutableLinkResult link)
+{
+    String8 hint = invocation.image_kind != NATIVE_IMAGE_EXECUTABLE && link.error == LINK_ERROR_RELOCATION
+                       ? S8(" (a position-independent image needs objects compiled with -fPIC)")
+                       : S8("");
+    return string_format(arena, S8("native C link failed with {S8}: {S8}{S8}"), link_error_name(link.error), link.symbol, hint);
 }
 
 // What a finished object becomes: textual assembly for -S, a written object
@@ -3233,13 +3221,13 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
                                                     .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
                                                     .runtime_exports_known = dynamic_libraries.runtime.exports_known,
                                                     .debug_info = invocation.debug_info,
+                                                    .image_kind = (u8)invocation.image_kind,
                                                 });
     compiler_driver_dynamic_libraries_release(&dynamic_libraries);
     if (result->native_link.error != LINK_ERROR_NONE)
     {
         result->error = COMPILER_DRIVER_ERROR_LINK;
-        result->diagnostic =
-            string_format(arena, S8("native C link failed with {S8}: {S8}"), link_error_name(result->native_link.error), result->native_link.symbol);
+        result->diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result->native_link);
     }
 }
 
@@ -3697,19 +3685,19 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         LlvmBitcodeArtifact artifact =
             llvm_bitcode_emit_with_options(arena, lowered.program, module, 1,
                                            compiler_driver_llvm_bitcode_options(invocation.target, invocation.input_paths[0]));
-        compiler_driver_write_llvm_bitcode(arena, invocation, artifact, &result);
+        compiler_driver_write_llvm_bitcode(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }
     if (compiler_driver_target_is_wasm(invocation.target))
     {
         WasmArtifact artifact = wasm_emit(arena, lowered.program, module, 1, compiler_driver_wasm_options(invocation.target));
-        compiler_driver_write_wasm(arena, invocation, artifact, &result);
+        compiler_driver_write_wasm(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }
     if (invocation.target.cpu_arch == CPU_ARCH_BPFEL)
     {
         EbpfArtifact artifact = ebpf_emit(arena, lowered.program, module, 1);
-        compiler_driver_write_ebpf(arena, invocation, artifact, &result);
+        compiler_driver_write_ebpf(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }
     BootstrapTrace mir_trace = {0};
@@ -4823,13 +4811,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                                     .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
                                                     .runtime_exports_known = dynamic_libraries.runtime.exports_known,
                                                     .debug_info = invocation.debug_info,
+                                                    .image_kind = (u8)invocation.image_kind,
                                                 });
     compiler_driver_dynamic_libraries_release(&dynamic_libraries);
     if (result.native_link.error != LINK_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic =
-            string_format(arena, S8("native C link failed with {S8}: {S8}"), link_error_name(result.native_link.error), result.native_link.symbol);
+        result.diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result.native_link);
     }
 finish:
     if (archive_state.arena) arena_destroy(archive_state.arena, 1);

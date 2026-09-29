@@ -391,6 +391,55 @@ things in the x86-64 dynamic writer, and the AArch64 one through it:
   Clang-differential fixture** — a harness that reads "Clang refuses, Buster
   accepts" as a Buster success measures nothing (issue #660).
 
+A hosted executable also exports each of its own definitions that a requested
+library leaves undefined, as GNU ld does: `compiler_driver_elf_dynamic_symbols`
+records every library's undefined names as `referenced_symbols`, and the
+index marks them, so a library that calls back into the program or reads its
+data binds without `-rdynamic`. Only the requested libraries are consulted, not
+`libc.so.6`, whose undefined names are loader internals.
+
+## Shared objects and position-independent executables
+
+On x86-64 Linux, `-shared` links a shared object and `-pie` a
+position-independent executable (`NativeImageKind`, carried to the linker in
+`NativeExecutableLinkOptions.image_kind`). `-shared` outranks `-pie` in either
+order and `-no-pie` undoes only `-pie`. Linking either kind compiles the C
+inputs of that invocation with the position-independent code model, and
+`-fPIE`/`-fpie` select that same model on every target (the last of the four
+positive spellings wins; `-fno-pie` cancels only a PIE spelling). On any other
+target a link that asks for either image is refused as an unsupported option,
+while a compile-only invocation ignores the link option, as GCC does.
+
+`link_native_image_elf64_x86_64_position_independent` writes both kinds as an
+ET_DYN at base zero. Its orientation comment is the contract; in short:
+
+- Every absolute address becomes a dynamic relocation: `R_X86_64_RELATIVE` for
+  a definition bound in the image, `R_X86_64_64`/`GLOB_DAT` for an import and,
+  in a shared object, for an exported definition, because an executable may
+  copy-relocate the library's data and the library must then follow the copy.
+  Direct calls bind to the library's own definitions (ld's
+  `-Bsymbolic-functions` answer). A rel32 to preemptible data or to imported
+  data, 32-bit absolute addresses, and address relocations in code are refused
+  with a hint to compile with `-fPIC`; copy relocations are not produced.
+- A shared object exports every defined default-visibility symbol, leaves
+  undefined ones for the loader (`-Wl,--no-undefined`/`-z,defs` restore the
+  executable's rule), keeps `.init_array`/`.fini_array` for the loader, takes
+  `DT_SONAME` from `-Wl,-soname,NAME`, and records symbol versions like the
+  fixed-address writer. `.rodata`, the initializer arrays, `.dynamic` and
+  `.got` sit under `PT_GNU_RELRO`; `PT_GNU_STACK` is not executable.
+- Thread-local storage in a PIE is relaxed to local-exec as in a fixed-address
+  executable. In a shared object general-dynamic keeps its `__tls_get_addr`
+  call with a `DTPMOD64`/`DTPOFF64` pair, initial-exec gets `TPOFF64` and
+  `DF_STATIC_TLS`, and local-exec is refused.
+
+`compiler_driver_test_position_independent_images` exercises the whole path:
+a Buster library loaded by `dlopen` and linked by Buster (fixed-address and
+PIE) and by the host toolchain (PIE and `-no-pie`, whose copy relocations the
+library must follow), calls and data in both directions, the lifecycle order
+of initializers and handlers, a randomized PIE base, a CPython extension when
+`python3` and its headers exist, and the `-fPIC` refusal. AArch64 ELF, PE DLLs
+and Mach-O dylibs have no writer yet.
+
 ## Object output (`-c`)
 
 `-c` writes the object through `object_write`. The ELF64 writer plans the
