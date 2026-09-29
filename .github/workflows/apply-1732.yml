@@ -22,13 +22,27 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
+
           source = Path('.github/apply-1732-source.yml').read_text()
           start = source.index('          from pathlib import Path\n')
           end = source.index('\n          PY\n', start)
           lines = source[start:end].splitlines()
-          Path('/tmp/apply_1732.py').write_text(
-              '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
-          )
+          script = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
+
+          old = '''test, replacements = re.subn(r"(\\.function_count\\s*!=\\s*)9\\b", r"\\g<1>11", test)
+          if replacements != 1:
+              raise RuntimeError(f"expected one SysV va_list function-count check, found {replacements}")'''
+          new = '''count_matches = list(re.finditer(r"(\\.function_count\\s*!=\\s*)(\\d+)\\b", test))
+          if len(count_matches) > 1:
+              raise RuntimeError(f"expected at most one SysV va_list function-count check, found {len(count_matches)}")
+          if count_matches:
+              count_match = count_matches[0]
+              old_count = int(count_match.group(2))
+              test = test[:count_match.start(2)] + str(old_count + 2) + test[count_match.end(2):]'''
+          if script.count(old) != 1:
+              raise RuntimeError('unexpected embedded driver patch')
+          script = script.replace(old, new, 1)
+          Path('/tmp/apply_1732.py').write_text(script)
           PY
           python3 /tmp/apply_1732.py
           rm .github/workflows/apply-1732.yml .github/apply-1732-source.yml
