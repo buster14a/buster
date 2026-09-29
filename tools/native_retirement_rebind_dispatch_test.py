@@ -80,11 +80,13 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual([row["status"] for row in result["groups"]], ["dispatched", "waiting"])
         self.assertEqual([row["head"] for row in self.writer.sent], [self.g1])
         self.reader.runs = [{"display_title": "Native rebind " + self.g1,
-                             "path": dispatch.WORKFLOW_PATH, "event": "workflow_dispatch",
+                             "path": dispatch.WORKFLOW_PATH + "@main", "event": "workflow_dispatch",
                              "head_branch": "main", "repository": {"full_name": self.args.repository},
                              "id": 17, "run_attempt": 1, "status": "in_progress"}]
         self.assertEqual(self.reconcile()["groups"][0]["status"], "present")
         self.assertEqual(len(self.writer.sent), 1)
+        self.reader.runs[0]["path"] = dispatch.WORKFLOW_PATH + "@refs/heads/main"
+        self.assertEqual(self.reconcile()["groups"][0]["status"], "present")
         admission.git(self.work, "push", "-q", "-f", str(self.origin), f"{self.g1}:refs/heads/main")
         self.reader.main = self.g1
         self.assertEqual(self.reconcile()["groups"][1]["status"], "stale-policy")
@@ -104,6 +106,15 @@ class DispatchTests(unittest.TestCase):
                              "path": ".github/workflows/unrelated.yml", "event": "workflow_dispatch",
                              "head_branch": "main", "repository": {"full_name": self.args.repository},
                              "id": 20}]
+        result = self.reconcile()
+        self.assertEqual(result["groups"][0]["status"], "retry")
+        self.assertEqual(self.writer.sent, [])
+
+    def test_same_name_run_from_wrong_ref_never_suppresses_work(self):
+        self.reader.runs = [{"display_title": "Native rebind " + self.g1,
+                             "path": dispatch.WORKFLOW_PATH + "@feature", "event": "workflow_dispatch",
+                             "head_branch": "main", "repository": {"full_name": self.args.repository},
+                             "id": 21}]
         result = self.reconcile()
         self.assertEqual(result["groups"][0]["status"], "retry")
         self.assertEqual(self.writer.sent, [])
