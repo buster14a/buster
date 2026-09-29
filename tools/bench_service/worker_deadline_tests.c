@@ -2,6 +2,10 @@
  * bq_test_worker_deadlines checks capture/launcher deadlines and owned cleanup.
  * bq_test_worker_group_reaping retains live and zombie group members explicitly;
  * no verdict depends on how promptly PID 1 reaps an orphaned shell descendant.
+ * bq_test_worker_retirement_runtime pins the budget -> limit -> deadline ->
+ * argv path (#881-C); bq_test_worker_lease_keeper races a contending
+ * coordinator against the reverse lease handoff, and bq_test_worker_keeper_unit
+ * is the stand-in unit tests.c's recovery fixture reuses.
  */
 #define BQ_TEST_WORKER_TIMEOUT_MILLISECONDS 20u
 #define BQ_TEST_WORKER_BOUND_MILLISECONDS 1000u
@@ -528,11 +532,189 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_retirement_runtime(void)
     }
 }
 
+/* True once `pid` has exited (absent, or a zombie whose descriptors are
+ * closed) before `deadline`. The keeper is the unit's child, so the test
+ * cannot reap it; its closed references are what matter. */
+BUSTER_GLOBAL_LOCAL bool bq_test_worker_process_gone(pid_t pid, u64 deadline)
+{
+    char path[64];
+    bool gone = pid <= 0;
+    while (!gone && snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid) > 0)
+    {
+        char stat_text[512] = {0};
+        int descriptor = open(path, O_RDONLY | O_CLOEXEC);
+        ssize_t length = descriptor >= 0 ? read(descriptor, stat_text, sizeof(stat_text) - 1) : -1;
+        if (descriptor >= 0) close(descriptor);
+        char const* state = length > 0 ? strrchr(stat_text, ')') : NULL;
+        gone = descriptor < 0 || (state && state[1] == ' ' && state[2] == 'Z');
+        if (!gone && bq_worker_monotonic_milliseconds() >= deadline) break;
+        if (!gone) poll(NULL, 0, 5);
+    }
+    return gone;
+}
+
+/* A stand-in outer unit: a child that acquires the lease (the reference a
+ * real unit adopts from the coordinator), starts the real keeper, reports
+ * the keeper's pid and waits to be killed. Returns the unit pid, or -1. */
+BUSTER_GLOBAL_LOCAL pid_t bq_test_worker_keeper_unit(char const* lease_path, String8 workspace_root, u64 job,
+                                                     u64 token, pid_t* keeper)
+{
+    char root[BQ_PATH_CAP + 1], results[BQ_PATH_CAP + 16];
+    int report[2] = {-1, -1};
+    bool ok = bq_worker_text(workspace_root, root, sizeof(root)) &&
+              snprintf(results, sizeof(results), "%s/results", root) > 0 &&
+              (mkdir(results, 0700) == 0 || errno == EEXIST) && pipe2(report, O_CLOEXEC) == 0;
+    pid_t unit = ok ? fork() : -1;
+    if (unit == 0)
+    {
+        /* Like a real unit, hold nothing of the caller's (queue lock and
+         * journal included) except the report pipe. */
+        for (int descriptor = 3; descriptor < 1024; descriptor += 1)
+            if (descriptor != report[1]) close(descriptor);
+        BqWorkerLease lease = {.descriptor = -1};
+        pid_t started = bq_worker_lease_acquire(lease_path, &lease) == 0 ?
+                        bq_worker_lease_keeper_start(root, job, token, lease_path, lease.descriptor, -1) : -1;
+        ssize_t written = write(report[1], &started, sizeof(started));
+        close(report[1]);
+        while (written == (ssize_t)sizeof(started) && started > 0) pause();
+        _exit(1);
+    }
+    if (report[1] >= 0) close(report[1]);
+    pid_t started = -1;
+    ok = unit > 0 && bq_worker_lease_handoff_poll(report[0], POLLIN,
+             bq_worker_deadline(bq_worker_monotonic_milliseconds(), 5000)) &&
+         read(report[0], &started, sizeof(started)) == (ssize_t)sizeof(started) && started > 0;
+    if (report[0] >= 0) close(report[0]);
+    if (!ok && unit > 0)
+    {
+        kill(unit, SIGKILL);
+        waitpid(unit, NULL, 0);
+    }
+    if (keeper) *keeper = ok ? started : -1;
+    return ok ? unit : -1;
+}
+
+/* Kill the stand-in unit and wait until it and its keeper have exited, so
+ * every reference the unit held is closed. */
+BUSTER_GLOBAL_LOCAL bool bq_test_worker_keeper_unit_kill(pid_t unit, pid_t keeper)
+{
+    int status = 0;
+    bool ok = unit > 0 && kill(unit, SIGKILL) == 0;
+    if (unit > 0) while (waitpid(unit, &status, 0) < 0 && errno == EINTR) {}
+    ok = ok && bq_test_worker_process_gone(keeper, bq_worker_deadline(bq_worker_monotonic_milliseconds(), 5000));
+    return ok;
+}
+
+/* #881-C reverse lease handoff at the descriptor level. With the reclaim, a
+ * contending coordinator cannot take the lease once every unit reference is
+ * closed; without it (the old order) the same contender wins that window and
+ * the recovering coordinator then sees BQ_BUSY. Failure modes return
+ * BQ_NOT_FOUND (no keeper) or BQ_CLEANUP_FAILED (stale socket, foreign
+ * request), and a leftover socket is purged only while it is a private one. */
+BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_keeper(void)
+{
+    char root[] = "/tmp/buster-lease-keeper-XXXXXX";
+    char lease_path[BQ_PATH_CAP + 1], other_lease[BQ_PATH_CAP + 1], socket_path[BQ_WORKER_SUN_PATH_CAP];
+    bool ready = mkdtemp(root) != NULL;
+    int lease_length = snprintf(lease_path, sizeof(lease_path), "%s/host.lock", root);
+    int other_length = snprintf(other_lease, sizeof(other_lease), "%s/other.lock", root);
+    ready = ready && lease_length > 0 && (u32)lease_length < sizeof(lease_path) && other_length > 0 &&
+            (u32)other_length < sizeof(other_lease) &&
+            bq_worker_lease_keeper_path(string_from_pointer(root), 7, 9, socket_path);
+    BQ_CHECK(ready);
+    BqWorkerConfig config = {.workspace_root = string_from_pointer(root)};
+    BqWorkerObserved identity = {0};
+    BqJob job = {.id = 7, .token = 9};
+    struct stat info = {0};
+    for (u32 mode = 0; ready && mode < 2; mode += 1)
+    {
+        pid_t keeper = -1;
+        pid_t unit = bq_test_worker_keeper_unit(lease_path, config.workspace_root, 7, 9, &keeper);
+        BQ_CHECK(unit > 0 && keeper > 0 && lstat(socket_path, &info) == 0 && S_ISSOCK(info.st_mode) &&
+                 (info.st_mode & 077) == 0 && bq_test_worker_probe_locked(lease_path));
+        BqWorkerLease reclaimed = {.descriptor = -1};
+        if (mode == 0)
+            BQ_CHECK(bq_worker_lease_reclaim(&config, &identity, &job, lease_path, &reclaimed) == BQ_OK &&
+                     reclaimed.descriptor >= 3 && (fcntl(reclaimed.descriptor, F_GETFD) & FD_CLOEXEC));
+        /* TERM/KILL closes every unit reference; a second coordinator then
+         * contends for the host lease at once. */
+        BQ_CHECK(bq_test_worker_keeper_unit_kill(unit, keeper));
+        BqWorkerLease contender = {.descriptor = -1};
+        int contended = bq_worker_lease_acquire(lease_path, &contender);
+        if (mode == 0)
+        {
+            BQ_CHECK((contended == EWOULDBLOCK || contended == EAGAIN) && contender.descriptor < 0);
+            /* The keeper stopped gracefully and removed its socket. */
+            BQ_CHECK(lstat(socket_path, &info) != 0 && errno == ENOENT);
+            bq_worker_lease_release(&reclaimed);
+            BQ_CHECK(!bq_test_worker_probe_locked(lease_path));
+        }
+        else
+        {
+            /* The old order: the contender wins the gap, and a late acquire
+             * by the recovering coordinator is BQ_BUSY. */
+            BqWorkerLease late = {.descriptor = -1};
+            BQ_CHECK(contended == 0 && contender.descriptor >= 0 && bq_worker_lease_acquire(lease_path, &late) != 0);
+            bq_worker_lease_release(&late);
+        }
+        bq_worker_lease_release(&contender);
+    }
+    /* No keeper socket: nothing to reclaim, and nothing is held. */
+    BqWorkerLease reclaimed = {.descriptor = -1};
+    BQ_CHECK(ready && bq_worker_lease_reclaim(&config, &identity, &job, lease_path, &reclaimed) == BQ_NOT_FOUND &&
+             reclaimed.descriptor < 0);
+    /* A foreign lease path or attempt is refused and leaves the unit's
+     * reference the only holder; a killed keeper leaves a stale socket that
+     * refuses, is never signalled through, and is purged only once empty. */
+    pid_t keeper = -1;
+    pid_t unit = ready ? bq_test_worker_keeper_unit(lease_path, config.workspace_root, 7, 9, &keeper) : -1;
+    BQ_CHECK(unit > 0);
+    BQ_CHECK(bq_worker_lease_reclaim(&config, &identity, &job, other_lease, &reclaimed) == BQ_CLEANUP_FAILED &&
+             reclaimed.descriptor < 0 && bq_test_worker_probe_locked(lease_path));
+    BqJob other_job = {.id = 7, .token = 10};
+    BQ_CHECK(bq_worker_lease_reclaim(&config, &identity, &other_job, lease_path, &reclaimed) == BQ_NOT_FOUND &&
+             reclaimed.descriptor < 0);
+    BqWorkerLease held = {.descriptor = 3};
+    BQ_CHECK(bq_worker_lease_reclaim(&config, &identity, &job, lease_path, &held) == BQ_CLEANUP_FAILED &&
+             held.descriptor == 3);
+    BQ_CHECK(keeper > 0 && kill(keeper, SIGKILL) == 0 &&
+             bq_test_worker_process_gone(keeper, bq_worker_deadline(bq_worker_monotonic_milliseconds(), 5000)));
+    BQ_CHECK(lstat(socket_path, &info) == 0 && S_ISSOCK(info.st_mode));
+    BQ_CHECK(bq_worker_lease_reclaim(&config, &identity, &job, lease_path, &reclaimed) == BQ_CLEANUP_FAILED &&
+             reclaimed.descriptor < 0 && bq_test_worker_probe_locked(lease_path));
+    if (unit > 0)
+    {
+        kill(unit, SIGKILL);
+        waitpid(unit, NULL, 0);
+    }
+    BQ_CHECK(bq_worker_lease_keeper_purge(&config, &job) == BQ_OK && lstat(socket_path, &info) != 0 &&
+             errno == ENOENT && bq_worker_lease_keeper_purge(&config, &job) == BQ_OK);
+    int planted = open(socket_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    BQ_CHECK(planted >= 0 && bq_worker_lease_keeper_purge(&config, &job) == BQ_CLEANUP_FAILED &&
+             lstat(socket_path, &info) == 0 && S_ISREG(info.st_mode));
+    if (planted >= 0) close(planted);
+    unlink(socket_path);
+    /* The unit's own keeper stop: graceful exit and socket removal. */
+    BqWorkerLease own = {.descriptor = -1};
+    pid_t local = ready && bq_worker_lease_acquire(lease_path, &own) == 0 ?
+                  bq_worker_lease_keeper_start(root, 7, 9, lease_path, own.descriptor, -1) : -1;
+    BQ_CHECK(local > 0 && lstat(socket_path, &info) == 0 &&
+             bq_worker_lease_keeper_start(root, 7, 9, lease_path, own.descriptor, -1) == -1);
+    BQ_CHECK(bq_worker_lease_keeper_stop(local) && lstat(socket_path, &info) != 0 && errno == ENOENT);
+    BQ_CHECK(bq_worker_lease_keeper_stop(-1) && bq_worker_lease_keeper_start(root, 7, 9, lease_path, 2, -1) == -1);
+    bq_worker_lease_release(&own);
+    char results[BQ_PATH_CAP + 16];
+    if (snprintf(results, sizeof(results), "%s/results", root) > 0) rmdir(results);
+    unlink(lease_path);
+    if (ready) BQ_CHECK(rmdir(root) == 0);
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_worker_deadlines(void)
 {
     bq_test_worker_pending_cancel_delivery();
     bq_test_worker_coordinator_lease_continuity();
     bq_test_worker_retirement_runtime();
+    bq_test_worker_lease_keeper();
     u64 absolute = 0, absolute_nanoseconds = 0;
     BQ_CHECK(!bq_worker_execution_deadline(1, 0, &absolute));
     BQ_CHECK(!bq_worker_execution_deadline(UINT64_MAX, 1, &absolute));

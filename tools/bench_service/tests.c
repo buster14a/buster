@@ -2701,9 +2701,13 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_unit_bad_lease_response(u32 mode)
 {
     char root[] = "/tmp/buster-lease-unit-negative-XXXXXX";
     char result_root[BQ_PATH_CAP + 1], lease_path[BQ_PATH_CAP + 1], prior_path[BQ_PATH_CAP + 1];
+    char results[BQ_PATH_CAP + 1];
     BqWorkerLease lease = {.descriptor = -1};
     BqWorkerLeaseHandoff handoff = {.listener = -1, .parent = -1};
     bool ready = bq_test_mkdtemp_physical(root, sizeof(root));
+    /* The unit's lease keeper (#881-C) binds under <workspace>/results. */
+    int results_length = snprintf(results, sizeof(results), "%s/results", root);
+    ready = ready && results_length > 0 && (u32)results_length < sizeof(results) && mkdir(results, 0700) == 0;
     int result_length = snprintf(result_root, sizeof(result_root), "%s/result", root);
     int lease_length = snprintf(lease_path, sizeof(lease_path), "%s/host.lock", root);
     int prior_length = snprintf(prior_path, sizeof(prior_path), "%s/prior.lock", root);
@@ -2832,6 +2836,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_unit_bad_lease_response(u32 mode)
     if (result_directory >= 0) close(result_directory);
     unlink(lease_path);
     rmdir(result_root);
+    /* Empty: the refused unit stopped its keeper, which removed its socket. */
+    if (results_length > 0 && (u32)results_length < sizeof(results)) BQ_CHECK(!ready || rmdir(results) == 0);
     rmdir(root);
 }
 
@@ -2984,6 +2990,13 @@ typedef struct BqWorkerFake
     bool collect_on_join;
     bool replace_slice_on_cleanup_join;
     bool launcher_cleanup_failure;
+    /* #881-C: a stand-in unit holding the lease through a real keeper. The
+     * outer TERM kills it and its keeper, then a second coordinator contends
+     * for the lease before the fake unit is reaped. */
+    pid_t keeper_unit;
+    pid_t keeper;
+    int contender_error;
+    bool contender_checked;
 } BqWorkerFake;
 
 typedef struct BqWorkerFixture
@@ -3195,6 +3208,16 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_signal(BqWorkerBackend* backend, char
     else if (!strcmp(signal_name, "TERM"))
     {
         fake->terms += 1;
+        if (fake->keeper_unit > 0)
+        {
+            BqWorkerFixture* fixture = (BqWorkerFixture*)((char*)fake - offsetof(BqWorkerFixture, fake));
+            BqWorkerLease contender = {.descriptor = -1};
+            BQ_CHECK(bq_test_worker_keeper_unit_kill(fake->keeper_unit, fake->keeper));
+            fake->contender_error = bq_worker_lease_acquire(fixture->lease, &contender);
+            fake->contender_checked = true;
+            fake->keeper_unit = 0;
+            bq_worker_lease_release(&contender);
+        }
         if (fake->term_clears) bq_test_worker_reap(fake);
     }
     else if (!strcmp(signal_name, "KILL"))
@@ -4337,6 +4360,78 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_quarantine_and_recovery(void)
                  fixture.fake.detached == 0 && fixture.quarantine.descriptor < 0 &&
                  !bq_test_worker_probe_locked(fixture.lease));
         bq_test_worker_end(&fixture);
+    }
+}
+
+/* #881-C reverse lease handoff through the recovering coordinator. After a
+ * restart the only lease references belong to the live unit. bq_worker_stop
+ * reclaims one from the unit's keeper before TERM, so when TERM closes every
+ * unit reference a contending coordinator still cannot take the lease; the
+ * job then finishes interrupted and the lease is released only after
+ * reconciliation. A keeper socket that no longer answers leaves the unit
+ * unsignalled and the job quarantined; once the unit is gone on its own, the
+ * next recovery acquires, purges the stale socket and reconciles. */
+BUSTER_GLOBAL_LOCAL void bq_test_worker_keeper_recovery(void)
+{
+    for (u32 mode = 0; mode < 2; mode += 1)
+    {
+        BqWorkerFixture fixture;
+        if (bq_test_worker_begin(&fixture, BQ_WORKER_EXECUTION_FAILED, false))
+        {
+            BqQueue* queue = &fixture.material.queue.queue;
+            BqRequest request = bq_test_real_request(75 + mode);
+            u64 id = 0, token = 0;
+            BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK &&
+                     bq_materialize(queue, fixture.config.installed_root, fixture.config.workspace_root, &id,
+                                    &token) == BQ_OK);
+            BqJob* job = bq_job(&queue->state, id);
+            BQ_CHECK(bq_test_worker_bind(&fixture, job));
+            char socket_path[BQ_WORKER_SUN_PATH_CAP];
+            pid_t keeper = -1;
+            pid_t unit = bq_test_worker_keeper_unit(fixture.lease, fixture.config.workspace_root, id, token, &keeper);
+            BQ_CHECK(unit > 0 && bq_worker_lease_keeper_path(fixture.config.workspace_root, id, token, socket_path) &&
+                     bq_test_worker_probe_locked(fixture.lease));
+            fixture.fake.term_clears = true;
+            bq_close(queue);
+            BQ_CHECK(bq_open(queue, fixture.material.queue.path) == BQ_OK && queue->needs_reconciliation &&
+                     fixture.quarantine.descriptor < 0);
+            struct stat info = {0};
+            if (mode == 0)
+            {
+                fixture.fake.keeper_unit = unit;
+                fixture.fake.keeper = keeper;
+                BQ_CHECK(bq_worker_run(queue, &fixture.config, &id) == BQ_OK);
+                BQ_CHECK(fixture.fake.contender_checked && fixture.fake.terms == 1 &&
+                         (fixture.fake.contender_error == EWOULDBLOCK || fixture.fake.contender_error == EAGAIN));
+                job = bq_job(&queue->state, id);
+                BQ_CHECK(job && job->outcome == BQ_INTERRUPTED &&
+                         bq_failure_evidence(queue, job) == BQ_WORKER_INTERRUPTED && !queue->state.active_id &&
+                         !queue->needs_reconciliation && !bq_test_worker_probe_locked(fixture.lease) &&
+                         lstat(socket_path, &info) != 0 && errno == ENOENT);
+            }
+            else
+            {
+                /* The keeper dies but the unit and its lease live on. */
+                BQ_CHECK(keeper > 0 && kill(keeper, SIGKILL) == 0 &&
+                         bq_test_worker_process_gone(keeper,
+                             bq_worker_deadline(bq_worker_monotonic_milliseconds(), 5000)) &&
+                         lstat(socket_path, &info) == 0 && S_ISSOCK(info.st_mode));
+                BQ_CHECK(bq_worker_run(queue, &fixture.config, &id) == BQ_CLEANUP_FAILED &&
+                         fixture.fake.terms == 0 && fixture.fake.kills == 0 && queue->state.active_id == id &&
+                         queue->needs_reconciliation && bq_test_worker_probe_locked(fixture.lease));
+                BQ_CHECK(bq_test_worker_keeper_unit_kill(unit, -1));
+                unit = -1;
+                bq_test_worker_reap(&fixture.fake);
+                BQ_CHECK(bq_worker_run(queue, &fixture.config, &id) == BQ_OK);
+                job = bq_job(&queue->state, id);
+                BQ_CHECK(job && job->outcome == BQ_INTERRUPTED && !queue->state.active_id &&
+                         !bq_test_worker_probe_locked(fixture.lease) && lstat(socket_path, &info) != 0 &&
+                         errno == ENOENT);
+            }
+            if (fixture.fake.keeper_unit > 0) bq_test_worker_keeper_unit_kill(fixture.fake.keeper_unit, keeper);
+            else if (mode == 1 && unit > 0) bq_test_worker_keeper_unit_kill(unit, keeper);
+            bq_test_worker_end(&fixture);
+        }
     }
 }
 
@@ -5582,6 +5677,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_capability_admission();
     bq_test_worker_outcomes();
     bq_test_worker_quarantine_and_recovery();
+    bq_test_worker_keeper_recovery();
     bq_test_worker_ancestor_budget();
     bq_test_worker_boot_and_identity_recovery();
     bq_test_worker_fixed_recipe_sigkill_recovery();
