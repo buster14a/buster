@@ -13,6 +13,7 @@
 #include <sys/vfs.h>
 #include <sys/wait.h>
 #include <sys/syscall.h>
+#include "systemd_runtime.h"
 
 #define BQ_WORKER_EXECUTABLE "/usr/local/libexec/buster-bench-service"
 #define BQ_RECIPE_EXECUTABLE "/usr/local/libexec/buster-bench-build"
@@ -67,6 +68,117 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_execution_deadline(u64 start, u64 runtime_use
     u64 milliseconds = runtime_usec / 1000 + (runtime_usec % 1000 != 0);
     bool ok = deadline && milliseconds && milliseconds <= UINT64_MAX - start;
     if (ok) *deadline = start + milliseconds;
+    return ok;
+}
+
+/* The campaign-budget record (tools/throughput/retirement_budget.h, whose
+ * throughput dependencies stay out of the service unit): its schema line, a
+ * derivation line, then these scalar keys first and in this order, each
+ * `key=<decimal ns>` without leading zeros. Index 0 is the reviewed whole-job
+ * ceiling; the rest are the record's fixed-phase bounds, two of them per
+ * collection stage. */
+#define BQ_WORKER_BUDGET_SCHEMA "schema=tp-retirement-campaign-budget-v2"
+#define BQ_WORKER_BUDGET_BYTES 4096u
+#define BQ_WORKER_BUDGET_STAGES 2u
+BUSTER_GLOBAL_LOCAL char const* const bq_worker_budget_keys[] = {
+    "reviewed-ns", "reservation-ns", "materialization-ns", "baseline-build-ns", "candidate-build-ns",
+    "correctness-ns", "settling-per-stage-ns", "aa-qualification-ns", "aa-receipt-sealing-ns",
+    "sample-export-per-stage-ns", "final-statistics-ns", "final-sealing-ns", "cleanup-ns"};
+BUSTER_GLOBAL_LOCAL bool const bq_worker_budget_per_stage[] = {
+    false, false, false, false, false, false, true, false, false, true, false, false, false};
+_Static_assert(BUSTER_ARRAY_LENGTH(bq_worker_budget_keys) == BUSTER_ARRAY_LENGTH(bq_worker_budget_per_stage),
+               "budget key table mismatch");
+
+/* One `key=value` line at `*offset`, advancing past its LF. */
+BUSTER_GLOBAL_LOCAL bool bq_worker_budget_line(String8 record, u64* offset, char const* key, u64* value)
+{
+    u64 key_length = strlen(key);
+    u64 start = *offset + key_length + 1;
+    u64 end = start;
+    while (end < record.length && record.pointer[end] != '\n') end += 1;
+    String8 digits = {record.pointer + start, end > start ? end - start : 0};
+    IntegerParsingU64 parsed = string8_parse_u64_decimal(digits);
+    bool ok = start < record.length && !memcmp(record.pointer + *offset, key, (size_t)key_length) &&
+              record.pointer[*offset + key_length] == '=' && end < record.length && digits.length &&
+              (digits.pointer[0] != '0' || digits.length == 1) &&
+              parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == digits.length;
+    *value = ok ? parsed.value : 0;
+    if (ok) *offset = end + 1;
+    return ok;
+}
+
+/* #881 A1: the retirement recipe's unit limit and absolute execution budget
+ * are its reviewed whole-job ceiling, read from the installed campaign-budget
+ * record only after its exact bytes hash to the recipe profile's
+ * campaign-budget-sha256= pin (the pin is the digest of the canonical
+ * encoding, so matching bytes are that encoding). The ceiling already
+ * contains every fixed-phase bound the record names (the `fixed` term of its
+ * derivation, as tp_retirement_budget_preflight sums it), so those bounds are
+ * a floor the ceiling must cover, never an addition to it. The value is
+ * rounded down to whole seconds, so the enforced limit never exceeds the
+ * reviewed ceiling, and must lie in the broker's closed range
+ * (systemd_runtime.h). A missing pin or record, a digest mismatch, another
+ * schema or an out-of-range ceiling refuses the job before launch; nothing
+ * observed during a run can change the value. */
+BUSTER_GLOBAL_LOCAL BqError bq_worker_retirement_runtime(String8 profile, String8 record, u64* runtime_usec)
+{
+    char pin[SHA256_HEX_CAPACITY] = {0};
+    char digest[SHA256_HEX_CAPACITY] = {0};
+    u64 schema_length = sizeof(BQ_WORKER_BUDGET_SCHEMA) - 1;
+    bool ok = runtime_usec && record.pointer && record.length > schema_length &&
+              record.length < BQ_WORKER_BUDGET_BYTES && record.pointer[record.length - 1] == '\n' &&
+              bq_retirement_profile_sha(profile, S8("campaign-budget-sha256="), pin);
+    if (ok) bq_digest(record.pointer, (u32)record.length, (char8*)digest);
+    ok = ok && !memcmp(digest, pin, SHA256_HEX_CAPACITY) &&
+         !memcmp(record.pointer, BQ_WORKER_BUDGET_SCHEMA "\nderivation=", schema_length + 12);
+    u64 offset = ok ? schema_length + 12 : 0;
+    while (ok && offset < record.length && record.pointer[offset] != '\n') offset += 1;
+    ok = ok && offset < record.length;
+    offset += 1;
+    u64 ceiling = 0, fixed = 0;
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(bq_worker_budget_keys); index += 1)
+    {
+        u64 value = 0;
+        ok = bq_worker_budget_line(record, &offset, bq_worker_budget_keys[index], &value);
+        if (ok && index == 0) ceiling = value;
+        else if (ok)
+        {
+            u64 stages = bq_worker_budget_per_stage[index] ? BQ_WORKER_BUDGET_STAGES : 1;
+            ok = value && value <= (UINT64_MAX - fixed) / stages;
+            if (ok) fixed += value * stages;
+        }
+    }
+    u64 usec = ok ? ceiling / UINT64_C(1000000000) * BQ_SYSTEMD_USEC_PER_SECOND : 0;
+    ok = ok && ceiling && fixed <= ceiling && bq_systemd_retirement_runtime_valid(usec);
+    if (runtime_usec) *runtime_usec = ok ? usec : 0;
+    return ok ? BQ_OK : BQ_RECIPE_MISMATCH;
+}
+
+/* The typed broker argv for the outer unit. Smoke keeps start-outer and its
+ * six values; retirement adds its derived limit in decimal microseconds,
+ * which the broker bounds again (systemd_broker.c, bq_broker_cli). */
+BUSTER_GLOBAL_LOCAL bool bq_worker_outer_arguments(BqRecipe recipe, u64 runtime_usec, char const* job_id,
+                                                   char const* attempt_token, char const* base,
+                                                   char const* candidate, char runtime_text[32],
+                                                   char const* arguments[8], u32* count)
+{
+    bool retirement = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
+    int length = retirement ? snprintf(runtime_text, 32, "%" PRIu64, (uint64_t)runtime_usec) : 0;
+    bool ok = job_id && attempt_token && base && candidate && count &&
+              (recipe == BQ_RECIPE_VALIDATE_BUSTER ||
+               (retirement && bq_systemd_retirement_runtime_valid(runtime_usec) && length > 0 && length < 32));
+    for (u32 index = 0; index < 8; index += 1) arguments[index] = NULL;
+    if (ok)
+    {
+        arguments[0] = BQ_SYSTEMD_BROKER;
+        arguments[1] = retirement ? BQ_SYSTEMD_RETIREMENT_OUTER_VERB : "start-outer";
+        arguments[2] = job_id;
+        arguments[3] = attempt_token;
+        arguments[4] = base;
+        arguments[5] = candidate;
+        arguments[6] = retirement ? runtime_text : NULL;
+    }
+    if (count) *count = ok ? (retirement ? 7u : 6u) : 0;
     return ok;
 }
 
@@ -1088,11 +1200,13 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_number(char const* text, u64* value)
     return ok;
 }
 
+/* Plain microseconds or the manager's whole-second timespan text ("1h",
+ * "10s", "2h 24min"), parsed exactly as the broker does (systemd_runtime.h). */
 BUSTER_GLOBAL_LOCAL bool bq_worker_duration(char const* text, u64* value)
 {
-    bool ok = bq_worker_number(text, value);
-    if (!ok && !strcmp(text, "1h")) { *value = 60ull * 60 * 1000000; ok = true; }
-    if (!ok && !strcmp(text, "10s")) { *value = 10ull * 1000000; ok = true; }
+    uint64_t parsed = 0;
+    bool ok = text && bq_systemd_timespan_parse(text, strlen(text), &parsed);
+    *value = ok ? (u64)parsed : 0;
     return ok;
 }
 
@@ -4167,8 +4281,9 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
                                   &finalization);
     if (error == BQ_OK && !recovering && bq_worker_lease_acquire(lease_path, &lease) != 0) error = BQ_BUSY;
     u64 execution_deadline = 0;
+    u64 lease_start = error == BQ_OK && !recovering ? backend->clock(backend) : 0;
     if (error == BQ_OK && !recovering &&
-        !bq_worker_execution_deadline(backend->clock(backend), config->limits.runtime_max_usec,
+        !bq_worker_execution_deadline(lease_start, config->limits.runtime_max_usec,
                                       &execution_deadline)) error = BQ_CONFIGURATION_MISMATCH;
     if (error == BQ_OK && !recovering) finalization.execution_deadline = execution_deadline;
     if (error == BQ_OK && !recovering && bq_worker_cancel_signal) error = BQ_WORKER_CANCEL_SIGNAL;
@@ -4176,6 +4291,29 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     if (error == BQ_OK && !recovering) error = bq_materialize(queue, config->installed_root, config->workspace_root, id, &token);
     if (!recovering) job = error == BQ_OK ? bq_job(&queue->state, *id) : NULL;
     if (error == BQ_OK && !recovering && job) error = bq_worker_result_open(config, job, &finalization, true);
+    /* #881 A1: once the reserved job is known, a retirement job replaces the
+     * smoke hour with its authenticated budget ceiling, before preparation or
+     * any launch. The deadline still counts from lease acquisition, and the
+     * effective configuration carries the same limit to the outer unit's
+     * RuntimeMaxUSec readback (bq_worker_observed) and its broker request. */
+    BqWorkerConfig retirement_config;
+    u64 job_runtime_usec = config ? config->limits.runtime_max_usec : 0;
+    if (error == BQ_OK && !recovering && job &&
+        bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)
+    {
+        error = bq_worker_retirement_runtime(bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED),
+                                             config->retirement_budget, &job_runtime_usec);
+        if (error == BQ_OK && !bq_worker_execution_deadline(lease_start, job_runtime_usec, &execution_deadline))
+            error = BQ_CONFIGURATION_MISMATCH;
+        if (error == BQ_OK)
+        {
+            retirement_config = *config;
+            retirement_config.limits.runtime_max_usec = job_runtime_usec;
+            config = &retirement_config;
+            finalization.config = config;
+            finalization.execution_deadline = execution_deadline;
+        }
+    }
     char preparation_sha256[SHA256_HEX_CAPACITY] = {0};
     if (error == BQ_OK && !recovering && job &&
         string_equal(bq_field(&job->request, 2), S8("native-retirement-performance-v1")))
@@ -4238,9 +4376,13 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
         error = BQ_WORKER_TIMEOUT;
     if (error == BQ_OK && !recovering)
     {
-        char const* arguments[] = {BQ_SYSTEMD_BROKER, "start-outer", job_id, attempt_token,
-                                   base_revision_text, candidate_revision_text, NULL};
-        error = backend->start(backend, arguments, BUSTER_ARRAY_LENGTH(arguments) - 1);
+        char const* arguments[8];
+        char runtime_text[32];
+        u32 argument_count = 0;
+        error = bq_worker_outer_arguments(bq_request_recipe(&job->request), job_runtime_usec, job_id,
+                                          attempt_token, base_revision_text, candidate_revision_text,
+                                          runtime_text, arguments, &argument_count) ?
+                backend->start(backend, arguments, argument_count) : BQ_CONFIGURATION_MISMATCH;
         launched = error == BQ_OK;
     }
     if (error == BQ_OK && !recovering && handoff.listener >= 0)

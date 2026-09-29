@@ -306,10 +306,233 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_group_reaping(void)
     }
 }
 
+/* The scalar head of a canonical tp-retirement-campaign-budget-v2 record, in
+ * bq_worker_budget_keys order: a 2 h 24 min 0.5 s ceiling, then every fixed
+ * phase (38.8 s in all, settling and export counted per collection stage).
+ * The service unit does not link the throughput encoder, so the fixture
+ * spells the canonical text: these lines, the three remaining scalars and
+ * both bound tables, exactly as tp_retirement_budget_encode lays them out. */
+typedef struct BqTestWorkerBudget
+{
+    u64 values[BUSTER_ARRAY_LENGTH(bq_worker_budget_keys)];
+} BqTestWorkerBudget;
+
+BUSTER_GLOBAL_LOCAL BqTestWorkerBudget bq_test_worker_retirement_budget(void)
+{
+    BqTestWorkerBudget budget = {{UINT64_C(8640500000000), 1000000000, 2000000000, 3000000000, 3000000000,
+        4000000000, 500000000, 600000000, 700000000, 800000000, 900000000, 1000000000, UINT64_C(20000000000)}};
+    return budget;
+}
+
+/* Write `budget` as a canonical record and a one-line profile pinning its
+ * digest. */
+BUSTER_GLOBAL_LOCAL bool bq_test_worker_retirement_record(BqTestWorkerBudget const* budget,
+                                                          char record[BQ_WORKER_BUDGET_BYTES], u64* size,
+                                                          char profile[128])
+{
+    int length = snprintf(record, BQ_WORKER_BUDGET_BYTES, "%s\nderivation=%s\n", BQ_WORKER_BUDGET_SCHEMA,
+        "fixed+stages*(settling+export)+sum_g(stages*2*(W+R*P)*timed(kind_g,stage_g,n_g))"
+        "+U*stages*2*(W+R*P)*runtime+sum_u(4*untimed(kind_u,stage_u,n_u));"
+        "object:first batch class with max_inputs>=n;singleton:its stage bound,never a one-input batch;"
+        "untimed:separate tables measured on the slowest untimed target");
+    u64 used = length > 0 && length < (int)BQ_WORKER_BUDGET_BYTES ? (u64)length : BQ_WORKER_BUDGET_BYTES;
+    for (u32 index = 0; used < BQ_WORKER_BUDGET_BYTES && index < BUSTER_ARRAY_LENGTH(bq_worker_budget_keys);
+         index += 1)
+    {
+        length = snprintf(record + used, BQ_WORKER_BUDGET_BYTES - used, "%s=%" PRIu64 "\n",
+                          bq_worker_budget_keys[index], (uint64_t)budget->values[index]);
+        used = length > 0 && (u64)length < BQ_WORKER_BUDGET_BYTES - used ? used + (u64)length :
+               BQ_WORKER_BUDGET_BYTES;
+    }
+    if (used < BQ_WORKER_BUDGET_BYTES)
+    {
+        length = snprintf(record + used, BQ_WORKER_BUDGET_BYTES - used, "%s",
+                          "runtime-process-ns=50000000\nmetrics-header-bytes=4096\nmetrics-input-bytes=16384\n"
+                          "batch=1:40000000\nbatch=1024:2000000000\nsingleton=link:45000000\n"
+                          "singleton=self-host-stage1:900000000\nuntimed-batch=1:50000000\n"
+                          "untimed-batch=1024:2500000000\nuntimed-singleton=link:60000000\n"
+                          "untimed-singleton=self-host-stage1:1200000000\n");
+        used = length > 0 && (u64)length < BQ_WORKER_BUDGET_BYTES - used ? used + (u64)length :
+               BQ_WORKER_BUDGET_BYTES;
+    }
+    bool ok = used < BQ_WORKER_BUDGET_BYTES;
+    char digest[SHA256_HEX_CAPACITY] = {0};
+    if (ok)
+    {
+        bq_digest(record, (u32)used, (char8*)digest);
+        length = snprintf(profile, 128, "campaign-budget-sha256=%s\n", digest);
+        ok = length > 0 && length < 128;
+    }
+    *size = ok ? used : 0;
+    return ok;
+}
+
+/* Derive the limit of `budget`'s own correctly pinned record. */
+BUSTER_GLOBAL_LOCAL BqError bq_test_worker_runtime_of(BqTestWorkerBudget const* budget, u64* runtime)
+{
+    char record[BQ_WORKER_BUDGET_BYTES], profile[128];
+    u64 size = 0;
+    BqError error = bq_test_worker_retirement_record(budget, record, &size, profile) ?
+        bq_worker_retirement_runtime(string_from_pointer(profile), (String8){(char8*)record, size}, runtime) :
+        BQ_IO;
+    return error;
+}
+
+/* #881-C: the retirement unit limit and deadline come from the authenticated
+ * budget ceiling, and every absent, unpinned, mismatched, zero, too-small,
+ * oversized or fixed-phase-starved record is refused. The coordinator argv
+ * carries the same value the broker self-test installs as a property
+ * (bq_broker_runtime_self_test), and the deadline reaches the lease message. */
+BUSTER_GLOBAL_LOCAL void bq_test_worker_retirement_runtime(void)
+{
+    BqTestWorkerBudget budget = bq_test_worker_retirement_budget();
+    char record[BQ_WORKER_BUDGET_BYTES], profile[128];
+    u64 size = 0, runtime = 1;
+    bool built = bq_test_worker_retirement_record(&budget, record, &size, profile);
+    BQ_CHECK(built);
+    String8 record_text = {(char8*)record, size};
+    String8 profile_text = string_from_pointer(profile);
+    /* Budget -> limit, rounded down to whole seconds under the ceiling. */
+    BQ_CHECK(built && bq_worker_retirement_runtime(profile_text, record_text, &runtime) == BQ_OK &&
+             runtime == UINT64_C(8640000000));
+    /* Limit -> absolute deadline from lease acquisition -> lease message. */
+    u64 start = bq_worker_monotonic_milliseconds();
+    u64 deadline = 0, deadline_ns = 0;
+    BQ_CHECK(bq_worker_execution_deadline(start, runtime, &deadline) && deadline == start + UINT64_C(8640000) &&
+             bq_phase_deadline_from_milliseconds(deadline, &deadline_ns));
+    BqWorkerLeaseMessage message;
+    char const* digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    BQ_CHECK(bq_worker_lease_message_make(&message, BQ_WORKER_LEASE_RESPONSE, "/tmp/host.lock", 1, 2, 3, 4,
+                                          digest, deadline_ns) &&
+             message.execution_deadline_ns == deadline_ns &&
+             bq_worker_lease_message_matches(&message, BQ_WORKER_LEASE_RESPONSE, "/tmp/host.lock", 1, 2, 3, 4,
+                                             digest, deadline_ns) &&
+             !bq_worker_lease_message_matches(&message, BQ_WORKER_LEASE_RESPONSE, "/tmp/host.lock", 1, 2, 3, 4,
+                                              digest, deadline_ns - 1));
+    /* Limit -> typed broker argv; smoke keeps its six values. */
+    char const* arguments[8];
+    char runtime_text[32];
+    u32 count = 0;
+    char const* base = "1111111111111111111111111111111111111111";
+    char const* candidate = "2222222222222222222222222222222222222222";
+    BQ_CHECK(bq_worker_outer_arguments(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, runtime, "1", "2", base, candidate,
+                                       runtime_text, arguments, &count) && count == 7 &&
+             !strcmp(arguments[0], BQ_SYSTEMD_BROKER) && !strcmp(arguments[1], BQ_SYSTEMD_RETIREMENT_OUTER_VERB) &&
+             !strcmp(arguments[1], "start-retirement-outer") && !strcmp(arguments[2], "1") &&
+             !strcmp(arguments[3], "2") && !strcmp(arguments[4], base) && !strcmp(arguments[5], candidate) &&
+             !strcmp(arguments[6], "8640000000") && arguments[7] == NULL);
+    BQ_CHECK(bq_worker_outer_arguments(BQ_RECIPE_VALIDATE_BUSTER, BQ_SYSTEMD_SMOKE_RUNTIME_USEC, "1", "2", base,
+                                       candidate, runtime_text, arguments, &count) && count == 6 &&
+             !strcmp(arguments[1], "start-outer") && arguments[6] == NULL);
+    u64 const refused_limits[] = {0, UINT64_C(59000000), UINT64_C(8640000001),
+                                  BQ_SYSTEMD_RETIREMENT_RUNTIME_MAX_USEC + BQ_SYSTEMD_USEC_PER_SECOND, UINT64_MAX};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused_limits); index += 1)
+        BQ_CHECK(!bq_worker_outer_arguments(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, refused_limits[index], "1", "2",
+                                            base, candidate, runtime_text, arguments, &count) &&
+                 count == 0 && arguments[0] == NULL);
+    BQ_CHECK(!bq_worker_outer_arguments(BQ_RECIPE_UNKNOWN, runtime, "1", "2", base, candidate, runtime_text,
+                                        arguments, &count) && count == 0);
+    /* The manager's readback of the same limit parses to the same value. */
+    u64 observed = 0;
+    BQ_CHECK(bq_worker_duration("2h 24min", &observed) && observed == runtime &&
+             bq_worker_duration("8640000000", &observed) && observed == runtime &&
+             bq_worker_duration("1h", &observed) && observed == BQ_SYSTEMD_SMOKE_RUNTIME_USEC &&
+             bq_worker_duration("10s", &observed) && observed == UINT64_C(10000000) &&
+             !bq_worker_duration("infinity", &observed) && observed == 0 &&
+             !bq_worker_duration("2h 24min 0.5s", &observed));
+    /* Absent record, unpinned (blocked) profile, empty profile. */
+    BQ_CHECK(bq_worker_retirement_runtime(profile_text, (String8){0}, &runtime) == BQ_RECIPE_MISMATCH &&
+             runtime == 0);
+    BQ_CHECK(bq_worker_retirement_runtime(bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED), record_text,
+                                          &runtime) == BQ_RECIPE_MISMATCH && runtime == 0);
+    BQ_CHECK(bq_worker_retirement_runtime((String8){0}, record_text, &runtime) == BQ_RECIPE_MISMATCH);
+    BQ_CHECK(bq_worker_retirement_runtime(profile_text, record_text, NULL) == BQ_RECIPE_MISMATCH);
+    /* A record the pin does not name, a truncated or extended record. */
+    BqTestWorkerBudget other = budget;
+    other.values[12] += 1;
+    char other_record[BQ_WORKER_BUDGET_BYTES], other_profile[128];
+    u64 other_size = 0;
+    BQ_CHECK(bq_test_worker_retirement_record(&other, other_record, &other_size, other_profile) &&
+             bq_worker_retirement_runtime(profile_text, (String8){(char8*)other_record, other_size}, &runtime) ==
+                 BQ_RECIPE_MISMATCH &&
+             bq_worker_retirement_runtime(string_from_pointer(other_profile), record_text, &runtime) ==
+                 BQ_RECIPE_MISMATCH &&
+             bq_worker_retirement_runtime(string_from_pointer(other_profile),
+                                          (String8){(char8*)other_record, other_size}, &runtime) == BQ_OK);
+    BQ_CHECK(bq_worker_retirement_runtime(profile_text, (String8){(char8*)record, size - 1}, &runtime) ==
+             BQ_RECIPE_MISMATCH);
+    char spaced[BQ_WORKER_BUDGET_BYTES + 1];
+    memcpy(spaced, record, (size_t)size);
+    spaced[size] = '\n';
+    BQ_CHECK(bq_worker_retirement_runtime(profile_text, (String8){(char8*)spaced, size + 1}, &runtime) ==
+             BQ_RECIPE_MISMATCH);
+    /* Even correctly pinned: another schema, a leading zero or a reordered
+     * scalar is not the canonical record this worker reads. */
+    char const* const substitutions[][2] = {
+        {"schema=tp-retirement-campaign-budget-v2", "schema=tp-retirement-campaign-budget-v1"},
+        {"reservation-ns=1000000000", "reservation-ns=01000000000"},
+        {"reservation-ns=1000000000\nmaterialization-ns=2000000000",
+         "materialization-ns=2000000000\nreservation-ns=1000000000"}};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(substitutions); index += 1)
+    {
+        char changed[BQ_WORKER_BUDGET_BYTES + 8], changed_profile[128], changed_digest[SHA256_HEX_CAPACITY];
+        char const* found = strstr(record, substitutions[index][0]);
+        u64 old_length = strlen(substitutions[index][0]), new_length = strlen(substitutions[index][1]);
+        u64 prefix = found ? (u64)(found - record) : 0;
+        BQ_CHECK(found != NULL);
+        if (found)
+        {
+            memcpy(changed, record, (size_t)prefix);
+            memcpy(changed + prefix, substitutions[index][1], (size_t)new_length);
+            memcpy(changed + prefix + new_length, found + old_length, (size_t)(size - prefix - old_length));
+            u64 changed_size = size - old_length + new_length;
+            bq_digest(changed, (u32)changed_size, (char8*)changed_digest);
+            snprintf(changed_profile, sizeof(changed_profile), "campaign-budget-sha256=%s\n", changed_digest);
+            BQ_CHECK(bq_worker_retirement_runtime(string_from_pointer(changed_profile),
+                                                  (String8){(char8*)changed, changed_size}, &runtime) ==
+                     BQ_RECIPE_MISMATCH && runtime == 0);
+        }
+    }
+    /* Zero, under-a-minute, over-range and fixed-phase-starved ceilings, and
+     * a zero fixed-phase bound, are refused even when correctly pinned. */
+    u64 const ceilings[] = {0, UINT64_C(59999999999),
+                            BQ_SYSTEMD_RETIREMENT_RUNTIME_MAX_USEC * 1000 + UINT64_C(1000000000), UINT64_MAX};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(ceilings); index += 1)
+    {
+        BqTestWorkerBudget changed = budget;
+        changed.values[0] = ceilings[index];
+        BQ_CHECK(bq_test_worker_runtime_of(&changed, &runtime) == BQ_RECIPE_MISMATCH && runtime == 0);
+    }
+    BqTestWorkerBudget starved = budget;
+    starved.values[12] = UINT64_C(60000000000);
+    starved.values[0] = UINT64_C(70000000000);
+    BQ_CHECK(bq_test_worker_runtime_of(&starved, &runtime) == BQ_RECIPE_MISMATCH && runtime == 0);
+    starved.values[0] = UINT64_C(78800000000);
+    BQ_CHECK(bq_test_worker_runtime_of(&starved, &runtime) == BQ_OK && runtime == UINT64_C(78000000));
+    starved.values[0] = UINT64_C(78799999999);
+    BQ_CHECK(bq_test_worker_runtime_of(&starved, &runtime) == BQ_RECIPE_MISMATCH);
+    for (u32 index = 1; index < BUSTER_ARRAY_LENGTH(budget.values); index += 1)
+    {
+        BqTestWorkerBudget changed = budget;
+        changed.values[index] = 0;
+        BQ_CHECK(bq_test_worker_runtime_of(&changed, &runtime) == BQ_RECIPE_MISMATCH);
+    }
+    /* The range edges themselves are accepted. */
+    u64 const edges[] = {UINT64_C(60999999999), BQ_SYSTEMD_RETIREMENT_RUNTIME_MAX_USEC * 1000};
+    u64 const edge_limits[] = {BQ_SYSTEMD_RETIREMENT_RUNTIME_MIN_USEC, BQ_SYSTEMD_RETIREMENT_RUNTIME_MAX_USEC};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(edges); index += 1)
+    {
+        BqTestWorkerBudget changed = budget;
+        changed.values[0] = edges[index];
+        BQ_CHECK(bq_test_worker_runtime_of(&changed, &runtime) == BQ_OK && runtime == edge_limits[index]);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_worker_deadlines(void)
 {
     bq_test_worker_pending_cancel_delivery();
     bq_test_worker_coordinator_lease_continuity();
+    bq_test_worker_retirement_runtime();
     u64 absolute = 0, absolute_nanoseconds = 0;
     BQ_CHECK(!bq_worker_execution_deadline(1, 0, &absolute));
     BQ_CHECK(!bq_worker_execution_deadline(UINT64_MAX, 1, &absolute));

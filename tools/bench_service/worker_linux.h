@@ -147,6 +147,14 @@ typedef struct BqWorkerConfig
      * satisfy every observed security property; it only replaces process
      * control in tests. */
     bool production_path;
+    /* Retirement only (#881 A1): the installed canonical campaign-budget
+     * record (tools/throughput/retirement_budget.h). The worker authenticates
+     * it against the job recipe profile's campaign-budget-sha256= pin and
+     * derives the job's unit limit and execution deadline from its reviewed
+     * ceiling (bq_worker_retirement_runtime). Empty, like the blocked
+     * profile's missing pin, refuses a retirement job before launch; the
+     * smoke recipe ignores it and keeps limits.runtime_max_usec. */
+    String8 retirement_budget;
 } BqWorkerConfig;
 
 BUSTER_F_DECL BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id);

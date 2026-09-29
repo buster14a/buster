@@ -17,6 +17,15 @@
  * BQ_RETIREMENT_STAGE_UNPROVEN_STATUS unless the unit is proven gone (#1785);
  * bq_broker_unit_stop_self_test pins that path.
  *
+ * RuntimeMax (systemd_runtime.h): smoke units keep the fixed one hour. A
+ * retirement outer start (BQ_SYSTEMD_RETIREMENT_OUTER_VERB) carries the
+ * coordinator's budget-derived limit in the request, which
+ * bq_broker_request_valid bounds; each retirement stage start inherits the
+ * outer unit's effective limit (bq_broker_parent_runtime) and never takes one
+ * from its caller. bq_broker_runtime_identity accepts only those values on a
+ * signal, and bq_broker_command sizes the relay wait from the same limit;
+ * bq_broker_runtime_self_test pins the path and its refusals.
+ *
  * This executable is Linux-only and deliberately has no Buster dependency.
  */
 #ifndef _GNU_SOURCE
@@ -48,6 +57,7 @@
 #include <unistd.h>
 #include <sys/xattr.h>
 #include "retirement_stage.h"
+#include "systemd_runtime.h"
 
 #define BQ_BROKER_SOCKET "/run/buster-bench-systemd-broker/control.sock"
 #define BQ_BROKER_QUEUE "/var/lib/buster-bench/queue"
@@ -63,6 +73,8 @@
 #define BQ_BROKER_RUN "/usr/bin/systemd-run"
 #define BQ_BROKER_CTL "/usr/bin/systemctl"
 #define BQ_BROKER_MAGIC 0x42515344u
+/* Version 2 added the recipe selector and the retirement runtime limit. */
+#define BQ_BROKER_VERSION 2u
 #define BQ_BROKER_MAX_ARGS 96u
 #define BQ_BROKER_TEXT 2048u
 #define BQ_BROKER_DIAG_LINE 1200u
@@ -86,7 +98,13 @@ enum { BQ_BROKER_OUTER = 0, BQ_BROKER_BASE_GENERATE = 1, BQ_BROKER_BASE_BUILD = 
        BQ_BROKER_RETIREMENT_CANDIDATE_BUILD = BQ_RETIREMENT_STAGE_FIRST_NUMBER + 3,
        BQ_BROKER_LAST_STAGE = BQ_BROKER_RETIREMENT_CANDIDATE_BUILD };
 enum { BQ_BROKER_TERM = 1, BQ_BROKER_KILL = 2, BQ_BROKER_CONT = 3 };
+/* The smoke recipe is the zero selector every smoke and signal request keeps. */
+enum { BQ_BROKER_RECIPE_SMOKE = 0, BQ_BROKER_RECIPE_RETIREMENT = 1 };
 
+/* runtime_max_usec is nonzero only for a retirement start: on the wire only
+ * for the outer unit (the coordinator's budget-derived limit); a retirement
+ * stage sends zero and the server resolves the outer unit's effective value
+ * into its copy before building the command. */
 typedef struct BqBrokerRequest
 {
     uint32_t magic;
@@ -94,9 +112,10 @@ typedef struct BqBrokerRequest
     uint32_t operation;
     uint32_t stage;
     uint32_t signal_number;
-    uint32_t reserved;
+    uint32_t recipe;
     uint64_t job;
     uint64_t attempt;
+    uint64_t runtime_max_usec;
     char base[65];
     char candidate[65];
 } BqBrokerRequest;
@@ -106,6 +125,9 @@ typedef struct BqBrokerCommand
     char const* argv[BQ_BROKER_MAX_ARGS + 1];
     char text[BQ_BROKER_MAX_ARGS][BQ_BROKER_TEXT];
     unsigned count;
+    /* The bounded relay wait for a start (bq_systemd_relay_milliseconds);
+     * zero selects the fixed smoke/signal bounds in bq_broker_execute. */
+    uint64_t relay_milliseconds;
     bool valid;
 } BqBrokerCommand;
 
@@ -237,16 +259,39 @@ static bool bq_broker_revision(char const value[65])
     return ok;
 }
 
-static bool bq_broker_request_valid(BqBrokerRequest const* request)
+/* The recipe/runtime pairing of a start. A smoke start (outer or stages
+ * 1..5) carries neither; a retirement outer carries a bounded limit; a
+ * retirement stage carries none on the wire and, once `resolved`, exactly the
+ * inherited bounded limit. Absent, zero, oversized, fractional or mismatched
+ * values fail closed. */
+static bool bq_broker_request_runtime_valid(BqBrokerRequest const* request, bool resolved)
+{
+    bool retirement_stage = bq_broker_retirement_stage(request->stage);
+    bool retirement = request->recipe == BQ_BROKER_RECIPE_RETIREMENT;
+    bool ok = request->recipe == BQ_BROKER_RECIPE_SMOKE || retirement;
+    if (ok && request->stage == BQ_BROKER_OUTER)
+        ok = retirement ? bq_systemd_retirement_runtime_valid(request->runtime_max_usec) :
+                          request->runtime_max_usec == 0;
+    else if (ok && retirement_stage)
+        ok = retirement && (resolved ? bq_systemd_retirement_runtime_valid(request->runtime_max_usec) :
+                                       request->runtime_max_usec == 0);
+    else if (ok)
+        ok = !retirement && request->runtime_max_usec == 0;
+    return ok;
+}
+
+static bool bq_broker_request_check(BqBrokerRequest const* request, bool resolved)
 {
     bool start = request->operation == BQ_BROKER_START;
     bool signal = request->operation == BQ_BROKER_SIGNAL;
-    bool ok = request->magic == BQ_BROKER_MAGIC && request->version == 1 && request->reserved == 0 &&
+    bool ok = request->magic == BQ_BROKER_MAGIC && request->version == BQ_BROKER_VERSION &&
               (start || signal) && request->stage <= BQ_BROKER_LAST_STAGE &&
               request->job != 0 && request->attempt != 0;
     if (ok && start)
         ok = request->signal_number == 0 && bq_broker_revision(request->base) &&
-             bq_broker_revision(request->candidate);
+             bq_broker_revision(request->candidate) && bq_broker_request_runtime_valid(request, resolved);
+    if (ok && signal)
+        ok = request->recipe == BQ_BROKER_RECIPE_SMOKE && request->runtime_max_usec == 0;
     if (ok && signal)
     {
         ok = request->signal_number == BQ_BROKER_TERM || request->signal_number == BQ_BROKER_KILL ||
@@ -254,6 +299,20 @@ static bool bq_broker_request_valid(BqBrokerRequest const* request)
         for (unsigned index = 0; ok && index < sizeof(request->base); index += 1)
             ok = request->base[index] == 0 && request->candidate[index] == 0;
     }
+    return ok;
+}
+
+/* The request as received from a client. */
+static bool bq_broker_request_valid(BqBrokerRequest const* request)
+{
+    bool ok = bq_broker_request_check(request, false);
+    return ok;
+}
+
+/* The request after the server resolved a retirement stage's inherited limit. */
+static bool bq_broker_request_resolved_valid(BqBrokerRequest const* request)
+{
+    bool ok = bq_broker_request_check(request, true);
     return ok;
 }
 
@@ -368,11 +427,16 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroup
                               BqBrokerCommand* command)
 {
     BqBrokerPaths paths;
-    bool ok = bq_broker_request_valid(request) && bq_broker_paths(request, &paths);
+    bool ok = bq_broker_request_resolved_valid(request) && bq_broker_paths(request, &paths);
     memset(command, 0, sizeof(*command));
     command->valid = ok;
+    /* Smoke keeps its fixed hour; retirement uses the validated limit. */
+    uint64_t runtime_usec = ok && request->recipe == BQ_BROKER_RECIPE_RETIREMENT ?
+                            request->runtime_max_usec : BQ_SYSTEMD_SMOKE_RUNTIME_USEC;
     if (ok && request->operation == BQ_BROKER_START)
     {
+        command->relay_milliseconds = bq_systemd_relay_milliseconds(runtime_usec);
+        if (!command->relay_milliseconds) command->valid = false;
         bq_broker_add(command, BQ_BROKER_RUN);
         bq_broker_add(command, "--quiet");
         bq_broker_add(command, "--wait");
@@ -398,7 +462,7 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroup
         bq_broker_add(command, "--property=MemoryMax=8589934592");
         bq_broker_add(command, "--property=MemorySwapMax=0");
         bq_broker_add(command, "--property=TasksMax=256");
-        bq_broker_add(command, "--property=RuntimeMaxSec=3600000000us");
+        bq_broker_add_format(command, "--property=RuntimeMaxSec=%" PRIu64 "us", runtime_usec);
         if (request->stage != BQ_BROKER_OUTER)
         {
             bq_broker_add_format(command, "--property=PartOf=%s", paths.parent);
@@ -487,7 +551,8 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroup
             bq_broker_add(command, BQ_BROKER_LEASE);
             bq_broker_add_format(command, "%" PRIu64, request->job);
             bq_broker_add_format(command, "%" PRIu64, request->attempt);
-            bq_broker_add(command, "validate-buster-v1");
+            bq_broker_add(command, request->recipe == BQ_BROKER_RECIPE_RETIREMENT ?
+                                   BQ_SYSTEMD_RETIREMENT_RECIPE : "validate-buster-v1");
             bq_broker_add(command, BQ_BROKER_WORKSPACES);
             bq_broker_add(command, request->base);
             bq_broker_add(command, request->candidate);
@@ -900,7 +965,7 @@ static bool bq_broker_state(BqBrokerRequest const* request, uid_t service_uid,
 
 static bool bq_broker_unit_from_text(char const* unit, BqBrokerRequest* request)
 {
-    BqBrokerRequest candidate = {.magic = BQ_BROKER_MAGIC, .version = 1, .operation = BQ_BROKER_SIGNAL};
+    BqBrokerRequest candidate = {.magic = BQ_BROKER_MAGIC, .version = BQ_BROKER_VERSION, .operation = BQ_BROKER_SIGNAL};
     char const* at = unit && !strncmp(unit, "buster-bench-", 13) ? unit + 13 : NULL;
     bool ok = at != NULL;
     if (ok)
@@ -1026,6 +1091,73 @@ static bool bq_broker_gate_exec_identity(char const* text, BqBrokerRequest const
         for (unsigned index = 0; ok && index < 6; index += 1)
             ok = !strcmp(tokens[index], expected.argv[index]);
     }
+    return ok;
+}
+
+/* Copy argument `wanted` (0-based, from the gate itself) of a gated
+ * ExecStart. Like bq_broker_gate_exec_identity it reads only the single
+ * ExecStart line and the fixed unescaped leading arguments the broker wrote. */
+static bool bq_broker_exec_token(char const* text, unsigned wanted, char* output, size_t capacity)
+{
+    char const* value = text ? bq_broker_field(text, "ExecStart") : NULL;
+    char const* end = value ? strchr(value, '\n') : NULL;
+    if (value && !end) end = value + strlen(value);
+    char const prefix[] = "{ path=" BQ_BROKER_GATE " ; argv[]=";
+    size_t prefix_size = sizeof(prefix) - 1;
+    bool ok = value && end && output && capacity && (size_t)(end - value) > prefix_size &&
+              !memcmp(value, prefix, prefix_size);
+    char const* at = ok ? value + prefix_size : NULL;
+    bool found = false;
+    for (unsigned index = 0; ok && !found && index <= wanted; index += 1)
+    {
+        char const* first = at;
+        while (at < end && *at != ' ' && *at != ';' && *at != '\t' && *at != '\r') at += 1;
+        size_t length = (size_t)(at - first);
+        ok = length > 0 && (index < wanted || length < capacity) && at < end && *at == ' ';
+        if (ok && index == wanted)
+        {
+            memcpy(output, first, length);
+            output[length] = 0;
+            found = true;
+        }
+        if (ok) at += 1;
+    }
+    if (output && capacity && !found) output[0] = 0;
+    return ok && found;
+}
+
+/* The outer worker-unit command's recipe argument (bq_broker_command). */
+#define BQ_BROKER_OUTER_RECIPE_TOKEN 11u
+
+static bool bq_broker_retirement_outer_exec(char const* text)
+{
+    char recipe[64];
+    bool retirement = bq_broker_exec_token(text, BQ_BROKER_OUTER_RECIPE_TOKEN, recipe, sizeof(recipe)) &&
+                      !strcmp(recipe, BQ_SYSTEMD_RETIREMENT_RECIPE);
+    return retirement;
+}
+
+/* A signalled unit's effective RuntimeMaxUSec must be one the broker could
+ * have installed for that unit: the smoke hour, or a bounded retirement limit
+ * on a retirement stage or on an outer unit whose command runs the
+ * retirement recipe. A retirement stage started before the limit was derived
+ * carried the smoke hour, so it stays cleanable. */
+static bool bq_broker_runtime_identity(char const* text, BqBrokerRequest const* request)
+{
+    char const* value = bq_broker_field(text, "RuntimeMaxUSec");
+    char const* end = value ? strchr(value, '\n') : NULL;
+    size_t length = end ? (size_t)(end - value) : value ? strlen(value) : 0;
+    uint64_t usec = 0;
+    bool parsed = value && bq_systemd_timespan_parse(value, length, &usec);
+    bool smoke = parsed && usec == BQ_SYSTEMD_SMOKE_RUNTIME_USEC;
+    bool bounded = parsed && bq_systemd_retirement_runtime_valid(usec);
+    bool ok = false;
+    if (request->stage == BQ_BROKER_OUTER)
+        ok = bq_broker_retirement_outer_exec(text) ? bounded : smoke;
+    else if (bq_broker_retirement_stage(request->stage))
+        ok = smoke || bounded;
+    else
+        ok = smoke;
     return ok;
 }
 
@@ -1420,7 +1552,7 @@ static bool bq_broker_unit_stop_commands(BqBrokerRequest const* request, BqBroke
 {
     BqBrokerPaths paths;
     memset(stop, 0, sizeof(*stop));
-    stop->enabled = bq_broker_request_valid(request) && request->operation == BQ_BROKER_START &&
+    stop->enabled = bq_broker_request_resolved_valid(request) && request->operation == BQ_BROKER_START &&
                     request->stage != BQ_BROKER_OUTER && bq_broker_paths(request, &paths) &&
                     bq_broker_format(stop->unit, sizeof(stop->unit), "%s", paths.unit);
     if (stop->enabled)
@@ -1459,6 +1591,31 @@ static bool bq_broker_unit_stop(BqBrokerUnitStop const* stop)
     return gone;
 }
 
+/* The immutable worker-instance record's fixed fields for this job/attempt:
+ * a 32-character InvocationID at 232 and a bounded ControlGroup at 288. */
+static bool bq_broker_instance_record_valid(unsigned char const* record, size_t size, uint64_t job,
+                                            uint64_t attempt)
+{
+    bool ok = record && size == 544 && !memcmp(record, "BQINSTANCE000002", 16) &&
+              bq_broker_u64(record + 16) == job && bq_broker_u64(record + 24) == attempt &&
+              record[264] == 0 && record[479] == 0 &&
+              strnlen((char const*)(record + 232), 33) == 32 &&
+              strnlen((char const*)(record + 288), 192) < 192;
+    return ok;
+}
+
+static bool bq_broker_instance_record(uint64_t job, uint64_t attempt, unsigned char record[544])
+{
+    char name[64];
+    size_t size = 0;
+    struct passwd* service = getpwnam("buster-bench");
+    bool ok = service && bq_broker_format(name, sizeof(name), "worker-instance-%" PRIu64, job) &&
+              bq_broker_regular(BQ_BROKER_QUEUE, name, service->pw_uid, service->pw_gid,
+                                0440, true, record, 544, &size) &&
+              bq_broker_instance_record_valid(record, size, job, attempt);
+    return ok;
+}
+
 static bool bq_broker_signal_identity(BqBrokerRequest const* request,
                                        BqBrokerStartGroups const* groups)
 {
@@ -1482,24 +1639,12 @@ static bool bq_broker_signal_identity(BqBrokerRequest const* request,
               bq_broker_field_equals(output, "MemoryMax", "8589934592") &&
               bq_broker_field_equals(output, "MemorySwapMax", "0") &&
               bq_broker_field_equals(output, "TasksMax", "256") &&
-              (bq_broker_field_equals(output, "RuntimeMaxUSec", "3600000000") ||
-               bq_broker_field_equals(output, "RuntimeMaxUSec", "1h")) &&
+              bq_broker_runtime_identity(output, request) &&
               bq_broker_field_equals(output, "ControlGroup", cgroup);
     if (ok && request->stage == BQ_BROKER_OUTER)
     {
         unsigned char record[544];
-        char name[64];
-        size_t size = 0;
-        struct passwd* service = getpwnam("buster-bench");
-        ok = service && bq_broker_format(name, sizeof(name), "worker-instance-%" PRIu64, request->job) &&
-             bq_broker_regular(BQ_BROKER_QUEUE, name, service->pw_uid, service->pw_gid,
-                               0440, true, record, sizeof(record), &size) && size == sizeof(record) &&
-             !memcmp(record, "BQINSTANCE000002", 16) &&
-             bq_broker_u64(record + 16) == request->job &&
-             bq_broker_u64(record + 24) == request->attempt &&
-             record[264] == 0 && record[479] == 0 &&
-             strnlen((char const*)(record + 232), 33) == 32 &&
-             strnlen((char const*)(record + 288), 192) < 192 &&
+        ok = bq_broker_instance_record(request->job, request->attempt, record) &&
              bq_broker_field_equals(output, "User", "buster-bench") &&
              bq_broker_field_equals(output, "Group", "buster-bench") &&
              bq_broker_exec_identity(output, request, groups) &&
@@ -1516,6 +1661,69 @@ static bool bq_broker_signal_identity(BqBrokerRequest const* request,
              bq_broker_field_has_unit(output, "BindsTo", paths.parent) &&
              bq_broker_field_has_unit(output, "After", paths.parent);
     }
+    return ok;
+}
+
+/* A retirement stage inherits the limit PID1 holds for its exact outer unit:
+ * the loaded buster-bench worker-unit of this job and attempt, running the
+ * retirement recipe through the current gate, whose invocation and control
+ * group match the durable instance record, with a bounded effective
+ * RuntimeMaxUSec. Parsed from one systemctl show readback; the caller's
+ * request never names the value. */
+static bool bq_broker_parent_runtime_matches(char const* text, BqBrokerRequest const* request,
+                                             BqBrokerStartGroups const* groups,
+                                             unsigned char const* record, uint64_t* runtime)
+{
+    BqBrokerPaths paths;
+    char cgroup[256], job[32], attempt[32], verb[32], job_token[32], attempt_token[32];
+    BqBrokerRequest outer = {.magic = BQ_BROKER_MAGIC, .version = BQ_BROKER_VERSION,
+                             .operation = BQ_BROKER_SIGNAL, .stage = BQ_BROKER_OUTER,
+                             .signal_number = BQ_BROKER_CONT, .job = request->job,
+                             .attempt = request->attempt};
+    char const* value = text ? bq_broker_field(text, "RuntimeMaxUSec") : NULL;
+    char const* end = value ? strchr(value, '\n') : NULL;
+    size_t length = end ? (size_t)(end - value) : value ? strlen(value) : 0;
+    uint64_t usec = 0;
+    bool ok = text && runtime && bq_broker_retirement_stage(request->stage) &&
+              request->recipe == BQ_BROKER_RECIPE_RETIREMENT &&
+              bq_broker_instance_record_valid(record, 544, request->job, request->attempt) &&
+              bq_broker_paths(request, &paths) &&
+              bq_broker_format(cgroup, sizeof(cgroup), BQ_BROKER_CGROUP_SLICE "/%s", paths.parent) &&
+              bq_broker_format(job, sizeof(job), "%" PRIu64, request->job) &&
+              bq_broker_format(attempt, sizeof(attempt), "%" PRIu64, request->attempt) &&
+              bq_broker_field_equals(text, "Id", paths.parent) &&
+              bq_broker_field_equals(text, "LoadState", "loaded") &&
+              bq_broker_field_equals(text, "Slice", "buster-bench.slice") &&
+              bq_broker_field_equals(text, "User", "buster-bench") &&
+              bq_broker_field_equals(text, "Group", "buster-bench") &&
+              bq_broker_field_equals(text, "NoNewPrivileges", "yes") &&
+              bq_broker_field_equals(text, "CollectMode", "inactive") &&
+              bq_broker_field_equals(text, "ControlGroup", cgroup) &&
+              bq_broker_field_equals(text, "ControlGroup", (char const*)(record + 288)) &&
+              bq_broker_field_equals(text, "InvocationID", (char const*)(record + 232)) &&
+              bq_broker_gate_exec_identity(text, &outer, groups) &&
+              bq_broker_exec_token(text, 7, verb, sizeof(verb)) && !strcmp(verb, "worker-unit") &&
+              bq_broker_exec_token(text, 9, job_token, sizeof(job_token)) && !strcmp(job_token, job) &&
+              bq_broker_exec_token(text, 10, attempt_token, sizeof(attempt_token)) &&
+              !strcmp(attempt_token, attempt) && bq_broker_retirement_outer_exec(text) &&
+              value && bq_systemd_timespan_parse(value, length, &usec) &&
+              bq_systemd_retirement_runtime_valid(usec);
+    if (runtime) *runtime = ok ? usec : 0;
+    return ok;
+}
+
+/* Resolve a retirement stage start's inherited limit into the request. */
+static bool bq_broker_parent_runtime(BqBrokerRequest* request, BqBrokerStartGroups const* groups)
+{
+    BqBrokerPaths paths;
+    unsigned char record[544] = {0};
+    char output[8192];
+    uint64_t runtime = 0;
+    bool ok = bq_broker_paths(request, &paths) &&
+              bq_broker_instance_record(request->job, request->attempt, record) &&
+              bq_broker_show(paths.parent, output) &&
+              bq_broker_parent_runtime_matches(output, request, groups, record, &runtime);
+    if (ok) request->runtime_max_usec = runtime;
     return ok;
 }
 
@@ -1582,7 +1790,9 @@ static int bq_broker_execute(BqBrokerCommand const* command, int connection, boo
     if (ok) ok = fcntl(output[0], F_SETFL, fcntl(output[0], F_GETFL) | O_NONBLOCK) == 0 &&
                  fcntl(error_pipe[0], F_SETFL, fcntl(error_pipe[0], F_GETFL) | O_NONBLOCK) == 0;
     uint64_t now = bq_broker_now_milliseconds();
-    uint64_t deadline = now + (signal_operation ? 5000u : 3700000u);
+    uint64_t relay = signal_operation ? 5000u : command->relay_milliseconds ? command->relay_milliseconds :
+                     bq_systemd_relay_milliseconds(BQ_SYSTEMD_SMOKE_RUNTIME_USEC);
+    uint64_t deadline = now + relay;
     uint64_t total = 0;
     int status = 0;
     bool reaped = false;
@@ -1883,6 +2093,9 @@ static int bq_broker_server(void)
     bool state_checked = ok;
     if (ok) ok = bq_broker_state(&request, accounts.service_uid, accounts.service_gid, accounts.candidate_gid);
     bool state_valid = state_checked && ok;
+    /* A retirement stage runs under its outer unit's effective limit. */
+    if (ok && request.operation == BQ_BROKER_START && bq_broker_retirement_stage(request.stage))
+        ok = bq_broker_parent_runtime(&request, &start_groups);
     bool signal_checked = ok && request.operation == BQ_BROKER_SIGNAL;
     if (signal_checked) ok = bq_broker_signal_identity(&request, &start_groups);
     bool signal_valid = signal_checked && ok;
@@ -1972,15 +2185,23 @@ static bool bq_broker_cli(int argc, char** argv, BqBrokerRequest* request)
 {
     memset(request, 0, sizeof(*request));
     request->magic = BQ_BROKER_MAGIC;
-    request->version = 1;
+    request->version = BQ_BROKER_VERSION;
     bool ok = false;
-    if (argc == 6 && !strcmp(argv[1], "start-outer"))
+    bool retirement_outer = argc == 7 && !strcmp(argv[1], BQ_SYSTEMD_RETIREMENT_OUTER_VERB);
+    if ((argc == 6 && !strcmp(argv[1], "start-outer")) || retirement_outer)
     {
         request->operation = BQ_BROKER_START;
         ok = bq_broker_decimal(argv[2], &request->job) &&
              bq_broker_decimal(argv[3], &request->attempt) &&
              (strlen(argv[4]) == 40 || strlen(argv[4]) == 64) &&
              (strlen(argv[5]) == 40 || strlen(argv[5]) == 64);
+        /* The retirement limit is typed decimal microseconds; the range and
+         * whole-second checks are bq_broker_request_valid's. */
+        if (ok && retirement_outer)
+        {
+            request->recipe = BQ_BROKER_RECIPE_RETIREMENT;
+            ok = bq_broker_decimal(argv[6], &request->runtime_max_usec);
+        }
         if (ok)
         {
             memcpy(request->base, argv[4], strlen(argv[4]));
@@ -1995,6 +2216,8 @@ static bool bq_broker_cli(int argc, char** argv, BqBrokerRequest* request)
              bq_broker_stage(argv[4], &request->stage) &&
              (strlen(argv[5]) == 40 || strlen(argv[5]) == 64) &&
              (strlen(argv[6]) == 40 || strlen(argv[6]) == 64);
+        /* A retirement stage never names its limit: the server inherits it. */
+        if (ok && bq_broker_retirement_stage(request->stage)) request->recipe = BQ_BROKER_RECIPE_RETIREMENT;
         if (ok)
         {
             memcpy(request->base, argv[5], strlen(argv[5]));
@@ -2037,6 +2260,9 @@ static unsigned bq_broker_property_count(BqBrokerCommand const* command, char co
     return count;
 }
 
+/* The self-tests' inherited retirement limit: 2 h 24 min in whole seconds. */
+#define BQ_BROKER_TEST_RUNTIME_USEC UINT64_C(8640000000)
+
 /* #1020 retirement stages. The expected systemd-run vectors are spelled out
  * here rather than derived from retirement_stage.h, so a drift in the shared
  * contract or in the command builder fails this test. Returns its checks. */
@@ -2064,8 +2290,10 @@ static unsigned bq_broker_retirement_self_test(BqBrokerStartGroups const* groups
     unsigned checks = 0;
     bool ok = true;
 #define BQ_RETIREMENT_CHECK(condition) do { checks += 1; if (!(condition)) ok = false; } while (0)
-    BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = 1, .operation = BQ_BROKER_START,
-                               .job = 1, .attempt = 2};
+    /* Resolved stage requests: the server inherited the outer unit's limit. */
+    BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = BQ_BROKER_VERSION, .operation = BQ_BROKER_START,
+                               .recipe = BQ_BROKER_RECIPE_RETIREMENT,
+                               .runtime_max_usec = BQ_BROKER_TEST_RUNTIME_USEC, .job = 1, .attempt = 2};
     memset(request.base, 'a', 40);
     memset(request.candidate, 'b', 40);
     BqBrokerCommand command;
@@ -2084,7 +2312,7 @@ static unsigned bq_broker_retirement_self_test(BqBrokerStartGroups const* groups
             "--setenv=PATH=/opt/buster-bench/installed/toolchain/native-retirement-performance-v1/bin",
             "--setenv=LC_ALL=C", "--setenv=TZ=UTC", "--setenv=HOME=/nonexistent", unit,
             "--slice=buster-bench.slice", "--property=AllowedCPUs=2", "--property=MemoryMax=8589934592",
-            "--property=MemorySwapMax=0", "--property=TasksMax=256", "--property=RuntimeMaxSec=3600000000us",
+            "--property=MemorySwapMax=0", "--property=TasksMax=256", "--property=RuntimeMaxSec=8640000000us",
             "--property=PartOf=buster-bench-1-2.service", "--property=BindsTo=buster-bench-1-2.service",
             "--property=After=buster-bench-1-2.service", "--collect",
             service ? "--uid=buster-bench" : "--uid=buster-bench-candidate",
@@ -2112,7 +2340,8 @@ static unsigned bq_broker_retirement_self_test(BqBrokerStartGroups const* groups
             expected[count++] = generate ? generate_options[item] : build_options[item];
         request.stage = 6u + index;
         bool built = bq_broker_command(&request, groups, &command);
-        BQ_RETIREMENT_CHECK(built && command.count == count && command.argv[count] == NULL);
+        BQ_RETIREMENT_CHECK(built && command.count == count && command.argv[count] == NULL &&
+                            command.relay_milliseconds == UINT64_C(8640000) + BQ_SYSTEMD_RELAY_ALLOWANCE_MILLISECONDS);
         for (unsigned item = 0; built && item < count && item < command.count; item += 1)
             BQ_RETIREMENT_CHECK(!strcmp(command.argv[item], expected[item]));
         /* One writable path, and never the other subject's root. */
@@ -2121,10 +2350,12 @@ static unsigned bq_broker_retirement_self_test(BqBrokerStartGroups const* groups
                             !bq_broker_has_argument(&command, service ?
                                 "--property=ReadWritePaths=" BQ_ATTEMPT "/candidate/matched-build" :
                                 "--property=ReadWritePaths=" BQ_ATTEMPT "/base/build/matched-build"));
-        /* The typed CLI selects the stage by name only. */
+        /* The typed CLI selects the stage by name only; it names no limit,
+         * so the wire request is unresolved and builds no command. */
         char* cli[] = {"broker", "start-stage", "1", "2", (char*)names[index], request.base, request.candidate};
         BQ_RETIREMENT_CHECK(bq_broker_cli(7, cli, &parsed) && parsed.stage == 6u + index &&
-                            parsed.operation == BQ_BROKER_START);
+                            parsed.operation == BQ_BROKER_START && parsed.recipe == BQ_BROKER_RECIPE_RETIREMENT &&
+                            parsed.runtime_max_usec == 0 && !bq_broker_command(&parsed, groups, &command));
         /* signal accepts exactly this unit, TERM or KILL, never CONT. */
         snprintf(unit_name, sizeof(unit_name), "buster-bench-1-2-%s.service", names[index]);
         char* kill_cli[] = {"broker", "signal", unit_name, "KILL"};
@@ -2144,7 +2375,8 @@ static unsigned bq_broker_retirement_self_test(BqBrokerStartGroups const* groups
                  " %u %s %s %s -- " BQ_BROKER_BUILD " %s fixed ; ignore_errors=no }\n", 6u + index,
                  service ? "65000" : "65001", service ? "65000" : "65001", service ? "65000,65001" : "65001",
                  generate ? "generate" : "build");
-        BqBrokerRequest signal_request = {.magic = BQ_BROKER_MAGIC, .version = 1, .operation = BQ_BROKER_SIGNAL,
+        BqBrokerRequest signal_request = {.magic = BQ_BROKER_MAGIC, .version = BQ_BROKER_VERSION,
+                                          .operation = BQ_BROKER_SIGNAL,
                                           .stage = 6u + index, .signal_number = BQ_BROKER_KILL,
                                           .job = 1, .attempt = 2};
         BQ_RETIREMENT_CHECK(bq_broker_exec_identity(show, &signal_request, groups));
@@ -2238,8 +2470,16 @@ static unsigned bq_broker_retirement_self_test(BqBrokerStartGroups const* groups
         rmdir(build);
         rmdir(base);
     }
-    /* The smoke recipe's stages keep their fixed PATH and build directories. */
+    /* The smoke recipe's stages keep their fixed PATH, build directories and
+     * hour, and refuse a retirement selector or limit. */
     request.stage = BQ_BROKER_CANDIDATE_GENERATE;
+    BQ_RETIREMENT_CHECK(!bq_broker_command(&request, groups, &command));
+    request.recipe = BQ_BROKER_RECIPE_SMOKE;
+    BQ_RETIREMENT_CHECK(!bq_broker_command(&request, groups, &command));
+    request.runtime_max_usec = 0;
+    BQ_RETIREMENT_CHECK(bq_broker_command(&request, groups, &command) &&
+                        bq_broker_has_argument(&command, "--property=RuntimeMaxSec=3600000000us") &&
+                        command.relay_milliseconds == UINT64_C(3700000));
     BQ_RETIREMENT_CHECK(bq_broker_command(&request, groups, &command) &&
                         bq_broker_has_argument(&command, "--setenv=PATH=/usr/bin:/bin") &&
                         !bq_broker_has_argument(&command, "--setenv=TZ=UTC") &&
@@ -2289,8 +2529,9 @@ static unsigned bq_broker_unit_stop_self_test(bool* passed)
     unsigned checks = 0;
     bool ok = true;
 #define BQ_STOP_CHECK(condition) do { checks += 1; if (!(condition)) ok = false; } while (0)
-    BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = 1, .operation = BQ_BROKER_START,
-                               .stage = BQ_BROKER_RETIREMENT_BASE_GENERATE, .job = 1, .attempt = 2};
+    BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = BQ_BROKER_VERSION, .operation = BQ_BROKER_START,
+                               .stage = BQ_BROKER_RETIREMENT_BASE_GENERATE, .recipe = BQ_BROKER_RECIPE_RETIREMENT,
+                               .runtime_max_usec = BQ_BROKER_TEST_RUNTIME_USEC, .job = 1, .attempt = 2};
     memset(request.base, 'a', 40);
     memset(request.candidate, 'b', 40);
     BqBrokerUnitStop stop;
@@ -2306,15 +2547,19 @@ static unsigned bq_broker_unit_stop_self_test(bool* passed)
         vectors = state_vector[index] ? stop.state[index] && !strcmp(stop.state[index], state_vector[index]) :
                                         stop.state[index] == NULL;
     BQ_STOP_CHECK(vectors);
+    /* An unresolved retirement stage (no inherited limit) names no unit. */
+    request.runtime_max_usec = 0;
+    BQ_STOP_CHECK(!bq_broker_unit_stop_commands(&request, &stop) && !stop.enabled);
     /* Smoke stage units are stopped the same way; the outer unit (the
      * coordinator's recursive stop proof) and signals never are. */
+    request.recipe = BQ_BROKER_RECIPE_SMOKE;
     request.stage = BQ_BROKER_BASE_BUILD;
     BQ_STOP_CHECK(bq_broker_unit_stop_commands(&request, &stop) &&
                   !strcmp(stop.kill[4], "buster-bench-1-2-base-build.service"));
     request.stage = BQ_BROKER_OUTER;
     BQ_STOP_CHECK(!bq_broker_unit_stop_commands(&request, &stop) && !stop.enabled);
-    BqBrokerRequest signal_request = {.magic = BQ_BROKER_MAGIC, .version = 1, .operation = BQ_BROKER_SIGNAL,
-                                      .stage = BQ_BROKER_RETIREMENT_BASE_GENERATE,
+    BqBrokerRequest signal_request = {.magic = BQ_BROKER_MAGIC, .version = BQ_BROKER_VERSION,
+                                      .operation = BQ_BROKER_SIGNAL, .stage = BQ_BROKER_RETIREMENT_BASE_GENERATE,
                                       .signal_number = BQ_BROKER_KILL, .job = 1, .attempt = 2};
     BQ_STOP_CHECK(!bq_broker_unit_stop_commands(&signal_request, &stop) && !stop.enabled);
     char directory[] = "/tmp/buster-broker-stop-XXXXXX";
@@ -2325,6 +2570,8 @@ static unsigned bq_broker_unit_stop_self_test(bool* passed)
     for (unsigned trial = 0; marked && trial < 2; trial += 1)
     {
         request.stage = BQ_BROKER_RETIREMENT_BASE_GENERATE;
+        request.recipe = BQ_BROKER_RECIPE_RETIREMENT;
+        request.runtime_max_usec = BQ_BROKER_TEST_RUNTIME_USEC;
         bool built = bq_broker_unit_stop_commands(&request, &stop);
         /* Stand-ins for systemctl: kill leaves a marker; show reads back the
          * unit still active, or unloaded and inactive. */
@@ -2363,9 +2610,236 @@ static unsigned bq_broker_unit_stop_self_test(bool* passed)
     return checks;
 }
 
+/* #881-C runtime limits: the typed retirement outer CLI, the bounded
+ * request, the installed property and relay wait, a stage's inheritance from
+ * its exact outer unit, the signal readback and the timespan parser, with
+ * every absent, zero, oversized, fractional and mismatched value refused.
+ * Returns its checks. */
+static unsigned bq_broker_runtime_self_test(BqBrokerStartGroups const* groups, bool* passed)
+{
+    unsigned checks = 0;
+    bool ok = true;
+#define BQ_RUNTIME_CHECK(condition) do { checks += 1; if (!(condition)) ok = false; } while (0)
+    char base[41], candidate[41];
+    memset(base, 'a', 40);
+    memset(candidate, 'b', 40);
+    base[40] = 0;
+    candidate[40] = 0;
+    BqBrokerRequest parsed;
+    BqBrokerCommand command;
+    /* Coordinator argv -> request -> property, recipe and relay wait. */
+    char* outer_cli[] = {"broker", BQ_SYSTEMD_RETIREMENT_OUTER_VERB, "1", "2", base, candidate, "8640000000"};
+    BQ_RUNTIME_CHECK(bq_broker_cli(7, outer_cli, &parsed) && parsed.stage == BQ_BROKER_OUTER &&
+                     parsed.recipe == BQ_BROKER_RECIPE_RETIREMENT &&
+                     parsed.runtime_max_usec == BQ_BROKER_TEST_RUNTIME_USEC &&
+                     bq_broker_command(&parsed, groups, &command) &&
+                     bq_broker_argument_count(&command, "--property=RuntimeMaxSec=8640000000us") == 1 &&
+                     bq_broker_property_count(&command, "--property=RuntimeMaxSec=") == 1 &&
+                     bq_broker_has_argument(&command, BQ_SYSTEMD_RETIREMENT_RECIPE) &&
+                     !bq_broker_has_argument(&command, "validate-buster-v1") &&
+                     bq_broker_has_argument(&command, "worker-unit") &&
+                     bq_broker_has_argument(&command, "--property=CollectMode=inactive") &&
+                     command.relay_milliseconds == UINT64_C(8640000) + BQ_SYSTEMD_RELAY_ALLOWANCE_MILLISECONDS);
+    /* The smoke outer is unchanged: no limit argument, the fixed hour. */
+    char* smoke_cli[] = {"broker", "start-outer", "1", "2", base, candidate, "8640000000"};
+    BQ_RUNTIME_CHECK(bq_broker_cli(6, smoke_cli, &parsed) && parsed.recipe == BQ_BROKER_RECIPE_SMOKE &&
+                     parsed.runtime_max_usec == 0 && bq_broker_command(&parsed, groups, &command) &&
+                     bq_broker_has_argument(&command, "--property=RuntimeMaxSec=3600000000us") &&
+                     bq_broker_has_argument(&command, "validate-buster-v1") &&
+                     !bq_broker_has_argument(&command, BQ_SYSTEMD_RETIREMENT_RECIPE) &&
+                     command.relay_milliseconds == UINT64_C(3700000));
+    BQ_RUNTIME_CHECK(!bq_broker_cli(7, smoke_cli, &parsed));
+    /* Absent, zero, out-of-range, fractional or malformed limits. */
+    BQ_RUNTIME_CHECK(!bq_broker_cli(6, outer_cli, &parsed));
+    static char const* const refused[] = {"0", "", "00", "08640000000", "59000000", "59999999",
+        "259200000001", "259201000000", "8640000001", "8640000000us", "2h", "-8640000000",
+        "18446744073709551616", "99999999999999999999"};
+    for (unsigned index = 0; index < sizeof(refused) / sizeof(refused[0]); index += 1)
+    {
+        outer_cli[6] = (char*)refused[index];
+        BQ_RUNTIME_CHECK(!bq_broker_cli(7, outer_cli, &parsed));
+    }
+    static char const* const accepted[] = {"60000000", "3600000000", "259200000000"};
+    for (unsigned index = 0; index < sizeof(accepted) / sizeof(accepted[0]); index += 1)
+    {
+        outer_cli[6] = (char*)accepted[index];
+        BQ_RUNTIME_CHECK(bq_broker_cli(7, outer_cli, &parsed) && bq_broker_command(&parsed, groups, &command));
+    }
+    /* Request-level pairing: the selector and limit must agree. */
+    BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = BQ_BROKER_VERSION, .operation = BQ_BROKER_START,
+                               .recipe = BQ_BROKER_RECIPE_RETIREMENT,
+                               .runtime_max_usec = BQ_BROKER_TEST_RUNTIME_USEC, .job = 1, .attempt = 2};
+    memcpy(request.base, base, 41);
+    memcpy(request.candidate, candidate, 41);
+    BQ_RUNTIME_CHECK(bq_broker_request_valid(&request));
+    request.runtime_max_usec = 0;
+    BQ_RUNTIME_CHECK(!bq_broker_request_valid(&request) && !bq_broker_command(&request, groups, &command));
+    request.runtime_max_usec = BQ_SYSTEMD_RETIREMENT_RUNTIME_MAX_USEC + BQ_SYSTEMD_USEC_PER_SECOND;
+    BQ_RUNTIME_CHECK(!bq_broker_request_valid(&request) && !bq_broker_command(&request, groups, &command));
+    request.runtime_max_usec = UINT64_MAX;
+    BQ_RUNTIME_CHECK(!bq_broker_request_valid(&request));
+    request.runtime_max_usec = BQ_BROKER_TEST_RUNTIME_USEC;
+    request.recipe = 2;
+    BQ_RUNTIME_CHECK(!bq_broker_request_valid(&request));
+    request.recipe = BQ_BROKER_RECIPE_SMOKE;
+    BQ_RUNTIME_CHECK(!bq_broker_request_valid(&request));
+    for (uint32_t stage = BQ_BROKER_BASE_GENERATE; stage <= BQ_BROKER_THROUGHPUT_STAGE; stage += 1)
+    {
+        request.stage = stage;
+        request.recipe = BQ_BROKER_RECIPE_SMOKE;
+        request.runtime_max_usec = BQ_BROKER_TEST_RUNTIME_USEC;
+        BQ_RUNTIME_CHECK(!bq_broker_request_valid(&request) && !bq_broker_command(&request, groups, &command));
+        request.recipe = BQ_BROKER_RECIPE_RETIREMENT;
+        BQ_RUNTIME_CHECK(!bq_broker_request_valid(&request) && !bq_broker_command(&request, groups, &command));
+        request.runtime_max_usec = 0;
+        BQ_RUNTIME_CHECK(!bq_broker_request_valid(&request));
+    }
+    /* A retirement stage never carries a limit on the wire, and never
+     * builds without the resolved one. */
+    request.stage = BQ_BROKER_RETIREMENT_CANDIDATE_BUILD;
+    request.recipe = BQ_BROKER_RECIPE_RETIREMENT;
+    request.runtime_max_usec = BQ_BROKER_TEST_RUNTIME_USEC;
+    BQ_RUNTIME_CHECK(!bq_broker_request_valid(&request) && bq_broker_request_resolved_valid(&request));
+    request.runtime_max_usec = 0;
+    BQ_RUNTIME_CHECK(bq_broker_request_valid(&request) && !bq_broker_request_resolved_valid(&request));
+    request.recipe = BQ_BROKER_RECIPE_SMOKE;
+    BQ_RUNTIME_CHECK(!bq_broker_request_valid(&request));
+    BqBrokerRequest signal_request = {.magic = BQ_BROKER_MAGIC, .version = BQ_BROKER_VERSION,
+                                      .operation = BQ_BROKER_SIGNAL, .signal_number = BQ_BROKER_TERM,
+                                      .job = 1, .attempt = 2};
+    BQ_RUNTIME_CHECK(bq_broker_request_valid(&signal_request));
+    signal_request.runtime_max_usec = BQ_BROKER_TEST_RUNTIME_USEC;
+    BQ_RUNTIME_CHECK(!bq_broker_request_valid(&signal_request));
+    signal_request.runtime_max_usec = 0;
+    signal_request.recipe = BQ_BROKER_RECIPE_RETIREMENT;
+    BQ_RUNTIME_CHECK(!bq_broker_request_valid(&signal_request));
+    /* Manager timespan readback. */
+    static struct { char const* text; uint64_t usec; } const spans[] = {
+        {"1h", UINT64_C(3600000000)}, {"3600000000", UINT64_C(3600000000)}, {"10s", UINT64_C(10000000)},
+        {"2h 24min", UINT64_C(8640000000)}, {"1d 3h 5s", UINT64_C(97205000000)},
+        {"3d", UINT64_C(259200000000)}, {"1min 1s", UINT64_C(61000000)}, {"0", 0}};
+    for (unsigned index = 0; index < sizeof(spans) / sizeof(spans[0]); index += 1)
+    {
+        uint64_t value = 1;
+        BQ_RUNTIME_CHECK(bq_systemd_timespan_parse(spans[index].text, strlen(spans[index].text), &value) &&
+                         value == spans[index].usec);
+    }
+    static char const* const bad_spans[] = {"", " 1h", "1h ", "1h  2min", "2min 1h", "1h 1h", "1.5s", "1w",
+        "infinity", "01h", "1ms", "1us", "h", "1", "1 h", "1H", "213503982334601d", "18446744073709551616",
+        "1h\t2min", "1d 0h"};
+    for (unsigned index = 0; index < sizeof(bad_spans) / sizeof(bad_spans[0]); index += 1)
+    {
+        uint64_t value = 1;
+        bool rejected = !bq_systemd_timespan_parse(bad_spans[index], strlen(bad_spans[index]), &value) && value == 0;
+        /* "1" is one microsecond: plain decimal, never a bounded limit. */
+        if (!strcmp(bad_spans[index], "1"))
+            rejected = bq_systemd_timespan_parse("1", 1, &value) && value == 1 &&
+                       !bq_systemd_retirement_runtime_valid(value);
+        BQ_RUNTIME_CHECK(rejected);
+    }
+    BQ_RUNTIME_CHECK(bq_systemd_relay_milliseconds(UINT64_C(3601000000)) == UINT64_C(3701000) &&
+                     bq_systemd_relay_milliseconds(UINT64_C(3601000001)) == 0 &&
+                     bq_systemd_relay_milliseconds(0) == 0);
+    /* The exact outer unit a retirement stage inherits from. */
+    unsigned char record[544] = {0};
+    memcpy(record, "BQINSTANCE000002", 16);
+    for (unsigned index = 0; index < 8; index += 1)
+    {
+        record[16 + index] = (unsigned char)(index == 0 ? 1 : 0);
+        record[24 + index] = (unsigned char)(index == 0 ? 2 : 0);
+    }
+    memcpy(record + 232, "0123456789abcdef0123456789abcdef", 32);
+    memcpy(record + 288, BQ_BROKER_CGROUP_SLICE "/buster-bench-1-2.service",
+           sizeof(BQ_BROKER_CGROUP_SLICE "/buster-bench-1-2.service"));
+#define BQ_RUNTIME_PARENT_HEAD "Id=buster-bench-1-2.service\nLoadState=loaded\nSlice=buster-bench.slice\n" \
+    "User=buster-bench\nGroup=buster-bench\nNoNewPrivileges=yes\nCollectMode=inactive\n" \
+    "ControlGroup=" BQ_BROKER_CGROUP_SLICE "/buster-bench-1-2.service\n" \
+    "InvocationID=0123456789abcdef0123456789abcdef\n"
+#define BQ_RUNTIME_PARENT_EXEC(recipe, job) "ExecStart={ path=" BQ_BROKER_GATE " ; argv[]=" BQ_BROKER_GATE \
+    " 0 65000 65000 65000,65001 -- " BQ_BROKER_SERVICE " worker-unit " BQ_BROKER_LEASE " " job " 2 " recipe \
+    " " BQ_BROKER_WORKSPACES " fixed ; ignore_errors=no }\n"
+    char const* parent = BQ_RUNTIME_PARENT_HEAD BQ_RUNTIME_PARENT_EXEC(BQ_SYSTEMD_RETIREMENT_RECIPE, "1")
+                         "RuntimeMaxUSec=2h 24min\n";
+    BqBrokerRequest stage = {.magic = BQ_BROKER_MAGIC, .version = BQ_BROKER_VERSION, .operation = BQ_BROKER_START,
+                             .stage = BQ_BROKER_RETIREMENT_BASE_BUILD, .recipe = BQ_BROKER_RECIPE_RETIREMENT,
+                             .job = 1, .attempt = 2};
+    memcpy(stage.base, base, 41);
+    memcpy(stage.candidate, candidate, 41);
+    uint64_t inherited = 0;
+    BQ_RUNTIME_CHECK(bq_broker_request_valid(&stage) &&
+                     bq_broker_parent_runtime_matches(parent, &stage, groups, record, &inherited) &&
+                     inherited == BQ_BROKER_TEST_RUNTIME_USEC);
+    stage.runtime_max_usec = inherited;
+    BQ_RUNTIME_CHECK(bq_broker_command(&stage, groups, &command) &&
+                     bq_broker_argument_count(&command, "--property=RuntimeMaxSec=8640000000us") == 1 &&
+                     bq_broker_has_argument(&command, "--property=BindsTo=buster-bench-1-2.service"));
+    stage.runtime_max_usec = 0;
+    char const* smoke_parent = BQ_RUNTIME_PARENT_HEAD BQ_RUNTIME_PARENT_EXEC("validate-buster-v1", "1")
+                               "RuntimeMaxUSec=2h 24min\n";
+    char const* foreign_job = BQ_RUNTIME_PARENT_HEAD BQ_RUNTIME_PARENT_EXEC(BQ_SYSTEMD_RETIREMENT_RECIPE, "3")
+                              "RuntimeMaxUSec=2h 24min\n";
+    char const* hour_parent = BQ_RUNTIME_PARENT_HEAD BQ_RUNTIME_PARENT_EXEC(BQ_SYSTEMD_RETIREMENT_RECIPE, "1")
+                              "RuntimeMaxUSec=1h 1s\n";
+    char const* huge_parent = BQ_RUNTIME_PARENT_HEAD BQ_RUNTIME_PARENT_EXEC(BQ_SYSTEMD_RETIREMENT_RECIPE, "1")
+                              "RuntimeMaxUSec=3d 1s\n";
+    char const* infinite_parent = BQ_RUNTIME_PARENT_HEAD BQ_RUNTIME_PARENT_EXEC(BQ_SYSTEMD_RETIREMENT_RECIPE, "1")
+                                  "RuntimeMaxUSec=infinity\n";
+    char const* absent_parent = BQ_RUNTIME_PARENT_HEAD BQ_RUNTIME_PARENT_EXEC(BQ_SYSTEMD_RETIREMENT_RECIPE, "1");
+    char const* refused_parents[] = {smoke_parent, foreign_job, huge_parent, infinite_parent, absent_parent};
+    for (unsigned index = 0; index < sizeof(refused_parents) / sizeof(refused_parents[0]); index += 1)
+        BQ_RUNTIME_CHECK(!bq_broker_parent_runtime_matches(refused_parents[index], &stage, groups, record,
+                                                           &inherited) && inherited == 0);
+    /* 1h 1s is inside the range: a limit, not a smoke hour. */
+    BQ_RUNTIME_CHECK(bq_broker_parent_runtime_matches(hour_parent, &stage, groups, record, &inherited) &&
+                     inherited == UINT64_C(3601000000));
+    record[232] = 'f';
+    BQ_RUNTIME_CHECK(!bq_broker_parent_runtime_matches(parent, &stage, groups, record, &inherited));
+    record[232] = '0';
+    record[24] = 3;
+    BQ_RUNTIME_CHECK(!bq_broker_parent_runtime_matches(parent, &stage, groups, record, &inherited));
+    record[24] = 2;
+    stage.recipe = BQ_BROKER_RECIPE_SMOKE;
+    BQ_RUNTIME_CHECK(!bq_broker_parent_runtime_matches(parent, &stage, groups, record, &inherited));
+    stage.recipe = BQ_BROKER_RECIPE_RETIREMENT;
+    stage.stage = BQ_BROKER_BASE_BUILD;
+    BQ_RUNTIME_CHECK(!bq_broker_parent_runtime_matches(parent, &stage, groups, record, &inherited));
+    stage.stage = BQ_BROKER_RETIREMENT_BASE_BUILD;
+    BqBrokerStartGroups other = *groups;
+    other.uid[0] = 65003;
+    BQ_RUNTIME_CHECK(!bq_broker_parent_runtime_matches(parent, &stage, &other, record, &inherited));
+    /* Signal readback accepts only a value the broker could have installed. */
+    BqBrokerRequest signal_outer = {.stage = BQ_BROKER_OUTER, .signal_number = BQ_BROKER_TERM};
+    char const* smoke_hour = BQ_RUNTIME_PARENT_EXEC("validate-buster-v1", "1") "RuntimeMaxUSec=1h\n";
+    char const* smoke_plain = BQ_RUNTIME_PARENT_EXEC("validate-buster-v1", "1") "RuntimeMaxUSec=3600000000\n";
+    char const* smoke_long = BQ_RUNTIME_PARENT_EXEC("validate-buster-v1", "1") "RuntimeMaxUSec=2h 24min\n";
+    char const* retirement_long = BQ_RUNTIME_PARENT_EXEC(BQ_SYSTEMD_RETIREMENT_RECIPE, "1") "RuntimeMaxUSec=2h 24min\n";
+    char const* retirement_short = BQ_RUNTIME_PARENT_EXEC(BQ_SYSTEMD_RETIREMENT_RECIPE, "1") "RuntimeMaxUSec=30s\n";
+    char const* retirement_huge = BQ_RUNTIME_PARENT_EXEC(BQ_SYSTEMD_RETIREMENT_RECIPE, "1") "RuntimeMaxUSec=4d\n";
+    BQ_RUNTIME_CHECK(bq_broker_runtime_identity(smoke_hour, &signal_outer) &&
+                     bq_broker_runtime_identity(smoke_plain, &signal_outer) &&
+                     !bq_broker_runtime_identity(smoke_long, &signal_outer) &&
+                     bq_broker_runtime_identity(retirement_long, &signal_outer) &&
+                     !bq_broker_runtime_identity(retirement_short, &signal_outer) &&
+                     !bq_broker_runtime_identity(retirement_huge, &signal_outer));
+    BqBrokerRequest signal_stage = {.stage = BQ_BROKER_RETIREMENT_CANDIDATE_BUILD, .signal_number = BQ_BROKER_KILL};
+    BQ_RUNTIME_CHECK(bq_broker_runtime_identity("RuntimeMaxUSec=2h 24min\n", &signal_stage) &&
+                     bq_broker_runtime_identity("RuntimeMaxUSec=1h\n", &signal_stage) &&
+                     !bq_broker_runtime_identity("RuntimeMaxUSec=3d 1s\n", &signal_stage) &&
+                     !bq_broker_runtime_identity("RuntimeMaxUSec=1h 0.5s\n", &signal_stage) &&
+                     !bq_broker_runtime_identity("", &signal_stage));
+    signal_stage.stage = BQ_BROKER_THROUGHPUT_STAGE;
+    BQ_RUNTIME_CHECK(bq_broker_runtime_identity("RuntimeMaxUSec=1h\n", &signal_stage) &&
+                     !bq_broker_runtime_identity("RuntimeMaxUSec=2h 24min\n", &signal_stage));
+#undef BQ_RUNTIME_PARENT_EXEC
+#undef BQ_RUNTIME_PARENT_HEAD
+#undef BQ_RUNTIME_CHECK
+    if (!ok) *passed = false;
+    return checks;
+}
+
 static int bq_broker_self_test(void)
 {
-    BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = 1, .operation = BQ_BROKER_START,
+    BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = BQ_BROKER_VERSION, .operation = BQ_BROKER_START,
                                .job = 1, .attempt = 2};
     memset(request.base, 'a', 40);
     memset(request.candidate, 'b', 40);
@@ -2592,6 +3066,7 @@ static int bq_broker_self_test(void)
     BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
     request.stage = BQ_BROKER_OUTER;
     checks += bq_broker_retirement_self_test(&start_groups, &ok);
+    checks += bq_broker_runtime_self_test(&start_groups, &ok);
     request.stage = BQ_BROKER_OUTER;
     request.base[0] = '/';
     BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
@@ -2602,9 +3077,11 @@ static int bq_broker_self_test(void)
     request.magic = 0;
     BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
     request.magic = BQ_BROKER_MAGIC;
-    request.version = 2;
+    request.version = BQ_BROKER_VERSION + 1;
     BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
     request.version = 1;
+    BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
+    request.version = BQ_BROKER_VERSION;
     request.attempt = 0;
     BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
     request.attempt = 2;
