@@ -1,0 +1,121 @@
+name: Native retirement merge admission
+
+# PR readiness and main invalidation. The exact merge-group check is published
+# by trusted-main reconciliation after the queued predecessor lands.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  statuses: read
+  checks: write
+
+concurrency:
+  group: native-retirement-admission-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-retirement-admission:
+    name: Native retirement merge admission
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require CI admission to be enabled
+        shell: bash
+        env:
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: |
+          if [[ "$CI_ENABLED" != true ]]; then
+            echo '::error::Required validation is disabled; refusing a skipped admission check.'
+            exit 1
+          fi
+      - name: Check out exact candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out the independently trusted admission policy
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ github.repository }}
+          ref: main
+          path: trusted
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out exact combined validation tree
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          # On PRs this is GitHub's immutable merge revision, not the old head.
+          # Self-tests added on main must not require rebasing clean branches.
+          # This checkout is test input only; trusted/ remains the authority.
+          ref: ${{ github.sha }}
+          path: validation
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Test native-retirement merge admission
+        shell: bash
+        working-directory: validation
+        run: |
+          python3 -B tools/native_retirement_merge_gate_test.py -v
+          python3 -B tools/native_retirement_merge_gate_workflow_test.py -v
+      - name: Enforce trusted native-retirement integration
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          tool="$GITHUB_WORKSPACE/trusted/tools/native_retirement_merge_gate.py"
+          if [[ ! -f "$tool" ]]; then
+            tool="$GITHUB_WORKSPACE/candidate/tools/native_retirement_merge_gate.py"
+          fi
+          current_main=$(git -C candidate ls-remote --refs origin refs/heads/main | cut -f1)
+          [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
+          # The PR event's base SHA can predate a successful current-main writer.
+          BASE_SHA=$(git -C trusted rev-parse HEAD)
+          if [[ "$BASE_SHA" != "$current_main" ]]; then
+            echo '::error::Main advanced after trusted PR policy checkout.' >&2
+            exit 1
+          fi
+          rows="$RUNNER_TEMP/native-retirement-status-rows.json"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA?per_page=100" > "$rows"
+          python3 - "$HEAD_SHA" "$rows" "$RUNNER_TEMP/native-retirement-status.json" <<'PY_STATUS'
+          import json, pathlib, sys
+          head, rows_path, output_path = sys.argv[1:]
+          pages = json.loads(pathlib.Path(rows_path).read_text())
+          if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
+              raise SystemExit("commit status pages are not arrays")
+          rows = [row for page in pages for row in page]
+          pathlib.Path(output_path).write_text(json.dumps({"sha": head, "statuses": rows}))
+          PY_STATUS
+          python3 "$tool" check \
+            --repo-root "$GITHUB_WORKSPACE/candidate" \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --current-main "$current_main" \
+            --event "$EVENT_NAME" \
+            --status-json "$RUNNER_TEMP/native-retirement-status.json" \
+            | tee "$RUNNER_TEMP/native-retirement-admission.json"
+      - name: Invalidate stale trusted integrations after main advances
+        if: ${{ github.event_name == 'push' }}
+        working-directory: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/native_retirement_merge_gate.py invalidate-stale \
+            --repository "$GITHUB_REPOSITORY" \
+            --new-main "$GITHUB_SHA" \
+            --details-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            | tee "$RUNNER_TEMP/native-retirement-invalidation.json"

@@ -97,10 +97,10 @@ Manual generated edits, edits stacked on unrecognized integration output and
 genuine conflicts remain blocked. A fresh dispatch is still required after main
 advances; this recovery does not grant automated dispatcher authority.
 
-Merge-group admission is read-only: a speculative base waits until it has landed
-as current main, using the independently trusted main policy checked out at
-workflow start. A queued predecessor that changes that policy requires a fresh
-group. The synthetic commit must then have current main first, the attested
+Merge-group admission is read-only: the trusted-main reconciler leaves a
+speculative group pending without a reserved runner until its base lands as
+current main. A queued predecessor that changes policy requires a fresh group.
+The synthetic commit must then have current main first, the attested
 integration head second, and exactly the attested final tree. A stale writer
 head still needs a fresh authorized dispatch and replacement group. The gate
 resolves live publication evidence for that PR head,
@@ -146,14 +146,18 @@ delta, current-main identity, and GitHub Actions attestation. A main-push run
 invalidates every open integration head whose recorded base no longer equals
 current `main`; dispatching the writer again reconstructs it without requiring
 a manual feature-branch rebase. The independent `API migration policy` check
-continues to enforce bounded API compatibility. Configure admission as a
+continues to enforce bounded API compatibility. The PR/main readiness job now
+lives in `native-retirement-admission.yml`; its workflow has no merge-group
+trigger. For a merge-group head, the trusted-main reconciler publishes the same
+required check only after its exact base lands and the native publication gate
+passes twice. Configure admission as a
 required GitHub Actions check (integration ID `15368`) without enabling strict
 required-status-check policy or removing any existing required check.
 On PR events, both read-only admission jobs check out independent live `main`
 and require that checkout to match the remote `main` before checking the writer's
 recorded base. The PR event's base SHA may still name the commit that was main
-when the PR opened. Merge groups keep their exact queued base SHA and wait for
-the predecessor to land before final admission.
+when the PR opened. Merge groups keep their exact queued base SHA and remain
+pending until the predecessor lands before final admission.
 
 Evidence records base/head commits and trees, the pre-generation combined tree,
 the final tree, the old trusted rebinder revision/tree and file digests, the

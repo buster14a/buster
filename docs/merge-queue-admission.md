@@ -90,7 +90,7 @@ only as part of the reviewed queue rollout; never remove an existing requirement
 | GPU Linux consumers | gpu-toolchains.yml | Workflow-selected PR revision | Exact synthetic group |
 | Benchmark service workflow policy | bench-service-policy.yml | GitHub PR merge revision | Exact synthetic group |
 | API migration policy | api-migration-policy.yml | Bounded API compatibility policy | Exact synthetic group |
-| Native retirement merge admission | api-migration-policy.yml | Exact head and trusted integration evidence | Exact generated tree plus successful trusted writer publication |
+| Native retirement merge admission | native-retirement-admission.yml (PR/main); trusted reconciler (merge group) | Exact head and trusted integration evidence | Exact generated tree plus successful trusted writer publication |
 | Main integration admission | merge-queue-admission.yml | Readiness/regression checks only | Trusted-base verification of the exact group and all six gates |
 
 `CI complete` also runs the [merge-parent preservation guard](merge-parent-preservation.md) over merges introduced by each PR candidate, merge-group candidate, and main push. It uses the event's exact base commit and does not require a feature branch to be updated when `main` advances.
@@ -199,8 +199,8 @@ Report admission time in three separate parts:
 - **Build/test queue delay:** runner assignment for the six gates themselves.
 
 This change does not explain or fix host-specific assignment delay (#1805). The
-native-retirement admission producer and optional rebinding transitions are
-tracked in #1818 and #1820, respectively.
+native-retirement admission activation is tracked in #1818. Optional rebinding
+dispatch is part of #1810.
 
 ## Exact identities and fail-closed evidence
 

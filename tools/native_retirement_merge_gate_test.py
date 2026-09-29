@@ -200,7 +200,7 @@ class AdmissionTests(unittest.TestCase):
     def test_workflows_fetch_creator_bearing_status_rows(self):
         root = Path(__file__).resolve().parents[1]
         for relative, head in (
-            (".github/workflows/api-migration-policy.yml", "HEAD_SHA"),
+            (".github/workflows/native-retirement-admission.yml", "HEAD_SHA"),
             (".github/workflows/native-retirement-rebind.yml", "CANDIDATE_HEAD"),
         ):
             with self.subTest(workflow=relative):
@@ -512,12 +512,12 @@ class WorkflowPolicyTests(unittest.TestCase):
     root = Path(__file__).resolve().parents[1]
 
     def test_stale_pr_event_base_uses_trusted_live_main_and_groups_keep_queued_base(self):
-        for name, step in (("api-migration-policy.yml", "Enforce trusted native-retirement integration"),
-                           ("native-retirement-rebind.yml", "Reject feature-owned generated state and classify trust transitions")):
+        for name, step, events in (("native-retirement-admission.yml", "Enforce trusted native-retirement integration", ("pull_request",)),
+                                   ("native-retirement-rebind.yml", "Reject feature-owned generated state and classify trust transitions", ("pull_request", "merge_group"))):
             workflow = (self.root / ".github/workflows" / name).read_text()
             block = workflow.split("      - name: " + step + "\n", 1)[1].split("      - name:", 1)[0]
             script = textwrap.dedent(block.split("        run: |\n", 1)[1])
-            for event in ("pull_request", "merge_group"):
+            for event in events:
                 with self.subTest(workflow=name, event=event), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
                     (root / "trusted/tools").mkdir(parents=True)
@@ -568,8 +568,8 @@ class WorkflowPolicyTests(unittest.TestCase):
                         self.assertIn("Main advanced after trusted PR policy checkout", moved.stderr)
 
     def test_admission_and_compatibility_are_independent_required_checks(self):
-        workflow = (self.root / ".github/workflows/api-migration-policy.yml").read_text()
-        policy, admission = workflow.split("  native-retirement-admission:\n", 1)
+        policy = (self.root / ".github/workflows/api-migration-policy.yml").read_text()
+        admission = (self.root / ".github/workflows/native-retirement-admission.yml").read_text()
         self.assertEqual(gate.REQUIRED_CHECK_NAME, "Native retirement merge admission")
         self.assertIn("    name: API migration policy\n", policy)
         self.assertIn("    name: Native retirement merge admission\n", admission)
@@ -577,11 +577,12 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("tools/native_retirement_merge_gate.py", policy)
         self.assertIn("tools/native_retirement_merge_gate.py", admission)
         self.assertNotIn("tools/api_migration_audit.py", admission)
-        self.assertIn("github.event.merge_group.base_sha", admission)
+        self.assertNotIn("  merge_group:", admission)
+        self.assertNotIn("wait-base", admission)
 
     def test_both_required_jobs_fail_instead_of_skipping_when_ci_is_disabled(self):
-        workflow = (self.root / ".github/workflows/api-migration-policy.yml").read_text()
-        policy, admission = workflow.split("  native-retirement-admission:\n", 1)
+        policy = (self.root / ".github/workflows/api-migration-policy.yml").read_text()
+        admission = (self.root / ".github/workflows/native-retirement-admission.yml").read_text()
         for job in (policy.split("  policy:\n", 1)[1], admission):
             self.assertNotIn("vars.GH_ACTIONS_CI_ENABLED", job.split("    steps:\n", 1)[0])
             guard = job.split("      - name: Require CI admission to be enabled\n", 1)[1]
@@ -596,7 +597,7 @@ class WorkflowPolicyTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0 if enabled == "true" else 1)
 
     def test_paginated_status_wrapper_preserves_creator_evidence(self):
-        for name in ("api-migration-policy.yml", "native-retirement-rebind.yml"):
+        for name in ("native-retirement-admission.yml", "native-retirement-rebind.yml"):
             workflow = (self.root / ".github/workflows" / name).read_text()
             self.assertIn("gh api --paginate --slurp", workflow)
             script = textwrap.dedent(workflow.split("<<'PY_STATUS'\n", 1)[1].split("          PY_STATUS\n", 1)[0])
