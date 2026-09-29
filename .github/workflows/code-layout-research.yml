@@ -1,0 +1,64 @@
+name: Code layout diagnostic
+
+# Disposable, branch-scoped research transport. No production or admission gate.
+on:
+  push:
+    branches: [codex/1517-code-layout-research]
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    steps:
+      - name: Diagnostic checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: diagnostic
+          persist-credentials: false
+      - name: Untouched production checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 8f67df736f13d4edc055110a7a6d619a00a22eaf
+          path: production
+          persist-credentials: false
+      - name: Record source and tools
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          git -C production rev-parse HEAD HEAD^{tree} | tee evidence/production.txt
+          test "$(git -C production rev-parse HEAD)" = 8f67df736f13d4edc055110a7a6d619a00a22eaf
+          git -C production status --porcelain > evidence/production-status.txt
+          test ! -s evidence/production-status.txt
+          git -C diagnostic rev-parse HEAD HEAD^{tree} > evidence/diagnostic.txt
+          clang --version | tee evidence/clang.txt
+          objdump --version | tee evidence/objdump.txt
+          uname -a | tee evidence/host.txt
+          lscpu > evidence/cpu.txt
+      - name: Build unchanged compiler
+        working-directory: production
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o ../build-driver
+          ../build-driver generate --cc clang --ci --linker DEFAULT 2>&1 | tee ../evidence/generate.log
+          ../build-driver build --config Release -t ide 2>&1 | tee ../evidence/build.log
+          sha256sum build/Release/ide > ../evidence/compiler.sha256
+          git status --porcelain > ../evidence/production-status-after-build.txt
+      - name: Exhaustive synthetic layouts
+        run: |
+          set -euo pipefail
+          python3 diagnostic/tools/investigations/code-layout/synthetic.py --output evidence/synthetic.json
+      - name: Real emitted functions
+        run: |
+          set -euo pipefail
+          python3 diagnostic/tools/investigations/code-layout/collect.py --production production --output evidence
+      - name: Retain evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: code-layout-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 30
+          if-no-files-found: error
