@@ -221,6 +221,12 @@ RESULT_INPUT_POPULATIONS = {
     },
 }
 RESULT_INPUT_MAX_PARTITIONS = 3
+# The frozen pair count per round: even, at least 60, and at most the 254-pair
+# collection maximum (the harness cap TP_RETIREMENT_EXECUTION_MAX_PAIRS).  A1's
+# smaller native population would fit the record ceiling at 256, so the
+# maximum is explicit rather than implied by that ceiling.
+SAMPLING_MIN_PAIRS = 60
+SAMPLING_MAX_PAIRS = 254
 CODE_RECORD_LINE_CAP = 8192
 # Per-input metrics artifacts: records use the #615 1 MiB record bound and one
 # artifact is at most 64 MiB.
@@ -1362,6 +1368,14 @@ def _decimal(value, expected, name):
     return value
 
 
+def _check_pair_count(pairs, name):
+    if type(pairs) is not int or not SAMPLING_MIN_PAIRS <= pairs <= SAMPLING_MAX_PAIRS:
+        _fail(f"{name} must be between {SAMPLING_MIN_PAIRS} and the "
+              f"{SAMPLING_MAX_PAIRS}-pair collection maximum")
+    if pairs % 2:
+        _fail(f"{name} must be even for AB/BA blocks")
+
+
 def _rules(value):
     value = _keys(value, ("thresholds", "sampling", "aggregation", "uncertainty",
                           "outcomes"), "rules")
@@ -1386,10 +1400,7 @@ def _rules(value):
     if type(sampling["rounds"]) is not int or sampling["rounds"] != 2:
         _fail("rules.sampling.rounds must be exactly 2")
     _positive_int(sampling["pairs_per_round"], "rules.sampling.pairs_per_round")
-    if sampling["pairs_per_round"] < 60 or sampling["pairs_per_round"] > 256:
-        _fail("rules.sampling.pairs_per_round must be between 60 and 256")
-    if sampling["pairs_per_round"] % 2:
-        _fail("rules.sampling.pairs_per_round must be even for AB/BA blocks")
+    _check_pair_count(sampling["pairs_per_round"], "rules.sampling.pairs_per_round")
     _positive_int(sampling["resamples"], "rules.sampling.resamples")
     if sampling["resamples"] < 100000 or sampling["resamples"] > 1000000:
         _fail("rules.sampling.resamples must be between 100000 and 1000000")
@@ -2293,6 +2304,7 @@ def _result_input_plan(root, artifact, support_output, population, rules):
     if value["object_row_count"] != object_row_count:
         _fail("result-input plan object row count is not derived from schema-2 rows")
     sampling = rules["sampling"]
+    _check_pair_count(value["pairs_per_round"], "result_input_plan.pairs_per_round")
     if value["rounds"] != sampling["rounds"] \
             or value["pairs_per_round"] != sampling["pairs_per_round"]:
         _fail("result-input plan does not bind the frozen sample dimensions")
@@ -2596,6 +2608,7 @@ def _check_execution_plan(root, descriptor, binding, parsed, sampling,
     if plan["schema"] != EXECUTION_PLAN_SCHEMA or type(plan["version"]) is not int \
             or plan["version"] != 1 or plan["schedule"] != EXECUTION_SCHEDULE:
         _fail("execution plan schema/version/schedule is not supported")
+    _check_pair_count(plan["pairs_per_round"], "execution_plan.pairs_per_round")
     for key in ("seed", "rounds", "pairs_per_round", "warmups_per_variant"):
         if type(plan[key]) is not int or plan[key] != sampling[key]:
             _fail(f"execution plan.{key} differs from the frozen sampling policy")

@@ -18,7 +18,9 @@
 #include <inttypes.h>
 
 #define TP_RETIREMENT_WARMUPS 2u
-/* #568's complete population includes link and self-host rows. */
+/* The 254-pair collection maximum, equal to the validator's
+ * SAMPLING_MAX_PAIRS. A1's smaller native population would fit the record
+ * ceiling at 256, so this cap, not that ceiling, keeps the maximum. */
 #define TP_RETIREMENT_EXECUTION_MAX_PAIRS 254u
 #define TP_RETIREMENT_EXECUTION_LINE_CAP 8192u
 /* An identity field that does not apply to an invocation kind (JSON null). */

@@ -2113,7 +2113,9 @@ class BindingTests(unittest.TestCase):
 
     def test_pairs_are_even_bounded_and_seeded(self):
         record, _contents = self.make_record()
-        for pairs in (61, 257):
+        # 256 is even and would fit the A1 record ceiling, but the collection
+        # maximum stays 254.
+        for pairs in (58, 61, 256, 257):
             candidate = copy.deepcopy(record)
             candidate["rules"]["sampling"]["pairs_per_round"] = pairs
             with self.subTest(pairs=pairs):

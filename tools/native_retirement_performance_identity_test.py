@@ -178,6 +178,17 @@ class PerformanceIdentityTests(unittest.TestCase):
                                   for kind in ("rows", "batches")], [1, 1])
                 self.assertLessEqual(sample_rows * 2 * pairs, binding.RESULT_INPUT_MAX_RECORDS)
 
+    def test_native_population_rejects_pairs_above_the_collection_maximum(self):
+        # (A1) The smaller native population fits the record ceiling even at
+        # 256 pairs, so the 254-pair maximum must be enforced by name.
+        sample_rows, groups = self.native_population_bounds()
+        self.assertEqual(binding.SAMPLING_MAX_PAIRS, 254)
+        self.assertLessEqual((sample_rows + groups) * 2 * 256, binding.RESULT_INPUT_MAX_TOTAL_RECORDS)
+        for pairs in (256, 258):
+            with tempfile.TemporaryDirectory() as directory, self.subTest(pairs=pairs), \
+                    self.assertRaisesRegex(ValueError, "254-pair collection maximum"):
+                self.check_plan(Path(directory), pairs, sample_rows, groups)
+
     def test_current_population_over_cap_cannot_be_rescued_by_more_shards(self):
         # The immutable ceiling is kept: the full census at 256 pairs, even
         # ignoring the native projection, is rejected before any sample.
@@ -763,6 +774,15 @@ class InvocationEvidenceTests(unittest.TestCase):
                             for event in batches))
         self.assertTrue(all(event["row"] is None and event["code_section_bytes"] is None
                             for event in self.events if event["kind"] == "compiler"))
+
+    def test_execution_plan_rejects_pairs_above_the_collection_maximum(self):
+        for pairs in (256, 255):
+            def widen(plan, pairs=pairs):
+                plan["pairs_per_round"] = pairs
+            self.rewrite_plan(widen)
+            with self.subTest(pairs=pairs), \
+                    self.assertRaisesRegex(ValueError, "254-pair collection maximum|even"):
+                self.check()
 
     def add_untimed_rows(self):
         """Append a retained non-object control and a cross-target object row."""
