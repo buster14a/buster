@@ -7,6 +7,7 @@ on:
       - '.github/workflows/native-retirement-contract.yml'
       - '.github/workflows/native-retirement-integration.yml'
       - '.github/workflows/native-retirement-rebind.yml'
+      - '.github/workflows/native-retirement-rebind-dispatch.yml'
       - 'AGENTS.md'
       - 'docs/agents/workflow.md'
       - 'docs/native-retirement-rebinding.md'
@@ -23,6 +24,8 @@ on:
       - 'tools/native_retirement_integration.py'
       - 'tools/native_retirement_integration_test.py'
       - 'tools/native_retirement_rebind.py'
+      - 'tools/native_retirement_rebind_dispatch.py'
+      - 'tools/native_retirement_rebind_dispatch_test.py'
       - 'tools/native_retirement_rebind_contract.py'
       - 'tools/native_retirement_rebind_test.py'
       - 'tools/native_retirement_materializer.py'
@@ -60,13 +63,26 @@ on:
       - 'tools/native-retirement-mingw/**'
       - 'tools/native-retirement-darwin/**'
       - 'src/buster/lib/**'
-  merge_group:
-    types: [checks_requested]
   workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Exact landed predecessor commit
+        required: true
+        type: string
+      head_sha:
+        description: Exact merge-group commit
+        required: true
+        type: string
+      head_ref:
+        description: Exact queue branch ref
+        required: true
+        type: string
+
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Native rebind {0}', inputs.head_sha) || github.workflow }}
 
 concurrency:
-  group: native-retirement-rebind-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'merge_group' && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+  group: native-retirement-rebind-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'workflow_dispatch' && inputs.head_sha || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -76,7 +92,7 @@ permissions:
 
 jobs:
   unit:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && github.event_name != 'workflow_dispatch' }}
     name: Rebind unit (${{ matrix.runner }})
     strategy:
       fail-fast: false
@@ -103,15 +119,15 @@ jobs:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     name: Reconstruct candidate closure ephemerally
     runs-on: ubuntu-26.04
-    timeout-minutes: 310
+    timeout-minutes: 45
     env:
-      TRUSTED_REF: ${{ github.event.merge_group.base_sha || github.sha }}
-      CANDIDATE_HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+      TRUSTED_REF: ${{ inputs.base_sha || github.sha }}
+      CANDIDATE_HEAD: ${{ inputs.head_sha || github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Check out exact candidate or merge revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          ref: ${{ inputs.head_sha || github.event.pull_request.head.sha || github.sha }}
           path: candidate
           fetch-depth: 0
           persist-credentials: false
@@ -119,26 +135,39 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: ${{ github.repository }}
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'main' || env.TRUSTED_REF }}
+          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && 'main' || env.TRUSTED_REF }}
           path: trusted
           fetch-depth: 1
           persist-credentials: false
-      - name: Wait for the queued predecessor to land
-        if: ${{ github.event_name == 'merge_group' }}
+      - name: Verify dispatched exact group and landed predecessor
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          GROUP_BASE: ${{ inputs.base_sha }}
+          GROUP_HEAD: ${{ inputs.head_sha }}
+          GROUP_REF: ${{ inputs.head_ref }}
         run: |
+          python3 - "$RUNNER_TEMP/rebind-group-event.json" <<'PY_EVENT'
+          import json, os, pathlib, sys
+          event = {"action": "checks_requested",
+                   "repository": {"full_name": os.environ["GITHUB_REPOSITORY"]},
+                   "merge_group": {"base_ref": "refs/heads/main",
+                                   "base_sha": os.environ["GROUP_BASE"],
+                                   "head_sha": os.environ["GROUP_HEAD"],
+                                   "head_ref": os.environ["GROUP_REF"]}}
+          pathlib.Path(sys.argv[1]).write_text(json.dumps(event))
+          PY_EVENT
           python3 -B trusted/tools/merge_queue_admission.py wait-base \
             --repo-root "$GITHUB_WORKSPACE/candidate" \
             --trusted-root "$GITHUB_WORKSPACE/trusted" \
-            --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_REPOSITORY" \
-            --sha "$GITHUB_SHA" --wait-seconds 18000
+            --event "$RUNNER_TEMP/rebind-group-event.json" --repository "$GITHUB_REPOSITORY" \
+            --sha "$CANDIDATE_HEAD" --wait-seconds 0
       - name: Reject feature-owned generated state and classify trust transitions
         id: admission
-        if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
+          EVENT_NAME: ${{ github.event_name == 'workflow_dispatch' && 'merge_group' || github.event_name }}
         run: |
           set -euo pipefail
           classifier="$GITHUB_WORKSPACE/trusted/tools/native_retirement_integration.py"
@@ -301,6 +330,7 @@ jobs:
           name: native-retirement-rebind-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/native-retirement-classification.json
+            ${{ runner.temp }}/rebind-group-event.json
             ${{ runner.temp }}/native-retirement-rebind
           if-no-files-found: warn
           retention-days: 7

@@ -140,23 +140,23 @@ class AdmissionWorkflowTests(unittest.TestCase):
             self.assertIn("requires trusted main with wait-base", later.stderr)
             self.assertNotIn("trusted native gate passed", later.stdout)
 
-    def test_rebinding_waits_on_trusted_main_before_classifying_second_group(self):
+    def test_rebinding_dispatched_group_has_zero_second_trusted_preflight(self):
         workflow = (ROOT / ".github/workflows/native-retirement-rebind.yml").read_text()
         repository = workflow.split("  repository:\n", 1)[1]
-        self.assertIn("    timeout-minutes: 310\n", repository)
-        self.assertIn("(github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'main'", repository)
+        self.assertIn("    timeout-minutes: 45\n", repository)
+        self.assertIn("(github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && 'main'", repository)
         self.assertNotIn("github.event.pull_request.base.sha", repository)
         checkout = repository.index("      - name: Check out the previously trusted rebinder revision")
-        wait = repository.index("      - name: Wait for the queued predecessor to land")
+        wait = repository.index("      - name: Verify dispatched exact group and landed predecessor")
         admission = repository.index("      - name: Reject feature-owned generated state")
         self.assertLess(checkout, wait)
         self.assertLess(wait, admission)
         first_wait = repository[wait:admission]
-        self.assertIn("if: ${{ github.event_name == 'merge_group' }}", first_wait)
+        self.assertIn("if: ${{ github.event_name == 'workflow_dispatch' }}", first_wait)
         self.assertIn("GH_TOKEN: ${{ github.token }}", first_wait)
         self.assertIn("trusted/tools/merge_queue_admission.py wait-base", first_wait)
         self.assertIn('--trusted-root "$GITHUB_WORKSPACE/trusted"', first_wait)
-        self.assertIn('--wait-seconds 18000', first_wait)
+        self.assertIn('--wait-seconds 0', first_wait)
         self.assertNotIn("continue-on-error", first_wait)
 
     def history(self, root: Path) -> tuple[Path, Path, Path, str, str]:
