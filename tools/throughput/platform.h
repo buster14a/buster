@@ -584,6 +584,12 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
         {
             waited = wait4(pid, &status, 0, &usage);
         } while (waited < 0 && errno == EINTR);
+        /* Disarm at once: an alarm after the reap must neither kill the
+         * reaped child's group nor mark a clean exit as a timeout, so the
+         * pid is forgotten first and a timeout needs a signalled child. */
+        tp_active_pid = 0;
+        alarm(0);
+        result.timed_out = tp_timeout_fired != 0 && waited == pid && WIFSIGNALED(status);
         result.wall_seconds = (double)timestamp_ns_between(start, timestamp_take()) * 1e-9;
 #ifdef __linux__
         if (observation)
@@ -595,9 +601,6 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
                 result.wall_seconds = (double)(observation->finished_ns - observation->started_ns) / 1000000000.0;
         }
 #endif
-        alarm(0);
-        tp_active_pid = 0;
-        result.timed_out = tp_timeout_fired != 0;
         ok = waited == pid && sent == 1 && (!observation || observation->valid);
         if (ok)
         {
