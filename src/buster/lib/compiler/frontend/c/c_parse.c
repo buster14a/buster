@@ -7702,6 +7702,14 @@ BUSTER_C_SHARED bool c_parse_type_qualifier_word(String8 spelling, CType* type)
     return false;
 }
 
+// Clang's nullability qualifiers stand wherever a pointer qualifier may,
+// including an array parameter's brackets (`[_Nonnull 3]` in Bionic). They
+// affect diagnostics, not the C object representation, so they set no flag.
+BUSTER_C_INTERNAL bool c_parse_nullability_word(String8 spelling)
+{
+    return string_equal(spelling, S8("_Nonnull")) || string_equal(spelling, S8("_Nullable")) || string_equal(spelling, S8("_Null_unspecified"));
+}
+
 BUSTER_C_SHARED u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 index, u32 end);
 
 // Skips the run of `_Alignas ( ... )` alignment specifiers at `index`. An
@@ -10225,11 +10233,20 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         // C11 6.7.2.1p13: only an untagged `struct { ... }` or `union { ... }`
         // written here is an anonymous member. A tag (`struct S;`) or a
         // typedef name for an untagged aggregate declares nothing, as in GCC
-        // and Clang without -fms-extensions.
+        // and Clang without -fms-extensions. The Microsoft dialect, which
+        // Windows targets get alongside `_MSC_EXTENSIONS`, also makes any
+        // complete struct or union named here an anonymous member.
         CType const* base = frame->base_type.value < result->type_count ? &result->types[frame->base_type.value] : 0;
         if (frame->declarator_start == frame->end && base && (base->kind == C_TYPE_STRUCT || base->kind == C_TYPE_UNION))
         {
-            if (!base->tag.length && base->definition_start > frame->start && base->definition_start < frame->end)
+            bool defined_in_place = base->definition_start > frame->start && base->definition_start < frame->end;
+            CType const* unqualified = base;
+            if (!unqualified->is_complete && unqualified->has_unqualified_type && unqualified->unqualified_type.value < result->type_count)
+            {
+                unqualified = &result->types[unqualified->unqualified_type.value];
+            }
+            bool microsoft_anonymous = preprocess.target.os == OPERATING_SYSTEM_WINDOWS && (defined_in_place || unqualified->is_complete);
+            if ((defined_in_place && !base->tag.length) || microsoft_anonymous)
             {
                 BUSTER_VALIDATE(result->member_count < result->member_capacity);
                 result->members[result->member_count++] = (CMember){
@@ -10364,8 +10381,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                         {
                             String8 spelling = c_token_spelling(preprocess.spelling_base, token);
                             CType ignored = {0};
-                            if (c_parse_type_qualifier_word(spelling, &ignored) || string_equal(spelling, S8("_Nonnull")) ||
-                                string_equal(spelling, S8("_Nullable")) || string_equal(spelling, S8("_Null_unspecified")))
+                            if (c_parse_type_qualifier_word(spelling, &ignored) || c_parse_nullability_word(spelling))
                             {
                                 missing_name += 1;
                                 continue;
@@ -13116,15 +13132,7 @@ BUSTER_C_SHARED CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessR
                 break;
             }
             String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[*index]);
-            if (c_parse_type_qualifier_word(spelling, &pointer))
-            {
-            }
-            else if (string_equal(spelling, S8("_Nonnull")) || string_equal(spelling, S8("_Nullable")) || string_equal(spelling, S8("_Null_unspecified")))
-            {
-                /* Nullability affects diagnostics, not the C object
-                   representation. */
-            }
-            else
+            if (!c_parse_type_qualifier_word(spelling, &pointer) && !c_parse_nullability_word(spelling))
             {
                 break;
             }
@@ -13156,8 +13164,7 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult p
                     break;
                 }
                 String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
-                if (c_parse_type_qualifier_word(spelling, &ignored) || string_equal(spelling, S8("_Nonnull")) || string_equal(spelling, S8("_Nullable")) ||
-                    string_equal(spelling, S8("_Null_unspecified")))
+                if (c_parse_type_qualifier_word(spelling, &ignored) || c_parse_nullability_word(spelling))
                 {
                     index += 1;
                     continue;
@@ -13292,7 +13299,8 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
             bool is_static_word = string_equal(bound_spelling, S8("static"));
             is_static |= is_static_word;
             CType bound_qualifiers = {0};
-            if (!is_static_word && !(bound_token.kind == C_TOKEN_IDENTIFIER && c_parse_type_qualifier_word(bound_spelling, &bound_qualifiers)))
+            if (!is_static_word && !(bound_token.kind == C_TOKEN_IDENTIFIER && (c_parse_type_qualifier_word(bound_spelling, &bound_qualifiers) ||
+                                                                                   c_parse_nullability_word(bound_spelling))))
             {
                 bound_word_index = token_index;
                 bound_word_count += 1;
@@ -21610,6 +21618,25 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
     return diagnostic;
 }
 
+// Whether the operand's first token names an object, function or enumerator.
+// The type parse falls back to the file's typedef table when its scoped
+// lookup misses, so `typedef long T; ... int T; sizeof (T + 1)` reads `T` as
+// the type; the recorded use, or the scoped lookup, still sees the object, and
+// that operand is an expression whatever the type parse left over.
+BUSTER_C_INTERNAL bool c_parse_type_name_operand_names_value(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 token_index)
+{
+    bool value = false;
+    if (preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER)
+    {
+        u32 use = c_parse_identifier_use_index(result, token_index);
+        CEntityId entity = use != C_ID_UNDERLYING_INVALID
+                               ? result->identifier_uses[use].entity
+                               : c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[token_index]);
+        value = entity.value < result->entity_count && result->entities[entity.value].kind != C_ENTITY_TYPEDEF;
+    }
+    return value;
+}
+
 BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(CTypeParseMachine* machine, CParseResult* result,
                                                                                 CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end)
 {
@@ -21617,6 +21644,11 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
     u64 mark = machine->scratch_arena->position;
     u32* openers = 0;
     CParseCandidates sizeof_words = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_SIZEOF, C_PARSE_POPULATION_NONE, start);
+    // A parenthesized operand's updates are checked once, with the outermost
+    // operand that contains them. A `sizeof` nested inside that operand still
+    // needs its own type-name check: `sizeof (sizeof (long + 1))` passed while
+    // the walk jumped from each outer operand straight to its `)`.
+    u32 walked_end = start;
     for (u32 index = c_parse_candidates_next(&sizeof_words, start, end); !diagnostic.message.length && index + 1 < end;
          index = c_parse_candidates_next(&sizeof_words, index + 1, end))
     {
@@ -21627,6 +21659,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
         bool grouped = c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
         u32 close = grouped ? c_parse_matching_delimiter_indexed(result, preprocess, index + 1) : end;
         if (grouped && close >= end) continue;
+        bool nested = index < walked_end;
         u32 operand_start = grouped ? index + 2 : index + 1;
         u32 operand_end = grouped ? close : c_parse_update_prefix_operand_end(result, preprocess, operand_start, end);
         if (grouped && operand_start < close)
@@ -21655,11 +21688,21 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
                 if (type.value < result->type_count)
                 {
                     type = c_parse_pointer_chain(result, preprocess, type, &cursor, close);
-                    c_parse_array_suffixes(result, preprocess, type, &cursor, close);
+                    type = c_parse_array_suffixes(result, preprocess, type, &cursor, close);
+                }
+                // A type name here must end at the operand's `)`: `sizeof
+                // (typeof (char) * 2)` answered 4 as if `char` were a value, and
+                // `sizeof (long + 1)` 8 (#1535). An operand whose first word
+                // names an object, function or enumerator is an expression
+                // whatever the type parse made of a typedef it shadows.
+                if (type.value < result->type_count && cursor < close && c_parse_type_name_trailer_invalid(preprocess, preprocess.tokens[cursor]) &&
+                    !c_parse_type_name_operand_names_value(result, preprocess, operand_scope, operand_start))
+                {
+                    diagnostic = (CParseInitializerDiagnostic){.message = S8("expected ')' after type name"), .token = cursor};
                 }
             }
         }
-        for (u32 update = operand_start; !diagnostic.message.length && update < operand_end; update += 1)
+        for (u32 update = operand_start; !nested && !diagnostic.message.length && update < operand_end; update += 1)
         {
             CToken current = preprocess.tokens[update];
             if (!c_token_is_punctuator(&current, C_PUNCTUATOR_PLUS_PLUS) && !c_token_is_punctuator(&current, C_PUNCTUATOR_MINUS_MINUS)) continue;
@@ -21692,7 +21735,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
             if (typed && !c_parse_update_operand_modifiable(result, preprocess, place_start, place_end, type))
                 diagnostic = (CParseInitializerDiagnostic){.message = S8("increment or decrement operand is not a modifiable place"), .token = update};
         }
-        if (grouped) index = close;
+        if (grouped && !nested) walked_end = close;
     }
     arena_set_position(machine->scratch_arena, mark);
     return diagnostic;
@@ -24043,8 +24086,8 @@ BUSTER_C_INTERNAL void c_parse_validate_alignment_redeclarations(CTypeParseMachi
     }
 }
 
-// Every recorded array bound is one expression once its `static` and
-// qualifier words are set aside; `[]` and `[*]` have none to check.
+// Every recorded array bound is one expression once its `static`, qualifier
+// and nullability words are set aside; `[]` and `[*]` have none to check.
 BUSTER_C_INTERNAL void c_parse_validate_array_bound_syntax(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess)
 {
     u32 bound_count = result->array_bound_count;
@@ -24057,7 +24100,8 @@ BUSTER_C_INTERNAL void c_parse_validate_array_bound_syntax(CTypeParseMachine* ma
         CType qualifiers = {0};
         while (start < end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
                (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("static")) ||
-                c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[start], &qualifiers)))
+                c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[start], &qualifiers) ||
+                c_parse_nullability_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]))))
         {
             start += 1;
         }
