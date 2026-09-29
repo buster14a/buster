@@ -19,53 +19,25 @@ jobs:
       - name: Extract lowering paths
         shell: bash
         run: |
-          python3 <<'PY'
-          from pathlib import Path
-
-          root = Path('.')
-          output = []
-
-          def emit(path: Path, start: int, end: int) -> None:
-              lines = path.read_text(encoding='utf-8').splitlines()
-              start = max(0, start)
-              end = min(len(lines), end)
-              output.append(f'===== {path.as_posix()} lines {start + 1}-{end} =====')
-              output.extend(f'{i + 1:6}: {lines[i]}' for i in range(start, end))
-              output.append('')
-
-          gen = root / 'src/buster/lib/compiler/frontend/c/c_gen.c'
-          test = root / 'src/buster/tests/compiler/frontend/c/c_test.c'
-
-          for start, end in (
-              (38070, 38225),
-              (50370, 50515),
-          ):
-              emit(gen, start, end)
-
-          gen_lines = gen.read_text(encoding='utf-8').splitlines()
-          for needle in (
-              'c_ir_static_assert_expression_range',
-              'failure_message',
-              'C_PARSER_DECLARATION_STATIC_ASSERT',
-              'deferred_static_assert',
-          ):
-              hits = [i for i, line in enumerate(gen_lines) if needle in line]
-              output.append(f'===== c_gen.c matches: {needle} ({len(hits)}) =====')
-              for hit in hits:
-                  emit(gen, hit - 30, hit + 55)
-
-          for start, end in (
-              (10390, 10520),
-              (23520, 23670),
-              (24020, 24150),
-          ):
-              emit(test, start, end)
-
-          destination = root / '.agent/issue-1646-gen.txt'
-          destination.parent.mkdir(parents=True, exist_ok=True)
-          destination.write_text('\n'.join(output) + '\n', encoding='utf-8')
-          print(f'wrote {destination} ({destination.stat().st_size} bytes)')
-          PY
+          set -euo pipefail
+          output=.agent/issue-1646-gen.txt
+          mkdir -p .agent
+          {
+            echo '===== c_gen.c 38071-38225 ====='
+            sed -n '38071,38225p' src/buster/lib/compiler/frontend/c/c_gen.c | nl -ba -v 38071
+            echo '===== c_gen.c 50371-50515 ====='
+            sed -n '50371,50515p' src/buster/lib/compiler/frontend/c/c_gen.c | nl -ba -v 50371
+            echo '===== c_gen static-assert helpers ====='
+            grep -n -B 30 -A 55 -E 'c_ir_static_assert_expression_range|failure_message|C_PARSER_DECLARATION_STATIC_ASSERT|deferred_static_assert' src/buster/lib/compiler/frontend/c/c_gen.c || true
+            echo '===== c_test.c 10391-10520 ====='
+            sed -n '10391,10520p' src/buster/tests/compiler/frontend/c/c_test.c | nl -ba -v 10391
+            echo '===== c_test.c 23521-23670 ====='
+            sed -n '23521,23670p' src/buster/tests/compiler/frontend/c/c_test.c | nl -ba -v 23521
+            echo '===== c_test.c 24021-24150 ====='
+            sed -n '24021,24150p' src/buster/tests/compiler/frontend/c/c_test.c | nl -ba -v 24021
+          } > "$output"
+          test -s "$output"
+          wc -c "$output"
 
       - name: Publish extracted context
         shell: bash
