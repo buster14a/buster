@@ -242,8 +242,7 @@ class AptInputTests(unittest.TestCase):
 
     def test_only_reviewed_same_commit_local_workflow_is_allowed(self):
         allowed = "./.github/workflows/throughput-real-source.yml"
-        self.assertEqual(check_action_pins.APPROVED_LOCAL_WORKFLOWS,
-                         {allowed, "./.github/workflows/compiler-throughput.yml"})
+        self.assertEqual(check_action_pins.APPROVED_LOCAL_WORKFLOWS, {allowed})
         self.assertEqual(check_action_pins.check_text("uses: " + allowed, "case.yml"), [])
         for value in (allowed + "@main", allowed + "@" + "a" * 40,
                       "./local-action", "./.github/workflows/other.yml",
