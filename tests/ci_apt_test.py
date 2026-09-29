@@ -237,6 +237,10 @@ class AptInputTests(unittest.TestCase):
         self.assertIn("real-source:\n    needs: inputs", qualification)
         self.assertIn("uses: ./.github/workflows/throughput-real-source.yml", qualification)
         self.assertIn("qualify_pinned_inputs: true", qualification)
+        self.assertEqual(real.count("continue-on-error: ${{ inputs.qualify_pinned_inputs }}"), 2)
+        self.assertIn("Validate pinned-input qualification boundary", real)
+        self.assertIn("steps.oracle_lua.outcome == 'success'", real)
+        self.assertIn("steps.oracle_sqlite.outcome == 'success'", real)
         self.assertNotIn("secrets: inherit", qualification)
         self.assertNotIn("actions: write", qualification)
 

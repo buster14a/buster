@@ -27,6 +27,38 @@ class SnapshotRetryTests(unittest.TestCase):
             stderr=f"E: Failed to fetch {url}  {code} Service Unavailable\n"
                    "E: Unable to fetch some archives, maybe run apt update or try with --fix-missing?\n" + extra)
 
+    def real_mixed_index_failure(self):
+        # Reduced verbatim shape from run 36508201892 command-002: APT reports
+        # the transient statuses on stdout but only blank/correlated 404
+        # summaries on stderr.
+        base = self.snapshot.rstrip("/")
+        output = (
+            f"Err:11 {base} resolute/universe amd64 c-n-f Metadata\n"
+            "  503  Service Unavailable [IP: 185.125.189.69 443]\n"
+            "  503  Service Unavailable [IP: 185.125.189.37 443]\n"
+            "  404  NOT FOUND [IP: 185.125.189.37 443]\n"
+            f"Err:10 {base} resolute/universe amd64 Components\n"
+            f"Err:9 {base} resolute/universe Translation-en\n"
+            f"Err:8 {base} resolute/universe amd64 Packages\n"
+            f"Err:14 {base} resolute-updates/main amd64 Components\n"
+            "  503  Service Unavailable [IP: 185.125.189.69 443]\n"
+            "  503  Service Unavailable [IP: 185.125.189.37 443]\n"
+            "  404  NOT FOUND [IP: 185.125.189.69 443]\n"
+            "  404  NOT FOUND [IP: 185.125.189.37 443]\n"
+        )
+        stderr = (
+            "W: Download is performed unsandboxed as root\n"
+            f"E: Failed to fetch {self.snapshot}dists/resolute/main/binary-amd64/Packages.gz  \n"
+            f"E: Failed to fetch {self.snapshot}dists/resolute/universe/binary-amd64/Packages.gz  \n"
+            f"E: Failed to fetch {self.snapshot}dists/resolute/universe/cnf/Commands-amd64"
+            "  404  NOT FOUND [IP: 185.125.189.37 443]\n"
+            f"E: Failed to fetch {self.snapshot}dists/resolute-updates/main/dep11/Components-amd64.yml"
+            "  404  NOT FOUND [IP: 185.125.189.37 443]\n"
+            "E: Some index files failed to download. They have been ignored, or old ones used instead.\n"
+        )
+        return subprocess.CalledProcessError(
+            100, ["apt-get", "update"], output=output, stderr=stderr)
+
     def simulate_install(self, update_failures=0, install_failures=0):
         commands = []
         original_read = Path.read_text
@@ -112,6 +144,19 @@ class SnapshotRetryTests(unittest.TestCase):
                 self.assertEqual(commands, [["apt-get", "update"]])
                 sleep.assert_not_called()
 
+    def test_snapshot_5xx_does_not_authorize_an_unrelated_index_404(self):
+        base = self.snapshot.rstrip("/")
+        output = (f"Err:11 {base} resolute/universe amd64 c-n-f Metadata\n"
+                  "  503  Service Unavailable [IP: 185.125.189.69 443]\n")
+        stderr = (
+            f"E: Failed to fetch {self.snapshot}dists/resolute/main/dep11/Components-amd64.yml"
+            "  404  NOT FOUND [IP: 185.125.189.37 443]\n"
+            "E: Some index files failed to download. They have been ignored, or old ones used instead.\n"
+        )
+        error = subprocess.CalledProcessError(
+            100, ["apt-get", "update"], output=output, stderr=stderr)
+        self.assertFalse(ci_apt.transient_snapshot_failure(error, self.data))
+
     def test_blank_index_errors_with_snapshot_503_still_retry(self):
         diagnostics = ("E: Failed to fetch " + self.snapshot + "dists/resolute-updates/InRelease"
                        "  503  Service Unavailable\n"
@@ -132,6 +177,41 @@ class SnapshotRetryTests(unittest.TestCase):
         self.assertEqual(result, "signed indexes refreshed")
         self.assertEqual(commands, [["apt-get", "update"], ["apt-get", "update"]])
         sleep.assert_called_once_with(30)
+
+    def test_real_mixed_index_failure_recovers_with_the_same_command(self):
+        error = self.real_mixed_index_failure()
+        self.assertTrue(ci_apt.transient_snapshot_failure(error, self.data))
+        results = [
+            subprocess.CompletedProcess(error.cmd, error.returncode, error.output, error.stderr),
+            subprocess.CompletedProcess(error.cmd, 0, "signed indexes refreshed\n", ""),
+        ]
+        command = ["apt-get", "update"]
+        with mock.patch.object(ci_apt.subprocess, "run", side_effect=results) as process, \
+                mock.patch.object(ci_apt.time, "sleep") as sleep:
+            output = ci_apt.run_snapshot_apt(ci_apt.Commands(self.root), command, self.data)
+        self.assertEqual(output, "signed indexes refreshed\n")
+        self.assertEqual([call.args[0] for call in process.call_args_list], [command, command])
+        sleep.assert_called_once_with(30)
+        self.assertEqual([json.loads((self.root / f"command-{i:03}.json").read_text())["status"]
+                          for i in range(1, 3)], [100, 0])
+        self.assertEqual((self.root / "command-001.stdout").read_text(), error.output)
+        self.assertEqual((self.root / "command-001.stderr").read_text(), error.stderr)
+
+    def test_real_mixed_index_failure_exhausts_three_retained_attempts(self):
+        error = self.real_mixed_index_failure()
+        result = subprocess.CompletedProcess(error.cmd, error.returncode, error.output, error.stderr)
+        command = ["apt-get", "update"]
+        with mock.patch.object(ci_apt.subprocess, "run", side_effect=[result, result, result]) as process, \
+                mock.patch.object(ci_apt.time, "sleep") as sleep, \
+                self.assertRaises(subprocess.CalledProcessError):
+            ci_apt.run_snapshot_apt(ci_apt.Commands(self.root), command, self.data)
+        self.assertEqual([call.args[0] for call in process.call_args_list], [command, command, command])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [30, 60])
+        self.assertEqual([json.loads((self.root / f"command-{i:03}.json").read_text())["status"]
+                          for i in range(1, 4)], [100, 100, 100])
+        for attempt in range(1, 4):
+            self.assertEqual((self.root / f"command-{attempt:03}.stdout").read_text(), error.output)
+            self.assertEqual((self.root / f"command-{attempt:03}.stderr").read_text(), error.stderr)
 
     def test_each_attempt_retains_status_and_diagnostics(self):
         results = [subprocess.CompletedProcess(["apt-get"], 100, "", self.failed_fetch().stderr),
