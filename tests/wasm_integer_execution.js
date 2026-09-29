@@ -47,4 +47,8 @@ for (const bits of [32, 64]) {
         }
     }
 }
-console.log(`${checks} frontend-to-Wasm integer checks passed`);
+// The C harness requires both the exact terminal marker and a normal exit before
+// its fixed deadline. Write the marker synchronously, then terminate explicitly
+// so a delayed Node stream shutdown cannot turn a completed oracle into a timeout.
+fs.writeSync(process.stdout.fd, `${checks} frontend-to-Wasm integer checks passed\n`);
+process.exit(0);
