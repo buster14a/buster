@@ -1,8 +1,16 @@
 name: Exercise nested action resolution failure
 description: Temporary #1790 probe for runner behavior before composite execution.
+outputs:
+  entered:
+    description: Whether any composite step began after dependency resolution.
+    value: ${{ steps.entry.outputs.entered }}
 runs:
   using: composite
   steps:
+    - name: Record composite entry
+      id: entry
+      shell: bash
+      run: printf 'entered=true\n' >> "$GITHUB_OUTPUT"
     - name: Resolve unavailable nested action
       uses: actions/upload-artifact@0000000000000000000000000000000000000000
       with:
