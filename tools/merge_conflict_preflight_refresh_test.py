@@ -38,6 +38,7 @@ class SnapshotRefreshTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.output = self.root / "reports"
         self.api = mock.Mock()
+        self.api.queue_membership.return_value = {}
         self.event = {"repository": {"default_branch": "main"}}
 
     def tearDown(self) -> None:
@@ -52,10 +53,11 @@ class SnapshotRefreshTests(unittest.TestCase):
         return REFRESH.PullIdentity(number, head, "main")
 
     @classmethod
-    def report(cls, head: str, blocking: bool = False) -> dict:
+    def report(cls, head: str, blocking: bool = False, clean: bool = True) -> dict:
         return {
             "main": {"sha": cls.MAIN},
             "head": {"sha": head},
+            "merge": {"clean": clean},
             "outcome": {"blocking": blocking},
             "candidate_changes": {
                 "generated_or_integration_owned_retirement_paths": [],
@@ -262,6 +264,106 @@ class SnapshotRefreshTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertTrue(refresh["coverage_complete"])
         self.assertEqual(refresh["blocking_count"], 2)
+
+    def test_queued_conflicted_pull_is_named_for_dequeue_without_changing_outcome(self) -> None:
+        identities = [
+            self.identity(1, self.HEAD_ONE),
+            self.identity(2, self.HEAD_TWO),
+            self.identity(3, self.HEAD_THREE),
+        ]
+        rows = [self.row(identity.number, identity.head) for identity in identities]
+        self.api.open_pull_requests.side_effect = [rows, rows]
+        # #1 is queued and conflicts, #2 is queued and clean, #3 conflicts unqueued.
+        self.api.queue_membership.return_value = {
+            1: (self.HEAD_ONE, True),
+            2: (self.HEAD_TWO, True),
+            3: (self.HEAD_THREE, False),
+        }
+        reports = {
+            self.HEAD_ONE: self.report(self.HEAD_ONE, blocking=True, clean=False),
+            self.HEAD_TWO: self.report(self.HEAD_TWO),
+            self.HEAD_THREE: self.report(self.HEAD_THREE, blocking=True, clean=False),
+        }
+        with (mock.patch.object(REFRESH, "_fetch_main",
+                                side_effect=[self.MAIN, self.MAIN]),
+              mock.patch.object(REFRESH, "_fetch_heads",
+                                return_value=self.resolution(identities)),
+              mock.patch.object(
+                  REFRESH, "_analyze_identity",
+                  side_effect=lambda _repo, _api, _main, identity, _context:
+                  reports[identity.head],
+              )):
+            status, refresh = self.run_refresh()
+        self.assertEqual(status, 0)
+        self.assertTrue(refresh["coverage_complete"])
+        self.assertEqual(refresh["blocking_count"], 2)
+        self.api.queue_membership.assert_called_once_with("main")
+        self.assertEqual(refresh["merge_queue"], {
+            "lookup": "complete",
+            "error": None,
+            "queued_pull_requests": [1, 2],
+            "dequeue_required": [1],
+        })
+        published = {call.args[0]: call.args[1] for call in self.api.publish_status.call_args_list}
+        self.assertEqual(published[self.HEAD_ONE]["merge_queue"]["action"],
+                         PREFLIGHT.QUEUE_LOCKED_ACTION)
+        self.assertTrue(published[self.HEAD_TWO]["merge_queue"]["branch_locked_by_queue"])
+        self.assertIsNone(published[self.HEAD_TWO]["merge_queue"]["action"])
+        self.assertEqual(published[self.HEAD_THREE]["merge_queue"]["membership"],
+                         PREFLIGHT.QUEUE_NOT_QUEUED)
+        self.assertIsNone(published[self.HEAD_THREE]["merge_queue"]["action"])
+
+    def test_unavailable_queue_lookup_is_advisory_and_marks_membership_unknown(self) -> None:
+        identities = [self.identity(1, self.HEAD_ONE), self.identity(2, self.HEAD_TWO)]
+        rows = [self.row(identity.number, identity.head) for identity in identities]
+        self.api.open_pull_requests.side_effect = [rows, rows]
+        self.api.queue_membership.side_effect = PREFLIGHT.ApiRequestError(
+            "POST /graphql HTTP 403: Resource not accessible by integration", 1, False, False)
+        with (mock.patch.object(REFRESH, "_fetch_main",
+                                side_effect=[self.MAIN, self.MAIN]),
+              mock.patch.object(REFRESH, "_fetch_heads",
+                                return_value=self.resolution(identities)),
+              mock.patch.object(
+                  REFRESH, "_analyze_identity",
+                  side_effect=lambda _repo, _api, _main, identity, _context:
+                  self.report(identity.head, blocking=identity.number == 1,
+                              clean=identity.number != 1),
+              )):
+            status, refresh = self.run_refresh()
+        self.assertEqual(status, 0)
+        self.assertTrue(refresh["coverage_complete"])
+        self.assertEqual(refresh["merge_queue"]["lookup"], "unavailable")
+        self.assertIn("Resource not accessible", refresh["merge_queue"]["error"])
+        self.assertEqual(refresh["merge_queue"]["dequeue_required"], [])
+        self.assertEqual(self.api.publish_status.call_count, 2)
+        conflicted = self.api.publish_status.call_args_list[0].args[1]
+        self.assertEqual(conflicted["merge_queue"]["membership"], PREFLIGHT.QUEUE_UNKNOWN)
+        self.assertEqual(conflicted["merge_queue"]["action"], PREFLIGHT.QUEUE_UNKNOWN_ACTION)
+        self.assertIsNone(self.api.publish_status.call_args_list[1].args[1]["merge_queue"]["action"])
+
+    def test_queue_summary_names_locked_pulls_and_unavailable_lookups(self) -> None:
+        summary = self.root / "summary.md"
+        REFRESH._write_queue_summary({
+            "lookup": "complete", "error": None,
+            "queued_pull_requests": [1521, 1523], "dequeue_required": [1521, 1523],
+        }, summary)
+        REFRESH._write_queue_summary({
+            "lookup": "unavailable", "error": "HTTP 403",
+            "queued_pull_requests": [], "dequeue_required": [],
+        }, summary)
+        text = summary.read_text(encoding="utf-8")
+        self.assertIn("Queued PR(s) that conflict with main: #1521, #1523.", text)
+        self.assertIn("(GH006)", text)
+        self.assertIn("dequeue each one before pushing its resolution", text)
+        self.assertIn("Merge-queue membership unavailable: HTTP 403", text)
+
+    def test_queue_summary_is_not_attempted_before_main_is_resolved(self) -> None:
+        self.api.open_pull_requests.side_effect = PREFLIGHT.ApiRequestError(
+            "GET /pulls HTTP 500", 3, True, False)
+        status, refresh = self.run_refresh()
+        self.assertEqual(status, 2)
+        self.assertEqual(refresh["merge_queue"]["lookup"], "not_attempted")
+        self.api.queue_membership.assert_not_called()
 
     def test_analyze_skips_previous_status_but_keeps_retirement_attestation(self) -> None:
         identity = self.identity(1, self.HEAD_ONE)

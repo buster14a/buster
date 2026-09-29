@@ -27,12 +27,19 @@ class LifecycleWorkflowTests(unittest.TestCase):
         self.assertIn("branches-ignore:\n      - main\n      - 'gh-readonly-queue/main/**'", recover)
         self.assertEqual(re.findall(r"^  ([\w-]+):$", recover.split("\njobs:\n", 1)[1], re.M),
                          ["recover"])
-        self.assertIn("types: [in_progress]", watch)
+        self.assertIn("types: [in_progress, completed]", watch)
         self.assertIn("branches:\n      - 'gh-readonly-queue/main/**'", watch)
+        self.assertIn("- cron: '13-59/15 * * * *'", watch)
+        self.assertIn("workflow_dispatch:", watch)
+        for name in ("Buster CI", "Self-host fixed point", "TCC bootstrap",
+                     "GPU toolchain acceptance", "Benchmark service workflow policy",
+                     "API migration policy", "Main integration admission"):
+            self.assertIn("      - " + name + "\n", watch)
         self.assertEqual(re.findall(r"^  ([\w-]+):$", watch.split("\njobs:\n", 1)[1], re.M),
                          ["watch-merge-group"])
+        self.assertIn("group: ci-recovery-${{ github.event.workflow_run.id }}", recover)
+        self.assertIn("group: ci-recovery-${{ github.event.workflow_run.id || github.run_id }}", watch)
         for workflow in (recover, watch):
-            self.assertIn("group: ci-recovery-${{ github.event.workflow_run.id }}", workflow)
             self.assertIn("ref: ${{ github.sha }}", workflow)
             self.assertIn("github.event.workflow_run.head_repository.full_name == github.repository", workflow)
             self.assertIn("run-name:", workflow)
@@ -62,6 +69,14 @@ class LifecycleWorkflowTests(unittest.TestCase):
         self.assertIn("<code>" + "a" * 40 + "</code>", summary)
         self.assertIn("<code>" + "b" * 40 + "</code>", summary)
         self.assertIn("No action: failed job &lt;test&gt;", summary)
+
+    def test_sweep_summary_identifies_trusted_handler(self):
+        summary = recovery.lifecycle_summary(
+            "Merge-group CI fail-fast", "No live merge groups.",
+            {"schedule": "13-59/15 * * * *"}, "buster14a/buster", "b" * 40, 234, 1)
+        self.assertIn("Trigger: <code>13-59/15 * * * *</code>", summary)
+        self.assertIn("/actions/runs/234/attempts/1", summary)
+        self.assertIn("No live merge groups.", summary)
 
 
 if __name__ == "__main__":
