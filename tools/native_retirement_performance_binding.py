@@ -251,7 +251,8 @@ METRICS_SHARD_RE = re.compile(r"^retirement-metrics-([a-z]{1,8})-([0-9]{4})\.txt
 # only where the next line would not fit, so the header line opens shard 0
 # and the shards' concatenation is exactly the series.  The manifest binds the
 # order, each shard's offset, bytes and SHA-256 and the whole series' bytes
-# and SHA-256; shard paths are leaves in the manifest's directory.  Format:
+# and SHA-256; shard i is the leaf ``retirement-statistics-series-NNNN.txt``
+# (i in four digits) in the manifest's directory.  Format:
 #   BQ-RETIREMENT-STATISTICS-SERIES-V1
 #   series bytes=<total> sha256=<hex> shards=<count> shard_bytes=<cap>
 #   shard=<index> offset=<offset> bytes=<bytes> sha256=<hex> path=<leaf>
@@ -263,7 +264,7 @@ ADAPTER_SERIES_SHARD_BYTES = 64 * 1024 * 1024
 ADAPTER_SERIES_SHARD_CAP = 1024
 ADAPTER_SERIES_MANIFEST_LINE_BYTES = 512
 ADAPTER_SERIES_LINE_BYTES = 4096
-ADAPTER_SERIES_LEAF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+ADAPTER_SERIES_LEAF_FORMAT = "retirement-statistics-series-{:04d}.txt"
 # (A1, M4, L7) The execution plan binds the reviewed campaign budget record
 # (tools/throughput/retirement_budget.h canonical text) and its SHA-256, the
 # recipe-profile pin `campaign-budget-sha256=`.  Every object group's
@@ -3986,18 +3987,17 @@ def adapter_series_shards(data, shard_bytes=None):
     return shards
 
 
-def adapter_series_manifest(shards, leaves, shard_bytes=None):
-    """The canonical manifest bytes over ordered ``shards`` named ``leaves``."""
+def adapter_series_manifest(shards, shard_bytes=None):
+    """The canonical manifest bytes over ordered ``shards`` (canonical leaves)."""
     cap = ADAPTER_SERIES_SHARD_BYTES if shard_bytes is None else shard_bytes
     total = hashlib.sha256()
-    if len(shards) != len(leaves):
-        raise ValueError("every series shard needs exactly one leaf")
     lines = []
     offset = 0
-    for index, (shard, leaf) in enumerate(zip(shards, leaves)):
+    for index, shard in enumerate(shards):
         total.update(shard)
         lines.append(f"shard={index} offset={offset} bytes={len(shard)} "
-                     f"sha256={hashlib.sha256(shard).hexdigest()} path={leaf}")
+                     f"sha256={hashlib.sha256(shard).hexdigest()} "
+                     f"path={ADAPTER_SERIES_LEAF_FORMAT.format(index)}")
         offset += len(shard)
     head = [ADAPTER_SERIES_MANIFEST_HEADER,
             f"series bytes={offset} sha256={total.hexdigest()} shards={len(shards)} shard_bytes={cap}"]
@@ -4062,10 +4062,10 @@ def _adapter_series_manifest(root, artifact, name="sealed_result_bundle.adapter_
             _fail(f"{name} shard offsets leave a gap or overlap")
         if size > shard_bytes:
             _fail(f"{name} shard {index} exceeds the series shard size")
-        if not ADAPTER_SERIES_LEAF_RE.fullmatch(leaf) or leaf == manifest_leaf:
-            _fail(f"{name} shard {index} path is not a series shard leaf")
         if leaf in leaves:
             _fail(f"{name} names one shard twice")
+        if leaf != ADAPTER_SERIES_LEAF_FORMAT.format(index) or leaf == manifest_leaf:
+            _fail(f"{name} shard {index} path is not its canonical series shard leaf")
         leaves.add(leaf)
         shards.append({"path": (directory / leaf).as_posix(), "bytes": size,
                        "sha256": match.group(4), "offset": shard_offset})

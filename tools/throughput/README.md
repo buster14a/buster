@@ -582,12 +582,15 @@ for both. `retirement-replay` binds each member's metric token prefix
 `compiler_batch_wall_time`, `compiler_batch_peak_rss`) to its index and rejects
 a member presented under another metric's index.
 Its `--input` is the (#1880) series manifest, not the series: the unchanged
-series stream is split greedily over whole lines into shards beside the
-manifest, which binds their order, offsets, bytes and SHA-256 and the joined
-series' bytes and SHA-256. The adapter rehashes every shard and the joined
-series as it parses them and refuses a reordered, missing, duplicated or
-truncated shard, an offset gap, a line split across shards and a
-non-canonical split (`tp_series_open`, `tp_series_line`); the format is
+series stream is split greedily over whole lines into shards
+`retirement-statistics-series-NNNN.txt` beside the manifest, which binds
+their order, offsets, bytes and SHA-256 and the joined series' bytes and
+SHA-256. The adapter rehashes every shard and the joined series as it parses
+them and refuses, naming the rule (`TpSeriesReader.refused`), a reordered,
+missing, duplicated, oversized or truncated shard, an offset gap, a count or
+leaf that is not canonical, a non-canonical number, a trailing manifest
+line, a line split across shards and a non-canonical split (`tp_series_open`,
+`tp_series_line`); the format is
 described in `tools/bench_service/README.md` under the composer.
 
 The complete declared family contains all overall aggregates, required slices

@@ -1292,6 +1292,8 @@ typedef struct TpComposeState
     uint64_t* series_sizes;
     TpRetirementComposeArtifact* series_shards;
     unsigned series_shard_count;
+    /* Scratch copies this composition created, removed on any outcome. */
+    unsigned scratch_shards, scratch_manifest, scratch_replay;
     uint64_t series_bytes;
     char series_sha256[65];
 } TpComposeState;
@@ -2317,6 +2319,7 @@ BUSTER_GLOBAL_LOCAL void tp_compose_series_line(TpComposeSeries* series, char co
             tp_compose_series_shard_path(path, series->shard);
             int fd = openat(state->request->scratch_root, path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC,
                             0600);
+            if (fd >= 0) state->scratch_shards = series->shard + 1;
             series->copy = fd >= 0 ? fdopen(fd, "wb") : NULL;
             if (fd >= 0 && !series->copy) close(fd);
             tp_compose_writer_begin(&series->writer, state->store, path, state->series_sizes[series->shard],
@@ -2448,6 +2451,7 @@ BUSTER_GLOBAL_LOCAL int tp_compose_series(TpComposeState* state)
     int valid = tp_compose_series_pass(state, 1);
     int fd = valid ? openat(request->scratch_root, TP_RETIREMENT_COMPOSE_SERIES_PATH,
                             O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0600) : -1;
+    state->scratch_manifest = fd >= 0;
     FILE* copy = fd >= 0 ? fdopen(fd, "wb") : NULL;
     if (fd >= 0 && !copy) close(fd);
     TpComposeWriter writer;
@@ -2654,14 +2658,73 @@ BUSTER_GLOBAL_LOCAL int tp_compose_adapter_run(TpComposeState* state)
     return valid;
 }
 
+/* One scratch copy the adapter read must still be exactly its sealed store
+ * file: a regular, unlinked-elsewhere file of the sealed bytes and digest. */
+BUSTER_GLOBAL_LOCAL int tp_compose_scratch_matches(TpComposeState* state, char const* path,
+                                                   TpRetirementComposeArtifact const* artifact)
+{
+    struct stat info = {0};
+    int fd = openat(state->request->scratch_root, path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    int valid = fd >= 0 && fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 &&
+                (uint64_t)info.st_size == artifact->bytes;
+    Sha256 hash;
+    sha256_init(&hash);
+    uint64_t used = 0;
+    unsigned char buffer[TP_COMPOSE_READ_BYTES];
+    while (valid && used < artifact->bytes)
+    {
+        ssize_t count = read(fd, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR) continue;
+        valid = count > 0 && (uint64_t)count <= artifact->bytes - used;
+        if (valid)
+        {
+            sha256_add(&hash, buffer, (u64)count);
+            used += (uint64_t)count;
+        }
+    }
+    if (valid)
+    {
+        char digest[65];
+        sha256_finish_hex(&hash, (char8*)digest);
+        valid = !strcmp(digest, artifact->sha256);
+    }
+    if (fd >= 0 && close(fd) != 0) valid = 0;
+    return valid;
+}
+
+/* Remove the scratch copies this composition created (the manifest and the
+ * shards it opened with O_EXCL) and the adapter's output, on success and on
+ * any refusal after the series began. */
+BUSTER_GLOBAL_LOCAL void tp_compose_scratch_clean(TpComposeState* state)
+{
+    TpRetirementComposeRequest const* request = state->request;
+    if (request && request->scratch_root >= 0)
+    {
+        if (state->scratch_replay) unlinkat(request->scratch_root, TP_RETIREMENT_COMPOSE_REPLAY_PATH, 0);
+        if (state->scratch_manifest) unlinkat(request->scratch_root, TP_RETIREMENT_COMPOSE_SERIES_PATH, 0);
+        for (unsigned s = 0; s < state->scratch_shards; ++s)
+        {
+            char path[TP_RETIREMENT_STORE_PATH_BYTES + 1];
+            tp_compose_series_shard_path(path, s);
+            unlinkat(request->scratch_root, path, 0);
+        }
+    }
+    state->scratch_replay = 0;
+    state->scratch_manifest = 0;
+    state->scratch_shards = 0;
+}
+
 /* Run the reviewed `bench_throughput retirement-replay` adapter on the
- * scratch copies of the series manifest and shards, check its output, then
- * seal it unchanged. */
+ * scratch copies of the series manifest and shards, check its output and
+ * that every copy it read is still its sealed store file, then seal the
+ * output unchanged. */
 BUSTER_GLOBAL_LOCAL int tp_compose_adapter(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
     struct stat info = {0};
     int valid = tp_compose_adapter_run(state);
+    /* The adapter's output (it runs only while that path is absent). */
+    state->scratch_replay = 1;
     int fd = valid ? openat(request->scratch_root, TP_RETIREMENT_COMPOSE_REPLAY_PATH,
                             O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC) : -1;
     valid = valid && fd >= 0 && fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_size > 0 &&
@@ -2678,6 +2741,15 @@ BUSTER_GLOBAL_LOCAL int tp_compose_adapter(TpComposeState* state)
     }
     if (fd >= 0 && close(fd) != 0) valid = 0;
     valid = valid && tp_compose_replay_check(state, bytes, length);
+    /* The adapter read the scratch copies, not the store: each must still
+     * be byte for byte the sealed manifest or shard. */
+    valid = valid && tp_compose_scratch_matches(state, TP_RETIREMENT_COMPOSE_SERIES_PATH, &state->series);
+    for (unsigned s = 0; valid && s < state->series_shard_count; ++s)
+    {
+        char path[TP_RETIREMENT_STORE_PATH_BYTES + 1];
+        tp_compose_series_shard_path(path, s);
+        valid = tp_compose_scratch_matches(state, path, state->series_shards + s);
+    }
     TpComposeWriter writer;
     if (valid)
     {
@@ -2685,17 +2757,7 @@ BUSTER_GLOBAL_LOCAL int tp_compose_adapter(TpComposeState* state)
         tp_compose_writer_bytes(&writer, bytes, length);
         valid = tp_compose_writer_publish(&writer, &state->replay);
     }
-    if (request->scratch_root >= 0)
-    {
-        unlinkat(request->scratch_root, TP_RETIREMENT_COMPOSE_REPLAY_PATH, 0);
-        unlinkat(request->scratch_root, TP_RETIREMENT_COMPOSE_SERIES_PATH, 0);
-        for (unsigned s = 0; s < state->series_shard_count; ++s)
-        {
-            char path[TP_RETIREMENT_STORE_PATH_BYTES + 1];
-            tp_compose_series_shard_path(path, s);
-            unlinkat(request->scratch_root, path, 0);
-        }
-    }
+    tp_compose_scratch_clean(state);
     return valid;
 }
 
@@ -3200,6 +3262,7 @@ int tp_retirement_compose(TpRetirementComposeRequest const* request, TpRetiremen
         if (result) result->refused = stage;
         tp_compose_tiling_abandon(&state.timed);
         tp_compose_tiling_abandon(&state.untimed_tiling);
+        tp_compose_scratch_clean(&state);
         if (request && request->store) request->store->failed = 1;
     }
     if (state.arena) arena_destroy(state.arena, 1);

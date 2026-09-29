@@ -489,7 +489,9 @@ its storage is sharded, in the way the transcripts and metrics already are.
 
   one shard line per shard in series order: indexes from 0, offsets
   contiguous from 0 with no gap or overlap, every shard nonempty and within
-  `shard_bytes`, distinct leaves, and shard bytes summing to the series.
+  `shard_bytes`, each leaf the canonical `retirement-statistics-series-NNNN.txt`
+  of its index, and shard bytes summing to the series. Numbers have one
+  spelling (no sign or leading zero) and nothing follows the last line.
 - **Store.** Each shard and the manifest are store entries with their own
   path, bytes and SHA-256, and sealed-closure members
   (`workflow.adapter_input` for the manifest,
@@ -504,9 +506,16 @@ its storage is sharded, in the way the transcripts and metrics already are.
   the joined series from the bytes it parses, and refuses a reordered,
   missing, duplicated or truncated shard, an offset gap, a line split across
   shards or a non-maximal (non-canonical) split. `bench_throughput
-  retirement-replay --input` takes the manifest and applies the same checks
-  (it accepts any shard size from 4 KiB to 64 MiB, so its own tests can span
-  several small shards; the validator alone pins 64 MiB).
+  retirement-replay --input` takes the manifest and applies the same checks,
+  naming the broken rule in its refusal (it accepts any shard size from
+  4 KiB to 64 MiB, so its own tests and the fixture-only composer size can
+  span several small shards; the validator alone pins 64 MiB, so a smaller
+  size cannot pass validation). Each rule has a test that fails when the rule
+  is removed.
+- **Composer scratch.** The adapter reads scratch copies; after it exits the
+  composer rehashes the manifest and every shard copy against the sealed
+  store files and refuses any difference. It removes the scratch copies it
+  created on success and on every refusal after the series began.
 
 Linux supervisor deadline coverage lives in `worker_deadline_tests.c`. Timed
 commands use explicit `exec` so the test retains an owned direct child rather

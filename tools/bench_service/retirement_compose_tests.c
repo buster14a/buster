@@ -715,6 +715,14 @@ BUSTER_GLOBAL_LOCAL int stub_adapter(char const* input_path, char const* output_
         }
     }
     if (valid) fputs("]}\n", output);
+    /* The tamper mode changes a series copy it read, keeping its size. */
+    FILE* tampered = !strncmp(mode, "tamper-manifest", 15) ? fopen(TP_RETIREMENT_COMPOSE_SERIES_PATH, "r+b") :
+                     !strncmp(mode, "tamper", 6) ? fopen("retirement-statistics-series-0000.txt", "r+b") : NULL;
+    if (tampered)
+    {
+        if (fputc('V', tampered) == EOF) valid = 0;
+        if (fclose(tampered) != 0) valid = 0;
+    }
     if (output && fclose(output) != 0) valid = 0;
     if (shard) fclose(shard);
     if (input) fclose(input);
@@ -1195,6 +1203,7 @@ BUSTER_GLOBAL_LOCAL void fixture_stop(Fixture* fixture)
         CHECK(rmdir(fixture->root) == 0);
     }
     tp_retirement_store_test_fail_sync = 0;
+    tp_retirement_compose_test_shard_bytes = 0;
 }
 
 BUSTER_GLOBAL_LOCAL int fixture_ready(Fixture* fixture)
@@ -1402,13 +1411,14 @@ typedef enum Refusal
     REFUSE_SAMPLE_ORDER, REFUSE_UNTIMED_MISSING, REFUSE_ADAPTER, REFUSE_WINDOW, REFUSE_DROPPED_RETAINED,
     REFUSE_DECLARATION_CHANGED, REFUSE_HALVED_WALL, REFUSE_MEMBER_MEMORY, REFUSE_ADAPTER_DIGEST,
     REFUSE_ADAPTER_TIMEOUT, REFUSE_ADAPTER_OUTPUT, REFUSE_GROUP_GAP, REFUSE_BINDING_POST, REFUSE_PRIOR_COUNT,
-    REFUSE_AA_TRAILING_SHARD, REFUSE_AA_TRANSCRIPT_TAMPERED, REFUSE_COUNT
+    REFUSE_AA_TRAILING_SHARD, REFUSE_AA_TRANSCRIPT_TAMPERED, REFUSE_SCRATCH_TAMPERED, REFUSE_SCRATCH_MANIFEST,
+    REFUSE_SCRATCH_TAKEN, REFUSE_COUNT
 } Refusal;
 
 BUSTER_GLOBAL_LOCAL char const* const refusal_stages[REFUSE_COUNT] = {"inventory", "inventory", "transcript", "prior",
     "context", "transcript", "prior", "bounds", "request", "partitions", "transcript", "samples", "untimed", "adapter",
     "transcript", "inventory", "retained", "samples", "samples", "adapter", "adapter", "adapter", "inventory", "context",
-    "prior", "aa-transcript", "aa-transcript"};
+    "prior", "aa-transcript", "aa-transcript", "adapter", "adapter", "series"};
 
 /* Swap two lines of a source stream file before import. */
 BUSTER_GLOBAL_LOCAL int fixture_swap_lines(Fixture* fixture, char const* name, unsigned first, unsigned second)
@@ -1491,6 +1501,17 @@ BUSTER_GLOBAL_LOCAL void test_compose_refusal(Refusal refusal)
         driver->timeout_ns = FIXTURE_ADAPTER_TIMEOUT_NS;
     }
     if (ready && refusal == REFUSE_ADAPTER_OUTPUT) ready = fixture_write(fixture.scratch, "stub-mode", "wrong-index\n", 12);
+    /* (#1880) A series copy changed while the adapter ran; and a scratch
+     * shard name already taken, so the series stage stops after creating
+     * its first shard copy (4 KiB shards). */
+    if (ready && refusal == REFUSE_SCRATCH_TAMPERED) ready = fixture_write(fixture.scratch, "stub-mode", "tamper\n", 7);
+    if (ready && refusal == REFUSE_SCRATCH_MANIFEST)
+        ready = fixture_write(fixture.scratch, "stub-mode", "tamper-manifest\n", 16);
+    if (ready && refusal == REFUSE_SCRATCH_TAKEN)
+    {
+        tp_retirement_compose_test_shard_bytes = 4096;
+        ready = fixture_write(fixture.scratch, "retirement-statistics-series-0001.txt", "taken\n", 6);
+    }
     if (ready && refusal == REFUSE_WINDOW) driver->completed_at_ns = driver->bound_at_ns + 5000;
     ready = ready && driver_open(driver);
     if (ready && refusal != REFUSE_UNPLANNED) ready = driver_plan(driver);
@@ -1544,6 +1565,12 @@ BUSTER_GLOBAL_LOCAL void test_compose_refusal(Refusal refusal)
         CHECK(driver->store.failed);
         struct stat info;
         CHECK(fstatat(driver->store_fd, "retirement-sealed-result.json", &info, AT_SYMLINK_NOFOLLOW) != 0);
+        /* Every scratch copy this attempt created is removed; a file it
+         * did not create stays. */
+        CHECK(fstatat(driver->scratch_fd, TP_RETIREMENT_COMPOSE_SERIES_PATH, &info, AT_SYMLINK_NOFOLLOW) != 0);
+        CHECK(fstatat(driver->scratch_fd, "retirement-statistics-series-0000.txt", &info, AT_SYMLINK_NOFOLLOW) != 0);
+        CHECK((fstatat(driver->scratch_fd, "retirement-statistics-series-0001.txt", &info, AT_SYMLINK_NOFOLLOW) == 0) ==
+              (refusal == REFUSE_SCRATCH_TAKEN));
     }
     fixture_stop(&fixture);
 }
