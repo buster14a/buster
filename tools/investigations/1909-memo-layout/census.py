@@ -289,6 +289,8 @@ def main():
     try:
         for path in paths:
             bodies, event_count = read_trace(path)
+            for body in bodies:
+                body["trace"] = str(path.relative_to(args.artifact_dir))
             summary = summarize(bodies)
             summary["trace"] = str(path.relative_to(args.artifact_dir))
             summary["events"] = event_count

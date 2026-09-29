@@ -114,7 +114,7 @@ def patch_parser(source, poison, replacements):
         memset(machine->expression_query_flags, 0, declaration->body_token_count);
 """
     if poison:
-        initialization += """        // Research diagnostic only: exercise misses with nonzero unpublished payload.
+        initialization += """        // Research diagnostic only: prove invalid flags prevent all payload reads.
         memset(machine->expression_queries, 0xa5, sizeof(*machine->expression_queries) * declaration->body_token_count);
 """
     source = replace_exact(source, """        machine->expression_queries = arena_allocate(machine->scratch_arena, CParseExpressionQuery, declaration->body_token_count);

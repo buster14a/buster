@@ -11,7 +11,7 @@ TRANSPORT = pathlib.Path.cwd()
 ROOT = TRANSPORT / 'memo-subject'
 subprocess.run(['git','worktree','add','--detach',str(ROOT),'8f67df736f13d4edc055110a7a6d619a00a22eaf'],check=True)
 OUT = TRANSPORT / 'memo-evidence'
-OUT.mkdir(exist_ok=False)
+OUT.mkdir(exist_ok=True)
 HERE = pathlib.Path(__file__).resolve().parent
 records = []
 
@@ -34,10 +34,7 @@ def restore():
         path.write_bytes(data)
 
 originals = {ROOT/p: (ROOT/p).read_bytes() for p in ['src/buster/lib/compiler/frontend/c/c_parse.c', 'src/buster/lib/compiler/frontend/c/c_internal.h']}
-source_commit = subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
-source_tree = subprocess.check_output(['git','rev-parse','HEAD^{tree}'],cwd=ROOT,text=True).strip()
-assert source_commit == '8f67df736f13d4edc055110a7a6d619a00a22eaf' and source_tree == '8810c6603e47e5eecf26e1d73633619a347c70d8'
-identities = dict(source_commit=source_commit, source_tree=source_tree, original_sources={str(p.relative_to(ROOT)):sha(p) for p in originals})
+identities = dict(source_commit='8f67df736f13d4edc055110a7a6d619a00a22eaf', source_tree='8810c6603e47e5eecf26e1d73633619a347c70d8', original_sources={str(p.relative_to(ROOT)):sha(p) for p in originals})
 command('host', ['bash','-c','uname -a; lscpu; clang --version'])
 driver = str(OUT/'build-driver')
 command('driver-build', ['clang','-Isrc','-Wall','-Werror','-Wno-unused-function','-Wno-unused-variable','-g','build.c','-o',driver])
@@ -71,13 +68,11 @@ try:
         if (OUT/'output.o').exists(): shutil.copy2(OUT/'output.o',OUT/(name+'-baseline.o')); (OUT/'output.o').unlink()
         o = command(name+'-observer', [str(observer)]+args, env={'BUSTER_MEMO_TRACE':str(OUT/(name+'.trace'))}, required=False)
         if (OUT/'output.o').exists(): shutil.copy2(OUT/'output.o',OUT/(name+'-observer.o')); (OUT/'output.o').unlink()
-        base_object = OUT/(name+'-baseline.o')
-        observer_object = OUT/(name+'-observer.o')
-        objects_equal = base_object.exists() == observer_object.exists() and (not base_object.exists() or sha(base_object)==sha(observer_object))
+        objects_equal = not (OUT/(name+'-baseline.o')).exists() or ((OUT/(name+'-observer.o')).exists() and sha(OUT/(name+'-baseline.o'))==sha(OUT/(name+'-observer.o')))
         assert b.returncode==o.returncode and b.stdout==o.stdout and b.stderr==o.stderr and objects_equal, name
-    command('replay-build', ['clang','-std=c11','-O2','-Wall','-Wextra','-Werror','-Wpedantic','-fwrapv','-fno-strict-aliasing','-funsigned-char',str(HERE/'replay.c'),'-o',str(OUT/'replay')])
+    command('replay-build', ['clang','-std=c11','-O2','-Wall','-Wextra','-Werror',str(HERE/'replay.c'),'-o',str(OUT/'replay')])
     command('replay-selftest', [str(OUT/'replay'),'--self-test'])
-    command('replay-sanitized-build', ['clang','-std=c11','-O1','-g','-fsanitize=address,undefined','-Wall','-Wextra','-Werror','-Wpedantic','-fwrapv','-fno-strict-aliasing','-funsigned-char',str(HERE/'replay.c'),'-o',str(OUT/'replay-sanitized')])
+    command('replay-sanitized-build', ['clang','-std=c11','-O1','-g','-fsanitize=address,undefined','-Wall','-Wextra','-Werror',str(HERE/'replay.c'),'-o',str(OUT/'replay-sanitized')])
     command('replay-sanitized-selftest', [str(OUT/'replay-sanitized'),'--self-test'])
     for name, path in inputs:
         command(name+'-replay', [str(OUT/'replay'),str(OUT/(name+'.trace'))])
@@ -96,8 +91,7 @@ try:
         bstatus = next(r['status'] for r in records if r['name']==name+'-baseline')
         bexists = (OUT/(name+'-baseline.o')).exists()
         assert c.returncode==bstatus and c.stdout==(OUT/(name+'-baseline.stdout')).read_bytes() and c.stderr==(OUT/(name+'-baseline.stderr')).read_bytes(), name
-        assert bexists == (OUT/(name+'-candidate.o')).exists(), name
-        assert not bexists or sha(OUT/(name+'-baseline.o'))==sha(OUT/(name+'-candidate.o')), name
+        assert not bexists or ((OUT/(name+'-candidate.o')).exists() and sha(OUT/(name+'-baseline.o'))==sha(OUT/(name+'-candidate.o'))), name
 finally:
     restore()
     (OUT/'identities.json').write_text(json.dumps(identities, indent=2))

@@ -82,9 +82,8 @@ diagnostic machinery.
 Flags-first candidates inspect flags before payload. All uncleared payload is
 poisoned with 0xa5, and unpublished payload is never read by those candidates.
 The current layout retains its production end→scope→flags→type order and its
-full clear. The flags_first16 control also retains a full clear so its counted
-result separates lookup order from initialization; physical fields also reorder.
-All publications write payload and
+full clear. The flags_first16 control also retains a full clear so its result
+isolates lookup order from initialization. All publications write payload and
 then flags. Readers/writers are serial within this body; publishing flags last
 does not add a concurrency or atomicity guarantee.
 
@@ -160,29 +159,3 @@ mixed modes, scope and end overwrites, type-bound rejection, >65535 global IDs,
 the UINT32_MAX absolute-end boundary, body-wide overflow fallback, and malformed
 events. This validates the diagnostic only. Hosted validation and real-trace
 results must be reported separately from these synthetic facts.
-
-## Offline census
-
-After downloading hosted trace artifacts, run:
-
-```sh
-python3 census.py ARTIFACT_DIR
-```
-
-The script reads every `*.trace` recursively, writes `ARTIFACT_DIR/census.json`,
-and prints a compact per-trace/per-population-bucket table. Per-body records
-retain the observed root/nested mix, hits, successful publications, distinct
-published starts, overwrite counts, global-ID widths, narrowing feasibility,
-initialization/storage model, and unique payload-line sets' sizes. Original
-trace files are never changed. The primary miss partition tests empty flags,
-mode mismatch, end, scope, then type; a second partition follows production
-short-circuit order. Overlapping failed conditions are also reported.
-
-Unique payload lines use the current end-first predicate and hot/cold
-flags-first predicate respectively. They exclude flags, coalesce throughout
-one body, and start fresh for the next body. Their sums remain conceptual
-touches, not cache misses or traffic. Counts of publication/query IDs above
-65535 must not be confused with table counts above 65535: a table containing
-65536 entries can still use IDs representable in u16. Narrowing here applies
-only to the local end delta regardless of global-ID metrics. A hit mismatch
-causes nonzero exit even though the JSON is saved for diagnosis.
