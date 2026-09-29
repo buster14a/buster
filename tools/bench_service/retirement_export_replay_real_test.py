@@ -124,6 +124,10 @@ class RealThroughputOutputTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.root = ROOT
+        # Only the Linux descriptor-bound throughput self-test produces these
+        # artifacts; on Linux a missing artifact is still an error.
+        if sys.platform != "linux":
+            raise unittest.SkipTest("the retirement producer's real output requires Linux")
         for name in (TIMED_EXECUTION, TIMED_SHARD, UNTIMED_RECORDS, UNTIMED_SHARD, RECEIPT):
             if not (cls.root / name).is_file():
                 raise RuntimeError(f"run `bench_throughput self-test` first: {name} is missing")
