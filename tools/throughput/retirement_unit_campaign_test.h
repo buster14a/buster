@@ -73,10 +73,13 @@ typedef struct TestUnitCampaign
     char command_sha[2][6][65];
     char* untimed_arguments[2][7];
     char* slow_arguments[2][7];
-    char untimed_sha[2][65], slow_sha[2][65];
+    char* noisy_arguments[2][7];
+    char* zero_arguments[7];
+    char untimed_sha[2][65], slow_sha[2][65], noisy_sha[2][65], zero_sha[65], zero_output[65];
     TpRetirementMeasuredCommand commands[2][6];
-    TpRetirementUntimedBatch untimed[4], slow[4];
+    TpRetirementUntimedBatch untimed[4], slow[4], noisy[4], different[4];
     TpRetirementCodeRow codes[4];
+    TpRetirementCodeSide code_side;
     BqRetirementCampaignReady ready;
     unsigned untimed_rows[1];
     TestBatchFixture batch;
@@ -86,7 +89,7 @@ typedef struct TestUnitCampaign
     BqRetirementTrustedRow trusted[7];
     BqRetirementRowFact facts[7];
     BqRetirementBatchGroup frozen;
-    BqRetirementCorrectness gate;
+    BqRetirementCorrectness gate, gate_copy;
     BqRetirementHeldBinaries held;
     BqRetirementUnitCampaignPins pins;
     uint8_t assigned[7];
@@ -181,6 +184,20 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
     unsigned artifact_bytes = test_artifact_fixture(artifact, 1, 1);
     Sha256 hash;
     sha256_init(&hash); sha256_add(&hash, artifact, artifact_bytes); sha256_finish_hex(&hash, fixture->artifact_sha);
+    /* The fixture compiler's artifact, parsed once: its code-section facts
+     * are the gate's for every code-eligible row. */
+    int probe = ok ? openat(fixture->cwd, "code-probe.bin", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600) : -1;
+    ok = ok && probe >= 3 && write(probe, artifact, artifact_bytes) == (ssize_t)artifact_bytes &&
+        tp_retirement_code_observe(probe, probe, &fixture->code_side);
+    if (probe >= 0) ok = close(probe) == 0 && unlinkat(fixture->cwd, "code-probe.bin", 0) == 0 && ok;
+    /* The artifact the child writes for `zero-code`, and its output digest. */
+    unsigned char zero[1024];
+    memcpy(zero, artifact, artifact_bytes);
+    test_artifact_put(zero, 136, 2, 8);
+    char zero_artifact[65];
+    sha256_init(&hash); sha256_add(&hash, zero, artifact_bytes); sha256_finish_hex(&hash, zero_artifact);
+    char const* zero_objects[] = {zero_artifact};
+    ok = ok && tp_retirement_batch_output_digest(zero_objects, 1, fixture->zero_output);
     sha256_init(&hash); sha256_add(&hash, "fixture-code\n", 13); sha256_finish_hex(&hash, fixture->code_sha);
     memcpy(fixture->runtime_sha, fixture->code_sha, 65);
     char const* objects[] = {fixture->artifact_sha};
@@ -271,7 +288,26 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
         for (unsigned purpose = 0; ok && purpose < 2; ++purpose)
             fixture->slow[variant * 2 + purpose] = (TpRetirementUntimedBatch){sleeping, 0, variant, purpose,
                 TP_RETIREMENT_GROUP_SINGLETON};
+        /* The same batch whose child writes 1.5 MiB of output and fails. */
+        char** noisy = fixture->noisy_arguments[variant];
+        memcpy(noisy, argv, sizeof(fixture->noisy_arguments[variant]));
+        noisy[4] = "noisy";
+        TpRetirementMeasuredCommand talking = command;
+        talking.arguments = noisy;
+        talking.command_sha256 = fixture->noisy_sha[variant];
+        ok = ok && tp_retirement_command_hash(&talking, fixture->noisy_sha[variant]);
+        for (unsigned purpose = 0; ok && purpose < 2; ++purpose)
+            fixture->noisy[variant * 2 + purpose] = (TpRetirementUntimedBatch){talking, 0, variant, purpose,
+                TP_RETIREMENT_GROUP_SINGLETON};
     }
+    /* A reproduction that writes other (valid) bytes than its production. */
+    memcpy(fixture->different, fixture->untimed, sizeof(fixture->different));
+    memcpy(fixture->zero_arguments, fixture->untimed_arguments[0], sizeof(fixture->zero_arguments));
+    fixture->zero_arguments[4] = "zero-code";
+    fixture->different[1].command.arguments = fixture->zero_arguments;
+    fixture->different[1].command.output_sha256 = fixture->zero_output;
+    fixture->different[1].command.command_sha256 = fixture->zero_sha;
+    ok = ok && tp_retirement_command_hash(&fixture->different[1].command, fixture->zero_sha);
     /* The untimed singleton group's row: row 3, a cross-target
      * compiler-eligible code row, which the timed projection never counts. */
     fixture->untimed_rows[0] = 3;
@@ -310,6 +346,13 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
     fixture->trusted[3].stage = BQ_RETIREMENT_STAGE_OBJECT;
     fixture->trusted[3].target = 2;
     fixture->facts[3].compiler_eligible = fixture->facts[3].code_eligible = 1;
+    for (unsigned variant = 0; variant < 2; ++variant)
+    {
+        BqRetirementObservedSide* side = &fixture->facts[3].side[variant];
+        memcpy(side->artifact_sha256, fixture->artifact_sha, 65);
+        memcpy(side->code_sha256, fixture->code_side.code_sha256, 65);
+        side->code_bytes = fixture->code_side.code_bytes;
+    }
     fixture->trusted[6].compiler_eligible = fixture->trusted[6].code_obligation = 1;
     fixture->trusted[6].stage = BQ_RETIREMENT_STAGE_LINK;
     fixture->trusted[6].target = BQ_RETIREMENT_NATIVE_TIMED_TARGET;
@@ -320,9 +363,9 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
         BqRetirementObservedSide* side = &fixture->facts[6].side[variant];
         memcpy(side->compiler_command_sha256, fixture->command_sha[1][2 + variant], 65);
         memcpy(side->artifact_sha256, fixture->artifact_sha, 65);
-        memcpy(side->code_sha256, fixture->code_sha, 65);
+        memcpy(side->code_sha256, fixture->code_side.code_sha256, 65);
         memcpy(side->runtime_command_sha256, fixture->command_sha[1][4 + variant], 65);
-        side->code_bytes = 13;
+        side->code_bytes = fixture->code_side.code_bytes;
     }
     fixture->frozen = (BqRetirementBatchGroup){{fixture->batch.contract, fixture->batch.contract}, {{0}}};
     memcpy(fixture->frozen.command_sha256[0], fixture->command_sha[1][0], 65);
@@ -484,6 +527,37 @@ static void test_unit_campaign_plan(TestUnitCampaign* fixture)
     BqRetirementUnitCampaignFacts facts = {digest, test_unit_campaign_ready, fixture->budget_sha, commands, &untimed,
         "job-1", "boot-123", 2, 1000, 0};
     CHECK(bq_retirement_unit_campaign_pre_context(&fixture->gate, &facts, context));
+    /* Exactly these facts, in this order: each subject (the candidate binary
+     * too, although the gate seal also covers it), the frozen commands, the
+     * untimed stream and the host and transcript identity. */
+    {
+        Sha256 hash;
+        char expected[65];
+        sha256_init(&hash);
+        static char const domain[] = BQ_RETIREMENT_UNIT_CAMPAIGN_PRE_DOMAIN;
+        sha256_add(&hash, domain, sizeof(domain) - 1);
+        BqRetirementPrepared const* prepared = &fixture->gate.prepared;
+        bq_retirement_unit_campaign_text(&hash, "plan", digest);
+        bq_retirement_unit_campaign_text(&hash, "ready", test_unit_campaign_ready);
+        bq_retirement_unit_campaign_text(&hash, "gate", fixture->gate.sealed_sha256);
+        bq_retirement_unit_campaign_text(&hash, "preparation", prepared->preparation_sha256);
+        bq_retirement_unit_campaign_text(&hash, "source-base", prepared->source_sha256[0]);
+        bq_retirement_unit_campaign_text(&hash, "source-candidate", prepared->source_sha256[1]);
+        bq_retirement_unit_campaign_text(&hash, "binary-base", prepared->binary_sha256[0]);
+        bq_retirement_unit_campaign_text(&hash, "binary-candidate", prepared->binary_sha256[1]);
+        bq_retirement_unit_campaign_text(&hash, "budget", fixture->budget_sha);
+        bq_retirement_unit_campaign_text(&hash, "commands", commands);
+        bq_retirement_unit_campaign_text(&hash, "untimed", untimed.sha256);
+        bq_retirement_unit_campaign_number(&hash, "untimed-records", untimed.records);
+        bq_retirement_unit_campaign_number(&hash, "untimed-bytes", untimed.bytes);
+        bq_retirement_unit_campaign_text(&hash, "job", "job-1");
+        bq_retirement_unit_campaign_number(&hash, "attempt", 2);
+        bq_retirement_unit_campaign_text(&hash, "boot", "boot-123");
+        bq_retirement_unit_campaign_number(&hash, "cpu", 0);
+        bq_retirement_unit_campaign_number(&hash, "bound-at", 1000);
+        sha256_finish_hex(&hash, expected);
+        CHECK(!strcmp(expected, context));
+    }
     fixture->gate.prepared.binary_sha256[1][0] = saved == 'e' ? 'f' : 'e';
     bq_retirement_correctness_seal(&fixture->gate, fixture->gate.sealed_sha256);
     CHECK(bq_retirement_unit_campaign_pre_context(&fixture->gate, &facts, context_changed) &&
@@ -528,6 +602,8 @@ enum
     TEST_UNIT_CAMPAIGN_EARLY_FREEZE, TEST_UNIT_CAMPAIGN_CANCELLED, TEST_UNIT_CAMPAIGN_AB_WITHOUT_ADMISSION,
     TEST_UNIT_CAMPAIGN_DENIED, TEST_UNIT_CAMPAIGN_STALE_ADMISSION, TEST_UNIT_CAMPAIGN_POST_AA_ADMISSION,
     TEST_UNIT_CAMPAIGN_AB_WITHOUT_FREEZE, TEST_UNIT_CAMPAIGN_FREEZE_AFTER_LAUNCH, TEST_UNIT_CAMPAIGN_BAD_HANDOFF,
+    TEST_UNIT_CAMPAIGN_UNTIMED_REPRODUCTION, TEST_UNIT_CAMPAIGN_UNTIMED_NOISY, TEST_UNIT_CAMPAIGN_UNTIMED_FACT,
+    TEST_UNIT_CAMPAIGN_TIMED_FACT, TEST_UNIT_CAMPAIGN_BOOTSTRAP, TEST_UNIT_CAMPAIGN_GATE_COPY,
     TEST_UNIT_CAMPAIGN_SCENARIOS
 };
 
@@ -539,7 +615,13 @@ static int test_unit_campaign_untimed(TestUnitCampaign* fixture, BqRetirementUni
     BqRetirementUnitCampaignStreams none = {0};
     BqRetirementHeldBinaries held = fixture->held;
     TpRetirementUntimedBatch batches[4];
-    memcpy(batches, scenario == TEST_UNIT_CAMPAIGN_UNTIMED_CANCELLED ? fixture->slow : fixture->untimed, sizeof(batches));
+    memcpy(batches, scenario == TEST_UNIT_CAMPAIGN_UNTIMED_CANCELLED ? fixture->slow :
+                    scenario == TEST_UNIT_CAMPAIGN_UNTIMED_NOISY ? fixture->noisy :
+                    scenario == TEST_UNIT_CAMPAIGN_UNTIMED_REPRODUCTION ? fixture->different : fixture->untimed,
+           sizeof(batches));
+    /* A copy of the gate the attach must refuse (the bind uses the fixture's). */
+    fixture->gate_copy = fixture->gate;
+    BqRetirementCorrectness const* gate = scenario == TEST_UNIT_CAMPAIGN_GATE_COPY ? &fixture->gate_copy : &fixture->gate;
     BqRetirementUnitCampaignCode code = {fixture->untimed_rows, fixture->codes, BUSTER_ARRAY_LENGTH(fixture->codes),
         fixture->code};
     memset(fixture->codes, 0, sizeof(fixture->codes));
@@ -563,7 +645,8 @@ static int test_unit_campaign_untimed(TestUnitCampaign* fixture, BqRetirementUni
         }
     }
     uint64_t started = tp_process_monotonic_ns();
-    int ok = bq_retirement_unit_campaign_untimed(driver, untimed, batches, 4, &held, &fixture->review, &none, &code);
+    int ok = bq_retirement_unit_campaign_untimed(driver, untimed, batches, 4, &held, gate, &fixture->review, &none,
+                                                 &code);
     uint64_t elapsed = tp_process_monotonic_ns() - started;
     fixture->untimed_inputs[0] = 1;
     BqRetirementUnitCampaignFailure failure = bq_retirement_unit_campaign_failure(driver);
@@ -589,6 +672,31 @@ static int test_unit_campaign_untimed(TestUnitCampaign* fixture, BqRetirementUni
         /* A 2 s launch cannot finish before a deadline 1.5 s away. */
         CHECK(!ok && failure.reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_DEADLINE && !failure.launched &&
               !failure.stage && !failure.group && !failure.variant && !failure.purpose && !driver->launches[0]);
+    else if (scenario == TEST_UNIT_CAMPAIGN_UNTIMED_REPRODUCTION)
+        /* The reproduction finished with its own valid output, but other bytes
+         * than the retained production object: refused after the launch,
+         * with its launch facts and its kept log. */
+        CHECK(!ok && failure.reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_LAUNCH && failure.launched &&
+              failure.after == BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_CODE && !failure.stage && !failure.variant &&
+              failure.purpose == TP_RETIREMENT_UNTIMED_REPRODUCTION && failure.sequence == 1 &&
+              failure.status == TP_RETIREMENT_MEASUREMENT_COMPLETE && !failure.exit_code &&
+              driver->launches[0] == 1 && tp_retirement_digest(failure.log_sha256) &&
+              !strcmp(failure.log_sha256, failure.retained_sha256) && failure.log_bytes == failure.retained_bytes &&
+              fstatat(fixture->cwd, BQ_RETIREMENT_UNIT_CAMPAIGN_LOG, &kept, AT_SYMLINK_NOFOLLOW) == 0);
+    else if (scenario == TEST_UNIT_CAMPAIGN_UNTIMED_NOISY)
+        /* 1.5 MiB of output: the full size and digest are kept, the file is
+         * capped at 1 MiB and its retained digest recorded. */
+        CHECK(!ok && failure.reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_LAUNCH && failure.launched &&
+              !failure.after && failure.exit_code == 7 && failure.log_bytes == UINT64_C(1572864) &&
+              tp_retirement_digest(failure.log_sha256) &&
+              failure.retained_bytes == BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_BYTES_MAX &&
+              tp_retirement_digest(failure.retained_sha256) && strcmp(failure.log_sha256, failure.retained_sha256) &&
+              fstatat(fixture->cwd, BQ_RETIREMENT_UNIT_CAMPAIGN_LOG, &kept, AT_SYMLINK_NOFOLLOW) == 0 &&
+              (uint64_t)kept.st_size == BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_BYTES_MAX && !driver->launches[0]);
+    else if (scenario == TEST_UNIT_CAMPAIGN_UNTIMED_FACT)
+        /* Every batch ran, but row 3's code size is not the gate's. */
+        CHECK(!ok && failure.reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_REFUSED && driver->launches[0] == 4 &&
+              driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED);
     else
     {
         /* Each untimed row's code facts: the retained production object,
@@ -636,7 +744,39 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
     TpRetirementUntimed untimed;
     CHECK(records && tp_retirement_untimed_init(&untimed, records, NULL, &fixture->budget, 1, reproduced, "job-1", 2,
                                                 "boot-123", fixture->cpu, start, UINT64_MAX - 1, 0));
+    /* A gate whose code facts the observed code must match: row 3's (untimed)
+     * or row 6's candidate (timed) size is changed and the gate resealed. */
+    uint64_t* changed = scenario == TEST_UNIT_CAMPAIGN_UNTIMED_FACT ? &fixture->facts[3].side[0].code_bytes :
+        scenario == TEST_UNIT_CAMPAIGN_TIMED_FACT ? &fixture->facts[6].side[1].code_bytes : NULL;
+    if (changed)
+    {
+        *changed += 1;
+        bq_retirement_correctness_seal(&fixture->gate, fixture->gate.sealed_sha256);
+    }
     int ok = test_unit_campaign_untimed(fixture, &driver, &untimed, scenario, cancel[1]);
+    if (ok && scenario == TEST_UNIT_CAMPAIGN_COMPLETE)
+    {
+        /* The untimed log chain: four empty logs (the fixture compiler
+         * writes no output), recomputed independently. */
+        Sha256 chain;
+        char expected[65], empty[65];
+        sha256_init(&chain);
+        static char const domain[] = BQ_RETIREMENT_UNIT_CAMPAIGN_LOGS_DOMAIN;
+        sha256_add(&chain, domain, sizeof(domain) - 1);
+        bq_retirement_unit_campaign_number(&chain, "stage", 0);
+        Sha256 nothing;
+        sha256_init(&nothing);
+        sha256_finish_hex(&nothing, empty);
+        for (unsigned launch = 0; launch < 4; ++launch)
+        {
+            bq_retirement_unit_campaign_number(&chain, "log", launch);
+            bq_retirement_unit_campaign_number(&chain, "bytes", 0);
+            bq_retirement_unit_campaign_text(&chain, "sha256", empty);
+        }
+        bq_retirement_unit_campaign_number(&chain, "logs", 4);
+        sha256_finish_hex(&chain, expected);
+        CHECK(!strcmp(driver.log_chain_sha256[0], expected));
+    }
     ok = ok && bq_retirement_unit_campaign_measuring(&driver);
     if (scenario == TEST_UNIT_CAMPAIGN_MEASURING_ACK)
         CHECK(!ok && driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED && phases.failed &&
@@ -689,13 +829,15 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
             store_plan.remaining_bytes += TP_RETIREMENT_RECEIPT_BYTES;
         }
         /* E's family counts for the same layout (5 bootstrap members, 9 cells). */
-        TpRetirementFamilyCounts family = {5, scenario == TEST_UNIT_CAMPAIGN_FAMILY ? 10u : 9u};
+        TpRetirementFamilyCounts family = {scenario == TEST_UNIT_CAMPAIGN_BOOTSTRAP ? 6u : 5u,
+                                           scenario == TEST_UNIT_CAMPAIGN_FAMILY ? 10u : 9u};
         ok = bq_retirement_unit_campaign_attach(&driver, &binding, &fixture->ready, &fixture->pins,
             scenario == TEST_UNIT_CAMPAIGN_UNPLANNED_STORE ? NULL : &store_plan, &family);
         if (scenario == TEST_UNIT_CAMPAIGN_LATE_BINDING || scenario == TEST_UNIT_CAMPAIGN_PLAN_OVERRIDE ||
             scenario == TEST_UNIT_CAMPAIGN_CONTEXT_OVERRIDE || scenario == TEST_UNIT_CAMPAIGN_UNPLANNED_STORE ||
             scenario == TEST_UNIT_CAMPAIGN_SHORT_STORE || scenario == TEST_UNIT_CAMPAIGN_UNMARKED ||
-            scenario == TEST_UNIT_CAMPAIGN_FAMILY || scenario == TEST_UNIT_CAMPAIGN_OTHER_HELD)
+            scenario == TEST_UNIT_CAMPAIGN_FAMILY || scenario == TEST_UNIT_CAMPAIGN_OTHER_HELD ||
+            scenario == TEST_UNIT_CAMPAIGN_BOOTSTRAP || scenario == TEST_UNIT_CAMPAIGN_GATE_COPY)
             CHECK(!ok && driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED &&
                   campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID && !stages.aa.execution.sequence &&
                   bq_retirement_unit_campaign_failure(&driver).reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_REFUSED);
@@ -733,7 +875,23 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
               campaign.phase == TP_RETIREMENT_CAMPAIGN_AWAIT_AA && tp_retirement_campaign_stage_ready(&campaign, 0) &&
               driver.transcript_shards[0] == 1 && driver.metrics_shards[1] == 1 && !stages.ab.execution.sequence &&
               tp_retirement_digest(driver.post_aa_sha256) && tp_retirement_digest(driver.log_chain_sha256[1]) &&
-              strcmp(driver.post_aa_sha256, context_sha));
+              strcmp(driver.post_aa_sha256, context_sha) &&
+              strcmp(driver.log_chain_sha256[0], driver.log_chain_sha256[1]));
+    if (ok && scenario == TEST_UNIT_CAMPAIGN_COMPLETE)
+    {
+        /* The post-A/A digest binds both launch-log chains. */
+        char post[65], chains[2][65];
+        memcpy(chains, driver.log_chain_sha256, sizeof(chains));
+        CHECK(bq_retirement_unit_campaign_post_aa(&campaign, context_sha, driver.shard_chain_sha256[0],
+                  (char const (*)[65])chains, post) && !strcmp(post, driver.post_aa_sha256));
+        for (unsigned index = 0; index < 2; ++index)
+        {
+            chains[index][0] = chains[index][0] == '0' ? '1' : '0';
+            CHECK(bq_retirement_unit_campaign_post_aa(&campaign, context_sha, driver.shard_chain_sha256[0],
+                      (char const (*)[65])chains, post) && strcmp(post, driver.post_aa_sha256));
+            chains[index][0] = driver.log_chain_sha256[index][0];
+        }
+    }
     if (ok && scenario == TEST_UNIT_CAMPAIGN_AB_WITHOUT_ADMISSION)
     {
         CHECK(!bq_retirement_unit_campaign_stage(&driver, fixture->commands[1], 6, &streams[1]) &&
@@ -779,6 +937,16 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
     }
     ok = ok && bq_retirement_unit_campaign_freeze(&driver) &&
         bq_retirement_unit_campaign_stage(&driver, fixture->commands[1], 6, &streams[1]);
+    if (scenario == TEST_UNIT_CAMPAIGN_TIMED_FACT)
+    {
+        /* Row 6's first candidate artifact is not the gate's code size:
+         * refused after that A/B launch, with its coordinates. */
+        BqRetirementUnitCampaignFailure failure = bq_retirement_unit_campaign_failure(&driver);
+        CHECK(!ok && failure.reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_LAUNCH && failure.launched &&
+              failure.after == BQ_RETIREMENT_UNIT_CAMPAIGN_AFTER_CODE && failure.stage == 2 && failure.group == 1 &&
+              failure.variant == 1 && !failure.kind && failure.status == TP_RETIREMENT_MEASUREMENT_COMPLETE &&
+              driver.launches[2] < 732 && campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID);
+    }
     if (ok)
         CHECK(driver.launches[2] == 732 && driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_AB &&
               campaign.phase == TP_RETIREMENT_CAMPAIGN_COLLECTED && phases.sequence == BQ_PHASE_MEASURING);
@@ -793,7 +961,10 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
               result.completed_at_ns > bound && !memcmp(&result.plan, &plan, sizeof(plan)) &&
               !strcmp(result.plan_sha256, plan_sha) && !strcmp(result.context_sha256, context_sha) &&
               !strcmp(result.post_aa_sha256, driver.post_aa_sha256) &&
-              !strcmp(result.post_context_sha256, driver.post_context_sha256) && result.code_count == 1 &&
+              !strcmp(result.post_context_sha256, driver.post_context_sha256) && result.code_count == 2 &&
+              result.codes[0].row == 3 && result.codes[1].row == 6 &&
+              !strcmp(result.codes[1].sides[1].code_sha256, fixture->code_side.code_sha256) &&
+              result.codes[1].sides[0].code_bytes == fixture->code_side.code_bytes &&
               result.codes == fixture->codes && result.untimed_records.records == 4 && result.launches[0] == 4 &&
               result.launches[1] == 732 && result.launches[2] == 732 &&
               tp_retirement_digest(result.log_chain_sha256[0]) && tp_retirement_digest(result.log_chain_sha256[1]) &&
@@ -808,7 +979,8 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
     {
         TpRetirementCampaignOutcome outcome = tp_retirement_campaign_outcome(&campaign);
         char post[65];
-        char const other_chains[2][65] = {"0000000000000000000000000000000000000000000000000000000000000000",
+        char const other_chains[3][65] = {"0000000000000000000000000000000000000000000000000000000000000000",
+                                          "0000000000000000000000000000000000000000000000000000000000000000",
                                           "0000000000000000000000000000000000000000000000000000000000000000"};
         CHECK(ok && driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_FINISHED && phases.sequence == BQ_PHASE_MEASURED &&
               outcome.execution == TP_RETIREMENT_CAMPAIGN_STATE_COMPLETE &&
@@ -818,13 +990,33 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
               tp_retirement_digest(driver.post_context_sha256) && strcmp(driver.post_context_sha256, context_sha) &&
               bq_retirement_unit_campaign_failure(&driver).reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_NONE);
         /* The post-sample digest chains exactly the frozen pre-sample one. */
+        char const (*logs)[65] = (char const (*)[65])driver.log_chain_sha256;
         CHECK(bq_retirement_unit_campaign_post_context(&campaign, context_sha,
-                  (char const (*)[65])driver.shard_chain_sha256, post) && !strcmp(post, driver.post_context_sha256));
+                  (char const (*)[65])driver.shard_chain_sha256, logs, post) &&
+              !strcmp(post, driver.post_context_sha256));
         CHECK(!bq_retirement_unit_campaign_post_context(&campaign, plan_sha,
-                  (char const (*)[65])driver.shard_chain_sha256, post) && !post[0]);
-        CHECK(bq_retirement_unit_campaign_post_context(&campaign, context_sha, other_chains, post) &&
+                  (char const (*)[65])driver.shard_chain_sha256, logs, post) && !post[0]);
+        CHECK(bq_retirement_unit_campaign_post_context(&campaign, context_sha, other_chains, logs, post) &&
               strcmp(post, driver.post_context_sha256));
-        CHECK(bq_retirement_unit_campaign_result(&driver, &result) && result.code_count == 1);
+        /* Each log chain enters the post-sample digest. */
+        for (unsigned index = 0; index < 3; ++index)
+        {
+            char chains[3][65];
+            memcpy(chains, driver.log_chain_sha256, sizeof(chains));
+            chains[index][0] = chains[index][0] == '0' ? '1' : '0';
+            CHECK(bq_retirement_unit_campaign_post_context(&campaign, context_sha,
+                      (char const (*)[65])driver.shard_chain_sha256, (char const (*)[65])chains, post) &&
+                  strcmp(post, driver.post_context_sha256));
+        }
+        /* MEASURED recorded the two confirmed digests over the post-sample one. */
+        char measured[65];
+        CHECK(bq_retirement_unit_campaign_result(&driver, &result) && result.code_count == 2 &&
+              !strcmp(result.sealed_result_sha256, test_unit_campaign_receipt) &&
+              !strcmp(result.authority_sha256, test_unit_campaign_ready) &&
+              bq_retirement_unit_campaign_measured_digest(driver.post_context_sha256, test_unit_campaign_receipt,
+                  test_unit_campaign_ready, measured) && !strcmp(result.measured_sha256, measured) &&
+              bq_retirement_unit_campaign_measured_digest(driver.post_context_sha256, test_unit_campaign_ready,
+                  test_unit_campaign_receipt, measured) && strcmp(result.measured_sha256, measured));
         /* A finished driver runs no further step, and then has no result. */
         CHECK(!bq_retirement_unit_campaign_measured(&driver, &handoff) &&
               driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED && !bq_retirement_unit_campaign_result(&driver, &result) &&
@@ -841,6 +1033,11 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
         if (cancel[side] >= 0) CHECK(close(cancel[side]) == 0);
     CHECK(test_unit_campaign_peer_join(&phases, peer));
     test_unit_campaign_scrub(fixture->cwd, fixture->code);
+    if (changed)
+    {
+        *changed -= 1;
+        bq_retirement_correctness_seal(&fixture->gate, fixture->gate.sealed_sha256);
+    }
 }
 
 static void test_retirement_unit_campaign(char const* executable_path, char const* root)
@@ -860,8 +1057,8 @@ static void test_retirement_unit_campaign(char const* executable_path, char cons
         TpRetirementFamilyCounts family = {5, 9};
         CHECK(!bq_retirement_unit_campaign_measuring(&idle) && idle.step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED);
         idle = (BqRetirementUnitCampaign){0};
-        CHECK(!bq_retirement_unit_campaign_untimed(&idle, NULL, fixture->untimed, 4, &fixture->held, &fixture->review,
-                                                   &none, &code));
+        CHECK(!bq_retirement_unit_campaign_untimed(&idle, NULL, fixture->untimed, 4, &fixture->held, &fixture->gate,
+                                                   &fixture->review, &none, &code));
         idle = (BqRetirementUnitCampaign){0};
         CHECK(!bq_retirement_unit_campaign_attach(&idle, NULL, &fixture->ready, &fixture->pins, NULL, &family));
         idle = (BqRetirementUnitCampaign){0};

@@ -455,6 +455,39 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_imports(BqPrepCampaignAttempt* context
         if (!trial) BQ_PREP_CHECK(read(cancel[0], drained, sizeof(drained)) == 1);
         BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
     }
+    /* A record store whose request names another recipe (the attempt's own
+     * request with only its recipe field changed): refused before anything
+     * is imported. */
+    char root[] = "/tmp/bq-retirement-unit-recipe-XXXXXX";
+    bool made = mkdtemp(root) != NULL;
+    int directory = made ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    char request_name[48];
+    BqRequest original = {0}, other = {0};
+    bool staged = directory >= 3 && bq_record_name(request_name, "request", job) &&
+        bq_record_read_at(attempt->store.directory, request_name, original.bytes, BQ_REQUEST_CAP, &original.size) ==
+        BQ_OK && bq_request_recipe(&original) == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
+    String8 request_fields[BQ_FIELD_COUNT];
+    for (u32 index = 0; staged && index < BQ_FIELD_COUNT; index += 1) request_fields[index] = bq_field(&original, index);
+    if (staged) request_fields[2] = S8("fake-success-v1");
+    staged = staged && bq_request_make(request_fields, &other) == BQ_OK &&
+        bq_request_recipe(&other) == BQ_RECIPE_FAKE_SUCCESS;
+    int record = staged ? openat(directory, request_name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600) : -1;
+    staged = record >= 0 && bq_write_all(record, other.bytes, other.size) && fchmod(record, 0400) == 0;
+    if (record >= 0) BQ_PREP_CHECK(close(record) == 0);
+    BQ_PREP_CHECK(staged);
+    if (staged)
+    {
+        BqRetirementCampaignUnitStore unit = context->unit;
+        unit.store.directory = directory;
+        BqPhaseChannel phases;
+        pid_t peer = bq_prep_campaign_channel(&phases, job, token, 2);
+        BQ_PREP_CHECK(bq_retirement_campaign_service_import_unit_pinned(&unit, &phases, cancel[0], generous, job, token,
+                          attempt->digest, context->ready_sha256, &campaign->unit_gate, &campaign->held,
+                          &campaign->ready) == BQ_INVALID_TRANSITION && bq_prep_campaign_unheld(campaign));
+        BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
+    }
+    if (directory >= 0) BQ_PREP_CHECK(close(directory) == 0);
+    if (made) bq_prep_test_cleanup(root);
     /* A gate sealed over other source manifests; the compiled blocked
      * profile of the production wrapper. */
     for (u32 trial = 0; trial < 2; trial += 1)
@@ -592,17 +625,18 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_ready_cases(BqPrepCampaignAttempt* con
                   bq_retirement_campaign_ready_unit_gate(&ready, admitted) == BQ_OK);
     BqRetirementCampaignReady joined = ready;
     joined.correctness_sha256[0] = joined.correctness_sha256[0] == '0' ? '1' : '0';
-    BQ_PREP_CHECK(bq_retirement_campaign_ready_gate(&joined, gate) == BQ_SOURCE_MISMATCH);
-    /* The unit gate: unissued, or with another seal, check authority or check
-     * evidence than the record's, never joins. */
-    for (u32 trial = 0; trial < 4; trial += 1)
+    BQ_PREP_CHECK(bq_retirement_campaign_ready_gate(&joined, gate) == BQ_RECIPE_MISMATCH);
+    /* The unit gate: released (not owned), unissued, or with another seal,
+     * check authority or check evidence than the record's, never joins. */
+    for (u32 trial = 0; trial < 5; trial += 1)
     {
         BqRetirementUnitGate other_gate = *admitted;
+        if (trial == 4) other_gate.owned = 0;
         if (!trial) other_gate.issuer = 0;
         char* digest = trial == 1 ? other_gate.seal_sha256 : trial == 2 ? other_gate.authority_sha256 :
             other_gate.evidence_sha256;
-        if (trial) digest[0] = digest[0] == '0' ? '1' : '0';
-        BQ_PREP_CHECK(bq_retirement_campaign_ready_unit_gate(&ready, &other_gate) == BQ_SOURCE_MISMATCH);
+        if (trial && trial < 4) digest[0] = digest[0] == '0' ? '1' : '0';
+        BQ_PREP_CHECK(bq_retirement_campaign_ready_unit_gate(&ready, &other_gate) == BQ_RECIPE_MISMATCH);
     }
     char* fields[] = {gate->prepared.preparation_sha256, gate->prepared.binary_sha256[1],
                       gate->prepared.support_sha256, gate->prepared.census_sha256,
@@ -619,7 +653,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_ready_cases(BqPrepCampaignAttempt* con
         joined = ready;
         memcpy(joined.correctness_sha256, gate->sealed_sha256, SHA256_HEX_CAPACITY);
         BQ_PREP_CHECK(bq_retirement_correctness_ready(gate) &&
-                      bq_retirement_campaign_ready_gate(&ready, gate) == BQ_SOURCE_MISMATCH &&
+                      bq_retirement_campaign_ready_gate(&ready, gate) == BQ_RECIPE_MISMATCH &&
                       bq_retirement_campaign_ready_gate(&joined, gate) == BQ_SOURCE_MISMATCH);
         memcpy(fields[index], saved, sizeof(saved));
         bq_retirement_correctness_seal(gate, gate->sealed_sha256);
@@ -628,7 +662,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_ready_cases(BqPrepCampaignAttempt* con
     /* An unready (resealed-after-change) gate never joins. */
     campaign->rows[7].census_row += 1;
     BQ_PREP_CHECK(!bq_retirement_correctness_ready(gate) &&
-                  bq_retirement_campaign_ready_gate(&ready, gate) == BQ_SOURCE_MISMATCH);
+                  bq_retirement_campaign_ready_gate(&ready, gate) == BQ_RECIPE_MISMATCH);
     campaign->rows[7].census_row -= 1;
 
     /* The held pair comes back from the record's digests and matches it. */
@@ -656,6 +690,37 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_ready_cases(BqPrepCampaignAttempt* con
     bq_retirement_campaign_ready_release(&ready);
 }
 
+/* Census row `census`'s tab-separated fields in the installed rows.tsv (an
+ * independent source for the dimension values): target, cpu, allocator,
+ * frontend_lowering and PIC, as columns 3, 5, 7, 8 and 9. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_census_fields(char const* text, u32 census, char fields[5][65])
+{
+    static u32 const columns[5] = {3, 5, 7, 8, 9};
+    char const* line = strchr(text, '\n');
+    bool found = false;
+    while (line && !found)
+    {
+        line += 1;
+        char const* end = strchr(line, '\n');
+        found = end && (u32)strtoul(line, NULL, 10) == census && line[0] >= '0' && line[0] <= '9';
+        for (u32 index = 0; found && index < 5; index += 1)
+        {
+            char const* cursor = line;
+            for (u32 column = 0; cursor && column < columns[index]; column += 1)
+            {
+                cursor = strchr(cursor, '\t');
+                if (cursor) cursor += 1;
+            }
+            size_t length = cursor ? strcspn(cursor, "\t\n") : 0;
+            found = cursor && length && length < 65;
+            if (found) memcpy(fields[index], cursor, length);
+            if (found) fields[index][length] = 0;
+        }
+        line = found ? line : end;
+    }
+    return found;
+}
+
 /* Lane E's per-timed-row layout from the pinned performance rows: every
  * timed row in ascending order with its campaign group, runtime flag and
  * dimension values; a short workspace, a gate row whose identity is not the
@@ -666,6 +731,34 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_timed_rows(BqPrepCampaignAttempt* cont
     unsigned count = 0;
     BQ_PREP_CHECK(rows && bq_retirement_campaign_service_timed_rows(&context->unit, campaign->gate, rows,
                   BQ_PREP_CAMPAIGN_CAP, &count) == BQ_OK && count == campaign->timed);
+    char path[256];
+    u32 const text_capacity = 1u << 20;
+    char* census_rows = malloc(text_capacity);
+    int named = snprintf(path, sizeof(path), "%s/rows.tsv", context->fixture->census);
+    BQ_PREP_CHECK(census_rows && named > 0 && (size_t)named < sizeof(path) &&
+                  bq_prep_test_read_text(path, census_rows, text_capacity) > 0);
+    for (u32 dense = 0; rows && census_rows && dense < count && dense < campaign->timed; dense += 1)
+    {
+        /* The exact values: the census row's own rows.tsv columns. */
+        char expected[5][65];
+        BQ_PREP_CHECK(bq_prep_campaign_census_fields(census_rows, campaign->rows[rows[dense].id].census_row, expected));
+        for (u32 dimension = 0; dimension < 5; dimension += 1)
+        {
+            bool same = !strcmp(rows[dense].dimensions[dimension], expected[dimension]);
+            if (!same)
+                fprintf(stderr, "RETIREMENT_PREP timed row %u dimension %u is %s, census has %s\n", rows[dense].id,
+                        dimension, rows[dense].dimensions[dimension], expected[dimension]);
+            BQ_PREP_CHECK(same);
+        }
+    }
+    free(census_rows);
+    /* The group total: without the last (singleton) timed row the ordinals
+     * cannot cover the gate's timed groups. */
+    TpRetirementTimedRow* partial = calloc(BQ_PREP_CAMPAIGN_CAP, sizeof(*partial));
+    if (partial) memcpy(partial, rows, (size_t)count * sizeof(*partial));
+    BQ_PREP_CHECK(partial && count > 1 && bq_retirement_campaign_timed_groups_assign(campaign->gate, partial, count) &&
+                  !bq_retirement_campaign_timed_groups_assign(campaign->gate, partial, count - 1u));
+    free(partial);
     for (u32 dense = 0; rows && dense < count && dense < campaign->timed; dense += 1)
     {
         u32 row = campaign->row_ids[dense], group = UINT32_MAX;
@@ -744,6 +837,7 @@ enum
     BQ_PREP_CAMPAIGN_BIND, BQ_PREP_CAMPAIGN_LATE, BQ_PREP_CAMPAIGN_READY_JOB, BQ_PREP_CAMPAIGN_READY_TOKEN,
     BQ_PREP_CAMPAIGN_MOVED, BQ_PREP_CAMPAIGN_SWAPPED, BQ_PREP_CAMPAIGN_HELD_DIGEST, BQ_PREP_CAMPAIGN_HELD_PREPARATION,
     BQ_PREP_CAMPAIGN_OTHER_GATE, BQ_PREP_CAMPAIGN_OTHER_UNIT_GATE, BQ_PREP_CAMPAIGN_CALLER_GATE,
+    BQ_PREP_CAMPAIGN_UNIT_GATE_COPY,
     BQ_PREP_CAMPAIGN_BLOCKED_PROFILE, BQ_PREP_CAMPAIGN_UNPINNED,
     BQ_PREP_CAMPAIGN_PLAN_OVERRIDE, BQ_PREP_CAMPAIGN_CONTEXT_OVERRIDE, BQ_PREP_CAMPAIGN_UNTIMED_OVERRIDE,
     BQ_PREP_CAMPAIGN_MODES
@@ -824,10 +918,14 @@ BUSTER_GLOBAL_LOCAL BqError bq_prep_campaign_bind(BqPrepCampaignAttempt* context
      * holds (an identical copy) rather than the unit gate's own. */
     BqRetirementUnitGate other_gate = campaign->unit_gate;
     other_gate.seal_sha256[0] = other_gate.seal_sha256[0] == '0' ? '1' : '0';
+    /* A whole-struct copy of the imported unit gate: identical, but not the
+     * gate the import joined. */
+    BqRetirementUnitGate whole = campaign->unit_gate;
     BqRetirementUnitGate const* unit_gate = mode == BQ_PREP_CAMPAIGN_OTHER_UNIT_GATE ? &other_gate :
-        &campaign->unit_gate;
+        mode == BQ_PREP_CAMPAIGN_UNIT_GATE_COPY ? &whole : &campaign->unit_gate;
     BqRetirementCorrectness copied = campaign->unit_gate.correctness;
     if (mode == BQ_PREP_CAMPAIGN_CALLER_GATE) request.gate = &copied;
+    if (mode == BQ_PREP_CAMPAIGN_UNIT_GATE_COPY) request.gate = &whole.correctness;
     u64 deadline = bq_phase_clock() + 300000000000ull;
     BqError result = mode == BQ_PREP_CAMPAIGN_BLOCKED_PROFILE ?
         bq_retirement_campaign_service_bind_unit(attempt->store, context->fixture->workspaces_fd,
@@ -849,7 +947,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_binds(BqPrepCampaignAttempt* context, 
 {
     static BqError const expected[BQ_PREP_CAMPAIGN_MODES] = {BQ_OK, BQ_INVALID_TRANSITION, BQ_INVALID_TRANSITION,
         BQ_INVALID_TRANSITION, BQ_WORKSPACE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH,
-        BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH,
+        BQ_RECIPE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH,
         BQ_RECIPE_MISMATCH};
     for (u32 mode = 0; mode < BQ_PREP_CAMPAIGN_MODES; mode += 1)
     {
@@ -956,7 +1054,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_driver(BqPrepCampaignAttempt* context,
         tp_retirement_untimed_init(&untimed, records, NULL, &campaign->budget, 1, reproduced, label, token,
             "boot-fixture", tp_first_allowed_cpu(), tp_process_monotonic_ns(), UINT64_MAX - 1, 0);
     BQ_PREP_CHECK(ok);
-    bool ran = ok && bq_retirement_unit_campaign_untimed(&driver, &untimed, batches, 4, &campaign->held, &review, &none,
+    bool ran = ok && bq_retirement_unit_campaign_untimed(&driver, &untimed, batches, 4, &campaign->held, campaign->gate,
+                                                         &review, &none,
                                                          &code);
     BqRetirementUnitCampaignFailure failure = bq_retirement_unit_campaign_failure(&driver);
     struct stat kept;

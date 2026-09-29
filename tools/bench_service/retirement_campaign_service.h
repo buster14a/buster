@@ -388,9 +388,12 @@ static inline BqError bq_retirement_campaign_ready_gate(BqRetirementCampaignRead
     BqRetirementCorrectness const* gate)
 {
     char population[SHA256_HEX_CAPACITY] = {0};
-    int ok = ready && ready->owned && ready->text && gate && bq_retirement_correctness_ready(gate) &&
-        !strcmp(gate->sealed_sha256, ready->correctness_sha256) &&
-        !strcmp(gate->prepared.preparation_sha256, ready->preparation_sha256) &&
+    /* Another or an unready correctness gate than the record's seal is a
+     * recipe (gate) mismatch; a field of the sealed gate that differs is a
+     * source mismatch. */
+    int sealed = ready && ready->owned && ready->text && gate && bq_retirement_correctness_ready(gate) &&
+        !strcmp(gate->sealed_sha256, ready->correctness_sha256);
+    int ok = sealed && !strcmp(gate->prepared.preparation_sha256, ready->preparation_sha256) &&
         !strcmp(gate->prepared.support_sha256, ready->support_sha256) &&
         !strcmp(gate->prepared.census_sha256, ready->census_sha256) &&
         !strcmp(gate->prepared.binary_sha256[0], ready->binary_sha256[0]) &&
@@ -415,7 +418,7 @@ static inline BqError bq_retirement_campaign_ready_gate(BqRetirementCampaignRead
     for (u32 row = 0; ok && row < gate->prepared.rows; row += 1)
         claimed += gate->trusted_rows[row].independent_oracle_sha256[0] ? 1u : 0u;
     ok = ok && claimed == ready->observed_rows;
-    BqError result = ok ? BQ_OK : BQ_SOURCE_MISMATCH;
+    BqError result = !sealed ? BQ_RECIPE_MISMATCH : ok ? BQ_OK : BQ_SOURCE_MISMATCH;
     return result;
 }
 
@@ -430,8 +433,20 @@ static inline BqError bq_retirement_campaign_ready_unit_gate(BqRetirementCampaig
         unit_gate->issuer == BQ_RETIREMENT_UNIT_GATE_ISSUED && !strcmp(unit_gate->seal_sha256, ready->gate_sha256) &&
         !strcmp(unit_gate->authority_sha256, ready->checks_authority_sha256) &&
         !strcmp(unit_gate->evidence_sha256, ready->check_evidence_sha256);
-    BqError result = issued ? bq_retirement_campaign_ready_gate(ready, &unit_gate->correctness) : BQ_SOURCE_MISMATCH;
+    BqError result = issued ? bq_retirement_campaign_ready_gate(ready, &unit_gate->correctness) : BQ_RECIPE_MISMATCH;
     return result;
+}
+
+/* The attempt's request, read from the record store before anything else:
+ * it must name the blocked retirement recipe. */
+static inline int bq_retirement_campaign_service_request_blocked(BqRetirementStore store, uint64_t job_id)
+{
+    char name[48];
+    BqRequest request = {0};
+    int ok = store.directory >= 0 && bq_record_name(name, "request", job_id) &&
+        bq_record_read_at(store.directory, name, request.bytes, BQ_REQUEST_CAP, &request.size) == BQ_OK &&
+        bq_request_recipe(&request) == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
+    return ok;
 }
 
 /* Hold both binaries again from the record digests the ready record names:
@@ -485,7 +500,9 @@ static inline int bq_retirement_campaign_service_phase(BqPhaseChannel const* pha
  * retirement recipe), the ready record through the coordinator replay, the
  * unit gate's A and sources, the unit gate joined to the record
  * (bq_retirement_campaign_ready_unit_gate), and both binaries held again
- * from the record's digests. held and ready must be empty; on
+ * from the record's digests; the imported record remembers the unit gate it
+ * joined (ready->unit_gate), and the bind accepts only that gate. held and
+ * ready must be empty; on
  * success both are filled for this attempt (release both). A refusal
  * releases only what this call filled. The channel is checked before and
  * after the import. */
@@ -500,11 +517,11 @@ static inline BqError bq_retirement_campaign_service_import_unit_pinned(BqRetire
         cancellation_fd, deadline_ns) ? BQ_OK : BQ_INVALID_TRANSITION;
     bool held_started = result == BQ_OK, ready_started = result == BQ_OK;
     if (held_started) *held = (BqRetirementHeldBinaries){.descriptors = {-1, -1}};
+    if (result == BQ_OK && !bq_retirement_campaign_service_request_blocked(unit->store, job_id))
+        result = BQ_INVALID_TRANSITION;
     if (result == BQ_OK)
         result = bq_retirement_unit_prepare_pinned(unit->store, unit->workspaces, unit->installed, job_id,
             attempt_token, unit->profile, unit->toolchain_root, preparation_sha256, &prepared);
-    if (result == BQ_OK && bq_request_recipe(&prepared.job.request) != BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)
-        result = BQ_INVALID_TRANSITION;
     if (result == BQ_OK) result = bq_retirement_campaign_ready_import(unit, &prepared, ready_sha256, ready);
     if (result == BQ_OK)
         result = bq_retirement_campaign_service_gate_matches(&unit_gate->correctness, preparation_sha256,
@@ -515,6 +532,7 @@ static inline BqError bq_retirement_campaign_service_import_unit_pinned(BqRetire
         cancellation_fd, deadline_ns))
         result = BQ_INVALID_TRANSITION;
     if (prepared.owned && !bq_retirement_unit_release(&prepared) && result == BQ_OK) result = BQ_IO;
+    if (result == BQ_OK) ready->unit_gate = unit_gate;
     if (result != BQ_OK)
     {
         if (held_started && held->owned) bq_retirement_binaries_release(held);
@@ -730,7 +748,8 @@ static inline BqError bq_retirement_campaign_service_bind_unit_pinned(BqRetireme
         ready->job.id == job_id && ready->job.token == attempt_token && transcript &&
         transcript->bound_at_ns > phases->last_time && unit_gate ? BQ_OK : BQ_INVALID_TRANSITION;
     if (result == BQ_OK && !bq_retirement_campaign_ready_standing(unit, ready)) result = BQ_WORKSPACE_MISMATCH;
-    if (result == BQ_OK && request->gate != &unit_gate->correctness) result = BQ_SOURCE_MISMATCH;
+    if (result == BQ_OK && (unit_gate != ready->unit_gate || request->gate != &unit_gate->correctness))
+        result = BQ_SOURCE_MISMATCH;
     if (result == BQ_OK) result = bq_retirement_campaign_ready_unit_gate(ready, unit_gate);
     if (result == BQ_OK && !bq_retirement_campaign_ready_holds(ready, held)) result = BQ_SOURCE_MISMATCH;
     BqRetirementUnitCampaignPins pins = {0};

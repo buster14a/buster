@@ -543,7 +543,8 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
 #ifdef __linux__
         /* With a cancellation descriptor, wait on the child's pidfd and that
          * descriptor together; without pidfd support the child is killed
-         * rather than run uncancellable. The alarm still bounds the child. */
+         * rather than run uncancellable, reported as launch error ENOSYS (not
+         * as a cancellation). The alarm still bounds the child. */
         int cancellation = inputs && inputs->cancellation >= 3 && sent == 1 ? inputs->cancellation : -1;
 #ifdef SYS_pidfd_open
         int child_fd = cancellation >= 0 ? (int)syscall(SYS_pidfd_open, pid, 0) : -1;
@@ -552,7 +553,7 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
 #endif
         if (cancellation >= 0 && child_fd < 0)
         {
-            result.cancelled = 1;
+            result.launch_error = ENOSYS;
             kill(-pid, SIGKILL);
         }
         int watching = child_fd >= 0;

@@ -10,10 +10,11 @@
  * reviewed campaign budget to hash to the caller's recipe-profile pin and to
  * hold the counts, each group costed by the kind and stage the gate's rows
  * give it. (M2) Object batch groups bind only when the gate carries the #509
- * correctness authority (gate->batch_authority), which only the future #509
- * importer sets; until then bind, bind_held and the pinned service entry
- * refuse every campaign with an object group, whatever the profile pins.
- * The recipe stays blocked until #509 supplies the correctness authority.
+ * correctness authority (gate->batch_authority), which only
+ * bq_retirement_correctness_authorize sets (lane B's step 9 issuer, over the
+ * row plan's evidence and the required checks); without it bind, bind_held
+ * and the pinned service entry refuse every campaign with an object group,
+ * whatever the profile pins. The recipe stays blocked.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_CAMPAIGN_BINDING_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_CAMPAIGN_BINDING_H

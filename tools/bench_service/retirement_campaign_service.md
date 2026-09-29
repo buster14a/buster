@@ -32,9 +32,11 @@ profile's `campaign-budget-sha256=` pin and passes it into the binding, where
 freeze requires the budget's digest to equal it; the checked-in blocked
 profile has no such pin, so the entry returns `BQ_RECIPE_MISMATCH`. Timed
 object rows bind through the gate's frozen batch groups, and only when the gate
-carries the sealed #509 authority flag, which only the future #509 importer
-sets. The fixture binds a singleton-only campaign and one with an object group
-(with a test stand-in for that flag) under a test-pinned profile, and refuses
+carries the sealed #509 authority flag, which only
+`bq_retirement_correctness_authorize` sets (lane B's step 9 issuer, over the row
+plan's evidence and the required checks). The queue fixture binds a
+singleton-only campaign and one with an object group (its test gate sets that
+flag by hand) under a test-pinned profile, and refuses
 an object row without a frozen contract, the unpinned profile, a budget other
 than the pin, object groups without the #509 flag under the pinned profile,
 and a singleton costed at another stage.

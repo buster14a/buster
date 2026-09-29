@@ -173,6 +173,15 @@ static int test_retirement_measurement_child(int argc, char** argv)
             access("cwd-marker", F_OK) == 0;
         if (ok && !strcmp(argv[4], "timeout")) test_delay(5000);
         if (ok && !strcmp(argv[4], "fail")) result = 7;
+        else if (ok && !strcmp(argv[4], "noisy"))
+        {
+            /* 1.5 MiB of output, then a failure: a log past the unit's cap. */
+            static char block[65536];
+            memset(block, 'n', sizeof(block));
+            for (unsigned i = 0; ok && i < 24; ++i) ok = fwrite(block, 1, sizeof(block), stdout) == sizeof(block);
+            ok = fflush(stdout) == 0 && ok;
+            result = 7;
+        }
         else if (ok && !strcmp(argv[4], "missing")) result = 0;
         else if (ok)
         {
