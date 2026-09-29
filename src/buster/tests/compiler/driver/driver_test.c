@@ -7300,7 +7300,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestAr
         String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
         if (node.length)
         {
-            String8 node_arguments[] = {node, S8("tests/wasm_integer_execution.js"), output};
+            String8 node_arguments[] = {node, S8("tests/wasm_integer_execution_startup.js"), output};
             CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run_with_retry(
                 arguments, arguments->arena, S8("integer"), S8("default"), S8("retry"),
                 (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments),

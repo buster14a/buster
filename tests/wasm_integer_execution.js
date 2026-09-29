@@ -1,8 +1,6 @@
 // Check the frontend and binary emitter together in an independent engine.
 "use strict";
 const fs = require("fs");
-// Prove that Node reached the oracle before loading or executing the module.
-fs.writeSync(process.stdout.fd, `WASM_NODE_READY startup_ms=${Date.now()}\n`);
 const assert = require("assert").strict;
 if (process.argv.length !== 3) throw new Error("usage: node wasm_integer_execution.js module.wasm");
 const e = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[2]))).exports;
