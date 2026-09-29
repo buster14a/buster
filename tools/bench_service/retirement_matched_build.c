@@ -414,6 +414,20 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_build_child(int writer, int directory, in
     return ok;
 }
 
+/* fexecve is POSIX.1-2008 but undeclared on macOS. bq_retirement_build_child
+ * already fails off Linux, so the portable build only needs the symbol gone. */
+BUSTER_GLOBAL_LOCAL void bq_retirement_build_fexecve(int executable, char const* const* argv,
+    char const* const* env)
+{
+#if defined(__linux__) && defined(SYS_close_range)
+    fexecve(executable, (char* const*)argv, (char* const*)env);
+#else
+    (void)executable;
+    (void)argv;
+    (void)env;
+#endif
+}
+
 /* The child keeps verified executable and source descriptors through setup;
  * replacement of either pathname cannot select different bytes or a cwd. The
  * worker still owns the separate candidate UID and sandbox around this stage. */
@@ -421,7 +435,7 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_build_exec_fd(int executable, int writer,
     BqRetirementBuildStage const* stage)
 {
     if (bq_retirement_build_child(writer, directory, source, true, stage->file_umask))
-        fexecve(executable, (char* const*)stage->argv, (char* const*)stage->env);
+        bq_retirement_build_fexecve(executable, stage->argv, stage->env);
     _exit(126);
 }
 
@@ -441,7 +455,7 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_build_exec_broker(int broker, int writer,
     bool ok = job_length > 0 && (size_t)job_length < sizeof(job) &&
               attempt_length > 0 && (size_t)attempt_length < sizeof(attempt) && stage->broker_stage &&
               bq_retirement_build_child(writer, directory, source, false, 0077);
-    if (ok) fexecve(broker, (char* const*)argv, (char* const*)env);
+    if (ok) bq_retirement_build_fexecve(broker, argv, env);
     _exit(126);
 }
 
@@ -647,7 +661,7 @@ BUSTER_GLOBAL_LOCAL pid_t bq_retirement_build_broker_kill(BqRetirementMatchedBui
     {
         char const* argv[] = {build->broker, "signal", unit, "KILL", NULL};
         char const* env[] = {"PATH=/usr/bin:/bin", "LC_ALL=C", NULL};
-        if (bq_retirement_build_child(null, -1, -1, false, 0077)) fexecve(broker, (char* const*)argv, (char* const*)env);
+        if (bq_retirement_build_child(null, -1, -1, false, 0077)) bq_retirement_build_fexecve(broker, argv, env);
         _exit(126);
     }
     if (child > 0) setpgid(child, child);
