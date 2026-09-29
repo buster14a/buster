@@ -3,7 +3,8 @@
 // The linker's public API: link_objects merges ObjectFiles into one, and
 // link_native_executable lays the merged file out as a runnable image —
 // static/dynamic ELF64 (x86-64, AArch64, Android), hosted PE64,
-// imports-free UEFI PE64, and Mach-O.
+// imports-free UEFI PE64, and Mach-O — or, on x86-64 Linux, as a shared
+// object or position-independent executable (NativeImageKind).
 
 #include <buster/lib/compiler/object/object.h>
 
@@ -49,6 +50,20 @@ struct LinkObjectResult
     String8 symbol;
     LinkError error;
 };
+
+// What link_native_executable produces.  EXECUTABLE is the fixed-address
+// image every writer has always made.  The two position-independent kinds are
+// ELF ET_DYN images at base zero, written only for x86-64 Linux today:
+// SHARED is a shared object with no entry point, whose defined default-
+// visibility symbols are exported (`-shared`), and PIE is an executable the
+// loader may place anywhere (`-pie`).
+typedef enum NativeImageKind
+{
+    NATIVE_IMAGE_EXECUTABLE,
+    NATIVE_IMAGE_SHARED,
+    NATIVE_IMAGE_PIE,
+    NATIVE_IMAGE_COUNT,
+} NativeImageKind;
 
 typedef struct NativeExecutableLinkOptions NativeExecutableLinkOptions;
 typedef struct NativeDynamicDataSymbol NativeDynamicDataSymbol;
@@ -97,15 +112,21 @@ struct NativeDynamicLibrary
     // to record the version of every reference that does bind, and a weak
     // reference to a name no library defines resolves to zero.
     NativeDynamicVersionedSymbol* versioned_symbols;
+    // ELF only: the names this library leaves undefined.  An executable
+    // exports each of its own definitions a library on its link line names,
+    // as ld does, so a library that calls back into the program or reads its
+    // data finds the definition without -rdynamic.
+    String8* referenced_symbols;
     u32 exported_symbol_count;
     u32 exported_data_symbol_count;
     u32 versioned_symbol_count;
+    u32 referenced_symbol_count;
     // Whether the driver read this library at all.  An empty export list is
     // not evidence that the library defines nothing: a library that was never
     // found on disk exports whatever it happens to export, so only a link
     // whose libraries were all read may read an absent name as absent.
     bool exports_known;
-    u8 reserved[3];
+    u8 reserved[7];
 };
 
 struct NativeExecutableLinkOptions
@@ -134,7 +155,9 @@ struct NativeExecutableLinkOptions
     u32 runtime_versioned_symbol_count;
     bool runtime_exports_known;
     bool debug_info;
-    u8 reserved[6];
+    // A NativeImageKind; zero is the fixed-address executable.
+    u8 image_kind;
+    u8 reserved[5];
 };
 
 typedef struct NativeExecutableLinkResult NativeExecutableLinkResult;
