@@ -19,12 +19,15 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # The macOS leg lives in throughput-harness-macos.yml with a path filter
+  # (#1825), so the Linux comparison below never waits for a macOS runner.
+  # Keep its Unix harness step identical to this one.
   harness:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-26.04, macos-26, windows-2025]
+        os: [ubuntu-26.04, windows-2025]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:

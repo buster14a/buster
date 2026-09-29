@@ -406,6 +406,13 @@ struct CodegenStatistics
     u32 verified_ir_module_count;
     u32 verified_mir_function_count;
     u32 verified_scheduled_function_count;
+    // Committed machine-path code bytes the encoder wrote straight into the
+    // module's code buffer, and those it wrote into its own buffer -- when
+    // its worst-case budget did not fit what the module buffer had left --
+    // and that were then copied in. A function abandoned for the canonical
+    // path after encoding counts in neither.
+    u64 machine_code_bytes_in_place;
+    u64 machine_code_bytes_copied;
 };
 
 struct CodegenModule
