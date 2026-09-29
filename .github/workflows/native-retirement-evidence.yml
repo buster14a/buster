@@ -144,8 +144,18 @@ jobs:
             python3 ../trusted/tools/native_retirement_rebind.py refresh \
               --repo-root "$(pwd)" | tee evidence/rebinding/refresh.json
           fi
+          # Outside a pull request the committed generated pair is checked as-is.
+          # Between an ordinary-bound merge and its catch-up (#1893) that pair
+          # is behind; fail with the reason instead of a census binding mismatch.
+          check_status=0
           python3 ../trusted/tools/native_retirement_rebind.py check \
-            --repo-root "$(pwd)" | tee evidence/rebinding/check.json
+            --repo-root "$(pwd)" | tee evidence/rebinding/check.json || check_status=$?
+          if [[ "$check_status" -eq 2 ]]; then
+            echo '::error::Committed native-retirement generated state is behind this revision; a catch-up is pending. Run evidence on a revision after the catch-up lands.'
+          fi
+          if [[ "$check_status" -ne 0 ]]; then
+            exit "$check_status"
+          fi
           unexpected=$(git diff --name-only -- . \
             ':(exclude)docs/native-retirement-repository-sources-v1.json' \
             ':(exclude)tools/native_retirement_dependency_binding.generated.h')
