@@ -21,7 +21,7 @@ files retain their exact unified-diff context, including blank context lines.
 | `layout-probe.c` | Compile-time checks against actual backend structures, not duplicated definitions. |
 
 For kernel replay, build current Debug non-unity objects through `./build.sh`
-and follow [the opt-in harness instructions](../../../../tools/bench_pr139_simd/README.md).
+and follow [the opt-in harness instructions](https://github.com/buster14a/buster/blob/ed99d3deca479e9eb2db1331103ddeba734e4fb7/tools/bench_pr139_simd/README.md).
 Its output directory must be private to the run. Never compare two current
 source trees as if they were a frozen-input compiler A/B.
 

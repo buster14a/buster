@@ -2808,6 +2808,86 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_uefi_pe64(UnitTestArguments* argume
 
 // Inspect both ELF writers on every host; runtime fixtures separately check
 // that the C frontend's alignment survives linking a real object file.
+// Empty loaded sections get no section header, so no allocated header sits at
+// address zero, and PT_TLS appears exactly when the image has thread-locals.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_empty_loaded_sections(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    u8 x86_64_text[] = {0x31, 0xc0, 0xc3};
+    u32 aarch64_text[] = {0x52800000, 0xd65f03c0};
+    u8 thread_local_data[] = {1, 2, 3, 4};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        ByteSlice text = architectures[architecture] == CPU_ARCH_X86_64
+                             ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_64_text)
+                             : (ByteSlice){.pointer = (u8*)aarch64_text, .length = sizeof(aarch64_text)};
+        for (u32 hosted = 0; hosted < 2; hosted += 1)
+        {
+            for (u32 with_thread_local = 0; with_thread_local < 2; with_thread_local += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                ObjectSymbol symbol = {.name = S8("main"), .size = text.length, .section = OBJECT_SECTION_TEXT,
+                                       .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+                ObjectFile object = link_test_object_make(arena, (Target){.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_LINUX},
+                                                          text, &symbol, 1, 0, 0);
+                if (with_thread_local)
+                {
+                    object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(thread_local_data);
+                }
+                NativeDynamicLibrary library = {.name = S8("libemptyprobe.so")};
+                NativeExecutableLinkResult linked = link_native_executable(arena, &object, (NativeExecutableLinkOptions){
+                    .dynamic_libraries = &library, .dynamic_library_count = hosted,
+                });
+                if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE && linked.executable.length >= 64))
+                {
+                    u8* image = linked.executable.pointer;
+                    u64 section_table = link_read_u64(image, 40);
+                    u16 section_count = 0;
+                    memcpy(&section_count, image + 60, sizeof(section_count));
+                    BUSTER_TEST(arguments, section_count > 1 && section_table <= linked.executable.length &&
+                                               (u64)section_count <= (linked.executable.length - section_table) / 64);
+                    bool allocated_headers_placed = true;
+                    for (u32 index = 1; index < section_count && section_table <= linked.executable.length &&
+                                        (u64)section_count <= (linked.executable.length - section_table) / 64;
+                         index += 1)
+                    {
+                        u64 header = section_table + (u64)index * 64;
+                        if (link_read_u64(image, header + 8) & 2)
+                        {
+                            allocated_headers_placed = allocated_headers_placed && link_read_u64(image, header + 16) != 0 &&
+                                                       link_read_u64(image, header + 32) != 0;
+                        }
+                    }
+                    BUSTER_TEST(arguments, allocated_headers_placed);
+                    BUSTER_TEST(arguments, link_test_elf_section_find(linked.executable, S8(".tdata"), 0, 0) == (with_thread_local != 0));
+                    BUSTER_TEST(arguments, !link_test_elf_section_find(linked.executable, S8(".rodata"), 0, 0));
+                    u64 program_header_offset = link_read_u64(image, 32);
+                    u16 program_header_count = 0;
+                    memcpy(&program_header_count, image + 56, sizeof(program_header_count));
+                    u32 thread_local_header_count = 0;
+                    bool thread_local_header_sized = true;
+                    for (u32 index = 0; index < program_header_count && program_header_offset <= linked.executable.length &&
+                                        (u64)program_header_count <= (linked.executable.length - program_header_offset) / 56;
+                         index += 1)
+                    {
+                        u64 program_header = program_header_offset + (u64)index * 56;
+                        if (link_read_u32(image, program_header) == 7)
+                        {
+                            thread_local_header_count += 1;
+                            thread_local_header_sized = thread_local_header_sized && link_read_u64(image, program_header + 40) != 0;
+                        }
+                    }
+                    BUSTER_TEST(arguments, thread_local_header_count == with_thread_local && thread_local_header_sized);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_data_alignment(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4012,6 +4092,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult section_table_tail = link_test_elf_section_table_tail(arguments);
     result.succeeded_test_count += section_table_tail.succeeded_test_count;
     result.test_count += section_table_tail.test_count;
+    UnitTestResult empty_loaded_sections = link_test_elf_empty_loaded_sections(arguments);
+    result.succeeded_test_count += empty_loaded_sections.succeeded_test_count;
+    result.test_count += empty_loaded_sections.test_count;
     UnitTestResult alignment = link_test_elf_data_alignment(arguments);
     result.succeeded_test_count += alignment.succeeded_test_count;
     result.test_count += alignment.test_count;
@@ -5643,10 +5726,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     u64 aarch64_bss_header = 0;
     u64 aarch64_debug_info_header = 0;
     BUSTER_TEST(arguments, link_test_elf_section_find(aarch64_executable.executable, S8(".text"), 0, &aarch64_text_header));
-    BUSTER_TEST(arguments, link_test_elf_section_find(aarch64_executable.executable, S8(".bss"), 0, &aarch64_bss_header));
+    BUSTER_TEST(arguments, !link_test_elf_section_find(aarch64_executable.executable, S8(".bss"), 0, &aarch64_bss_header));
     BUSTER_TEST(arguments, link_test_elf_section_find(aarch64_executable.executable, S8(".debug_info"), 0, &aarch64_debug_info_header));
     BUSTER_TEST(arguments, aarch64_text_header && link_read_u32(aarch64_executable.executable.pointer, aarch64_text_header + 4) == 1);
-    BUSTER_TEST(arguments, aarch64_bss_header && link_read_u32(aarch64_executable.executable.pointer, aarch64_bss_header + 4) == 8);
     BUSTER_TEST(arguments, aarch64_debug_info_header && link_read_u64(aarch64_executable.executable.pointer, aarch64_debug_info_header + 32) == 0);
     // The address oracle derives the result from ELF section addresses,
     // independently of the relocation input. Text targets precede the pair;
