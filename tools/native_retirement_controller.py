@@ -1,21 +1,33 @@
 #!/usr/bin/env python3
 """Reconcile retirement requests using the existing trusted writer (#1791).
 
-Ownership: this file and its workflow execute only from protected main. PR
+Ownership: this file and its workflows execute only from protected main. PR
 comments are a durable deduplication ledger, NOT authorization; the writer
 requires the exact request artifact of this trusted controller run. No candidate
 code, generated-file publication, merge mutation or host execution occurs here.
 
-Map: ledger codec; writer/outcome reconciliation; candidate selection; two-phase
-plan -> immutable artifact upload -> dispatch. An uncertain POST is never retried.
+Ordinary-bound PRs need no writer (#1893). When main's committed repository-
+source snapshot falls behind its admitted sources, the separate catch-up
+workflow opens one bot-owned PR from CATCH_UP_BRANCH whose only commit is empty
+(open_catch_up); the controller then dispatches the writer for it like any
+ordinary request, without prerequisite CI, and auto-merge queues it.
+
+Map: ledger codec; writer/outcome reconciliation; catch-up detection
+(snapshot_stale, is_catch_up_pr, catch_up_admissible); candidate selection;
+two-phase plan -> immutable artifact upload -> dispatch; catch_up opener. An
+uncertain POST is never retried.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
+import urllib.error
+import urllib.request
 
 import native_retirement_automation as automation
 import native_retirement_integration as integration
@@ -27,6 +39,18 @@ ACTIVE = frozenset(("queued", "in_progress", "waiting", "pending", "requested"))
 OUTCOME_JOB = "Native retirement automation outcome"
 OUTCOME_STEPS = {"Superseded request": "superseded", "Published request": "published",
                  "Blocked request": "blocked"}
+CATCH_UP_PATH = ".github/workflows/native-retirement-catch-up.yml"
+CATCH_UP_EVENTS = frozenset(("push", "schedule", "workflow_dispatch"))
+CATCH_UP_TITLE = "Native retirement catch-up: publish generated state for main"
+CATCH_UP_BODY = (
+    "Automatic catch-up (#1893). This PR's only commit is empty. The trusted "
+    "native-retirement writer replaces it with generated state reconstructed for "
+    "main, and auto-merge queues it. Do not edit or push to this branch.\n"
+)
+AUTO_MERGE_MUTATION = (
+    "mutation($id: ID!) { enablePullRequestAutoMerge("
+    "input: {pullRequestId: $id, mergeMethod: MERGE}) { clientMutationId } }"
+)
 
 
 def ledger_body(record: dict) -> str:
@@ -165,6 +189,53 @@ def eligible_pr(pr: dict, repository: str) -> bool:
             (pr.get("head", {}).get("repo") or {}).get("full_name") == repository)
 
 
+def _blob(repo: Path, revision: str, path: str) -> bytes:
+    result = subprocess.run(
+        ["git", "-C", os.fspath(repo), "cat-file", "blob", revision + ":" + path],
+        capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        raise integration.IntegrationError("cannot read " + path + " at " + revision)
+    return result.stdout
+
+
+def snapshot_stale(repo: Path, base: str) -> bool:
+    """Cheap, closure-free check: do admitted source bytes differ from the snapshot?
+
+    External/SDK inputs change only through policy transitions, which the writer
+    integrates before landing, so the snapshot is the only part that can lag.
+    """
+    import native_retirement_dependency_binding as authority
+    policy_raw = _blob(repo, base, authority.POLICY_PATH)
+    policy = authority.parse_policy(policy_raw)
+
+    def identity(source: str) -> tuple[int, str]:
+        data = _blob(repo, base, source)
+        return len(data), hashlib.sha256(data).hexdigest()
+
+    rendered, _records = authority.render_snapshot(policy_raw, policy, identity)
+    return rendered != _blob(repo, base, authority.SNAPSHOT_PATH)
+
+
+def is_catch_up_pr(pr: dict, repository: str) -> bool:
+    import native_retirement_merge_gate as gate
+    return (eligible_pr(pr, repository) and automation.is_bot(pr.get("user")) and
+            pr.get("head", {}).get("ref") == gate.CATCH_UP_BRANCH)
+
+
+def catch_up_admissible(repo: Path, base: str, head: str) -> bool:
+    """A published catch-up stays useful until main publishes newer generated state."""
+    import native_retirement_merge_gate as gate
+    parents, trailers = gate.integration_record(repo, head)
+    recorded = trailers.get(gate.TRAILER_BASE)
+    admissible = False
+    if len(parents) == 2 and isinstance(recorded, str) and gate.HEX40.fullmatch(recorded):
+        ancestor = integration._git(repo, "merge-base", "--is-ancestor", recorded, base, check=False)
+        admissible = (ancestor.returncode == 0 and
+                      not gate.generated_changed_between(repo, recorded, base))
+    return admissible
+
+
 def resolve_candidate(repo: Path, base: str, pr: dict, api) -> dict:
     # Lazy import keeps the ledger/state-machine tests independent of unrelated
     # repository materializers; production uses the existing trusted verifier.
@@ -182,10 +253,16 @@ def resolve_candidate(repo: Path, base: str, pr: dict, api) -> dict:
         raise automation.AutomationError(str(error)) from error
     classification = integration.classify_candidate(repo, base, record["source_head"])
     record["classification_record"] = classification.as_dict()
-    record["requires_writer"] = gate.classification_requires_writer(
-        classification, classification.changed_paths, gate.bound_sources(repo, base))
-    parents, trailers = gate.integration_record(repo, expected)
-    record["already_current"] = (len(parents) == 2 and trailers.get(gate.TRAILER_BASE) == base)
+    record["catch_up"] = is_catch_up_pr(pr, api.repository) and not classification.changed_paths
+    if record["catch_up"]:
+        record["already_current"] = catch_up_admissible(repo, base, expected)
+        record["requires_writer"] = not record["already_current"]
+    else:
+        # Ordinary-bound sources land through the queue; only trust
+        # transitions still need pre-integration (#1893).
+        record["requires_writer"] = gate.classification_requires_writer(classification)
+        parents, trailers = gate.integration_record(repo, expected)
+        record["already_current"] = (len(parents) == 2 and trailers.get(gate.TRAILER_BASE) == base)
     record["previously_published"] = record["source_head"] != expected
     return record
 
@@ -259,7 +336,9 @@ def plan(api, repo: Path, base: str, run_id: int) -> dict:
                 observations.append({"number": number, "status": "stale-idle-pr-deferred"})
                 continue
             automation.require_scope(policy, number, candidate["classification_record"])
-            if not prerequisite_ci(api, candidate["head"]):
+            # A bot-created catch-up head triggers no CI and contains no change
+            # to test; its published head runs the ordinary PR and queue CI.
+            if not candidate.get("catch_up") and not prerequisite_ci(api, candidate["head"]):
                 observations.append({"number": number, "status": "waiting-for-successful-ci-complete"})
                 continue
             request = automation.new_request(
@@ -346,16 +425,97 @@ def dispatch(api, request: dict) -> dict:
     return result
 
 
+def open_catch_up(api, graphql, base: str) -> dict:
+    """Create one empty commit on main, point the bot branch at it and open a PR."""
+    import native_retirement_merge_gate as gate
+    tree = api.request("git/commits/" + base)["tree"]["sha"]
+    commit = api.request("git/commits", method="POST", body={
+        "message": "Request native-retirement catch-up for " + base + "\n",
+        "tree": tree, "parents": [base]})
+    sha = automation.hex_value(commit.get("sha"), 40, "catch-up commit")
+    reference = "heads/" + gate.CATCH_UP_BRANCH
+    exists = True
+    try:
+        api.request("git/ref/" + reference)
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+        exists = False
+    if exists:
+        api.request("git/refs/" + reference, method="PATCH", body={"sha": sha, "force": True})
+    else:
+        api.request("git/refs", method="POST", body={"ref": "refs/" + reference, "sha": sha})
+    pr = api.request("pulls", method="POST", body={
+        "title": CATCH_UP_TITLE, "head": gate.CATCH_UP_BRANCH, "base": "main",
+        "body": CATCH_UP_BODY, "maintainer_can_modify": False})
+    number = automation.positive(pr.get("number"), "catch-up PR")
+    node = pr.get("node_id")
+    if not isinstance(node, str) or not node:
+        raise automation.AutomationError("catch-up PR has no node identity")
+    graphql(AUTO_MERGE_MUTATION, {"id": node})
+    return {"status": "opened", "pull_request": number, "head": sha}
+
+
+def catch_up(api, graphql, repo: Path, base: str, run_id: int) -> dict:
+    run = api.request("actions/runs/" + str(run_id))
+    automation.verify_run(run, api.repository, run_id, CATCH_UP_PATH, base, CATCH_UP_EVENTS)
+    if run.get("status") != "in_progress":
+        raise automation.AutomationError("catch-up opener is not an active fresh run")
+    if integration._commit(repo, "HEAD") != base:
+        raise automation.AutomationError("catch-up checkout differs from its immutable main revision")
+    policy, _digest = automation.read_policy(api, base)
+    result = {"status": "disabled"}
+    if policy["enabled"]:
+        automation.require_enabled(api, policy)
+        pulls = [pull for pull in api.all("pulls", state="open", base="main")
+                 if is_catch_up_pr(pull, api.repository)]
+        if not snapshot_stale(repo, base):
+            for pull in pulls:
+                api.request("pulls/" + str(pull["number"]), method="PATCH", body={"state": "closed"})
+            result = {"status": "current", "closed": [pull["number"] for pull in pulls]}
+        elif pulls:
+            result = {"status": "pending", "pull_requests": [pull["number"] for pull in pulls]}
+        else:
+            # Re-read main last: never open a request for a revision already replaced.
+            if api.request("git/ref/heads/main")["object"]["sha"] != base:
+                raise automation.AutomationMoved("main moved before opening a catch-up", 75)
+            result = open_catch_up(api, graphql, base)
+    return result
+
+
+def github_graphql(token: str):
+    def call(query: str, variables: dict) -> dict:
+        request = urllib.request.Request(
+            "https://api.github.com/graphql", method="POST",
+            data=json.dumps({"query": query, "variables": variables}).encode("utf-8"),
+            headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = json.loads(response.read())
+        if not isinstance(data, dict) or data.get("errors"):
+            raise automation.AutomationError("GraphQL request failed: " +
+                                             json.dumps(data.get("errors") if isinstance(data, dict) else data)[:500])
+        return data
+    return call
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("plan", "dispatch"))
+    parser.add_argument("command", choices=("plan", "dispatch", "catch-up"))
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
-    parser.add_argument("--request", type=Path, required=True)
+    parser.add_argument("--request", type=Path)
     args = parser.parse_args(argv)
     result = 1
     try:
         api = integration.GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GH_TOKEN"])
-        if args.command == "plan":
+        if args.command == "catch-up":
+            report = catch_up(api, github_graphql(os.environ["GH_TOKEN"]), args.repo_root,
+                              os.environ["GITHUB_WORKFLOW_SHA"], int(os.environ["GITHUB_RUN_ID"]))
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                summary.write("## Retirement catch-up\n\n```json\n" +
+                              json.dumps(report, indent=2) + "\n```\n")
+        elif args.request is None:
+            raise ValueError("--request is required for plan and dispatch")
+        elif args.command == "plan":
             report = plan(api, args.repo_root, os.environ["GITHUB_WORKFLOW_SHA"],
                           int(os.environ["GITHUB_RUN_ID"]))
             if report["status"] == "planned":

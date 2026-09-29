@@ -1,0 +1,42 @@
+name: Native retirement catch-up
+
+# Opens the single bot-owned catch-up request when main's committed
+# repository-source snapshot falls behind its admitted sources (#1893).
+# It runs only trusted main code, writes no generated state and cannot merge:
+# the writer publishes the request through the existing standing grant and the
+# native merge queue admits it. Its only write is an empty commit on the
+# catch-up branch plus the PR that carries it.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '2,32 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+concurrency:
+  group: native-retirement-catch-up
+  cancel-in-progress: false
+
+jobs:
+  open:
+    if: ${{ github.server_url == 'https://github.com' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Open the native-retirement catch-up request
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out immutable trusted main only
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Open or retire the catch-up request
+        run: python3 tools/native_retirement_controller.py catch-up --repo-root .

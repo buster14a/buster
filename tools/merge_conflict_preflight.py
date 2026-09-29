@@ -94,6 +94,7 @@ RETIREMENT_TRUST_PATHS = frozenset((
     ".github/workflows/native-retirement-contract.yml",
     ".github/workflows/native-retirement-integration.yml",
     ".github/workflows/native-retirement-automation.yml",
+    ".github/workflows/native-retirement-catch-up.yml",
     ".github/workflows/native-retirement-rebind.yml",
     ".gitattributes",
     "tools/native_retirement_contract.py",
