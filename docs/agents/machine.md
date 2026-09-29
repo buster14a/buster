@@ -259,12 +259,16 @@
   or CFG blocks. The extended-precision contract retains all 64 integer bits;
   arbitrary rounding-control modes and the complete control word are preserved.
 - System V x86-64 sixteen-byte vector wrappers retain SSE/SSEUP as one
-  sixteen-byte VECTOR ABI part. Union merging can split that pair into two
-  independent parts; an orphan SSEUP becomes SSE. Canonical classification
-  publishes no FLOAT_UP parts. MIR keeps these aggregates in frame slots,
-  with explicit XMM definition/use operands for whole-register argument
-  transfers and the existing XMM0 result bridges. Variadic prologues save
-  all sixteen XMM bytes, and each VECTOR read consumes one FP cursor slot.
+  sixteen-byte VECTOR ABI part. Android IEEE binary128 scalar values and
+  one-member wrappers use the same XMM contract. Union merging can split that
+  pair into two independent parts; an orphan SSEUP becomes SSE. Canonical
+  classification publishes no FLOAT_UP parts. MIR keeps these values in frame
+  slots, with explicit XMM definition/use operands for whole-register argument
+  transfers and the existing XMM0 result bridges. `machine_x64_type_is_f128`
+  admits only Android's exact sixteen-byte scalar layout; constants write both
+  limbs, CFG joins use the canonical pair mapping, and ordinary loads/stores
+  copy all sixteen bytes. Variadic prologues save all sixteen XMM bytes, and
+  each VECTOR read consumes one FP cursor slot.
   The shared direct oracle also copies both register-save/overflow halves
   and aligns the overflow cursor after an eight-byte stack argument.
   `basic_c_sysv_sseup.c` requires strict MIR across four SysV targets, all

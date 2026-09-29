@@ -3476,12 +3476,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                             String8 description = string_format(temporary.arena, S8("frame vector {S8} {S8} {S8} {S8} {S8} PIC={u32}: {S8}"),
                                 sources[fixture], targets[target], modes[mode], frontends[frontend], cpus[cpu], pic, compiled.diagnostic);
                             TargetDataLayout layout = target_data_layout(invocation.target);
-                            // No x86-64 allocator implements binary128 loads.
-                            // Require the structured refusal so selecting the
-                            // Android ABI can never silently reuse x87.
-                            bool x86_quad_control = fixture == 6 &&
+                            // Android x86-64 binary128 is strict in every MIR
+                            // allocator. The archived `none` emitter may still
+                            // report its structured pointer-load gap, exactly
+                            // like AArch64 during the MIR-only transition.
+                            bool x86_quad_target = fixture == 6 &&
                                 invocation.target.cpu_arch == CPU_ARCH_X86_64 &&
                                 layout.long_double_type.bit_width == 128;
+                            bool x86_quad_transition = x86_quad_target && mode == 0;
                             // During the MIR-only transition, the archived
                             // `none` path may still report its structured load
                             // gap while the MIR alias succeeds. Validate either
@@ -3501,12 +3503,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                             bool supported_quad = compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object &&
                                 compiled.codegen_statistics.function_count == function_counts[fixture] &&
                                 compiled.codegen_statistics.fallback_function_count == 0;
-                            BUSTER_TEST_RAW(arguments, x86_quad_control
-                                ? explicit_quad_unsupported
+                            BUSTER_TEST_RAW(arguments, x86_quad_target
+                                ? x86_quad_transition ? explicit_quad_unsupported || supported_quad : supported_quad
                                 : aarch64_quad_transition
                                 ? explicit_quad_unsupported || supported_quad
                                 : compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
-                            if (x86_quad_control)
+                            if (x86_quad_target)
                             {
                                 command[BUSTER_ARRAY_LENGTH(command) - 1] = S8("-UBUSTER_SIGNBIT_BINARY128_REJECTION");
                                 CompilerDriverInvocation positive = compiler_driver_parse_arguments(temporary.arena,
@@ -4649,20 +4651,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_binary128_transp
     return result;
 }
 
-// AAPCS64 binary128 arithmetic, comparisons, conversions, static folding,
-// variadics, HFA aggregates and complex values lower to compiler-runtime calls
-// around the transport contract above. Every cell is strict and must import
-// the soft-float entry points; native Linux links each object with the host
-// compiler's runtime library and executes its Clang-derived byte oracles.
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_binary128_runtime(UnitTestArguments* arguments)
+// Supported IEEE binary128 ABIs lower arithmetic, comparisons, conversions,
+// static folding, variadics, aggregates and complex values to compiler-runtime
+// calls around their direct-register transport. Every cell is strict and must
+// import the soft-float entry points; native Linux AArch64 also links each
+// object with the host runtime and executes its Clang-derived byte oracles.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_binary128_runtime(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-a64-f128-runtime-source"), S8(".c"));
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-f128-runtime-source"), S8(".c"));
     // Two literals keep each chunk under the portable string-length limit.
     String8 source_parts[] = {
         S8(
-        "// AAPCS64 binary128 runtime lowering: arithmetic, comparisons, negation,\n"
-        "// truth, rounding and integer conversions, static folding, variadics, HFA\n"
+        "// IEEE binary128 runtime lowering: arithmetic, comparisons, negation,\n"
+        "// truth, rounding and integer conversions, static folding and variadics;\n"
         "// aggregates and complex values. Every expected image was produced by Clang\n"
         "// for the same expression; each check compares all sixteen bytes.\n"
         "#if __LDBL_MANT_DIG__ == 113\n"
@@ -4806,7 +4808,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_binary128_runtim
     {
         return result;
     }
-    String8 targets[] = {S8("aarch64-linux"), S8("aarch64-linux-android"), S8("aarch64-unknown-uefi")};
+    String8 targets[] = {S8("aarch64-linux"), S8("aarch64-linux-android"), S8("aarch64-unknown-uefi"),
+                         S8("x86_64-linux-android")};
     String8 modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
     String8 positions[] = {S8("-fno-pic"), S8("-fPIC")};
@@ -4821,7 +4824,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_binary128_runtim
                 for (u32 position = 0; position < BUSTER_ARRAY_LENGTH(positions); position += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-a64-f128-runtime"), S8(".o"));
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-f128-runtime"), S8(".o"));
                     String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend], positions[position],
                         S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, source_path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
@@ -4839,10 +4842,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_binary128_runtim
                         BUSTER_TEST_RAW(arguments, symbol && symbol->section == OBJECT_SECTION_UNDEFINED,
                             string_format(temporary.arena, S8("{S8} imports {S8}"), description, imports[import]));
                     }
+                    if (compiled.has_object && target == BUSTER_ARRAY_LENGTH(targets) - 1)
+                    {
+                        String8 import = S8("__extenddftf2");
+                        ObjectSymbol const* symbol = compiler_driver_test_object_symbol(&compiled.object, import);
+                        BUSTER_TEST_RAW(arguments, symbol && symbol->section == OBJECT_SECTION_UNDEFINED,
+                            string_format(temporary.arena, S8("{S8} imports {S8}"), description, import));
+                    }
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && BUSTER_LINUX && !BUSTER_ANDROID
                     if (target == 0 && compiled.error == COMPILER_DRIVER_ERROR_NONE)
                     {
-                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-a64-f128-runtime-run"), S8(".elf"));
+                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-f128-runtime-run"), S8(".elf"));
                         String8 link[8];
                         u32 count = 0;
                         link[count++] = S8(BUSTER_HOST_C_COMPILER);
@@ -9945,7 +9955,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_i128_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_f128);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_binary128_transport);
-    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_binary128_runtime);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_binary128_runtime);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_i128_to_float);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x64_i128_float);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_node_policy);

@@ -528,8 +528,8 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_class_scalar_bit_width(MachineX64Selector co
     return result;
 }
 
-// The only sixteen-byte scalar float carried here is resolved SysV f80.
-// AArch64 binary128 and Win64 long double remain their own target shapes.
+// Resolved SysV f80 and Android binary128 are both sixteen-byte frame values,
+// but they use distinct x87 and XMM call shapes.
 BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_f80(MachineX64Selector const* selector, IrTypeId type_id)
 {
     MachineTypeClass type_class = machine_x64_type_class(selector, type_id);
@@ -539,6 +539,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_f80(MachineX64Selector const* selec
         result = codegen_canonical_x64_type_is_f80(ir_type_from_id(&selector->program->types, type_id));
     }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_f128(IrProgram* program, Target target, IrTypeId type_id)
+{
+    IrType* type = program ? ir_type_from_id(&program->types, type_id) : 0;
+    return target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_ANDROID &&
+           machine_x64_abi_convention(target) == IR_ABI_CONVENTION_SYSTEMV_X86_64 && type &&
+           type->layout.resolved && type->kind == IR_TYPE_FLOAT && type->bit_width == 128 &&
+           type->layout.size == 16 && type->layout.alignment == 16;
 }
 
 // Darwin caps bare vector ABI alignment at the CPU's available width.
@@ -823,6 +832,26 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
             .part_is_float = {1},
             .part_count = 1,
             .byte_size = 8,
+        };
+        return true;
+    }
+    if (machine_x64_type_is_f128(program, target, type_id))
+    {
+        IrAbiValue abi = ir_type_abi_value(program, type_id, convention, use);
+        if (abi.indirect || abi.memory || abi.part_count != 1 ||
+            abi.parts[0].abi_class != IR_ABI_CLASS_VECTOR || abi.parts[0].size != 16)
+        {
+            return false;
+        }
+        *shape = (MachineX64ValueShape){
+            .part_is_float = {1},
+            .part_sizes = {16},
+            .part_count = 1,
+            .byte_size = 16,
+            .exact_byte_size = 16,
+            .aggregate = true,
+            .xmm128 = true,
+            .stack_alignment = 16,
         };
         return true;
     }
@@ -2501,8 +2530,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_constant(MachineX64Selector* selecto
         machine_x64_define(selector, result_register, row);
         selected = true;
     }
-    else if (machine_x64_type_is_f80(selector, instruction->canonical_type) && instruction->immediate_count == 2 &&
-             !(instruction->immediates[1] & ~UINT64_C(0xffff)))
+    else if (instruction->immediate_count == 2 &&
+             ((machine_x64_type_is_f80(selector, instruction->canonical_type) &&
+               !(instruction->immediates[1] & ~UINT64_C(0xffff))) ||
+              machine_x64_type_is_f128(selector->program, selector->target, instruction->canonical_type)))
     {
         u32 slot = selector->value_stack_slots[instruction->result.value];
         selected = slot != UINT32_MAX;
@@ -7882,6 +7913,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             bool windows_va_list = machine_x64_type_is_windows_va_list(ir_type_from_id(&program->types, parameter->canonical_type), target);
             bool wide = (parameter_class.flags & MACHINE_TYPE_CLASS_INTEGER128) != 0 ||
                         machine_x64_type_is_f80(&selector, parameter->canonical_type) ||
+                        machine_x64_type_is_f128(program, target, parameter->canonical_type) ||
                         (parameter_class.kind == IR_TYPE_VECTOR && (parameter_class.flags & MACHINE_TYPE_CLASS_RESOLVED) &&
                          parameter_class.size_log2 <= 4);
             bool vector = selector.vector_registers_supported && (parameter_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER);
@@ -8420,8 +8452,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             // Address producers hold an 8-byte address in their vreg no
             // matter what their declared canonical type is, exactly like
             // the canonical path stores an address in the value's slot.
-            bool float_scalar = (value_class.flags & (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR)) ==
-                                (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR);
+            bool float_scalar =
+                !machine_x64_type_is_f128(program, selector.target, value->canonical_type) &&
+                (value_class.flags & (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR)) ==
+                    (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR);
             bool windows_va_list_register = windows_va_list &&
                                             (instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD ||
                                              instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_CALL);
@@ -8435,7 +8469,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                                                                                          });
                 selector.value_virtual_registers[instruction->result.value] = register_index;
             }
-            else if (machine_x64_type_is_f80(&selector, value->canonical_type))
+            else if (machine_x64_type_is_f80(&selector, value->canonical_type) ||
+                     machine_x64_type_is_f128(program, selector.target, value->canonical_type))
             {
                 selector.value_stack_slots[instruction->result.value] = machine_x64_append_slot(&selector, 16, 16);
             }
