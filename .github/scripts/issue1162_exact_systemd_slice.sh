@@ -878,6 +878,8 @@ record = {"outer": outer, "properties": props, "processes": rows, "keeper": keep
 json.dump(record, open("/root/k-out/a-keeper.json", "w"), indent=2, sort_keys=True)
 if keeper:
     print(f"K_VAR keeper={keeper['pid']}", flush=True)
+    if keeper["lease_fds"]:
+        print(f"K_VAR keeper_fd={keeper['lease_fds'][0]}", flush=True)
     emit(f"K_A_KEEPER_IN_OUTER unit={outer} keeper_pid={keeper['pid']} keeper_ppid={keeper['ppid']} "
          f"outer_main_pid={props.get('MainPID')} keeper_exe={keeper['exe']} keeper_cgroup={keeper['cgroup']} "
          f"outer_cgroup={props.get('ControlGroup')} keeper_lease_fds={keeper['lease_fds']} "
@@ -920,12 +922,18 @@ while not probed and time.monotonic() < b1_deadline:
         if stage in probed:
             continue
         unit = f"buster-bench-{job}-{attempt}-{stage}.service"
-        members = procs(f"{SLICE}/{unit}")
-        if not members:
+        pid, st = None, None
+        for member in procs(f"{SLICE}/{unit}"):
+            try:
+                candidate = status(member)
+            except OSError:
+                continue
+            if candidate["Uid"].split()[0] != "0":
+                pid, st = member, candidate
+                break
+        if pid is None:
             continue
-        pid = members[0]
         try:
-            st = status(pid)
             uid, gid = st["Uid"].split()[0], st["Gid"].split()[0]
             mountinfo = [l for l in open(f"/proc/{pid}/mountinfo").read().splitlines() if ".lease-return" in l]
         except (OSError, KeyError):
@@ -986,18 +994,27 @@ st = os.stat("/var/lib/buster-bench/lease/host.lock")
 dev = "%02x:%02x:%d" % (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino)
 out = open("/root/k-out/locks.log", "w", buffering=1)
 stop = "/root/k-out/locks.stop"
-previous, samples, gaps = None, 0, 0
+fdinfo = "/proc/%s/fdinfo/%s" % (sys.argv[2], sys.argv[3]) if len(sys.argv) > 3 else None
+previous, samples, gaps, keeper_gone = None, 0, 0, False
 end = time.monotonic() + float(sys.argv[1])
 while time.monotonic() < end and not os.path.exists(stop):
-    lines = tuple(sorted(l.split(":", 1)[1].strip() for l in open("/proc/locks").read().splitlines() if dev in l))
+    proc_locks = tuple(sorted(l.split(":", 1)[1].strip() for l in open("/proc/locks").read().splitlines() if dev in l))
+    held = None
+    if fdinfo and not keeper_gone:
+        try:
+            held = tuple(l.split(":", 1)[1].strip() for l in open(fdinfo).read().splitlines() if l.startswith("lock:"))
+        except OSError:
+            keeper_gone = True
     samples += 1
-    if lines != previous:
-        if not lines:
+    state = ("keeper-fdinfo=" + (" | ".join(held) if held else ("KEEPER-GONE" if keeper_gone else "NO-LOCK")),
+             "proc-locks=" + (" | ".join(proc_locks) or "none-visible"))
+    if state != previous:
+        if held is not None and not held and not keeper_gone:
             gaps += 1
-        out.write("%d %d %s\n" % (time.time_ns(), time.monotonic_ns(), " | ".join(lines) or "NO-LEASE-LOCK"))
-        previous = lines
+        out.write("%d %d %s\n" % (time.time_ns(), time.monotonic_ns(), " ; ".join(state)))
+        previous = state
     time.sleep(0.001)
-out.write("SUMMARY samples=%d unlocked_transitions=%d\n" % (samples, gaps))
+out.write("SUMMARY samples=%d keeper_fdinfo_unlocked_transitions=%d keeper_gone=%s\n" % (samples, gaps, keeper_gone))
 KLOCKS
   sudo docker exec -i "$guest" tee /root/k-stopper.py >/dev/null <<'KSTOP'
 import os, signal, subprocess, sys, time
@@ -1046,6 +1063,7 @@ KSTOP
   sudo docker exec "$guest" python3 /root/k-watch.py "$job" 900 2>&1 | tee "$evidence/k-watch.txt" || true
   attempt="$(sed -nE 's/^K_VAR attempt=([0-9]+)$/\1/p' "$evidence/k-watch.txt" | head -1)"
   keeper="$(sed -nE 's/^K_VAR keeper=([0-9]+)$/\1/p' "$evidence/k-watch.txt" | head -1)"
+  keeper_fd="$(sed -nE 's/^K_VAR keeper_fd=([0-9]+)$/\1/p' "$evidence/k-watch.txt" | head -1)"
   echo "K_REPRO job=$job attempt=${attempt:-none} keeper=${keeper:-none}"
   if [[ -n "$keeper" ]]; then
     sudo docker exec -d "$guest" strace -f -tt -T -yy -s 256 -o /root/k-strace/keeper -p "$keeper"
@@ -1063,7 +1081,7 @@ KSTOP
     # then restarts while the outer unit and its keeper are alive.
     oldpids="$(sudo docker exec "$guest" cat /sys/fs/cgroup/system.slice/buster-bench.service/cgroup.procs | tr '\n' ' ')"
     sudo docker exec "$guest" rm -f /root/k-out/locks.stop
-    sudo docker exec -d "$guest" python3 /root/k-locks.py 240
+    sudo docker exec -d "$guest" python3 /root/k-locks.py 240 "$keeper" "$keeper_fd"
     sudo docker exec -d "$guest" python3 /root/k-stopper.py $oldpids
     sleep 1
     echo "K_C_KILL_SERVICE $(date +%s%N) old_pids=$oldpids"
@@ -1090,6 +1108,7 @@ KSTOP
     sudo docker exec "$guest" touch /root/k-out/locks.stop
     sudo docker exec "$guest" pkill -INT -x strace || true
     sleep 2
+    sudo docker exec "$guest" sh -c 'sed "s/^/K_C_LOCKS /" /root/k-out/locks.log' || true
     kstate after-recovery
     # (d) a second job: explicit v2 TERM on a live stage, then KILL on the outer unit.
     key2="issue1162-${GITHUB_RUN_ID}-k2"
