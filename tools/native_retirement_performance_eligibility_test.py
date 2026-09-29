@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import unittest
+from unittest import mock
 import tempfile
 
 import native_retirement_performance_binding as binding
@@ -521,85 +522,226 @@ def disposition_inputs(census_rows):
     return expected_object, by_row, reasons
 
 
+def canonical_json(value):
+    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            + "\n").encode("utf-8")
+
+
 class SupplementDispositionTests(unittest.TestCase):
-    """Option 3 of the census disposition (decision recorded in #36)."""
+    """Option 3 of the census disposition (decision recorded in #36).
+
+    The fixture's two failed direct references (rows 0 and 4) are resolved by
+    genuine supplements; ``self.pin`` is this fixture's explicit test-only pin.
+    """
 
     def setUp(self):
         from native_retirement_contract_test import ContractTests, read_table
         self.fixture = ContractTests()
         self.fixture.setUp()
+        # The binding's manifest parser rejects empty property values, while the
+        # census writes empty fixture_filter/target_filter for an unfiltered
+        # run (reported separately); give this self-test fixture non-empty ones.
+        for shard in self.fixture.shards:
+            manifest = shard / "manifest.txt"
+            manifest.write_text(manifest.read_text()
+                                .replace("fixture_filter=\n", "fixture_filter=unfiltered\n")
+                                .replace("target_filter=\n", "target_filter=unfiltered\n"))
+        # Authenticated skips (census rows 128..143) beside the resolved rows.
+        self.fixture.install_applicability({("tests/unit.c", "x86_64-apple-ios",
+                                             "platform-inapplicable", "source-registration-test")})
         self.resolved = self.fixture.make_failed_direct_reference_supplements()
-        self.report = census.validate_shards(self.fixture.shards, self.fixture.root / "report.json",
+        self.report_path = self.fixture.root / "report.json"
+        self.report = census.validate_shards(self.fixture.shards, self.report_path,
                                              True, reference_supplements=True)
         _fields, self.rows = read_table(self.fixture.shards[0] / "rows.tsv")
         self.skips = set(self.report["applicability_skip_rows"])
+        self.pin = (len(self.resolved), binding._supplement_identity_digest(self.rows, self.resolved))
 
     def tearDown(self):
         self.fixture.tearDown()
 
-    def rule(self, report):
-        return binding._supplement_resolved_rows(report, self.rows, self.skips)
+    def rule(self, report, approved=None):
+        return binding._supplement_resolved_rows(report, self.rows, self.skips,
+                                                 self.pin if approved is None else approved)
 
-    def rehash_supplement(self, shard, mutation):
+    def supplements(self, report):
+        return binding._check_reference_supplements(self.fixture.root, report, self.rows,
+                                                    self.resolved)
+
+    def manifest_path(self, shard):
+        return self.fixture.shards[shard] / "reference-supplement/manifest.json"
+
+    def rehash_supplement(self, shard, mutation, report=None):
         """Rewrite one shard's supplement manifest and rebind its report digest."""
-        path = self.fixture.shards[shard] / "reference-supplement/manifest.json"
+        path = self.manifest_path(shard)
         manifest = json.loads(path.read_text())
         mutation(manifest)
         path.write_text(json.dumps(manifest))
-        report = copy.deepcopy(self.report)
+        report = copy.deepcopy(self.report if report is None else report)
         report["reference_supplement_sha256"][shard] = hashlib.sha256(path.read_bytes()).hexdigest()
         return report
 
-    def test_supplement_set_is_accepted_and_those_rows_are_compiler_ineligible(self):
+    # --- The end-to-end support check -------------------------------------
+
+    def support_binding(self, population=None):
+        """A binding whose support set is this genuine supplement census."""
+        root = self.fixture.root
+        shard = self.fixture.shards[0]
+        declaration = root / binding.SUPPORT_DECLARATION_PATH
+        declaration.parent.mkdir(parents=True, exist_ok=True)
+        declaration.write_bytes((shard / "support-contract.tsv").read_bytes())
+        performance = root / "performance"
+        performance.mkdir(exist_ok=True)
+
+        def descriptor(path):
+            data = path.read_bytes()
+            return {"path": path.relative_to(root).as_posix(), "bytes": len(data),
+                    "sha256": hashlib.sha256(data).hexdigest()}
+
+        files = {"support_declaration": descriptor(declaration),
+                 "manifest": descriptor(shard / "manifest.txt"),
+                 "inputs": descriptor(shard / "inputs.tsv"),
+                 "rows": descriptor(shard / "rows.tsv"),
+                 "dependencies": descriptor(shard / "dependencies.tsv"),
+                 "environment": descriptor(shard / "environment.tsv"),
+                 "validator_report": descriptor(self.report_path)}
+        resolved = set(self.resolved)
+        rows = [disposition_row(index, source, "object",
+                                index not in self.skips and index not in resolved)
+                for index, source in enumerate(self.rows)]
+        for stage, census_row in (("link", 1), ("self-host-stage1", 2)):
+            rows.append(disposition_row(len(rows), self.rows[census_row], stage, True))
+        for row in rows:
+            del row["metrics"]
+        if population is not None:
+            population(rows)
+        record = {"schema": binding.ROW_SCHEMA, "version": binding.ROW_VERSION,
+                  "row_identity_fields": list(binding.ROW_IDENTITY_FIELDS),
+                  "sources": {role: files[role]["sha256"] for role in binding.ROW_SOURCE_ROLES},
+                  "rows": rows}
+        rows_path = performance / "rows.json"
+        rows_path.write_bytes(canonical_json(record))
+        files["performance_rows"] = descriptor(rows_path)
+        row_data = binding._performance_rows_with_sources(rows_path.read_bytes())
+        parsed, axes, family, _sources = row_data
+        declaration_record = {
+            "schema": binding.PERFORMANCE_DECLARATION_SCHEMA,
+            "version": binding.PERFORMANCE_DECLARATION_VERSION,
+            **{f"{role}_sha256": files[role]["sha256"] for role in (
+                "support_declaration", "manifest", "inputs", "rows", "dependencies",
+                "environment", "validator_report", "performance_rows")},
+            "object_row_count": len(self.rows), "required_row_count": len(parsed),
+            "axes": axes, "row_identity_fields": list(binding.ROW_IDENTITY_FIELDS),
+            "statistical_family": family,
+            "runtime_eligibility": "independent-native-executable-oracle-only",
+            "code_section_eligibility": "deterministic-code-section-payload-only"}
+        declaration_path = performance / "declaration.json"
+        declaration_path.write_bytes(canonical_json(declaration_record))
+        files["performance_declaration"] = descriptor(declaration_path)
+        manifest = dict(line.split("=", 1) for line in
+                        (shard / "manifest.txt").read_text().splitlines())
+        subject = {"binary": {"bytes": int(manifest["compiler_bytes"]),
+                              "sha256": manifest["compiler_sha256"]}}
+        record = {"support": {"files": [dict(files[role], name=role)
+                                        for role in binding.SUPPORT_FILE_ROLES]},
+                  "subjects": {"candidate": subject, "baseline": subject}}
+        return record, row_data
+
+    def check_support(self, record, row_data, approved="pin"):
+        """Run the unmodified _check_support_output over this fixture census.
+
+        Only identities are substituted: the fixture's support declaration
+        digest, its self-test census profile and (option 3) its explicit
+        test-only pin of the approved set.
+        """
+        declaration = record["support"]["files"][
+            binding.SUPPORT_FILE_ROLES.index("support_declaration")]["sha256"]
+        approved_sets = {"self-test": self.pin} if approved == "pin" else approved
+        with mock.patch.object(binding, "SUPPORT_DECLARATION_SHA256", declaration), \
+                mock.patch.object(binding, "CENSUS_PROFILE", "self-test"), \
+                mock.patch.object(binding, "APPROVED_SUPPLEMENT_SETS", approved_sets):
+            return binding._check_support_output(self.fixture.root, record, row_data,
+                                                 binding.NATIVE_TIMED_TARGET)
+
+    def test_support_output_accepts_the_pinned_supplement_set_end_to_end(self):
+        record, row_data = self.support_binding()
+        output = self.check_support(record, row_data)
+        self.assertEqual(output["supplement_resolved_rows"], self.resolved)
+        self.assertEqual(self.skips, set(range(128, 144)))
+        for row in self.skips:
+            self.assertEqual(output["performance_applicability"][row]["compiler_ineligible_reason"],
+                             binding.NONEXECUTED_INELIGIBLE_REASON)
+        self.assertEqual(sorted(set(range(len(self.rows) + 2)) - output["compiler_eligible_rows"]),
+                         sorted(self.skips | set(self.resolved)))
+        for shard, row in enumerate(self.resolved):
+            applicability = output["performance_applicability"][row]
+            self.assertFalse(applicability["compiler_eligible"])
+            self.assertEqual(applicability["compiler_ineligible_reason"],
+                             binding.SUPPLEMENT_INELIGIBLE_REASON)
+            self.assertEqual(applicability["supplement"]["supplement_manifest_sha256"],
+                             self.report["reference_supplement_sha256"][shard])
+            self.assertEqual(applicability["reason"],
+                             "direct-reference-unresolved-clang-control-passed")
+        # MIR rows of the resolved groups keep every obligation.
+        self.assertTrue({1, 2, 3, 5, 6, 7} <= output["compiler_eligible_rows"])
+        self.assertEqual(output["eligible_object_row_count"],
+                         len(self.rows) - len(self.skips) - len(self.resolved))
+
+    def test_support_output_refuses_an_unpinned_or_different_set(self):
+        record, row_data = self.support_binding()
+        with self.assertRaisesRegex(ValueError, "no approved supplement-resolved set is pinned"):
+            self.check_support(record, row_data, approved={})
+        with self.assertRaisesRegex(ValueError, "not exactly the approved set"):
+            self.check_support(record, row_data, approved={"self-test": (
+                1, binding._supplement_identity_digest(self.rows, [0]))})
+
+    def test_support_output_refuses_a_resolved_row_kept_timed(self):
+        def keep_timed(rows):
+            eligibility = rows[0]["eligibility"]
+            eligibility.update(compiler_wall_time=True, compiler_peak_rss=True,
+                               generated_code_bytes=True, code_section="deterministic-code-section")
+        record, row_data = self.support_binding(keep_timed)
+        with self.assertRaisesRegex(ValueError, "supplement provenance"):
+            self.check_support(record, row_data)
+
+    def test_support_output_refuses_a_stage_row_on_a_resolved_identity(self):
+        def stage_identity(rows):
+            row = disposition_row(len(rows), self.rows[4], "link", False)
+            del row["metrics"]
+            rows.append(row)
+        record, row_data = self.support_binding(stage_identity)
+        with self.assertRaisesRegex(ValueError, "stage row carries a supplement-resolved"):
+            self.check_support(record, row_data)
+
+    def test_support_output_refuses_a_rehashed_supplement_missing_one_record(self):
+        def drop(manifest):
+            manifest["results"].pop()
+        self.report = self.rehash_supplement(1, drop)
+        self.report_path.write_text(json.dumps(self.report, indent=2, sort_keys=True) + "\n")
+        record, row_data = self.support_binding()
+        # The census replay rejects the forged report before the binding's own
+        # inventory check, which the next test isolates.
+        with self.assertRaisesRegex(ValueError, "replay"):
+            self.check_support(record, row_data)
+
+    # --- The support-check rule (b) and the pin ----------------------------
+
+    def test_pinned_supplement_set_is_accepted(self):
         self.assertEqual(self.resolved, [0, 4])
         self.assertEqual(self.rule(self.report), self.resolved)
-        by_row = {row: name for name, ids in self.report["applicability_rows_by_class"].items()
-                  for row in ids}
-        evidence = binding._check_validator_projection_evidence(
-            self.fixture.root, self.report, self.rows, by_row, self.skips)
-        binding._replay_validator_report(self.fixture.root, self.report, evidence)
-        proofs = binding._check_reference_supplements(self.fixture.root, self.report, self.rows,
-                                                      self.resolved)
-        self.assertEqual(set(proofs), {0, 4})
-        for shard, row in enumerate(self.resolved):
-            self.assertEqual(proofs[row]["reason"], binding.SUPPLEMENT_INELIGIBLE_REASON)
-            self.assertEqual(proofs[row]["decision"], binding.SUPPLEMENT_DISPOSITION_DECISION)
-            self.assertEqual(proofs[row]["supplement_manifest_sha256"],
-                             self.report["reference_supplement_sha256"][shard])
-        expected_object, _classes, _reasons = disposition_inputs(self.rows)
-        parsed = [disposition_row(index, row, "object", index not in self.resolved)
-                  for index, row in enumerate(self.rows)]
-        parsed.append(disposition_row(len(parsed), self.rows[1], "link", True))
-        eligible, applicability, objects = binding._derive_compiler_eligibility(
-            parsed, expected_object, self.skips, proofs, by_row, evidence["reasons"])
-        self.assertEqual(set(range(len(parsed))) - eligible, {0, 4})
-        self.assertEqual(objects, len(self.rows) - 2)
-        for row in self.resolved:
-            self.assertFalse(applicability[row]["compiler_eligible"])
-            self.assertEqual(applicability[row]["compiler_ineligible_reason"],
-                             binding.SUPPLEMENT_INELIGIBLE_REASON)
-            self.assertEqual(applicability[row]["supplement"], proofs[row])
-            self.assertEqual(applicability[row]["reason"],
-                             "direct-reference-unresolved-clang-control-passed")
-        # Correctness and MIR rows are unchanged: the group's MIR rows stay eligible.
-        self.assertTrue({1, 2, 3, 5, 6, 7} <= eligible)
-        timed = {row["row"] for row in binding._timed_rows(parsed)}
-        self.assertFalse({0, 4} & timed)
-        self.assertEqual(len(timed), 16 - 2 + 1)
-        self.assertEqual({row["row"] for row in parsed if row["metrics"]["generated_code_bytes"]},
-                         eligible)
 
-        # The rows are never silently dropped: an artifact that keeps them
-        # eligible, or a stage row carrying their identity, is rejected.
-        kept = copy.deepcopy(parsed)
-        kept[0] = disposition_row(0, self.rows[0], "object", True)
-        with self.assertRaisesRegex(ValueError, "supplement provenance"):
-            binding._derive_compiler_eligibility(kept, expected_object, self.skips, proofs,
-                                                 by_row, evidence["reasons"])
-        stage = parsed + [disposition_row(len(parsed), self.rows[4], "link", False)]
-        with self.assertRaisesRegex(ValueError, "stage row carries a supplement-resolved"):
-            binding._derive_compiler_eligibility(stage, expected_object, self.skips, proofs,
-                                                 by_row, evidence["reasons"])
+    def test_set_outside_the_pin_is_refused(self):
+        for approved in ((1, binding._supplement_identity_digest(self.rows, [0])),
+                         (2, binding._supplement_identity_digest(self.rows, [0, 8])),
+                         (3, binding._supplement_identity_digest(self.rows, [0, 4, 8]))):
+            with self.subTest(approved=approved), \
+                    self.assertRaisesRegex(ValueError, "not exactly the approved set"):
+                self.rule(self.report, approved)
+        with self.assertRaisesRegex(ValueError, "no approved supplement-resolved set is pinned"):
+            binding._supplement_resolved_rows(self.report, self.rows, self.skips)
+        full = dict(self.report, profile="full-census")
+        with self.assertRaisesRegex(ValueError, "not exactly the approved set"):
+            binding._supplement_resolved_rows(full, self.rows, self.skips)
 
     def test_every_defect_outside_the_supplement_set_stays_fatal(self):
         cases = (
@@ -620,97 +762,230 @@ class SupplementDispositionTests(unittest.TestCase):
                     self.assertRaisesRegex(ValueError, message):
                 self.rule(report)
 
-    def test_supplement_inventory_and_digest_must_match(self):
+    def test_direct_reference_set_is_group_closed(self):
+        orphan = copy.deepcopy(self.report)
+        orphan["direct_reference_failure_rows"] = sorted(orphan["direct_reference_failure_rows"] + [9])
+        with self.assertRaisesRegex(ValueError, "has no failed allocator-none reference"):
+            self.rule(orphan)
+        partial = copy.deepcopy(self.report)
+        partial["direct_reference_failure_rows"] = [0, 1, 2, 4, 5, 6, 7]
+        with self.assertRaisesRegex(ValueError, "do not cover the group's executed rows"):
+            self.rule(partial)
+
+    def test_supplement_digest_count_is_one_per_shard_exactly_when_rows_resolve(self):
         unsupplemented = copy.deepcopy(self.report)
         unsupplemented["reference_supplement_sha256"] = []
         with self.assertRaisesRegex(ValueError, "without an independent reference supplement"):
             self.rule(unsupplemented)
         short = copy.deepcopy(self.report)
         short["reference_supplement_sha256"] = short["reference_supplement_sha256"][:1]
-        with self.assertRaisesRegex(ValueError, "do not cover every census shard"):
+        with self.assertRaisesRegex(ValueError, "do not cover every census shard exactly"):
             self.rule(short)
-        partial = copy.deepcopy(self.report)
-        partial["direct_reference_failure_rows"] = [0, 1, 2, 4, 5, 6, 7]
-        with self.assertRaisesRegex(ValueError, "do not cover the group's executed rows"):
-            self.rule(partial)
+        # With nothing resolved, no supplement digest may be retained (as in C).
+        empty = copy.deepcopy(self.report)
+        for field in ("direct_reference_failure_rows",) + binding.SUPPLEMENT_DEFECT_FIELDS:
+            empty[field] = []
+        with self.assertRaisesRegex(ValueError, "do not cover every census shard exactly"):
+            self.rule(empty, (0, hashlib.sha256(b"").hexdigest()))
+        empty["reference_supplement_sha256"] = []
+        self.assertEqual(self.rule(empty, (0, hashlib.sha256(b"").hexdigest())), [])
+        self.assertEqual(binding._supplement_resolved_rows(empty, self.rows, self.skips), [])
 
+    # --- Per-row supplement authentication ----------------------------------
+
+    def test_supplement_records_are_authenticated(self):
+        proofs = self.supplements(self.report)
+        self.assertEqual(set(proofs), {0, 4})
+        for shard, row in enumerate(self.resolved):
+            self.assertEqual(proofs[row]["reason"], binding.SUPPLEMENT_INELIGIBLE_REASON)
+            self.assertEqual(proofs[row]["decision"], binding.SUPPLEMENT_DISPOSITION_DECISION)
+            self.assertEqual(proofs[row]["supplement_manifest_sha256"],
+                             self.report["reference_supplement_sha256"][shard])
         mismatched = copy.deepcopy(self.report)
         mismatched["reference_supplement_sha256"][0] = "0" * 64
         with self.assertRaisesRegex(ValueError, "manifest digest differs"):
-            binding._check_reference_supplements(self.fixture.root, mismatched, self.rows,
-                                                 self.resolved)
+            self.supplements(mismatched)
         with self.assertRaisesRegex(ValueError, "inventory differs"):
             binding._check_reference_supplements(self.fixture.root, self.report, self.rows, [0])
 
-        def forge_object(manifest):
-            manifest["results"][0]["object_sha256"] = "1" * 64
-        with self.assertRaisesRegex(ValueError, "object differs"):
-            binding._check_reference_supplements(self.fixture.root,
-                                                 self.rehash_supplement(0, forge_object),
-                                                 self.rows, self.resolved)
+    def test_supplement_manifest_must_bind_the_census_identities(self):
+        for field in ("rows_identity_sha256", "input_ledger_sha256"):
+            original = self.manifest_path(0).read_text()
+            with self.subTest(field=field):
+                report = self.rehash_supplement(0, lambda manifest: manifest.__setitem__(field, "1" * 64))
+                with self.assertRaisesRegex(ValueError, "does not bind the census identities"):
+                    self.supplements(report)
+            self.manifest_path(0).write_text(original)
 
-    def test_right_set_with_a_failed_supplement_is_rejected(self):
-        def fail_control(manifest):
-            manifest["results"][0]["status"] = 1
-        claimed = self.rehash_supplement(1, fail_control)
+    def test_supplement_record_must_bind_its_group_and_shard(self):
+        original = self.manifest_path(0).read_text()
+        report = self.rehash_supplement(0, lambda manifest: manifest["results"][0].__setitem__("group", "2"))
+        with self.assertRaisesRegex(ValueError, "not bound to its census group and shard"):
+            self.supplements(report)
+        self.manifest_path(0).write_text(original)
+        # Move shard 0's record into shard 1's manifest (with its object).
+        record = json.loads(original)["results"][0]
+        source = self.manifest_path(0).parent / "0.o"
+        (self.manifest_path(1).parent / "0.o").write_bytes(source.read_bytes())
+        report = self.rehash_supplement(0, lambda manifest: manifest["results"].clear())
+        report = self.rehash_supplement(1, lambda manifest: manifest["results"].insert(0, record),
+                                        report)
+        with self.assertRaisesRegex(ValueError, "not bound to its census group and shard"):
+            self.supplements(report)
+
+    def test_supplement_object_needs_the_target_header(self):
+        import struct
+        data = bytearray(64)
+        data[:6] = b"\x7fELF\x02\x01"
+        struct.pack_into("<HH", data, 16, 1, 183)  # AArch64 for an x86-64 row.
+        (self.manifest_path(0).parent / "0.o").write_bytes(data)
+        digest = hashlib.sha256(bytes(data)).hexdigest()
+        report = self.rehash_supplement(0, lambda manifest: manifest["results"][0].update(
+            object_bytes=len(data), object_sha256=digest))
+        with self.assertRaisesRegex(ValueError, "object differs from its record or target header"):
+            self.supplements(report)
+
+    def test_rehashed_supplement_missing_one_record_is_refused(self):
+        report = self.rehash_supplement(1, lambda manifest: manifest["results"].pop())
+        with self.assertRaisesRegex(ValueError, "inventory differs"):
+            self.supplements(report)
+
+    def test_failed_supplement_control_is_refused(self):
+        claimed = self.rehash_supplement(1, lambda manifest: manifest["results"][0].__setitem__("status", 1))
         with self.assertRaisesRegex(ValueError, "did not pass"):
-            binding._check_reference_supplements(self.fixture.root, claimed, self.rows,
-                                                 self.resolved)
+            self.supplements(claimed)
         # The honest census of that supplement retains the unresolved reference.
         report = census.validate_shards(self.fixture.shards, self.fixture.root / "failed.json",
                                         True, reference_supplements=True)
         self.assertEqual(report["reference_failure_rows"], [4, 5, 6, 7])
         with self.assertRaisesRegex(ValueError, "contains reference_failure_rows"):
             self.rule(report)
-        by_row = {row: name for name, ids in claimed["applicability_rows_by_class"].items()
-                  for row in ids}
-        evidence = binding._check_validator_projection_evidence(
-            self.fixture.root, report, self.rows, by_row, self.skips)
-        with self.assertRaisesRegex(ValueError, "replay differs"):
-            binding._replay_validator_report(self.fixture.root, claimed, evidence)
+
+    # --- Eligibility derivation (a) -----------------------------------------
+
+    def test_resolved_rows_become_compiler_ineligible_with_the_reason(self):
+        proofs = self.supplements(self.report)
+        expected_object, by_row, reasons = disposition_inputs(self.rows)
+        parsed = [disposition_row(index, row, "object", index not in self.resolved)
+                  for index, row in enumerate(self.rows)]
+        parsed.append(disposition_row(len(parsed), self.rows[1], "link", True))
+        eligible, applicability, objects = binding._derive_compiler_eligibility(
+            parsed, expected_object, set(), proofs, by_row, reasons)
+        self.assertEqual(set(range(len(parsed))) - eligible, {0, 4})
+        self.assertEqual(objects, len(self.rows) - 2)
+        for row in self.resolved:
+            self.assertEqual(applicability[row]["compiler_ineligible_reason"],
+                             binding.SUPPLEMENT_INELIGIBLE_REASON)
+            self.assertEqual(applicability[row]["supplement"], proofs[row])
+        timed = {row["row"] for row in binding._timed_rows(parsed)}
+        self.assertFalse({0, 4} & timed)
+        self.assertEqual(len(timed), 16 - 2 + 1)
 
 
-class SupplementDispositionShapeTests(unittest.TestCase):
-    """The real census shape: 276 rows, 69 per shard, 24 on the timed host."""
+class ApprovedSupplementSetTests(unittest.TestCase):
+    """The approved set: the 276 rows of census run 36336216460 / job 108667445262.
 
-    HOST_FIXTURES = ("tests/basic_c_asm_goto_identity.c", "tests/basic_c_compiler_barrier_fallback.c",
+    Its 69 (fixture, target) pairs are each resolved in all four
+    (frontend, PIC) configurations. The job log's report binds the checked-in
+    support declaration, whose validated cross-product fixes the row order.
+    """
+
+    PAIRS = (
+        ("tests/basic_c_aarch64_float_to_f128.c", "aarch64-linux-android"),
+        ("tests/basic_c_aarch64_float_to_f128.c", "aarch64-unknown-linux-gnu"),
+        ("tests/basic_c_aarch64_float_to_f128.c", "aarch64-unknown-uefi"),
+        ("tests/basic_c_asm.c", "aarch64-apple-ios"),
+        ("tests/basic_c_asm.c", "aarch64-apple-macos"),
+        ("tests/basic_c_asm.c", "aarch64-linux-android"),
+        ("tests/basic_c_asm.c", "aarch64-pc-windows-msvc"),
+        ("tests/basic_c_asm.c", "aarch64-unknown-linux-gnu"),
+        ("tests/basic_c_asm.c", "aarch64-unknown-uefi"),
+        ("tests/basic_c_asm_goto_identity.c", "aarch64-apple-ios"),
+        ("tests/basic_c_asm_goto_identity.c", "aarch64-apple-macos"),
+        ("tests/basic_c_asm_goto_identity.c", "aarch64-linux-android"),
+        ("tests/basic_c_asm_goto_identity.c", "aarch64-pc-windows-msvc"),
+        ("tests/basic_c_asm_goto_identity.c", "aarch64-unknown-linux-gnu"),
+        ("tests/basic_c_asm_goto_identity.c", "aarch64-unknown-uefi"),
+        ("tests/basic_c_asm_goto_identity.c", "x86_64-apple-ios"),
+        ("tests/basic_c_asm_goto_identity.c", "x86_64-apple-macos"),
+        ("tests/basic_c_asm_goto_identity.c", "x86_64-linux-android"),
+        ("tests/basic_c_asm_goto_identity.c", "x86_64-pc-windows-msvc"),
+        ("tests/basic_c_asm_goto_identity.c", "x86_64-unknown-linux-gnu"),
+        ("tests/basic_c_asm_goto_identity.c", "x86_64-unknown-uefi"),
+        ("tests/basic_c_asm_goto_range.c", "aarch64-apple-ios"),
+        ("tests/basic_c_asm_goto_range.c", "aarch64-apple-macos"),
+        ("tests/basic_c_asm_goto_range.c", "aarch64-linux-android"),
+        ("tests/basic_c_asm_goto_range.c", "aarch64-pc-windows-msvc"),
+        ("tests/basic_c_asm_goto_range.c", "aarch64-unknown-linux-gnu"),
+        ("tests/basic_c_asm_goto_range.c", "aarch64-unknown-uefi"),
+        ("tests/basic_c_compiler_barrier_fallback.c", "x86_64-apple-ios"),
+        ("tests/basic_c_compiler_barrier_fallback.c", "x86_64-apple-macos"),
+        ("tests/basic_c_compiler_barrier_fallback.c", "x86_64-linux-android"),
+        ("tests/basic_c_compiler_barrier_fallback.c", "x86_64-pc-windows-msvc"),
+        ("tests/basic_c_compiler_barrier_fallback.c", "x86_64-unknown-linux-gnu"),
+        ("tests/basic_c_compiler_barrier_fallback.c", "x86_64-unknown-uefi"),
+        ("tests/basic_c_created_nan_sign.c", "aarch64-linux-android"),
+        ("tests/basic_c_created_nan_sign.c", "aarch64-unknown-linux-gnu"),
+        ("tests/basic_c_created_nan_sign.c", "aarch64-unknown-uefi"),
+        ("tests/basic_c_signbit_images.c", "aarch64-linux-android"),
+        ("tests/basic_c_signbit_images.c", "aarch64-unknown-linux-gnu"),
+        ("tests/basic_c_signbit_images.c", "aarch64-unknown-uefi"),
+        ("tests/basic_c_wide_vector_abi.c", "x86_64-apple-ios"),
+        ("tests/basic_c_wide_vector_abi.c", "x86_64-apple-macos"),
+        ("tests/basic_c_wide_vector_abi.c", "x86_64-linux-android"),
+        ("tests/basic_c_wide_vector_abi.c", "x86_64-pc-windows-msvc"),
+        ("tests/basic_c_wide_vector_abi.c", "x86_64-unknown-linux-gnu"),
+        ("tests/basic_c_wide_vector_abi.c", "x86_64-unknown-uefi"),
+        ("tests/basic_stb_compat.c", "aarch64-pc-windows-msvc"),
+        ("tests/differential/native_aggregate_host.c", "x86_64-unknown-linux-gnu"),
+        ("tests/differential/win64_aligned.c", "aarch64-unknown-uefi"),
+        ("tests/differential/win64_aligned.c", "x86_64-pc-windows-msvc"),
+        ("tests/differential/win64_aligned.c", "x86_64-unknown-uefi"),
+        ("tests/differential/win64_vector.c", "x86_64-apple-ios"),
+        ("tests/differential/win64_vector.c", "x86_64-apple-macos"),
+        ("tests/differential/win64_vector.c", "x86_64-linux-android"),
+        ("tests/differential/win64_vector.c", "x86_64-pc-windows-msvc"),
+        ("tests/differential/win64_vector.c", "x86_64-unknown-linux-gnu"),
+        ("tests/differential/win64_vector.c", "x86_64-unknown-uefi"),
+        ("tests/differential/win64_wide.c", "aarch64-unknown-uefi"),
+        ("tests/differential/win64_wide.c", "x86_64-apple-ios"),
+        ("tests/differential/win64_wide.c", "x86_64-apple-macos"),
+        ("tests/differential/win64_wide.c", "x86_64-linux-android"),
+        ("tests/differential/win64_wide.c", "x86_64-pc-windows-msvc"),
+        ("tests/differential/win64_wide.c", "x86_64-unknown-linux-gnu"),
+        ("tests/differential/win64_wide.c", "x86_64-unknown-uefi"),
+        ("tests/host_aarch64_float_to_f128.c", "aarch64-apple-ios"),
+        ("tests/host_aarch64_float_to_f128.c", "aarch64-apple-macos"),
+        ("tests/host_aarch64_float_to_f128.c", "aarch64-linux-android"),
+        ("tests/host_aarch64_float_to_f128.c", "aarch64-pc-windows-msvc"),
+        ("tests/host_aarch64_float_to_f128.c", "aarch64-unknown-linux-gnu"),
+        ("tests/host_aarch64_float_to_f128.c", "aarch64-unknown-uefi"),
+    )
+    CENSUS_DECLARATION_SHA256 = "932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82"
+    HOST_FIXTURES = ["tests/basic_c_asm_goto_identity.c", "tests/basic_c_compiler_barrier_fallback.c",
                      "tests/basic_c_wide_vector_abi.c", "tests/differential/native_aggregate_host.c",
-                     "tests/differential/win64_vector.c", "tests/differential/win64_wide.c")
-    F128_FIXTURE = "tests/host_aarch64_float_to_f128.c"
+                     "tests/differential/win64_vector.c", "tests/differential/win64_wide.c"]
 
-    def test_real_shape_population_delta(self):
+    def census(self):
+        """The approved census row order: the checked-in declaration's cross-product."""
         root = Path(__file__).resolve().parents[1]
+        declaration = (root / binding.SUPPORT_DECLARATION_PATH).read_bytes()
+        # The declaration the job-log report binds (support_contract_sha256).
+        self.assertEqual(hashlib.sha256(declaration).hexdigest(), self.CENSUS_DECLARATION_SHA256)
         with (root / binding.SUPPORT_DECLARATION_PATH).open() as stream:
             subjects = [row["path"] for row in csv.DictReader(stream, delimiter="\t")
                         if row["role"] == "subject"]
-        for fixture in self.HOST_FIXTURES + (self.F128_FIXTURE,):
-            self.assertIn(fixture, subjects)
-        targets = list(census.TARGETS)
-        foreign = [target for target in targets if target != binding.NATIVE_TIMED_TARGET]
-        aarch64 = [target for target in targets if target.startswith("aarch64-")]
-        # 69 (fixture, target) pairs, each four groups (one per shard):
-        # 58 retained-reference (6 on the host), 6 admitted-supported, 5
-        # platform-inapplicable.
-        pairs = {(fixture, binding.NATIVE_TIMED_TARGET): "retained-reference"
-                 for fixture in self.HOST_FIXTURES}
-        pairs.update({(self.F128_FIXTURE, target): "admitted-supported" for target in aarch64})
-        others = [fixture for fixture in subjects
-                  if fixture not in self.HOST_FIXTURES and fixture != self.F128_FIXTURE]
-        for index in range(57):
-            pairs[(others[index], foreign[index % len(foreign)])] = (
-                "platform-inapplicable" if index < 5 else "retained-reference")
-        self.assertEqual(len(pairs), 69)
-        census_rows = []
+        rows = []
         for fixture in subjects:
             recipe = census.expected_fixture_recipe(fixture)[0]
-            for target in targets:
+            for target in census.TARGETS:
                 abi, link, execution = census.TARGETS[target]
                 cpu = census.expected_cpu(fixture, target, "baseline")
                 for frontend in ("local-backed-canonical", "direct-ssa"):
                     for pic in ("0", "1"):
                         for allocator in census.ALLOCATORS:
-                            index = len(census_rows)
-                            census_rows.append({
+                            index = len(rows)
+                            rows.append({
                                 "row": str(index), "group": str(index // 4), "fixture": fixture,
                                 "target": target, "target_abi": abi, "cpu": cpu,
                                 "cpu_features": cpu, "allocator": allocator,
@@ -720,31 +995,53 @@ class SupplementDispositionShapeTests(unittest.TestCase):
                                 "link_obligation": link, "execution_obligation": execution,
                                 "diagnostic_obligation": "none",
                                 "argv_evidence": f"groups/{index // 4}/{allocator}.argv"})
-        self.assertEqual(len(census_rows), census.FULL_ROW_COUNT)
-        direct = sorted(int(row["row"]) for row in census_rows
-                        if (row["fixture"], row["target"]) in pairs)
-        resolved = [row for row in direct if row % 4 == 0]
-        report = {"direct_reference_failure_rows": direct, "shards": 4,
-                  "reference_supplement_sha256": ["a" * 64, "b" * 64, "c" * 64, "d" * 64],
-                  **{field: resolved for field in binding.SUPPLEMENT_DEFECT_FIELDS},
-                  **{field: [] for field in binding.ALWAYS_FATAL_DEFECT_FIELDS}}
-        self.assertEqual(binding._supplement_resolved_rows(report, census_rows, set()), resolved)
-        self.assertEqual(len(resolved), 276)
-        self.assertEqual([sum(int(census_rows[row]["group"]) % 4 == shard for row in resolved)
-                          for shard in range(4)], [69] * 4)
-        classes = [pairs[(census_rows[row]["fixture"], census_rows[row]["target"])]
-                   for row in resolved]
-        self.assertEqual({name: classes.count(name) for name in set(classes)},
-                         {"retained-reference": 232, "admitted-supported": 24,
-                          "platform-inapplicable": 20})
-        self.assertEqual({census_rows[row]["target"] for row in resolved}, set(targets))
+        self.assertEqual(len(rows), census.FULL_ROW_COUNT)
+        return rows
 
+    def report(self, rows, resolved):
+        resolved_groups = {row // 4 for row in resolved}
+        direct = sorted(index for index in range(len(rows)) if index // 4 in resolved_groups)
+        return {"profile": "full-census", "shards": 4,
+                "direct_reference_failure_rows": direct,
+                "reference_supplement_sha256": ["a" * 64, "b" * 64, "c" * 64, "d" * 64],
+                **{field: resolved for field in binding.SUPPLEMENT_DEFECT_FIELDS},
+                **{field: [] for field in binding.ALWAYS_FATAL_DEFECT_FIELDS}}
+
+    def approved_rows(self, rows):
+        pairs = set(self.PAIRS)
+        return [index for index, row in enumerate(rows)
+                if row["allocator"] == "none" and (row["fixture"], row["target"]) in pairs]
+
+    def test_pinned_set_is_the_job_log_census_set(self):
+        rows = self.census()
+        resolved = self.approved_rows(rows)
+        self.assertEqual(len(self.PAIRS), 69)
+        self.assertEqual(binding.APPROVED_SUPPLEMENT_SETS["full-census"],
+                         (276, binding._supplement_identity_digest(rows, resolved)))
+        self.assertEqual(binding._supplement_resolved_rows(self.report(rows, resolved), rows, set()),
+                         resolved)
+        self.assertEqual([sum(int(rows[row]["group"]) % 4 == shard for row in resolved)
+                          for shard in range(4)], [69] * 4)
+        self.assertEqual(len({rows[row]["target"] for row in resolved}), 12)
+        host = sorted({rows[row]["fixture"] for row in resolved
+                       if rows[row]["target"] == binding.NATIVE_TIMED_TARGET})
+        self.assertEqual(host, self.HOST_FIXTURES)
+        # One row more or less is a different set, which needs a new decision.
+        extra = sorted(resolved + [next(index for index, row in enumerate(rows)
+                                        if row["allocator"] == "none" and index not in resolved)])
+        for changed in (resolved[1:], extra):
+            with self.subTest(rows=len(changed)), \
+                    self.assertRaisesRegex(ValueError, "not exactly the approved set"):
+                binding._supplement_resolved_rows(self.report(rows, changed), rows, set())
+
+    def test_approved_set_population_delta(self):
+        rows = self.census()
+        resolved = self.approved_rows(rows)
         proofs = {row: {"reason": binding.SUPPLEMENT_INELIGIBLE_REASON} for row in resolved}
-        expected_object, by_row, reasons = disposition_inputs(census_rows)
-        before = [disposition_row(index, row, "object", True)
-                  for index, row in enumerate(census_rows)]
+        expected_object, by_row, reasons = disposition_inputs(rows)
+        before = [disposition_row(index, row, "object", True) for index, row in enumerate(rows)]
         after = [disposition_row(index, row, "object", index not in proofs)
-                 for index, row in enumerate(census_rows)]
+                 for index, row in enumerate(rows)]
         eligible, _applicability, _objects = binding._derive_compiler_eligibility(
             after, expected_object, set(), proofs, by_row, reasons)
         self.assertEqual(len(eligible), census.FULL_ROW_COUNT - 276)
@@ -754,20 +1051,13 @@ class SupplementDispositionShapeTests(unittest.TestCase):
         code_after = {row["row"] for row in after if row["metrics"]["generated_code_bytes"]}
         removed_timed = timed_before - timed_after
         removed_code = code_before - code_after
+        # At most 276 code-byte ratio rows (a zero-baseline row was never one).
         self.assertEqual(len(removed_timed), 24)
         self.assertEqual(len(removed_code), 276)
         self.assertEqual(len(removed_code - removed_timed), 252)
-        self.assertTrue(all(census_rows[row]["allocator"] == "none" for row in removed_code))
-        # The six real host fixtures use compiler-default: no timed batch group
-        # vanishes. (Untimed group counts depend on which foreign fixtures are
-        # affected, which this synthetic shape does not reproduce.)
+        self.assertTrue(all(rows[row]["allocator"] == "none" for row in removed_code))
+        # The six host fixtures use compiler-default: no timed batch group vanishes.
         self.assertEqual(len(binding._batch_groups(before)), len(binding._batch_groups(after)))
-        print(json.dumps({"proof": "supplement-disposition-real-shape",
-                          "resolved_rows": len(resolved), "timed_rows_removed": len(removed_timed),
-                          "untimed_code_byte_rows_removed": len(removed_code - removed_timed),
-                          "code_byte_rows_removed": len(removed_code),
-                          "timed_rows_before": len(timed_before), "timed_rows_after": len(timed_after),
-                          "batch_groups": len(binding._batch_groups(after))}, sort_keys=True))
 
 
 if __name__ == "__main__":

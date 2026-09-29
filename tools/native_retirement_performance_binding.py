@@ -160,6 +160,19 @@ SINGLETON_STAGE_GROUP = "singleton-stage"
 # defect lists only when each equals that set.  Every other defect stays fatal.
 SUPPLEMENT_DISPOSITION_DECISION = (
     "https://github.com/buster14a/buster/issues/36#issuecomment-5895408613")
+# The production census profile the binding admits.
+CENSUS_PROFILE = "full-census"
+# The approved supplement-resolved set per census profile, as (row count,
+# _supplement_identity_digest).  The decision is exactly these rows: the 276
+# allocator-none rows of census run 36336216460 / job 108667445262 (candidate
+# df1a1dc127e92f039a94b1326c384ff2b657a82d, support declaration
+# 932fb6e2...).  A different set, including a subset, needs a new #36
+# decision.  A profile without an entry may resolve no row; test-scale
+# fixtures pass an explicit test-only pin instead.
+APPROVED_SUPPLEMENT_SETS = {
+    "full-census": (276, "729c0f18d13963e9723768574586386fe2f0814f7b08810dbbb91e21503d96e9"),
+}
+SUPPLEMENT_EVIDENCE = "census run 36336216460 / job 108667445262"
 SUPPLEMENT_INELIGIBLE_REASON = "direct-reference-supplement-resolved"
 NONEXECUTED_INELIGIBLE_REASON = "authenticated-non-executed"
 SUPPLEMENT_DEFECT_FIELDS = ("telemetry_defect_rows", "execution_defect_rows",
@@ -1688,7 +1701,7 @@ def _tsv_rows(data, fields, name, *, allow_empty=False):
 
 def _validator_projection(report, row_count):
     # Validate the producer's complete applicability/admission partition.
-    if report["profile"] != "full-census":
+    if report["profile"] != CENSUS_PROFILE:
         _fail("#508 validator report is not the production full-census profile")
     _exact_list(report["applicability_classes"], list(RETIREMENT_SCHEMA.APPLICABILITY_CLASSES),
                 "validator_report.applicability_classes")
@@ -1924,18 +1937,35 @@ def _replay_validator_report(root, validator_report, projection_evidence):
                 _fail(f"#508 schema-2 validator replay differs in {field}")
 
 
-def _supplement_resolved_rows(report, census_rows, skip_rows):
+def _supplement_identity_digest(census_rows, rows):
+    """SHA-256 over one ``fixture\\ttarget\\tfrontend_lowering\\tPIC\\tallocator``
+    line per row, in ascending census order (the C projection's
+    ``bq_retirement_validator_supplement_identity_sha256``)."""
+    digest = hashlib.sha256()
+    for row in sorted(rows):
+        source = census_rows[row]
+        digest.update(("\t".join(source[field] for field in (
+            "fixture", "target", "frontend_lowering", "PIC", "allocator")) + "\n").encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _supplement_resolved_rows(report, census_rows, skip_rows, approved=None):
     """Option 3 support rule: the exact supplement-resolved direct-reference set.
 
     ``direct_reference_failure_rows`` is the census's pre-supplement record:
     the allocator-``none`` row of every group whose frozen direct compile
     failed, plus that group's executed MIR rows.  The supplement-resolved set
-    is its allocator-``none`` rows.  The telemetry, execution and artifact
-    defect lists are accepted only when each equals that set exactly; the
-    candidate, final reference, fallback and unexpected lists must stay empty,
-    so a defect outside the set, on a MIR row, or of another kind is fatal.
-    ``census_rows`` must already be in the validated allocator order.
+    is its allocator-``none`` rows, and it must be exactly the approved set
+    (``approved``, by default ``APPROVED_SUPPLEMENT_SETS`` for the report's
+    profile; no entry means no row may be resolved).  The telemetry,
+    execution and artifact defect lists are accepted only when each equals
+    that set exactly; the candidate, final reference, fallback and unexpected
+    lists must stay empty, so a defect outside the set, on a MIR row, or of
+    another kind is fatal.  ``census_rows`` must already be in the validated
+    allocator order.
     """
+    if approved is None:
+        approved = APPROVED_SUPPLEMENT_SETS.get(report["profile"])
     row_count = len(census_rows)
     for field in ALWAYS_FATAL_DEFECT_FIELDS:
         if report[field]:
@@ -1959,10 +1989,17 @@ def _supplement_resolved_rows(report, census_rows, skip_rows):
         for member in range(row + 1, row + width):
             if (member in direct_set) is (member in skip_rows):
                 _fail("direct-reference failure rows do not cover the group's executed rows")
+    if approved is None:
+        if resolved:
+            _fail("supplement-resolved rows exist but no approved supplement-resolved set is pinned")
+    elif (len(resolved), _supplement_identity_digest(census_rows, resolved)) != tuple(approved):
+        _fail("supplement-resolved rows are not exactly the approved set "
+              f"({SUPPLEMENT_EVIDENCE}); any change needs a new #36 decision")
     if resolved and not supplements:
         _fail("direct-reference defects are retained without an independent reference supplement")
-    if supplements and len(supplements) != report["shards"]:
-        _fail("reference supplement digests do not cover every census shard")
+    if len(supplements) != (report["shards"] if resolved else 0):
+        _fail("reference supplement digests do not cover every census shard exactly "
+              "(one per shard with resolved rows, none without)")
     for field in SUPPLEMENT_DEFECT_FIELDS:
         rows = _row_ids(report[field], f"validator_report.{field}", row_count)
         if rows != resolved:
@@ -2079,7 +2116,7 @@ def _derive_compiler_eligibility(parsed, expected_object, skip_rows, supplement_
             if any(row["metrics"][metric] for metric in ROW_METRICS) \
                     or row["eligibility"]["runtime_oracle"] != "not-applicable" \
                     or row["eligibility"]["code_section"] != "not-applicable":
-                _fail("authenticated non-executed row contains measurement eligibility")
+                _fail("compiler-ineligible row contains measurement eligibility")
         else:
             compiler_eligible_rows.add(row["row"])
             if row["identity"]["artifact_stage"] == "object":
@@ -5305,7 +5342,7 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
                     or item["artifact_kind"] is not None \
                     or item["artifact_bytes"] is not None \
                     or item["artifact_sha256"] is not None:
-                _fail("authenticated non-executed admission must use explicit null observations")
+                _fail("compiler-ineligible admission must use explicit null observations")
         admission_by_row[item["row"]] = item
     if set(admission_by_row) != set(range(len(parsed))):
         _fail("admission records do not cover every canonical performance row")

@@ -39,7 +39,9 @@ a nonempty fallback defect or unexpected failure array. Under option 3
 ([#36](https://github.com/buster14a/buster/issues/36#issuecomment-5895408613),
 [import rules](retirement_census_import.md)), the telemetry, execution and
 artifact defect arrays must each equal the supplement-resolved allocator-`none`
-set exactly, and those rows are compiler-ineligible with a supplement proof.
+set exactly. That set must be exactly the pinned approved set (276 rows for
+full-census, or a self-test profile's explicit test-only pin), and those rows are
+compiler-ineligible with a supplement proof.
 A report with retained
 direct-reference failures and four supplement digests remains only a staged
 projection; independent supplemental proof and the separate #508 binding are

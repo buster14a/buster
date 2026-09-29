@@ -33,13 +33,28 @@ disposes of the census rows whose frozen direct backend cannot compile a fixture
 It was made before any binding record or measurement exists, and it changes no
 threshold, sampling rule or outcome. The rule and its bounds are:
 
+- **The approved set is exactly these rows.** It is the 276 allocator-`none`
+  rows that census run
+  [36336216460](https://github.com/buster14a/buster/actions/runs/36336216460) /
+  job [108667445262](https://github.com/buster14a/buster/actions/runs/36336216460/job/108667445262)
+  (candidate `df1a1dc127e92f039a94b1326c384ff2b657a82d`, support declaration
+  `932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82`) retained
+  in its telemetry, execution and artifact defect lists: 69
+  (fixture, target) pairs, each in all four frontend/PIC configurations, 69 per
+  shard. It is pinned by count (276) and an identity digest: SHA-256 over one
+  `fixture<TAB>target<TAB>frontend_lowering<TAB>PIC<TAB>allocator<LF>` line per
+  row in census order,
+  `729c0f18d13963e9723768574586386fe2f0814f7b08810dbbb91e21503d96e9`. A census
+  whose resolved set differs in any way (a new failing `none` row, or one fewer)
+  is rejected. Any change to the set needs a new decision in #36.
 - A row is **supplement-resolved** when it is an executed allocator-`none` row
   in the census validator report's `direct_reference_failure_rows` and its
   independent Clang control passed. The proof is authenticated provenance: the
   report's `direct_reference_failure_rows`, the per-shard supplement manifest
-  whose SHA-256 is in `reference_supplement_sha256`, and that row's own
-  supplement record (status zero, object size, digest and target header), all
-  of which the census validator replay also checks.
+  whose SHA-256 is in `reference_supplement_sha256` (one digest per shard when
+  rows are resolved, none otherwise), and that row's own supplement record
+  (status zero, object size, digest and target header), all of which the census
+  validator replay also checks.
 - Exactly those rows are **compiler-ineligible** for performance, with the
   explicit reason `direct-reference-supplement-resolved` and their supplement
   proof. They leave the timed projection and the code-byte ratio (they carry no
@@ -61,15 +76,19 @@ threshold, sampling rule or outcome. The rule and its bounds are:
   twelve targets, and each group's MIR rows keep their eligibility, correctness
   and timing obligations.
 
-On the census of 2026-09-27 this is 276 rows (69 per shard), all allocator
-`none`: 24 on the timed native host (six fixtures), so the timed projection
-shrinks by 24 rows, and 252 untimed cross-target rows, so the code-byte ratio
-population shrinks by 276 rows in all. `_supplement_resolved_rows`,
-`_check_reference_supplements` and `_derive_compiler_eligibility` in
-`tools/native_retirement_performance_binding.py` and
+Of the 276 rows, 24 are on the timed native host (six fixtures), so the timed
+projection shrinks by exactly 24 rows. The other 252 are untimed cross-target
+rows. The code-byte ratio population shrinks by at most 276 rows, because a
+row whose baseline code payload would be zero was never a ratio row.
+`_supplement_resolved_rows`, `_check_reference_supplements` and
+`_derive_compiler_eligibility` in
+`tools/native_retirement_performance_binding.py`, and
 `bq_retirement_validator_applicability_projection` in
-`tools/bench_service/retirement_correctness_service.c` implement the rule
-identically.
+`tools/bench_service/retirement_correctness_service.c`, implement the same
+rule, including the pin. Their per-row proof bytes differ: the binding records
+the supplement manifest and object digests, and the C projection hashes the
+report digest, the shard's supplement digest and the row's applicability
+line.
 
 This contract reuses the native throughput harness, the support manifest from
 [#508](https://github.com/buster14a/buster/issues/508), semantic acceptance from

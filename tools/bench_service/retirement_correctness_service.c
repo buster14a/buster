@@ -49,6 +49,12 @@
 #define BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT (12u * 2u * 2u * 4u)
 #define BQ_RETIREMENT_FULL_APPLICABILITY_LEDGER_COUNT 374u
 #define BQ_RETIREMENT_FULL_SUPPORTED_GAP_COUNT 192u
+/* Option 3 (#36): the approved supplement-resolved set, exactly the 276
+ * allocator-none rows of census run 36336216460 / job 108667445262. The
+ * digest is SHA-256 over "fixture\ttarget\tfrontend_lowering\tPIC\tallocator\n"
+ * per row in census order (the binding's _supplement_identity_digest). */
+#define BQ_RETIREMENT_FULL_SUPPLEMENT_RESOLVED_COUNT 276u
+#define BQ_RETIREMENT_SUPPLEMENT_SHARD_CAP 16u
 
 BUSTER_GLOBAL_LOCAL char const bq_retirement_full_applicability_ledger_sha256[] =
     "934be981e866fe3dbbdb4a5b9e551c052b4546487bb04245fac24bb271be78fa";
@@ -56,6 +62,8 @@ BUSTER_GLOBAL_LOCAL char const bq_retirement_full_supported_gap_sha256[] =
     "0f531b1cf7c7922ea891e15703971bcb2ddf95f398f628e0b2681831d7cbf81e";
 BUSTER_GLOBAL_LOCAL char const bq_retirement_full_supported_gap_ledger_sha256[] =
     "e67ef103035b1b99e97ae640de2ef0b7a84add2705758cb2431a4855b303dfc3";
+BUSTER_GLOBAL_LOCAL char const bq_retirement_full_supplement_resolved_sha256[] =
+    "729c0f18d13963e9723768574586386fe2f0814f7b08810dbbb91e21503d96e9";
 BUSTER_GLOBAL_LOCAL char const bq_retirement_empty_residual_sha256[] =
     "a4b667fab9df2e5e5a1e24f3395904d3ec77fd306a7e4c8e85153dbff6a30818";
 
@@ -1278,6 +1286,33 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_row_set_sha256(u8 const* rows, 
     return ok;
 }
 
+/* Option 3 identity digest of the flagged rows: SHA-256 over one
+ * "fixture\ttarget\tfrontend_lowering\tPIC\tallocator\n" line per flagged row
+ * in census order (rows.tsv columns 2, 3, 8, 9 and 7). */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_supplement_identity_sha256(
+    BqRetirementValidatorRawRow const* raw_rows, u8 const* flags, u32 row_count,
+    char digest[SHA256_HEX_CAPACITY])
+{
+    static u8 const columns[5] = {2, 3, 8, 9, 7};
+    bool ok = raw_rows && flags && digest;
+    Sha256 hash;
+    sha256_init(&hash);
+    for (u32 row = 0; ok && row < row_count; row += 1)
+    {
+        if (flags[row])
+        {
+            for (u32 column = 0; column < BUSTER_ARRAY_LENGTH(columns); column += 1)
+            {
+                String8 value = raw_rows[row].fields[columns[column]];
+                sha256_add(&hash, value.pointer, value.length);
+                sha256_add(&hash, column + 1 < BUSTER_ARRAY_LENGTH(columns) ? "\t" : "\n", 1);
+            }
+        }
+    }
+    if (ok) sha256_finish_hex(&hash, (char8*)digest);
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL u32 bq_retirement_validator_class(String8 value)
 {
     u32 result = 0;
@@ -1568,9 +1603,10 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_json_string_array_equals(String
 /* The official full census retains one supplemental reference digest per
  * shard, including when a direct-reference failure was later resolved. The
  * projection validates only the canonical shape; independent supplement and
- * shard replay remains a separate production authority. */
+ * shard replay remains a separate production authority. digests, when not
+ * NULL, receives the expected_count digests in shard order. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_json_sha256_array(String8 json, String8 key,
-    u32 expected_count)
+    u32 expected_count, char (*digests)[SHA256_HEX_CAPACITY])
 {
     u64 cursor = 0;
     bool ok = bq_retirement_validator_json_top_value(json, key, NULL, &cursor) &&
@@ -1586,6 +1622,11 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_json_sha256_array(String8 json,
              cursor + 64 < json.length &&
              bq_retirement_hex((String8){json.pointer + cursor, 64}, 64) &&
              json.pointer[cursor + 64] == '"';
+        if (ok && digests)
+        {
+            memcpy(digests[index], json.pointer + cursor, 64);
+            digests[index][64] = 0;
+        }
         if (ok) cursor += 65;
     }
     while (ok && cursor < json.length && (json.pointer[cursor] == ' ' || json.pointer[cursor] == '\n' ||
@@ -1774,8 +1815,8 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_support_inputs_join(String8 sup
 }
 
 BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String8 report,
-    String8 report_sha256, String8 census_profile, String8 applicability, String8 skips_text,
-    BqRetirementValidatorRawRow const* raw_rows, BqRetirementSupportSubject const* subjects,
+    String8 report_sha256, String8 census_profile, String8 supplement_pin, String8 applicability,
+    String8 skips_text, BqRetirementValidatorRawRow const* raw_rows, BqRetirementSupportSubject const* subjects,
     u32 subject_count, BqRetirementApplicabilityLedgerRecord const* ledger, u32 ledger_count,
     u32 row_count, BqRetirementValidatorEligibility* projection)
 {
@@ -1826,7 +1867,26 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String
         projection->supplement_resolved[index] = resolved;
         supplement_count += resolved;
     }
-    if (ok) ok = bq_retirement_validator_json_uint(report, S8("shards"), &report_shards) && report_shards > 0;
+    /* The set must be exactly the approved one: the compiled full-census pin,
+     * or the self-test profile's explicit test-only pin. No approved set means
+     * no supplement-resolved row may exist. */
+    char supplement_identity[SHA256_HEX_CAPACITY] = {0};
+    if (ok) ok = bq_retirement_validator_supplement_identity_sha256(raw_rows, projection->supplement_resolved,
+                                                                     row_count, supplement_identity);
+    if (ok && string_equal(census_profile, S8("full-census")))
+        ok = supplement_count == BQ_RETIREMENT_FULL_SUPPLEMENT_RESOLVED_COUNT &&
+             !memcmp(supplement_identity, bq_retirement_full_supplement_resolved_sha256, SHA256_HEX_CAPACITY);
+    else if (ok)
+        ok = supplement_pin.length ? string_equal(supplement_pin, string_from_pointer(supplement_identity)) :
+                                     supplement_count == 0;
+    /* One supplement digest per shard when rows are resolved, none otherwise
+     * (the binding's rule). */
+    char supplement_digests[BQ_RETIREMENT_SUPPLEMENT_SHARD_CAP][SHA256_HEX_CAPACITY] = {{0}};
+    if (ok) ok = bq_retirement_validator_json_uint(report, S8("shards"), &report_shards) && report_shards > 0 &&
+                 report_shards <= BQ_RETIREMENT_SUPPLEMENT_SHARD_CAP &&
+                 (direct_failure_count == 0) == (supplement_count == 0) &&
+                 bq_retirement_validator_json_sha256_array(report, S8("reference_supplement_sha256"),
+                     supplement_count ? (u32)report_shards : 0, supplement_digests);
     u32 report_counts[5] = {0}, admission_counts[5] = {0}, app_counts[5] = {0};
     if (ok) ok = bq_retirement_validator_class_counts(report, S8("applicability_counts"), report_counts) &&
                  bq_retirement_validator_class_counts(report, S8("admission_counts"), admission_counts);
@@ -1840,13 +1900,9 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String
     if (ok && string_equal(census_profile, S8("full-census")))
         ok = supported_gap_count == BQ_RETIREMENT_FULL_SUPPORTED_GAP_COUNT &&
              !memcmp(supported_gap_sha256, bq_retirement_full_supported_gap_sha256,
-                     SHA256_HEX_CAPACITY) &&
-             bq_retirement_validator_json_sha256_array(report, S8("reference_supplement_sha256"), 4);
+                     SHA256_HEX_CAPACITY);
     else if (ok && string_equal(census_profile, S8("self-test")))
-        ok = supported_gap_count == 0 && (direct_failure_count == 0) == (supplement_count == 0) &&
-             report_shards <= UINT32_MAX &&
-             bq_retirement_validator_json_sha256_array(report, S8("reference_supplement_sha256"),
-                                                       supplement_count ? (u32)report_shards : 0);
+        ok = supported_gap_count == 0;
     else if (ok) ok = false;
     String8 residual_evidence = {0}, residual_tsv = {0};
     bool residual_truncated = true, require_clean_acceptance = false, clean_acceptance = false;
@@ -1919,13 +1975,16 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String
         {
             /* The replayable reason for a supplement-resolved row: its
              * report-bound applicability line (with the validator's rewritten
-             * clang-control reason) under the pinned report digest. */
+             * clang-control reason), under the pinned report digest and the
+             * report's supplement digest for the row's shard (group % shards). */
             Sha256 hash;
             sha256_init(&hash);
             static char const domain[] = "bq-retirement-validator-supplement-v1";
             sha256_add(&hash, domain, sizeof(domain) - 1);
             sha256_add(&hash, "\0", 1);
             sha256_add(&hash, report_sha256.pointer, report_sha256.length);
+            sha256_add(&hash, "\0", 1);
+            sha256_add(&hash, supplement_digests[(raw_index / BQ_RETIREMENT_CENSUS_ALLOCATOR_COUNT) % report_shards], 64);
             sha256_add(&hash, "\0", 1);
             sha256_add(&hash, line.pointer, line.length);
             sha256_finish_hex(&hash, (char8*)projection->skip_proof_sha256[raw_index]);
@@ -2233,6 +2292,14 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_eligibility_projection(int supp
                      bq_retirement_validator_json_bool(report_text, S8("clean_candidate"), &clean) &&
                      complete && unique && require_clean && clean &&
                      bq_retirement_validator_json_empty_array(report_text, S8("candidate_failure_rows"));
+        /* Option 3: full-census uses the compiled approved set; a test-scale
+         * (self-test) census may only resolve rows under an explicit test-only
+         * profile pin, validator-supplement-resolved-sha256. */
+        char supplement_pin_sha[SHA256_HEX_CAPACITY] = {0};
+        String8 supplement_pin = {0};
+        if (ok && !string_equal(manifest_profile, S8("full-census")) &&
+            bq_retirement_profile_sha(profile, S8("validator-supplement-resolved-sha256="), supplement_pin_sha))
+            supplement_pin = (String8){(char8*)supplement_pin_sha, 64};
         if (ok)
         {
             projection->compiler_eligible = calloc(row_count, 1);
@@ -2242,7 +2309,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_eligibility_projection(int supp
             ok = projection->compiler_eligible && projection->classification &&
                  projection->supplement_resolved && projection->skip_proof_sha256 &&
                  bq_retirement_validator_applicability_projection(report_text,
-                    string_from_pointer(report_sha), manifest_profile, applicability_text, skips_text,
+                    string_from_pointer(report_sha), manifest_profile, supplement_pin, applicability_text, skips_text,
                     raw_rows, subjects, subject_count, ledger, ledger_count, row_count, projection);
         }
         /* raw_rows produced the rows_identity_sha256 matched above, so each

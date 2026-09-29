@@ -14,25 +14,37 @@ flags, and failure arrays. Candidate and final reference failures, fallback
 defects, and unexpected failures must be empty. It retains the direct-reference
 failures recorded before supplemental resolution and uses their group-level
 pattern to derive the `retained-reference` class. The current full-census
-hosted recipe uses `--reference-supplements`; this staged projection checks four
-canonical supplement digest strings (the `self-test` profile: one per shard
-when there are direct-reference failures, none otherwise), but does not
-independently authenticate or replay the supplemental bytes. The binding's
+hosted recipe uses `--reference-supplements`; this staged projection checks one
+canonical supplement digest string per shard when rows are supplement-resolved
+and none otherwise (four for full-census), but does not independently
+authenticate or replay the supplemental bytes. The binding's
 `_check_reference_supplements` does that before trusted use.
 
 **Option 3 ([#36](https://github.com/buster14a/buster/issues/36#issuecomment-5895408613)).**
 The allocator-`none` rows of the retained direct-reference failures are the
-supplement-resolved set (`supplement_resolved`). The telemetry, execution and
+supplement-resolved set (`supplement_resolved`). It must be exactly the approved
+set. For full-census that is the compiled pin: `BQ_RETIREMENT_FULL_SUPPLEMENT_RESOLVED_COUNT`
+(276) and `bq_retirement_full_supplement_resolved_sha256`, the identity digest
+that `bq_retirement_validator_supplement_identity_sha256` computes over one
+`fixture<TAB>target<TAB>frontend_lowering<TAB>PIC<TAB>allocator<LF>` line per row
+(census run 36336216460 / job 108667445262). A test-scale `self-test` census may
+resolve rows only under an explicit test-only profile pin,
+`validator-supplement-resolved-sha256=`; without it, no row may be resolved.
+The telemetry, execution and
 artifact defect arrays must each equal that set exactly, so a defect row outside
 it, a missing row, or a defect on a MIR row fails closed. Each supplement-resolved
 row is compiler-ineligible. Its `skip_proof_sha256` holds a supplement proof:
 SHA-256 over `bq-retirement-validator-supplement-v1`, NUL, the pinned report
-digest, NUL and the row's `applicability.tsv` line. A skip proof uses the
+digest, NUL, the report's supplement digest for the row's shard
+(`group % shards`), NUL and the row's `applicability.tsv` line. A skip proof uses the
 `bq-retirement-validator-skip-v1` domain instead.
 `bq_retirement_performance_rows_derive` rejects a declared link or self-host row
-that carries a supplement-resolved identity. This mirrors the Python binding
-exactly, and `retirement_validator_eligibility_test.py` checks that the two agree
-on genuine supplement evidence. For retained direct-reference failures that the report
+that carries a supplement-resolved identity. This is the same rule as the
+Python binding's (`_supplement_resolved_rows`, `_derive_compiler_eligibility`);
+the proof bytes differ, since the binding records the supplement manifest and
+object digests it authenticates. `retirement_validator_eligibility_test.py`
+checks that the two agree on genuine supplement evidence and that the compiled
+pin equals the binding's `APPROVED_SUPPLEMENT_SETS`. For retained direct-reference failures that the report
 says were resolved, it checks the validator's rewritten reason, ownership, and
 acceptance flag while preserving the original class. Other acceptance failures
 must match the `unavailable` class; `clean_acceptance` must agree with the

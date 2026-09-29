@@ -580,10 +580,12 @@ defect is folded into the telemetry defect). The census does not clear them.
 The performance binding's disposition of those rows (option 3, decided in
 [#36](https://github.com/buster14a/buster/issues/36#issuecomment-5895408613))
 is defined in the
-[performance contract](native-retirement-performance-contract.md): exactly the
-supplement-resolved allocator-`none` rows become compiler-ineligible for
-performance, those three lists are accepted only when each equals that set,
-and every other defect list must stay empty.
+[performance contract](native-retirement-performance-contract.md). The
+supplement-resolved allocator-`none` rows must be exactly the approved 276 rows
+of census run 36336216460 / job 108667445262, pinned by count and identity
+digest. Those rows become compiler-ineligible for performance. The three
+defect lists are accepted only when each equals that set, and every other
+defect list must stay empty. Any change to the set needs a new #36 decision.
 
 Clang's UEFI controls use the corresponding freestanding C ABI: x64 MSVC/LLP64
 and ARM64 AAPCS64/LP64, with short wchar. The ARM64 control is an ELF object; it

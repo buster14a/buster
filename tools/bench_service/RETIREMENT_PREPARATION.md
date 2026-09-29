@@ -436,12 +436,19 @@ The import requires the following:
   The binding comes from the declaration, not a heuristic. The row's
   identity is the same serialization with its own `artifact_stage`, and no
   identity may repeat, as in the binding.
+- **Stage rows avoid the supplement-resolved set.** Option 3
+  ([#36](https://github.com/buster14a/buster/issues/36#issuecomment-5895408613))
+  disposes of census object rows only. A declared `link` or `self-host-stage1`
+  row must therefore not carry the identity of a supplement-resolved census
+  row (one of the approved 276 allocator-`none` rows). The C import
+  (`bq_retirement_performance_rows_derive`) and the binding
+  (`_derive_compiler_eligibility`) both reject such a row. Whoever declares the
+  stage rows must choose identities outside that set.
 - **Values from the census row.** Classification, compiler eligibility and
   skip proof come from the census row's schema-2 projection. An option-3
   supplement-resolved allocator-`none` row is compiler-ineligible, and its
   skip proof is its supplement proof
-  ([census import](retirement_census_import.md)). A stage row may not carry
-  such an identity. The source
+  ([census import](retirement_census_import.md)). The source
   digest is the subject's support-declaration digest, and
   `configuration_sha256` is the census row's #1020 digest.
 - **Eligibility markers.** `compiler_wall_time` and `compiler_peak_rss`

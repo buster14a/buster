@@ -184,7 +184,12 @@ def write_profile(path, artifacts):
         ("performance-rows-sha256", "performance_rows"),
     )
     data = "".join(f"{key}={sha256(artifacts[name].read_bytes())}\n"
-                   for key, name in keys if name in artifacts).encode("ascii")
+                   for key, name in keys if name in artifacts)
+    # Option 3: a self-test census resolves rows only under this explicit
+    # test-only pin of its approved set (full-census uses the compiled pin).
+    if "supplement_pin" in artifacts:
+        data += f"validator-supplement-resolved-sha256={artifacts['supplement_pin']}\n"
+    data = data.encode("ascii")
     if path.exists():
         path.chmod(stat.S_IMODE(path.stat().st_mode) | stat.S_IWUSR)
     path.write_bytes(data)
@@ -248,29 +253,44 @@ def census_rows_of(shard):
     return census_rows
 
 
+def fixture_supplement_pin(shard):
+    """The supplement fixture's explicit test-only pin: rows 0 and 4."""
+    return (len(SUPPLEMENT_RESOLVED_ROWS),
+            binding._supplement_identity_digest(census_rows_of(shard), SUPPLEMENT_RESOLVED_ROWS))
+
+
 def supplement_disposition(report, shard):
-    """The binding's option-3 supplement-resolved set for this report."""
+    """The binding's option-3 supplement-resolved set for this report.
+
+    The supplement fixture is judged against its test-only pin; the plain
+    fixture has no pin, so it may resolve no row.
+    """
+    approved = fixture_supplement_pin(shard) if report["reference_supplement_sha256"] else None
     return binding._supplement_resolved_rows(report, census_rows_of(shard),
-                                             set(report["applicability_skip_rows"]))
+                                             set(report["applicability_skip_rows"]), approved)
 
 
 def expected_ineligible(report, artifacts, shard):
     """Python reference for the C probe's VALIDATOR_INELIGIBLE lines.
 
-    A skipped row's proof hashes its applicability-skips.tsv line and a
-    supplement-resolved row's proof hashes its applicability.tsv line, each
-    under its own domain and the pinned report digest; the reason strings are
-    the binding's.
+    A skipped row's proof hashes its applicability-skips.tsv line; a
+    supplement-resolved row's proof hashes the report's supplement digest for
+    its shard (group % shards) and its applicability.tsv line. Each is under
+    its own domain and the pinned report digest, and the reason strings are
+    the binding's. (The binding's own per-row proof is the supplement manifest
+    and object digests; the rule, not the proof bytes, is shared.)
     """
     report_sha = sha256(artifacts["report"].read_bytes()).encode("ascii")
+    supplements = report["reference_supplement_sha256"]
 
     def lines_by_row(path):
         lines = path.read_bytes().split(b"\n")
         require(lines[-1] == b"", f"{path.name} does not end with a newline")
         return {int(line.split(b"\t", 1)[0]): line for line in lines[1:-1]}
 
-    def proof(domain, line):
-        return sha256(domain + b"\0" + report_sha + b"\0" + line)
+    def proof(domain, line, supplement=None):
+        prefix = b"" if supplement is None else supplement.encode("ascii") + b"\0"
+        return sha256(domain + b"\0" + report_sha + b"\0" + prefix + line)
 
     skips = lines_by_row(artifacts["skips"])
     applicability = lines_by_row(artifacts["applicability"])
@@ -284,7 +304,8 @@ def expected_ineligible(report, artifacts, shard):
             digest = proof(b"bq-retirement-validator-skip-v1", skips[row])
         else:
             reason = binding.SUPPLEMENT_INELIGIBLE_REASON
-            digest = proof(b"bq-retirement-validator-supplement-v1", applicability[row])
+            digest = proof(b"bq-retirement-validator-supplement-v1", applicability[row],
+                           supplements[(row // 4) % report["shards"]])
         lines.append(f"VALIDATOR_INELIGIBLE row={row} reason={reason} proof={digest}")
     return lines
 
@@ -668,19 +689,29 @@ def census_artifacts(fixture, report_path):
     }
 
 
-def expect_both_reject_report(probe, artifacts, report, shard, mutation, label):
+def expect_both_reject_report(probe, artifacts, report, shard, mutation, label, pinned=True):
     """A report tamper that the binding's rule and the C projection both reject."""
     changed = json.loads(json.dumps(report))
     mutation(changed)
     try:
         binding._supplement_resolved_rows(changed, census_rows_of(shard),
-                                          set(changed["applicability_skip_rows"]))
+                                          set(changed["applicability_skip_rows"]),
+                                          fixture_supplement_pin(shard) if pinned else None)
     except ValueError:
         pass
     else:
         raise RuntimeError(f"binding supplement rule accepted {label}")
     expect_tamper_rejected(probe, artifacts, artifacts["report"],
                            lambda data: mutate_report(data, mutation), label)
+
+
+def check_approved_supplement_pins():
+    """The compiled full-census pin in C equals the binding's approved set."""
+    count, digest = binding.APPROVED_SUPPLEMENT_SETS["full-census"]
+    source = (REPOSITORY / "tools/bench_service/retirement_correctness_service.c").read_text()
+    require(f"#define BQ_RETIREMENT_FULL_SUPPLEMENT_RESOLVED_COUNT {count}u\n" in source and
+            f'bq_retirement_full_supplement_resolved_sha256[] =\n    "{digest}";' in source,
+            "C and Python approved supplement-resolved pins differ")
 
 
 def check_supplement_disposition(probe):
@@ -715,9 +746,33 @@ def check_supplement_disposition(probe):
                 "binding did not authenticate each resolved row's supplement")
 
         artifacts = census_artifacts(fixture, report_path)
-        write_profile(artifacts["profile"], artifacts)
         make_read_only(*(path for name, path in artifacts.items() if name != "profile"))
+        pin_count, pin = fixture_supplement_pin(shard)
+        require(pin_count == len(SUPPLEMENT_RESOLVED_ROWS), "fixture pin count changed")
         configurations = expected_configurations(report, shard)
+
+        # Without the explicit test-only pin, or with a pin of another set,
+        # both implementations refuse the resolved rows.
+        for label, approved, profile_pin in (
+                ("no approved set", None, None),
+                ("a pin of another set", (1, binding._supplement_identity_digest(census_rows, [0])),
+                 binding._supplement_identity_digest(census_rows, [0]))):
+            try:
+                binding._supplement_resolved_rows(report, census_rows,
+                                                  set(report["applicability_skip_rows"]), approved)
+            except ValueError:
+                pass
+            else:
+                raise RuntimeError(f"binding supplement rule accepted {label}")
+            unpinned = {name: value for name, value in artifacts.items() if name != "supplement_pin"}
+            if profile_pin is not None:
+                unpinned["supplement_pin"] = profile_pin
+            write_profile(unpinned["profile"], unpinned)
+            require(probe_result(probe, unpinned).returncode != 0,
+                    f"compiled C eligibility probe accepted resolved rows with {label}")
+
+        artifacts["supplement_pin"] = pin
+        write_profile(artifacts["profile"], artifacts)
         expect_probe_success(probe, artifacts, configurations, report, shard,
                              EXPECTED_SUPPLEMENT_PROBE_OUTPUT)
 
@@ -742,6 +797,8 @@ def check_supplement_disposition(probe):
              "direct-reference defects without a supplement"),
             (drop("direct_reference_failure_rows", 5),
              "direct-reference set that does not cover its group"),
+            (append("direct_reference_failure_rows", 9),
+             "MIR direct-reference row without its failed base"),
         )
         for mutation, label in cases:
             expect_both_reject_report(probe, artifacts, report, shard, mutation, label)
@@ -847,6 +904,12 @@ def execute(probe):
                 lambda data, field=field: mutate_report(data, lambda report:
                     report[field].append(1)),
                 f"nonempty {field}")
+        # Option 3's zero-resolved rule, identical in both: with no resolved
+        # row, no supplement digest may be retained.
+        expect_both_reject_report(
+            probe, artifacts, report, shard,
+            lambda changed: changed["reference_supplement_sha256"].extend(["a" * 64, "b" * 64]),
+            "supplement digests without a resolved row", pinned=False)
         expect_tamper_rejected(
             probe, artifacts, artifacts["report"],
             lambda data: mutate_report(data, lambda report:
@@ -928,6 +991,7 @@ def execute(probe):
                 "population cross-check did not cover every declared row")
     finally:
         fixture.tearDown()
+    check_approved_supplement_pins()
     check_supplement_disposition(probe)
 
 
