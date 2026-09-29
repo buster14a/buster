@@ -1083,6 +1083,8 @@ buster_register_module(ui_builder "${BUSTER_SOURCE_DIR}/ui_builder${COMMON_EXTEN
 buster_register_module(window "${BUSTER_SOURCE_DIR}/window${COMMON_EXTENSION}")
 buster_register_module(rendering "${BUSTER_SOURCE_DIR}/rendering${COMMON_EXTENSION}")
 buster_register_module(truetype "${BUSTER_SOURCE_DIR}/truetype${COMMON_EXTENSION}")
+buster_register_module(image
+    "${BUSTER_SOURCE_DIR}/image${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/png${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/jpeg${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/gif${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/bmp${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/tga${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/qoi${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/pnm${COMMON_EXTENSION}")
 buster_register_module(font_provider "${BUSTER_SOURCE_DIR}/font_provider${COMMON_EXTENSION}")
 buster_register_module(hash "${BUSTER_SOURCE_DIR}/hash${COMMON_EXTENSION}")
 
@@ -1100,6 +1102,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/file_test.c
     src/buster/tests/target_test.c
     src/buster/tests/truetype_test.c
+    src/buster/tests/image_test.c
     src/buster/tests/compiler/metamorphic/metamorphic_test.c
     src/buster/tests/compiler/frontend/c/c_test.c
     src/buster/tests/compiler/frontend/c/once_test.c
@@ -1156,6 +1159,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/file_test.h
     src/buster/tests/target_test.h
     src/buster/tests/truetype_test.h
+    src/buster/tests/image_test.h
     src/buster/tests/x86_64_test.h
     src/buster/tests/compiler/metamorphic/metamorphic_test.h
     src/buster/tests/compiler/codegen/ebpf_test_vm.h
@@ -2051,13 +2055,15 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
     list(APPEND BUSTER_COMPILER_PLATFORM_MODULES window)
 endif()
 
-# The headless compiler has no production font consumer.  Keep the reusable
-# module registered above, but add it to ide only when its registered tests are
-# present.  A future product target using font_provider must name truetype in
-# its own module inventory rather than relying on ide's test dependency.
+# The headless compiler has no production font or image consumer. Keep the
+# reusable modules registered above, but add them to ide only for their tests
+# (and image fuzzing). Future product targets must name their own dependencies.
 set(BUSTER_COMPILER_TEST_MODULES)
 if (BUSTER_INCLUDE_TESTS)
     list(APPEND BUSTER_COMPILER_TEST_MODULES truetype)
+endif()
+if (BUSTER_INCLUDE_TESTS OR BUSTER_FUZZ_AVAILABLE)
+    list(APPEND BUSTER_COMPILER_TEST_MODULES image)
 endif()
 
 # buster_add_executable(<name> <main_file> MODULES <module>... [SOURCES <source>...])
