@@ -124,6 +124,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
          .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_pointer_addend_caller.c")},
         {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_pointer_table.c"),
          .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_pointer_table_caller.c")},
+        {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_unprototyped_definition.c"), .both_optimizations = true},
+        {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_block_function_declaration.c"), .both_optimizations = true},
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
         {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_unaligned_pointer.c"),
          .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_unaligned_pointer_caller.c")},
@@ -136,7 +138,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
         {.source = S8("tests/basic_c_llvm_vector_abi.c"), .caller = S8("tests/basic_c_llvm_vector_abi_main.c")},
 #if BUSTER_LINUX || BUSTER_WINDOWS
         {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_varargs.c"),
-         .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_varargs_check.c"), .both_optimizations = true},
+         .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_varargs_check.c"),
+         .both_optimizations = true},
 #endif
 #endif
         {.source = S8("tests/basic_c_llvm_integer_boundary_values.c"), .caller = S8("tests/basic_c_llvm_integer_boundary_check.c")},
