@@ -52,7 +52,7 @@ per-PR group and do not wait behind manual measurements. For reproducible
 manual comparisons, select an exact baseline commit rather than a moving ref;
 scheduled runs use the default `main` baseline.
 
-`python3 tests/compiler_throughput_workflow_test.py` checks the PR and request
+`python3 tools/compiler_throughput_workflow_test.py` checks the PR and request
 policies, including three overlapping non-PR requests, a manual/schedule
 collision, and capacity exhaustion. The ordinary hosted workflow lint checks
 the syntax separately; no live benchmark is part of the offline policy test.

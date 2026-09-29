@@ -87,7 +87,7 @@ class CompilerThroughputWorkflowTest(unittest.TestCase):
                   if re.search(r"^\s+queue:", path.read_text(), re.MULTILINE)]
         self.assertEqual(queued, [REQUEST_WORKFLOW])
         ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
-        self.assertIn("python3 tests/compiler_throughput_workflow_test.py", ci)
+        self.assertIn("python3 tools/compiler_throughput_workflow_test.py", ci)
         self.assertIn("-ignore 'unexpected key \"queue\" for \"concurrency\" section'", ci)
 
 
