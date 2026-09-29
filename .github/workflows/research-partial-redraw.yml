@@ -1,0 +1,54 @@
+name: Partial redraw reference research (branch only)
+
+on:
+  push:
+    branches: [codex/1952-bounded-partial-redraw]
+    paths:
+      - tools/investigations/partial-redraw/model.c
+      - tools/investigations/partial-redraw/fixtures.inc
+      - tools/investigations/partial-redraw/benchmark.inc
+      - tools/investigations/partial-redraw/observer.c
+      - tools/investigations/partial-redraw/contract.md
+      - .github/workflows/research-partial-redraw.yml
+
+permissions:
+  contents: read
+
+jobs:
+  reference:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Reference checks and CPU diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/revision.txt
+          git rev-parse HEAD^{tree} > evidence/tree.txt
+          uname -a > evidence/environment.txt
+          lscpu >> evidence/environment.txt
+          clang --version > evidence/toolchains.txt
+          gcc --version >> evidence/toolchains.txt
+          src=tools/investigations/partial-redraw/model.c
+          sha256sum "$src" tools/investigations/partial-redraw/*.inc tools/investigations/partial-redraw/observer.c tools/investigations/partial-redraw/contract.md > evidence/source.sha256
+          observer=tools/investigations/partial-redraw/observer.c
+          clang -std=c11 -O2 -fwrapv -fno-strict-aliasing -funsigned-char -Wall -Wextra -Wpedantic -Werror "$src" "$observer" -o evidence/model-clang
+          gcc -std=c11 -O2 -fwrapv -fno-strict-aliasing -funsigned-char -Wall -Wextra -Wpedantic -Werror "$src" "$observer" -o evidence/model-gcc
+          clang -std=c11 -O1 -g -fwrapv -fno-strict-aliasing -funsigned-char -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined "$src" "$observer" -o evidence/model-sanitize
+          sha256sum evidence/model-clang evidence/model-gcc evidence/model-sanitize > evidence/binaries.sha256
+          evidence/model-clang | tee evidence/check-clang.txt
+          evidence/model-gcc | tee evidence/check-gcc.txt
+          ASAN_OPTIONS=detect_leaks=1 evidence/model-sanitize | tee evidence/check-sanitize.txt
+          evidence/model-clang --bench | tee evidence/cpu-model.txt
+      - name: Preserve all available evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: partial-redraw-reference-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 14
+          if-no-files-found: error

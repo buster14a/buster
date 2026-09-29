@@ -28,7 +28,8 @@ unique command IDs in 0..63. Geometry and effective clips are integer, half-open
 axis-aligned rectangles intersected with the target; geometry/clip coordinates
 are bounded to [-256, 256]. Empty rectangles issue no samples. Inputs are constant
 straight RGBA8 colors and optional nearest-neighbor 8x8 R8 coverage textures
-with explicit immutable ID/generation pairs. Clear is a known opaque constant.
+with explicit immutable ID/generation pairs. There are at most eight resource
+slots, IDs 0..7, each containing 64 R8 texels. Clear is a known opaque constant.
 
 For each covered sample let `a = (As * coverage + 127) / 255`.
 For each RGB component, `out = (Cs*a + destination*(255-a) + 127) / 255`,
