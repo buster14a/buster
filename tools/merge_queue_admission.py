@@ -40,7 +40,7 @@ CHECKS = {
 QUEUE = {
     "check_response_timeout_minutes": 360,
     "grouping_strategy": "ALLGREEN",
-    "max_entries_to_build": 20,
+    "max_entries_to_build": 4,
     "max_entries_to_merge": 1,
     "merge_method": "MERGE",
     "min_entries_to_merge": 1,
@@ -61,6 +61,9 @@ POLICY_PATHS = (
     "tools/native_retirement_rebind_contract.py",
     "tools/native_retirement_sdks.py",
     ".github/workflows/merge-queue-admission.yml",
+    ".github/workflows/ci-merge-group-watch.yml",
+    ".github/workflows/ci-recovery.yml",
+    ".github/scripts/recover-ci.py",
     ".github/workflows/api-migration-policy.yml",
     ".github/workflows/native-retirement-rebind.yml",
     ".github/main-merge-queue.ruleset.json",
