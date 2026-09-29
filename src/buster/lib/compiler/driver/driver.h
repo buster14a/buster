@@ -223,6 +223,8 @@ struct CompilerDriverResult
     LlvmBitcodeArtifact llvm_bitcode;
     EbpfArtifact ebpf;
     ObjectFile object;
+    // What serializing `object` cost, for -c; zero when no object was written.
+    ObjectWriteStatistics object_write_statistics;
     CodegenStatistics codegen_statistics;
     CompilerDriverFallbackRecord* fallback_records;
     u32 fallback_record_count;

@@ -2339,6 +2339,97 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_coff_section_alignment(U
     return result;
 }
 
+// One function per priority that is both a constructor and a destructor: its
+// .init_array and .fini_array priority groups each become an ELF section
+// with its own RELA table, four section headers per function.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_priority_source(Arena* arena, u32 count)
+{
+    u64 capacity = (u64)count * 96;
+    char8* bytes = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        String8 line = string_format(arena, S8("__attribute__((constructor({u32}), destructor({u32}))) static void f{u32}(void) {{}}\n"), 101 + index,
+                                     101 + index, index);
+        if (line.length <= capacity - length)
+        {
+            memcpy(bytes + length, line.pointer, line.length);
+            length += line.length;
+        }
+    }
+    return (String8){.pointer = bytes, .length = length};
+}
+
+// -c reports what serializing the object cost, and the ELF writer holds to
+// writing each byte of the file once. Past SHN_LORESERVE sections it refuses
+// the object with a diagnostic and leaves the existing output alone; the
+// writer it replaced truncated e_shnum and reported success.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_object_write_limits(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    String8 input = buster_test_temporary_path(arena, S8("buster-object-limit-input"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-object-limit-output"), S8(".o"));
+    String8 command[] = {S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"), output, input};
+    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+    BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+
+    String8 source = S8("int value = 7;\nint entry(void) { return value; }\n");
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+    ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+    ObjectWriteStatistics written = compiled.object_write_statistics;
+    BUSTER_TEST(arguments, bytes.length && written.output_bytes == bytes.length && written.image_bytes_stored == written.output_bytes &&
+                               written.image_bytes_reserved == written.output_bytes && written.retained_bytes == written.output_bytes &&
+                               !written.image_bytes_patched && written.relocation_visits == 3 * (u64)compiled.object.relocation_count &&
+                               written.symbol_visits == 3 * (u64)compiled.object.symbol_count);
+
+    // Sixteen thousand functions outgrow a fixture arena's reservation; the
+    // compiles near the limit get the one `ide cc` gives a translation unit.
+    Arena* limit_arena = arena_create((ArenaCreation){.reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE});
+    if (BUSTER_REQUIRE(arguments, limit_arena != 0))
+    {
+        // Just under the limit the header table is whole: it ends the file,
+        // so its offset plus e_shnum entries must reach exactly the end.
+        source = compiler_driver_test_priority_source(limit_arena, 16300);
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        u64 limit_position = limit_arena->position;
+        compiled = compiler_driver_execute_invocation(limit_arena, invocation);
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+        bytes = file_read(limit_arena, output, (FileReadOptions){0});
+        u64 header_offset = 0;
+        u16 header_count = 0;
+        if (BUSTER_REQUIRE(arguments, bytes.length >= 64))
+        {
+            memcpy(&header_offset, bytes.pointer + 40, sizeof(header_offset));
+            memcpy(&header_count, bytes.pointer + 60, sizeof(header_count));
+            BUSTER_TEST(arguments, header_count > 4 * 16300 && header_count < 0xff00 && header_offset + (u64)header_count * 64 == bytes.length);
+        }
+        arena_set_position(limit_arena, limit_position);
+
+        source = compiler_driver_test_priority_source(limit_arena, 16400);
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        String8 sentinel_text = S8("existing ELF object must survive a refused section count");
+        ByteSlice sentinel = BUSTER_SLICE_TO_BYTE_SLICE(sentinel_text);
+        BUSTER_TEST(arguments, file_write(output, sentinel));
+        CompilerDriverResult rejected = compiler_driver_execute_invocation(limit_arena, invocation);
+        BUSTER_TEST_RAW(arguments, rejected.error == COMPILER_DRIVER_ERROR_OBJECT, rejected.diagnostic);
+        BUSTER_TEST(arguments, rejected.object_error == OBJECT_ERROR_CAPACITY && !rejected.object_write_statistics.output_bytes &&
+                                   !rejected.object_write_statistics.image_bytes_reserved);
+        BUSTER_STRING_TEST(arguments, rejected.diagnostic,
+                           S8("native elf64 object exceeds the object writer's limits (section count, string-table offsets or size)"));
+        ByteSlice after = file_read(limit_arena, output, (FileReadOptions){0});
+        BUSTER_TEST(arguments, after.pointer && after.length == sentinel.length && memcmp(after.pointer, sentinel.pointer, sentinel.length) == 0);
+        BUSTER_TEST(arguments, arena_destroy(limit_arena, 1));
+    }
+    BUSTER_TEST(arguments, os_file_delete(input));
+    BUSTER_TEST(arguments, os_file_delete(output));
+    arena_set_position(arena, position);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2581,6 +2672,101 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_include_population(UnitT
     return result;
 }
 
+
+// Whether `index` is the first definition in `object` carrying its name: the
+// resolution every named reference in an object has always had.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_first_definition(ObjectFile const* object, u32 index)
+{
+    bool first = index < object->symbol_count && object->symbols[index].section != OBJECT_SECTION_UNDEFINED;
+    for (u32 candidate = 0; first && candidate < index; candidate += 1)
+    {
+        first = object->symbols[candidate].section == OBJECT_SECTION_UNDEFINED ||
+                !string_equal(object->symbols[candidate].name, object->symbols[index].name);
+    }
+    return first;
+}
+
+// A global variable's code relocations and its debug address relocations
+// (DWARF DW_OP_addr; CodeView S_GDATA32 SECREL32 and SECTION16) resolve
+// through its program symbol, which the object writer maps to the first
+// definition carrying its link name -- the answer the name lookup it replaced
+// gave. The fixture mixes the spellings that make names and identities
+// diverge: two block-scope statics spelled alike, an asm label, a tentative
+// definition completed later, and a block-scope extern redeclaration.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_global_relocations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = S8("int alpha = 1;\n"
+                        "int beta;\n"
+                        "static int gamma_value = 3;\n"
+                        "int renamed __asm__(\"renamed_link\") = 5;\n"
+                        "int beta = 2;\n"
+                        "int first(void) { static int counter = 6; extern int alpha; return alpha + beta + gamma_value + renamed + counter++; }\n"
+                        "int second(void) { static int counter = 7; return counter++ + first(); }\n");
+    String8 path = buster_test_temporary_path(temporary.arena, S8("buster-debug-global-relocations"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    String8 const targets[] = {S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu"), S8("x86_64-windows")};
+    // DWARF writes one address per global; CodeView two (offset, section).
+    u32 const relocations_per_global[] = {1, 1, 2};
+    String8 const named[] = {S8("alpha"), S8("beta"), S8("gamma_value"), S8("renamed_link")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        String8 output = buster_test_temporary_path(temporary.arena, S8("buster-debug-global-relocations"), S8(".o"));
+        String8 command[] = {S8("-c"), S8("-g"), S8("-target"), targets[target_index], S8("-o"), output, path};
+        CompilerDriverResult built = compiler_driver_execute_invocation(temporary.arena,
+            compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST_RAW(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object, targets[target_index]);
+        if (built.error != COMPILER_DRIVER_ERROR_NONE || !built.has_object)
+        {
+            continue;
+        }
+        ObjectFile* object = &built.object;
+        u32 debug_references = 0;
+        u32 code_references = 0;
+        u32 first_definitions = 0;
+        u32 distinct_debug_targets = 0;
+        bool named_found[BUSTER_ARRAY_LENGTH(named)] = {0};
+        u8* seen = arena_allocate(temporary.arena, u8, object->symbol_count ? object->symbol_count : 1);
+        memset(seen, 0, object->symbol_count);
+        for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+        {
+            ObjectRelocation relocation = object->relocations[relocation_index];
+            ObjectSymbol const* symbol = relocation.symbol < object->symbol_count ? object->symbols + relocation.symbol : 0;
+            bool data = symbol && symbol->kind == OBJECT_SYMBOL_DATA &&
+                        (symbol->section == OBJECT_SECTION_DATA || symbol->section == OBJECT_SECTION_READ_ONLY_DATA ||
+                         symbol->section == OBJECT_SECTION_ZERO);
+            bool debug = relocation.section == OBJECT_SECTION_DEBUG_INFO || relocation.section == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS;
+            if (!data || (!debug && relocation.section != OBJECT_SECTION_TEXT))
+            {
+                continue;
+            }
+            debug_references += debug;
+            code_references += !debug;
+            first_definitions += compiler_driver_test_first_definition(object, relocation.symbol);
+            if (debug && !seen[relocation.symbol])
+            {
+                seen[relocation.symbol] = 1;
+                distinct_debug_targets += 1;
+                for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(named); name_index += 1)
+                {
+                    named_found[name_index] |= string_equal(symbol->name, named[name_index]);
+                }
+            }
+        }
+        // alpha, beta, gamma_value, renamed_link and the two counters.
+        BUSTER_TEST_RAW(arguments, distinct_debug_targets == 6, targets[target_index]);
+        BUSTER_TEST_RAW(arguments, debug_references == 6 * relocations_per_global[target_index], targets[target_index]);
+        BUSTER_TEST_RAW(arguments, code_references >= 6, targets[target_index]);
+        BUSTER_TEST_RAW(arguments, first_definitions == debug_references + code_references, targets[target_index]);
+        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(named); name_index += 1)
+        {
+            BUSTER_TEST_RAW(arguments, named_found[name_index], named[name_index]);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
 
 // A valid C identifier can still exceed CodeView's single-record limit.
 // Reject -g explicitly instead of succeeding with no .debug$S/.debug$T.
@@ -9870,6 +10056,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_hexadecimal_output);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_scoped_constant_execution);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_coff_section_alignment);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_write_limits);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unneeded_prototyped_definitions);
@@ -9918,6 +10105,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_arm64_unwind);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_dwarf5_objects);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_codeview_limit);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_global_relocations);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_data_scaling);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_link_boundaries);

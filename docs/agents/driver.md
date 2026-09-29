@@ -446,6 +446,17 @@ of initializers and handlers, a randomized PIE base, a CPython extension when
 `python3` and its headers exist, and the `-fPIC` refusal. AArch64 ELF, PE DLLs
 and Mach-O dylibs have no writer yet.
 
+## Object output (`-c`)
+
+`-c` writes the object through `object_write`. The ELF64 writer plans the
+whole file with checked arithmetic, then stores each byte once; it refuses an
+object whose section count reaches `SHN_LORESERVE`, whose string tables need
+offsets past 32 bits, or whose size overflows or exceeds the arena, with the
+diagnostic `native elf64 object exceeds the object writer's limits (...)`,
+and leaves an existing output file untouched. `-v` prints the writer's exact
+work as one `OBJECT_WRITE` record, summed over the objects of a multi-input
+`-c`. See [object emission](../object-emission.md).
+
 ## External ELF debug information
 
 The ELF object reader carries the DWARF 5 `.debug_addr`, `.debug_str_offsets`,

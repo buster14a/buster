@@ -3773,6 +3773,20 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_base(CPreprocessResult pre
     return type;
 }
 
+// Past this many reached aggregates a promoted-member search stops scanning its
+// queue for repeats and indexes a flag per type instead.
+#define C_PARSE_MEMBER_SEARCH_QUEUE_SCAN_LIMIT 64u
+#if BUSTER_INCLUDE_TESTS
+// Promoted searches, and those that needed the per-type flag table.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_parse_member_search_counts[2];
+
+void c_test_member_search_counts(u64* searches, u64* tables)
+{
+    *searches = c_parse_member_search_counts[0];
+    *tables = c_parse_member_search_counts[1];
+}
+#endif
+
 BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result, CTypeId type, String8 name, u32* bit_width_out)
 {
     if (bit_width_out)
@@ -3802,14 +3816,21 @@ BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result
     }
     if (field_type.value == C_ID_UNDERLYING_INVALID && promoted)
     {
+        // The queue holds exactly the types the search has reached -- the
+        // root and every anonymous aggregate enqueued once -- so it is the
+        // visited set.  A search reaches a handful of them, and clearing a
+        // flag per type-table row for each lookup cost 107 KB of stores per
+        // call on the self-compile; only a search that outgrows the bound
+        // switches to that table, seeded from the queue.
         TemporalArena field_search = arena_begin_temporal(arena);
         CTypeId* work = arena_allocate(field_search.arena, CTypeId, result->type_count + 1);
-        bool* visited = arena_allocate(field_search.arena, bool, result->type_count + 1);
-        memset(visited, 0, sizeof(*visited) * (result->type_count + 1));
+        bool* visited = 0;
+#if BUSTER_INCLUDE_TESTS
+        c_parse_member_search_counts[0] += 1;
+#endif
         u32 work_index = 0;
         u32 work_count = 1;
         work[0] = type;
-        visited[type.value] = true;
         while (work_index < work_count && field_type.value == C_ID_UNDERLYING_INVALID)
         {
             CTypeId candidate_id = work[work_index++];
@@ -3826,7 +3847,16 @@ BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result
                     }
                     break;
                 }
-                if (member->name.length || member->type.value >= result->type_count || visited[member->type.value])
+                if (member->name.length || member->type.value >= result->type_count)
+                {
+                    continue;
+                }
+                bool reached = visited && visited[member->type.value];
+                for (u32 queued = 0; !visited && !reached && queued < work_count; queued += 1)
+                {
+                    reached = work[queued].value == member->type.value;
+                }
+                if (reached)
                 {
                     continue;
                 }
@@ -3835,7 +3865,22 @@ BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result
                 {
                     continue;
                 }
-                visited[member->type.value] = true;
+                if (!visited && work_count == C_PARSE_MEMBER_SEARCH_QUEUE_SCAN_LIMIT)
+                {
+                    visited = arena_allocate(field_search.arena, bool, result->type_count + 1);
+                    memset(visited, 0, sizeof(*visited) * (result->type_count + 1));
+#if BUSTER_INCLUDE_TESTS
+                    c_parse_member_search_counts[1] += 1;
+#endif
+                    for (u32 queued = 0; queued < work_count; queued += 1)
+                    {
+                        visited[work[queued].value] = true;
+                    }
+                }
+                if (visited)
+                {
+                    visited[member->type.value] = true;
+                }
                 work[work_count++] = member->type;
             }
         }
