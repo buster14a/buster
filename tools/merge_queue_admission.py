@@ -77,6 +77,8 @@ POLICY_PATHS = (
     ".github/scripts/recover-ci.py",
     ".github/workflows/api-migration-policy.yml",
     ".github/workflows/native-retirement-rebind.yml",
+    ".github/workflows/native-retirement-rebind-dispatch.yml",
+    "tools/native_retirement_rebind_dispatch.py",
     ".github/main-merge-queue.ruleset.json",
     "docs/native-retirement-dependencies-v1.json",
     "docs/native-retirement-sdks-v1.json",

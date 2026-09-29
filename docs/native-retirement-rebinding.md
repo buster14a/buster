@@ -107,10 +107,20 @@ resolves live publication evidence for that PR head,
 including the successful latest writer attempt. Combined-head CI remains required
 on the synthetic SHA. Rebinding checks that existing generated pair in place;
 it does not refresh it into a different, untested group tree.
-The read-only rebinding workflow likewise waits for a later group's predecessor
-under independently checked-out main policy. It verifies the exact queue ref
-and admission/rebinding policy identity before reconstruction. The repository
-job has a 310-minute limit for the bounded five-hour wait.
+The read-only rebinding workflow no longer reserves a runner while a later
+group waits for its predecessor. A trusted-main dispatcher makes one short pass
+when the API policy workflow completes, when main advances, or on the 15-minute
+recovery sweep. It dispatches the optional closure job only for a group whose
+base equals live main, and records the exact group in its run name. A visible
+previous run for that exact head suppresses duplicate dispatch; GitHub may not
+index a newly accepted dispatch immediately, so a closely spaced duplicate
+delivery can still schedule one extra read-only worker. Failures require an
+explicit rerun rather than an automatic retry to green. The dispatched worker
+uses read-only permissions, checks out trusted main and the exact group as
+data, then runs `wait-base --wait-seconds 0` against the live queue ref before
+reconstruction. A stale/replaced group fails before candidate execution. This
+job is not one of the eight required queue checks; admission still comes from
+the independent exact-tree gate.
 
 The workflow has three separately permissioned jobs:
 
