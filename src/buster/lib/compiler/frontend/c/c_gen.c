@@ -15980,12 +15980,13 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
 //     zero, and the other operand's imaginary part is carried through
 //     unchanged rather than added to it).
 //   * `*` and `/` with a real operand scale or divide both halves.
-//   * `*` and `/` with two complex operands are lowered inline with the
-//     Smith-style arithmetic implemented below: multiplication emits scalar
-//     products and sums, and division selects the stable ratio formula from
-//     the larger divisor component. No compiler runtime helper is involved.
-//   * `real / complex` promotes the numerator with a positive-zero imaginary
-//     half and uses that same inline division path.
+//   * `*` and `/` with two complex operands lower inline -- the naive product
+//     and Smith's algorithm in `c_ir_emit_complex_divide` -- matching Clang's
+//     `-fcomplex-arithmetic=improved` mode rather than the runtime helper calls
+//     it emits by default. This toolchain neither ships nor links a compiler
+//     runtime to resolve those helpers.
+//   * `real / complex` follows the same inline Smith path, with the numerator's
+//     imaginary part supplied as a positive zero.
 //   * When complex lowering is not active, ordinary integer and real
 //     floating-point division stays on the primitive operator path.
 //   * `==` and `!=` compare both halves.
