@@ -1324,6 +1324,10 @@ struct CLexState
 {
     CLexResult* result;
     CTranslatedSource translated;
+    // The result's arena. Diagnostic rows grow in diagnostic_arena, which is
+    // rewound or destroyed once lexing ends and the rows are copied out, so
+    // anything a row points at -- a formatted message -- lives here instead.
+    Arena* arena;
     Arena* diagnostic_arena;
     u64 diagnostic_capacity;
     u64 maximum_diagnostic_count;
@@ -1705,7 +1709,7 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
     }
     c_token_push(result, translated, offset, offset + 1, C_TOKEN_INVALID, C_PUNCTUATOR_NONE);
     c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, offset, C_DIAGNOSTIC_INVALID_CHARACTER,
-                      string_format(state->diagnostic_arena, S8("invalid character byte {u32} in C source"), (u32)character));
+                      string_format(state->arena, S8("invalid character byte {u32} in C source"), (u32)character));
     return offset + 1;
 }
 
@@ -2678,6 +2682,7 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
                     CLexState state = {
                         .result = &result,
                         .translated = translated,
+                        .arena = arena,
                         .diagnostic_arena = diagnostic_arena,
                         .maximum_diagnostic_count = translated.source.length + 1,
                     };
@@ -3252,6 +3257,40 @@ BUSTER_C_SHARED u32 c_symbol_intern(CSymbolTable* table, String8 name)
         .length_and_id = length_word | id,
     };
     return id;
+}
+
+// The id `name` was interned under, or 0 when it never was. The probe is
+// c_symbol_intern's without the insertion, so a consumer that holds a
+// spelling from outside the token stream -- lowering's IrField names -- can
+// ask for its id without growing the table. A 0 answer is exact: no token
+// interned into this table spells `name`.
+BUSTER_C_SHARED u32 c_symbol_find(const CSymbolTable* table, String8 name)
+{
+    CSymbolKey key = c_symbol_key(name);
+    u64 length_word = (u64)name.length << 32;
+    u32 mask = table->slot_capacity - 1;
+    u32 slot = c_symbol_slot_hash(key, name.length) & mask;
+    u32 result = 0;
+    for (;;)
+    {
+        CSymbolSlot* entry = &table->slots[slot];
+        u64 length_and_id = entry->length_and_id;
+        if (!length_and_id)
+        {
+            break;
+        }
+        if (entry->low == key.low && entry->high == key.high && (length_and_id & UINT64_C(0xFFFFFFFF00000000)) == length_word)
+        {
+            u32 id = (u32)length_and_id;
+            if (name.length <= 16 || c_symbol_middle_equal(table->names[id], name))
+            {
+                result = id;
+                break;
+            }
+        }
+        slot = (slot + 1) & mask;
+    }
+    return result;
 }
 
 BUSTER_C_SHARED String8 const c_declaration_keyword_spellings[] = {
@@ -4503,6 +4542,16 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 ok = false;
                 continue;
             }
+            // A pasted identifier is interned where it is formed, exactly as
+            // the token pass interns every lexed one, so the id -- not the
+            // spelling -- is the name key every later phase reads. Left at 0,
+            // each downstream lookup re-interned the joined spelling and
+            // dropped the answer; interning here is once per paste. The
+            // joined bytes live in the spelling space, which outlives the
+            // table's borrowed name pointer.
+            u32 pasted_symbol = pasted_shape.kind == C_TOKEN_IDENTIFIER && result->symbols
+                                    ? c_symbol_intern(result->symbols, (String8){.pointer = joined, .length = joined_length})
+                                    : 0;
             left->token = (CPpToken){
                 .token =
                     {
@@ -4510,6 +4559,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                         .length = c_token_length_field(joined_length),
                         .kind = pasted_shape.kind,
                         .punctuator = pasted_shape.punctuator,
+                        .symbol = pasted_symbol,
                     },
                 .stamp = stamp & C_PP_STAMP_MASK,
                 .foreign = true,
@@ -6377,6 +6427,21 @@ CIncludeFileStatus c_test_include_file_entry(CIncludeFileTable* table, CIncludeF
                                             CIncludeFileEntry** entry_out)
 {
     return c_include_file_entry(table, identity, spelling, entry_out);
+}
+
+u32 c_test_symbol_intern(CSymbolTable* table, String8 name)
+{
+    return c_symbol_intern(table, name);
+}
+
+u32 c_test_symbol_find(CSymbolTable const* table, String8 name)
+{
+    return c_symbol_find(table, name);
+}
+
+u32 c_test_symbol_count(CSymbolTable const* table)
+{
+    return table->count;
 }
 
 bool c_test_include_file_table_grow(CIncludeFileTable* table)

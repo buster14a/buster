@@ -579,6 +579,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_global_variable(ByteWriter* symbols, Debu
             .function = UINT32_MAX,
             .kind = CODEVIEW_RELOCATION_SECREL32,
             .symbol_name = variable->linkage_name.length ? variable->linkage_name : variable->name,
+            .symbol = variable->symbol,
         };
         *relocation_count += 1;
     }
@@ -590,6 +591,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_global_variable(ByteWriter* symbols, Debu
             .function = UINT32_MAX,
             .kind = CODEVIEW_RELOCATION_SECTION16,
             .symbol_name = variable->linkage_name.length ? variable->linkage_name : variable->name,
+            .symbol = variable->symbol,
         };
         *relocation_count += 1;
     }
