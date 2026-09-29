@@ -183,7 +183,8 @@ seconds, including both Windows mode lanes and the aggregate inventory check.
 It reports whole-workflow elapsed time, execution span, initial queue delay,
 individual job durations and job queue delays when API creation timestamps
 exist (otherwise `null`, never imputed zero). Missing successful steps or shard
-identities reject a sample. Historical 23-job and current 25-job workflow blobs
+identities reject a sample, so draft runs with deferred macOS lanes are never
+timing samples. Historical 23-job and current 25-job workflow blobs
 remain separate cohorts.
 
 Compare medians and retain individual shard distributions. Inspect
