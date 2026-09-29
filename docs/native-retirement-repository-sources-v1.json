@@ -21,8 +21,8 @@
     },
     {
       "source": "src/buster/lib/base.h",
-      "bytes": 42094,
-      "sha256": "2b858570273468236f9b05533258c09edc6690a3b2b2536f6aed6ef0a40b6ab1"
+      "bytes": 42477,
+      "sha256": "3edf03a7b8285752ecbae8de4c9f26dca3f851830d18365a1cbb96623824f46e"
     },
     {
       "source": "src/buster/lib/compiler/ebpf/ebpf.c",
@@ -91,8 +91,8 @@
     },
     {
       "source": "src/buster/lib/file.c",
-      "bytes": 24371,
-      "sha256": "7dc87af4ae316d46ab575e1fd3bc349754f4013419e5bea57008027fb28c46ce"
+      "bytes": 24455,
+      "sha256": "4b5d4786a138e2355cbf02aa3109dfd834ac5205fc790bcde029e0d911f6248e"
     },
     {
       "source": "src/buster/lib/file.h",
@@ -131,13 +131,13 @@
     },
     {
       "source": "src/buster/lib/os.c",
-      "bytes": 241317,
-      "sha256": "20f6ba962e862d88e4530a60222f7f0bf76a7cbb0eb4d8739c7a0fc3720d6671"
+      "bytes": 252355,
+      "sha256": "3d742cbf3b907a89b6b6634fcece4fb3e84659441422d2f2c801533f651b7dfd"
     },
     {
       "source": "src/buster/lib/os.h",
-      "bytes": 31720,
-      "sha256": "3fdbe86eb535eb496b8dd66cff5af02eadb26747e353d651351f4928cf1c17d1"
+      "bytes": 31902,
+      "sha256": "890f62f3ff56ffd5771e6db7a4f1210357bd235d0510f44c33b41f6e169c80b1"
     },
     {
       "source": "src/buster/lib/os_internal.h",
@@ -151,13 +151,13 @@
     },
     {
       "source": "src/buster/lib/string.c",
-      "bytes": 67233,
-      "sha256": "675be38bcaed9a6c3d242efebd416c644b8734aafc7d8c5f7ff3ced1efa9a3db"
+      "bytes": 68312,
+      "sha256": "91b05ad8e41d9947a814f1ebd6903b1c9bfd8e149a928566857b845070810e3a"
     },
     {
       "source": "src/buster/lib/string.h",
-      "bytes": 7209,
-      "sha256": "fa07c4f70e6bf85dbe51359d9af1dda9e2f3c8af3f4f3deccc86b958736dbd21"
+      "bytes": 7616,
+      "sha256": "56714276d1abb2893204adea0ab736a2d0091d8748a68540572a79d734fb403b"
     },
     {
       "source": "src/buster/lib/system_headers.h",

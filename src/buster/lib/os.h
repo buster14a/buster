@@ -312,24 +312,27 @@ BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnR
 BUSTER_F_DECL ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spawn, u64 timeout_microseconds);
 BUSTER_F_DECL String8 os_get_environment_variable(String8 variable);
 
-BUSTER_F_DECL void os_make_directory(String8 path);
-// Creates one owner-only directory. An existing path counts as success, like
-// mkdir/EEXIST; callers opening a result tree still validate its contents.
-// Unlike os_make_directory, reports failure and accepts bounded path slices.
-BUSTER_F_DECL bool os_make_directory_attempt(String8 path);
-
 typedef struct OsDirectoryCreateResult OsDirectoryCreateResult;
 struct OsDirectoryCreateResult
 {
     OsError error;
-    // True means an entry of any kind already occupied the requested name.
+    // `created` reports a new directory. `already_exists` reports a name
+    // collision; `existing_directory` distinguishes a usable directory from
+    // a file or other entry at that name. `error` is zero on either success.
+    bool created;
     bool already_exists;
-    u8 reserved[3];
+    bool existing_directory;
+    u8 reserved;
 };
-// Creates exactly one new directory and never accepts an existing file,
-// directory or link as ownership. POSIX mode is 0700; Windows inherits the
-// containing directory's access policy. Parent directories are not created.
+// Creates one directory (POSIX mode 0755 before umask). Parent directories
+// are not created. Existing directories count as success; other existing
+// entries and OS failures are reported in `error`.
+BUSTER_F_DECL OsDirectoryCreateResult os_make_directory(String8 path);
+// Creates exactly one new owner-only directory (POSIX mode 0700 before
+// umask). Existing names are reported as collisions without claiming ownership.
 BUSTER_F_DECL OsDirectoryCreateResult os_make_directory_exclusive(String8 path);
+// Creates one owner-only directory or accepts an existing directory.
+BUSTER_F_DECL bool os_make_directory_attempt(String8 path);
 
 BUSTER_F_DECL bool os_file_delete(String8 path);
 // The native error behind os_file_delete; a missing path is still success.
