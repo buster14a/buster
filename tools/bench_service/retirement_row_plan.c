@@ -769,11 +769,13 @@ bool bq_retirement_row_observed_format(BqRetirementRowObserved const* observed, 
     if (out.ok)
     {
         bq_retirement_row_text(&out, "BQ-RETIREMENT-ROW-EVIDENCE-V1\njob=%" PRIu64 "\nattempt=%" PRIu64
-                               "\nrow-plan=%s\npopulation=%s\ncpu=%s %u %s\nrows=%u\n", (uint64_t)observed->job_id,
-                               (uint64_t)observed->attempt_token, bq_retirement_row_digest_text(observed->plan_sha256),
+                               "\nrow-plan=%s\npopulation=%s\ncpu=%s %u %s\nsandbox-abi=%u\nrows=%u\n",
+                               (uint64_t)observed->job_id, (uint64_t)observed->attempt_token,
+                               bq_retirement_row_digest_text(observed->plan_sha256),
                                bq_retirement_row_digest_text(observed->population_sha256),
                                bq_retirement_row_digest_text(observed->cpu_model_sha256), observed->cpus,
-                               observed->cpu_mask[0] ? observed->cpu_mask : "-", observed->row_count);
+                               observed->cpu_mask[0] ? observed->cpu_mask : "-", observed->sandbox_abi,
+                               observed->row_count);
     }
     for (u32 index = 0; out.ok && index < observed->row_count; index += 1)
     {
@@ -894,6 +896,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_row_observed_decode(BqRetirementCheckCurs
         observed->cpus = (u32)cpus;
         snprintf(observed->cpu_mask, sizeof(observed->cpu_mask), "%s", strcmp(fields[2], "-") ? fields[2] : "");
     }
+    observed->sandbox_abi = bq_retirement_check_count(cursor, "sandbox-abi=", 0, UINT32_MAX);
     u32 rows = bq_retirement_check_count(cursor, "rows=", observed->row_count, observed->row_count);
     for (u32 index = 0; cursor->ok && index < rows; index += 1)
     {
@@ -1020,6 +1023,8 @@ BqError bq_retirement_row_evidence_join(BqRetirementRowPlan const* plan, BqRetir
     if (result == BQ_OK && !(observed->cpus == 1 && !strcmp(observed->cpu_mask, mask) &&
                              !memcmp(observed->cpu_model_sha256, plan->cpu_model_sha256, SHA256_HEX_CAPACITY)))
         result = BQ_CONFIGURATION_MISMATCH;
+    /* The steps ran in the whole sandbox. */
+    if (result == BQ_OK && observed->sandbox_abi < BQ_RETIREMENT_SANDBOX_MIN_ABI) result = BQ_CONFIGURATION_MISMATCH;
     u64 capacity = 0, used = 0;
     for (u32 index = 0; result == BQ_OK && index < plan->group_count; index += 1)
         capacity += strlen(plan->groups[index].allocator) + strlen(plan->groups[index].metrics) + 2u;

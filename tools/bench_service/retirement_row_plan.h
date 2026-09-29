@@ -159,6 +159,8 @@ typedef struct BqRetirementRowObserved
     char (*object_sha256)[2][SHA256_HEX_CAPACITY];
     u64 job_id, attempt_token;
     u32 row_count, input_count, cpus;
+    /* The Landlock ABI the producer's sandbox enforced. */
+    u32 sandbox_abi;
     char plan_sha256[SHA256_HEX_CAPACITY], population_sha256[SHA256_HEX_CAPACITY];
     char cpu_model_sha256[SHA256_HEX_CAPACITY];
     char cpu_mask[BQ_RETIREMENT_ROW_CPU_MASK_CAPACITY];
@@ -192,7 +194,8 @@ typedef struct BqRetirementRowJoined
 
 /* Joins plan and observed for projection. The observation must name this
  * plan, attempt and population and have run on the plan's CPU alone with the
- * plan's CPU model (BQ_CONFIGURATION_MISMATCH otherwise); the facts' commands,
+ * plan's CPU model, in a sandbox of at least BQ_RETIREMENT_SANDBOX_MIN_ABI
+ * (BQ_CONFIGURATION_MISMATCH otherwise); the facts' commands,
  * outputs and statuses are the correctness gate's to judge. */
 BUSTER_F_DECL BqError bq_retirement_row_evidence_join(BqRetirementRowPlan const* plan,
     BqRetirementProjection const* projection, BqRetirementRowObserved const* observed, BqRetirementRowJoined* joined);

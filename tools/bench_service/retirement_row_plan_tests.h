@@ -20,12 +20,19 @@
  * its row refused), per-target artifact checks (wrong machine, wrong kind),
  * prebuilt link inputs, a held binary changed before or during a step, and
  * the second A/A aggregate against lane D's bq_retirement_campaign_bind.
+ * bq_row_test_sockets has a row and a required check try to connect to a
+ * listening unix socket beside their step directories (the seccomp filter
+ * denies it) and refuses both below Landlock ABI
+ * BQ_RETIREMENT_SANDBOX_MIN_ABI through bq_retirement_sandbox_abi_ceiling.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_ROW_PLAN_TESTS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_ROW_PLAN_TESTS_H
 
 #define BQ_ROW_TEST_PLAN_CAP (4u * 1024u * 1024u)
 #define BQ_ROW_TEST_RUNTIME_OUTPUT "fixture-runtime\n"
+/* Landlock ABI 5, which lacks the signal and abstract-socket scopes: the
+ * sandbox must refuse it (a fixed number, so a lowered floor fails). */
+#define BQ_ROW_TEST_OLD_ABI 5u
 /* bq_row_test_plan variants. */
 #define BQ_ROW_TEST_DROP_ROW 1u
 #define BQ_ROW_TEST_ADD_ROW 2u
@@ -182,6 +189,7 @@ BUSTER_GLOBAL_LOCAL bool bq_row_test_observe(BqRetirementRowPlan const* plan, Bq
     {
         memcpy(observed->cpu_model_sha256, plan->cpu_model_sha256, SHA256_HEX_CAPACITY);
         observed->cpus = 1;
+        observed->sandbox_abi = BQ_RETIREMENT_SANDBOX_MIN_ABI;
         bq_retirement_row_cpu_mask(plan->cpu, observed->cpu_mask);
     }
     char empty[SHA256_HEX_CAPACITY], control[SHA256_HEX_CAPACITY];
@@ -426,6 +434,16 @@ BUSTER_GLOBAL_LOCAL char const bq_row_test_attack[] =
     "FILE* oracle = fopen(\"../reference-oracle/out\", \"r\"); int c = 0; if (!oracle) { fputs(\"denied\\n\", stdout); "
     "return 0; } while ((c = fgetc(oracle)) != EOF) putchar(c); fclose(oracle); return 0; }\n";
 
+/* A program that tries to connect to the listening unix socket beside its
+ * step directory (a stand-in for the broker's and the service's control
+ * sockets), printing whether it could. */
+BUSTER_GLOBAL_LOCAL char const bq_row_test_socket[] =
+    "#include <stdio.h>\n#include <string.h>\n#include <sys/socket.h>\n#include <sys/un.h>\n"
+    "int main(void) { struct sockaddr_un address = {.sun_family = AF_UNIX}; "
+    "strcpy(address.sun_path, \"../control.sock\"); int s = socket(AF_UNIX, SOCK_STREAM, 0); "
+    "int c = s >= 0 ? connect(s, (struct sockaddr*)&address, sizeof(address)) : -1; "
+    "fputs(c == 0 ? \"connected\\n\" : \"denied\\n\", stdout); return 0; }\n";
+
 typedef struct BqRowTestFixture
 {
     BqCheckTestFixture* checks;
@@ -433,7 +451,27 @@ typedef struct BqRowTestFixture
     char base_profile[256], profile[512], cpu_model[SHA256_HEX_CAPACITY];
     char* plan_text;
     u32 cpu;
+    /* The listening socket of a SOCKET run, or -1. */
+    int listener;
 } BqRowTestFixture;
+
+/* A listening unix socket named name in directory, bound through its
+ * /proc/self/fd path, or -1. */
+BUSTER_GLOBAL_LOCAL int bq_row_test_listen(int directory, char const* name)
+{
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
+    int length = snprintf(address.sun_path, sizeof(address.sun_path), "/proc/self/fd/%d/%s", directory, name);
+    int listener = length > 0 && (size_t)length < sizeof(address.sun_path) ?
+                   socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0) : -1;
+    bool ok = listener >= 0 && bind(listener, (struct sockaddr const*)&address, sizeof(address)) == 0 &&
+              listen(listener, 8) == 0;
+    if (!ok && listener >= 0)
+    {
+        close(listener);
+        listener = -1;
+    }
+    return listener;
+}
 
 /* bq_row_test_sources variants. */
 #define BQ_ROW_TEST_SOURCES_REJECTED 1u
@@ -441,6 +479,7 @@ typedef struct BqRowTestFixture
 #define BQ_ROW_TEST_SOURCES_ATTACK 4u
 #define BQ_ROW_TEST_SOURCES_WRONG_MACHINE 8u
 #define BQ_ROW_TEST_SOURCES_WRONG_KIND 16u
+#define BQ_ROW_TEST_SOURCES_SOCKET 32u
 
 /* The candidate root's prepared outputs for the stand-in compilers: the
  * members' x86-64 objects, per-row artifacts of each row's target and kind
@@ -449,7 +488,8 @@ typedef struct BqRowTestFixture
  * REJECTED records row 2's input as rejected; PREBUILT adds a prebuilt input
  * to row 4's link; ATTACK builds row 4 from bq_row_test_attack; WRONG_MACHINE
  * gives row 2 (an AArch64 row) an x86-64 object and WRONG_KIND row 5 (a
- * self-host executable) a relocatable object. */
+ * self-host executable) a relocatable object. SOCKET builds row 4 from
+ * bq_row_test_socket, and bq_row_test_run listens beside the steps. */
 BUSTER_GLOBAL_LOCAL bool bq_row_test_sources(BqRowTestFixture* fixture, char const* candidate, u32 variant)
 {
     BqRetirementProjection const* projection = &fixture->checks->projection;
@@ -509,7 +549,8 @@ BUSTER_GLOBAL_LOCAL bool bq_row_test_sources(BqRowTestFixture* fixture, char con
         {
             unlinkat(tests, name, 0);
             ok = bq_row_test_program(output, (variant & BQ_ROW_TEST_SOURCES_ATTACK) ? bq_row_test_attack :
-                                                                                 bq_row_test_honest);
+                                             (variant & BQ_ROW_TEST_SOURCES_SOCKET) ? bq_row_test_socket :
+                                                                                      bq_row_test_honest);
         }
         else
         {
@@ -763,6 +804,10 @@ BUSTER_GLOBAL_LOCAL void bq_row_test_join(BqRowTestFixture* fixture)
     changed = observed;
     bq_retirement_row_cpu_mask(plan.cpu + 1u, changed.cpu_mask);
     BQ_PREP_CHECK(bq_retirement_row_evidence_join(&plan, projection, &changed, &joined) == BQ_CONFIGURATION_MISMATCH);
+    /* Steps that ran below the sandbox's lowest Landlock ABI. */
+    changed = observed;
+    changed.sandbox_abi = BQ_ROW_TEST_OLD_ABI;
+    BQ_PREP_CHECK(bq_retirement_row_evidence_join(&plan, projection, &changed, &joined) == BQ_CONFIGURATION_MISMATCH);
     /* A command, a control's status or a batch key that does not match. */
     changed = observed;
     BqRetirementRowFact facts[BQ_CHECK_TEST_ROWS];
@@ -821,6 +866,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_row_test_run(BqRowTestFixture* fixture, u32 plan_
                                                      (u32)strlen(BQ_ROW_TEST_RUNTIME_OUTPUT));
         if (oracle >= 0) close(oracle);
     }
+    /* A listening unix socket beside every step directory. */
+    if (ready && (sources & BQ_ROW_TEST_SOURCES_SOCKET))
+    {
+        fixture->listener = bq_row_test_listen(*work, "control.sock");
+        ready = fixture->listener >= 0;
+    }
     BqRetirementRowRun run = {plan, &fixture->compilers, {checks->sources[0], checks->sources[1]}, *work,
                               checks->cancel[0], bq_retirement_build_clock_ns() + 120ull * 1000000000ull};
     BqError result = ready ? bq_retirement_row_produce(&run, observed) : BQ_IO;
@@ -872,7 +923,9 @@ BUSTER_GLOBAL_LOCAL void bq_row_test_producer_native(BqRowTestFixture* fixture)
     BqError produced = bq_row_test_run(fixture, 0, 0, &plan, &observed, &work);
     if (produced != BQ_OK) fprintf(stderr, "RETIREMENT_PREP row producer returned %d\n", (int)produced);
     BQ_PREP_CHECK(produced == BQ_OK && observed.owned && observed.cpus == 1 && bq_check_test_no_children() &&
-                  !strcmp(observed.cpu_model_sha256, fixture->cpu_model));
+                  !strcmp(observed.cpu_model_sha256, fixture->cpu_model) &&
+                  observed.sandbox_abi == bq_retirement_sandbox_abi() &&
+                  observed.sandbox_abi >= BQ_RETIREMENT_SANDBOX_MIN_ABI);
     for (u32 row = 0; observed.owned && row < observed.row_count; row += 1)
     {
         BqRetirementRowFact const* fact = observed.facts + row;
@@ -912,6 +965,27 @@ BUSTER_GLOBAL_LOCAL void bq_row_test_producer_native(BqRowTestFixture* fixture)
                   fstatat(work, "planted", &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT &&
                   bq_row_test_admit(fixture, &plan, &observed) == BQ_RECIPE_MISMATCH);
     bq_retirement_row_observed_release(&observed);
+    if (work >= 0) close(work);
+
+    /* The generated program tries to connect to a listening unix socket
+     * beside its step directory, which Landlock does not govern. The seccomp
+     * filter denies it, so it prints "denied", and the gate refuses the
+     * row. */
+    attacked = bq_row_test_run(fixture, 0, BQ_ROW_TEST_SOURCES_SOCKET, &plan, &observed, &work);
+    BQ_PREP_CHECK(attacked == BQ_OK && observed.owned &&
+                  !strcmp(observed.facts[4].side[0].runtime_output_sha256, denied) &&
+                  bq_row_test_admit(fixture, &plan, &observed) == BQ_RECIPE_MISMATCH);
+    bq_retirement_row_observed_release(&observed);
+    if (fixture->listener >= 0) close(fixture->listener);
+    fixture->listener = -1;
+    BQ_PREP_CHECK(work >= 0 && unlinkat(work, "control.sock", 0) == 0);
+    if (work >= 0) close(work);
+    /* A kernel below the sandbox's lowest Landlock ABI: refused before any
+     * step. */
+    bq_retirement_sandbox_abi_ceiling = BQ_ROW_TEST_OLD_ABI;
+    BQ_PREP_CHECK(bq_row_test_run(fixture, 0, 0, &plan, &observed, &work) == BQ_CONFIGURATION_MISMATCH &&
+                  !observed.owned && bq_check_test_no_children());
+    bq_retirement_sandbox_abi_ceiling = UINT32_MAX;
     if (work >= 0) close(work);
 
     /* (H2) An artifact of another machine (row 2 is an AArch64 row) or of
@@ -1016,6 +1090,55 @@ BUSTER_GLOBAL_LOCAL bool bq_row_test_stage_open(BqRowTestStage* stage, char cons
               tp_retirement_metrics_shards_init(&stage->metrics, tag, stage->streams[2]) &&
               tp_retirement_samples_attach_metrics(&stage->samples, &stage->metrics);
     return ok;
+}
+
+/* A required check that copies bq_row_test_socket out of A's candidate root
+ * into its work directory and runs it is denied the connect and fails its
+ * receipt; below the sandbox's lowest Landlock ABI a check is refused before
+ * its child starts. The check's run record names the ABI it ran with. */
+BUSTER_GLOBAL_LOCAL void bq_row_test_sockets(BqRowTestFixture* fixture)
+{
+    BqCheckTestFixture* checks = fixture->checks;
+    char probe[192];
+    snprintf(probe, sizeof(probe), "%s/source-candidate-1/socket-probe", checks->workspaces);
+    BqCheckTestSpec specs[BQ_CHECK_TEST_CHECKS];
+    memcpy(specs, checks->specs, sizeof(specs));
+    specs[1].script = "cp \"$4/socket-probe\" ./probe && ./probe";
+    BqRetirementRequiredChecks variant = {.hosted = -1};
+    BqRetirementCheckResult observed[BQ_CHECK_TEST_CHECKS] = {0};
+    int evidence = -1, work = -1;
+    BQ_PREP_CHECK(bq_row_test_program(probe, bq_row_test_socket) &&
+                  bq_check_test_import_variant(checks, specs, BQ_CHECK_TEST_CHECKS, 0, &checks->preparation,
+                                               &checks->projection, &variant) == BQ_OK &&
+                  bq_check_test_directory(checks, "evidence", &evidence) &&
+                  bq_check_test_directory(checks, "work", &work));
+    int listener = work >= 0 ? bq_row_test_listen(work, "control.sock") : -1;
+    BqRetirementCheckRun run = bq_check_test_run_for(checks, &variant, &checks->held, evidence, work);
+    bq_retirement_sandbox_abi_ceiling = BQ_ROW_TEST_OLD_ABI;
+    BQ_PREP_CHECK(variant.owned && bq_retirement_check_run(&run, 0, observed) == BQ_CONFIGURATION_MISMATCH &&
+                  bq_check_test_no_children());
+    bq_retirement_sandbox_abi_ceiling = UINT32_MAX;
+    char denied[SHA256_HEX_CAPACITY] = {0}, captured[SHA256_HEX_CAPACITY] = {0}, line[32] = {0};
+    char record[BQ_RETIREMENT_CHECK_RUN_CAP + 1] = {0};
+    u32 record_length = 0;
+    bq_digest("denied\n", 7, (char8*)denied);
+    snprintf(line, sizeof(line), "\nsandbox-abi=%u\n", bq_retirement_sandbox_abi());
+    BQ_PREP_CHECK(listener >= 0 && variant.owned && bq_retirement_check_run(&run, 1, observed + 1) == BQ_OK &&
+                  observed[1].exit_code == 0 && observed[1].failures == 1 &&
+                  strcmp(observed[1].receipt_sha256, variant.checks[1].receipt_sha256) &&
+                  bq_retirement_check_hash_file(evidence, "check-output-0001", BQ_RETIREMENT_CHECK_OUTPUT_CAP,
+                                                captured) &&
+                  !strcmp(captured, denied) &&
+                  bq_record_read_at(evidence, "check-run-0001", (u8*)record, BQ_RETIREMENT_CHECK_RUN_CAP,
+                                    &record_length) == BQ_OK &&
+                  strstr(record, line) && bq_check_test_no_children());
+    if (listener >= 0) close(listener);
+    BQ_PREP_CHECK(work >= 0 && unlinkat(work, "control.sock", 0) == 0 && unlink(probe) == 0);
+    if (work >= 0) close(work);
+    if (evidence >= 0) close(evidence);
+    BQ_PREP_CHECK(bq_retirement_required_checks_release(&variant) &&
+                  bq_check_test_install(checks->recipes, &checks->preparation, &checks->projection, checks->specs,
+                                        BQ_CHECK_TEST_CHECKS, 0, checks->profile, sizeof(checks->profile)));
 }
 
 /* The producer's cases on an x86-64 Linux host. Elsewhere it must refuse
@@ -1176,6 +1299,7 @@ BUSTER_GLOBAL_LOCAL void bq_row_test_runner(void)
         fixture->checks = checks;
         fixture->plan_text = text;
         fixture->compilers = (BqRetirementHeldBinaries){.descriptors = {-1, -1}};
+        fixture->listener = -1;
     }
     ok = ok && bq_row_test_cpu(&fixture->cpu, fixture->cpu_model) &&
          strlen(checks->profile) < sizeof(fixture->base_profile);
@@ -1186,6 +1310,7 @@ BUSTER_GLOBAL_LOCAL void bq_row_test_runner(void)
         bq_row_test_importer(fixture);
         bq_row_test_join(fixture);
         bq_row_test_producer(fixture);
+        bq_row_test_sockets(fixture);
         bq_row_test_campaign(fixture);
     }
     for (u32 side = 0; fixture && side < 2; side += 1)

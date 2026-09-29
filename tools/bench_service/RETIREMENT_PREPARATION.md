@@ -636,24 +636,66 @@ in a bounded child, with these limits:
 - It inherits only the held binaries, both source roots, the tools and that
   directory; a fixture check probes `/proc/self/fd/<n>` for every number
   below 256 to prove it.
-- It runs in a Landlock sandbox (`bq_retirement_sandbox`, entered with
-  `bq_retirement_sandbox_enter` just before exec). The sandbox is the one
-  the row steps use: the child may read and execute the system trees, read
-  `/etc` and A's two source roots, execute and read the held binaries and
-  tools, use `/dev/null` and its own work directory, and nothing else. It
-  cannot open `retirement-checks/` (this process writes every capture file),
-  the reference oracle's outputs, the row evidence or another check's or
-  row step's directory. A kernel without Landlock fails every non-hosted
-  check with `BQ_CONFIGURATION_MISMATCH`. A fixture check that tries to read
-  the oracle's output, another check's output and another check's work
-  directory, and to plant a file beside its own, is denied each time. It
-  prints `denied`, so its receipt does not match.
+- It runs in the child sandbox described below, the one the row steps use.
+  The run record names the Landlock ABI it enforced (`sandbox-abi=`).
 - It runs under the check's wall bound, the job's absolute deadline and the
   cancellation self-pipe.
 - A hosted check starts no child: its output is the held hosted record.
 
 stdout is the check's summary, bounded to 1 MiB and compared with the
 pinned digest. stderr is its log, bounded to 16 MiB.
+
+**The child sandbox.** `bq_retirement_sandbox` builds it and
+`bq_retirement_sandbox_enter` applies it just before exec, after
+`PR_SET_NO_NEW_PRIVS`. What it covers:
+
+- **Kernel.** It requires Landlock ABI 6 (`BQ_RETIREMENT_SANDBOX_MIN_ABI`),
+  the first ABI with the signal and abstract-socket scopes. An older kernel,
+  or one without Landlock, fails every non-hosted check and every row step
+  with `BQ_CONFIGURATION_MISMATCH`; it never runs with fewer rules. The
+  hosted runners have ABI 7.
+- **Files (Landlock).** The child may read and execute `/usr`, `/lib*`,
+  `/bin` and `/sbin`; read `/etc` and A's two source roots; execute and read
+  the held binaries (a check's tools too); use `/dev/null`; read the zero
+  and random devices; and use its own new work directory freely. Opening,
+  listing, creating, renaming, linking, removing and truncating anything
+  else is denied. That includes `retirement-checks/` (this process writes
+  every capture file), the reference oracle's outputs, the row evidence,
+  other checks' and steps' directories, `/proc` and `/sys`.
+- **Sockets (Landlock and seccomp).** Landlock denies TCP bind and connect
+  and scopes abstract unix sockets and signals to the child's domain. It
+  does not govern `connect()` to a path-named unix socket, and the child
+  runs as the service user, whose UID is all the broker's and the service's
+  control sockets check. So a seccomp filter refuses (`EPERM`) `socket`,
+  `socketpair`, `connect`, `bind`, `listen`, `accept`, `accept4`, `sendto`,
+  `sendmsg`, `sendmmsg` and the three io_uring calls, which could issue those
+  operations without the system calls. It kills the child on another
+  architecture and on an x32 call. No check or row step needs a socket: they
+  compile and run programs over files.
+- **Not covered.** Landlock governs no metadata at any ABI. The child can
+  `stat` a path it knows, and can `chmod`, `chown`, `utimes` or change the
+  xattrs of any file the service user owns, for example `chmod 000` an
+  evidence or oracle directory. That is denial of service, not forgery: the
+  child still cannot write those files. The gate notices a changed mode only
+  where it checks one: the sealed check evidence (exact directory and file
+  modes), the held binaries and tools (`fstat` identity around every child)
+  and A's roots (the rescan requires read-only entries). Anywhere else, such
+  as the reference oracle's outputs, the change shows up as a later failed
+  read, which is a refusal. Without `/proc` and `/sys`, libc's
+  `get_nprocs()` probably falls back to the affinity count, so a program
+  sees a different CPU count than it would unconfined. Both sides see the
+  same count (unverified).
+
+The fixtures attack it:
+
+- A check tries to read the oracle's output, another check's output and
+  another check's work directory, and to plant a file beside its own. It is
+  denied each time, prints `denied`, and its receipt does not match.
+- A check copies a probe out of A's candidate root and runs it to connect
+  to a listening unix socket beside its work directory. The probe is denied,
+  prints `denied`, and the receipt does not match.
+- With the ABI capped at 5 (`bq_retirement_sandbox_abi_ceiling`, a
+  test-only seam), a check is refused with `BQ_CONFIGURATION_MISMATCH`.
 
 Before the child the runner requires that this process has no child at
 all, rehashes both held binaries and every tool, and `fstat`s the binaries,
@@ -788,22 +830,21 @@ modify-and-restore during a step fails it with `BQ_SOURCE_MISMATCH`.
 
 **Isolation.** Each step runs candidate-derived code: the candidate binary
 compiling, and the program it generated running. Before exec the step
-enters the check runner's Landlock sandbox (`bq_retirement_sandbox`). It
-may:
+enters the child sandbox described under the runner, with its side's held
+binary as the one executable. Its limits apply unchanged: no metadata
+control, and a refusal below Landlock ABI 6. The producer checks the ABI
+before the first step and records it in the evidence (`sandbox-abi=`), and
+the join refuses an observation below ABI 6. The fixtures:
 
-- read and execute `/usr`, `/lib*`, `/bin` and `/sbin`, and read `/etc`;
-- read A's two source roots;
-- execute and read its side's held binary;
-- use `/dev/null` and read the zero and random devices;
-- use its own new step directory freely.
+- A generated program reads the reference oracle's output and plants a
+  file beside its step. It is denied, prints `denied`, and the row is
+  refused.
+- A generated program connects to a listening unix socket beside its step.
+  It is denied and prints `denied`, and the row is refused.
+- With the ABI capped at 5, the producer refuses before any step.
 
-Everything else is denied: the reference oracle's outputs, the check and row
-evidence, and every other step's directory. With Landlock ABI 4 it also
-cannot bind or connect TCP sockets, and with ABI 6 it cannot signal, or reach
-abstract sockets, outside its domain. A kernel without Landlock fails every
-step with `BQ_CONFIGURATION_MISMATCH`. The steps still run as the service
-user: the broker's separate candidate UID is not used here (see remaining
-work below).
+The steps still run as the service user: the broker's separate candidate
+UID is not used here (see remaining work below).
 
 For each side it runs:
 
@@ -842,8 +883,9 @@ The observation is `BqRetirementRowObserved`, with a canonical form,
 `BQ-RETIREMENT-ROW-EVIDENCE-V1`. `bq_retirement_row_observed_parse` accepts
 only bytes that format back to themselves, for this plan and attempt.
 `bq_retirement_row_evidence_join` requires the observation to name this
-plan, attempt and population and to have run on the plan's CPU alone with the
-plan's model (`BQ_CONFIGURATION_MISMATCH` otherwise). It then builds the
+plan, attempt and population, to have run on the plan's CPU alone with the
+plan's model, and to record a sandbox of at least Landlock ABI 6
+(`sandbox-abi=`; `BQ_CONFIGURATION_MISMATCH` otherwise). It then builds the
 `BqRetirementRowEvidence` the correctness gate admits: the plan's completed
 rows, the observed facts, and frozen batch groups from the plan's skeleton
 with the observed diagnostics and objects. Whether each fact matches its
@@ -921,8 +963,8 @@ or control-status mismatch, and changed row evidence.
 public entry refuses before either directory exists or any child starts.
 Integration must install and pin a reviewed row plan for the real corpus;
 the fixture plan and stand-in compilers prove mechanics only. The row steps
-and the required checks are isolated with the same Landlock sandbox but
-still run as the service user. Running them as the broker's separate
+and the required checks share one sandbox (Landlock plus a seccomp socket
+filter) but still run as the service user. Running them as the broker's separate
 candidate UID, in a unit that cannot read the service's workspace at all,
 needs per-step broker stages (a follow-up on #1021) and is not done. A
 per-step cgroup v2 leaf is still missing.

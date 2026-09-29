@@ -20,9 +20,10 @@
  * Map: bq_retirement_check_names names one check's four evidence files and
  * its work directory; bq_retirement_check_resolve turns one authority
  * template into a concrete argument with /proc/self/fd paths;
+ * bq_retirement_sandbox_abi reads the kernel's Landlock ABI;
  * bq_retirement_sandbox builds the Landlock ruleset of a child that runs
- * candidate-derived code and bq_retirement_sandbox_enter applies it before
- * exec (the row producer's steps use both);
+ * candidate-derived code and bq_retirement_sandbox_enter applies it and the
+ * seccomp filter before exec (the row producer's steps use both);
  * bq_retirement_check_spawn forks the child through
  * bq_retirement_build_child's normalized state (own process group, default
  * signal dispositions, empty mask, umask 0077, close-on-exec from 3) plus
@@ -49,18 +50,30 @@
  * did not send is recorded as out of memory (the kernel's OOM killer in the
  * unit's cgroup); RLIMIT_AS exhaustion shows as the child's own failing exit.
  *
- * Isolation. A check runs the candidate binary, so its child is confined
- * with Landlock before exec: it may read and execute the system trees (/usr,
- * /lib*, /bin, /sbin), read /etc and A's two source roots, execute and read
- * the held binaries and tools, use /dev/null and read the random and zero
- * devices, and use its own new work directory freely, and nothing else. It
- * cannot open the evidence directory (its own capture files and every other
- * check's are written by this process), the reference oracle's outputs, the
- * row evidence or another check's or row step's directory, cannot bind or
- * connect TCP sockets (ABI 4) and cannot signal or reach abstract sockets
- * outside its domain (ABI 6). A kernel without Landlock fails every non-hosted
- * check with BQ_CONFIGURATION_MISMATCH. Checks still run as the service user;
- * the broker's separate candidate UID is not used here.
+ * Isolation. A check runs the candidate binary, and a row step
+ * (retirement_row_producer.c) runs candidate-derived code, so both children
+ * enter the same sandbox before exec. bq_retirement_sandbox requires
+ * Landlock ABI BQ_RETIREMENT_SANDBOX_MIN_ABI (6) and refuses anything older
+ * (BQ_CONFIGURATION_MISMATCH); its filesystem rules let the child read and
+ * execute the system trees (/usr, /lib*, /bin, /sbin), read /etc and A's two
+ * source roots, execute and read the held binaries (and a check's tools),
+ * use /dev/null, read the random and zero devices and use its own new work
+ * directory freely. Every other path (the evidence directories, whose files
+ * this process writes, the reference oracle's outputs, other checks' and
+ * steps' directories, /proc and /sys) is denied for opening, listing,
+ * creating, renaming, linking, removing and truncating. Landlock also denies
+ * TCP bind and connect and scopes signals and abstract unix sockets to the
+ * child's domain. bq_retirement_sandbox_enter then installs a seccomp filter
+ * that refuses (EPERM) socket, socketpair, connect, bind, listen, accept,
+ * accept4, sendto, sendmsg, sendmmsg and io_uring, because Landlock does not
+ * govern connect() to a path-named unix socket (the broker's and the
+ * service's control sockets check only the peer UID), and kills any other
+ * architecture or x32 call. The sandbox does not cover metadata: stat of a
+ * known path, and chmod, chown, utimes and xattr changes on files the service
+ * user owns, are not governed at any Landlock ABI, so a child could deny
+ * service (say, chmod 000 an evidence directory) but not forge evidence; see
+ * RETIREMENT_PREPARATION.md for where the gate notices. Checks and rows still
+ * run as the service user; the broker's separate candidate UID is not used.
  */
 #include "retirement_check_runner.h"
 #include <poll.h>
@@ -70,7 +83,11 @@
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <stddef.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
 #include <linux/landlock.h>
+#include <linux/seccomp.h>
 
 #define BQ_RETIREMENT_CHECK_POLL_MS 10
 /* How long captured pipes may stay open after the child's own exit. */
@@ -99,6 +116,42 @@ typedef struct BqRetirementSandboxAttributes
     u64 handled_access_fs, handled_access_net, scoped;
 } BqRetirementSandboxAttributes;
 
+/* The seccomp filter's architecture: the build's own; any other is killed.
+ * On x86-64 the x32 system calls share the architecture value and carry
+ * this bit in their number, so they are killed too. The io_uring numbers are
+ * the same on every architecture and absent from older headers. */
+#if defined(__x86_64__)
+#define BQ_RETIREMENT_SANDBOX_AUDIT_ARCH AUDIT_ARCH_X86_64
+#define BQ_RETIREMENT_SANDBOX_X32_BIT 0x40000000u
+#elif defined(__aarch64__)
+#define BQ_RETIREMENT_SANDBOX_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#endif
+#if defined(BQ_RETIREMENT_SANDBOX_AUDIT_ARCH)
+#define BQ_RETIREMENT_SANDBOX_FILTERED 1
+#else
+#define BQ_RETIREMENT_SANDBOX_FILTERED 0
+#endif
+#define BQ_RETIREMENT_SANDBOX_IO_URING_SETUP 425u
+#define BQ_RETIREMENT_SANDBOX_IO_URING_ENTER 426u
+#define BQ_RETIREMENT_SANDBOX_IO_URING_REGISTER 427u
+
+#if defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
+/* Test-only: caps the Landlock ABI the sandbox sees, so a test can exercise
+ * the refusal below BQ_RETIREMENT_SANDBOX_MIN_ABI on a newer kernel. */
+BUSTER_GLOBAL_LOCAL u32 bq_retirement_sandbox_abi_ceiling = UINT32_MAX;
+#endif
+
+/* The kernel's Landlock ABI, or 0 without Landlock. */
+BUSTER_GLOBAL_LOCAL u32 bq_retirement_sandbox_abi(void)
+{
+    long abi = syscall(SYS_landlock_create_ruleset, NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
+    u32 result = abi > 0 && abi < (long)UINT32_MAX ? (u32)abi : 0;
+#if defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
+    if (result > bq_retirement_sandbox_abi_ceiling) result = bq_retirement_sandbox_abi_ceiling;
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_retirement_sandbox_rule(int ruleset, int parent, u64 allowed)
 {
     struct landlock_path_beneath_attr beneath = {.allowed_access = allowed, .parent_fd = parent};
@@ -116,27 +169,30 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_sandbox_system_rule(int ruleset, char con
 }
 
 /* The Landlock ruleset (close-on-exec) of one child that runs
- * candidate-derived code, or -1 when the kernel has no Landlock or a rule
- * fails: see the file header. executables are the held files it may execute
- * and read, sources A's roots (read only) and work its own new directory. */
+ * candidate-derived code, or -1: see the file header. It is -1 without
+ * Landlock ABI BQ_RETIREMENT_SANDBOX_MIN_ABI, on an architecture the seccomp
+ * filter does not know, or when a rule fails. executables are the held files
+ * it may execute and read, sources A's roots (read only) and work its own new
+ * directory; abi, when not NULL, receives the Landlock ABI enforced (0 on
+ * failure). */
 BUSTER_GLOBAL_LOCAL int bq_retirement_sandbox(int const* executables, u32 executable_count, int const sources[2],
-    int work)
+    int work, u32* abi)
 {
-    long abi = syscall(SYS_landlock_create_ruleset, NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
-    u64 handled = abi >= 1 ? BQ_RETIREMENT_SANDBOX_FS_ABI1 : 0;
-    if (abi >= 2) handled |= BQ_RETIREMENT_SANDBOX_FS_REFER;
-    if (abi >= 3) handled |= BQ_RETIREMENT_SANDBOX_FS_TRUNCATE;
-    if (abi >= 5) handled |= BQ_RETIREMENT_SANDBOX_FS_IOCTL_DEV;
-    BqRetirementSandboxAttributes attributes = {handled, abi >= 4 ? BQ_RETIREMENT_SANDBOX_NET_TCP : 0,
-                                                abi >= 6 ? BQ_RETIREMENT_SANDBOX_SCOPES : 0};
-    size_t size = abi >= 6 ? sizeof(attributes) : abi >= 4 ? 2u * sizeof(u64) : sizeof(u64);
-    int ruleset = abi >= 1 ? (int)syscall(SYS_landlock_create_ruleset, &attributes, size, 0) : -1;
+    u32 version = bq_retirement_sandbox_abi();
+    bool ok = BQ_RETIREMENT_SANDBOX_FILTERED && version >= BQ_RETIREMENT_SANDBOX_MIN_ABI && executables &&
+              executable_count;
+    /* ABI 6 handles every filesystem right, TCP bind and connect, and both
+     * scopes. */
+    u64 handled = BQ_RETIREMENT_SANDBOX_FS_ABI1 | BQ_RETIREMENT_SANDBOX_FS_REFER | BQ_RETIREMENT_SANDBOX_FS_TRUNCATE |
+                  BQ_RETIREMENT_SANDBOX_FS_IOCTL_DEV;
+    BqRetirementSandboxAttributes attributes = {handled, BQ_RETIREMENT_SANDBOX_NET_TCP, BQ_RETIREMENT_SANDBOX_SCOPES};
+    int ruleset = ok ? (int)syscall(SYS_landlock_create_ruleset, &attributes, sizeof(attributes), 0) : -1;
     u64 read = BQ_RETIREMENT_SANDBOX_FS_READ_FILE | BQ_RETIREMENT_SANDBOX_FS_READ_DIR;
     u64 null_device = BQ_RETIREMENT_SANDBOX_FS_READ_FILE | BQ_RETIREMENT_SANDBOX_FS_WRITE_FILE |
-                      (handled & BQ_RETIREMENT_SANDBOX_FS_TRUNCATE);
+                      BQ_RETIREMENT_SANDBOX_FS_TRUNCATE;
     static char const* const trees[] = {"/usr", "/lib", "/lib64", "/lib32", "/bin", "/sbin"};
     static char const* const devices[] = {"/dev/zero", "/dev/urandom", "/dev/random"};
-    bool ok = ruleset >= 0 && executables && executable_count;
+    ok = ok && ruleset >= 0;
     for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(trees); index += 1)
         ok = bq_retirement_sandbox_system_rule(ruleset, trees[index], true, read | BQ_RETIREMENT_SANDBOX_FS_EXECUTE);
     for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(devices); index += 1)
@@ -149,15 +205,47 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_sandbox(int const* executables, u32 execut
          bq_retirement_sandbox_rule(ruleset, sources[0], read) && bq_retirement_sandbox_rule(ruleset, sources[1], read) &&
          bq_retirement_sandbox_rule(ruleset, work, handled);
     if (!ok && ruleset >= 0) close(ruleset);
+    if (abi) *abi = ok ? version : 0;
     return ok ? ruleset : -1;
 }
 
-/* In the forked child, just before exec: no new privileges, then the
- * ruleset. */
+/* In the forked child, just before exec: no new privileges, the ruleset,
+ * then the seccomp filter. Landlock does not govern connect() to a
+ * path-named unix socket, so the filter refuses (EPERM) every system call
+ * that makes, names or uses a socket, and io_uring, which could issue those
+ * operations without the system calls; another architecture or an x32 call
+ * kills the child. No check or row step needs a socket: they compile and
+ * run programs over files. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_sandbox_enter(int ruleset)
 {
     bool ok = ruleset >= 0 && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 &&
               syscall(SYS_landlock_restrict_self, ruleset, 0) == 0;
+#if BQ_RETIREMENT_SANDBOX_FILTERED
+    static u32 const denied[] = {SYS_socket, SYS_socketpair, SYS_connect, SYS_bind, SYS_listen, SYS_accept,
+                                 SYS_accept4, SYS_sendto, SYS_sendmsg, SYS_sendmmsg,
+                                 BQ_RETIREMENT_SANDBOX_IO_URING_SETUP, BQ_RETIREMENT_SANDBOX_IO_URING_ENTER,
+                                 BQ_RETIREMENT_SANDBOX_IO_URING_REGISTER};
+    struct sock_filter filter[8u + 2u * BUSTER_ARRAY_LENGTH(denied)];
+    u32 count = 0;
+    filter[count++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch));
+    filter[count++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, BQ_RETIREMENT_SANDBOX_AUDIT_ARCH, 1, 0);
+    filter[count++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+    filter[count++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr));
+#if defined(BQ_RETIREMENT_SANDBOX_X32_BIT)
+    filter[count++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, BQ_RETIREMENT_SANDBOX_X32_BIT, 0, 1);
+    filter[count++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+#endif
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(denied); index += 1)
+    {
+        filter[count++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, denied[index], 0, 1);
+        filter[count++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA));
+    }
+    filter[count++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+    struct sock_fprog program = {.len = (unsigned short)count, .filter = filter};
+    ok = ok && prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program, 0, 0) == 0;
+#else
+    ok = false;
+#endif
     return ok;
 }
 
@@ -738,16 +826,18 @@ BqError bq_retirement_check_run(BqRetirementCheckRun const* run, u32 index, BqRe
     bool reaping = status == BQ_OK && !hosted && prctl(PR_GET_CHILD_SUBREAPER, &subreaper) == 0 &&
                    prctl(PR_SET_CHILD_SUBREAPER, 1) == 0;
     if (status == BQ_OK && !hosted && !reaping) status = BQ_WORKER_MISMATCH;
-    /* The child may execute the held binaries and tools, read A's roots and
-     * use its own work directory, and nothing else. */
+    /* The child's executables are the held binaries and tools; the sandbox
+     * (see the file header) adds A's roots, the system trees and its own
+     * work directory. */
     int executables[2u + BQ_RETIREMENT_CHECK_TOOLS_CAP];
     u32 executable_count = 0;
     for (u32 side = 0; status == BQ_OK && side < 2; side += 1)
         executables[executable_count++] = run->binaries->descriptors[side];
     for (u32 tool = 0; status == BQ_OK && tool < checks->tool_count; tool += 1)
         executables[executable_count++] = checks->tools[tool];
-    int ruleset = status == BQ_OK && !hosted ? bq_retirement_sandbox(executables, executable_count, run->sources, work) :
-                  -1;
+    u32 sandbox_abi = 0;
+    int ruleset = status == BQ_OK && !hosted ?
+                  bq_retirement_sandbox(executables, executable_count, run->sources, work, &sandbox_abi) : -1;
     if (status == BQ_OK && !hosted && ruleset < 0) status = BQ_CONFIGURATION_MISMATCH;
     u64 started = bq_retirement_build_clock_ns();
     if (status == BQ_OK && !hosted)
@@ -793,8 +883,9 @@ BqError bq_retirement_check_run(BqRetirementCheckRun const* run, u32 index, BqRe
     if (status == BQ_OK) bq_digest(receipt, receipt_length, (char8*)receipt_sha256);
     int record_length = status == BQ_OK ? snprintf(record, sizeof(record), "BQ-RETIREMENT-CHECK-RUN-V1\ncheck=%u\n"
         "receipt=%s\nobserved-command=%s\noutput=%s\noutput-bytes=%" PRIu64 "\nlog=%s\nlog-bytes=%" PRIu64 "\n"
-        "cpu-model=%s\ncpu-affinity=%u %s\n", index, receipt_sha256, observed_command, outcome.output_sha256,
-        (uint64_t)child.output_bytes, log_sha256, (uint64_t)child.log_bytes, model, cpus, mask) : -1;
+        "cpu-model=%s\ncpu-affinity=%u %s\nsandbox-abi=%u\n", index, receipt_sha256, observed_command,
+        outcome.output_sha256, (uint64_t)child.output_bytes, log_sha256, (uint64_t)child.log_bytes, model, cpus, mask,
+        sandbox_abi) : -1;
     if (status == BQ_OK && !(record_length > 0 && (size_t)record_length < sizeof(record))) status = BQ_CORRUPT;
     int receipt_file = status == BQ_OK ? bq_retirement_check_create(run->evidence, names.receipt) : -1;
     int record_file = receipt_file >= 3 ? bq_retirement_check_create(run->evidence, names.run) : -1;

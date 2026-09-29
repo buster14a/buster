@@ -9,7 +9,9 @@
 #include <regex.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/un.h>
 #include <time.h>
 
 BUSTER_GLOBAL_LOCAL u32 bq_retirement_tests;

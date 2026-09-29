@@ -8,19 +8,17 @@
  * Entry point: bq_retirement_row_produce.
  *
  * Isolation. Every step runs candidate-derived code: the candidate binary
- * compiling, and the program it generated running. Each step is confined
- * with Landlock (bq_retirement_sandbox) before exec: it may read and
- * execute the system trees (/usr, /lib*, /bin, /sbin), read /etc and A's two
- * source roots, execute and read its side's held binary, use /dev/null and
- * read the random and zero devices, and use its own new step directory
- * freely, and nothing else. It cannot open the reference oracle's outputs,
- * the check evidence, the row evidence or another step's directory, cannot
- * bind or connect TCP sockets (ABI 4) and cannot signal or reach abstract
- * sockets outside its domain (ABI 6). A kernel without Landlock makes every
- * step fail closed (BQ_CONFIGURATION_MISMATCH). The sandbox is the check
- * runner's (bq_retirement_sandbox, bq_retirement_sandbox_enter), which the
- * required checks enter too. The steps still run as the service user; the
- * broker's separate candidate UID is not used here.
+ * compiling, and the program it generated running. Each step enters the
+ * check runner's sandbox before exec (bq_retirement_sandbox,
+ * bq_retirement_sandbox_enter; its file header states exactly what it
+ * covers): Landlock rules that leave the step its side's held binary, A's
+ * two roots read-only, the system trees and its own new step directory, and
+ * a seccomp filter that refuses every socket system call and io_uring. It
+ * does not cover metadata changes (chmod, chown, utimes, xattr). The
+ * producer refuses before any step below Landlock ABI
+ * BQ_RETIREMENT_SANDBOX_MIN_ABI and records the ABI in the evidence
+ * (sandbox-abi=). The steps still run as the service user; the broker's
+ * separate candidate UID is not used here.
  *
  * Map: bq_retirement_row_spawn forks one step through
  * bq_retirement_build_child's normalized state (retirement_check_runner.c's
@@ -130,8 +128,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_row_step(BqRetirementRowRun const* run
     struct stat before[2] = {{0}}, after[2] = {{0}};
     for (u32 side = 0; status == BQ_OK && side < 2; side += 1)
         if (fstat(binaries->descriptors[side], before + side) != 0) status = BQ_SOURCE_MISMATCH;
-    int ruleset = status == BQ_OK ? bq_retirement_sandbox(binaries->descriptors + context->side, 1, run->sources, work) :
-                  -1;
+    int ruleset = status == BQ_OK ?
+                  bq_retirement_sandbox(binaries->descriptors + context->side, 1, run->sources, work, NULL) : -1;
     if (status == BQ_OK && ruleset < 0) status = BQ_CONFIGURATION_MISMATCH;
     char names[2][96];
     int named[2] = {snprintf(names[0], sizeof(names[0]), "%s.stdout", capture),
@@ -613,8 +611,12 @@ BqError bq_retirement_row_produce(BqRetirementRowRun const* run, BqRetirementRow
                      run->binaries->descriptors[0] >= 3 && run->binaries->descriptors[1] >= 3 && run->sources[0] >= 3 &&
                      run->sources[1] >= 3 && run->work >= 3 && bq_retirement_row_observed_init(plan, observed) ?
                      BQ_OK : BQ_BAD_REQUEST;
-    /* A host that cannot run the native target's executables. */
+    /* A host that cannot run the native target's executables, or whose
+     * kernel cannot enforce the whole sandbox. */
     if (result == BQ_OK && !BQ_RETIREMENT_ROW_HOST_NATIVE) result = BQ_CONFIGURATION_MISMATCH;
+    u32 sandbox_abi = result == BQ_OK ? bq_retirement_sandbox_abi() : 0;
+    if (result == BQ_OK && sandbox_abi < BQ_RETIREMENT_SANDBOX_MIN_ABI) result = BQ_CONFIGURATION_MISMATCH;
+    if (result == BQ_OK) observed->sandbox_abi = sandbox_abi;
     /* The held binaries are the verified bytes before the first step and
      * after the last; each step checks their file identity. */
     char digests[2][SHA256_HEX_CAPACITY] = {{0}};

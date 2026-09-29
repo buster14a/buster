@@ -30,6 +30,12 @@
 #define BQ_RETIREMENT_CHECK_LOG_CAP (16u * 1024u * 1024u)
 #define BQ_RETIREMENT_CHECK_RUN_CAP 1024u
 
+/* The lowest Landlock ABI the child sandbox accepts: ABI 6 is the first that
+ * also scopes signals and abstract unix sockets to the child's domain, so
+ * every rule the sandbox states is enforced. An older kernel is refused
+ * (BQ_CONFIGURATION_MISMATCH), never run with fewer rules. */
+#define BQ_RETIREMENT_SANDBOX_MIN_ABI 6u
+
 /* Everything one run borrows. evidence is the attempt's new check evidence
  * directory (the runner creates check-output-<i>, check-log-<i>,
  * check-receipt-<i> and check-run-<i> in it, each O_EXCL); work is the
