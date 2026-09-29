@@ -9,52 +9,80 @@ permissions:
   contents: write
 
 jobs:
-  apply-fix:
-    runs-on: ubuntu-latest
+  validate:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
         with:
           ref: codex/1646-static-assert-message
 
-      - name: Apply guarded repair
+      - name: Format and inspect the patch
         shell: bash
         run: |
-          set +e
-          : > .agent/apply-1646.log
-          python3 -m py_compile .agent/apply_1646.py >> .agent/apply-1646.log 2>&1
-          status=$?
-          if [ "$status" -eq 0 ]; then
-            python3 .agent/apply_1646.py >> .agent/apply-1646.log 2>&1
-            status=$?
-          fi
-          if [ "$status" -eq 0 ]; then
-            grep -R -n 'static assertion expression is not a true integer constant expression' src/buster >> .agent/apply-1646.log 2>&1
-            if [ "$?" -eq 0 ]; then
-              echo 'obsolete deferred diagnostic remains' >> .agent/apply-1646.log
-              status=1
-            fi
-          fi
-          if [ "$status" -eq 0 ]; then
-            git diff --check >> .agent/apply-1646.log 2>&1
-            status=$?
-          fi
-          printf '\nexit_status=%s\n' "$status" >> .agent/apply-1646.log
+          set -euo pipefail
+          formatter=$(command -v clang-format-20 || command -v clang-format)
+          "$formatter" --version
+          "$formatter" -i \
+            src/buster/lib/compiler/frontend/c/c_internal.h \
+            src/buster/lib/compiler/frontend/c/c_parse.c \
+            src/buster/lib/compiler/frontend/c/c_gen.c \
+            src/buster/tests/compiler/frontend/c/c_test.c \
+            src/buster/tests/compiler/driver/driver_fast_test.c
+          git diff --check
+
+      - name: Build and run the full Release test suite
+        id: test_all
+        shell: bash
+        run: |
+          set -o pipefail
+          ./build.sh build --config Release -t test_all 2>&1 | tee /tmp/issue-1646-test-all.log
+
+      - name: Verify the self-host fixed point
+        id: self_host
+        shell: bash
+        run: |
+          set -o pipefail
+          ./build.sh test_self_host --config Release 2>&1 | tee /tmp/issue-1646-self-host.log
+
+      - name: Commit formatting
+        if: ${{ success() }}
+        shell: bash
+        run: |
+          set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          if [ "$status" -eq 0 ]; then
-            git add src/buster/lib/compiler/frontend/c/c_internal.h \
-                    src/buster/lib/compiler/frontend/c/c_parse.c \
-                    src/buster/lib/compiler/frontend/c/c_gen.c \
-                    src/buster/tests/compiler/frontend/c/c_test.c \
-                    src/buster/tests/compiler/driver/driver_fast_test.c
-            git commit -m 'c: preserve deferred static assertion diagnostics'
-          else
-            git restore src/buster/lib/compiler/frontend/c/c_internal.h \
-                        src/buster/lib/compiler/frontend/c/c_parse.c \
-                        src/buster/lib/compiler/frontend/c/c_gen.c \
-                        src/buster/tests/compiler/frontend/c/c_test.c \
-                        src/buster/tests/compiler/driver/driver_fast_test.c
-            git add .agent/apply-1646.log
-            git commit -m 'chore: publish issue 1646 repair diagnostic'
+          git add src/buster/lib/compiler/frontend/c/c_internal.h \
+                  src/buster/lib/compiler/frontend/c/c_parse.c \
+                  src/buster/lib/compiler/frontend/c/c_gen.c \
+                  src/buster/tests/compiler/frontend/c/c_test.c \
+                  src/buster/tests/compiler/driver/driver_fast_test.c
+          if git diff --cached --quiet; then
+            exit 0
           fi
+          git commit -m 'style: format deferred static assertion repair'
+          git push origin HEAD:codex/1646-static-assert-message
+
+      - name: Publish failure evidence
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf 'test_all_outcome=%s\n' '${{ steps.test_all.outcome }}'
+            printf 'self_host_outcome=%s\n' '${{ steps.self_host.outcome }}'
+            printf '\n===== test_all tail =====\n'
+            tail -n 300 /tmp/issue-1646-test-all.log 2>/dev/null || true
+            printf '\n===== self_host tail =====\n'
+            tail -n 300 /tmp/issue-1646-self-host.log 2>/dev/null || true
+          } > .agent/test-1646.log
+          git restore src/buster/lib/compiler/frontend/c/c_internal.h \
+                      src/buster/lib/compiler/frontend/c/c_parse.c \
+                      src/buster/lib/compiler/frontend/c/c_gen.c \
+                      src/buster/tests/compiler/frontend/c/c_test.c \
+                      src/buster/tests/compiler/driver/driver_fast_test.c
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .agent/test-1646.log
+          git commit -m 'chore: publish issue 1646 validation failure'
           git push origin HEAD:codex/1646-static-assert-message
