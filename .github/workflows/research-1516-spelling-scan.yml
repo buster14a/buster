@@ -1,0 +1,49 @@
+name: "Research 1516 spelling-scan ownership (hosted functional only)"
+on:
+  push:
+    branches: [codex/1516-spelling-scan-research-8f67]
+permissions:
+  contents: read
+concurrency:
+  group: research-1516-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  functional:
+    if: ${{ github.repository == 'buster14a/buster' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: research
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: work
+          ref: 8f67df736f13d4edc055110a7a6d619a00a22eaf
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: owner
+          ref: 6bc106b08f96ec56a5dfc54c8a0a6fbcd93491be
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Existing build prerequisite
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v mold >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y mold
+          fi
+      - name: Pinned-source functional and census experiment
+        shell: bash
+        run: python3 research/tools/research/1516_spelling_scan.py work owner "$RUNNER_TEMP/spelling-research"
+      - name: Preserve results including incomplete attempts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: spelling-research-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/spelling-research
+          if-no-files-found: warn
+          retention-days: 7
