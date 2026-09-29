@@ -213,6 +213,17 @@ class SnapshotRetryTests(unittest.TestCase):
             self.assertEqual((self.root / f"command-{attempt:03}.stdout").read_text(), error.output)
             self.assertEqual((self.root / f"command-{attempt:03}.stderr").read_text(), error.stderr)
 
+    def test_pinned_input_qualification_tolerates_only_known_real_source_baselines(self):
+        workflow = (ci_apt.ROOT / ".github/workflows/throughput-real-source.yml").read_text()
+        self.assertEqual(workflow.count("continue-on-error: ${{ inputs.qualify_pinned_inputs }}"), 2)
+        self.assertIn("Validate pinned-input qualification boundary", workflow)
+        self.assertIn("could not lower call to 'sort_comp'", workflow)
+        self.assertIn("LUA_COMPILE_SUMMARY allocator=fast units=34 failed=1 status=fail", workflow)
+        self.assertIn("could not lower initializer expression for local 'aBuiltinFunc'", workflow)
+        self.assertIn("error: test_sqlite stage=library config=threadsafe allocator=fast failed", workflow)
+        self.assertIn("steps.oracle_lua.outcome == 'success'", workflow)
+        self.assertIn("steps.oracle_sqlite.outcome == 'success'", workflow)
+
     def test_each_attempt_retains_status_and_diagnostics(self):
         results = [subprocess.CompletedProcess(["apt-get"], 100, "", self.failed_fetch().stderr),
                    subprocess.CompletedProcess(["apt-get"], 100, "", self.failed_fetch(code=502).stderr),
