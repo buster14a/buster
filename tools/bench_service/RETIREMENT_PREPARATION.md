@@ -379,13 +379,16 @@ replay are the next PR.
 
 `bq_retirement_unit_project` is step 6. It performs these steps in order:
 
-1. It opens the eight pinned census files beside the reference template,
+1. It opens the nine pinned census files beside the reference template,
    in `recipes/native-retirement-performance-v1.census/`. The files are
    `support.tsv`, `source-applicability.tsv`, `inputs.tsv`, `rows.tsv`,
-   `manifest.txt`, `validator-report.json`, `applicability.tsv` and
-   `applicability-skips.tsv`. Each is opened without following links and
-   held close-on-exec at descriptor 3 or above. The projection then checks
-   every file against its own profile pin, as before.
+   `manifest.txt`, `validator-report.json`, `applicability.tsv`,
+   `applicability-skips.tsv` and `performance-rows.json`. The last is
+   #508's canonical performance-row population. Each file is opened without
+   following links and held close-on-exec at descriptor 3 or above. The
+   projection then checks every file against its own profile pin. The
+   population's pin is the new key `performance-rows-sha256=`, and a profile
+   without it fails closed with `BQ_RECIPE_MISMATCH`.
 2. It opens the sealed `retirement-build/` directory and requires its exact
    closure.
 3. It calls `bq_retirement_correctness_project_profile` with
@@ -393,37 +396,63 @@ replay are the next PR.
    never the queue. That re-imports A, the matched-build sequence (with its
    broker binding) and the binary record, and joins their preparation,
    source and binary identities into `BqRetirementPrepared`. It then runs
-   the eligibility projection for the pinned template's `native_target`.
-   The report must declare `full-census`, and its compiler and baseline
-   digests must equal the two frozen binaries.
-4. `bq_retirement_census_rows_derive` builds the whole
-   `BqRetirementTrustedRow` array from that projection. No caller can supply
-   rows. The raw census join and `bq_retirement_validator_rows_join` then
-   check that same array.
+   the eligibility projection. The report must declare `full-census`, and
+   its compiler and baseline digests must equal the two frozen binaries.
+4. `bq_retirement_performance_rows_derive` imports the whole
+   `BqRetirementTrustedRow` array from the pinned population, joined to that
+   projection, for the pinned template's `native_target`. No caller can
+   supply rows. The raw census join and `bq_retirement_validator_rows_join`
+   then check that same array.
 
 The projection is returned only when every check passes. It must name the
 binaries the unit holds, and its support and census digests must equal the
 template's.
 
-The derived population is:
+### The imported population
 
-- **Object rows.** One per census row, in ordinal order. Each takes its
-  target from the census matrix, its classification, compiler eligibility
-  and skip proof from the schema-2 sidecars, and its identity from the
-  approved #508 identity serialization with `artifact_stage=object`. Its
-  source digest is the subject's support-declaration digest and its
-  configuration digest is the #1020 digest. `code_obligation` is set for
-  `supported-object-zero-fallback` and `execution_obligation` for
-  `semantic-gate-509`.
-- **Two native stage rows.** A `link` row and then a `self-host-stage1`
-  row. Both name the *stage census row*: the lowest census ordinal on the
-  native target that is compiler eligible and owes both obligations. Their
-  identities use the same serialization with their own `artifact_stage`.
+The population artifact is the `performance_rows` support file that
+`tools/native_retirement_performance_binding.py` reads (`ROW_SCHEMA`
+`buster-native-retirement-performance-rows-v2`). Its bytes are exactly
+`json.dumps(record, sort_keys=True, separators=(",", ":"),
+ensure_ascii=False) + "\n"`. The C parser accepts only that canonical byte
+sequence, in its one fixed key order. It is bounded to 128 MiB and to one
+row per 256 bytes. Strings must be printable ASCII, and only the `\"` and
+`\\` escapes are accepted. Anything else fails closed.
 
-This stage-row rule is staged policy. The final stage population comes from
-#508's performance-row declaration, which this service does not import yet.
+The import requires the following:
+
+- **`row_identity_fields`.** The binding's `ROW_IDENTITY_FIELDS`, exactly.
+- **Row numbering.** Rows are numbered contiguously from zero.
+- **Object rows.** Rows `0..N-1` are the census object rows in census order.
+  Row `i` must carry `artifact_stage=object` and the same approved #508
+  identity digest as census row `i`.
+- **Stage rows.** Every later row is a declared `link` or `self-host-stage1`
+  row, and at least one of each must appear. Its census row is the unique
+  census row whose identity it carries (every identity field except
+  `artifact_stage`), found through a table of the census identity digests.
+  The binding comes from the declaration, not a heuristic. The row's
+  identity is the same serialization with its own `artifact_stage`, and no
+  identity may repeat, as in the binding.
+- **Values from the census row.** Classification, compiler eligibility and
+  skip proof come from the census row's schema-2 projection. The source
+  digest is the subject's support-declaration digest, and
+  `configuration_sha256` is the census row's #1020 digest.
+- **Eligibility markers.** `compiler_wall_time` and `compiler_peak_rss`
+  must equal that compiler eligibility. The code-section and runtime-oracle
+  markers follow the binding's pairing rules. `code_obligation` is the
+  declared `generated_code_bytes`.
+- **Native runtime.** `execution_obligation` is set when the identity's
+  execution obligation is `semantic-gate-509`. `generated_runtime` must
+  equal compiler eligibility combined with `_native_runtime_required`: that
+  obligation, a `link` or `self-host-stage1` stage, and the native target.
+- **Sources.** The `sources` digests for `support_declaration`, `inputs`,
+  `rows`, `manifest` and `validator_report` must equal their profile pins.
+  `dependencies` and `environment` must be well-formed, but those files are
+  not held here.
+
 The reviewed template pins the result, because its `population_sha256`
-covers every row.
+covers every row. Its reference rows are exactly the native-runtime stage
+rows, in row order.
 
 Command, oracle and #509 fields stay empty. `population_sha256` seals the
 rows that `rows_join` accepted. This is an in-process misuse check, not a
@@ -773,6 +802,12 @@ sequence on a separate real-A tree:
 
 - **Census.** `retirement_validator_eligibility_test.py --emit` writes the
   genuine schema-2 census with that module's Python configuration digests.
+  It also writes a #508 performance-row population built the way the
+  binding test builds one, which the binding's own parser accepts, and that
+  module's `expected_population` for it. The population has a native `link`
+  row on census row 16, a native `self-host-stage1` row on census row 17, a
+  foreign-target `link` row on census row 64 and an untimed
+  `self-host-stage1` row on census row 0.
 - **Sources.** The baseline snapshot also holds the census subject's bytes
   at `tests/unit.c`. This is the reference source.
 - **Toolchain.** `bin/clang` is a copy of the host compiler.
@@ -783,8 +818,11 @@ sequence on a separate real-A tree:
 The sequence is prepare, a fixture-broker build, project and oracle. The
 fixture checks these properties:
 
-- Every derived row's configuration digest equals the Python reference.
-- The stage rows name the first eligible native row.
+- Every imported row's census row, stage, native-runtime applicability and
+  configuration digest equal the Python reference.
+- Each stage row names the census row its declaration carries.
+- A profile without, or with a changed, `performance-rows-sha256` pin fails
+  closed.
 - The blocked profile, a missing census pin, a changed report pin and a
   `full-census` requirement on the self-test report each fail closed.
 - `begin_service` stays fail-closed, and a changed row is refused by both

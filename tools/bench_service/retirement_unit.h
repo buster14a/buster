@@ -4,8 +4,8 @@
  * coordinator's export, verifies the pinned toolchain and imports the pinned
  * reference policy. bq_retirement_unit_build then runs both matched trusted
  * builds through the broker launch seam and persists their evidence beside
- * the export. bq_retirement_unit_project derives the B population from the
- * pinned census descriptors, and bq_retirement_unit_oracle runs the oracle
+ * the export. bq_retirement_unit_project imports the B population from
+ * #508's pinned performance rows joined to the pinned census, and bq_retirement_unit_oracle runs the oracle
  * authority and the reference producer over that same row array. The
  * correctness gate stays fail-closed, the retirement recipe stays unadmitted
  * and bq_worker_unit calls none of these yet.
@@ -74,11 +74,13 @@ BUSTER_F_DECL BqError bq_retirement_unit_build(BqRetirementStore store, BqRetire
     u64 deadline_ns, BqRetirementUnitBuilt* built);
 BUSTER_F_DECL bool bq_retirement_unit_built_release(BqRetirementUnitBuilt* built);
 
-/* Installed beside the reference template under recipes/: the eight
- * profile-pinned #508 census and schema-2 validator files, by these names. */
+/* Installed beside the reference template under recipes/: the nine
+ * profile-pinned #508 census, schema-2 validator and performance-row files,
+ * by these names, in BqRetirementCensusFile order. */
 #define BQ_RETIREMENT_UNIT_CENSUS_DIRECTORY "native-retirement-performance-v1.census"
 #define BQ_RETIREMENT_UNIT_CENSUS_FILES "support.tsv", "source-applicability.tsv", "inputs.tsv", "rows.tsv", \
-    "manifest.txt", "validator-report.json", "applicability.tsv", "applicability-skips.tsv"
+    "manifest.txt", "validator-report.json", "applicability.tsv", "applicability-skips.tsv", \
+    "performance-rows.json"
 /* The unit's reference-producer output directory, created new beneath the
  * private retirement-work/ directory of the attempt. */
 #define BQ_RETIREMENT_UNIT_REFERENCE_DIRECTORY "reference-oracle"
@@ -91,8 +93,9 @@ BUSTER_F_DECL bool bq_retirement_unit_census_close(BqRetirementCensusFiles* cens
 
 /* Design step 6: opens the pinned census, re-imports A, the matched builds
  * and the binary record from store and the sealed retirement-build/ (never
- * the queue), and derives the B population for the pinned template's native
- * target (bq_retirement_correctness_project_service). The projection must
+ * the queue), and imports the B population from #508's pinned performance
+ * rows for the pinned template's native target
+ * (bq_retirement_correctness_project_service). The projection must
  * name built's binaries. Compiled profile: the blocked profile fails closed. */
 BUSTER_F_DECL BqError bq_retirement_unit_project(BqRetirementStore store, BqRetirementUnitPrepared const* prepared,
     BqRetirementUnitBuilt const* built, int workspaces, int installed, BqRetirementProjection* projection);

@@ -18,9 +18,10 @@
  *                                   in retirement-build/, re-imported and
  *                                   both binaries held
  *   bq_retirement_unit_built_release
- *   bq_retirement_unit_census_open  hold the eight pinned census files
- *   bq_retirement_unit_project      design step 6: derive and join the B rows
- *                                   from the census and the unit's stores
+ *   bq_retirement_unit_census_open  hold the nine pinned census files
+ *   bq_retirement_unit_project      design step 6: import and join the B rows
+ *                                   from #508's pinned population, the census
+ *                                   and the unit's stores
  *   bq_retirement_unit_oracle       design steps 7-8: oracle authority and
  *                                   reference producer over those rows
  *   bq_retirement_unit_oracle_release
@@ -507,7 +508,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_project_pinned(BqRetirementStore 
     BqError result = fresh && prepared && prepared->owned && built && built->owned && store.directory >= 0 &&
                      workspaces >= 0 && installed >= 0 &&
                      bq_workspace_name(attempt, prepared->job.id, prepared->job.token) ? BQ_OK : BQ_BAD_REQUEST;
-    BqRetirementCensusFiles census = {{-1, -1, -1, -1, -1, -1, -1, -1}};
+    BqRetirementCensusFiles census;
+    for (u32 index = 0; index < BQ_RETIREMENT_CENSUS_FILE_COUNT; index += 1) census.descriptors[index] = -1;
     if (result == BQ_OK) result = bq_retirement_unit_census_open(installed, &census);
     int workspace = result == BQ_OK ? openat(workspaces, attempt, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     int evidence = workspace >= 0 ? openat(workspace, BQ_RETIREMENT_UNIT_EVIDENCE_DIRECTORY,

@@ -24,8 +24,11 @@ manifest, the source applicability ledger, schema-2 report, and applicability
 and skip sidecars. It recomputes the raw identities, checks the complete fixed
 matrix and report class-row partition, and requires the exact source-derived
 non-executed set. For full-census it requires the approved source applicability
-ledger digest/count and exactly four shards. It then derives the B row
-inventory and checks its object ordinals. It derives classes, reasons, and
+ledger digest/count and exactly four shards. It then imports the B row
+inventory from #508's profile-pinned performance-row population, requiring
+its object rows to be the census rows in order and binding each declared
+stage row to the census row whose identity it carries, and checks its object
+ordinals. It derives classes, reasons, and
 ownership for default rows missing from the source applicability ledger using
 the raw row obligations, allocator role, and retained direct-reference failure
 set; it does not replay baseline shard results or independent supplements. It

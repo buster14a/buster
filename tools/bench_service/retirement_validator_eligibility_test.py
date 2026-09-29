@@ -171,9 +171,10 @@ def write_profile(path, artifacts):
         ("validator-report-sha256", "report"),
         ("validator-applicability-sha256", "applicability"),
         ("validator-skips-sha256", "skips"),
+        ("performance-rows-sha256", "performance_rows"),
     )
     data = "".join(f"{key}={sha256(artifacts[name].read_bytes())}\n"
-                   for key, name in keys).encode("ascii")
+                   for key, name in keys if name in artifacts).encode("ascii")
     if path.exists():
         path.chmod(stat.S_IMODE(path.stat().st_mode) | stat.S_IWUSR)
     path.write_bytes(data)
@@ -202,6 +203,8 @@ def probe_result(probe, artifacts):
         str(artifacts["applicability"]),
         str(artifacts["skips"]),
     ]
+    if "performance_rows" in artifacts:
+        command += [str(artifacts["performance_rows"]), str(POPULATION_NATIVE_TARGET_ID)]
     return subprocess.run(command, cwd=REPOSITORY, check=False,
                           capture_output=True, text=True)
 
@@ -364,6 +367,190 @@ def expect_missing_profile_pin_rejected(probe, artifacts, key):
         profile.chmod(mode)
 
 
+# The #508 performance-row population (binding.ROW_SCHEMA), built the way
+# native_retirement_performance_binding_test.py builds its fixture: every
+# census object row in census order, then declared link and
+# self-host-stage1 rows, each carrying one census row's identity. The C
+# service imports this artifact instead of inventing stage rows. Declared
+# here: native link and self-host rows on two eligible aarch64-linux rows, a
+# foreign-target link row and an untimed (source-ledger skipped) self-host row.
+POPULATION_NATIVE_TARGET = "aarch64-unknown-linux-gnu"
+POPULATION_NATIVE_TARGET_ID = 5
+POPULATION_STAGE_ROWS = (("link", 16), ("self-host-stage1", 17), ("link", 64),
+                         ("self-host-stage1", 0))
+POPULATION_STAGE_IDS = {"object": 1, "link": 2, "self-host-stage1": 3}
+
+
+def population_record(report, report_path, shard, stage_rows=POPULATION_STAGE_ROWS):
+    """The unserialized performance-row record for the fixture census."""
+    require(binding.TARGETS.index(POPULATION_NATIVE_TARGET) + 1 == POPULATION_NATIVE_TARGET_ID,
+            "population native target id is not its performance TARGETS ordinal")
+    _fields, census_rows = contract_test.read_table(shard / "rows.tsv")
+    skips = set(report["applicability_skip_rows"])
+
+    def declared(index, census_index, stage):
+        census = census_rows[census_index]
+        identity = {field: census[field] for field in binding.ROW_IDENTITY_FIELDS
+                    if field != "artifact_stage"}
+        identity["artifact_stage"] = stage
+        record = {"row": index, "identity": identity}
+        compile_eligible = census_index not in skips
+        runtime = compile_eligible and binding._native_runtime_required(
+            record, POPULATION_NATIVE_TARGET)
+        record["eligibility"] = {
+            "compiler_wall_time": compile_eligible, "compiler_peak_rss": compile_eligible,
+            "generated_code_bytes": compile_eligible, "generated_runtime": runtime,
+            "runtime_oracle": ("independent-native-executable-oracle" if runtime
+                               else "not-applicable"),
+            "code_section": ("deterministic-code-section" if compile_eligible
+                             else "not-applicable"),
+        }
+        return record
+
+    rows = [declared(index, index, "object") for index in range(len(census_rows))]
+    for stage, census_index in stage_rows:
+        rows.append(declared(len(rows), census_index, stage))
+    sources = {
+        "support_declaration": sha256((shard / "support-contract.tsv").read_bytes()),
+        "manifest": sha256((shard / "manifest.txt").read_bytes()),
+        "inputs": sha256((shard / "inputs.tsv").read_bytes()),
+        "rows": sha256((shard / "rows.tsv").read_bytes()),
+        "dependencies": sha256((shard / "dependencies.tsv").read_bytes()),
+        "environment": sha256((shard / "environment.tsv").read_bytes()),
+        "validator_report": sha256(report_path.read_bytes()),
+    }
+    return {"schema": binding.ROW_SCHEMA, "version": binding.ROW_VERSION,
+            "row_identity_fields": list(binding.ROW_IDENTITY_FIELDS),
+            "sources": sources, "rows": rows}
+
+
+def population_bytes(record):
+    return (json.dumps(record, sort_keys=True, separators=(",", ":"),
+                       ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def expected_population(report, shard, data):
+    """Python reference for the rows the C service derives from ``data``.
+
+    The binding's own parser accepts the artifact; each row's census row is
+    the unique census identity it carries (object rows in census order), its
+    configuration digest is that census row's row_configuration_digest, and
+    native-runtime applicability is compiler eligibility and
+    binding._native_runtime_required, exactly.
+    """
+    parsed, axes, _family, _sources = binding._performance_rows_with_sources(data)
+    require(axes["stages"] == binding.STAGES, "population lacks a declared stage")
+    _fields, census_rows = contract_test.read_table(shard / "rows.tsv")
+    by_identity = {}
+    for index, census in enumerate(census_rows):
+        key = tuple(census[field] for field in binding.ROW_IDENTITY_FIELDS
+                    if field != "artifact_stage")
+        require(key not in by_identity, "census identities are not unique")
+        by_identity[key] = index
+    configurations = expected_configurations(report, shard)
+    skips = set(report["applicability_skip_rows"])
+    lines = []
+    for row in parsed:
+        key = tuple(row["identity"][field] for field in binding.ROW_IDENTITY_FIELDS
+                    if field != "artifact_stage")
+        census_index = by_identity[key]
+        stage = row["identity"]["artifact_stage"]
+        if row["row"] < len(census_rows):
+            require(stage == "object" and census_index == row["row"],
+                    "population object rows are not the census rows in order")
+        compile_eligible = census_index not in skips
+        require(row["metrics"]["compiler_wall_time"] is compile_eligible,
+                "population compiler eligibility differs from the skip set")
+        runtime = compile_eligible and binding._native_runtime_required(
+            row, POPULATION_NATIVE_TARGET)
+        require(row["metrics"]["generated_runtime"] is runtime,
+                "population runtime eligibility differs from native applicability")
+        lines.append(f"VALIDATOR_POPULATION row={row['row']} census={census_index} "
+                     f"stage={POPULATION_STAGE_IDS[stage]} runtime={int(runtime)} "
+                     f"configuration={configurations[census_index]}")
+    return lines
+
+
+def check_population(probe, artifacts, report, shard):
+    """C/Python cross-check of the imported performance population."""
+    record = population_record(report, artifacts["report"], shard)
+    path = artifacts["report"].parent / "performance-rows.json"
+    path.write_bytes(population_bytes(record))
+    path.chmod(0o444)
+    population = dict(artifacts, performance_rows=path)
+    write_profile(population["profile"], population)
+    expected = expected_population(report, shard, path.read_bytes())
+    result = probe_result(probe, population)
+    require(result.returncode == 0,
+            "compiled C eligibility probe rejected the genuine performance population:\n" +
+            result.stdout + result.stderr)
+    derived = [line for line in result.stdout.splitlines()
+               if line.startswith("VALIDATOR_POPULATION ")]
+    require(derived == expected,
+            "C performance population differs from the Python reference")
+
+    def mutated(mutation):
+        def replacement(_original):
+            changed = json.loads(json.dumps(record))
+            mutation(changed)
+            return population_bytes(changed)
+        return replacement
+
+    def swap_objects(changed):
+        rows = changed["rows"]
+        rows[0]["identity"], rows[1]["identity"] = rows[1]["identity"], rows[0]["identity"]
+
+    def foreign_identity(changed):
+        changed["rows"][-1]["identity"]["argv_evidence"] = "groups/0/other.argv"
+
+    def foreign_runtime(changed):
+        eligibility = changed["rows"][-2]["eligibility"]
+        eligibility["generated_runtime"] = True
+        eligibility["runtime_oracle"] = "independent-native-executable-oracle"
+
+    def untimed_compiler(changed):
+        eligibility = changed["rows"][-1]["eligibility"]
+        eligibility["compiler_wall_time"] = eligibility["compiler_peak_rss"] = True
+
+    def no_link(changed):
+        changed["rows"] = [row for row in changed["rows"]
+                           if row["identity"]["artifact_stage"] != "link"]
+        for index, row in enumerate(changed["rows"]):
+            row["row"] = index
+
+    def extra_object(changed):
+        changed["rows"][-1]["identity"]["artifact_stage"] = "object"
+
+    def stale_source(changed):
+        changed["sources"]["rows"] = "0" * 64
+
+    def duplicate_stage(changed):
+        repeated = json.loads(json.dumps(changed["rows"][-4]))
+        repeated["row"] = len(changed["rows"])
+        changed["rows"].append(repeated)
+
+    for mutation, label in ((swap_objects, "reordered object rows"),
+                            (foreign_identity, "stage identity outside the census"),
+                            (foreign_runtime, "foreign-target runtime eligibility"),
+                            (untimed_compiler, "skipped-row compiler eligibility"),
+                            (no_link, "missing link stage"),
+                            (extra_object, "object row after the census rows"),
+                            (stale_source, "stale rows.tsv source digest"),
+                            (duplicate_stage, "duplicated stage row identity")):
+        expect_tamper_rejected(probe, population, path, mutated(mutation), label)
+    expect_tamper_rejected(probe, population, path,
+                           lambda data: data.replace(b'"row":0}', b'"row": 0}', 1),
+                           "non-canonical serialization")
+    expect_missing_profile_pin_rejected(probe, population, "performance-rows-sha256")
+    result = probe_result(probe, population)
+    require(result.returncode == 0 and
+            [line for line in result.stdout.splitlines()
+             if line.startswith("VALIDATOR_POPULATION ")] == expected,
+            "restored performance population no longer matches")
+    write_profile(artifacts["profile"], artifacts)
+    return len(expected)
+
+
 def execute(probe):
     require(probe.is_file() and os.access(probe, os.X_OK),
             f"compiled C probe is missing or not executable: {probe}")
@@ -517,6 +704,9 @@ def execute(probe):
         expect_missing_profile_pin_rejected(
             probe, artifacts, "validator-source-applicability-sha256")
         expect_probe_success(probe, artifacts, configurations)
+        population_rows = check_population(probe, artifacts, report, shard)
+        require(population_rows == 192 + len(POPULATION_STAGE_ROWS),
+                "population cross-check did not cover every declared row")
     finally:
         fixture.tearDown()
 
@@ -532,6 +722,7 @@ EMITTED_CENSUS_FILES = (
     ("validator-report.json", "report"),
     ("applicability.tsv", "applicability"),
     ("applicability-skips.tsv", "skips"),
+    ("performance-rows.json", "performance_rows"),
 )
 
 
@@ -540,8 +731,9 @@ def emit(directory):
 
     retirement_prepare_tests.c installs them as the worker unit's pinned
     census and compares the rows its projection derives with
-    ``configurations.txt``: this module's row_configuration_digest for every
-    census row, in row order. The directory must not exist yet.
+    ``configurations.txt`` (this module's row_configuration_digest for every
+    census row, in row order) and ``population.txt`` (expected_population for
+    the emitted ``performance-rows.json``). The directory must not exist yet.
     """
     check_row_configuration_reference()
     directory.mkdir(mode=0o700)
@@ -564,12 +756,19 @@ def emit(directory):
             "skips": fixture.root / "applicability-skips.tsv",
         }
         configurations = expected_configurations(report, shard)
+        artifacts["performance_rows"] = fixture.root / "performance-rows.json"
+        artifacts["performance_rows"].write_bytes(
+            population_bytes(population_record(report, report_path, shard)))
+        population = expected_population(report, shard, artifacts["performance_rows"].read_bytes())
         for name, key in EMITTED_CENSUS_FILES:
             target = directory / name
             target.write_bytes(artifacts[key].read_bytes())
             target.chmod(0o444)
         target = directory / "configurations.txt"
         target.write_text("".join(f"{digest}\n" for digest in configurations), encoding="ascii")
+        target.chmod(0o444)
+        target = directory / "population.txt"
+        target.write_text("".join(f"{line}\n" for line in population), encoding="ascii")
         target.chmod(0o444)
     finally:
         fixture.tearDown()
@@ -589,7 +788,8 @@ def main():
         return
     execute(arguments.probe.resolve())
     print("schema-2 validator eligibility fixture passed "
-          "(192 rows, 160 eligible, 32 skipped, 192 C/Python configuration digests; "
+          "(192 rows, 160 eligible, 32 skipped, 192 C/Python configuration digests, "
+          f"{192 + len(POPULATION_STAGE_ROWS)} C/Python performance-population rows; "
           "positive and tamper probes)")
 
 

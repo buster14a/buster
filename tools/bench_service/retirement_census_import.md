@@ -135,7 +135,10 @@ The pinned reference-policy importer has no projection to join against
 directly.
 `retirement_prepare_tests.c` and `retirement_validator_eligibility_test.py`
 share one golden digest. The real schema-2 fixture compares all 192 C digests with
-the Python reference. The unit-oracle fixture installs the same genuine census
+the Python reference, and compares every row the C service imports from a
+binding-accepted performance-row population (census row, stage, native
+runtime, configuration digest) with its Python `expected_population`,
+including tamper cases. The unit-oracle fixture installs the same genuine census
 (`retirement_validator_eligibility_test.py --emit`) and requires every row
 the unit derives, object and stage, to carry the Python reference digest of
 its census row.
@@ -156,10 +159,14 @@ rows at 192 rows per subject.
 `bq_retirement_correctness_project_service` reimports the durable A
 preparation, fixed matched-build and frozen-binary records from the worker
 unit's per-attempt stores, joins their source and binary identities into the
-derived `BqRetirementPrepared`, and derives the whole B row array from the
-projection before the raw and configuration joins. The two native stage rows
-follow a staged rule (the lowest compiler-eligible native row owing code and
-execution), pending an import of #508's performance-row declaration. The
+derived `BqRetirementPrepared`, and imports the whole B row array from #508's
+profile-pinned performance-row population (`performance-rows.json`,
+`performance-rows-sha256=`), joined to the projection, before the raw and
+configuration joins. Its object rows must be the census rows in order; each
+declared link or self-host-stage1 row names the census row whose identity it
+carries, and native-runtime applicability is derived exactly as the binding's
+`_native_runtime_required`
+([import rules](RETIREMENT_PREPARATION.md#the-imported-population)). The
 still fail-closed `begin_service` accepts only that sealed projection; it does
 not acquire launchable binary descriptors or call the correctness-gate begin
 function. Even a valid full-census projection returns `BQ_RECIPE_MISMATCH`

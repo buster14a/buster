@@ -44,9 +44,9 @@ BUSTER_F_DECL BqError bq_retirement_reference_policy_import(int installed,
     BqRetirementReferencePolicy* policy);
 BUSTER_F_DECL bool bq_retirement_reference_policy_release(BqRetirementReferencePolicy* policy);
 
-/* The two native stage rows (link, then self-host-stage1) that follow the
- * census object rows in the derived population. */
-#define BQ_RETIREMENT_DERIVED_STAGE_ROWS 2u
+/* #508's minimum stage population beyond the census object rows: at least
+ * one link and one self-host-stage1 row (min_stage_rows in the binding). */
+#define BQ_RETIREMENT_MIN_STAGE_ROWS 2u
 /* The fixed broker CLI whose path the unit's matched-build receipts bind. */
 #define BQ_RETIREMENT_STAGE_BROKER "/usr/local/libexec/buster-bench-systemd-broker"
 
@@ -62,6 +62,8 @@ typedef enum BqRetirementCensusFile
     BQ_RETIREMENT_CENSUS_VALIDATOR_REPORT,
     BQ_RETIREMENT_CENSUS_VALIDATOR_APPLICABILITY,
     BQ_RETIREMENT_CENSUS_VALIDATOR_SKIPS,
+    /* #508's canonical performance-row population (ROW_SCHEMA v2). */
+    BQ_RETIREMENT_CENSUS_PERFORMANCE_ROWS,
     BQ_RETIREMENT_CENSUS_FILE_COUNT
 } BqRetirementCensusFile;
 
@@ -70,9 +72,11 @@ typedef struct BqRetirementCensusFiles
     int descriptors[BQ_RETIREMENT_CENSUS_FILE_COUNT];
 } BqRetirementCensusFiles;
 
-/* #1020 B population derived by the service from the pinned census, never
- * supplied by a caller: census object rows in ordinal order, then the two
- * native stage rows. prepared joins A, the matched builds and the binaries.
+/* #1020 B population imported by the service from #508's pinned
+ * performance-row artifact and joined to the pinned census, never supplied by
+ * a caller: census object rows in ordinal order, then the declared link and
+ * self-host-stage1 rows. prepared joins A, the matched builds and the
+ * binaries.
  * population_sha256 seals the rows rows_join accepted; authority_begin must
  * receive this exact array. Zero-initialize; release on every path. */
 typedef struct BqRetirementProjection
@@ -88,8 +92,10 @@ typedef struct BqRetirementProjection
 /* Reads A, the matched-build sequence and the binary record from stores
  * (the unit's sealed export and retirement-build/), never the queue, with
  * the compiled profile, the fixed broker binding and a full-census report.
- * native_target is the pinned reference template's. Returns BQ_OK only when
- * bq_retirement_validator_rows_join accepts the derived rows. */
+ * native_target is the pinned reference template's; it decides native-runtime
+ * applicability as the binding's _native_runtime_required does. A profile
+ * without performance-rows-sha256 fails closed. Returns BQ_OK only when
+ * bq_retirement_validator_rows_join accepts the imported rows. */
 BUSTER_F_DECL BqError bq_retirement_correctness_project_service(BqRetirementBuildStores stores,
     BqJob const* job, int installed, int workspaces, BqRetirementCensusFiles const* census,
     u32 native_target, char const preparation_sha256[SHA256_HEX_CAPACITY],

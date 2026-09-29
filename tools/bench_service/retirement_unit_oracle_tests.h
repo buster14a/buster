@@ -6,8 +6,9 @@
  * configuration digests are that module's Python reference. A dedicated
  * installed tree carries A sources whose baseline also holds the census
  * subject's bytes (the reference source), a toolchain whose bin/clang is a
- * copy of the host compiler, the census, and a reference template and
- * inventory built for the rows the projection derives. The fixture driver
+ * copy of the host compiler, the census with #508's performance-row
+ * population (and that module's expected_population), and a reference
+ * template and inventory built for the rows the projection imports. The fixture driver
  * freezes the census manifest's literal compiler bytes, so the projection's
  * compiler/baseline join holds. The sequence is prepare, build (fixture
  * broker), project, oracle authority and reference producer; the service
@@ -20,6 +21,11 @@
 #define BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_ORACLE_TESTS_H
 
 #define BQ_PREP_ORACLE_ROWS 192u
+/* The emitted population: 192 object rows, then link@16, self-host@17
+ * (native), link@64 (foreign target) and self-host@0 (untimed). */
+#define BQ_PREP_ORACLE_POPULATION 196u
+/* Native-runtime stage rows, hence reference rows: link@16, self-host@17. */
+#define BQ_PREP_ORACLE_REFERENCES 2u
 /* aarch64-unknown-linux-gnu: the fixture ledger makes every x86_64-linux row
  * unavailable, so the fixture template names another native target. */
 #define BQ_PREP_ORACLE_NATIVE_TARGET 5u
@@ -34,15 +40,19 @@ typedef struct BqPrepOracleFixture
     char driver[160], broker[160];
     char base_profile[4096], profile[4096];
     char configurations[BQ_PREP_ORACLE_ROWS][SHA256_HEX_CAPACITY];
+    /* Python expected_population, one row each: census row, stage, runtime,
+     * configuration digest. */
+    u32 expected_census[BQ_PREP_ORACLE_POPULATION], expected_stage[BQ_PREP_ORACLE_POPULATION];
+    u32 expected_runtime[BQ_PREP_ORACLE_POPULATION];
+    char expected_configuration[BQ_PREP_ORACLE_POPULATION][SHA256_HEX_CAPACITY];
     char support_sha256[SHA256_HEX_CAPACITY], rows_sha256[SHA256_HEX_CAPACITY];
     char clang_sha256[SHA256_HEX_CAPACITY], toolchain_sha256[SHA256_HEX_CAPACITY];
     char flags[5][BQ_RETIREMENT_REFERENCE_FIELD_CAP];
-    BqRetirementTrustedRow rows[BQ_PREP_ORACLE_ROWS + BQ_RETIREMENT_DERIVED_STAGE_ROWS];
+    BqRetirementTrustedRow rows[BQ_PREP_ORACLE_POPULATION];
     BqRetirementPreparation preparation;
     BqJob job;
     BqQueue queue;
     int installed_fd, workspaces_fd;
-    u32 stage_census_row;
 } BqPrepOracleFixture;
 
 BUSTER_GLOBAL_LOCAL bool bq_prep_test_run(char* const argv[])
@@ -181,11 +191,11 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_toolchain(BqPrepOracleFixture* fixt
  * second reference program spin, for the cancellation and deadline cases. */
 BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_install(BqPrepOracleFixture* fixture, bool hang)
 {
-    u32 const population = BQ_PREP_ORACLE_ROWS + BQ_RETIREMENT_DERIVED_STAGE_ROWS;
-    BqRetirementOracleTemplateRow approved[BQ_RETIREMENT_DERIVED_STAGE_ROWS] = {0};
-    BqRetirementReferencePlanRow plan_rows[BQ_RETIREMENT_DERIVED_STAGE_ROWS] = {0};
+    u32 const population = BQ_PREP_ORACLE_POPULATION;
+    BqRetirementOracleTemplateRow approved[BQ_PREP_ORACLE_REFERENCES] = {0};
+    BqRetirementReferencePlanRow plan_rows[BQ_PREP_ORACLE_REFERENCES] = {0};
     BqRetirementOracleTemplate template = {.population_rows = population, .object_rows = BQ_PREP_ORACLE_ROWS,
-        .native_target = BQ_PREP_ORACLE_NATIVE_TARGET, .reference_count = BQ_RETIREMENT_DERIVED_STAGE_ROWS,
+        .native_target = BQ_PREP_ORACLE_NATIVE_TARGET, .reference_count = BQ_PREP_ORACLE_REFERENCES,
         .references = approved};
     BqRetirementReferenceSourceIdentity source[2] = {0};
     for (u32 side = 0; side < 2; side += 1)
@@ -202,9 +212,14 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_install(BqPrepOracleFixture* fixtur
     memcpy(template.census_sha256, fixture->rows_sha256, SHA256_HEX_CAPACITY);
     memcpy(template.toolchain_identity_sha256, fixture->toolchain_sha256, SHA256_HEX_CAPACITY);
     bool ok = bq_retirement_oracle_population_hash(fixture->rows, population, template.population_sha256);
-    for (u32 index = 0; ok && index < BQ_RETIREMENT_DERIVED_STAGE_ROWS; index += 1)
+    u32 index = 0;
+    for (u32 declared = 0; ok && declared < population; declared += 1)
     {
-        BqRetirementTrustedRow const* row = fixture->rows + BQ_PREP_ORACLE_ROWS + index;
+        BqRetirementTrustedRow const* row = fixture->rows + declared;
+        if (!(row->compiler_eligible && row->execution_obligation && row->stage != BQ_RETIREMENT_STAGE_OBJECT &&
+              row->target == BQ_PREP_ORACLE_NATIVE_TARGET)) continue;
+        ok = index < BQ_PREP_ORACLE_REFERENCES;
+        if (!ok) break;
         approved[index] = (BqRetirementOracleTemplateRow){.row = row->row, .census_row = row->census_row,
                                                           .target = row->target};
         memcpy(approved[index].source_sha256, row->source_sha256, SHA256_HEX_CAPACITY);
@@ -224,9 +239,11 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_install(BqPrepOracleFixture* fixtur
         plan->runtime_environment[1] = "LC_ALL=C";
         ok = bq_ref_plan_row(plan, approved + index, approved[index].build_command_sha256) &&
              bq_ref_runtime_command(plan, approved[index].logical_command_sha256);
+        index += 1;
     }
+    ok = ok && index == BQ_PREP_ORACLE_REFERENCES;
     BqRetirementReferencePlan plan = {.template = &template, .rows = plan_rows,
-                                      .count = BQ_RETIREMENT_DERIVED_STAGE_ROWS};
+                                      .count = BQ_PREP_ORACLE_REFERENCES};
     memcpy(plan.clang_sha256, fixture->clang_sha256, SHA256_HEX_CAPACITY);
     char template_sha256[SHA256_HEX_CAPACITY] = {0}, inventory_sha256[SHA256_HEX_CAPACITY] = {0};
     u8 bytes[4096];
@@ -256,7 +273,15 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_setup(BqPrepOracleFixture* fixture)
     strcpy(fixture->installed, "/tmp/bq-retirement-oracle-installed-XXXXXX");
     strcpy(fixture->workspaces, "/tmp/bq-retirement-oracle-workspaces-XXXXXX");
     strcpy(fixture->queue_path, "/tmp/bq-retirement-oracle-queue-XXXXXX");
-    bool ok = mkdtemp(fixture->installed) && mkdtemp(fixture->workspaces) && mkdtemp(fixture->queue_path);
+    /* An unmade directory is forgotten, so teardown removes exactly the ones
+     * that exist (a random suffix may itself contain an X). */
+    char* made[] = {fixture->installed, fixture->workspaces, fixture->queue_path};
+    bool ok = true;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(made); index += 1)
+    {
+        if (!mkdtemp(made[index])) made[index][0] = 0;
+        ok = ok && made[index][0];
+    }
     int lengths[6] = {
         snprintf(fixture->recipes, sizeof(fixture->recipes), "%s/recipes", fixture->installed),
         snprintf(fixture->sources, sizeof(fixture->sources), "%s/sources", fixture->installed),
@@ -283,12 +308,28 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_setup(BqPrepOracleFixture* fixture)
         memcpy(fixture->configurations[row], text + row * SHA256_HEX_CAPACITY, 64);
         ok = text[row * SHA256_HEX_CAPACITY + 64] == '\n';
     }
-    ok = ok && unlink(path) == 0 && chmod(fixture->census, 0500) == 0;
+    ok = ok && unlink(path) == 0;
+    char population_text[BQ_PREP_ORACLE_POPULATION * 192];
+    length = ok ? snprintf(path, sizeof(path), "%s/population.txt", fixture->census) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(path) &&
+         bq_prep_test_read_text(path, population_text, sizeof(population_text)) > 0;
+    char* line = population_text;
+    for (u32 row = 0; ok && row < BQ_PREP_ORACLE_POPULATION; row += 1)
+    {
+        u32 declared = 0;
+        int consumed = 0;
+        ok = sscanf(line, "VALIDATOR_POPULATION row=%u census=%u stage=%u runtime=%u configuration=%64s\n%n",
+                    &declared, &fixture->expected_census[row], &fixture->expected_stage[row],
+                    &fixture->expected_runtime[row], fixture->expected_configuration[row], &consumed) == 5 &&
+             declared == row && consumed > 0;
+        line += ok ? consumed : 0;
+    }
+    ok = ok && *line == 0 && unlink(path) == 0 && chmod(fixture->census, 0500) == 0;
     /* One pin per installed census file, in BqRetirementCensusFile order. */
     static char const* const names[] = {BQ_RETIREMENT_UNIT_CENSUS_FILES};
     static char const* const keys[] = {"support-declaration-sha256", "validator-source-applicability-sha256",
         "census-inputs-sha256", "census-rows-sha256", "census-manifest-sha256", "validator-report-sha256",
-        "validator-applicability-sha256", "validator-skips-sha256"};
+        "validator-applicability-sha256", "validator-skips-sha256", "performance-rows-sha256"};
     char pins[BUSTER_ARRAY_LENGTH(names)][SHA256_HEX_CAPACITY] = {{0}};
     for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(names); index += 1)
     {
@@ -343,18 +384,31 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_setup(BqPrepOracleFixture* fixture)
     fixture->installed_fd = ok ? open(fixture->installed, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     fixture->workspaces_fd = ok ? open(fixture->workspaces, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     ok = ok && fixture->installed_fd >= 3 && fixture->workspaces_fd >= 3;
-    /* The template must carry the population the projection derives, so
-     * derive it here through the same projection with the pinned files. */
-    BqRetirementCensusFiles census = {{-1, -1, -1, -1, -1, -1, -1, -1}};
+    /* The template must carry the population the projection imports, so
+     * import it here through the same functions with the pinned files. */
+    BqRetirementCensusFiles census;
+    for (u32 index = 0; index < BQ_RETIREMENT_CENSUS_FILE_COUNT; index += 1) census.descriptors[index] = -1;
     BqRetirementValidatorEligibility eligibility = {0};
     String8 base_profile = string_from_pointer(fixture->base_profile);
+    u8* population = NULL;
+    u64 population_length = 0;
+    char population_sha256[SHA256_HEX_CAPACITY] = {0};
+    BqRetirementTrustedRow* imported = NULL;
+    u32 imported_rows = 0;
     ok = ok && bq_retirement_unit_census_open(fixture->installed_fd, &census) == BQ_OK &&
          bq_retirement_validator_eligibility_projection(census.descriptors[0], census.descriptors[1],
              census.descriptors[2], census.descriptors[3], census.descriptors[4], census.descriptors[5],
-             census.descriptors[6], census.descriptors[7], base_profile, BQ_PREP_ORACLE_NATIVE_TARGET, &eligibility) &&
+             census.descriptors[6], census.descriptors[7], base_profile, true, &eligibility) &&
          eligibility.row_count == BQ_PREP_ORACLE_ROWS &&
-         bq_retirement_census_rows_derive(&eligibility, fixture->rows, BUSTER_ARRAY_LENGTH(fixture->rows));
-    fixture->stage_census_row = eligibility.stage_census_row;
+         bq_retirement_validator_read_pinned(census.descriptors[BQ_RETIREMENT_CENSUS_PERFORMANCE_ROWS], base_profile,
+             S8("performance-rows-sha256="), BQ_RETIREMENT_POPULATION_BYTES_CAP, &population, &population_length,
+             population_sha256) &&
+         bq_retirement_performance_rows_derive((String8){(char8*)population, population_length}, base_profile,
+             &eligibility, BQ_PREP_ORACLE_NATIVE_TARGET, &imported, &imported_rows) &&
+         imported_rows == BQ_PREP_ORACLE_POPULATION;
+    if (ok) memcpy(fixture->rows, imported, sizeof(fixture->rows));
+    free(imported);
+    free(population);
     bq_retirement_validator_eligibility_release(&eligibility);
     if (!bq_retirement_unit_census_close(&census)) ok = false;
     /* Commands and flags for both reference rows. */
@@ -387,9 +441,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_oracle_teardown(BqPrepOracleFixture* fixtu
     if (fixture->queue.directory_fd >= 0) bq_close(&fixture->queue);
     if (fixture->installed_fd >= 0) close(fixture->installed_fd);
     if (fixture->workspaces_fd >= 0) close(fixture->workspaces_fd);
-    if (fixture->queue_path[0] && !strchr(fixture->queue_path, 'X')) bq_prep_test_cleanup(fixture->queue_path);
-    if (fixture->workspaces[0] && !strchr(fixture->workspaces, 'X')) bq_prep_test_cleanup(fixture->workspaces);
-    if (fixture->installed[0] && !strchr(fixture->installed, 'X')) bq_prep_test_cleanup(fixture->installed);
+    if (fixture->queue_path[0]) bq_prep_test_cleanup(fixture->queue_path);
+    if (fixture->workspaces[0]) bq_prep_test_cleanup(fixture->workspaces);
+    if (fixture->installed[0]) bq_prep_test_cleanup(fixture->installed);
 }
 
 /* Live (unreaped or running) children of this process, through /proc. */
@@ -454,8 +508,8 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_attempt_close(BqPrepOracleAttempt* 
 typedef struct BqPrepOraclePair
 {
     BqRetirementOracleAuthority authority;
-    BqRetirementOracleReference references[BQ_RETIREMENT_DERIVED_STAGE_ROWS];
-    BqRetirementReferenceSourceFile sources[BQ_RETIREMENT_DERIVED_STAGE_ROWS];
+    BqRetirementOracleReference references[BQ_PREP_ORACLE_REFERENCES];
+    BqRetirementReferenceSourceFile sources[BQ_PREP_ORACLE_REFERENCES];
     BqRetirementReferenceProducer producer;
     BqRetirementTrustedRow* rows;
     int roots[2], output;
@@ -477,7 +531,7 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_pair(BqPrepOracleFixture* fixture, 
     }
     ok = ok && bq_retirement_oracle_authority_begin(&pair->authority, &unit->policy.template,
                    unit->policy.template_sha256, &attempt->projection.prepared, pair->rows, pair->references,
-                   BQ_RETIREMENT_DERIVED_STAGE_ROWS, unit->job.id, unit->job.token) &&
+                   BQ_PREP_ORACLE_REFERENCES, unit->job.id, unit->job.token) &&
          mkdirat(fixture->workspaces_fd, name, 0700) == 0;
     pair->output = ok ? openat(fixture->workspaces_fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     for (u32 side = 0; ok && side < 2; side += 1)
@@ -486,7 +540,7 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_oracle_pair(BqPrepOracleFixture* fixture, 
          bq_retirement_reference_producer_begin(&pair->producer, &unit->policy.plan, unit->policy.inventory_sha256,
              unit->policy.template_sha256, unit->policy.inventory, unit->policy.source, pair->roots,
              unit->policy.toolchain_manifest_sha256, unit->policy.clang, pair->output, pair->sources,
-             BQ_RETIREMENT_DERIVED_STAGE_ROWS, &pair->authority);
+             BQ_PREP_ORACLE_REFERENCES, &pair->authority);
     return ok;
 }
 
@@ -545,13 +599,14 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_oracle(void)
     String8 profile = ok ? string_from_pointer(fixture->profile) : (String8){0};
     String8 root = ok ? string_from_pointer(fixture->workspaces) : (String8){0};
 
-    /* Prepare, build, then the projection: rows come from the pinned census,
-     * never from a caller, and equal the Python reference digests. */
+    /* Prepare, build, then the projection: rows come from #508's pinned
+     * population joined to the pinned census, never from a caller, and equal
+     * the Python reference (census row, stage, runtime, configuration). */
     BqPrepOracleAttempt* success = calloc(1, sizeof(*success));
     ok = ok && success && bq_prep_test_oracle_attempt(fixture, 81, cancel[0], success);
     BQ_PREP_CHECK(ok);
     BqRetirementProjection* projection = success ? &success->projection : NULL;
-    u32 const population = BQ_PREP_ORACLE_ROWS + BQ_RETIREMENT_DERIVED_STAGE_ROWS;
+    u32 const population = BQ_PREP_ORACLE_POPULATION;
     BQ_PREP_CHECK(ok && projection->owned && projection->prepared.rows == population &&
                   projection->prepared.object_rows == BQ_PREP_ORACLE_ROWS &&
                   projection->prepared.native_target == BQ_PREP_ORACLE_NATIVE_TARGET &&
@@ -561,21 +616,25 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_oracle(void)
     for (u32 index = 0; ok && index < population; index += 1)
     {
         BqRetirementTrustedRow const* row = projection->rows + index;
-        BQ_PREP_CHECK(row->row == index && row->census_row < BQ_PREP_ORACLE_ROWS &&
+        bool runtime = row->compiler_eligible && row->execution_obligation &&
+                       row->stage != BQ_RETIREMENT_STAGE_OBJECT && row->target == BQ_PREP_ORACLE_NATIVE_TARGET;
+        BQ_PREP_CHECK(row->row == index && row->census_row == fixture->expected_census[index] &&
+                      row->stage == fixture->expected_stage[index] && runtime == (fixture->expected_runtime[index] != 0) &&
+                      !strcmp(row->configuration_sha256, fixture->expected_configuration[index]) &&
                       !strcmp(row->configuration_sha256, fixture->configurations[row->census_row]) &&
-                      (index < BQ_PREP_ORACLE_ROWS ? row->census_row == index && row->stage == BQ_RETIREMENT_STAGE_OBJECT :
-                       row->census_row == fixture->stage_census_row && row->compiler_eligible &&
-                       row->target == BQ_PREP_ORACLE_NATIVE_TARGET));
+                      (index >= BQ_PREP_ORACLE_ROWS || row->census_row == index));
     }
-    BQ_PREP_CHECK(ok && projection->rows[BQ_PREP_ORACLE_ROWS].stage == BQ_RETIREMENT_STAGE_LINK &&
-                  projection->rows[BQ_PREP_ORACLE_ROWS + 1].stage == BQ_RETIREMENT_STAGE_SELF_HOST &&
-                  fixture->stage_census_row == 16 &&
-                  strcmp(projection->rows[BQ_PREP_ORACLE_ROWS].identity_sha256,
-                         projection->rows[fixture->stage_census_row].identity_sha256) &&
-                  strcmp(projection->rows[BQ_PREP_ORACLE_ROWS].identity_sha256,
-                         projection->rows[BQ_PREP_ORACLE_ROWS + 1].identity_sha256) &&
-                  !projection->rows[0].compiler_eligible && projection->rows[0].skip_proof_sha256[0] &&
-                  !projection->rows[0].independent_oracle_sha256[0]);
+    /* Each stage row names the census row its declaration carries. */
+    BQ_PREP_CHECK(ok && projection->rows[192].census_row == 16 && projection->rows[193].census_row == 17 &&
+                  projection->rows[194].census_row == 64 && projection->rows[195].census_row == 0 &&
+                  projection->rows[192].stage == BQ_RETIREMENT_STAGE_LINK &&
+                  projection->rows[195].stage == BQ_RETIREMENT_STAGE_SELF_HOST &&
+                  strcmp(projection->rows[192].identity_sha256, projection->rows[16].identity_sha256) &&
+                  strcmp(projection->rows[192].identity_sha256, projection->rows[194].identity_sha256) &&
+                  projection->rows[194].compiler_eligible && projection->rows[194].target != BQ_PREP_ORACLE_NATIVE_TARGET &&
+                  !projection->rows[195].compiler_eligible && projection->rows[195].skip_proof_sha256[0] &&
+                  !strcmp(projection->rows[195].skip_proof_sha256, projection->rows[0].skip_proof_sha256) &&
+                  !projection->rows[0].compiler_eligible && !projection->rows[0].independent_oracle_sha256[0]);
 
     BqRetirementProjection refused = {0};
     BqRetirementStore store = ok ? success->attempt.store : (BqRetirementStore){-1};
@@ -599,13 +658,23 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_oracle(void)
                       fixture->toolchain_root, fixture->broker, fixture->workspaces, &refused) == BQ_OK &&
                       bq_retirement_projection_release(&refused));
         char variant[4096];
+        char const* missing[] = {"census-rows-sha256=", "performance-rows-sha256="};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(missing); index += 1)
+        {
+            memcpy(variant, fixture->profile, sizeof(variant));
+            char* line = strstr(variant, missing[index]);
+            char* end = line ? strchr(line, '\n') : NULL;
+            if (end) memmove(line, end + 1, strlen(end + 1) + 1);
+            BQ_PREP_CHECK(end && bq_retirement_unit_project_pinned(store, unit, &success->built, workspaces,
+                          installed, root, string_from_pointer(variant), S8("self-test"), fixture->driver,
+                          fixture->toolchain_root, fixture->broker, fixture->workspaces, &refused) ==
+                          BQ_RECIPE_MISMATCH && !refused.owned);
+        }
         memcpy(variant, fixture->profile, sizeof(variant));
-        char* line = strstr(variant, "census-rows-sha256=");
-        char* end = line ? strchr(line, '\n') : NULL;
-        if (end) memmove(line, end + 1, strlen(end + 1) + 1);
-        BQ_PREP_CHECK(end && bq_retirement_unit_project_pinned(store, unit, &success->built, workspaces, installed,
-                      root, string_from_pointer(variant), S8("self-test"), fixture->driver, fixture->toolchain_root,
-                      fixture->broker, fixture->workspaces, &refused) == BQ_RECIPE_MISMATCH && !refused.owned);
+        bq_prep_test_flip_pin(variant, "performance-rows-sha256=");
+        BQ_PREP_CHECK(bq_retirement_unit_project_pinned(store, unit, &success->built, workspaces, installed, root,
+                      string_from_pointer(variant), S8("self-test"), fixture->driver, fixture->toolchain_root,
+                      fixture->broker, fixture->workspaces, &refused) == BQ_SOURCE_MISMATCH && !refused.owned);
         memcpy(variant, fixture->profile, sizeof(variant));
         bq_prep_test_flip_pin(variant, "validator-report-sha256=");
         BQ_PREP_CHECK(bq_retirement_unit_project_pinned(store, unit, &success->built, workspaces, installed, root,
@@ -642,10 +711,11 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_oracle(void)
                       &oracle) == BQ_OK && oracle.owned && bq_retirement_oracle_authority_ready(&oracle.authority) &&
                       !strcmp(oracle.attempt_sha256, oracle.authority.attempt_sha256) &&
                       bq_retirement_hex(string_from_pointer(oracle.attempt_sha256), 64) &&
-                      oracle.authority.observed_rows == BQ_RETIREMENT_DERIVED_STAGE_ROWS &&
-                      projection->rows[BQ_PREP_ORACLE_ROWS].independent_oracle_sha256[0] &&
-                      projection->rows[BQ_PREP_ORACLE_ROWS + 1].independent_oracle_sha256[0] &&
-                      !projection->rows[fixture->stage_census_row].independent_oracle_sha256[0]);
+                      oracle.authority.observed_rows == BQ_PREP_ORACLE_REFERENCES &&
+                      projection->rows[192].independent_oracle_sha256[0] &&
+                      projection->rows[193].independent_oracle_sha256[0] &&
+                      !projection->rows[194].independent_oracle_sha256[0] &&
+                      !projection->rows[16].independent_oracle_sha256[0]);
         char const* outputs[] = {"reference-00000000", "reference-00000001", "reference-receipt-00000001",
                                  "oracle-output-0", "oracle-output-1"};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(outputs); index += 1)
