@@ -5807,7 +5807,7 @@ BUSTER_C_SHARED String8 c_parse_static_assert_diagnostic_message(Arena* arena, C
                    : S8("static assertion expression is not an integer constant expression");
     }
 
-    u32 declaration_end = declaration.token_start <= preprocess.token_count &&
+    u64 declaration_end = declaration.token_start <= preprocess.token_count &&
                                   declaration.token_count <= preprocess.token_count - declaration.token_start
                               ? declaration.token_start + declaration.token_count
                               : preprocess.token_count;
