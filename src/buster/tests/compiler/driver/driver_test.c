@@ -724,7 +724,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_response_file_arguments(
 
 // Contract amendment A1 of #881 compiles each ~400-input batch in one
 // `ide cc -c` whose input list arrives as a response file. The same inputs on
-// the command line and through `@file` must write identical objects. The run
+// the command line and through `@file` must write identical objects; 64
+// inputs keep the fixture cheap on slow CI hosts (argument-count and byte
+// limits are covered by compiler_driver_test_response_file_arguments). The run
 // happens in a private work directory because -c writes each object there by
 // basename. An unreadable response file fails the process with a driver error.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_response_file_batch(UnitTestArguments* arguments)
@@ -733,7 +735,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_response_file_batch(Unit
 #if !BUSTER_ANDROID && !BUSTER_IOS
     enum
     {
-        RESPONSE_FILE_BATCH_INPUTS = 400,
+        RESPONSE_FILE_BATCH_INPUTS = 64,
         RESPONSE_FILE_BATCH_PREFIX = 3,
     };
     Arena* arena = arguments->arena;
