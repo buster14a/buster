@@ -7,45 +7,53 @@ on:
 permissions:
   contents: read
 jobs:
-  inspect:
+  census:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 8f67df736f13d4edc055110a7a6d619a00a22eaf
+          fetch-depth: 0
           persist-credentials: false
-      - name: Inspect exact source and existing construction counters
+      - name: Run disposable scaling census
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD
+          python3 -u tools/research/scaling_probe_1297.py --out "$RUNNER_TEMP/scaling1297" | tee "$RUNNER_TEMP/scaling1297-console.log"
+      - name: Summarize source metadata
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          git status --short
           git hash-object src/buster/lib/compiler/frontend/c/c_gen.c
-          uname -a
-          clang --version
+          git ls-tree --name-only HEAD
+          git ls-files '*LICENSE*' '*LICENCE*' '*license*' '*License*' | head -50
           python3 - <<'PY'
           from pathlib import Path
-          targets = {
-              'src/buster/lib/compiler/frontend/c/c_gen.c': ['c_ir_predeclare_labeled_automatic_locals', 'c_ir_lower_function'],
-              'src/buster/lib/compiler/ir/ir.h': ['IR_CONSTRUCTION_COUNTER', 'IrConstruction'],
-              'src/buster/lib/compiler/ir/ir.c': ['IR_CONSTRUCTION_RECORD'],
-              '.github/workflows/ci.yml': ['build.c -o', 'BUSTER_BENCH_ALLOCATIONS'],
-          }
-          for filename, needles in targets.items():
-              p = Path(filename)
+          for name, needles in {
+              'src/buster/lib/compiler/frontend/c/c.h': ['struct CEntity', 'struct CDeclaration', 'struct CScope'],
+              'src/buster/lib/compiler/frontend/c/c_parse.c': ['c_parse_add_entity', 'declaration_token_plus_one ='],
+              'src/buster/lib/compiler/frontend/c/c_gen.c': ['c_ir_find_local_by_entity', 'c_ir_lower_body_initialize'],
+          }.items():
+              p = Path(name)
               if not p.exists():
-                  print('MISSING', filename)
                   continue
               lines = p.read_text().splitlines()
               for needle in needles:
-                  hits = [i for i, line in enumerate(lines) if needle in line]
-                  print('HITS', filename, needle, [i+1 for i in hits])
-                  for i in hits[:3]:
-                      for j in range(max(0, i-3), min(len(lines), i+105)):
-                          print(f'{filename}:{j+1}: {lines[j]}')
-          for filename in ['LICENSE', 'LICENSE.md', 'LICENSE.txt']:
-              p = Path(filename)
-              if p.exists():
-                  print('LICENSE', filename, p.read_text()[:3000])
+                  hits = [i for i,line in enumerate(lines) if needle in line]
+                  print('SOURCE_HITS', name, needle, [i+1 for i in hits])
+                  for i in hits[:1]:
+                      for j in range(max(0,i-2),min(len(lines),i+75)):
+                          print(f'{name}:{j+1}: {lines[j]}')
           PY
+      - name: Retain all results including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: scaling1297-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/scaling1297
+            ${{ runner.temp }}/scaling1297-console.log
+          if-no-files-found: error
+          retention-days: 30
