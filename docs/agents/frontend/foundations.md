@@ -656,9 +656,10 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   `int (* __attribute__((unused)))(void);`, `int , a;`, `int a, ;`) is
   `C_DIAGNOSTIC_EXPECTED_DECLARATION` at the token Clang names -- the scan
   steps over groups, pointers, their qualifiers and attributes first -- and a
-  parenthesized name behind an attribute the declarator parse does not take
-  (`int (* __attribute__((unused)) p)(void);`) is
-  `C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS`; neither rolls back silently. An empty
+  parenthesized name behind decorations the declarator parse does not take is
+  `C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS`; neither rolls back silently. An
+  attribute after `*` is taken: `int (* __attribute__((unused)) p)(void);`
+  declares `p`. An empty
   bit-field width likewise, and an unknown member type is
   `C_DIAGNOSTIC_UNKNOWN_TYPE_NAME`. A declaration that declares nothing
   (`int;`, `__attribute__((packed));`, `enum E { A };`) completes the segment
