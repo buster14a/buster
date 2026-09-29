@@ -409,7 +409,7 @@ BUSTER_GLOBAL_LOCAL void buster_research_memory_census(IrProgram* program, IrMod
             {
                 ResearchMemoryCounts counts = base;
                 research_memory_model(program, function, facts, escaped, reachable, model != 0, &counts);
-                fprintf(stderr, "MEMORY_CENSUS,%.*s,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+                fprintf(stderr, "MEMORY_CENSUS,%.*s,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
                     (int)function->name.length, (char const*)function->name.pointer, model,
                     (unsigned long long)counts.rows, (unsigned long long)counts.operands,
                     (unsigned long long)counts.values, (unsigned long long)counts.address_steps,
