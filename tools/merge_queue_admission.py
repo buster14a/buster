@@ -6,6 +6,8 @@ The six existing gates remain independently required. Their latest workflow
 attempts are resolved by path, event and exact group SHA, never by a same-name
 commit status or a historical PR-head result. Native-retirement admission is
 executed only from an independently trusted main revision and must fail closed.
+Groups that land admitted sources without an exact-tree writer attestation
+also require the ephemeral reconstruction job (required_checks, #1893).
 """
 
 from __future__ import annotations
@@ -37,6 +39,11 @@ CHECKS = {
     "bench-service-policy.yml": "Benchmark service workflow policy",
     "api-migration-policy.yml": "API migration policy",
 }
+# Retirement groups whose generated state is not attested for their exact
+# tree additionally need the read-only ephemeral reconstruction (#1893). It is
+# collected here, not made ruleset-required, because it is path-filtered on PRs.
+RECONSTRUCTION_CHECK = {"native-retirement-rebind.yml": "Reconstruct candidate closure ephemerally"}
+RECONSTRUCTION_MODES = frozenset(("ordinary-bound-merge-group", "trusted-integration-merge-group"))
 QUEUE = {
     "check_response_timeout_minutes": 360,
     "grouping_strategy": "ALLGREEN",
@@ -148,13 +155,20 @@ def verify_trusted_policy(candidate: dict, repo: Path) -> None:
             f"main={candidate['base']} head={candidate['head']}; rebuild this group")
 
 
-def latest_runs(rows: list, candidate: dict) -> dict:
+def required_checks(retirement: dict | None) -> dict:
+    checks = dict(CHECKS)
+    if retirement is not None and retirement.get("mode") in RECONSTRUCTION_MODES:
+        checks.update(RECONSTRUCTION_CHECK)
+    return checks
+
+
+def latest_runs(rows: list, candidate: dict, checks: dict = CHECKS) -> dict:
     selected = {}
     for row in rows:
         if not isinstance(row, dict):
             raise AdmissionError("malformed workflow-run row")
         path = row.get("path")
-        if path not in {".github/workflows/" + name for name in CHECKS}:
+        if path not in {".github/workflows/" + name for name in checks}:
             continue
         require(row.get("head_sha") == candidate["head"], "workflow SHA mismatch")
         require(row.get("event") == "merge_group", "workflow is not merge-group evidence")
@@ -171,9 +185,10 @@ def latest_runs(rows: list, candidate: dict) -> dict:
     return selected
 
 
-def check_results(runs: dict, jobs: dict, candidate: dict) -> tuple[list, list]:
+def check_results(runs: dict, jobs: dict, candidate: dict,
+                  checks: dict = CHECKS) -> tuple[list, list]:
     evidence, pending = [], []
-    for filename, context in CHECKS.items():
+    for filename, context in checks.items():
         run = runs.get(".github/workflows/" + filename)
         if run is None:
             pending.append(context + ": missing workflow")
@@ -350,16 +365,16 @@ def wait_base(arguments) -> dict:
         time.sleep(min(30, max(0, deadline - time.monotonic())))
 
 
-def collect(api: GitHub, candidate: dict) -> tuple[list, list]:
+def collect(api: GitHub, candidate: dict, checks: dict = CHECKS) -> tuple[list, list]:
     rows = api.pages("actions/runs", "workflow_runs", event="merge_group", head_sha=candidate["head"])
-    runs = latest_runs(rows, candidate)
+    runs = latest_runs(rows, candidate, checks)
     jobs = {}
     for run in runs.values():
         if run.get("status") == "completed":
             key = (run["id"], run["run_attempt"])
             path = f"actions/runs/{key[0]}/attempts/{key[1]}/jobs"
             jobs[key] = api.pages(path, "jobs")
-    return check_results(runs, jobs, candidate)
+    return check_results(runs, jobs, candidate, checks)
 
 
 def retirement_admission(arguments, candidate: dict) -> dict:
@@ -392,13 +407,13 @@ def run_gate(arguments) -> dict:
         if live_identity(api, candidate):
             verify_trusted_policy(candidate, arguments.repo_root)
             retirement = retirement_admission(arguments, candidate)
-            evidence, pending = collect(api, candidate)
+            evidence, pending = collect(api, candidate, required_checks(retirement))
         else:
             pending = ["queued predecessor has not landed"]
         if not pending:
             # Re-read completed attempts as well as refs. An older successful
             # attempt must not hide a rerun that started during collection.
-            repeated, pending = collect(api, candidate)
+            repeated, pending = collect(api, candidate, required_checks(retirement))
             if not pending and repeated == evidence:
                 require(retirement_admission(arguments, candidate) == retirement,
                         "trusted publication changed during combined-head CI; rebuild admission")
