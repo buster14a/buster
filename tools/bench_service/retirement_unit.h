@@ -117,7 +117,9 @@ typedef struct BqRetirementUnitOracle
  * private output directory, then producer_next, the producer-built runtime
  * command and authority_next for each reference row, and authority_finish,
  * authority_ready and producer_ready. Every child runs under
- * cancellation_fd (the SIGTERM self-pipe) and the absolute deadline_ns; a
+ * cancellation_fd (the SIGTERM self-pipe: a close-on-exec, read-only FIFO or
+ * socket, else BQ_CONFIGURATION_MISMATCH before any work) and the absolute
+ * deadline_ns, each step capped at 3500 s; a
  * readable descriptor returns BQ_WORKER_CANCEL_SIGNAL, an expired deadline
  * BQ_WORKER_TIMEOUT, and any failure releases everything with no facts. The
  * compiled profile must pin prepared's template, so the blocked profile

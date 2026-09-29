@@ -705,6 +705,23 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_oracle(void)
                               BQ_RETIREMENT_UNIT_REFERENCE_DIRECTORY, &info, AT_SYMLINK_NOFOLLOW) != 0 &&
                       errno == ENOENT);
 
+        /* A cancellation descriptor that is not a read-only close-on-exec
+         * FIFO or socket (the write end, a directory, one without CLOEXEC, a
+         * standard stream) is a configuration error before any work. */
+        int inherited[2] = {-1, -1};
+        BQ_PREP_CHECK(pipe2(inherited, O_NONBLOCK) == 0);
+        int const invalid[] = {cancel[1], workspaces, inherited[0], STDIN_FILENO, -1};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+        {
+            BQ_PREP_CHECK(bq_retirement_unit_oracle_pinned(unit, projection, workspaces, profile, invalid[index],
+                          generous, &oracle) == BQ_CONFIGURATION_MISMATCH && !oracle.owned &&
+                          fstatat(success->attempt.attempt, BQ_RETIREMENT_BUILD_WORK_DIRECTORY "/"
+                                  BQ_RETIREMENT_UNIT_REFERENCE_DIRECTORY, &info, AT_SYMLINK_NOFOLLOW) != 0 &&
+                          errno == ENOENT);
+        }
+        if (inherited[0] >= 0) close(inherited[0]);
+        if (inherited[1] >= 0) close(inherited[1]);
+
         /* Success: authority over the joined rows, the producer loop and all
          * three readiness checks; the rows carry the observed oracle. */
         BQ_PREP_CHECK(bq_retirement_unit_oracle_pinned(unit, projection, workspaces, profile, cancel[0], generous,

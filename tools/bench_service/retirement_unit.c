@@ -555,7 +555,8 @@ bool bq_retirement_unit_oracle_release(BqRetirementUnitOracle* oracle)
 }
 
 /* The producer and authority refuse a child deadline more than an hour
- * away; within the unit's absolute deadline each step takes the earlier. */
+ * away. Each step takes the earlier of the unit's absolute deadline and
+ * 3500 s from now, leaving headroom below that one-hour cap. */
 #define BQ_RETIREMENT_UNIT_STEP_NS (3500ull * 1000000000ull)
 
 BUSTER_GLOBAL_LOCAL u64 bq_retirement_unit_step_deadline(u64 deadline_ns)
@@ -573,6 +574,21 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_stop_reason(int cancellation_fd, 
     BqError result = bq_retirement_unit_cancelled(cancellation_fd) ? BQ_WORKER_CANCEL_SIGNAL :
                      bq_retirement_build_clock_ns() >= deadline_ns ? BQ_WORKER_TIMEOUT : otherwise;
     return result;
+}
+
+/* The producer requires its cancellation descriptor to be a close-on-exec,
+ * read-only FIFO or socket (the SIGTERM self-pipe). Check it before any work
+ * so a non-conforming caller fails with a configuration error, not as a
+ * worker failure after the first reference build. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_cancellation_valid(int cancellation_fd)
+{
+    int flags = cancellation_fd >= 3 ? fcntl(cancellation_fd, F_GETFD) : -1;
+    int mode = flags >= 0 ? fcntl(cancellation_fd, F_GETFL) : -1;
+    struct stat pipe_info = {0};
+    bool ok = flags >= 0 && (flags & FD_CLOEXEC) && mode >= 0 && (mode & O_ACCMODE) == O_RDONLY &&
+              fstat(cancellation_fd, &pipe_info) == 0 &&
+              (S_ISFIFO(pipe_info.st_mode) || S_ISSOCK(pipe_info.st_mode));
+    return ok;
 }
 
 /* A's materialized copy of one subject, held open only while it still
@@ -620,6 +636,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_oracle_pinned(BqRetirementUnitPre
           !memcmp(population, projection->population_sha256, SHA256_HEX_CAPACITY) &&
           !memcmp(projection->prepared.preparation_sha256, prepared->preparation_sha256, SHA256_HEX_CAPACITY)))
         result = BQ_SOURCE_MISMATCH;
+    if (result == BQ_OK && !bq_retirement_unit_cancellation_valid(cancellation_fd))
+        result = BQ_CONFIGURATION_MISMATCH;
     if (result == BQ_OK) result = bq_retirement_unit_stop_reason(cancellation_fd, deadline_ns, BQ_OK);
     u32 references = result == BQ_OK ? policy->template.reference_count : 0;
     BqRetirementOracleReference* reference_workspace = references ?
@@ -663,7 +681,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_oracle_pinned(BqRetirementUnitPre
                      bq_retirement_reference_producer_runtime(&producer, token, &runtime);
         bool observed = built && bq_retirement_oracle_authority_next(&oracle->authority, token, &runtime.command,
                                                                      runtime.output, cancellation_fd, step);
-        if (!observed) result = bq_retirement_unit_stop_reason(cancellation_fd, deadline_ns, BQ_WORKER_FAILED);
+        /* step never exceeds deadline_ns, so an expired step is a timeout. */
+        if (!observed) result = bq_retirement_unit_stop_reason(cancellation_fd, step, BQ_WORKER_FAILED);
     }
     if (result == BQ_OK)
         result = bq_retirement_oracle_authority_finish(&oracle->authority) &&

@@ -490,9 +490,12 @@ It then performs these steps in order:
    caller never composes argv.
 6. It calls `authority_finish`, `authority_ready` and `producer_ready`.
 
-Each step's deadline is the unit's absolute deadline, or one hour away if
-that is earlier, because the producer and authority refuse longer child
-deadlines. A readable cancellation descriptor returns
+Each step's deadline is the unit's absolute deadline, or 3500 s away if
+that is earlier, because the producer and authority refuse child deadlines
+more than an hour away. A step that exhausts its own 3500 s also returns
+`BQ_WORKER_TIMEOUT`. The cancellation descriptor must be a close-on-exec,
+read-only FIFO or socket (the SIGTERM self-pipe); any other descriptor is
+refused up front with `BQ_CONFIGURATION_MISMATCH`. A readable cancellation descriptor returns
 `BQ_WORKER_CANCEL_SIGNAL` and an expired deadline `BQ_WORKER_TIMEOUT`. In
 both cases the running child's process group is killed and reaped. Any
 failure releases the producer, the directories and the references, and
