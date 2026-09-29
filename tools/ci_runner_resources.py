@@ -75,7 +75,7 @@ def process_tree(output, parent_pid, sampler_pid):
 
 def memory_observation():
     pressure, pressure_error = command_output(["memory_pressure", "-Q"])
-    free_percent = re.search(r"System-wide free percentage:\s*(\d+)%", pressure or "")
+    free_percent = re.search(r"System-wide memory free percentage:\s*(\d+)%", pressure or "")
     swap, swap_error = command_output(["sysctl", "-n", "vm.swapusage"])
     swap_used = re.search(r"\bused\s*=\s*([\d.]+)([KMGT])\b", swap or "")
     pages, pages_error = command_output(["vm_stat"])

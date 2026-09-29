@@ -48,7 +48,7 @@ class RunnerResourceTests(unittest.TestCase):
                             ("pressure_status", "swap_status", "pageouts_status")))
 
     def test_mac_memory_parsing_preserves_units_and_probe_status(self):
-        responses = [("System-wide free percentage: 19%\n", None),
+        responses = [("The system has 17179869184 bytes.\nSystem-wide memory free percentage: 19%\n", None),
                      ("total = 2048.00M  used = 1.25G  free = 768.00M\n", None),
                      ("Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPageouts: 77.\n", None)]
         with mock.patch.object(resources, "command_output", side_effect=responses):
