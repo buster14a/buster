@@ -1,0 +1,26 @@
+name: Rebase issue 1732 onto current parent
+
+on:
+  push:
+    branches:
+      - automation/1732-rebase-current-base
+
+permissions:
+  contents: write
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Cherry-pick production commit and publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "OpenAI Codex"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin fix/1732-sysv-named-f80-varargs
+          git cherry-pick 1ebb580ecbabf4cac60b523f66ba6b193b162d95
+          git push --force origin HEAD:fix/1732-sysv-named-f80-varargs
