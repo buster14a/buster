@@ -5,7 +5,9 @@
  * cross-language comparison. Given #508's performance-row artifact and a
  * native target (1..12, performance TARGETS order) as two more arguments, it
  * also imports that population (bq_retirement_performance_rows_derive) and
- * prints each imported row for the Python reference comparison. */
+ * prints each imported row for the Python reference comparison. Every
+ * compiler-ineligible census row is printed with its reason (a skip, or the
+ * option-3 supplement disposition) and proof for the same comparison. */
 #define BQ_RETIREMENT_CORRECTNESS_TEST_ONLY 1
 #define main bq_service_cli_main
 #include "main.c"
@@ -76,13 +78,20 @@ int main(int argc, char** argv)
         for (u32 index = 0; index < projection.row_count; index += 1)
         {
             eligible += projection.compiler_eligible[index] != 0;
-            skipped += projection.compiler_eligible[index] == 0;
+            skipped += projection.compiler_eligible[index] == 0 && !projection.supplement_resolved[index];
         }
-        printf("VALIDATOR_ELIGIBILITY rows=%u eligible=%u skipped=%u\n",
-               projection.row_count, eligible, skipped);
+        printf("VALIDATOR_ELIGIBILITY rows=%u eligible=%u skipped=%u supplement=%u\n",
+               projection.row_count, eligible, skipped, projection.supplement_count);
         /* The fixture compares these with row_configuration_digest. */
         for (u32 index = 0; index < projection.row_count; index += 1)
             printf("VALIDATOR_CONFIGURATION row=%u sha256=%s\n", index, projection.configuration_sha256[index]);
+        /* And these with the binding's option-3 disposition and reasons. */
+        for (u32 index = 0; index < projection.row_count; index += 1)
+            if (!projection.compiler_eligible[index])
+                printf("VALIDATOR_INELIGIBLE row=%u reason=%s proof=%s\n", index,
+                       projection.supplement_resolved[index] ? "direct-reference-supplement-resolved" :
+                                                               "authenticated-non-executed",
+                       projection.skip_proof_sha256[index]);
         /* And these with expected_population. */
         for (u32 index = 0; index < row_count; index += 1)
         {

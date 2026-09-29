@@ -25,6 +25,71 @@ A/A-then-A/B sequence, the statistical estimator, family construction rule,
 simultaneous Bonferroni bounds and the four outcomes are unchanged. Every
 change that the unit-of-sampling change forces is stated where it applies.
 
+**Census supplement disposition (option 3).** The maintainer's decision
+[recorded in #36](https://github.com/buster14a/buster/issues/36#issuecomment-5895408613)
+on 2026-09-29 ([question](https://github.com/buster14a/buster/issues/36#issuecomment-5893580064),
+[evidence](https://github.com/buster14a/buster/issues/1020#issuecomment-5893577105))
+disposes of the census rows whose frozen direct backend cannot compile a fixture.
+It was made before any binding record or measurement exists, and it changes no
+threshold, sampling rule or outcome. The rule and its bounds are:
+
+- **The approved set is exactly these rows.** It is the 276 allocator-`none`
+  rows that census run
+  [36336216460](https://github.com/buster14a/buster/actions/runs/36336216460) /
+  job [108667445262](https://github.com/buster14a/buster/actions/runs/36336216460/job/108667445262)
+  (candidate `df1a1dc127e92f039a94b1326c384ff2b657a82d`, support declaration
+  `932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82`) retained
+  in its telemetry, execution and artifact defect lists: 69
+  (fixture, target) pairs, each in all four frontend/PIC configurations, 69 per
+  shard. It is pinned by count (276) and an identity digest: SHA-256 over one
+  `fixture<TAB>target<TAB>frontend_lowering<TAB>PIC<TAB>allocator<LF>` line per
+  row in census order,
+  `729c0f18d13963e9723768574586386fe2f0814f7b08810dbbb91e21503d96e9`. A census
+  whose resolved set differs in any way (a new failing `none` row, or one fewer)
+  is rejected. Any change to the set needs a new decision in #36.
+- A row is **supplement-resolved** when it is an executed allocator-`none` row
+  in the census validator report's `direct_reference_failure_rows` and its
+  independent Clang control passed. The proof is authenticated provenance: the
+  report's `direct_reference_failure_rows`, the per-shard supplement manifest
+  whose SHA-256 is in `reference_supplement_sha256` (one digest per shard when
+  rows are resolved, none otherwise), and that row's own supplement record
+  (status zero, object size, digest and target header), all of which the census
+  validator replay also checks.
+- Exactly those rows are **compiler-ineligible** for performance, with the
+  explicit reason `direct-reference-supplement-resolved` and their supplement
+  proof. They leave the timed projection and the code-byte ratio (they carry no
+  wall-time, peak-memory, code-byte or runtime eligibility). They are never
+  dropped: the canonical row artifact keeps them, the census identity join stays
+  exhaustive, and an artifact that keeps them eligible is rejected. Only census
+  object rows can be supplement-resolved; a declared link or self-host row that
+  carries such an identity is rejected.
+- The support check accepts non-empty `telemetry_defect_rows`,
+  `execution_defect_rows` and `artifact_defect_rows` **only** when each equals
+  the supplement-resolved set exactly. Every other defect stays fatal: a row
+  outside the set, any MIR (candidate) row, any fallback defect, any
+  `candidate_failure_rows`, `reference_failure_rows` or
+  `unexpected_failure_rows`, retained direct-reference failures without one
+  supplement digest per shard, a direct-reference set that does not cover each
+  failed group's executed rows, and a supplement inventory that differs from the
+  set or whose control failed.
+- Correctness coverage is unchanged: the census still covers every row on all
+  twelve targets, and each group's MIR rows keep their eligibility, correctness
+  and timing obligations.
+
+Of the 276 rows, 24 are on the timed native host (six fixtures), so the timed
+projection shrinks by exactly 24 rows. The other 252 are untimed cross-target
+rows. The code-byte ratio population shrinks by at most 276 rows, because a
+row whose baseline code payload would be zero was never a ratio row.
+`_supplement_resolved_rows`, `_check_reference_supplements` and
+`_derive_compiler_eligibility` in
+`tools/native_retirement_performance_binding.py`, and
+`bq_retirement_validator_applicability_projection` in
+`tools/bench_service/retirement_correctness_service.c`, implement the same
+rule, including the pin. Their per-row proof bytes differ: the binding records
+the supplement manifest and object digests, and the C projection hashes the
+report digest, the shard's supplement digest and the row's applicability
+line.
+
 This contract reuses the native throughput harness, the support manifest from
 [#508](https://github.com/buster14a/buster/issues/508), semantic acceptance from
 [#509](https://github.com/buster14a/buster/issues/509), durable evidence rules
@@ -122,7 +187,9 @@ unchanged `compiler_peak_rss` bit gates the peak-memory metric),
 deterministic code-section bytes and generated runtime. The array remains an
 exhaustive one-to-one audit join to every census row. Compiler eligibility is
 recomputed from the production validator's authenticated
-`applicability_skip_rows`; source-proven non-executed rows retain explicit null
+`applicability_skip_rows` and (option 3, above) its supplement-resolved
+direct-reference rows; source-proven non-executed and supplement-resolved rows
+retain explicit null
 admission/oracle observations and never enter the dense timing schedule,
 result-input population, or statistical family. (A1) The row eligibility bits
 keep their census meaning, so the artifact and its #508 producer are
@@ -146,7 +213,9 @@ Validator report shard directories may be absolute inside the evidence root or
 normalized relative paths; replay rejects missing directories and symlinks. When
 the report binds independent reference supplements, replay enables the existing
 census supplement validator and compares every supplement identity. Direct
-reference failures remain retained. A non-object control's source-owned skip
+reference failures remain retained; the binding then authenticates each
+supplement-resolved row's own record and applies the option-3 disposition
+above. A non-object control's source-owned skip
 reason remains distinct from its final platform-execution applicability; both
 are independently replayed rather than requiring their labels to coincide. Validation parses the whole array, rejects duplicate
 identities, recomputes its count and all axes, and derives the aggregate,
@@ -215,7 +284,9 @@ working directory, environment closure, and correctness oracle. Missing,
 unsupported, timed-out, nondeterministic, or incorrectly classified rows make
 the experiment invalid; no row may be silently dropped or replaced. (A1) The
 correctness census still covers all rows on all twelve targets; the timing and
-code-byte obligations below apply to the timed projection.
+code-byte obligations below apply to the timed projection. (Option 3) A
+supplement-resolved allocator-`none` row is explicitly compiler-ineligible
+with its recorded reason and proof, as defined above; it is not dropped.
 
 The manifest must contain these comparisons where the target and workload admit
 them:
