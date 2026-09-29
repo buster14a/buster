@@ -487,16 +487,43 @@ BUSTER_GLOBAL_LOCAL void bq_worker_lease_release(BqWorkerLease* lease)
 
 /* The supervisor can pause the unit after handoff. Before exec, recheck the
  * held lease against its installed pathname and conflicting lock so a renamed
- * or replaced lease cannot carry the worker into a different attempt. The
- * duplicate shares the original lock and is closed without releasing it. */
+ * or replaced lease cannot carry the worker into a different attempt.
+ *
+ * The outer unit has the lease pathname in InaccessiblePaths (the broker's
+ * fixed sandbox), so systemd mounts an inaccessible node over it and the
+ * pathname cannot be reopened there. The recheck goes through the held
+ * description instead: /proc/self/fd/<dup> names the file's current dentry in
+ * its own mount tree, which must be exactly the lease pathname (a rename away
+ * names the new path, a replacement over it reads "(deleted)"). Reopening
+ * that magic link yields a fresh description of the same inode, which must
+ * conflict with the lock while the held description still converts, so the
+ * held reference is the holder. The duplicate shares the original lock and is
+ * closed without releasing it. */
 BUSTER_GLOBAL_LOCAL bool bq_worker_lease_recheck_for_exec(char const* path,
                                                            BqWorkerLease const* lease)
 {
-    int duplicate = lease && lease->descriptor >= 3 ?
+    int duplicate = path && lease && lease->descriptor >= 3 ?
         fcntl(lease->descriptor, F_DUPFD_CLOEXEC, 3) : -1;
-    BqWorkerLease checked = {.descriptor = -1};
-    bool ok = duplicate >= 3 && bq_worker_lease_adopt(path, duplicate, &checked) == 0;
-    bq_worker_lease_release(&checked);
+    char self[64];
+    char named[BQ_PATH_CAP + 2];
+    ssize_t named_length = duplicate >= 3 && snprintf(self, sizeof(self), "/proc/self/fd/%d", duplicate) > 0 ?
+                           readlink(self, named, sizeof(named)) : -1;
+    size_t path_length = path ? strlen(path) : 0;
+    bool ok = named_length > 0 && (size_t)named_length == path_length && !memcmp(named, path, path_length);
+    int inspection = ok ? open(self, O_RDONLY | O_CLOEXEC | O_NONBLOCK) : -1;
+    struct stat held = {0}, reopened = {0};
+    ok = inspection >= 0 && fstat(duplicate, &held) == 0 && fstat(inspection, &reopened) == 0 &&
+         S_ISREG(held.st_mode) && held.st_nlink == 1 && bq_worker_lease_permissions(path, &held) &&
+         held.st_dev == reopened.st_dev && held.st_ino == reopened.st_ino;
+    if (ok)
+    {
+        errno = 0;
+        int probe = flock(inspection, LOCK_SH | LOCK_NB);
+        ok = probe != 0 && (errno == EWOULDBLOCK || errno == EAGAIN);
+    }
+    ok = ok && flock(duplicate, LOCK_EX | LOCK_NB) == 0;
+    if (inspection >= 0) close(inspection);
+    if (duplicate >= 0) close(duplicate);
     return ok;
 }
 

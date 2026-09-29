@@ -2655,7 +2655,10 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
 }
 
 /* A new lease inode at the same path cannot substitute for the transferred
- * lock. The checker must release each temporary descriptor on both paths. */
+ * lock. The checker must release each temporary descriptor on both paths.
+ * Inside the outer unit the lease pathname is an InaccessiblePaths node, so
+ * the recheck must not traverse it: a search-denied parent (mode 0, effective
+ * when not privileged) models that here and must still pass. */
 BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_recheck_before_exec(void)
 {
     char root[] = "/tmp/buster-lease-recheck-XXXXXX";
@@ -2673,6 +2676,13 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_recheck_before_exec(void)
         u32 before = 0, after = 0;
         for (int fd = 3; fd < 256; ++fd) before += fcntl(fd, F_GETFD) >= 0;
         BQ_CHECK(bq_worker_lease_recheck_for_exec(lease_path, &lease));
+        bool hidden = chmod(root, 0) == 0;
+        BQ_CHECK(hidden);
+        if (hidden)
+        {
+            BQ_CHECK(bq_worker_lease_recheck_for_exec(lease_path, &lease));
+            BQ_CHECK(chmod(root, 0700) == 0);
+        }
         bool moved = rename(lease_path, prior_path) == 0;
         BQ_CHECK(moved);
         if (moved)
