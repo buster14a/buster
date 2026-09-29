@@ -1,0 +1,5 @@
+Result=success
+ActiveState=inactive
+K_A_KEEPER_STOPPED=yes
+K_A_SOCKET_REMOVED=yes
+14: FLOCK  ADVISORY  WRITE 989 00:31:9200556 0 EOF

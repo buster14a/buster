@@ -1,0 +1,5 @@
+K_VAR attempt=2
+K_VAR keeper=793
+1790721228770820473 K_A_KEEPER_IN_OUTER unit=buster-bench-1-2.service keeper_pid=793 keeper_ppid=791 outer_main_pid=791 keeper_exe=/usr/local/libexec/buster-bench-service keeper_cgroup=0::/buster.slice/buster-bench.slice/buster-bench-1-2.service outer_cgroup=/buster.slice/buster-bench.slice/buster-bench-1-2.service keeper_lease_fds=[4] uid=65000 gid=65000 socket_mode=0o700 dir_mode=0o700 lease_locks=1 outer_processes=2
+1790721229046084727 K_B1_STAGE_ISOLATION unit=buster-bench-1-2-base-generate.service pid=817 uid=0 alive_after=True lease_return_mounts=1 inaccessible_prop_has_lease_return=True stage-uid[uid=0 gid=0 dir=mode=0,uid=0 list=ok:0 socket=ENOENT connect=ENOENT] service-uid[uid=65000 gid=65000 dir=mode=0,uid=0 list=EACCES socket=EACCES connect=EACCES]
+1790721229085318633 K_B1_CONTROL_ROOT_NAMESPACE service-uid[uid=65000 gid=65000 dir=mode=700,uid=65000 list=ok:1 socket=visible connect=CONNECTED]

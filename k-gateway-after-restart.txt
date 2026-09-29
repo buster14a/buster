@@ -1,0 +1,6 @@
+job=1 token=2 sequence=0 phase=finished outcome=interrupted validity=not-evaluated cancel-requested=0 reconciliation=0 pending=0 retained=0 request-sha256=196858af7504316aa8d5e0bdf833c67fdb40bff78ae9f975c05462d8ce83c085 failure=worker-interrupted
+result-bound=1 statistical-decision=not-evaluated
+result-root=/var/lib/buster-bench/workspaces/results/job-1-attempt-2
+manifest-sha256=dbb99e3d2186006eb13deb4aee60b9baa92539b372c308f4a2ec2acfa7b32901
+bundle-sha256=101c6dce4bc93bb7dd2a05c6b687f9d17d084629fcb1503dd02dae64fd4a8e54
+full-result-sha256=a7825f3f89272c9c911836d324d6acb14410be273ee31f331e3fa29b03c387c5

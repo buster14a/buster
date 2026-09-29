@@ -1,0 +1,2 @@
+K_B2_SLICE_PEER uid=65000 gid=65000 cgroup=0::/buster.slice/buster-bench.slice/k-slice-peer-1.service connect=ok sent=344 error=ConnectionResetError(104, 'Connection reset by peer')
+K_B2_KEEPER_STILL_SERVING=yes

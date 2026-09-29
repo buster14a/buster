@@ -1,0 +1,14 @@
+/var/lib/buster-bench/workspaces/results:
+total 16
+drwx--x--- 4 buster-bench buster-bench           4096 Sep 29 22:33 .
+drwx--s--- 4 buster-bench buster-bench-candidate 4096 Sep 29 22:33 ..
+drwx------ 2 buster-bench buster-bench           4096 Sep 29 22:33 .lease-return
+drwx------ 2 buster-bench buster-bench           4096 Sep 29 22:33 job-1-attempt-2
+
+/var/lib/buster-bench/workspaces/results/.lease-return:
+total 8
+drwx------ 2 buster-bench buster-bench 4096 Sep 29 22:33 .
+drwx--x--- 4 buster-bench buster-bench 4096 Sep 29 22:33 ..
+srwx------ 1 buster-bench buster-bench    0 Sep 29 22:33 1-2
+4: FLOCK  ADVISORY  WRITE 710 00:31:9200537 0 EOF
+5: FLOCK  ADVISORY  WRITE 710 00:31:9200556 0 EOF
