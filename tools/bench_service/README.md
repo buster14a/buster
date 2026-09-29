@@ -371,44 +371,84 @@ physical A/A qualification or an admitted retirement recipe.
 
 ### Retirement result composition (#881-E)
 
-`retirement_result.c` (the durable store) and `retirement_compose.c` (the
-result composer, `retirement_compose.h`) are separate translation units linked
-into the service. The service order is:
+`retirement_result.c` (the durable store), `retirement_compose.c` (the result
+composer, `retirement_compose.h`) and `retirement_compose_json.c` (its strict
+JSON reader and Python-exact canonical writer, `retirement_compose_json.h`)
+are separate translation units linked into the service. The service order is:
 
 1. Before any timing, `tp_retirement_compose_plan` derives the statistical
    family from the frozen timed layout, bounds every composer output and
-   reserves both campaign stages, the composer outputs and every retained file
-   (A/A evidence, logs, lifecycle records) through
-   `tp_retirement_campaign_store_preflight` and `tp_retirement_store_plan`.
-   A family whose single #619 adapter input exceeds the 64 MiB store file cap
-   is refused here.
-2. Lane D publishes its A/B transcript shards, row/batch numeric shards,
-   per-batch metrics shards and untimed batch records into that store.
-3. `tp_retirement_compose` requires every store file to be a declared input or
-   retained file, rehashes each through its sealed inode, replays the frozen
-   #619 schedule with D's cursor, checks process-instance bindings, interval
-   windows, metrics-shard tiling, untimed reproduction coverage and every
-   numeric record's coordinate, and rehashes the pre-sample closure. It then
-   settles the reservation to the exact final inventory
-   (`tp_retirement_store_settle`) and publishes the #615 manifests, the code
-   record set, the statistics input, the output of the reviewed
-   `bench_throughput retirement-replay` adapter, the post-sample execution
-   receipt (context = the frozen `_execution_context` template with the
-   streamed numeric digest), the result bundle and the
+   reserves both campaign stages, the composer outputs, the unreserved
+   retained kinds of the caller's `TpRetirementComposeDeclaration` and, as
+   external entries, the prior closure. It marks the upper-bounded kinds
+   (every metrics shard and each retained group) as the only slack settle may
+   release (`tp_retirement_store_bound`) and binds the declaration's digest
+   into the store (`tp_retirement_store_retain`). A declaration names each
+   retained file kind: an exact path (the A/A transcript and sample shards,
+   whose counts the campaign capacity fixes; lifecycle records) or a
+   `<prefix>NNNN<suffix>` group numbered from 0000 with a file cap (the A/A
+   metrics shards; failure logs). Lane D keeps only failure logs (successful
+   per-launch logs are deleted under its 4096-entry cap), so the log group is
+   bounded, not exact. A family whose single #619 adapter input exceeds the
+   64 MiB store file cap is refused here.
+2. Lane D publishes its A/A stage, A/B transcript shards, row/batch numeric
+   shards, per-batch metrics shards, untimed batch records and retained files
+   into that store.
+3. `tp_retirement_compose` requires the declaration digest to be the one bound
+   at plan time, every store file to be a declared sealed input or to match
+   exactly one declaration entry, every exact retained file to exist and every
+   group to be contiguous within its cap. It rehashes each input through its
+   sealed inode, replays the frozen #619 schedule with D's cursor, checks
+   process-instance bindings, interval windows, metrics-shard tiling and
+   untimed reproduction coverage, and joins every numeric sample to the
+   observation that produced it: a singleton or batch sample is D's encoding of
+   the supervised interval and RSS, an object member's sample is its metrics
+   input's interval and arena high-water (members are a batch's first inputs,
+   in census order). It rehashes the prior closure below the store root (the
+   evidence root is the store root; entry count and bytes are exactly those
+   reserved) and derives the post-sample `_execution_context` in C from the
+   authenticated post-A/A binding document with the streamed numeric digest.
+   It then settles the reservation (`tp_retirement_store_settle` releases only
+   bounded slack) and publishes the #615 manifests, the code record set, the
+   statistics input, the output of the reviewed `bench_throughput
+   retirement-replay` adapter (executed from the descriptor whose digest the
+   request authenticates, under a wall-clock limit, its JSON checked member by
+   member), the post-sample execution receipt, the retained manifest (every
+   unsealed file's kind, digest, size and path), the result bundle and the
    `workflow.phases.sealed_result` record. Any refusal poisons the store and
-   names the failing check; nothing is repaired or overwritten.
+   names the failing stage; nothing is repaired or overwritten.
 4. The producer issues `tp_retirement_store_receipt_authority` for the composed
-   context. After the private phase handoff is authenticated, the worker calls
+   context; the authority binds the retained manifest's digest (the sealed
+   record's schema is fixed, so the unsealed A/A evidence is bound there).
+   After the private phase handoff is authenticated, the worker calls
    `tp_retirement_store_authority_handoff` with the handoff's numeric job and
-   attempt; it copies the authority to the queue-private root, publishes and
-   reopens a journal record, and only its success permits the final ACK and
-   lease release. `tp_retirement_store_authority_state` classifies a restart as
-   complete, incomplete (poison the attempt, keep the evidence) or absent.
+   attempt; it refuses if any earlier record or temporary exists, copies the
+   authority to the queue-private root, publishes and reopens a journal record
+   (reopening every retained file), and only its success permits the final ACK
+   and lease release. `tp_retirement_store_authority_state` classifies a
+   restart as complete, incomplete (a crash prefix, including a `.pending`
+   temporary beside a final name), damaged (both records present but no longer
+   reopening) or absent; incomplete and damaged attempts are poisoned with
+   their evidence kept.
+
+The composer consumes, per timed row, its census id, batch group, runtime
+eligibility and the six frozen dimension values (target, cpu, allocator,
+frontend_lowering, PIC, artifact_stage); per code-observed row, each variant's
+artifact, reproduction and code-section digests and code-section bytes; the
+plan-v3 execution-plan digest and partitions; and the retained declaration.
+Lane D's driver does not emit these yet: its unit must pass them from the
+frozen layout, execution plan and result-input plan it already authenticates
+(no adapter derives them from the binding here).
 
 `retirement_compose_test.py` composes the bounded A1 binding fixture and runs
-the unchanged validator end to end; given the throughput self-test directory it
-also composes lane D's own C-encoded full-invocation fixture. Neither is
-service admission or performance evidence, and the recipe stays blocked.
+the unchanged validator end to end, with the receipt trust root read from the
+producer's authority file; it compares the C canonical writer with
+`json.dumps` and the validator's `_execution_context`, and checks that a
+halved sample, a dropped retained file and a changed binding are refused.
+Given the throughput self-test directory it also composes lane D's own
+C-encoded full-invocation fixture (CI runs this after `bench_throughput
+self-test` on Linux). None of this is service admission or performance
+evidence, and the recipe stays blocked.
 
 Linux supervisor deadline coverage lives in `worker_deadline_tests.c`. Timed
 commands use explicit `exec` so the test retains an owned direct child rather

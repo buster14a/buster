@@ -6,8 +6,12 @@
  * The owner supplies the external job/attempt/plan/context authority through
  * the private phase channel; bundle bytes cannot authorize themselves.
  * tp_retirement_store_read reopens one sealed inode for the #881-E composer,
+ * tp_retirement_store_bound/tp_retirement_store_retain fix (before any
+ * publication) the upper-bounded slack and the retained declaration digest,
  * tp_retirement_store_settle lowers the pre-timing reservation to the exact
- * final inventory, and tp_retirement_store_authority_handoff /
+ * final inventory releasing only that slack, receipt_authority binds the
+ * retained manifest (tp_retirement_store_retained_verify), and
+ * tp_retirement_store_authority_handoff /
  * tp_retirement_store_authority_state are the coordinator's queue-private
  * copy, journal and restart classification before its final ACK.
  */
@@ -28,6 +32,13 @@
 #ifdef BUSTER_RETIREMENT_STORE_TEST
 unsigned tp_retirement_store_test_sync_calls, tp_retirement_store_test_fail_sync;
 #endif
+
+/* Private authority and journal records (seven or eight short lines). */
+#define TP_RETIREMENT_STORE_AUTHORITY_BYTES 640u
+#define TP_RETIREMENT_STORE_JOURNAL_BYTES 768u
+/* A retained manifest line: kind, digest, byte count and store path. */
+#define TP_RETIREMENT_STORE_RETAINED_KIND_BYTES 16u
+#define TP_RETIREMENT_STORE_RECEIPT_BYTES_MAX UINT64_C(1048576)
 
 BUSTER_GLOBAL_LOCAL int tp_retirement_store_sync(int fd)
 {
@@ -193,6 +204,28 @@ int tp_retirement_store_plan(TpRetirementStore* store, unsigned owned_files, uin
         store->external_entries = external_entries;
         store->external_bytes = external_bytes;
         store->planned = 1;
+    }
+    else if (store) store->failed = 1;
+    return valid;
+}
+
+int tp_retirement_store_bound(TpRetirementStore* store, unsigned bounded_files)
+{
+    int valid = store && !store->failed && store->planned && !store->active && !store->count &&
+                !store->bounded_files && bounded_files <= store->planned_files;
+    if (valid) store->bounded_files = bounded_files;
+    else if (store) store->failed = 1;
+    return valid;
+}
+
+int tp_retirement_store_retain(TpRetirementStore* store, char const* declaration_sha256)
+{
+    int valid = store && !store->failed && store->planned && !store->active && !store->count &&
+                !store->retained_bound && tp_retirement_store_digest(declaration_sha256);
+    if (valid)
+    {
+        memcpy(store->retained_sha256, declaration_sha256, TP_RETIREMENT_STORE_SHA256_CAPACITY);
+        store->retained_bound = 1;
     }
     else if (store) store->failed = 1;
     return valid;
@@ -487,7 +520,7 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_receipt_validate(TpRetirementStore* 
     TpRetirementStoredFile const* receipt = NULL;
     for (unsigned i = 0; store && i < store->count; ++i)
         if (!strcmp(store->files[i].path, TP_RETIREMENT_EXECUTION_RECEIPT_PATH)) receipt = store->files + i;
-    int valid = receipt && receipt->bytes && receipt->bytes <= UINT64_C(1048576);
+    int valid = receipt && receipt->bytes && receipt->bytes <= TP_RETIREMENT_STORE_RECEIPT_BYTES_MAX;
     Sha256 identity;
     sha256_init(&identity);
     if (valid) valid = tp_retirement_store_identity(&identity, receipt);
@@ -617,20 +650,22 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_receipt_validate(TpRetirementStore* 
 }
 
 BUSTER_GLOBAL_LOCAL int tp_retirement_store_authority_bytes(TpRetirementReceiptAuthority const* authority,
-    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], char body[512], size_t* length)
+    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], char body[TP_RETIREMENT_STORE_AUTHORITY_BYTES], size_t* length)
 {
     int valid = authority && tp_retirement_store_token(authority->job) && authority->attempt &&
                 tp_retirement_store_digest(authority->plan_sha256) &&
                 tp_retirement_store_digest(authority->context_sha256) &&
                 tp_retirement_store_digest(authority->receipt_sha256) &&
-                tp_retirement_store_digest(authority->identity_sha256);
+                tp_retirement_store_digest(authority->identity_sha256) &&
+                tp_retirement_store_digest(authority->retained_sha256);
     int count = valid ? snprintf(name, TP_RETIREMENT_STORE_PATH_BYTES + 1,
                                  "authority-%s-%" PRIu64 ".txt", authority->job, authority->attempt) : -1;
     valid = valid && count > 0 && count <= (int)TP_RETIREMENT_STORE_PATH_BYTES - 8;
-    count = valid ? snprintf(body, 512, "BQ-RETIREMENT-AUTHORITY-V2\n%s\n%" PRIu64 "\n%s\n%s\n%s\n%s\n",
-        authority->job, authority->attempt, authority->plan_sha256,
-        authority->context_sha256, authority->receipt_sha256, authority->identity_sha256) : -1;
-    valid = valid && count > 0 && count < 512;
+    count = valid ? snprintf(body, TP_RETIREMENT_STORE_AUTHORITY_BYTES,
+        "BQ-RETIREMENT-AUTHORITY-V3\n%s\n%" PRIu64 "\n%s\n%s\n%s\n%s\n%s\n",
+        authority->job, authority->attempt, authority->plan_sha256, authority->context_sha256,
+        authority->receipt_sha256, authority->identity_sha256, authority->retained_sha256) : -1;
+    valid = valid && count > 0 && count < (int)TP_RETIREMENT_STORE_AUTHORITY_BYTES;
     if (length) *length = valid ? (size_t)count : 0;
     return valid;
 }
@@ -641,6 +676,139 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_private_root(TpRetirementStore const
     int valid = tp_retirement_store_root(private_store) &&
                 (store->root_identity.st_dev != private_store->root_identity.st_dev ||
                  store->root_identity.st_ino != private_store->root_identity.st_ino);
+    return valid;
+}
+
+/* Read one named file after reopen_file proved its identity and digest, and
+ * require the second read to hash identically. The caller munmaps. */
+BUSTER_GLOBAL_LOCAL int tp_retirement_store_slurp(TpRetirementStore* store, char const* path, char const* digest,
+    uint64_t maximum, char** output, size_t* output_length)
+{
+    TpRetirementStoredFile file = {0};
+    char leaf[TP_RETIREMENT_STORE_PATH_BYTES + 1] = {0};
+    struct stat directory = {0};
+    int valid = tp_retirement_store_reopen_file(store, path, digest, maximum, &file, NULL);
+    int parent = valid ? tp_retirement_store_parent(store, path, leaf, &directory) : -1;
+    int fd = parent >= 0 ? openat(parent, leaf, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC) : -1;
+    char* bytes = fd >= 0 ? mmap(NULL, (size_t)file.bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) :
+                  MAP_FAILED;
+    valid = bytes != MAP_FAILED;
+    size_t used = 0;
+    while (valid && used < file.bytes)
+    {
+        ssize_t count = read(fd, bytes + used, (size_t)(file.bytes - used));
+        if (count < 0 && errno == EINTR) continue;
+        valid = count > 0;
+        if (valid) used += (size_t)count;
+    }
+    if (valid)
+    {
+        char again[TP_RETIREMENT_STORE_SHA256_CAPACITY], extra = 0;
+        Sha256 hash;
+        sha256_init(&hash);
+        sha256_add(&hash, bytes, (u64)used);
+        sha256_finish_hex(&hash, (char8*)again);
+        valid = read(fd, &extra, 1) == 0 && !strcmp(again, digest);
+    }
+    if (fd >= 0 && close(fd) != 0) valid = 0;
+    if (parent >= 0 && close(parent) != 0) valid = 0;
+    if (!valid && bytes != MAP_FAILED) munmap(bytes, (size_t)file.bytes);
+    *output = valid ? bytes : NULL;
+    *output_length = valid ? used : 0;
+    return valid;
+}
+
+/* The composer's retained manifest: a header, then per retained file
+ * `kind sha256 bytes path` in strictly increasing path order (possibly none:
+ * the header alone still binds an empty retained set). live joins each
+ * line to the producer's sealed store entries; otherwise every listed file is
+ * independently reopened from its name. */
+BUSTER_GLOBAL_LOCAL int tp_retirement_store_retained_verify(TpRetirementStore* store, char const* bytes,
+                                                             size_t length, int live)
+{
+    size_t header = strlen(TP_RETIREMENT_RETAINED_MANIFEST_HEADER);
+    int valid = bytes && length >= header && !memcmp(bytes, TP_RETIREMENT_RETAINED_MANIFEST_HEADER, header) &&
+                bytes[length - 1] == '\n' && !memchr(bytes, 0, length);
+    size_t offset = header;
+    char previous[TP_RETIREMENT_STORE_PATH_BYTES + 1] = {0};
+    unsigned entries = 0;
+    while (valid && offset < length)
+    {
+        char kind[TP_RETIREMENT_STORE_RETAINED_KIND_BYTES + 1], digest[TP_RETIREMENT_STORE_SHA256_CAPACITY];
+        char path[TP_RETIREMENT_STORE_PATH_BYTES + 1];
+        uint64_t size = 0;
+        size_t start = offset;
+        while (offset < length && bytes[offset] >= 'a' && bytes[offset] <= 'z') ++offset;
+        valid = offset > start && offset - start <= TP_RETIREMENT_STORE_RETAINED_KIND_BYTES &&
+                tp_retirement_store_receipt_literal(bytes, length, &offset, " ");
+        if (valid)
+        {
+            memcpy(kind, bytes + start, offset - 1 - start);
+            kind[offset - 1 - start] = 0;
+            start = offset;
+            while (offset < length && bytes[offset] != ' ') ++offset;
+            valid = offset - start == 64;
+        }
+        if (valid)
+        {
+            memcpy(digest, bytes + start, 64);
+            digest[64] = 0;
+            valid = tp_retirement_store_digest(digest) &&
+                    tp_retirement_store_receipt_literal(bytes, length, &offset, " ") &&
+                    tp_retirement_store_receipt_number(bytes, length, &offset, &size) && size &&
+                    size <= TP_RETIREMENT_STORE_FILE_BYTES &&
+                    tp_retirement_store_receipt_literal(bytes, length, &offset, " ");
+            start = offset;
+            while (valid && offset < length && bytes[offset] != '\n') ++offset;
+            valid = valid && offset < length && offset - start <= TP_RETIREMENT_STORE_PATH_BYTES;
+        }
+        if (valid)
+        {
+            memcpy(path, bytes + start, offset - start);
+            path[offset - start] = 0;
+            ++offset;
+            valid = tp_retirement_store_path(path) && strcmp(path, TP_RETIREMENT_EXECUTION_RECEIPT_PATH) &&
+                    strcmp(path, TP_RETIREMENT_RETAINED_MANIFEST_PATH) && (!entries || strcmp(previous, path) < 0);
+        }
+        if (valid && live)
+        {
+            unsigned matches = 0;
+            for (unsigned i = 0; i < store->count; ++i)
+                matches += !strcmp(store->files[i].path, path) && !strcmp(store->files[i].sha256, digest) &&
+                           store->files[i].bytes == size;
+            valid = matches == 1;
+        }
+        else if (valid)
+        {
+            TpRetirementStoredFile reopened = {0};
+            valid = tp_retirement_store_reopen_file(store, path, digest, size, &reopened, NULL) &&
+                    reopened.bytes == size;
+        }
+        if (valid)
+        {
+            strcpy(previous, path);
+            ++entries;
+        }
+    }
+    return valid;
+}
+
+/* The producer's retained reference: the manifest's digest, or the explicit
+ * no-manifest value when the store bound no retained declaration. */
+BUSTER_GLOBAL_LOCAL int tp_retirement_store_retained_reference(TpRetirementStore* store,
+    char output[TP_RETIREMENT_STORE_SHA256_CAPACITY])
+{
+    TpRetirementStoredFile const* manifest = NULL;
+    for (unsigned i = 0; i < store->count; ++i)
+        if (!strcmp(store->files[i].path, TP_RETIREMENT_RETAINED_MANIFEST_PATH)) manifest = store->files + i;
+    char* bytes = NULL;
+    size_t length = 0;
+    int valid = manifest ? tp_retirement_store_slurp(store, manifest->path, manifest->sha256,
+                                                     TP_RETIREMENT_STORE_FILE_BYTES, &bytes, &length) &&
+                           tp_retirement_store_retained_verify(store, bytes, length, 1) :
+                           !store->retained_bound;
+    if (bytes) munmap(bytes, length);
+    if (valid) strcpy(output, manifest ? manifest->sha256 : TP_RETIREMENT_STORE_NO_RETAINED);
     return valid;
 }
 
@@ -659,7 +827,8 @@ int tp_retirement_store_receipt_authority(TpRetirementStore* store, int authorit
     if (authority) *authority = (TpRetirementReceiptAuthority){0};
     valid = valid && receipt &&
             tp_retirement_store_receipt_validate(store, job, attempt, plan_sha256, context_sha256,
-                0, authority->identity_sha256);
+                0, authority->identity_sha256) &&
+            tp_retirement_store_retained_reference(store, authority->retained_sha256);
     if (valid)
     {
         strcpy(authority->job, job);
@@ -667,7 +836,7 @@ int tp_retirement_store_receipt_authority(TpRetirementStore* store, int authorit
         strcpy(authority->context_sha256, context_sha256);
         strcpy(authority->receipt_sha256, receipt->sha256);
         authority->attempt = attempt;
-        char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], body[512], digest[65];
+        char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], body[TP_RETIREMENT_STORE_AUTHORITY_BYTES], digest[65];
         size_t length = 0;
         valid = tp_retirement_store_authority_bytes(authority, name, body, &length);
         TpRetirementStore private_store;
@@ -738,11 +907,12 @@ int tp_retirement_store_authority_reopen(int result_root, int authority_root,
                 tp_retirement_store_digest(trusted->context_sha256) &&
                 tp_retirement_store_digest(trusted->receipt_sha256) &&
                 tp_retirement_store_digest(trusted->identity_sha256) &&
+                tp_retirement_store_digest(trusted->retained_sha256) &&
                 tp_retirement_store_digest(trusted->authority_sha256) &&
                 !strcmp(trusted->job, job) && trusted->attempt == attempt &&
                 !strcmp(trusted->plan_sha256, plan_sha256) &&
                 !strcmp(trusted->context_sha256, context_sha256);
-    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], body[512], expected[65];
+    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], body[TP_RETIREMENT_STORE_AUTHORITY_BYTES], expected[65];
     size_t length = 0;
     if (valid) valid = tp_retirement_store_authority_bytes(trusted, name, body, &length);
     if (valid)
@@ -763,7 +933,7 @@ int tp_retirement_store_authority_reopen(int result_root, int authority_root,
     valid = private_open && tp_retirement_store_private_root(&result_store, &private_store);
     if (valid) valid = tp_retirement_store_reopen_file(&private_store, name, expected, length, NULL, NULL) &&
                        tp_retirement_store_reopen_file(&result_store, TP_RETIREMENT_EXECUTION_RECEIPT_PATH,
-                                                       trusted->receipt_sha256, UINT64_C(1048576), result_files, NULL);
+                                                       trusted->receipt_sha256, TP_RETIREMENT_STORE_RECEIPT_BYTES_MAX, result_files, NULL);
     if (valid)
     {
         result_store.count = 1;
@@ -772,10 +942,58 @@ int tp_retirement_store_authority_reopen(int result_root, int authority_root,
         valid = tp_retirement_store_receipt_validate(&result_store, job, attempt,
             plan_sha256, context_sha256, 1, identity) && !strcmp(identity, trusted->identity_sha256);
     }
+    /* The retained manifest and every file it lists, or its proven absence. */
+    if (valid && !strcmp(trusted->retained_sha256, TP_RETIREMENT_STORE_NO_RETAINED))
+    {
+        struct stat absent = {0};
+        valid = fstatat(result_store.root, TP_RETIREMENT_RETAINED_MANIFEST_PATH, &absent, AT_SYMLINK_NOFOLLOW) != 0 &&
+                errno == ENOENT;
+    }
+    else if (valid)
+    {
+        char* manifest = NULL;
+        size_t manifest_length = 0;
+        valid = tp_retirement_store_slurp(&result_store, TP_RETIREMENT_RETAINED_MANIFEST_PATH,
+                                          trusted->retained_sha256, TP_RETIREMENT_STORE_FILE_BYTES, &manifest,
+                                          &manifest_length) &&
+                tp_retirement_store_retained_verify(&result_store, manifest, manifest_length, 0);
+        if (manifest) munmap(manifest, manifest_length);
+    }
     if (private_open) tp_retirement_store_close(&private_store);
     if (result_open) tp_retirement_store_close(&result_store);
     if (result_files != MAP_FAILED) munmap(result_files, sizeof(*result_files) * TP_RETIREMENT_STORE_FILES);
     return valid;
+}
+
+/* Whether a final name and its `.pending` temporary exist. A temporary is
+ * a crash prefix (before the link, or between link and unlink). */
+BUSTER_GLOBAL_LOCAL int tp_retirement_store_entry_state(int root, char const* name, int* final_present,
+                                                         int* pending_present)
+{
+    char pending[TP_RETIREMENT_STORE_PATH_BYTES + 16];
+    struct stat info = {0};
+    int count = snprintf(pending, sizeof(pending), "%s.pending", name);
+    int named = fstatat(root, name, &info, AT_SYMLINK_NOFOLLOW);
+    int named_errno = named == 0 ? 0 : errno;
+    int temporary = count > 0 && (size_t)count < sizeof(pending) ?
+                    fstatat(root, pending, &info, AT_SYMLINK_NOFOLLOW) : 0;
+    int temporary_errno = temporary == 0 ? 0 : errno;
+    int valid = count > 0 && (size_t)count < sizeof(pending) &&
+                (named == 0 || named_errno == ENOENT) && (temporary == 0 || temporary_errno == ENOENT);
+    *final_present = valid && named == 0;
+    *pending_present = valid && temporary == 0;
+    return valid;
+}
+
+/* Neither the final name nor its `.pending` temporary exists: a new
+ * publication cannot collide with (or leave a temporary beside) an earlier
+ * attempt's record. */
+BUSTER_GLOBAL_LOCAL int tp_retirement_store_entry_absent(int root, char const* name)
+{
+    int final_present = 0, pending_present = 0;
+    int absent = tp_retirement_store_entry_state(root, name, &final_present, &pending_present) && !final_present &&
+                 !pending_present;
+    return absent;
 }
 
 int tp_retirement_store_authority_copy(int result_root, int authority_root,
@@ -795,9 +1013,10 @@ int tp_retirement_store_authority_copy(int result_root, int authority_root,
     int result_open = destination_open && tp_retirement_store_open(&result, result_root, &result_file, 1);
     valid = result_open && tp_retirement_store_private_root(&source, &destination) &&
             tp_retirement_store_private_root(&result, &destination);
-    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], body[512], digest[65];
+    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], body[TP_RETIREMENT_STORE_AUTHORITY_BYTES], digest[65];
     size_t length = 0;
-    if (valid) valid = tp_retirement_store_authority_bytes(trusted, name, body, &length);
+    if (valid) valid = tp_retirement_store_authority_bytes(trusted, name, body, &length) &&
+                       tp_retirement_store_entry_absent(queue_authority_root, name);
     if (valid)
     {
         Sha256 hash;
@@ -878,8 +1097,13 @@ int tp_retirement_store_settle(TpRetirementStore* store, unsigned exact_files)
 {
     int valid = store && !store->failed && !store->active && store->planned && exact_files &&
                 store->count <= exact_files && exact_files <= store->planned_files &&
+                store->planned_files - exact_files <= store->bounded_files &&
                 store->external_entries <= TP_RETIREMENT_STORE_FILES - exact_files;
-    if (valid) store->planned_files = exact_files;
+    if (valid)
+    {
+        store->bounded_files -= store->planned_files - exact_files;
+        store->planned_files = exact_files;
+    }
     else if (store) store->failed = 1;
     return valid;
 }
@@ -887,19 +1111,21 @@ int tp_retirement_store_settle(TpRetirementStore* store, unsigned exact_files)
 /* The queue-private journal record names every authenticated identity the
  * copied authority binds, plus that authority's own digest. */
 BUSTER_GLOBAL_LOCAL int tp_retirement_store_journal_bytes(TpRetirementReceiptAuthority const* authority,
-    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], char body[640], size_t* length)
+    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], char body[TP_RETIREMENT_STORE_JOURNAL_BYTES], size_t* length)
 {
-    char authority_name[TP_RETIREMENT_STORE_PATH_BYTES + 1], authority_body[512];
+    char authority_name[TP_RETIREMENT_STORE_PATH_BYTES + 1], authority_body[TP_RETIREMENT_STORE_AUTHORITY_BYTES];
     size_t authority_length = 0;
     int valid = tp_retirement_store_authority_bytes(authority, authority_name, authority_body, &authority_length) &&
                 tp_retirement_store_digest(authority->authority_sha256);
     int count = valid ? snprintf(name, TP_RETIREMENT_STORE_PATH_BYTES + 1, "authority-%s-%" PRIu64 ".journal",
                                  authority->job, authority->attempt) : -1;
     valid = valid && count > 0 && count <= (int)TP_RETIREMENT_STORE_PATH_BYTES - 8;
-    count = valid ? snprintf(body, 640, "BQ-RETIREMENT-AUTHORITY-JOURNAL-V1\n%s\n%" PRIu64 "\n%s\n%s\n%s\n%s\n%s\n",
+    count = valid ? snprintf(body, TP_RETIREMENT_STORE_JOURNAL_BYTES,
+        "BQ-RETIREMENT-AUTHORITY-JOURNAL-V2\n%s\n%" PRIu64 "\n%s\n%s\n%s\n%s\n%s\n%s\n",
         authority->job, authority->attempt, authority->plan_sha256, authority->context_sha256,
-        authority->receipt_sha256, authority->identity_sha256, authority->authority_sha256) : -1;
-    valid = valid && count > 0 && count < 640;
+        authority->receipt_sha256, authority->identity_sha256, authority->retained_sha256,
+        authority->authority_sha256) : -1;
+    valid = valid && count > 0 && count < (int)TP_RETIREMENT_STORE_JOURNAL_BYTES;
     if (length) *length = valid ? (size_t)count : 0;
     return valid;
 }
@@ -909,9 +1135,8 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_journal_bytes(TpRetirementReceiptAut
 BUSTER_GLOBAL_LOCAL int tp_retirement_store_handoff_identity(uint64_t job, uint64_t attempt,
     char const* plan_sha256, char const* context_sha256, TpRetirementReceiptAuthority const* trusted)
 {
-    char label[129];
-    int count = job ? snprintf(label, sizeof(label), "job-%" PRIu64, job) : -1;
-    int valid = count > 0 && count < (int)sizeof(label) && attempt && trusted &&
+    char label[TP_RETIREMENT_STORE_TOKEN_CAPACITY];
+    int valid = tp_retirement_store_job_label(label, job) && attempt && trusted &&
                 tp_retirement_store_digest(plan_sha256) && tp_retirement_store_digest(context_sha256) &&
                 !strcmp(trusted->job, label) && trusted->attempt == attempt &&
                 !strcmp(trusted->plan_sha256, plan_sha256) && !strcmp(trusted->context_sha256, context_sha256);
@@ -921,7 +1146,7 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_handoff_identity(uint64_t job, uint6
 BUSTER_GLOBAL_LOCAL int tp_retirement_store_journal_reopen(int queue_authority_root,
     TpRetirementReceiptAuthority const* trusted, TpRetirementAuthorityJournal* journal)
 {
-    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], body[640], digest[65] = {0};
+    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], body[TP_RETIREMENT_STORE_JOURNAL_BYTES], digest[65] = {0};
     size_t length = 0;
     int valid = tp_retirement_store_journal_bytes(trusted, name, body, &length);
     if (valid)
@@ -956,14 +1181,16 @@ int tp_retirement_store_authority_handoff(int result_root, int authority_root, i
     char const* plan_sha256, char const* final_context_sha256,
     TpRetirementReceiptAuthority const* trusted, TpRetirementAuthorityJournal* journal)
 {
+    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], body[TP_RETIREMENT_STORE_JOURNAL_BYTES], digest[65] = {0};
+    size_t length = 0;
     int valid = journal && tp_retirement_store_handoff_identity(authenticated_job, authenticated_attempt,
-        plan_sha256, final_context_sha256, trusted);
+        plan_sha256, final_context_sha256, trusted) && tp_retirement_store_journal_bytes(trusted, name, body, &length) &&
+        tp_retirement_store_entry_absent(queue_authority_root, name);
     if (journal) *journal = (TpRetirementAuthorityJournal){0};
+    /* A retry after any earlier attempt (complete or not) refuses here,
+     * before creating anything: restart classification is the state call's. */
     valid = valid && tp_retirement_store_authority_copy(result_root, authority_root, queue_authority_root,
         trusted->job, authenticated_attempt, plan_sha256, final_context_sha256, trusted);
-    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], body[640], digest[65] = {0};
-    size_t length = 0;
-    if (valid) valid = tp_retirement_store_journal_bytes(trusted, name, body, &length);
     TpRetirementStore queue;
     TpRetirementStoredFile file;
     int opened = valid && tp_retirement_store_open(&queue, queue_authority_root, &file, 1);
@@ -988,48 +1215,34 @@ int tp_retirement_store_authority_handoff(int result_root, int authority_root, i
     return valid;
 }
 
-BUSTER_GLOBAL_LOCAL int tp_retirement_store_entry_state(int root, char const* name, int* present)
-{
-    char pending[TP_RETIREMENT_STORE_PATH_BYTES + 16];
-    struct stat info = {0};
-    int count = snprintf(pending, sizeof(pending), "%s.pending", name);
-    int named = fstatat(root, name, &info, AT_SYMLINK_NOFOLLOW);
-    int named_errno = named == 0 ? 0 : errno;
-    int temporary = count > 0 && (size_t)count < sizeof(pending) ?
-                    fstatat(root, pending, &info, AT_SYMLINK_NOFOLLOW) : 0;
-    int temporary_errno = temporary == 0 ? 0 : errno;
-    /* A pending temporary is a crash prefix: it is present evidence. */
-    int valid = count > 0 && (size_t)count < sizeof(pending) &&
-                (named == 0 || named_errno == ENOENT) && (temporary == 0 || temporary_errno == ENOENT);
-    *present = valid && (named == 0 || temporary == 0);
-    return valid;
-}
-
 TpRetirementAuthorityState tp_retirement_store_authority_state(int result_root, int queue_authority_root,
     uint64_t authenticated_job, uint64_t authenticated_attempt,
     char const* plan_sha256, char const* final_context_sha256,
     TpRetirementReceiptAuthority const* trusted)
 {
     TpRetirementAuthorityState state = TP_RETIREMENT_AUTHORITY_INVALID;
-    char authority_name[TP_RETIREMENT_STORE_PATH_BYTES + 1], authority_body[512];
-    char journal_name[TP_RETIREMENT_STORE_PATH_BYTES + 1], journal_body[640];
+    char authority_name[TP_RETIREMENT_STORE_PATH_BYTES + 1], authority_body[TP_RETIREMENT_STORE_AUTHORITY_BYTES];
+    char journal_name[TP_RETIREMENT_STORE_PATH_BYTES + 1], journal_body[TP_RETIREMENT_STORE_JOURNAL_BYTES];
     size_t authority_length = 0, journal_length = 0;
     int valid = queue_authority_root >= 0 &&
                 tp_retirement_store_handoff_identity(authenticated_job, authenticated_attempt,
                     plan_sha256, final_context_sha256, trusted) &&
                 tp_retirement_store_authority_bytes(trusted, authority_name, authority_body, &authority_length) &&
                 tp_retirement_store_journal_bytes(trusted, journal_name, journal_body, &journal_length);
-    int authority_present = 0, journal_present = 0;
-    valid = valid && tp_retirement_store_entry_state(queue_authority_root, authority_name, &authority_present) &&
-            tp_retirement_store_entry_state(queue_authority_root, journal_name, &journal_present);
-    if (valid && !authority_present && !journal_present) state = TP_RETIREMENT_AUTHORITY_ABSENT;
+    int authority_final = 0, authority_pending = 0, journal_final = 0, journal_pending = 0;
+    valid = valid && tp_retirement_store_entry_state(queue_authority_root, authority_name, &authority_final,
+                                                     &authority_pending) &&
+            tp_retirement_store_entry_state(queue_authority_root, journal_name, &journal_final, &journal_pending);
+    int any = authority_final || authority_pending || journal_final || journal_pending;
+    int sealed = authority_final && journal_final && !authority_pending && !journal_pending;
+    if (valid && !any) state = TP_RETIREMENT_AUTHORITY_ABSENT;
+    else if (valid && !sealed) state = TP_RETIREMENT_AUTHORITY_INCOMPLETE;
     else if (valid)
     {
-        int complete = authority_present && journal_present &&
-            tp_retirement_store_authority_reopen(result_root, queue_authority_root, trusted->job,
-                authenticated_attempt, plan_sha256, final_context_sha256, trusted) &&
-            tp_retirement_store_journal_reopen(queue_authority_root, trusted, NULL);
-        state = complete ? TP_RETIREMENT_AUTHORITY_COMPLETE : TP_RETIREMENT_AUTHORITY_INCOMPLETE;
+        int complete = tp_retirement_store_authority_reopen(result_root, queue_authority_root, trusted->job,
+                           authenticated_attempt, plan_sha256, final_context_sha256, trusted) &&
+                       tp_retirement_store_journal_reopen(queue_authority_root, trusted, NULL);
+        state = complete ? TP_RETIREMENT_AUTHORITY_COMPLETE : TP_RETIREMENT_AUTHORITY_DAMAGED;
     }
     return state;
 }

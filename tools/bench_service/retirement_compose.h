@@ -6,38 +6,30 @@
  * sealed result: the #615 result-input manifests, the code-byte record set,
  * the #619 statistics input, the reviewed `bench_throughput
  * retirement-replay` output, the post-sample execution receipt, the result
- * bundle and the `workflow.phases.sealed_result` record. It never measures,
- * never chooses a trust anchor and never issues a verdict: the independent
- * validator (tools/native_retirement_performance_binding.py) re-derives every
- * join, and the producer authority is issued separately from the live store
- * (tp_retirement_store_receipt_authority).
+ * bundle, the retained-file manifest and the `workflow.phases.sealed_result`
+ * record. It never measures, never chooses a trust anchor and never issues a
+ * verdict: the independent validator
+ * (tools/native_retirement_performance_binding.py) re-derives every join, and
+ * the producer authority is issued separately from the live store
+ * (tp_retirement_store_receipt_authority), binding the retained manifest.
  *
- * Entry points:
+ * Entry points (tools/bench_service/retirement_compose.c):
  *   tp_retirement_compose_bounds   byte/file bounds of the composer outputs
- *   tp_retirement_compose_plan     plan the result store before any timing
+ *   tp_retirement_compose_plan     plan the result store before any timing and
+ *                                  bind the retained-file declaration
  *   tp_retirement_compose          verify every input and publish the result
+ * Canonical JSON: retirement_compose_json.h.
  *
- * Every store file must be classified by the request (sealed input or
- * retained file); a missing, extra, reordered or mismatched shard, a digest
- * mismatch, or any bound excess refuses the whole composition and poisons the
- * store. Nothing is repaired or overwritten. Definitions live in
- * tools/bench_service/retirement_compose.c.
+ * Every store file must be a sealed input or match the retained declaration
+ * bound at plan time; a missing, extra, reordered or mismatched shard, a
+ * sample that differs from its transcript observation, a digest mismatch, or
+ * any bound excess refuses the whole composition and poisons the store.
+ * Nothing is repaired or overwritten.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_COMPOSE_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_COMPOSE_H
-/* Lane D's collection primitives are header-only `static` functions written
- * for a translation unit that uses all of them (tools/throughput/tests.c).
- * The composer is its own translation unit and uses only the schedule cursor,
- * the canonical encoders and the store preflight, so only the unused-function
- * diagnostic is relaxed, and only across this one include. */
-#if defined(__GNUC__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
-#endif
 #include "../throughput/retirement_campaign.h"
-#if defined(__GNUC__)
-#pragma GCC diagnostic pop
-#endif
+#include "retirement_compose_json.h"
 
 #ifdef __linux__
 /* The six #619 slice dimensions, in the validator's STATISTICAL_DIMENSIONS
@@ -60,8 +52,16 @@
 #define TP_RETIREMENT_COMPOSE_REPLAY_PATH "retirement-statistics-replay.json"
 #define TP_RETIREMENT_COMPOSE_BUNDLE_PATH "retirement-result-bundle.json"
 /* Composer outputs besides the result-input manifests: code records, series,
- * replay output, bundle, execution receipt and sealed-result record. */
-#define TP_RETIREMENT_COMPOSE_FIXED_OUTPUTS 6u
+ * replay output, bundle, execution receipt, retained manifest and the
+ * sealed-result record. */
+#define TP_RETIREMENT_COMPOSE_FIXED_OUTPUTS 7u
+/* Retained declaration: entries, kind length and a group's index width
+ * (`<prefix>NNNN<suffix>`, contiguous from 0000). */
+#define TP_RETIREMENT_COMPOSE_RETAINED_ENTRIES 64u
+#define TP_RETIREMENT_COMPOSE_KIND_BYTES 16u
+#define TP_RETIREMENT_COMPOSE_GROUP_FILES 10000u
+/* The adapter's default wall-clock limit when the request names none. */
+#define TP_RETIREMENT_COMPOSE_ADAPTER_TIMEOUT_NS (UINT64_C(3600) * 1000000000u)
 
 /* One row of the native-host timed projection, in ascending census order.
  * group is its campaign batch-group ordinal (ascending smallest member);
@@ -76,7 +76,9 @@ typedef struct TpRetirementComposeRow
 /* The frozen A1 layout the gate authenticated before timing. group_kinds are
  * TP_RETIREMENT_GROUP_OBJECT or TP_RETIREMENT_GROUP_SINGLETON per campaign
  * group; population_rows is the canonical performance-row count;
- * untimed_groups is the untimed code-artifact group count. */
+ * untimed_groups is the untimed code-artifact group count. An object group's
+ * members are its rows in ascending census order and are the first metrics
+ * inputs of each of its batches (D's TpRetirementBatchInput order). */
 typedef struct TpRetirementComposeLayout
 {
     TpRetirementComposeRow const* rows;
@@ -101,7 +103,8 @@ typedef struct TpRetirementComposeCode
 
 /* One pre-existing sealed-closure artifact (the binding's pre-sample and
  * post-A/A identities, `contract.source`, `workflow.execution_plan`, census
- * projections): the validator's _sealed_closure_files name and descriptor. */
+ * projections): the validator's _sealed_closure_files name and descriptor.
+ * Its path is below the store root and is not a store file. */
 typedef struct TpRetirementComposeClosure
 {
     char const* name;
@@ -109,6 +112,33 @@ typedef struct TpRetirementComposeClosure
     uint64_t bytes;
     char const* sha256;
 } TpRetirementComposeClosure;
+
+/* One retained (unsealed) store file kind, declared before timing. With a
+ * NULL suffix, `prefix` is one exact path that must exist at composition;
+ * otherwise the group holds `<prefix>NNNN<suffix>` files numbered
+ * contiguously from 0000, at most files_max of them. reserved is 1 when the
+ * campaign capacity already reserves the files (A/A transcript and sample
+ * shards are exact; A/A metrics shards are within its metrics-shard bound);
+ * otherwise files_max files of bytes_max total are reserved here. kind is
+ * [a-z]{1,16}. */
+typedef struct TpRetirementComposeRetained
+{
+    char const* kind;
+    char const* prefix;
+    char const* suffix;
+    unsigned files_max, reserved;
+    uint64_t bytes_max;
+} TpRetirementComposeRetained;
+
+/* Everything the store holds besides the composer's inputs and outputs, and
+ * the prior closure it re-reads: bound by digest into the store at plan
+ * time and required unchanged at composition. */
+typedef struct TpRetirementComposeDeclaration
+{
+    TpRetirementComposeRetained const* retained;
+    unsigned retained_count, prior_entries;
+    uint64_t prior_bytes;
+} TpRetirementComposeDeclaration;
 
 /* Sizes known before timing that bound the composer outputs. */
 typedef struct TpRetirementComposeShape
@@ -119,21 +149,25 @@ typedef struct TpRetirementComposeShape
 
 typedef struct TpRetirementComposeBounds
 {
-    uint64_t manifests, code, series, replay, bundle, receipt, seal, total;
+    uint64_t manifests, code, series, replay, bundle, receipt, retained, seal, total;
     unsigned manifest_count, files, members, bootstrap_members, cell_members;
 } TpRetirementComposeBounds;
 
 typedef struct TpRetirementComposeRequest
 {
+    /* The prior closure and the binding are re-read below its root. */
     TpRetirementStore* store;
-    /* Directory under which every prior closure path is re-read (it may be
-     * the store root). */
-    int evidence_root;
     /* Private scratch directory for the adapter's input copy and output. */
     int scratch_root;
+    /* The reviewed adapter executable and its authenticated digest; it is
+     * executed from the descriptor that was hashed. 0 selects
+     * TP_RETIREMENT_COMPOSE_ADAPTER_TIMEOUT_NS. */
     char const* adapter_path;
+    char const* adapter_sha256;
+    uint64_t adapter_timeout_ns;
     TpRetirementComposeLayout const* layout;
     TpRetirementPlan const* statistics;
+    TpRetirementComposeDeclaration const* declaration;
     /* The campaign's authenticated identity: the transcript's process
      * instances and the receipt bind exactly these. */
     char const* job;
@@ -144,13 +178,12 @@ typedef struct TpRetirementComposeRequest
     char const* result_input_plan_sha256;
     char const* family_sha256;
     char const* post_aa_binding_sha256;
-    /* Canonical JSON of the validator's _execution_context with
-     * raw_measurements_sha256 set to 64 '0' placeholder digits. The composer
-     * substitutes the digest of the streamed numeric shards, so the receipt's
-     * context is post-sample. The campaign freeze's pre-sample context is not
-     * accepted here. */
-    unsigned char const* context_template;
-    size_t context_template_bytes;
+    /* The post-A/A binding document (below the store root, not a store file)
+     * and its authenticated digest. The composer derives the validator's
+     * _execution_context from it with the streamed numeric digest, so the
+     * receipt's context is post-sample and never caller-supplied. */
+    char const* binding_path;
+    char const* binding_sha256;
     TpRetirementComposePartition const* partitions[2];
     unsigned partition_counts[2];
     char const* const* transcript_paths;
@@ -166,12 +199,6 @@ typedef struct TpRetirementComposeRequest
     unsigned code_count;
     TpRetirementComposeClosure const* prior;
     unsigned prior_count;
-    /* Store files that are retained evidence but not sealed (A/A streams,
-     * logs, lifecycle records). */
-    char const* const* retained_paths;
-    unsigned retained_count;
-    /* Store files the caller still publishes after composition. */
-    unsigned later_files;
     char const* sealed_path;
 } TpRetirementComposeRequest;
 
@@ -185,9 +212,9 @@ typedef struct TpRetirementComposeArtifact
 typedef struct TpRetirementComposeResult
 {
     char raw_measurements_sha256[65], context_sha256[65];
-    TpRetirementComposeArtifact receipt, bundle, sealed, series, replay, code;
-    unsigned members, seal_entries;
-    uint64_t invocations;
+    TpRetirementComposeArtifact receipt, bundle, sealed, series, replay, code, retained;
+    unsigned members, seal_entries, retained_files;
+    uint64_t invocations, untimed_records, untimed_production;
     /* On refusal: the first failing check (a static diagnostic name). */
     char const* refused;
 } TpRetirementComposeResult;
@@ -197,15 +224,18 @@ typedef struct TpRetirementComposeResult
  * per-file cap; A1's single-file adapter input is included in that check. */
 int tp_retirement_compose_bounds(TpRetirementComposeShape const* shape, TpRetirementComposeBounds* bounds);
 /* Before any timing: reserve both campaign stages (capacity), the composer's
- * outputs and the caller's retained files through
- * tp_retirement_campaign_store_preflight, then tp_retirement_store_plan. */
+ * outputs, the declaration's unreserved retained files and, as external
+ * entries, the prior closure; plan the store; mark the upper-bounded kinds
+ * (metrics shards and retained groups) as the only slack settle may release;
+ * and bind the declaration's digest. */
 int tp_retirement_compose_plan(TpRetirementStore* store, TpRetirementCampaignCapacity const* capacity,
-    TpRetirementComposeShape const* shape, unsigned retained_files, uint64_t retained_bytes,
+    TpRetirementComposeShape const* shape, TpRetirementComposeDeclaration const* declaration,
     unsigned external_entries, uint64_t external_bytes, TpRetirementCampaignStorePlan* plan);
-/* After the A/B stage and the untimed batches are published into the planned
- * store. On success every composer output is sealed in the store and the
- * store validates at its settled exact inventory (less later_files). The
- * caller then issues the producer authority with result->context_sha256. */
+/* After the A/B stage, the untimed batches and every retained file are
+ * published into the planned store. On success every composer output is
+ * sealed and the store validates at its settled exact inventory. The caller
+ * then issues the producer authority with result->context_sha256. */
 int tp_retirement_compose(TpRetirementComposeRequest const* request, TpRetirementComposeResult* result);
+
 #endif
 #endif

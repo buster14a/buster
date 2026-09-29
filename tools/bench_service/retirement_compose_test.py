@@ -4,9 +4,16 @@
 Usage: retirement_compose_test.py COMPOSE_BINARY [THROUGHPUT_TEST_DIRECTORY]
 
 COMPOSE_BINARY is build/bench-service-tools/retirement-compose-tests, whose
-`compose SPEC` mode plans a fresh result store, imports lane D's stream files,
-runs the composer (including the reviewed `bench_throughput retirement-replay`
-adapter) and issues the producer authority.
+`compose SPEC` mode plans a fresh result store (binding the retained-file
+declaration), imports lane D's stream files and the retained A/A copies, runs
+the composer (including the reviewed `bench_throughput retirement-replay`
+adapter, executed from its hashed descriptor) and issues the producer
+authority; `canonical FILE` and `context BINDING RAW` print the C canonical
+JSON writer's bytes.
+
+test_canonical_writer_matches_python compares the C writer with json.dumps
+(sort_keys, compact, ensure_ascii=False) over generated documents, and the C
+`_execution_context` derivation with the validator's own function.
 
 test_composed_sealed_result_validates builds the bounded A1 binding fixture of
 native_retirement_performance_binding_test (one native object batch group with
@@ -16,25 +23,37 @@ per-batch metrics shards and untimed batch records of
 native_retirement_performance_identity_test, and #615 row/batch shards in D's
 canonical record form. Everything after the post-A/A phase -- manifests, code
 records, statistics input and output, execution receipt, result bundle and the
-`workflow.phases.sealed_result` seal -- is produced by the C composer. The test
-then adds the independent-replay phase and runs the unchanged validator
-end to end with the composer's receipt digest as the out-of-band trust root.
+`workflow.phases.sealed_result` seal -- is produced by the C composer, whose
+execution context is derived in C from the post-A/A binding document. The
+test then adds the independent-replay phase and runs the unchanged validator
+end to end; the out-of-band trust root is the receipt digest read from the
+producer's authority file (never from the composer's own report), and the
+authority's retained-manifest digest is checked against every retained file.
+Mutations (a halved sample, a dropped retained A/A file, a changed binding,
+tampered outputs) are refused by the composer or the validator.
 
 test_throughput_fixture_streams (only with THROUGHPUT_TEST_DIRECTORY, the
-output of `bench_throughput self-test`) composes lane D's own C-encoded
-full-invocation fixture and checks the composed receipt, manifests and
-statistics input with the validator's transcript, #615 and adapter-series
-readers. That fixture binds placeholder executable digests, so it cannot back
-a complete binding; the first test covers the full validate() path.
+output of `bench_throughput self-test`; CI runs it after that self-test)
+composes lane D's own C-encoded full-invocation fixture -- whose samples D's
+encoders derived from the same transcript and metrics -- and checks the
+composed receipt, manifests and statistics input with the validator's
+transcript, #615 and adapter-series readers; a halved sample is refused.
+That fixture binds placeholder executable digests, so it cannot back a
+complete binding; the first test covers the full validate() path.
 
-Spec directives written here (one per line): source, store, evidence, scratch,
-adapter, authority, context, sealed, identity JOB ATTEMPT BOOT BOUND COMPLETED,
-digests PLAN ROWS RESULT_PLAN FAMILY POST_AA, statistics SEED PAIRS RESAMPLES
-BOOTSTRAP CELLS, population ROWS, metrics-budget HEADER PER_INPUT,
-group KIND INPUTS, untimed-group KIND INPUTS, row ID GROUP RUNTIME DIMS*6,
-code ROW (ARTIFACT BYTES CODE REPRODUCTION)*2, partition rows|batches ID PATH
-START RECORDS, transcript|metrics|untimed|untimed-metrics|retained PATH [SOURCE],
-samples rows|batches PATH [SOURCE], prior NAME PATH BYTES SHA256.
+Spec directives written here (one per line): source, store, scratch,
+adapter PATH SHA256, authority, binding PATH SHA256, sealed, timeout NS,
+identity JOB ATTEMPT BOOT BOUND COMPLETED, digests PLAN ROWS RESULT_PLAN
+FAMILY POST_AA, statistics SEED PAIRS RESAMPLES BOOTSTRAP CELLS, population
+ROWS, metrics-budget HEADER PER_INPUT, group KIND INPUTS, untimed-group KIND
+INPUTS, row ID GROUP RUNTIME DIMS*6, code ROW (ARTIFACT BYTES CODE
+REPRODUCTION)*2, partition rows|batches ID PATH START RECORDS,
+transcript|metrics|untimed|untimed-metrics PATH [SOURCE], samples
+rows|batches PATH [SOURCE], retain-file KIND PATH reserved|BYTES [SOURCE],
+retain-declared KIND PATH reserved|BYTES (declared but never imported),
+retain-group KIND PREFIX =SUFFIX FILES reserved|BYTES, retain-member PATH
+[SOURCE], prior NAME PATH BYTES SHA256. The store root is the evidence root:
+the prior closure and the binding live beside the store files.
 No fixture here is service admission or performance evidence.
 """
 
@@ -45,6 +64,8 @@ import io
 import json
 import os
 from pathlib import Path
+import random
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -61,7 +82,10 @@ import native_retirement_performance_identity_test as identity_tests  # noqa: E4
 binding = binding_tests.binding
 COMPOSE_BINARY = None
 THROUGHPUT_DIRECTORY = None
-PLACEHOLDER = "0" * 64
+AUTHORITY_HEADER = "BQ-RETIREMENT-AUTHORITY-V3"
+RETAINED_MANIFEST = "retirement-retained-manifest.txt"
+RETAINED_HEADER = "BQ-RETIREMENT-RETAINED-V1"
+BINDING_PATH = "binding-post-aa.json"
 
 
 def _canonical(value):
@@ -79,20 +103,110 @@ def _records(prefix, values):
     }) for (unit, round_number, pair), measurements in sorted(values.items()))
 
 
-def _context_template(record):
-    value = binding._execution_context(record, PLACEHOLDER)
+def _python_canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
-def _run_compose(spec_lines, directory):
-    spec = Path(directory) / "compose.spec"
+def _write_binding(evidence, record):
+    """The post-A/A binding document, deliberately not in canonical form:
+    the composer derives the canonical execution context from it in C."""
+    data = json.dumps(record, indent=1, ensure_ascii=True).encode("ascii")
+    (evidence / BINDING_PATH).write_bytes(data)
+    return f"binding {BINDING_PATH} {hashlib.sha256(data).hexdigest()}"
+
+
+def _adapter_line(executable):
+    return f"adapter {executable} {hashlib.sha256(Path(executable).read_bytes()).hexdigest()}"
+
+
+def _compose_process(spec_lines, directory, name="compose.spec"):
+    spec = Path(directory) / name
     spec.write_text("\n".join(spec_lines) + "\n", encoding="utf-8")
-    process = subprocess.run([str(COMPOSE_BINARY), "compose", str(spec)], check=False,
-                             capture_output=True, text=True)
+    return subprocess.run([str(COMPOSE_BINARY), "compose", str(spec)], check=False,
+                          capture_output=True, text=True)
+
+
+def _run_compose(spec_lines, directory):
+    process = _compose_process(spec_lines, directory)
     lines = [line for line in process.stdout.splitlines() if line.startswith("COMPOSE_RESULT ")]
     if process.returncode != 0 or len(lines) != 1:
         raise AssertionError(f"composer refused: rc={process.returncode} stderr={process.stderr}")
     return json.loads(lines[0][len("COMPOSE_RESULT "):])
+
+
+def _refused_stage(spec_lines, directory, name):
+    """The stage at which the composer refused (None if it composed)."""
+    process = _compose_process(spec_lines, directory, name)
+    marker = "COMPOSE_RESULT refused stage="
+    stages = [line[len(marker):] for line in process.stderr.splitlines() if line.startswith(marker)]
+    return stages[0] if process.returncode != 0 and len(stages) == 1 else None
+
+
+def _with_store(spec_lines, store, scratch):
+    """The same spec against a fresh copy of the pristine store and scratch."""
+    return [f"store {store}" if line.startswith("store ") else
+            f"scratch {scratch}" if line.startswith("scratch ") else line for line in spec_lines]
+
+
+def _fresh(root, pristine, name):
+    store, scratch = root / f"{name}-store", root / f"{name}-scratch"
+    shutil.copytree(pristine, store)
+    scratch.mkdir(mode=0o700)
+    return store, scratch
+
+
+def _retained_lines(transcript, rows, batches, metrics):
+    """The A/A stage's retained evidence (copies of the A/B streams stand in:
+    the composer never reads them) and an empty failure-log group."""
+    lines = [f"retain-file transcript retirement-execution-aa-0000.jsonl reserved {transcript}",
+             f"retain-file samples retirement-samples-aa-0000.jsonl reserved {rows}",
+             f"retain-file samples retirement-batches-aa-0000.jsonl reserved {batches}",
+             "retain-group metrics retirement-metrics-aa- =.txt 8 reserved",
+             "retain-group log retirement-failure- =.log 8 65536"]
+    lines += [f"retain-member retirement-metrics-aa-{index:04d}.txt {source}"
+              for index, source in enumerate(metrics)]
+    return lines
+
+
+def _halved_sample(source, name, output):
+    """A copy of a D row shard (at `output`, relative to `source`) whose first
+    candidate wall time is halved."""
+    original = (source / name).read_bytes()
+    lines = original.split(b"\n")
+    record = json.loads(lines[0])
+    wall = record["measurements"]["compiler_wall_time"]
+    marker = b'"compiler_wall_time":{"baseline":' + json.dumps(wall["baseline"]).encode() + b',"candidate":'
+    old = marker + json.dumps(wall["candidate"]).encode()
+    new = marker + repr(wall["candidate"] / 2).encode()
+    if old not in lines[0]:
+        raise AssertionError("sample mutation did not apply")
+    lines[0] = lines[0].replace(old, new, 1)
+    (source / output).write_bytes(b"\n".join(lines))
+
+
+def _trusted_authority(test, authority, evidence, composed):
+    """The receipt trust root read from the producer's authority file, and
+    the retained manifest it binds checked against every retained file."""
+    record = composed["authority"]
+    text = (authority / f"authority-{record['job']}-{record['attempt']}.txt").read_text(encoding="ascii")
+    lines = text.split("\n")
+    test.assertEqual(lines[0], AUTHORITY_HEADER)
+    test.assertEqual(lines[1], record["job"])
+    test.assertEqual(hashlib.sha256(text.encode("ascii")).hexdigest(), record["authority_sha256"])
+    receipt, retained = lines[5], lines[7]
+    manifest = (evidence / RETAINED_MANIFEST).read_bytes()
+    test.assertEqual(hashlib.sha256(manifest).hexdigest(), retained)
+    listed = manifest.decode("ascii").split("\n")
+    test.assertEqual(listed[0], RETAINED_HEADER)
+    paths = []
+    for line in listed[1:-1]:
+        _kind, digest, size, path = line.split(" ")
+        data = (evidence / path).read_bytes()
+        test.assertEqual((len(data), hashlib.sha256(data).hexdigest()), (int(size), digest))
+        paths.append(path)
+    test.assertEqual(paths, sorted(paths))
+    test.assertIn("retirement-execution-aa-0000.jsonl", paths)
+    return receipt
 
 
 def _row_line(row, group, runtime):
@@ -250,6 +364,7 @@ class ComposeEndToEndTests(unittest.TestCase):
         (source / "retirement-samples-0000.jsonl").write_bytes(_records("row", samples))
         (source / "retirement-batches-0000.jsonl").write_bytes(_records("group", batch_samples))
         tests.write_evidence(evidence, record, contents)
+        binding_line = _write_binding(evidence, record)
 
         prior = [("contract.source", record["contract"]["source"])]
         prior += [(name, artifact) for name, artifact in binding._all_artifacts(record)
@@ -268,7 +383,7 @@ class ComposeEndToEndTests(unittest.TestCase):
             code_lines.append(f"code {contract['row']} " + " ".join(sides))
         spec = [
             f"source {source}", f"store {evidence}", f"scratch {source / 'scratch'}",
-            f"context {source / 'context.json'}", "sealed retirement-sealed-result.json",
+            "sealed retirement-sealed-result.json", binding_line,
             f"identity {execution_receipt['job_id']} {execution_receipt['attempt']} "
             f"{execution_receipt['boot_id']} {execution_receipt['bound_at_ns']} "
             f"{execution_receipt['completed_at_ns']}",
@@ -288,9 +403,11 @@ class ComposeEndToEndTests(unittest.TestCase):
             f"untimed retirement-untimed-batches.jsonl {untimed['path']}",
             *[f"untimed-metrics {path.name}" for path in sorted(source.glob("retirement-metrics-untimed-*.txt"))],
             *[f"prior {name} {artifact['path']} {artifact['bytes']} {artifact['sha256']}" for name, artifact in prior],
+            *_retained_lines("execution/invocations.jsonl", "retirement-samples-0000.jsonl",
+                             "retirement-batches-0000.jsonl",
+                             [path.name for path in sorted(source.glob("retirement-metrics-ab-*.txt"))]),
         ]
         (source / "scratch").mkdir(mode=0o700)
-        (source / "context.json").write_bytes(_context_template(record))
         census_rows_path = support_files[binding.SUPPORT_FILE_ROLES.index("rows")]["path"]
         support_output = {
             "manifest": {}, "inputs": [], "dependencies": [], "environment": [], "sources": {},
@@ -385,16 +502,25 @@ class ComposeEndToEndTests(unittest.TestCase):
             for path in (evidence, source, authority):
                 path.mkdir(mode=0o700)
             record, spec, support_output, family = self._fixture(evidence, source)
+            pristine = root / "pristine"
+            shutil.copytree(evidence, pristine)
             with tempfile.TemporaryDirectory(prefix="retirement-compose-trusted-adapter-") as adapter:
                 executable, *_ = binding._compile_trusted_retirement_adapter(Path(adapter))
-                spec += [f"adapter {executable}", f"authority {authority}"]
+                spec += [_adapter_line(executable), f"authority {authority}"]
                 composed = _run_compose(spec, root)
+                self._mutations(root, pristine, source, spec)
             self.assertEqual(composed["invocations"], 732)
             self.assertEqual(composed["members"], len(family["members"]))
-            self.assertEqual(len(composed["authority"]["authority_sha256"]), 64)
+            self.assertEqual(composed["retained_files"], 3 + len(list(source.glob("retirement-metrics-ab-*.txt"))))
+            self.assertEqual((composed["untimed_records"], composed["untimed_production"]), (4, 2))
+            # The composed context is the validator's own _execution_context.
+            receipt_value = json.loads((evidence / composed["receipt"]["path"]).read_bytes())
+            self.assertEqual(receipt_value["context_sha256"], binding._canonical_json_digest(
+                binding._execution_context(record, composed["raw_measurements_sha256"])))
+            trusted = _trusted_authority(self, authority, evidence, composed)
+            self.assertEqual(trusted, composed["receipt"]["sha256"])
             self._independent_replay(record, evidence, composed, family)
             path = tests.write_record(root, record)
-            trusted = composed["receipt"]["sha256"]
 
             def validate():
                 with mock.patch.object(binding, "_check_support_output", return_value=support_output), \
@@ -410,12 +536,107 @@ class ComposeEndToEndTests(unittest.TestCase):
                     mock.patch.object(binding, "_population", return_value=record["population"]), \
                     self.assertRaises(ValueError):
                 binding.validate(path, evidence, trusted_execution_receipt_sha256="f" * 64)
-            # A composed byte is content-bound by the seal: tamper and refuse.
-            target = evidence / composed["series"]["path"]
-            os.chmod(target, 0o600)
-            target.write_bytes(target.read_bytes() + b"end\n")
-            with self.assertRaises(ValueError):
-                validate()
+            # Composed bytes are content-bound: tamper with the receipt (the
+            # authority's trust root no longer matches) or the series (the
+            # seal no longer matches) and the validator refuses.
+            for name in ("receipt", "series"):
+                target = evidence / composed[name]["path"]
+                original = target.read_bytes()
+                os.chmod(target, 0o600)
+                target.write_bytes(original.replace(b"}", b"} ", 1) if name == "receipt" else original + b"end\n")
+                with self.assertRaises(ValueError):
+                    validate()
+                target.write_bytes(original)
+            validate()
+
+    def _mutations(self, root, pristine, source, spec):
+        """The composer refuses before sealing anything: a halved sample (the
+        transcript join), a dropped retained A/A file (the declaration bound
+        before timing) and a changed binding digest (the derived context)."""
+        _halved_sample(source, "retirement-samples-0000.jsonl", "retirement-samples-halved.jsonl")
+        store, scratch = _fresh(root, pristine, "halved")
+        halved = [line.replace("samples rows retirement-samples-0000.jsonl",
+                               "samples rows retirement-samples-0000.jsonl retirement-samples-halved.jsonl")
+                  for line in _with_store(spec, store, scratch)]
+        self.assertEqual(_refused_stage(halved, root, "halved.spec"), "samples")
+        self.assertFalse((store / "retirement-sealed-result.json").exists())
+        store, scratch = _fresh(root, pristine, "dropped")
+        # The declaration still names the A/A transcript copy at plan time,
+        # but it is never published: composing without it is refused.
+        dropped = ["retain-declared transcript retirement-execution-aa-0000.jsonl reserved"
+                   if line.startswith("retain-file transcript ") else line
+                   for line in _with_store(spec, store, scratch)]
+        self.assertEqual(_refused_stage(dropped, root, "dropped.spec"), "inventory")
+        store, scratch = _fresh(root, pristine, "binding")
+        changed = [f"binding {BINDING_PATH} {'0' * 64}" if line.startswith("binding ") else line
+                   for line in _with_store(spec, store, scratch)]
+        self.assertEqual(_refused_stage(changed, root, "binding.spec"), "context")
+
+    def test_canonical_writer_matches_python(self):
+        """The C writer is json.dumps(sort_keys, compact, ensure_ascii=False)."""
+        generator = random.Random(881)
+        alphabet = ["a", "Z", "0", " ", "\"", "\\", "/", "\n", "\t", "\x01", "\x1f", "\x7f", "\u00e9",
+                    "\u2028", "\U0001f600", "\u4e2d"]
+
+        def text():
+            return "".join(generator.choice(alphabet) for _ in range(generator.randrange(0, 8)))
+
+        def number():
+            choice = generator.randrange(6)
+            if choice == 0:
+                return generator.randrange(-10 ** 30, 10 ** 30)
+            if choice == 1:
+                return generator.random() * 10 ** generator.randrange(-30, 30)
+            if choice == 2:
+                return -generator.random() * 10.0 ** generator.randrange(-300, 300)
+            if choice == 3:
+                return float(generator.randrange(0, 10 ** 17))
+            if choice == 4:
+                return generator.choice([0.0, -0.0, 1e16, 1e-5, 0.0001, 5e-324, 1.7976931348623157e308])
+            return generator.randrange(-5, 5)
+
+        def value(depth):
+            choice = generator.randrange(8 if depth < 4 else 5)
+            if choice == 0:
+                return text()
+            if choice in (1, 3, 4):
+                return number()
+            if choice == 2:
+                return generator.choice([True, False, None])
+            if choice in (5, 6):
+                return {text(): value(depth + 1) for _ in range(generator.randrange(0, 5))}
+            return [value(depth + 1) for _ in range(generator.randrange(0, 5))]
+
+        with tempfile.TemporaryDirectory(prefix="retirement-compose-canonical-") as directory:
+            path = Path(directory) / "document.json"
+            for index in range(200):
+                document = {text(): value(0) for _ in range(generator.randrange(1, 6))}
+                encoded = json.dumps(document, indent=generator.choice([None, 1]),
+                                     ensure_ascii=bool(index % 2)).encode("utf-8")
+                path.write_bytes(encoded)
+                process = subprocess.run([str(COMPOSE_BINARY), "canonical", str(path)], check=False,
+                                         capture_output=True)
+                self.assertEqual(process.returncode, 0, encoded)
+                self.assertEqual(process.stdout, _python_canonical(json.loads(encoded)), encoded)
+            # The execution context of a binding with every kind of value.
+            record = {"workflow": {"phases": {"pre_sample_plan": {"sha256": "1" * 64},
+                                              "post_aa_binding": {"sha256": "2" * 64}},
+                                   "records": {"admission": {"sha256": "3" * 64}, "oracle": {"sha256": "4" * 64}}},
+                      "support": {"root_sha256": "5" * 64, "files": [1, 2.5]},
+                      "subjects": {"baseline": {"binary": value(1)}, "candidate": {"b\u00e9": [value(1), -0.0]}},
+                      "measurement": {"x": 1e21, "y": [0.1, 1e-7, "tab\t"]}, "execution": {"z": {"w": None}}}
+            path.write_bytes(json.dumps(record, indent=2).encode("ascii"))
+            raw = "6" * 64
+            process = subprocess.run([str(COMPOSE_BINARY), "context", str(path), raw], check=False,
+                                     capture_output=True)
+            self.assertEqual(process.returncode, 0)
+            self.assertEqual(hashlib.sha256(process.stdout).hexdigest(),
+                             binding._canonical_json_digest(binding._execution_context(record, raw)))
+            # Duplicate keys (which the validator refuses) are refused.
+            path.write_bytes(b'{"a":1,"a":2}')
+            process = subprocess.run([str(COMPOSE_BINARY), "canonical", str(path)], check=False,
+                                     capture_output=True)
+            self.assertNotEqual(process.returncode, 0)
 
 
 @unittest.skipIf(THROUGHPUT_DIRECTORY is None and len(sys.argv) < 3,
@@ -504,18 +725,22 @@ class ThroughputFixtureTests(unittest.TestCase):
                 "workflow": {"phases": {"pre_sample_plan": artifact, "post_aa_binding": post},
                              "records": {"admission": artifact, "oracle": oracle_descriptor}},
             }
-            (root / "context.json").write_bytes(_context_template(record))
+            binding_line = _write_binding(evidence, record)
             events = binding._execution_trace_records(
                 fixture, [{"path": "retirement-execution.jsonl",
                            "bytes": (fixture / "retirement-execution.jsonl").stat().st_size,
                            "sha256": hashlib.sha256((fixture / "retirement-execution.jsonl").read_bytes()).hexdigest(),
                            "records": 1220}], 1220)
             completed = max(event["finished_ns"] for event in events) + 1
+            authority = root / "authority"
+            authority.mkdir(mode=0o700)
+            pristine = root / "pristine"
+            shutil.copytree(evidence, pristine)
             with tempfile.TemporaryDirectory(prefix="retirement-compose-trusted-adapter-") as adapter:
                 executable, *_ = binding._compile_trusted_retirement_adapter(Path(adapter))
-                composed = _run_compose([
-                    f"source {fixture}", f"store {evidence}", f"scratch {scratch}", f"adapter {executable}",
-                    f"context {root / 'context.json'}", "sealed retirement-sealed-result.json",
+                spec = [
+                    f"source {fixture}", f"store {evidence}", f"scratch {scratch}", _adapter_line(executable),
+                    f"authority {authority}", binding_line, "sealed retirement-sealed-result.json",
                     f"identity job-1 2 boot-123 1000 {completed}",
                     f"digests {plan['sha256']} {'a' * 64} {result_plan['sha256']} {family['sha256']} {post['sha256']}",
                     f"statistics 1 60 100000 {counts['bootstrap_members_per_scope']} "
@@ -535,12 +760,31 @@ class ThroughputFixtureTests(unittest.TestCase):
                     f"prior workflow.phases.post_aa_binding {post['path']} {post['bytes']} {post['sha256']}",
                     f"prior workflow.records.result_input_plan {result_plan['path']} {result_plan['bytes']} "
                     f"{result_plan['sha256']}",
-                ], root)
+                    *_retained_lines("retirement-execution.jsonl", "retirement-samples-0000.jsonl",
+                                     "retirement-batches-0000.jsonl", ["retirement-metrics-rec-0000.txt"]),
+                ]
+                composed = _run_compose(spec, root)
+                # D's own samples, with one candidate wall time halved, no
+                # longer equal their transcript observation. The copy lives
+                # beside the fixture's source directory under a private name.
+                halved_source = root / "halved-source"
+                halved_source.mkdir(mode=0o700)
+                for name in ("retirement-execution.jsonl", "retirement-batches-0000.jsonl",
+                             "retirement-metrics-rec-0000.txt"):
+                    shutil.copyfile(fixture / name, halved_source / name)
+                shutil.copyfile(fixture / "retirement-samples-0000.jsonl",
+                                halved_source / "retirement-samples-original.jsonl")
+                _halved_sample(halved_source, "retirement-samples-original.jsonl", "retirement-samples-0000.jsonl")
+                store, fresh_scratch = _fresh(root, pristine, "halved")
+                halved = [f"source {halved_source}" if line.startswith("source ") else line
+                          for line in _with_store(spec, store, fresh_scratch)]
+                self.assertEqual(_refused_stage(halved, root, "halved.spec"), "samples")
             self.assertEqual(composed["invocations"], 1220)
+            trusted = _trusted_authority(self, authority, evidence, composed)
             # The composed files are checked by the validator's own readers.
-            self._check_composed(fixture, evidence, composed, record, rows, rules, plan, family)
+            self._check_composed(fixture, evidence, composed, record, rows, rules, plan, family, trusted)
 
-    def _check_composed(self, fixture, evidence, composed, record, rows, rules, plan, family):
+    def _check_composed(self, fixture, evidence, composed, record, rows, rules, plan, family, trusted):
         receipt = json.loads((evidence / composed["receipt"]["path"]).read_bytes())
         self.assertEqual(receipt["context_sha256"], binding._canonical_json_digest(
             binding._execution_context(record, composed["raw_measurements_sha256"])))
@@ -572,7 +816,7 @@ class ThroughputFixtureTests(unittest.TestCase):
             descriptor = {key: composed["receipt"][key] for key in ("path", "bytes", "sha256")}
             checked = binding._check_execution_transcript(
                 evidence, descriptor, plan, record, rows, rules["sampling"], db,
-                composed["raw_measurements_sha256"], descriptor["sha256"], 2, binding.NATIVE_TIMED_TARGET)
+                composed["raw_measurements_sha256"], trusted, 2, binding.NATIVE_TIMED_TARGET)
             self.assertEqual(checked["invocations"], 1220)
 
 

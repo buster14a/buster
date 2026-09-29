@@ -3,24 +3,31 @@
  *
  * Map (searchable symbols):
  *   helpers        tp_compose_cursor_*, tp_compose_field, tp_compose_json_number,
- *                  tp_compose_repr, tp_compose_decimal_ratio
+ *                  tp_compose_decimal_ratio, tp_compose_sort, tp_compose_sort_text
  *   family         tp_compose_layout_check, tp_compose_family_build,
- *                  tp_compose_family_free, tp_compose_bounds_of
+ *                  tp_compose_bounds_of
+ *   declaration    tp_compose_declaration_digest, tp_compose_declaration_reserve
  *   readers        TpComposeReader, tp_compose_reader_*, TpComposeTiling,
- *                  tp_compose_tiling_*
- *   inputs         tp_compose_inventory, tp_compose_prior, tp_compose_transcript,
- *                  tp_compose_untimed, tp_compose_samples, tp_compose_partitions
+ *                  tp_compose_tiling_*, tp_compose_metrics_input
+ *   inputs         tp_compose_inventory, tp_compose_prior, tp_compose_transcript
+ *                  (tp_compose_invocation, tp_compose_observe), tp_compose_untimed,
+ *                  tp_compose_samples, tp_compose_partitions, tp_compose_context
  *   outputs        TpComposeWriter, tp_compose_manifests, tp_compose_code,
- *                  tp_compose_series, tp_compose_adapter, tp_compose_receipt,
- *                  tp_compose_bundle, tp_compose_seal
+ *                  tp_compose_series, tp_compose_adapter (tp_compose_adapter_run,
+ *                  tp_compose_replay_check), tp_compose_receipt,
+ *                  tp_compose_retained, tp_compose_bundle, tp_compose_seal
  *   entry points   tp_retirement_compose_bounds, tp_retirement_compose_plan,
  *                  tp_retirement_compose
  *
  * The line formats checked here are lane D's canonical encoders
  * (retirement_execution.h, retirement_samples.h, retirement_untimed.h). The
- * composer re-reads every input through its sealed store inode, rehashes it
- * and cross-checks the frozen schedule with D's own #619 cursor; the binding
- * validator remains the independent authority over every semantic join.
+ * composer re-reads every input through its sealed store inode, rehashes it,
+ * cross-checks the frozen schedule with D's own #619 cursor, and joins every
+ * numeric sample to the transcript observation (and, for object members,
+ * the metrics input) that produced it; the binding validator remains the
+ * independent authority over every semantic join. All working memory comes
+ * from one arena per call whose reservation is checked before each
+ * allocation.
  */
 #define _GNU_SOURCE 1
 #include "retirement_compose.h"
@@ -29,6 +36,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +44,7 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 /* "ratio=" + the longest %.17g double (23 bytes) + LF, rounded up. */
@@ -57,7 +66,8 @@
 /* The sealed-result record: envelope plus one {name,path,bytes,sha256}. */
 #define TP_COMPOSE_SEAL_FIXED_BYTES 2048u
 #define TP_COMPOSE_SEAL_ENTRY_BYTES 512u
-#define TP_COMPOSE_TEMPLATE_BYTES (UINT64_C(1) << 20)
+/* One retained-manifest line: kind, digest, byte count and path. */
+#define TP_COMPOSE_RETAINED_LINE_BYTES 320u
 #define TP_COMPOSE_NUMBER_BYTES 48u
 #define TP_COMPOSE_LINE_BYTES 8192u
 /* Decimal('a') / Decimal('b') under Python's default 28-digit context. */
@@ -66,24 +76,51 @@
 #define TP_COMPOSE_CODE_BYTES_MAX (UINT64_C(1) << 53)
 /* Code-byte totals stay below 2^60, so decimal long division never wraps. */
 #define TP_COMPOSE_TOTAL_BYTES_MAX (UINT64_C(1) << 60)
-#define TP_COMPOSE_PLACEHOLDER \
-    "\"raw_measurements_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\""
+/* D's peak-memory and RSS samples are exact integers in a double. */
+#define TP_COMPOSE_MEMORY_MAX UINT64_C(9007199254740991)
+/* The per-call working reservation (virtual; committed as used). */
+#define TP_COMPOSE_ARENA_BYTES (UINT64_C(1) << 30)
+/* The post-A/A binding document read for the execution context. */
+#define TP_COMPOSE_BINDING_BYTES (UINT64_C(4) << 20)
+/* The reviewed adapter executable is hashed whole before it is executed. */
+#define TP_COMPOSE_ADAPTER_BYTES (UINT64_C(256) << 20)
+/* The adapter is polled at this interval against its wall-clock limit. */
+#define TP_COMPOSE_ADAPTER_POLL_NS 10000000L
+#define TP_COMPOSE_NANOSECONDS 1000000000L
+/* A retained group member: `<prefix>` + four digits + `<suffix>`. */
+#define TP_COMPOSE_GROUP_DIGITS 4u
+#define TP_COMPOSE_SUFFIX_BYTES 32u
 #define TP_COMPOSE_EMPTY_SHA256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 #define TP_COMPOSE_NONE 0xffffffffu
+#define TP_COMPOSE_READ_BYTES 65536u
+/* The adapter's approved schema and its three #619 scopes. */
+#define TP_COMPOSE_REPLAY_SCHEMA "buster-native-retirement-statistics-replay-v1"
+#define TP_COMPOSE_SCOPES 3u
+/* Classes of a store file during the inventory. */
+#define TP_COMPOSE_CLASS_FREE 0u
+#define TP_COMPOSE_CLASS_SEALED 1u
+#define TP_COMPOSE_CLASS_RETAINED 2u
+/* Numeric observation tables: row wall/memory, runtime, batch wall/RSS. */
+#define TP_COMPOSE_ROW_WALL 0u
+#define TP_COMPOSE_ROW_MEMORY 1u
+#define TP_COMPOSE_RUNTIME 2u
+#define TP_COMPOSE_BATCH_WALL 3u
+#define TP_COMPOSE_BATCH_RSS 4u
+#define TP_COMPOSE_OBSERVATIONS 5u
 
-static char const* const tp_compose_metric_names[TP_RETIREMENT_COMPOSE_METRICS] = {
+BUSTER_GLOBAL_LOCAL char const* const tp_compose_metric_names[TP_RETIREMENT_COMPOSE_METRICS] = {
     "compiler_wall_time", "compiler_peak_memory", "generated_runtime",
     "compiler_batch_wall_time", "compiler_batch_peak_rss"};
-static char const* const tp_compose_aggregate_limits[TP_RETIREMENT_COMPOSE_METRICS] = {
+BUSTER_GLOBAL_LOCAL char const* const tp_compose_aggregate_limits[TP_RETIREMENT_COMPOSE_METRICS] = {
     "1.02", "1.02", "1.03", "1.02", "1.02"};
-static char const* const tp_compose_cell_limits[TP_RETIREMENT_COMPOSE_METRICS] = {
+BUSTER_GLOBAL_LOCAL char const* const tp_compose_cell_limits[TP_RETIREMENT_COMPOSE_METRICS] = {
     "1.05", "1.05", "1.03", "1.05", "1.05"};
-static char const* const tp_compose_dimension_names[TP_RETIREMENT_COMPOSE_DIMENSIONS] = {
+BUSTER_GLOBAL_LOCAL char const* const tp_compose_dimension_names[TP_RETIREMENT_COMPOSE_DIMENSIONS] = {
     "target", "cpu", "allocator", "frontend_lowering", "PIC", "artifact_stage"};
 
 /* ---------------------------------------------------------------- helpers */
 
-static int tp_compose_digest(char const* text)
+BUSTER_GLOBAL_LOCAL int tp_compose_digest(char const* text)
 {
     int valid = text && strnlen(text, 65) == 64;
     for (unsigned i = 0; valid && i < 64; ++i)
@@ -91,8 +128,8 @@ static int tp_compose_digest(char const* text)
     return valid;
 }
 
-/* A JSON-safe printable identifier: no quote, backslash or control byte. */
-static int tp_compose_printable(char const* text, size_t capacity)
+/* A JSON-safe printable identifier: no space, quote, backslash or control. */
+BUSTER_GLOBAL_LOCAL int tp_compose_printable(char const* text, size_t capacity)
 {
     size_t length = text ? strnlen(text, capacity + 1) : 0;
     int valid = length && length <= capacity;
@@ -102,7 +139,7 @@ static int tp_compose_printable(char const* text, size_t capacity)
 }
 
 /* A normalized relative evidence path (the validator's _relative_path). */
-static int tp_compose_relative_path(char const* path)
+BUSTER_GLOBAL_LOCAL int tp_compose_relative_path(char const* path)
 {
     size_t length = path ? strnlen(path, TP_RETIREMENT_STORE_PATH_BYTES + 1) : 0;
     int valid = tp_compose_printable(path, TP_RETIREMENT_STORE_PATH_BYTES) && path[0] != '/';
@@ -119,7 +156,7 @@ static int tp_compose_relative_path(char const* path)
 }
 
 /* The adapter member token domain: [A-Za-z0-9][A-Za-z0-9_.:/=-]*. */
-static int tp_compose_member_text(char const* text, int first)
+BUSTER_GLOBAL_LOCAL int tp_compose_member_text(char const* text, int first)
 {
     size_t length = text ? strlen(text) : 0;
     int valid = length > 0;
@@ -132,7 +169,7 @@ static int tp_compose_member_text(char const* text, int first)
     return valid;
 }
 
-static void tp_compose_sha_hex(void const* bytes, size_t length, char output[65])
+BUSTER_GLOBAL_LOCAL void tp_compose_sha_hex(void const* bytes, size_t length, char output[65])
 {
     Sha256 hash;
     sha256_init(&hash);
@@ -147,7 +184,7 @@ typedef struct TpComposeCursor
     int valid;
 } TpComposeCursor;
 
-static void tp_compose_cursor_literal(TpComposeCursor* cursor, char const* literal)
+BUSTER_GLOBAL_LOCAL void tp_compose_cursor_literal(TpComposeCursor* cursor, char const* literal)
 {
     size_t length = strlen(literal);
     cursor->valid = cursor->valid && cursor->offset <= cursor->length && length <= cursor->length - cursor->offset &&
@@ -155,7 +192,7 @@ static void tp_compose_cursor_literal(TpComposeCursor* cursor, char const* liter
     if (cursor->valid) cursor->offset += length;
 }
 
-static void tp_compose_cursor_u64(TpComposeCursor* cursor, uint64_t* output)
+BUSTER_GLOBAL_LOCAL void tp_compose_cursor_u64(TpComposeCursor* cursor, uint64_t* output)
 {
     size_t start = cursor->offset;
     uint64_t value = 0;
@@ -177,7 +214,7 @@ static void tp_compose_cursor_u64(TpComposeCursor* cursor, uint64_t* output)
 }
 
 /* A string body up to (not including) its closing quote, which is consumed. */
-static void tp_compose_cursor_text(TpComposeCursor* cursor, char* output, size_t capacity)
+BUSTER_GLOBAL_LOCAL void tp_compose_cursor_text(TpComposeCursor* cursor, char* output, size_t capacity)
 {
     size_t start = cursor->offset;
     while (cursor->valid && cursor->offset < cursor->length && cursor->bytes[cursor->offset] != '"' &&
@@ -196,7 +233,7 @@ static void tp_compose_cursor_text(TpComposeCursor* cursor, char* output, size_t
 }
 
 /* One finite positive JSON number: (0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?. */
-static int tp_compose_json_number(char const* text, size_t length, double* value)
+BUSTER_GLOBAL_LOCAL int tp_compose_json_number(char const* text, size_t length, double* value)
 {
     size_t i = 0;
     int valid = text && length && length < TP_COMPOSE_NUMBER_BYTES;
@@ -236,19 +273,24 @@ static int tp_compose_json_number(char const* text, size_t length, double* value
     return valid;
 }
 
-static void tp_compose_cursor_number(TpComposeCursor* cursor, double* value)
+/* A number up to the next `,` or `}`: its text span and its value. */
+BUSTER_GLOBAL_LOCAL void tp_compose_cursor_number(TpComposeCursor* cursor, char const** text, size_t* length,
+                                                  double* value)
 {
     size_t start = cursor->offset;
     while (cursor->valid && cursor->offset < cursor->length && cursor->bytes[cursor->offset] != ',' &&
            cursor->bytes[cursor->offset] != '}')
         ++cursor->offset;
     cursor->valid = cursor->valid && tp_compose_json_number(cursor->bytes + start, cursor->offset - start, value);
+    *text = cursor->bytes + start;
+    *length = cursor->valid ? cursor->offset - start : 0;
     if (!cursor->valid) *value = 0.0;
 }
 
 /* Locate a top-level `"key":` in one canonical JSON object line and return
  * its value span. Keys are unique and values carry no escapes. */
-static int tp_compose_field(char const* line, size_t length, char const* key, char const** value, size_t* value_length)
+BUSTER_GLOBAL_LOCAL int tp_compose_field(char const* line, size_t length, char const* key, char const** value,
+                                         size_t* value_length)
 {
     size_t key_length = strlen(key), i = 0, start = 0, end = 0;
     unsigned depth = 0;
@@ -294,7 +336,7 @@ static int tp_compose_field(char const* line, size_t length, char const* key, ch
     return valid;
 }
 
-static int tp_compose_field_u64(char const* line, size_t length, char const* key, uint64_t* output)
+BUSTER_GLOBAL_LOCAL int tp_compose_field_u64(char const* line, size_t length, char const* key, uint64_t* output)
 {
     char const* value = NULL;
     size_t count = 0;
@@ -310,7 +352,7 @@ static int tp_compose_field_u64(char const* line, size_t length, char const* key
     return valid;
 }
 
-static int tp_compose_field_is(char const* line, size_t length, char const* key, char const* expected)
+BUSTER_GLOBAL_LOCAL int tp_compose_field_is(char const* line, size_t length, char const* key, char const* expected)
 {
     char const* value = NULL;
     size_t count = 0;
@@ -320,7 +362,8 @@ static int tp_compose_field_is(char const* line, size_t length, char const* key,
 }
 
 /* A quoted string field copied without its quotes. */
-static int tp_compose_field_text(char const* line, size_t length, char const* key, char* output, size_t capacity)
+BUSTER_GLOBAL_LOCAL int tp_compose_field_text(char const* line, size_t length, char const* key, char* output,
+                                              size_t capacity)
 {
     char const* value = NULL;
     size_t count = 0;
@@ -336,7 +379,8 @@ static int tp_compose_field_text(char const* line, size_t length, char const* ke
 }
 
 /* A number field or `null` (none == 1) when the frozen identity is absent. */
-static int tp_compose_field_optional(char const* line, size_t length, char const* key, int none, uint64_t expected)
+BUSTER_GLOBAL_LOCAL int tp_compose_field_optional(char const* line, size_t length, char const* key, int none,
+                                                  uint64_t expected)
 {
     uint64_t value = 0;
     int valid = none ? tp_compose_field_is(line, length, key, "null") :
@@ -344,96 +388,9 @@ static int tp_compose_field_optional(char const* line, size_t length, char const
     return valid;
 }
 
-/* Python's repr(float) for a finite nonnegative double: the shortest
- * round-tripping digits, fixed notation for -4 < decpt <= 16, otherwise
- * d.ddde+XX. json.dumps writes floats with this repr. */
-static int tp_compose_repr(double value, char output[40])
-{
-    int valid = isfinite(value) && value >= 0.0;
-    uint64_t mantissa = 0;
-    int exponent = 0;
-    unsigned digits = 0;
-    if (valid && value == 0.0)
-    {
-        strcpy(output, "0.0");
-        digits = 0;
-    }
-    else if (valid)
-    {
-        int found = 0;
-        for (unsigned precision = 1; !found && precision <= 17; ++precision)
-        {
-            char text[40], candidate[48];
-            snprintf(text, sizeof(text), "%.*e", (int)precision - 1, value);
-            uint64_t parsed = 0;
-            int exp10 = 0;
-            char const* cursor = text;
-            while (*cursor && *cursor != 'e')
-            {
-                if (*cursor >= '0' && *cursor <= '9') parsed = parsed * 10 + (uint64_t)(*cursor - '0');
-                ++cursor;
-            }
-            if (*cursor == 'e') exp10 = atoi(cursor + 1);
-            uint64_t low = 1;
-            for (unsigned i = 1; i < precision; ++i) low *= 10;
-            uint64_t high = low * 10;
-            for (int delta = 0; !found && delta < 3; ++delta)
-            {
-                uint64_t trial = delta == 0 ? parsed : delta == 1 ? parsed - 1 : parsed + 1;
-                if (trial >= low && trial < high)
-                {
-                    snprintf(candidate, sizeof(candidate), "%" PRIu64 "e%d", trial, exp10 - (int)(precision - 1));
-                    if (strtod(candidate, NULL) == value)
-                    {
-                        found = 1;
-                        mantissa = trial;
-                        exponent = exp10;
-                        digits = precision;
-                    }
-                }
-            }
-        }
-        valid = found;
-    }
-    if (valid && digits)
-    {
-        char text[24];
-        snprintf(text, sizeof(text), "%" PRIu64, mantissa);
-        while (digits > 1 && text[digits - 1] == '0') text[--digits] = 0;
-        int point = exponent + 1;
-        size_t used = 0;
-        if (point > -4 && point <= 16)
-        {
-            if (point <= 0)
-            {
-                used += (size_t)snprintf(output + used, 40 - used, "0.");
-                for (int i = 0; i < -point; ++i) output[used++] = '0';
-                used += (size_t)snprintf(output + used, 40 - used, "%s", text);
-            }
-            else if ((unsigned)point >= digits)
-            {
-                used += (size_t)snprintf(output + used, 40 - used, "%s", text);
-                for (unsigned i = digits; i < (unsigned)point; ++i) output[used++] = '0';
-                used += (size_t)snprintf(output + used, 40 - used, ".0");
-            }
-            else
-                used += (size_t)snprintf(output + used, 40 - used, "%.*s.%s", point, text, text + point);
-        }
-        else if (digits > 1)
-            used += (size_t)snprintf(output + used, 40 - used, "%c.%se%c%02d", text[0], text + 1,
-                                     exponent < 0 ? '-' : '+', exponent < 0 ? -exponent : exponent);
-        else
-            used += (size_t)snprintf(output + used, 40 - used, "%ce%c%02d", text[0], exponent < 0 ? '-' : '+',
-                                     exponent < 0 ? -exponent : exponent);
-        output[used] = 0;
-    }
-    if (!valid) output[0] = 0;
-    return valid;
-}
-
 /* float(Decimal(numerator) / Decimal(denominator)) under the default
  * 28-digit ROUND_HALF_EVEN context, then correctly rounded to a double. */
-static int tp_compose_decimal_ratio(uint64_t numerator, uint64_t denominator, double* value)
+BUSTER_GLOBAL_LOCAL int tp_compose_decimal_ratio(uint64_t numerator, uint64_t denominator, double* value)
 {
     /* remainder * 10 stays below 2^64 for these operand bounds. */
     int valid = denominator > 0 && numerator <= TP_COMPOSE_TOTAL_BYTES_MAX && denominator <= TP_COMPOSE_TOTAL_BYTES_MAX;
@@ -495,13 +452,12 @@ static int tp_compose_decimal_ratio(uint64_t numerator, uint64_t denominator, do
     return valid;
 }
 
-/* Iterative bottom-up merge sort of `order` by name (strcmp, which is
- * Python's code-point order for these ASCII names). */
-static int tp_compose_sort(unsigned* order, unsigned count, char const* names, size_t stride)
+/* Iterative bottom-up merge sort of `order` by the name at a fixed stride
+ * (strcmp: Python's code-point order for these ASCII names). */
+BUSTER_GLOBAL_LOCAL void tp_compose_sort(unsigned* order, unsigned* scratch, unsigned count, char const* names,
+                                         size_t stride)
 {
-    unsigned* scratch = count ? (unsigned*)malloc((size_t)count * sizeof(*scratch)) : NULL;
-    int valid = !count || scratch;
-    for (unsigned width = 1; valid && width < count; width *= 2)
+    for (unsigned width = 1; width < count; width *= 2)
     {
         for (unsigned left = 0; left < count; left += 2 * width)
         {
@@ -517,8 +473,39 @@ static int tp_compose_sort(unsigned* order, unsigned count, char const* names, s
         }
         memcpy(order, scratch, (size_t)count * sizeof(*order));
     }
-    free(scratch);
+}
+
+/* The same sort over an array of strings. */
+BUSTER_GLOBAL_LOCAL void tp_compose_sort_text(char const** items, char const** scratch, unsigned count)
+{
+    for (unsigned width = 1; width < count; width *= 2)
+    {
+        for (unsigned left = 0; left < count; left += 2 * width)
+        {
+            unsigned middle = left + width < count ? left + width : count;
+            unsigned right = left + 2 * width < count ? left + 2 * width : count;
+            unsigned a = left, b = middle, out = left;
+            while (a < middle || b < right)
+            {
+                int take_left = b >= right || (a < middle && strcmp(items[a], items[b]) <= 0);
+                scratch[out++] = take_left ? items[a++] : items[b++];
+            }
+        }
+        memcpy(items, scratch, (size_t)count * sizeof(*items));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL int tp_compose_add(uint64_t* total, uint64_t value)
+{
+    int valid = value <= UINT64_MAX - *total;
+    if (valid) *total += value;
     return valid;
+}
+
+BUSTER_GLOBAL_LOCAL Arena* tp_compose_arena(void)
+{
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = TP_COMPOSE_ARENA_BYTES, .flags = {.no_pool = 1}});
+    return arena;
 }
 
 /* ----------------------------------------------------------------- family */
@@ -536,22 +523,26 @@ typedef struct TpComposeFamily
     TpComposeMember* members;
     unsigned* order;
     unsigned* group_first;
+    unsigned* group_offset;
+    unsigned* group_rows;
+    unsigned* group_object;
     unsigned* object_groups;
     unsigned* runtime_dense;
     unsigned* runtime_ids;
     unsigned* runtime_index;
-    unsigned count, bootstrap, cells_total, object_count, runtime_count;
+    unsigned count, capacity, bootstrap, cells_total, object_count, runtime_count;
     unsigned cells[TP_RETIREMENT_COMPOSE_METRICS];
 } TpComposeFamily;
 
 /* The frozen A1 shape: ascending rows, groups numbered by smallest member,
  * singletons of one non-object row, object rows sharing configuration. */
-static int tp_compose_layout_check(TpRetirementComposeLayout const* layout)
+BUSTER_GLOBAL_LOCAL int tp_compose_layout_check(TpRetirementComposeLayout const* layout, Arena* arena)
 {
     int valid = layout && layout->rows && layout->group_kinds && layout->row_count && layout->group_count &&
                 layout->row_count <= TP_RETIREMENT_MAX_CELLS && layout->group_count <= layout->row_count &&
                 layout->population_rows <= TP_RETIREMENT_MAX_CELLS && layout->untimed_groups <= TP_RETIREMENT_MAX_CELLS;
-    unsigned* first = valid ? (unsigned*)malloc((size_t)layout->group_count * 2 * sizeof(*first)) : NULL;
+    unsigned* first = valid ? (unsigned*)tp_retirement_compose_allocate(arena,
+                                  (uint64_t)layout->group_count * 2 * sizeof(unsigned)) : NULL;
     unsigned* members = first ? first + layout->group_count : NULL;
     valid = valid && first;
     for (unsigned g = 0; valid && g < layout->group_count; ++g)
@@ -588,25 +579,15 @@ static int tp_compose_layout_check(TpRetirementComposeLayout const* layout)
     }
     valid = valid && next == layout->group_count;
     for (unsigned g = 0; valid && g < layout->group_count; ++g)
-        valid = layout->group_kinds[g] == TP_RETIREMENT_GROUP_OBJECT || members[g] == 1;
-    free(first);
+        valid = (layout->group_kinds[g] == TP_RETIREMENT_GROUP_OBJECT && members[g] <= TP_RETIREMENT_BATCH_INPUTS) ||
+                members[g] == 1;
     return valid;
-}
-
-static void tp_compose_family_free(TpComposeFamily* family)
-{
-    if (family)
-    {
-        free(family->members);
-        free(family->order);
-        free(family->group_first);
-        *family = (TpComposeFamily){0};
-    }
 }
 
 /* Dimension `d` of cell `cell` of metric `metric`: a timed row's identity or,
  * for the batch pair, its object group's (the group's first member). */
-static char const* tp_compose_cell_value(TpComposeFamily const* family, unsigned metric, unsigned cell, unsigned d)
+BUSTER_GLOBAL_LOCAL char const* tp_compose_cell_value(TpComposeFamily const* family, unsigned metric, unsigned cell,
+                                                      unsigned d)
 {
     TpRetirementComposeLayout const* layout = family->layout;
     unsigned dense = metric < 2 ? cell : metric == 2 ? family->runtime_dense[cell] :
@@ -614,10 +595,11 @@ static char const* tp_compose_cell_value(TpComposeFamily const* family, unsigned
     return layout->rows[dense].dimensions[d];
 }
 
-static int tp_compose_member_add(TpComposeFamily* family, unsigned capacity, unsigned metric, unsigned kind,
-                                 unsigned dimension, unsigned unit, char const* value, char const* format, ...)
+BUSTER_GLOBAL_LOCAL int tp_compose_member_add(TpComposeFamily* family, unsigned metric, unsigned kind,
+                                              unsigned dimension, unsigned unit, unsigned cells, char const* value,
+                                              char const* format, ...)
 {
-    int valid = family->count < capacity;
+    int valid = family->count < family->capacity;
     if (valid)
     {
         TpComposeMember* member = family->members + family->count;
@@ -633,7 +615,7 @@ static int tp_compose_member_add(TpComposeFamily* family, unsigned capacity, uns
             member->dimension = dimension;
             member->unit = unit;
             member->value = value;
-            member->cells = 0;
+            member->cells = cells;
             ++family->count;
         }
     }
@@ -641,30 +623,41 @@ static int tp_compose_member_add(TpComposeFamily* family, unsigned capacity, uns
 }
 
 /* The validator's _derive_statistical_family over the timed projection:
- * per metric an aggregate, one slice per present dimension value, one cell
- * per eligible row (wall/memory: timed rows; runtime: runtime rows) or
- * object group (the batch pair); members sorted; bootstrap and cell family
- * indexes are the ordinals among aggregate/slice and cell members. */
-static int tp_compose_family_build(TpRetirementComposeLayout const* layout, TpComposeFamily* family)
+ * per metric an aggregate, one slice per present dimension value (distinct
+ * values found by sorting, each with its cell count), one cell per eligible
+ * row (wall/memory: timed rows; runtime: runtime rows) or object group (the
+ * batch pair); members sorted; bootstrap and cell family indexes are the
+ * ordinals among aggregate/slice and cell members. The group tables (member
+ * rows per group, object ordinal per group) serve the transcript join. */
+BUSTER_GLOBAL_LOCAL int tp_compose_family_build(TpRetirementComposeLayout const* layout, TpComposeFamily* family,
+                                                Arena* arena)
 {
     *family = (TpComposeFamily){.layout = layout};
-    int valid = tp_compose_layout_check(layout);
+    int valid = tp_compose_layout_check(layout, arena);
     unsigned rows = valid ? layout->row_count : 0, groups = valid ? layout->group_count : 0;
-    size_t slots = valid ? (size_t)groups * 2 + (size_t)rows * 3 : 0;
-    family->group_first = valid ? (unsigned*)malloc(slots * sizeof(unsigned)) : NULL;
+    uint64_t slots = valid ? (uint64_t)groups * 4 + 1 + (uint64_t)rows * 4 : 0;
+    family->group_first = valid ? (unsigned*)tp_retirement_compose_allocate(arena, slots * sizeof(unsigned)) : NULL;
     valid = valid && family->group_first;
     if (valid)
     {
-        family->object_groups = family->group_first + groups;
-        family->runtime_dense = family->object_groups + groups;
+        family->group_offset = family->group_first + groups;
+        family->group_object = family->group_offset + groups + 1;
+        family->object_groups = family->group_object + groups;
+        family->group_rows = family->object_groups + groups;
+        family->runtime_dense = family->group_rows + rows;
         family->runtime_ids = family->runtime_dense + rows;
         family->runtime_index = family->runtime_ids + rows;
-        for (unsigned g = 0; g < groups; ++g) family->group_first[g] = TP_COMPOSE_NONE;
+        for (unsigned g = 0; g < groups; ++g)
+        {
+            family->group_first[g] = TP_COMPOSE_NONE;
+            family->group_object[g] = TP_COMPOSE_NONE;
+        }
         for (unsigned r = 0; r < rows; ++r)
         {
             TpRetirementComposeRow const* row = layout->rows + r;
             family->runtime_index[r] = TP_COMPOSE_NONE;
             if (family->group_first[row->group] == TP_COMPOSE_NONE) family->group_first[row->group] = r;
+            ++family->group_offset[row->group + 1];
             if (row->runtime)
             {
                 family->runtime_index[r] = family->runtime_count;
@@ -672,8 +665,16 @@ static int tp_compose_family_build(TpRetirementComposeLayout const* layout, TpCo
                 family->runtime_dense[family->runtime_count++] = r;
             }
         }
+        for (unsigned g = 0; g < groups; ++g) family->group_offset[g + 1] += family->group_offset[g];
+        /* Members in ascending census order; object_groups is scratch. */
+        for (unsigned g = 0; g < groups; ++g) family->object_groups[g] = family->group_offset[g];
+        for (unsigned r = 0; r < rows; ++r) family->group_rows[family->object_groups[layout->rows[r].group]++] = r;
         for (unsigned g = 0; g < groups; ++g)
-            if (layout->group_kinds[g] == TP_RETIREMENT_GROUP_OBJECT) family->object_groups[family->object_count++] = g;
+            if (layout->group_kinds[g] == TP_RETIREMENT_GROUP_OBJECT)
+            {
+                family->group_object[g] = family->object_count;
+                family->object_groups[family->object_count++] = g;
+            }
         family->cells[0] = family->cells[1] = rows;
         family->cells[2] = family->runtime_count;
         family->cells[3] = family->cells[4] = family->object_count;
@@ -684,48 +685,48 @@ static int tp_compose_family_build(TpRetirementComposeLayout const* layout, TpCo
             if (valid) family->cells_total += family->cells[m];
         }
     }
-    unsigned capacity = 0;
-    for (unsigned m = 0; valid && m < TP_RETIREMENT_COMPOSE_METRICS; ++m)
-        capacity += 1 + family->cells[m] * (TP_RETIREMENT_COMPOSE_DIMENSIONS + 1);
-    family->members = valid ? (TpComposeMember*)malloc((size_t)capacity * sizeof(*family->members)) : NULL;
-    family->order = valid ? (unsigned*)malloc((size_t)capacity * sizeof(*family->order)) : NULL;
-    valid = valid && family->members && family->order;
+    /* Aggregates and slices share the bootstrap cap; cells are exact. */
+    family->capacity = valid ? TP_RETIREMENT_COMPOSE_BOOTSTRAP_MEMBERS + family->cells_total : 0;
+    family->members = valid ? (TpComposeMember*)tp_retirement_compose_allocate(arena,
+                                  (uint64_t)family->capacity * sizeof(TpComposeMember)) : NULL;
+    family->order = valid ? (unsigned*)tp_retirement_compose_allocate(arena,
+                                (uint64_t)family->capacity * 2 * sizeof(unsigned)) : NULL;
+    char const** values = valid ? (char const**)tp_retirement_compose_allocate(arena,
+                              (uint64_t)rows * 2 * sizeof(char const*)) : NULL;
+    valid = valid && family->members && family->order && values;
     for (unsigned m = 0; valid && m < TP_RETIREMENT_COMPOSE_METRICS; ++m)
     {
         char const* metric = tp_compose_metric_names[m];
-        valid = tp_compose_member_add(family, capacity, m, 0, TP_COMPOSE_NONE, TP_COMPOSE_NONE, NULL,
-                                      "%s/aggregate", metric);
+        unsigned cells = family->cells[m];
+        valid = tp_compose_member_add(family, m, 0, TP_COMPOSE_NONE, TP_COMPOSE_NONE, cells, NULL, "%s/aggregate", metric);
         for (unsigned d = 0; valid && d < TP_RETIREMENT_COMPOSE_DIMENSIONS; ++d)
-            for (unsigned cell = 0; valid && cell < family->cells[m]; ++cell)
+        {
+            for (unsigned cell = 0; cell < cells; ++cell) values[cell] = tp_compose_cell_value(family, m, cell, d);
+            tp_compose_sort_text(values, values + rows, cells);
+            unsigned run = 0;
+            for (unsigned cell = 0; valid && cell < cells; ++cell)
             {
-                char const* value = tp_compose_cell_value(family, m, cell, d);
-                int seen = 0;
-                for (unsigned earlier = 0; !seen && earlier < cell; ++earlier)
-                    seen = !strcmp(tp_compose_cell_value(family, m, earlier, d), value);
-                if (!seen)
-                    valid = tp_compose_member_add(family, capacity, m, 0, d, TP_COMPOSE_NONE, value, "%s/slice/%s=%s",
-                                                  metric, tp_compose_dimension_names[d], value);
+                ++run;
+                if (cell + 1 == cells || strcmp(values[cell], values[cell + 1]))
+                {
+                    valid = tp_compose_member_add(family, m, 0, d, TP_COMPOSE_NONE, run, values[cell], "%s/slice/%s=%s",
+                                                  metric, tp_compose_dimension_names[d], values[cell]);
+                    run = 0;
+                }
             }
-        for (unsigned cell = 0; valid && cell < family->cells[m]; ++cell)
-            valid = m < 2 ? tp_compose_member_add(family, capacity, m, 1, TP_COMPOSE_NONE, cell, NULL,
-                                                  "%s/cell/row=%u", metric, layout->rows[cell].id) :
-                    m == 2 ? tp_compose_member_add(family, capacity, m, 1, TP_COMPOSE_NONE, cell, NULL,
-                                                   "%s/cell/row=%u", metric, family->runtime_ids[cell]) :
-                             tp_compose_member_add(family, capacity, m, 1, TP_COMPOSE_NONE, cell, NULL,
-                                                   "%s/cell/group=%u", metric, family->object_groups[cell]);
+        }
+        for (unsigned cell = 0; valid && cell < cells; ++cell)
+            valid = m < 2 ? tp_compose_member_add(family, m, 1, TP_COMPOSE_NONE, cell, 1, NULL, "%s/cell/row=%u", metric,
+                                                  layout->rows[cell].id) :
+                    m == 2 ? tp_compose_member_add(family, m, 1, TP_COMPOSE_NONE, cell, 1, NULL, "%s/cell/row=%u",
+                                                   metric, family->runtime_ids[cell]) :
+                             tp_compose_member_add(family, m, 1, TP_COMPOSE_NONE, cell, 1, NULL, "%s/cell/group=%u",
+                                                   metric, family->object_groups[cell]);
     }
-    for (unsigned i = 0; valid && i < family->count; ++i)
-    {
-        TpComposeMember* member = family->members + i;
-        family->order[i] = i;
-        if (member->kind) member->cells = 1;
-        else if (member->dimension == TP_COMPOSE_NONE) member->cells = family->cells[member->metric];
-        else
-            for (unsigned cell = 0; cell < family->cells[member->metric]; ++cell)
-                member->cells += !strcmp(tp_compose_cell_value(family, member->metric, cell, member->dimension),
-                                         member->value);
-    }
-    valid = valid && tp_compose_sort(family->order, family->count, family->members[0].name, sizeof(TpComposeMember));
+    for (unsigned i = 0; valid && i < family->count; ++i) family->order[i] = i;
+    if (valid)
+        tp_compose_sort(family->order, family->order + family->capacity, family->count, family->members[0].name,
+                        sizeof(TpComposeMember));
     unsigned cells = 0;
     for (unsigned i = 0; valid && i < family->count; ++i)
     {
@@ -735,20 +736,13 @@ static int tp_compose_family_build(TpRetirementComposeLayout const* layout, TpCo
     }
     valid = valid && family->bootstrap && family->bootstrap <= TP_RETIREMENT_COMPOSE_BOOTSTRAP_MEMBERS &&
             cells == family->cells_total;
-    if (!valid) tp_compose_family_free(family);
-    return valid;
-}
-
-static int tp_compose_add(uint64_t* total, uint64_t value)
-{
-    int valid = value <= UINT64_MAX - *total;
-    if (valid) *total += value;
+    if (!valid) *family = (TpComposeFamily){0};
     return valid;
 }
 
 /* Every composer output's byte bound, each at most one store file. */
-static int tp_compose_bounds_of(TpRetirementComposeShape const* shape, TpComposeFamily const* family,
-                                TpRetirementComposeBounds* bounds)
+BUSTER_GLOBAL_LOCAL int tp_compose_bounds_of(TpRetirementComposeShape const* shape, TpComposeFamily const* family,
+                                             TpRetirementComposeBounds* bounds)
 {
     TpRetirementComposeLayout const* layout = shape->layout;
     uint64_t per_unit = (uint64_t)TP_RETIREMENT_ROUNDS * shape->pairs;
@@ -786,6 +780,8 @@ static int tp_compose_bounds_of(TpRetirementComposeShape const* shape, TpCompose
         result.replay = TP_COMPOSE_REPLAY_FIXED_BYTES + (uint64_t)family->count * TP_COMPOSE_REPLAY_MEMBER_BYTES;
         result.bundle = TP_COMPOSE_BUNDLE_BYTES;
         result.receipt = TP_RETIREMENT_RECEIPT_BYTES;
+        result.retained = sizeof(TP_RETIREMENT_RETAINED_MANIFEST_HEADER) +
+                          (uint64_t)TP_RETIREMENT_STORE_FILES * TP_COMPOSE_RETAINED_LINE_BYTES;
         result.seal = TP_COMPOSE_SEAL_FIXED_BYTES +
             (uint64_t)(shape->prior_entries + TP_RETIREMENT_STORE_FILES) * TP_COMPOSE_SEAL_ENTRY_BYTES;
         result.files = result.manifest_count + TP_RETIREMENT_COMPOSE_FIXED_OUTPUTS;
@@ -794,11 +790,11 @@ static int tp_compose_bounds_of(TpRetirementComposeShape const* shape, TpCompose
      * a family too large for it is refused here, before any timing. */
     valid = valid && result.manifests <= TP_RETIREMENT_STORE_FILE_BYTES && result.code <= TP_RETIREMENT_STORE_FILE_BYTES &&
             result.series <= TP_RETIREMENT_STORE_FILE_BYTES && result.replay <= TP_RETIREMENT_STORE_FILE_BYTES &&
-            result.seal <= TP_RETIREMENT_STORE_FILE_BYTES;
+            result.retained <= TP_RETIREMENT_STORE_FILE_BYTES && result.seal <= TP_RETIREMENT_STORE_FILE_BYTES;
     valid = valid && tp_compose_add(&result.total, result.manifests) && tp_compose_add(&result.total, result.code) &&
             tp_compose_add(&result.total, result.series) && tp_compose_add(&result.total, result.replay) &&
             tp_compose_add(&result.total, result.bundle) && tp_compose_add(&result.total, result.receipt) &&
-            tp_compose_add(&result.total, result.seal);
+            tp_compose_add(&result.total, result.retained) && tp_compose_add(&result.total, result.seal);
     *bounds = valid ? result : (TpRetirementComposeBounds){0};
     return valid;
 }
@@ -806,30 +802,121 @@ static int tp_compose_bounds_of(TpRetirementComposeShape const* shape, TpCompose
 int tp_retirement_compose_bounds(TpRetirementComposeShape const* shape, TpRetirementComposeBounds* bounds)
 {
     TpComposeFamily family;
-    int valid = shape && bounds && tp_compose_family_build(shape->layout, &family);
-    if (valid)
-    {
-        valid = tp_compose_bounds_of(shape, &family, bounds);
-        tp_compose_family_free(&family);
-    }
+    Arena* arena = shape && bounds ? tp_compose_arena() : NULL;
+    int valid = arena && tp_compose_family_build(shape->layout, &family, arena) &&
+                tp_compose_bounds_of(shape, &family, bounds);
+    if (arena) arena_destroy(arena, 1);
     if (bounds && !valid) *bounds = (TpRetirementComposeBounds){0};
     return valid;
 }
 
+/* ------------------------------------------------------------ declaration */
+
+BUSTER_GLOBAL_LOCAL int tp_compose_kind(char const* kind)
+{
+    size_t length = kind ? strnlen(kind, TP_RETIREMENT_COMPOSE_KIND_BYTES + 1) : 0;
+    int valid = length && length <= TP_RETIREMENT_COMPOSE_KIND_BYTES;
+    for (size_t i = 0; valid && i < length; ++i) valid = kind[i] >= 'a' && kind[i] <= 'z';
+    return valid;
+}
+
+/* Paths the composer publishes itself (and the producer's receipt). */
+BUSTER_GLOBAL_LOCAL int tp_compose_reserved_path(char const* path)
+{
+    int reserved = !strcmp(path, TP_RETIREMENT_EXECUTION_RECEIPT_PATH) ||
+                   !strcmp(path, TP_RETIREMENT_RETAINED_MANIFEST_PATH) || !strcmp(path, TP_RETIREMENT_COMPOSE_CODE_PATH) ||
+                   !strcmp(path, TP_RETIREMENT_COMPOSE_SERIES_PATH) || !strcmp(path, TP_RETIREMENT_COMPOSE_REPLAY_PATH) ||
+                   !strcmp(path, TP_RETIREMENT_COMPOSE_BUNDLE_PATH);
+    return reserved;
+}
+
+/* Validate the declaration and digest its canonical text:
+ *   BQ-RETIREMENT-RETAINED-DECLARATION-V1
+ *   file <kind> <reserved> <bytes_max> <path>
+ *   group <kind> <reserved> <files_max> <bytes_max> <prefix> =<suffix>
+ *   prior <entries> <bytes>
+ * in declaration order. */
+BUSTER_GLOBAL_LOCAL int tp_compose_declaration_digest(TpRetirementComposeDeclaration const* declaration,
+                                                      char output[65])
+{
+    int valid = declaration && declaration->retained_count <= TP_RETIREMENT_COMPOSE_RETAINED_ENTRIES &&
+                (!declaration->retained_count || declaration->retained) &&
+                declaration->prior_entries <= TP_RETIREMENT_STORE_FILES &&
+                declaration->prior_bytes <= TP_RETIREMENT_STORE_TOTAL_BYTES;
+    Sha256 hash;
+    sha256_init(&hash);
+    char line[TP_RETIREMENT_STORE_PATH_BYTES + TP_COMPOSE_SUFFIX_BYTES + 128];
+    int length = snprintf(line, sizeof(line), "BQ-RETIREMENT-RETAINED-DECLARATION-V1\n");
+    sha256_add(&hash, line, (u64)length);
+    for (unsigned i = 0; valid && i < declaration->retained_count; ++i)
+    {
+        TpRetirementComposeRetained const* entry = declaration->retained + i;
+        int group = entry->suffix != NULL;
+        size_t prefix = entry->prefix ? strnlen(entry->prefix, TP_RETIREMENT_STORE_PATH_BYTES + 1) : 0;
+        size_t suffix = group ? strnlen(entry->suffix, TP_COMPOSE_SUFFIX_BYTES + 1) : 0;
+        valid = tp_compose_kind(entry->kind) && entry->reserved <= 1 && (entry->reserved ? !entry->bytes_max :
+                entry->bytes_max && entry->bytes_max <= TP_RETIREMENT_STORE_TOTAL_BYTES) &&
+                tp_compose_relative_path(entry->prefix);
+        if (valid && group)
+        {
+            valid = suffix <= TP_COMPOSE_SUFFIX_BYTES && (!suffix || tp_compose_printable(entry->suffix, suffix)) &&
+                    !memchr(entry->suffix, '/', suffix) && prefix + TP_COMPOSE_GROUP_DIGITS + suffix <=
+                    TP_RETIREMENT_STORE_PATH_BYTES && entry->files_max && entry->files_max <= TP_RETIREMENT_COMPOSE_GROUP_FILES;
+            length = valid ? snprintf(line, sizeof(line), "group %s %u %u %" PRIu64 " %s =%s\n", entry->kind,
+                                      entry->reserved, entry->files_max, entry->bytes_max, entry->prefix, entry->suffix) : 0;
+        }
+        else if (valid)
+        {
+            valid = entry->files_max == 1 && !tp_compose_reserved_path(entry->prefix);
+            for (unsigned j = 0; valid && j < i; ++j)
+                valid = declaration->retained[j].suffix || strcmp(declaration->retained[j].prefix, entry->prefix);
+            length = valid ? snprintf(line, sizeof(line), "file %s %u %" PRIu64 " %s\n", entry->kind, entry->reserved,
+                                      entry->bytes_max, entry->prefix) : 0;
+        }
+        valid = valid && length > 0 && (size_t)length < sizeof(line);
+        if (valid) sha256_add(&hash, line, (u64)length);
+    }
+    length = valid ? snprintf(line, sizeof(line), "prior %u %" PRIu64 "\n", declaration->prior_entries,
+                              declaration->prior_bytes) : 0;
+    if (valid)
+    {
+        sha256_add(&hash, line, (u64)length);
+        sha256_finish_hex(&hash, (char8*)output);
+    }
+    else output[0] = 0;
+    return valid;
+}
+
 int tp_retirement_compose_plan(TpRetirementStore* store, TpRetirementCampaignCapacity const* capacity,
-    TpRetirementComposeShape const* shape, unsigned retained_files, uint64_t retained_bytes,
+    TpRetirementComposeShape const* shape, TpRetirementComposeDeclaration const* declaration,
     unsigned external_entries, uint64_t external_bytes, TpRetirementCampaignStorePlan* plan)
 {
     TpRetirementComposeBounds bounds = {0};
-    uint64_t control_bytes = 0;
-    int valid = store && capacity && plan && tp_retirement_compose_bounds(shape, &bounds) &&
-                retained_files <= TP_RETIREMENT_STORE_FILES - bounds.files &&
-                tp_compose_add(&control_bytes, bounds.total) && tp_compose_add(&control_bytes, retained_bytes);
+    uint64_t control_bytes = 0, control_files = 0, bounded = capacity ? capacity->total_metrics_shards_upper_bound : 0;
+    char digest[65];
+    int valid = store && capacity && plan && shape && tp_retirement_compose_bounds(shape, &bounds) &&
+                tp_compose_declaration_digest(declaration, digest) &&
+                shape->prior_entries == declaration->prior_entries &&
+                tp_compose_add(&control_bytes, bounds.total) && tp_compose_add(&control_files, bounds.files);
+    for (unsigned i = 0; valid && i < declaration->retained_count; ++i)
+    {
+        TpRetirementComposeRetained const* entry = declaration->retained + i;
+        if (!entry->reserved)
+        {
+            valid = tp_compose_add(&control_files, entry->files_max) && tp_compose_add(&control_bytes, entry->bytes_max);
+            if (valid && entry->suffix) bounded += entry->files_max;
+        }
+    }
+    uint64_t externals = (uint64_t)external_entries + (valid ? declaration->prior_entries : 0);
+    valid = valid && control_files <= TP_RETIREMENT_STORE_FILES && externals <= TP_RETIREMENT_STORE_FILES &&
+            external_bytes <= TP_RETIREMENT_STORE_TOTAL_BYTES && tp_compose_add(&external_bytes, declaration->prior_bytes);
     if (plan) *plan = (TpRetirementCampaignStorePlan){0};
-    valid = valid && tp_retirement_campaign_store_preflight(capacity, bounds.files + retained_files, control_bytes,
-        external_entries, external_bytes, plan) &&
-        plan->owned_files <= store->capacity &&
-        tp_retirement_store_plan(store, (unsigned)plan->owned_files, plan->owned_bytes, external_entries, external_bytes);
+    valid = valid && tp_retirement_campaign_store_preflight(capacity, control_files, control_bytes,
+        externals, external_bytes, plan) &&
+        plan->owned_files <= store->capacity && bounded <= plan->owned_files &&
+        tp_retirement_store_plan(store, (unsigned)plan->owned_files, plan->owned_bytes, (unsigned)externals,
+                                 external_bytes) &&
+        tp_retirement_store_bound(store, (unsigned)bounded) && tp_retirement_store_retain(store, digest);
     if (!valid)
     {
         if (plan) *plan = (TpRetirementCampaignStorePlan){0};
@@ -849,7 +936,7 @@ typedef struct TpComposeReader
     int failed;
 } TpComposeReader;
 
-static int tp_compose_reader_open(TpComposeReader* reader, TpRetirementStore* store, char const* path)
+BUSTER_GLOBAL_LOCAL int tp_compose_reader_open(TpComposeReader* reader, TpRetirementStore* store, char const* path)
 {
     *reader = (TpComposeReader){0};
     int fd = tp_retirement_store_read(store, path, &reader->entry);
@@ -862,7 +949,7 @@ static int tp_compose_reader_open(TpComposeReader* reader, TpRetirementStore* st
 }
 
 /* 1 for one LF-terminated line, 0 at a clean end of file, -1 otherwise. */
-static int tp_compose_reader_line(TpComposeReader* reader, char* line, size_t capacity, size_t* length)
+BUSTER_GLOBAL_LOCAL int tp_compose_reader_line(TpComposeReader* reader, char* line, size_t capacity, size_t* length)
 {
     size_t used = 0;
     int result = -1, done = reader->failed || !reader->stream;
@@ -897,30 +984,8 @@ static int tp_compose_reader_line(TpComposeReader* reader, char* line, size_t ca
     return result;
 }
 
-/* Read exactly `count` raw bytes, hashing them into the file and `extra`. */
-static int tp_compose_reader_bytes(TpComposeReader* reader, uint64_t count, Sha256* extra)
-{
-    unsigned char buffer[65536];
-    int valid = !reader->failed && reader->stream;
-    while (valid && count)
-    {
-        size_t want = count < sizeof(buffer) ? (size_t)count : sizeof(buffer);
-        size_t got = fread(buffer, 1, want, reader->stream);
-        valid = got == want;
-        if (valid)
-        {
-            sha256_add(&reader->hash, buffer, (u64)got);
-            sha256_add(extra, buffer, (u64)got);
-            reader->bytes += got;
-            count -= got;
-        }
-    }
-    if (!valid) reader->failed = 1;
-    return valid;
-}
-
 /* Close after requiring the sealed byte count, end of file and digest. */
-static int tp_compose_reader_close(TpComposeReader* reader)
+BUSTER_GLOBAL_LOCAL int tp_compose_reader_close(TpComposeReader* reader)
 {
     char digest[65];
     int valid = !reader->failed && reader->stream && reader->entry && getc_unlocked(reader->stream) == EOF &&
@@ -935,7 +1000,7 @@ static int tp_compose_reader_close(TpComposeReader* reader)
     return valid;
 }
 
-static void tp_compose_reader_abandon(TpComposeReader* reader)
+BUSTER_GLOBAL_LOCAL void tp_compose_reader_abandon(TpComposeReader* reader)
 {
     if (reader->stream) fclose(reader->stream);
     reader->stream = NULL;
@@ -944,18 +1009,23 @@ static void tp_compose_reader_abandon(TpComposeReader* reader)
 
 /* One writer's metrics shards: artifacts must tile each declared shard from
  * offset zero in record order, shards in declared order (tag, 0000...), with
- * no declared shard left unreferenced or partly referenced. */
+ * no declared shard left unreferenced or partly referenced. Each artifact is
+ * read as D's metrics lines (a CC_METRICS header, then CC_METRICS_INPUT and
+ * CC_METRICS_FUNCTION records), and its first `members` inputs yield their
+ * (interval, arena high-water) samples. */
 typedef struct TpComposeTiling
 {
     TpRetirementStore* store;
     char const* const* paths;
+    char* line;
     unsigned count, next;
     TpComposeReader reader;
     int open, failed;
     uint64_t artifacts;
 } TpComposeTiling;
 
-static int tp_compose_shard_tag(char const* path, char tag[TP_RETIREMENT_METRICS_TAG_BYTES + 1], unsigned* index)
+BUSTER_GLOBAL_LOCAL int tp_compose_shard_tag(char const* path, char tag[TP_RETIREMENT_METRICS_TAG_BYTES + 1],
+                                             unsigned* index)
 {
     size_t length = path ? strnlen(path, TP_RETIREMENT_METRICS_PATH_CAP) : 0;
     int valid = tp_retirement_metrics_shard_leaf(path);
@@ -969,11 +1039,12 @@ static int tp_compose_shard_tag(char const* path, char tag[TP_RETIREMENT_METRICS
     return valid;
 }
 
-static int tp_compose_tiling_init(TpComposeTiling* tiling, TpRetirementStore* store, char const* const* paths,
-                                  unsigned count, char tag[TP_RETIREMENT_METRICS_TAG_BYTES + 1])
+BUSTER_GLOBAL_LOCAL int tp_compose_tiling_init(TpComposeTiling* tiling, TpRetirementStore* store,
+                                               char const* const* paths, unsigned count, char* line,
+                                               char tag[TP_RETIREMENT_METRICS_TAG_BYTES + 1])
 {
-    *tiling = (TpComposeTiling){.store = store, .paths = paths, .count = count};
-    int valid = count <= TP_RETIREMENT_METRICS_SHARDS && (!count || paths);
+    *tiling = (TpComposeTiling){.store = store, .paths = paths, .count = count, .line = line};
+    int valid = count <= TP_RETIREMENT_METRICS_SHARDS && (!count || paths) && line;
     tag[0] = 0;
     for (unsigned i = 0; valid && i < count; ++i)
     {
@@ -986,8 +1057,27 @@ static int tp_compose_tiling_init(TpComposeTiling* tiling, TpRetirementStore* st
     return valid;
 }
 
-static int tp_compose_tiling_add(TpComposeTiling* tiling, char const* path, uint64_t offset, uint64_t bytes,
-                                 char const* sha256)
+/* One CC_METRICS_INPUT record: its ordinal and, for a member, its sample. */
+BUSTER_GLOBAL_LOCAL int tp_compose_metrics_input(char const* line, size_t length, unsigned ordinal,
+                                                 uint64_t* interval, uint64_t* memory)
+{
+    TpRetirementMetricsValue values[TP_METRICS_I_COUNT];
+    int valid = tp_retirement_metrics_line(line, length, "CC_METRICS_INPUT", tp_retirement_metrics_input_fields,
+                                           TP_METRICS_I_COUNT, values) &&
+                values[TP_METRICS_I_INDEX].number == ordinal &&
+                values[TP_METRICS_I_END].number > values[TP_METRICS_I_START].number;
+    if (valid && interval)
+    {
+        *interval = values[TP_METRICS_I_END].number - values[TP_METRICS_I_START].number;
+        *memory = values[TP_METRICS_I_ARENA_PEAK].number;
+        valid = *memory > 0 && *memory <= TP_COMPOSE_MEMORY_MAX;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL int tp_compose_tiling_add(TpComposeTiling* tiling, char const* path, uint64_t offset,
+                                              uint64_t bytes, char const* sha256, unsigned members,
+                                              uint64_t* intervals, uint64_t* memory)
 {
     int valid = !tiling->failed && bytes && bytes <= TP_RETIREMENT_METRICS_ARTIFACT_BYTES && tp_compose_digest(sha256);
     int same = valid && tiling->open && !strcmp(path, tiling->reader.entry->path);
@@ -1004,17 +1094,37 @@ static int tp_compose_tiling_add(TpComposeTiling* tiling, char const* path, uint
         }
     }
     valid = valid && offset == tiling->reader.bytes && bytes <= tiling->reader.entry->bytes - offset;
-    if (valid)
+    Sha256 hash;
+    sha256_init(&hash);
+    uint64_t consumed = 0;
+    unsigned inputs = 0, lines = 0;
+    while (valid && consumed < bytes)
     {
-        Sha256 hash;
-        char digest[65];
-        sha256_init(&hash);
-        valid = tp_compose_reader_bytes(&tiling->reader, bytes, &hash);
+        size_t length = 0;
+        valid = tp_compose_reader_line(&tiling->reader, tiling->line, TP_RETIREMENT_METRICS_LINE_BYTES + 1, &length) == 1 &&
+                length <= bytes - consumed;
         if (valid)
         {
-            sha256_finish_hex(&hash, (char8*)digest);
-            valid = !strcmp(digest, sha256);
+            sha256_add(&hash, tiling->line, (u64)length);
+            consumed += length;
+            size_t body = length - 1;
+            if (!lines) valid = body > 11 && !memcmp(tiling->line, "CC_METRICS ", 11);
+            else if (body > 17 && !memcmp(tiling->line, "CC_METRICS_INPUT ", 17))
+            {
+                valid = inputs < TP_RETIREMENT_BATCH_INPUTS &&
+                        tp_compose_metrics_input(tiling->line, body, inputs, inputs < members ? intervals + inputs : NULL,
+                                                 inputs < members ? memory + inputs : NULL);
+                ++inputs;
+            }
+            else valid = body > 20 && !memcmp(tiling->line, "CC_METRICS_FUNCTION ", 20) && inputs;
+            ++lines;
         }
+    }
+    if (valid)
+    {
+        char digest[65];
+        sha256_finish_hex(&hash, (char8*)digest);
+        valid = consumed == bytes && inputs >= members && !strcmp(digest, sha256);
         tiling->artifacts += valid;
     }
     if (!valid)
@@ -1026,7 +1136,7 @@ static int tp_compose_tiling_add(TpComposeTiling* tiling, char const* path, uint
     return valid;
 }
 
-static int tp_compose_tiling_finish(TpComposeTiling* tiling)
+BUSTER_GLOBAL_LOCAL int tp_compose_tiling_finish(TpComposeTiling* tiling)
 {
     int valid = !tiling->failed;
     if (tiling->open) valid = tp_compose_reader_close(&tiling->reader) && valid;
@@ -1036,7 +1146,7 @@ static int tp_compose_tiling_finish(TpComposeTiling* tiling)
     return valid;
 }
 
-static void tp_compose_tiling_abandon(TpComposeTiling* tiling)
+BUSTER_GLOBAL_LOCAL void tp_compose_tiling_abandon(TpComposeTiling* tiling)
 {
     if (tiling->open) tp_compose_reader_abandon(&tiling->reader);
     tiling->open = 0;
@@ -1045,7 +1155,8 @@ static void tp_compose_tiling_abandon(TpComposeTiling* tiling)
 
 /* `{"bytes":B,"offset":O,"path":"P","sha256":"S"}` or `null`. expected is 1
  * (an artifact is required), 0 (null is required) or -1 (either). */
-static int tp_compose_metrics_field(char const* line, size_t length, int expected, TpComposeTiling* tiling)
+BUSTER_GLOBAL_LOCAL int tp_compose_metrics_field(char const* line, size_t length, int expected, TpComposeTiling* tiling,
+                                                 unsigned members, uint64_t* intervals, uint64_t* memory)
 {
     char const* value = NULL;
     size_t count = 0;
@@ -1067,11 +1178,11 @@ static int tp_compose_metrics_field(char const* line, size_t length, int expecte
         tp_compose_cursor_literal(&cursor, ",\"sha256\":\"");
         tp_compose_cursor_text(&cursor, sha256, sizeof(sha256));
         tp_compose_cursor_literal(&cursor, "}");
-        valid = cursor.valid && cursor.offset == count && tp_compose_tiling_add(tiling, path, offset, bytes, sha256);
+        valid = cursor.valid && cursor.offset == count &&
+                tp_compose_tiling_add(tiling, path, offset, bytes, sha256, members, intervals, memory);
     }
     return valid;
 }
-
 
 /* ------------------------------------------------------------------ state */
 
@@ -1094,16 +1205,30 @@ typedef struct TpComposeState
 {
     TpRetirementComposeRequest const* request;
     TpRetirementStore* store;
+    Arena* arena;
     TpComposeFamily family;
     TpRetirementComposeBounds bounds;
     TpComposeTiling timed, untimed_tiling;
-    unsigned pairs, partitions;
+    unsigned pairs, partitions, retained_files;
+    uint64_t per_unit;
     TpComposeShard* shards;
     TpComposeShard* transcript;
     TpComposeShard* samples[2];
     double* ratios[TP_RETIREMENT_COMPOSE_METRICS];
+    /* Sample-phase observations per (unit, round, pair, variant). */
+    uint64_t* observations[TP_COMPOSE_OBSERVATIONS];
+    uint64_t* member_intervals;
+    uint64_t* member_memory;
+    char* line;
+    char* metrics_line;
+    /* The store files at inventory time (before any composer output),
+     * sorted by path, and each file's class and declaration. */
+    unsigned files;
+    unsigned* by_path;
+    unsigned char* classes;
+    unsigned* declared;
     Sha256 raw;
-    uint64_t invocations, untimed_records, code_records;
+    uint64_t invocations, untimed_records, untimed_production, code_records;
     uint64_t input_bytes[TP_RETIREMENT_COMPOSE_PARTITIONS];
     unsigned partition_population[TP_RETIREMENT_COMPOSE_PARTITIONS];
     unsigned partition_first[TP_RETIREMENT_COMPOSE_PARTITIONS], partition_shards[TP_RETIREMENT_COMPOSE_PARTITIONS];
@@ -1111,55 +1236,121 @@ typedef struct TpComposeState
     char raw_sha256[65], context_sha256[65];
     char summary[512];
     TpRetirementComposeArtifact manifests[TP_RETIREMENT_COMPOSE_PARTITIONS];
-    TpRetirementComposeArtifact code, series, replay, receipt, bundle, sealed, untimed;
+    TpRetirementComposeArtifact code, series, replay, receipt, bundle, sealed, untimed, retained;
     unsigned seal_entries;
 } TpComposeState;
 
-static TpRetirementStoredFile const* tp_compose_store_entry(TpRetirementStore const* store, char const* path)
+/* The store file at `path` (binary search of the sorted order), or NONE. */
+BUSTER_GLOBAL_LOCAL unsigned tp_compose_find(TpComposeState const* state, char const* path)
 {
-    TpRetirementStoredFile const* found = NULL;
-    for (unsigned i = 0; store && path && i < store->count; ++i)
-        if (!strcmp(store->files[i].path, path)) found = store->files + i;
+    unsigned low = 0, high = state->files, found = TP_COMPOSE_NONE;
+    while (path && low < high && found == TP_COMPOSE_NONE)
+    {
+        unsigned middle = low + (high - low) / 2;
+        int order = strcmp(state->store->files[state->by_path[middle]].path, path);
+        if (!order) found = state->by_path[middle];
+        else if (order < 0) low = middle + 1;
+        else high = middle;
+    }
     return found;
 }
 
-static unsigned tp_compose_occurrences(char const* path, char const* const* list, unsigned count)
+/* Mark one declared sealed input: present once and not otherwise claimed. */
+BUSTER_GLOBAL_LOCAL int tp_compose_claim(TpComposeState* state, char const* path)
 {
-    unsigned found = 0;
-    for (unsigned i = 0; list && i < count; ++i) found += list[i] && !strcmp(list[i], path);
-    return found;
+    unsigned index = tp_compose_find(state, path);
+    int valid = index != TP_COMPOSE_NONE && state->classes[index] == TP_COMPOSE_CLASS_FREE;
+    if (valid) state->classes[index] = TP_COMPOSE_CLASS_SEALED;
+    return valid;
 }
 
-/* Every store file is exactly one declared sealed input or retained file,
- * and every declared file is in the store: no missing or extra entry. */
-static int tp_compose_inventory(TpComposeState* state)
+/* Whether `path` is `<prefix>NNNN<suffix>`, and its index. */
+BUSTER_GLOBAL_LOCAL int tp_compose_group_member(TpRetirementComposeRetained const* entry, char const* path,
+                                                unsigned* index)
+{
+    size_t length = strlen(path), prefix = strlen(entry->prefix), suffix = strlen(entry->suffix);
+    int valid = length == prefix + TP_COMPOSE_GROUP_DIGITS + suffix && !memcmp(path, entry->prefix, prefix) &&
+                !memcmp(path + prefix + TP_COMPOSE_GROUP_DIGITS, entry->suffix, suffix);
+    unsigned value = 0;
+    for (unsigned i = 0; valid && i < TP_COMPOSE_GROUP_DIGITS; ++i)
+    {
+        char c = path[prefix + i];
+        valid = c >= '0' && c <= '9';
+        value = value * 10 + (unsigned)(c - '0');
+    }
+    *index = valid ? value : 0;
+    return valid;
+}
+
+/* Every store file is exactly one declared sealed input or matches exactly
+ * one entry of the retained declaration bound at plan time; every exact
+ * retained file is present, every group is contiguous from 0000 within its
+ * cap, and unreserved kinds stay within their reserved bytes. */
+BUSTER_GLOBAL_LOCAL int tp_compose_inventory(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
+    TpRetirementComposeDeclaration const* declaration = request->declaration;
     TpRetirementStore const* store = state->store;
-    uint64_t declared = (uint64_t)request->transcript_count + request->sample_counts[0] + request->sample_counts[1] +
-                        request->metrics_count + request->untimed_metrics_count + request->retained_count +
-                        (request->untimed_path ? 1 : 0);
-    int valid = declared == store->count && (!request->retained_count || request->retained_paths);
-    for (unsigned i = 0; valid && i < store->count; ++i)
+    int valid = 1;
+    for (unsigned i = 0; valid && i < request->transcript_count; ++i) valid = tp_compose_claim(state, request->transcript_paths[i]);
+    for (unsigned p = 0; p < 2; ++p)
+        for (unsigned i = 0; valid && i < request->sample_counts[p]; ++i)
+            valid = tp_compose_claim(state, request->sample_paths[p][i]);
+    for (unsigned i = 0; valid && i < request->metrics_count; ++i) valid = tp_compose_claim(state, request->metrics_paths[i]);
+    for (unsigned i = 0; valid && i < request->untimed_metrics_count; ++i)
+        valid = tp_compose_claim(state, request->untimed_metrics_paths[i]);
+    if (valid && request->untimed_path) valid = tp_compose_claim(state, request->untimed_path);
+    unsigned counts[TP_RETIREMENT_COMPOSE_RETAINED_ENTRIES] = {0}, highest[TP_RETIREMENT_COMPOSE_RETAINED_ENTRIES] = {0};
+    uint64_t bytes[TP_RETIREMENT_COMPOSE_RETAINED_ENTRIES] = {0};
+    for (unsigned f = 0; valid && f < state->files; ++f)
     {
-        char const* path = store->files[i].path;
-        unsigned found = tp_compose_occurrences(path, request->transcript_paths, request->transcript_count) +
-            tp_compose_occurrences(path, request->sample_paths[0], request->sample_counts[0]) +
-            tp_compose_occurrences(path, request->sample_paths[1], request->sample_counts[1]) +
-            tp_compose_occurrences(path, request->metrics_paths, request->metrics_count) +
-            tp_compose_occurrences(path, request->untimed_metrics_paths, request->untimed_metrics_count) +
-            tp_compose_occurrences(path, request->retained_paths, request->retained_count) +
-            (request->untimed_path && !strcmp(path, request->untimed_path));
-        valid = found == 1;
+        TpRetirementStoredFile const* file = store->files + f;
+        unsigned matches = 0, match = 0, index = 0;
+        for (unsigned e = 0; state->classes[f] == TP_COMPOSE_CLASS_FREE && e < declaration->retained_count; ++e)
+        {
+            TpRetirementComposeRetained const* entry = declaration->retained + e;
+            unsigned member = 0;
+            int matched = entry->suffix ? tp_compose_group_member(entry, file->path, &member) :
+                          !strcmp(entry->prefix, file->path);
+            if (matched)
+            {
+                ++matches;
+                match = e;
+                index = member;
+            }
+        }
+        if (state->classes[f] == TP_COMPOSE_CLASS_FREE)
+        {
+            valid = matches == 1;
+            if (valid)
+            {
+                state->classes[f] = TP_COMPOSE_CLASS_RETAINED;
+                state->declared[f] = match;
+                ++counts[match];
+                if (index > highest[match]) highest[match] = index;
+                valid = tp_compose_add(&bytes[match], file->bytes);
+                ++state->retained_files;
+            }
+        }
+    }
+    for (unsigned e = 0; valid && e < declaration->retained_count; ++e)
+    {
+        TpRetirementComposeRetained const* entry = declaration->retained + e;
+        valid = entry->suffix ? counts[e] <= entry->files_max && (!counts[e] || highest[e] + 1 == counts[e]) :
+                                counts[e] == 1;
+        valid = valid && (entry->reserved || bytes[e] <= entry->bytes_max);
     }
     return valid;
 }
 
-/* Re-read one pre-existing closure file below the evidence root without
- * following links, and require its declared size and digest. */
-static int tp_compose_evidence_file(int root, char const* path, uint64_t bytes, char const* sha256)
+/* Re-read one pre-existing file below the store root without following
+ * links; require its size (bytes, or at most `maximum` when bytes is 0) and
+ * digest; optionally keep its bytes in the arena. */
+BUSTER_GLOBAL_LOCAL int tp_compose_evidence_file(int root, char const* path, uint64_t bytes, uint64_t maximum,
+                                                 char const* sha256, Arena* arena, unsigned char** output,
+                                                 uint64_t* output_bytes)
 {
-    int valid = root >= 0 && tp_compose_relative_path(path) && bytes && tp_compose_digest(sha256);
+    int valid = root >= 0 && tp_compose_relative_path(path) && tp_compose_digest(sha256);
     int directory = valid ? fcntl(root, F_DUPFD_CLOEXEC, 3) : -1;
     size_t length = valid ? strlen(path) : 0, start = 0;
     int fd = -1;
@@ -1181,20 +1372,24 @@ static int tp_compose_evidence_file(int root, char const* path, uint64_t bytes, 
             start = i + 1;
         }
     struct stat info = {0};
-    valid = valid && fd >= 0 && fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_size >= 0 &&
-            (uint64_t)info.st_size == bytes;
+    valid = valid && fd >= 0 && fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_size > 0 &&
+            (bytes ? (uint64_t)info.st_size == bytes : (uint64_t)info.st_size <= maximum);
+    uint64_t size = valid ? (uint64_t)info.st_size : 0;
+    unsigned char* kept = valid && output ? (unsigned char*)tp_retirement_compose_allocate(arena, size) : NULL;
+    valid = valid && (!output || kept);
     Sha256 hash;
     sha256_init(&hash);
     uint64_t used = 0;
-    unsigned char buffer[65536];
-    while (valid && used < bytes)
+    unsigned char buffer[TP_COMPOSE_READ_BYTES];
+    while (valid && used < size)
     {
         ssize_t count = read(fd, buffer, sizeof(buffer));
         if (count < 0 && errno == EINTR) continue;
-        valid = count > 0 && (uint64_t)count <= bytes - used;
+        valid = count > 0 && (uint64_t)count <= size - used;
         if (valid)
         {
             sha256_add(&hash, buffer, (u64)count);
+            if (kept) memcpy(kept + used, buffer, (size_t)count);
             used += (uint64_t)count;
         }
     }
@@ -1206,21 +1401,29 @@ static int tp_compose_evidence_file(int root, char const* path, uint64_t bytes, 
     }
     if (fd >= 0 && close(fd) != 0) valid = 0;
     if (directory >= 0 && close(directory) != 0) valid = 0;
+    if (output) *output = valid ? kept : NULL;
+    if (output_bytes) *output_bytes = valid ? size : 0;
     return valid;
 }
 
-/* Rehash the pre-sample closure and join its plan, post-A/A and result-input
- * plan entries to the identities the receipt, bundle and sealed record bind. */
-static int tp_compose_prior(TpComposeState* state)
+/* Rehash the pre-sample closure below the store root (none is a store file;
+ * the declared entry count and bytes are exact) and join its plan, post-A/A
+ * and result-input plan entries to the identities the receipt, bundle and
+ * sealed record bind. */
+BUSTER_GLOBAL_LOCAL int tp_compose_prior(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
     unsigned plan = 0, post = 0, result_plan = 0;
-    int valid = request->prior_count && request->prior;
+    uint64_t total = 0;
+    int valid = request->prior_count && request->prior && request->prior_count == request->declaration->prior_entries;
     for (unsigned i = 0; valid && i < request->prior_count; ++i)
     {
         TpRetirementComposeClosure const* entry = request->prior + i;
-        valid = tp_compose_printable(entry->name, TP_RETIREMENT_COMPOSE_NAME_BYTES) &&
-                tp_compose_evidence_file(request->evidence_root, entry->path, entry->bytes, entry->sha256);
+        valid = tp_compose_printable(entry->name, TP_RETIREMENT_COMPOSE_NAME_BYTES) && entry->bytes &&
+                tp_compose_find(state, entry->path) == TP_COMPOSE_NONE &&
+                tp_compose_evidence_file(state->store->root, entry->path, entry->bytes, 0, entry->sha256, NULL, NULL,
+                                         NULL) &&
+                tp_compose_add(&total, entry->bytes);
         if (valid && !strcmp(entry->name, "workflow.execution_plan"))
             plan += !strcmp(entry->sha256, request->execution_plan_sha256);
         if (valid && !strcmp(entry->name, "workflow.phases.post_aa_binding"))
@@ -1231,18 +1434,79 @@ static int tp_compose_prior(TpComposeState* state)
                       !strcmp(entry->name, "workflow.phases.independent_replay")))
             valid = 0;
     }
-    valid = valid && plan == 1 && post == 1 && result_plan == 1;
+    valid = valid && plan == 1 && post == 1 && result_plan == 1 && total == request->declaration->prior_bytes;
+    return valid;
+}
+
+/* The observation slot of (unit, round, pair, variant) in a table. */
+BUSTER_GLOBAL_LOCAL size_t tp_compose_slot(TpComposeState const* state, unsigned unit, unsigned round, unsigned pair,
+                                           unsigned variant)
+{
+    size_t slot = (((size_t)unit * state->per_unit) + (size_t)round * state->pairs + pair) * 2 + variant;
+    return slot;
+}
+
+/* The dense timed row with census id `id`, or NONE. */
+BUSTER_GLOBAL_LOCAL unsigned tp_compose_dense(TpRetirementComposeLayout const* layout, uint64_t id)
+{
+    unsigned low = 0, high = layout->row_count, found = TP_COMPOSE_NONE;
+    while (low < high && found == TP_COMPOSE_NONE)
+    {
+        unsigned middle = low + (high - low) / 2;
+        if (layout->rows[middle].id == id) found = middle;
+        else if (layout->rows[middle].id < id) low = middle + 1;
+        else high = middle;
+    }
+    return found;
+}
+
+/* Record one sample-phase invocation's observations: a runtime row's wall
+ * time, a singleton row's wall time and RSS, or an object batch's wall time
+ * and RSS plus each member's metrics interval and arena bytes. */
+BUSTER_GLOBAL_LOCAL int tp_compose_observe(TpComposeState* state, TpRetirementInvocation const* invocation,
+                                           uint64_t elapsed, uint64_t rss)
+{
+    TpComposeFamily const* family = &state->family;
+    unsigned round = (unsigned)invocation->round, pair = (unsigned)invocation->pair, variant = invocation->variant;
+    int valid = 1;
+    if (invocation->kind)
+    {
+        unsigned dense = tp_compose_dense(state->request->layout, invocation->row);
+        unsigned runtime = dense != TP_COMPOSE_NONE ? family->runtime_index[dense] : TP_COMPOSE_NONE;
+        valid = runtime != TP_COMPOSE_NONE;
+        if (valid) state->observations[TP_COMPOSE_RUNTIME][tp_compose_slot(state, runtime, round, pair, variant)] = elapsed;
+    }
+    else if (family->group_object[invocation->group] == TP_COMPOSE_NONE)
+    {
+        size_t slot = tp_compose_slot(state, family->group_first[invocation->group], round, pair, variant);
+        state->observations[TP_COMPOSE_ROW_WALL][slot] = elapsed;
+        state->observations[TP_COMPOSE_ROW_MEMORY][slot] = rss;
+    }
+    else
+    {
+        size_t slot = tp_compose_slot(state, family->group_object[invocation->group], round, pair, variant);
+        state->observations[TP_COMPOSE_BATCH_WALL][slot] = elapsed;
+        state->observations[TP_COMPOSE_BATCH_RSS][slot] = rss;
+        for (unsigned i = family->group_offset[invocation->group]; i < family->group_offset[invocation->group + 1]; ++i)
+        {
+            unsigned member = i - family->group_offset[invocation->group];
+            size_t row = tp_compose_slot(state, family->group_rows[i], round, pair, variant);
+            state->observations[TP_COMPOSE_ROW_WALL][row] = state->member_intervals[member];
+            state->observations[TP_COMPOSE_ROW_MEMORY][row] = state->member_memory[member];
+        }
+    }
     return valid;
 }
 
 /* One transcript line against the next #619 cursor invocation. */
-static int tp_compose_invocation(TpComposeState* state, TpRetirementExecution* execution, char const* line,
-                                 size_t length, uint64_t* last_end)
+BUSTER_GLOBAL_LOCAL int tp_compose_invocation(TpComposeState* state, TpRetirementExecution* execution, char const* line,
+                                              size_t length, uint64_t* last_end)
 {
     TpRetirementComposeRequest const* request = state->request;
+    TpComposeFamily const* family = &state->family;
     TpRetirementInvocation expected = {0};
-    uint64_t pid = 0, started = 0, finished = 0, sequence = 0;
-    char token[129], instance[65], computed[65];
+    uint64_t pid = 0, started = 0, finished = 0, sequence = 0, rss = 0;
+    char token[TP_RETIREMENT_STORE_TOKEN_CAPACITY], instance[65], computed[65], seconds[32];
     int valid = tp_retirement_execution_peek(execution, &expected) == TP_RETIREMENT_NEXT_READY &&
         tp_compose_field_u64(line, length, "sequence", &sequence) && sequence == expected.sequence &&
         tp_compose_field_is(line, length, "kind", expected.kind ? "\"runtime\"" : "\"compiler\"") &&
@@ -1263,9 +1527,25 @@ static int tp_compose_invocation(TpComposeState* state, TpRetirementExecution* e
         !strcmp(instance, computed) &&
         tp_compose_field_u64(line, length, "started_ns", &started) &&
         tp_compose_field_u64(line, length, "finished_ns", &finished) &&
-        started > *last_end && finished > started && finished < request->completed_at_ns;
-    int object = valid && !expected.kind && request->layout->group_kinds[expected.group] == TP_RETIREMENT_GROUP_OBJECT;
-    valid = valid && tp_compose_metrics_field(line, length, object, &state->timed);
+        started > *last_end && finished > started && finished < request->completed_at_ns &&
+        tp_retirement_seconds(seconds, finished - started) &&
+        tp_compose_field_is(line, length, "wall_seconds", seconds);
+    /* A compiler process reports its peak RSS; a runtime process none. */
+    if (valid && !expected.kind) valid = tp_compose_field_u64(line, length, "peak_rss_bytes", &rss) && rss &&
+                                         rss <= TP_COMPOSE_MEMORY_MAX;
+    else if (valid) valid = tp_compose_field_is(line, length, "peak_rss_bytes", "null");
+    int object = valid && !expected.kind && family->group_object[expected.group] != TP_COMPOSE_NONE;
+    unsigned members = object ? family->group_offset[expected.group + 1] - family->group_offset[expected.group] : 0;
+    valid = valid && tp_compose_metrics_field(line, length, object, &state->timed, members, state->member_intervals,
+                                              state->member_memory);
+    /* Members run serially inside their batch's supervised interval. */
+    uint64_t total = 0;
+    for (unsigned i = 0; valid && i < members; ++i)
+    {
+        valid = state->member_intervals[i] <= finished - started - total;
+        if (valid) total += state->member_intervals[i];
+    }
+    if (valid && expected.phase) valid = tp_compose_observe(state, &expected, finished - started, rss);
     if (valid)
     {
         *last_end = finished;
@@ -1276,23 +1556,22 @@ static int tp_compose_invocation(TpComposeState* state, TpRetirementExecution* e
 
 /* The complete A/B transcript: D's cursor replays the frozen seeded schedule,
  * every process instance binds the campaign identity, intervals stay ordered
- * inside the bound window, and every metrics artifact tiles its shard. */
-static int tp_compose_transcript(TpComposeState* state)
+ * inside the bound window, every metrics artifact tiles its shard, and every
+ * sample-phase observation is recorded for the numeric join. */
+BUSTER_GLOBAL_LOCAL int tp_compose_transcript(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
     TpRetirementComposeLayout const* layout = request->layout;
     TpComposeFamily const* family = &state->family;
-    size_t slots = (size_t)layout->group_count * 3 + family->runtime_count;
-    unsigned* workspace = (unsigned*)malloc(slots * sizeof(*workspace));
+    uint64_t slots = (uint64_t)layout->group_count * 3 + family->runtime_count;
+    unsigned* workspace = (unsigned*)tp_retirement_compose_allocate(state->arena, slots * sizeof(unsigned));
     TpRetirementExecution execution;
     int valid = workspace && request->transcript_paths && request->transcript_count &&
         request->transcript_count <= TP_RETIREMENT_TRANSCRIPT_SHARDS &&
         tp_retirement_execution_init(&execution, request->statistics->seed, layout->group_count, family->runtime_ids,
-            family->runtime_count, layout->population_rows, state->pairs, workspace, slots);
+            family->runtime_count, layout->population_rows, state->pairs, workspace, (size_t)slots);
     state->invocations = valid ? execution.expected : 0;
     uint64_t last_end = request->bound_at_ns;
-    char* line = valid ? (char*)malloc(TP_COMPOSE_LINE_BYTES) : NULL;
-    valid = valid && line;
     for (unsigned s = 0; valid && s < request->transcript_count; ++s)
     {
         char const* path = request->transcript_paths[s];
@@ -1304,10 +1583,10 @@ static int tp_compose_transcript(TpComposeState* state)
         while (valid && more)
         {
             size_t length = 0;
-            int read = tp_compose_reader_line(&reader, line, TP_COMPOSE_LINE_BYTES, &length);
+            int read = tp_compose_reader_line(&reader, state->line, TP_COMPOSE_LINE_BYTES, &length);
             if (!read) more = 0;
             else valid = read == 1 && reader.lines <= TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS &&
-                         tp_compose_invocation(state, &execution, line, length, &last_end);
+                         tp_compose_invocation(state, &execution, state->line, length, &last_end);
         }
         uint64_t records = reader.lines;
         TpRetirementStoredFile const* entry = reader.entry;
@@ -1326,22 +1605,21 @@ static int tp_compose_transcript(TpComposeState* state)
     }
     valid = valid && tp_retirement_execution_complete(&execution) && execution.sequence == state->invocations &&
             tp_compose_tiling_finish(&state->timed);
-    free(line);
-    free(workspace);
     return valid;
 }
 
 /* Untimed code-artifact batch records: strictly ordered (group, variant,
  * purpose), each a fresh campaign-bound process outside the timed window,
- * one reproduction per group and variant, metrics tiling the untimed shards. */
-static int tp_compose_untimed(TpComposeState* state)
+ * one reproduction per group and variant, metrics tiling the untimed shards.
+ * Production records are counted. */
+BUSTER_GLOBAL_LOCAL int tp_compose_untimed(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
     unsigned groups = request->layout->untimed_groups;
     int valid = groups ? request->untimed_path != NULL : !request->untimed_path && !request->untimed_metrics_count;
-    unsigned char* reproduced = valid && groups ? (unsigned char*)calloc((size_t)groups * 2, 1) : NULL;
-    char* line = valid && groups ? (char*)malloc(TP_COMPOSE_LINE_BYTES) : NULL;
-    valid = valid && (!groups || (reproduced && line));
+    unsigned char* reproduced = valid && groups ?
+        (unsigned char*)tp_retirement_compose_allocate(state->arena, (uint64_t)groups * 2) : NULL;
+    valid = valid && (!groups || reproduced);
     TpComposeReader reader = {0};
     if (valid && groups) valid = tp_compose_reader_open(&reader, state->store, request->untimed_path);
     uint64_t last_end = 0, last_key = UINT64_MAX;
@@ -1349,9 +1627,10 @@ static int tp_compose_untimed(TpComposeState* state)
     while (valid && more)
     {
         size_t length = 0;
-        int read = tp_compose_reader_line(&reader, line, TP_COMPOSE_LINE_BYTES, &length);
+        int read = tp_compose_reader_line(&reader, state->line, TP_COMPOSE_LINE_BYTES, &length);
+        char const* line = state->line;
         uint64_t group = 0, exit_status = 0, pid = 0, started = 0, finished = 0;
-        char token[129], instance[65], computed[65], digest[65];
+        char token[TP_RETIREMENT_STORE_TOKEN_CAPACITY], instance[65], computed[65], digest[65];
         if (!read) more = 0;
         else
         {
@@ -1378,13 +1657,14 @@ static int tp_compose_untimed(TpComposeState* state)
                 tp_compose_field_u64(line, length, "finished_ns", &finished) &&
                 finished > started && started > last_end &&
                 (finished < request->bound_at_ns || started > request->completed_at_ns) &&
-                tp_compose_metrics_field(line, length, -1, &state->untimed_tiling);
+                tp_compose_metrics_field(line, length, -1, &state->untimed_tiling, 0, NULL, NULL);
             uint64_t key = (group * 2 + (uint64_t)candidate) * 2 + (uint64_t)reproduction;
             valid = valid && (last_key == UINT64_MAX || key > last_key);
             if (valid)
             {
                 last_key = key;
                 last_end = finished;
+                state->untimed_production += (uint64_t)production;
                 if (reproduction) reproduced[group * 2 + (uint64_t)candidate] = 1;
             }
         }
@@ -1406,13 +1686,11 @@ static int tp_compose_untimed(TpComposeState* state)
         }
     }
     valid = valid && tp_compose_tiling_finish(&state->untimed_tiling);
-    free(line);
-    free(reproduced);
     return valid;
 }
 
 /* A candidate/baseline ratio exactly as the validator recomputes it. */
-static int tp_compose_ratio(double candidate, double baseline, double* output)
+BUSTER_GLOBAL_LOCAL int tp_compose_ratio(double candidate, double baseline, double* output)
 {
     double ratio = candidate / baseline;
     int valid = isfinite(ratio) && ratio > 0.0;
@@ -1420,33 +1698,47 @@ static int tp_compose_ratio(double candidate, double baseline, double* output)
     return valid;
 }
 
+/* A sample's seconds text is D's encoding of its observed nanoseconds. */
+BUSTER_GLOBAL_LOCAL int tp_compose_seconds_are(char const* text, size_t length, uint64_t nanoseconds)
+{
+    char expected[32];
+    int valid = nanoseconds && tp_retirement_seconds(expected, nanoseconds) && strlen(expected) == length &&
+                !memcmp(expected, text, length);
+    return valid;
+}
+
 /* One `row-round-pair` record of D's tp_retirement_sample_record, at its
- * frozen coordinate, capturing its wall, memory and runtime ratios. */
-static int tp_compose_row_record(TpComposeState* state, char const* line, size_t length, uint64_t ordinal)
+ * frozen coordinate, joined to its observations; its ratios are captured. */
+BUSTER_GLOBAL_LOCAL int tp_compose_row_record(TpComposeState* state, char const* line, size_t length, uint64_t ordinal)
 {
     unsigned pairs = state->pairs;
-    uint64_t per_unit = (uint64_t)TP_RETIREMENT_ROUNDS * pairs;
+    uint64_t per_unit = state->per_unit;
     unsigned unit = (unsigned)(ordinal / per_unit), round = (unsigned)(ordinal / pairs % TP_RETIREMENT_ROUNDS);
     unsigned pair = (unsigned)(ordinal % pairs);
     TpRetirementComposeRow const* row = state->request->layout->rows + unit;
-    double memory[2], wall[2], runtime[2] = {1.0, 1.0};
+    unsigned runtime_unit = row->runtime ? state->family.runtime_index[unit] : 0;
+    uint64_t memory[2] = {0, 0};
+    double wall[2], runtime[2] = {1.0, 1.0};
+    char const* wall_text[2];
+    char const* runtime_text[2] = {NULL, NULL};
+    size_t wall_length[2], runtime_length[2] = {0, 0};
     uint64_t pair_field = 0, id = 0, round_id = 0, pair_id = 0, round_field = 0, row_field = 0;
     TpComposeCursor cursor = {line, length, 0, 1};
     tp_compose_cursor_literal(&cursor, "{\"measurements\":{\"compiler_peak_memory\":{\"baseline\":");
-    tp_compose_cursor_number(&cursor, &memory[0]);
+    tp_compose_cursor_u64(&cursor, &memory[0]);
     tp_compose_cursor_literal(&cursor, ",\"candidate\":");
-    tp_compose_cursor_number(&cursor, &memory[1]);
+    tp_compose_cursor_u64(&cursor, &memory[1]);
     tp_compose_cursor_literal(&cursor, "},\"compiler_wall_time\":{\"baseline\":");
-    tp_compose_cursor_number(&cursor, &wall[0]);
+    tp_compose_cursor_number(&cursor, &wall_text[0], &wall_length[0], &wall[0]);
     tp_compose_cursor_literal(&cursor, ",\"candidate\":");
-    tp_compose_cursor_number(&cursor, &wall[1]);
+    tp_compose_cursor_number(&cursor, &wall_text[1], &wall_length[1], &wall[1]);
     tp_compose_cursor_literal(&cursor, "}");
     if (row->runtime)
     {
         tp_compose_cursor_literal(&cursor, ",\"generated_runtime\":{\"baseline\":");
-        tp_compose_cursor_number(&cursor, &runtime[0]);
+        tp_compose_cursor_number(&cursor, &runtime_text[0], &runtime_length[0], &runtime[0]);
         tp_compose_cursor_literal(&cursor, ",\"candidate\":");
-        tp_compose_cursor_number(&cursor, &runtime[1]);
+        tp_compose_cursor_number(&cursor, &runtime_text[1], &runtime_length[1], &runtime[1]);
         tp_compose_cursor_literal(&cursor, "}");
     }
     tp_compose_cursor_literal(&cursor, "},\"pair\":");
@@ -1464,36 +1756,50 @@ static int tp_compose_row_record(TpComposeState* state, char const* line, size_t
     tp_compose_cursor_literal(&cursor, "}\n");
     size_t index = (size_t)unit * per_unit + (size_t)round * pairs + pair;
     int valid = cursor.valid && cursor.offset == length && pair_field == pair && pair_id == pair &&
-                round_id == round && round_field == round && id == row->id && row_field == row->id &&
-                tp_compose_ratio(wall[1], wall[0], &state->ratios[0][index]) &&
-                tp_compose_ratio(memory[1], memory[0], &state->ratios[1][index]);
+                round_id == round && round_field == round && id == row->id && row_field == row->id;
+    for (unsigned variant = 0; valid && variant < 2; ++variant)
+    {
+        size_t slot = tp_compose_slot(state, unit, round, pair, variant);
+        valid = tp_compose_seconds_are(wall_text[variant], wall_length[variant],
+                                       state->observations[TP_COMPOSE_ROW_WALL][slot]) &&
+                memory[variant] && memory[variant] == state->observations[TP_COMPOSE_ROW_MEMORY][slot];
+        if (valid && row->runtime)
+            valid = tp_compose_seconds_are(runtime_text[variant], runtime_length[variant],
+                state->observations[TP_COMPOSE_RUNTIME][tp_compose_slot(state, runtime_unit, round, pair, variant)]);
+    }
+    valid = valid && tp_compose_ratio(wall[1], wall[0], &state->ratios[0][index]) &&
+            tp_compose_ratio((double)memory[1], (double)memory[0], &state->ratios[1][index]);
     if (valid && row->runtime)
-        valid = tp_compose_ratio(runtime[1], runtime[0], &state->ratios[2][(size_t)state->family.runtime_index[unit] *
-            per_unit + (size_t)round * pairs + pair]);
+        valid = tp_compose_ratio(runtime[1], runtime[0],
+                                 &state->ratios[2][(size_t)runtime_unit * per_unit + (size_t)round * pairs + pair]);
     return valid;
 }
 
-/* One `group-round-pair` record of D's tp_retirement_batch_record. */
-static int tp_compose_batch_record(TpComposeState* state, char const* line, size_t length, uint64_t ordinal)
+/* One `group-round-pair` record of D's tp_retirement_batch_record, joined to
+ * its batch's observations. */
+BUSTER_GLOBAL_LOCAL int tp_compose_batch_record(TpComposeState* state, char const* line, size_t length, uint64_t ordinal)
 {
     unsigned pairs = state->pairs;
-    uint64_t per_unit = (uint64_t)TP_RETIREMENT_ROUNDS * pairs;
+    uint64_t per_unit = state->per_unit;
     unsigned unit = (unsigned)(ordinal / per_unit), round = (unsigned)(ordinal / pairs % TP_RETIREMENT_ROUNDS);
     unsigned pair = (unsigned)(ordinal % pairs);
     unsigned group = state->family.object_groups[unit];
-    double rss[2], wall[2];
+    uint64_t rss[2] = {0, 0};
+    double wall[2];
+    char const* wall_text[2];
+    size_t wall_length[2];
     uint64_t group_field = 0, pair_field = 0, group_id = 0, round_id = 0, pair_id = 0, round_field = 0;
     TpComposeCursor cursor = {line, length, 0, 1};
     tp_compose_cursor_literal(&cursor, "{\"group\":");
     tp_compose_cursor_u64(&cursor, &group_field);
     tp_compose_cursor_literal(&cursor, ",\"measurements\":{\"compiler_batch_peak_rss\":{\"baseline\":");
-    tp_compose_cursor_number(&cursor, &rss[0]);
+    tp_compose_cursor_u64(&cursor, &rss[0]);
     tp_compose_cursor_literal(&cursor, ",\"candidate\":");
-    tp_compose_cursor_number(&cursor, &rss[1]);
+    tp_compose_cursor_u64(&cursor, &rss[1]);
     tp_compose_cursor_literal(&cursor, "},\"compiler_batch_wall_time\":{\"baseline\":");
-    tp_compose_cursor_number(&cursor, &wall[0]);
+    tp_compose_cursor_number(&cursor, &wall_text[0], &wall_length[0], &wall[0]);
     tp_compose_cursor_literal(&cursor, ",\"candidate\":");
-    tp_compose_cursor_number(&cursor, &wall[1]);
+    tp_compose_cursor_number(&cursor, &wall_text[1], &wall_length[1], &wall[1]);
     tp_compose_cursor_literal(&cursor, "}},\"pair\":");
     tp_compose_cursor_u64(&cursor, &pair_field);
     tp_compose_cursor_literal(&cursor, ",\"record_id\":\"group-");
@@ -1507,23 +1813,29 @@ static int tp_compose_batch_record(TpComposeState* state, char const* line, size
     tp_compose_cursor_literal(&cursor, "}\n");
     size_t index = (size_t)unit * per_unit + (size_t)round * pairs + pair;
     int valid = cursor.valid && cursor.offset == length && group_field == group && group_id == group &&
-                pair_field == pair && pair_id == pair && round_id == round && round_field == round &&
-                tp_compose_ratio(wall[1], wall[0], &state->ratios[3][index]) &&
-                tp_compose_ratio(rss[1], rss[0], &state->ratios[4][index]);
+                pair_field == pair && pair_id == pair && round_id == round && round_field == round;
+    for (unsigned variant = 0; valid && variant < 2; ++variant)
+    {
+        size_t slot = tp_compose_slot(state, unit, round, pair, variant);
+        valid = tp_compose_seconds_are(wall_text[variant], wall_length[variant],
+                                       state->observations[TP_COMPOSE_BATCH_WALL][slot]) &&
+                rss[variant] && rss[variant] == state->observations[TP_COMPOSE_BATCH_RSS][slot];
+    }
+    valid = valid && tp_compose_ratio(wall[1], wall[0], &state->ratios[3][index]) &&
+            tp_compose_ratio((double)rss[1], (double)rss[0], &state->ratios[4][index]);
     return valid;
 }
 
 /* Both #615 populations, in canonical record order: every record present
- * once at its frozen coordinate, full-size shards before the last, and the
- * streamed bytes (rows, then batches) are the raw measurement digest. */
-static int tp_compose_samples(TpComposeState* state)
+ * once at its frozen coordinate and equal to its transcript observation,
+ * full-size shards before the last, and the streamed bytes (rows, then
+ * batches) are the raw measurement digest. */
+BUSTER_GLOBAL_LOCAL int tp_compose_samples(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
-    uint64_t per_unit = (uint64_t)TP_RETIREMENT_ROUNDS * state->pairs;
-    uint64_t expected[2] = {(uint64_t)request->layout->row_count * per_unit,
-                            (uint64_t)state->family.object_count * per_unit};
-    char* line = (char*)malloc(TP_RETIREMENT_SAMPLE_LINE_CAP);
-    int valid = line != NULL;
+    uint64_t expected[2] = {(uint64_t)request->layout->row_count * state->per_unit,
+                            (uint64_t)state->family.object_count * state->per_unit};
+    int valid = 1;
     sha256_init(&state->raw);
     for (unsigned p = 0; valid && p < 2; ++p)
     {
@@ -1539,16 +1851,16 @@ static int tp_compose_samples(TpComposeState* state)
             while (valid && more)
             {
                 size_t length = 0;
-                int read = tp_compose_reader_line(&reader, line, TP_RETIREMENT_SAMPLE_LINE_CAP, &length);
+                int read = tp_compose_reader_line(&reader, state->line, TP_RETIREMENT_SAMPLE_LINE_CAP, &length);
                 if (!read) more = 0;
                 else
                 {
                     valid = read == 1 && ordinal < expected[p] &&
-                            (p ? tp_compose_batch_record(state, line, length, ordinal) :
-                                 tp_compose_row_record(state, line, length, ordinal));
+                            (p ? tp_compose_batch_record(state, state->line, length, ordinal) :
+                                 tp_compose_row_record(state, state->line, length, ordinal));
                     if (valid)
                     {
-                        sha256_add(&state->raw, line, (u64)length);
+                        sha256_add(&state->raw, state->line, (u64)length);
                         ++ordinal;
                     }
                 }
@@ -1571,18 +1883,16 @@ static int tp_compose_samples(TpComposeState* state)
         valid = valid && ordinal == expected[p];
     }
     if (valid) sha256_finish_hex(&state->raw, (char8*)state->raw_sha256);
-    free(line);
     return valid;
 }
 
 /* The pre-sample plan's partitions: contiguous full-cap #615 partitions per
  * population, unique identities and paths, and whole shards in each. */
-static int tp_compose_partitions(TpComposeState* state)
+BUSTER_GLOBAL_LOCAL int tp_compose_partitions(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
-    uint64_t per_unit = (uint64_t)TP_RETIREMENT_ROUNDS * state->pairs;
-    uint64_t expected[2] = {(uint64_t)request->layout->row_count * per_unit,
-                            (uint64_t)state->family.object_count * per_unit};
+    uint64_t expected[2] = {(uint64_t)request->layout->row_count * state->per_unit,
+                            (uint64_t)state->family.object_count * state->per_unit};
     unsigned total = request->partition_counts[0] + request->partition_counts[1];
     int valid = request->partition_counts[0] && request->partition_counts[1] &&
                 total <= TP_RETIREMENT_COMPOSE_PARTITIONS && total == state->bounds.manifest_count &&
@@ -1598,8 +1908,8 @@ static int tp_compose_partitions(TpComposeState* state)
             uint64_t records = i + 1 < request->partition_counts[p] ? TP_RETIREMENT_SAMPLE_PARTITION_RECORDS :
                                expected[p] - start;
             valid = tp_retirement_token(partition->identity) && tp_retirement_receipt_path(partition->path) &&
-                    partition->start == start && partition->records == records && records &&
-                    records <= TP_RETIREMENT_SAMPLE_PARTITION_RECORDS;
+                    !tp_compose_reserved_path(partition->path) && partition->start == start &&
+                    partition->records == records && records && records <= TP_RETIREMENT_SAMPLE_PARTITION_RECORDS;
             for (unsigned j = 0; valid && j < global; ++j)
                 valid = strcmp(state->partition_plan[j]->identity, partition->identity) &&
                         strcmp(state->partition_plan[j]->path, partition->path);
@@ -1627,37 +1937,31 @@ static int tp_compose_partitions(TpComposeState* state)
     return valid;
 }
 
-/* The post-sample execution context: the frozen canonical template with the
- * streamed numeric digest substituted for its placeholder. */
-static int tp_compose_context(TpComposeState* state)
+/* The post-sample execution context: the validator's _execution_context of
+ * the authenticated post-A/A binding (below the store root, not a store
+ * file) with the streamed numeric digest, in canonical JSON. Its post-A/A
+ * phase digest must be the one the sealed record binds. */
+BUSTER_GLOBAL_LOCAL int tp_compose_context(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
-    unsigned char const* template = request->context_template;
-    size_t length = request->context_template_bytes;
-    size_t placeholder = strlen(TP_COMPOSE_PLACEHOLDER);
-    char post[128];
-    int count = snprintf(post, sizeof(post), "\"post_aa_binding_sha256\":\"%s\"", request->post_aa_binding_sha256);
-    int valid = template && length > placeholder && length <= TP_COMPOSE_TEMPLATE_BYTES && template[0] == '{' &&
-                template[length - 1] == '}' && !memchr(template, '\n', length) && !memchr(template, 0, length) &&
-                count > 0 && (size_t)count < sizeof(post) && memmem(template, length, post, (size_t)count);
-    unsigned occurrences = 0;
-    size_t at = 0;
-    for (size_t i = 0; valid && i + placeholder <= length; ++i)
-        if (!memcmp(template + i, TP_COMPOSE_PLACEHOLDER, placeholder))
-        {
-            ++occurrences;
-            at = i;
-        }
-    valid = valid && occurrences == 1;
-    unsigned char* copy = valid ? (unsigned char*)malloc(length) : NULL;
-    valid = valid && copy;
-    if (valid)
-    {
-        memcpy(copy, template, length);
-        memcpy(copy + at + placeholder - 65, state->raw_sha256, 64);
-        tp_compose_sha_hex(copy, length, state->context_sha256);
-    }
-    free(copy);
+    static char const* const post_path[] = {"workflow", "phases", "post_aa_binding", "sha256"};
+    unsigned char* binding = NULL;
+    uint64_t bytes = 0;
+    char* context = NULL;
+    size_t context_bytes = 0;
+    TpComposeJson json = {0};
+    int valid = request->binding_path && tp_compose_find(state, request->binding_path) == TP_COMPOSE_NONE &&
+                tp_compose_evidence_file(state->store->root, request->binding_path, 0, TP_COMPOSE_BINDING_BYTES,
+                                         request->binding_sha256, state->arena, &binding, &bytes) &&
+                tp_retirement_compose_json_parse(binding, (size_t)bytes, state->arena, &json);
+    unsigned node = valid ? 0u : TP_COMPOSE_JSON_NONE;
+    for (unsigned i = 0; node != TP_COMPOSE_JSON_NONE && i < BUSTER_ARRAY_LENGTH(post_path); ++i)
+        node = tp_retirement_compose_json_member(&json, node, post_path[i]);
+    valid = valid && node != TP_COMPOSE_JSON_NONE && json.nodes[node].kind == TP_COMPOSE_JSON_STRING &&
+            json.nodes[node].length == 64 && !memcmp(json.nodes[node].text, request->post_aa_binding_sha256, 64) &&
+            tp_retirement_compose_execution_context(binding, (size_t)bytes, state->raw_sha256, state->arena, &context,
+                                                    &context_bytes);
+    if (valid) tp_compose_sha_hex(context, context_bytes, state->context_sha256);
     return valid;
 }
 
@@ -1675,8 +1979,8 @@ typedef struct TpComposeWriter
     int valid;
 } TpComposeWriter;
 
-static void tp_compose_writer_begin(TpComposeWriter* writer, TpRetirementStore* store, char const* path,
-                                    uint64_t limit, FILE* copy)
+BUSTER_GLOBAL_LOCAL void tp_compose_writer_begin(TpComposeWriter* writer, TpRetirementStore* store, char const* path,
+                                                 uint64_t limit, FILE* copy)
 {
     *writer = (TpComposeWriter){.store = store, .copy = copy, .limit = limit};
     sha256_init(&writer->hash);
@@ -1684,7 +1988,7 @@ static void tp_compose_writer_begin(TpComposeWriter* writer, TpRetirementStore* 
                     tp_retirement_store_begin(store, path, limit, &writer->pending);
 }
 
-static void tp_compose_writer_bytes(TpComposeWriter* writer, void const* data, size_t length)
+BUSTER_GLOBAL_LOCAL void tp_compose_writer_bytes(TpComposeWriter* writer, void const* data, size_t length)
 {
     writer->valid = writer->valid && length <= writer->limit - writer->bytes &&
                     fwrite(data, 1, length, writer->pending.stream) == length &&
@@ -1696,7 +2000,7 @@ static void tp_compose_writer_bytes(TpComposeWriter* writer, void const* data, s
     }
 }
 
-static void tp_compose_writer_format(TpComposeWriter* writer, char const* format, ...)
+BUSTER_GLOBAL_LOCAL void tp_compose_writer_format(TpComposeWriter* writer, char const* format, ...)
 {
     char buffer[2048];
     va_list arguments;
@@ -1707,7 +2011,7 @@ static void tp_compose_writer_format(TpComposeWriter* writer, char const* format
     if (writer->valid) tp_compose_writer_bytes(writer, buffer, (size_t)length);
 }
 
-static int tp_compose_writer_publish(TpComposeWriter* writer, TpRetirementComposeArtifact* artifact)
+BUSTER_GLOBAL_LOCAL int tp_compose_writer_publish(TpComposeWriter* writer, TpRetirementComposeArtifact* artifact)
 {
     char digest[65];
     char path[TP_RETIREMENT_STORE_PATH_BYTES + 1];
@@ -1732,7 +2036,7 @@ static int tp_compose_writer_publish(TpComposeWriter* writer, TpRetirementCompos
 /* ----------------------------------------------------------------- outputs */
 
 /* One #615 manifest per predeclared partition, listing its whole shards. */
-static int tp_compose_manifests(TpComposeState* state)
+BUSTER_GLOBAL_LOCAL int tp_compose_manifests(TpComposeState* state)
 {
     int valid = 1;
     for (unsigned g = 0; valid && g < state->partitions; ++g)
@@ -1763,7 +2067,7 @@ static int tp_compose_manifests(TpComposeState* state)
 
 /* candidate * 100 <= baseline * 101 without widening: for candidate above
  * baseline this is 100 * (candidate - baseline) <= baseline. */
-static int tp_compose_within_one_percent(uint64_t candidate, uint64_t baseline)
+BUSTER_GLOBAL_LOCAL int tp_compose_within_one_percent(uint64_t candidate, uint64_t baseline)
 {
     int within = candidate <= baseline || candidate - baseline <= baseline / 100;
     return within;
@@ -1771,7 +2075,7 @@ static int tp_compose_within_one_percent(uint64_t candidate, uint64_t baseline)
 
 /* The code-byte record set through D's encoder, and the exact summary the
  * validator's _code_bytes_summary derives from it. */
-static int tp_compose_code(TpComposeState* state)
+BUSTER_GLOBAL_LOCAL int tp_compose_code(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
     TpRetirementPending pending = {0};
@@ -1794,11 +2098,11 @@ static int tp_compose_code(TpComposeState* state)
                 tp_retirement_code_records_append(&records, code->row, code->sides);
         if (valid && baseline)
         {
-            char text[40], item[96];
+            char text[TP_RETIREMENT_COMPOSE_REPR_BYTES], item[96];
             double ratio = (double)candidate / (double)baseline;
             valid = tp_compose_add(&baseline_total, baseline) && tp_compose_add(&candidate_total, candidate) &&
                     baseline_total <= TP_COMPOSE_TOTAL_BYTES_MAX && candidate_total <= TP_COMPOSE_TOTAL_BYTES_MAX &&
-                    tp_compose_repr(ratio, text);
+                    tp_retirement_compose_float_repr(ratio, text);
             int count = valid ? snprintf(item, sizeof(item), "%s{\"ratio\":%s,\"row\":%u}", rows ? "," : "", text,
                                          code->row) : -1;
             valid = valid && count > 0 && (size_t)count < sizeof(item);
@@ -1815,9 +2119,11 @@ static int tp_compose_code(TpComposeState* state)
             tp_retirement_store_publish(state->store, &pending, descriptor.bytes, descriptor.sha256);
     if (!valid && pending.stream) tp_retirement_store_abort(state->store, &pending);
     double aggregate = 0.0;
-    char aggregate_text[40], maximum_text[40], ratios_sha256[65];
+    char aggregate_text[TP_RETIREMENT_COMPOSE_REPR_BYTES], maximum_text[TP_RETIREMENT_COMPOSE_REPR_BYTES];
+    char ratios_sha256[65];
     valid = valid && tp_compose_decimal_ratio(candidate_total, baseline_total, &aggregate) &&
-            tp_compose_repr(aggregate, aggregate_text) && tp_compose_repr(maximum, maximum_text);
+            tp_retirement_compose_float_repr(aggregate, aggregate_text) &&
+            tp_retirement_compose_float_repr(maximum, maximum_text);
     if (valid)
     {
         sha256_add(&ratios, "]", 1);
@@ -1839,12 +2145,12 @@ static int tp_compose_code(TpComposeState* state)
 /* The #619 statistics input the reviewed adapter consumes: every family
  * member in sorted order with its cells' ratios, round-major. The same bytes
  * go to the store and to the adapter's private scratch copy. */
-static int tp_compose_series(TpComposeState* state)
+BUSTER_GLOBAL_LOCAL int tp_compose_series(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
     TpComposeFamily const* family = &state->family;
     TpRetirementPlan const* plan = request->statistics;
-    uint64_t per_unit = (uint64_t)TP_RETIREMENT_ROUNDS * state->pairs;
+    uint64_t per_unit = state->per_unit;
     int fd = openat(request->scratch_root, TP_RETIREMENT_COMPOSE_SERIES_PATH,
                     O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0600);
     FILE* copy = fd >= 0 ? fdopen(fd, "wb") : NULL;
@@ -1879,43 +2185,137 @@ static int tp_compose_series(TpComposeState* state)
     return valid;
 }
 
-/* The adapter's own JSON: the approved schema, every family member once in
- * the series order, each result valid. Its numbers are replayed by the
- * validator from the reviewed source, never trusted here. */
-static int tp_compose_replay_check(TpComposeState* state, char const* bytes, size_t length)
+/* A JSON integer node equal to `expected`. */
+BUSTER_GLOBAL_LOCAL int tp_compose_json_is(TpComposeJson const* json, unsigned node, uint64_t expected)
 {
-    static char const prefix[] = "{\"schema\":\"buster-native-retirement-statistics-replay-v1\",\"version\":1,\"members\":[";
-    static char const opening[] = "{\"member\":\"";
-    TpComposeFamily const* family = &state->family;
-    int valid = bytes && length > sizeof(prefix) + 3 && !memcmp(bytes, prefix, sizeof(prefix) - 1) &&
-                !memcmp(bytes + length - 3, "]}\n", 3) && !memchr(bytes, 0, length) &&
-                !memmem(bytes, length, "\"valid\":false", 13);
-    size_t offset = sizeof(prefix) - 1;
-    for (unsigned i = 0; valid && i < family->count; ++i)
-    {
-        char const* name = family->members[family->order[i]].name;
-        char expected[TP_RETIREMENT_COMPOSE_MEMBER_BYTES + 16];
-        int count = snprintf(expected, sizeof(expected), "%s%s%s\",", i ? "," : "", opening, name);
-        char const* found = (char const*)memmem(bytes + offset, length - offset, opening, sizeof(opening) - 1);
-        size_t at = found ? (size_t)(found - bytes) - (i ? 1 : 0) : 0;
-        valid = found && count > 0 && at >= offset && (i || at == offset) && at + (size_t)count <= length &&
-                !memcmp(bytes + at, expected, (size_t)count) &&
-                memmem(bytes + at, length - at, "\"valid\":true", 12);
-        if (valid) offset = at + (size_t)count;
-    }
-    valid = valid && !memmem(bytes + offset, length - offset, opening, sizeof(opening) - 1);
+    char text[24];
+    int length = snprintf(text, sizeof(text), "%" PRIu64, expected);
+    int valid = node < json->count && json->nodes[node].kind == TP_COMPOSE_JSON_INTEGER &&
+                json->nodes[node].length == (uint32_t)length && !memcmp(json->nodes[node].text, text, (size_t)length);
     return valid;
 }
 
-/* Run the reviewed `bench_throughput retirement-replay` adapter on the
- * scratch copy of the series, then seal its output unchanged. */
-static int tp_compose_adapter(TpComposeState* state)
+BUSTER_GLOBAL_LOCAL int tp_compose_json_numeric(TpComposeJson const* json, unsigned node, double* value)
+{
+    int valid = node < json->count && (json->nodes[node].kind == TP_COMPOSE_JSON_INTEGER ||
+                                       json->nodes[node].kind == TP_COMPOSE_JSON_FLOAT) &&
+                isfinite(json->nodes[node].number);
+    *value = valid ? json->nodes[node].number : 0.0;
+    return valid;
+}
+
+/* One {estimate, lower, upper} #619 bound, positive and ordered. */
+BUSTER_GLOBAL_LOCAL int tp_compose_replay_bound(TpComposeJson const* json, unsigned node, double limit, int* passed,
+                                                int* regressed)
+{
+    static char const* const fields[] = {"estimate", "lower", "upper"};
+    double estimate = 0.0, lower = 0.0, upper = 0.0;
+    int valid = tp_retirement_compose_json_keys(json, node, fields, BUSTER_ARRAY_LENGTH(fields)) &&
+                tp_compose_json_numeric(json, tp_retirement_compose_json_member(json, node, "estimate"), &estimate) &&
+                tp_compose_json_numeric(json, tp_retirement_compose_json_member(json, node, "lower"), &lower) &&
+                tp_compose_json_numeric(json, tp_retirement_compose_json_member(json, node, "upper"), &upper) &&
+                estimate > 0.0 && lower >= 0.0 && upper > 0.0 && lower <= upper;
+    *passed = *passed && upper <= limit;
+    *regressed = *regressed && lower > limit;
+    return valid;
+}
+
+/* The adapter's own JSON, structurally: the approved schema, every family
+ * member once in the series order with its #619 metric, kind and family
+ * index, bootstrap resampling only for bootstrap members, the family's tail
+ * alpha, both round bounds and the pooled bound, and the outcome those
+ * bounds imply. Its numbers are replayed by the validator from the reviewed
+ * source, never trusted here. */
+BUSTER_GLOBAL_LOCAL int tp_compose_replay_check(TpComposeState* state, char const* bytes, size_t length)
+{
+    static char const* const top[] = {"members", "schema", "version"};
+    static char const* const fields[] = {"member", "metric", "kind", "family_index", "outcome", "valid", "resampled",
+                                         "resamples", "tail_alpha", "round", "pooled"};
+    TpComposeFamily const* family = &state->family;
+    TpRetirementPlan const* plan = state->request->statistics;
+    TpComposeJson json = {0};
+    int valid = tp_retirement_compose_json_parse((unsigned char const*)bytes, length, state->arena, &json) &&
+                tp_retirement_compose_json_keys(&json, 0, top, BUSTER_ARRAY_LENGTH(top));
+    unsigned schema = valid ? tp_retirement_compose_json_member(&json, 0, "schema") : TP_COMPOSE_JSON_NONE;
+    unsigned members = valid ? tp_retirement_compose_json_member(&json, 0, "members") : TP_COMPOSE_JSON_NONE;
+    valid = valid && json.nodes[schema].kind == TP_COMPOSE_JSON_STRING &&
+            json.nodes[schema].length == strlen(TP_COMPOSE_REPLAY_SCHEMA) &&
+            !memcmp(json.nodes[schema].text, TP_COMPOSE_REPLAY_SCHEMA, json.nodes[schema].length) &&
+            tp_compose_json_is(&json, tp_retirement_compose_json_member(&json, 0, "version"), 1) &&
+            json.nodes[members].kind == TP_COMPOSE_JSON_ARRAY && json.nodes[members].count == family->count;
+    unsigned call = valid ? json.nodes[members].first : TP_COMPOSE_JSON_NONE;
+    for (unsigned i = 0; valid && i < family->count; ++i, call = json.nodes[call].next)
+    {
+        TpComposeMember const* member = family->members + family->order[i];
+        unsigned name = tp_retirement_compose_json_member(&json, call, "member");
+        unsigned outcome = tp_retirement_compose_json_member(&json, call, "outcome");
+        unsigned resampled = tp_retirement_compose_json_member(&json, call, "resampled");
+        unsigned rounds = tp_retirement_compose_json_member(&json, call, "round");
+        double alpha = 0.0, limit = strtod(member->kind ? tp_compose_cell_limits[member->metric] :
+                                                          tp_compose_aggregate_limits[member->metric], NULL);
+        unsigned count = member->kind ? plan->cell_members_per_scope : plan->bootstrap_members_per_scope;
+        double expected_alpha = 0.05 / (2.0 * (double)TP_COMPOSE_SCOPES * 2.0 * (double)count);
+        valid = tp_retirement_compose_json_keys(&json, call, fields, BUSTER_ARRAY_LENGTH(fields)) &&
+                json.nodes[name].kind == TP_COMPOSE_JSON_STRING && json.nodes[name].length == strlen(member->name) &&
+                !memcmp(json.nodes[name].text, member->name, json.nodes[name].length) &&
+                tp_compose_json_is(&json, tp_retirement_compose_json_member(&json, call, "metric"), member->metric) &&
+                tp_compose_json_is(&json, tp_retirement_compose_json_member(&json, call, "kind"), member->kind) &&
+                tp_compose_json_is(&json, tp_retirement_compose_json_member(&json, call, "family_index"), member->family) &&
+                json.nodes[tp_retirement_compose_json_member(&json, call, "valid")].kind == TP_COMPOSE_JSON_TRUE &&
+                json.nodes[resampled].kind == (member->kind ? TP_COMPOSE_JSON_FALSE : TP_COMPOSE_JSON_TRUE) &&
+                tp_compose_json_is(&json, tp_retirement_compose_json_member(&json, call, "resamples"),
+                                   member->kind ? 0u : plan->resamples) &&
+                tp_compose_json_numeric(&json, tp_retirement_compose_json_member(&json, call, "tail_alpha"), &alpha) &&
+                alpha == expected_alpha && json.nodes[rounds].kind == TP_COMPOSE_JSON_ARRAY &&
+                json.nodes[rounds].count == TP_COMPOSE_SCOPES - 1 && json.nodes[outcome].kind == TP_COMPOSE_JSON_STRING;
+        int passed = 1, regressed = 1;
+        for (unsigned bound = valid ? json.nodes[rounds].first : TP_COMPOSE_JSON_NONE;
+             valid && bound != TP_COMPOSE_JSON_NONE; bound = json.nodes[bound].next)
+            valid = tp_compose_replay_bound(&json, bound, limit, &passed, &regressed);
+        valid = valid && tp_compose_replay_bound(&json, tp_retirement_compose_json_member(&json, call, "pooled"), limit,
+                                                 &passed, &regressed);
+        char const* derived = passed ? "pass" : regressed ? "regression" : "inconclusive";
+        valid = valid && json.nodes[outcome].length == strlen(derived) &&
+                !memcmp(json.nodes[outcome].text, derived, json.nodes[outcome].length);
+    }
+    return valid;
+}
+
+/* Execute the adapter from the descriptor whose bytes were hashed, with no
+ * inherited descriptors, in the scratch directory, under a wall-clock
+ * limit; the executable must be unchanged after it exits. */
+BUSTER_GLOBAL_LOCAL int tp_compose_adapter_run(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
-    struct stat info = {0};
-    int valid = request->adapter_path && request->adapter_path[0] == '/' && request->scratch_root >= 0 &&
-                fstatat(request->scratch_root, TP_RETIREMENT_COMPOSE_REPLAY_PATH, &info, AT_SYMLINK_NOFOLLOW) != 0 &&
+    struct stat before = {0}, after = {0}, absent = {0};
+    int fd = request->adapter_path && request->adapter_path[0] == '/' && tp_compose_digest(request->adapter_sha256) ?
+             open(request->adapter_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    int valid = fd >= 0 && fstat(fd, &before) == 0 && S_ISREG(before.st_mode) && (before.st_mode & S_IXUSR) &&
+                before.st_size > 0 && (uint64_t)before.st_size <= TP_COMPOSE_ADAPTER_BYTES &&
+                request->scratch_root >= 0 &&
+                fstatat(request->scratch_root, TP_RETIREMENT_COMPOSE_REPLAY_PATH, &absent, AT_SYMLINK_NOFOLLOW) != 0 &&
                 errno == ENOENT;
+    Sha256 hash;
+    sha256_init(&hash);
+    uint64_t used = 0;
+    unsigned char buffer[TP_COMPOSE_READ_BYTES];
+    while (valid && used < (uint64_t)before.st_size)
+    {
+        ssize_t count = read(fd, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR) continue;
+        valid = count > 0 && (uint64_t)count <= (uint64_t)before.st_size - used;
+        if (valid)
+        {
+            sha256_add(&hash, buffer, (u64)count);
+            used += (uint64_t)count;
+        }
+    }
+    if (valid)
+    {
+        char digest[65];
+        sha256_finish_hex(&hash, (char8*)digest);
+        valid = !strcmp(digest, request->adapter_sha256);
+    }
     pid_t child = valid ? fork() : -1;
     if (child == 0)
     {
@@ -1925,27 +2325,59 @@ static int tp_compose_adapter(TpComposeState* state)
         char* const environment[] = {(char*)"LC_ALL=C", NULL};
         if (fchdir(request->scratch_root) == 0)
         {
-#ifdef SYS_close_range
-            syscall(SYS_close_range, 3u, ~0u, 0u);
+#if defined(SYS_close_range) && defined(CLOSE_RANGE_CLOEXEC)
+            syscall(SYS_close_range, 3u, ~0u, (unsigned)CLOSE_RANGE_CLOEXEC);
 #endif
-            execve(request->adapter_path, arguments, environment);
+            fexecve(fd, arguments, environment);
         }
         _exit(127);
     }
-    int status = 0;
-    pid_t waited = -1;
-    while (child > 0 && waited < 0)
+    uint64_t limit = request->adapter_timeout_ns ? request->adapter_timeout_ns : TP_RETIREMENT_COMPOSE_ADAPTER_TIMEOUT_NS;
+    uint64_t start = tp_process_monotonic_ns();
+    int status = 0, exited = 0, killed = 0;
+    while (child > 0 && !exited)
     {
-        waited = waitpid(child, &status, 0);
-        if (waited < 0 && errno != EINTR) break;
+        pid_t waited = waitpid(child, &status, killed ? 0 : WNOHANG);
+        if (waited == child) exited = 1;
+        else if (waited < 0 && errno != EINTR)
+        {
+            /* The child is unreachable: stop polling and refuse. */
+            exited = 1;
+            killed = 1;
+        }
+        else if (!killed && tp_process_monotonic_ns() - start > limit)
+        {
+            kill(child, SIGKILL);
+            killed = 1;
+        }
+        else if (!killed)
+        {
+            struct timespec pause = {0, TP_COMPOSE_ADAPTER_POLL_NS};
+            nanosleep(&pause, NULL);
+        }
     }
-    valid = child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    valid = valid && child > 0 && exited && !killed && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+            fstat(fd, &after) == 0 && after.st_dev == before.st_dev && after.st_ino == before.st_ino &&
+            after.st_size == before.st_size && after.st_mtim.tv_sec == before.st_mtim.tv_sec &&
+            after.st_mtim.tv_nsec == before.st_mtim.tv_nsec && after.st_ctim.tv_sec == before.st_ctim.tv_sec &&
+            after.st_ctim.tv_nsec == before.st_ctim.tv_nsec;
+    if (fd >= 0 && close(fd) != 0) valid = 0;
+    return valid;
+}
+
+/* Run the reviewed `bench_throughput retirement-replay` adapter on the
+ * scratch copy of the series, check its output, then seal it unchanged. */
+BUSTER_GLOBAL_LOCAL int tp_compose_adapter(TpComposeState* state)
+{
+    TpRetirementComposeRequest const* request = state->request;
+    struct stat info = {0};
+    int valid = tp_compose_adapter_run(state);
     int fd = valid ? openat(request->scratch_root, TP_RETIREMENT_COMPOSE_REPLAY_PATH,
                             O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC) : -1;
     valid = valid && fd >= 0 && fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_size > 0 &&
             (uint64_t)info.st_size <= state->bounds.replay;
     size_t length = valid ? (size_t)info.st_size : 0, used = 0;
-    char* bytes = valid ? (char*)malloc(length + 1) : NULL;
+    char* bytes = valid ? (char*)tp_retirement_compose_allocate(state->arena, length) : NULL;
     valid = valid && bytes;
     while (valid && used < length)
     {
@@ -1963,7 +2395,6 @@ static int tp_compose_adapter(TpComposeState* state)
         tp_compose_writer_bytes(&writer, bytes, length);
         valid = tp_compose_writer_publish(&writer, &state->replay);
     }
-    free(bytes);
     if (request->scratch_root >= 0)
     {
         unlinkat(request->scratch_root, TP_RETIREMENT_COMPOSE_REPLAY_PATH, 0);
@@ -1974,7 +2405,7 @@ static int tp_compose_adapter(TpComposeState* state)
 
 /* The post-sample execution receipt in D's canonical encoding
  * (tp_retirement_transcript_receipt), for the composed context. */
-static int tp_compose_receipt(TpComposeState* state)
+BUSTER_GLOBAL_LOCAL int tp_compose_receipt(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
     TpComposeWriter writer;
@@ -1995,13 +2426,40 @@ static int tp_compose_receipt(TpComposeState* state)
     return valid;
 }
 
-static void tp_compose_descriptor(TpComposeWriter* writer, TpRetirementComposeArtifact const* artifact)
+/* The retained manifest (TP_RETIREMENT_RETAINED_MANIFEST_HEADER, then
+ * `kind sha256 bytes path` per retained file in path order): the producer
+ * authority binds its digest, so the unsealed A/A evidence is bound too. */
+BUSTER_GLOBAL_LOCAL int tp_compose_retained(TpComposeState* state)
+{
+    TpRetirementComposeDeclaration const* declaration = state->request->declaration;
+    TpComposeWriter writer;
+    tp_compose_writer_begin(&writer, state->store, TP_RETIREMENT_RETAINED_MANIFEST_PATH, state->bounds.retained, NULL);
+    tp_compose_writer_format(&writer, "%s", TP_RETIREMENT_RETAINED_MANIFEST_HEADER);
+    unsigned written = 0;
+    for (unsigned i = 0; writer.valid && i < state->files; ++i)
+    {
+        unsigned index = state->by_path[i];
+        TpRetirementStoredFile const* file = state->store->files + index;
+        if (state->classes[index] == TP_COMPOSE_CLASS_RETAINED)
+        {
+            tp_compose_writer_format(&writer, "%s %s %" PRIu64 " %s\n", declaration->retained[state->declared[index]].kind,
+                                     file->sha256, file->bytes, file->path);
+            ++written;
+        }
+    }
+    writer.valid = writer.valid && written == state->retained_files;
+    int valid = tp_compose_writer_publish(&writer, &state->retained);
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL void tp_compose_descriptor(TpComposeWriter* writer, TpRetirementComposeArtifact const* artifact)
 {
     tp_compose_writer_format(writer, "{\"bytes\":%" PRIu64 ",\"path\":\"%s\",\"sha256\":\"%s\"}", artifact->bytes,
                              artifact->path, artifact->sha256);
 }
 
-static void tp_compose_manifest_list(TpComposeWriter* writer, TpComposeState const* state, unsigned population)
+BUSTER_GLOBAL_LOCAL void tp_compose_manifest_list(TpComposeWriter* writer, TpComposeState const* state,
+                                                  unsigned population)
 {
     unsigned written = 0;
     tp_compose_writer_format(writer, "[");
@@ -2018,7 +2476,7 @@ static void tp_compose_manifest_list(TpComposeWriter* writer, TpComposeState con
 }
 
 /* The member-invocation digest: one #619 call per member, all three scopes. */
-static void tp_compose_invocations_sha256(TpComposeFamily const* family, char output[65])
+BUSTER_GLOBAL_LOCAL void tp_compose_invocations_sha256(TpComposeFamily const* family, char output[65])
 {
     Sha256 hash;
     sha256_init(&hash);
@@ -2035,7 +2493,7 @@ static void tp_compose_invocations_sha256(TpComposeFamily const* family, char ou
 }
 
 /* The existing-schema result bundle (buster-native-retirement-result-bundle-v2). */
-static int tp_compose_bundle(TpComposeState* state)
+BUSTER_GLOBAL_LOCAL int tp_compose_bundle(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
     char invocations[65];
@@ -2065,8 +2523,8 @@ static int tp_compose_bundle(TpComposeState* state)
     return valid;
 }
 
-static int tp_compose_entry(TpComposeEntry* entries, unsigned* count, unsigned capacity, char const* path,
-                            uint64_t bytes, char const* sha256, char const* format, ...)
+BUSTER_GLOBAL_LOCAL int tp_compose_entry(TpComposeEntry* entries, unsigned* count, unsigned capacity, char const* path,
+                                         uint64_t bytes, char const* sha256, char const* format, ...)
 {
     int valid = *count < capacity && tp_compose_relative_path(path) && bytes && tp_compose_digest(sha256);
     if (valid)
@@ -2089,25 +2547,30 @@ static int tp_compose_entry(TpComposeEntry* entries, unsigned* count, unsigned c
     return valid;
 }
 
-static int tp_compose_store_entry_add(TpComposeState* state, TpComposeEntry* entries, unsigned* count,
-                                      unsigned capacity, char const* path, char const* format, unsigned index)
+BUSTER_GLOBAL_LOCAL int tp_compose_store_entry_add(TpComposeState* state, TpComposeEntry* entries, unsigned* count,
+                                                   unsigned capacity, char const* path, char const* format,
+                                                   unsigned index)
 {
-    TpRetirementStoredFile const* file = tp_compose_store_entry(state->store, path);
+    unsigned found = tp_compose_find(state, path);
+    TpRetirementStoredFile const* file = found != TP_COMPOSE_NONE ? state->store->files + found : NULL;
     int valid = file && tp_compose_entry(entries, count, capacity, file->path, file->bytes, file->sha256, format, index);
     return valid;
 }
 
 /* The validator's exact sealed closure (_sealed_closure_files): the prior
  * pre-replay identities plus every composed and streamed artifact, sorted
- * by name, with unique names and paths; the outer record binds its root. */
-static int tp_compose_seal(TpComposeState* state)
+ * by name, with unique names and paths; the outer record binds its root.
+ * (The by-path order predates the composer's own outputs, which are looked
+ * up from their artifacts.) */
+BUSTER_GLOBAL_LOCAL int tp_compose_seal(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
     unsigned capacity = request->prior_count + request->transcript_count + request->metrics_count +
                         request->untimed_metrics_count + request->sample_counts[0] + request->sample_counts[1] +
                         state->partitions + 8;
-    TpComposeEntry* entries = (TpComposeEntry*)malloc((size_t)capacity * sizeof(*entries));
-    unsigned* order = (unsigned*)malloc((size_t)capacity * sizeof(*order));
+    TpComposeEntry* entries = (TpComposeEntry*)tp_retirement_compose_allocate(state->arena,
+                                  (uint64_t)capacity * sizeof(TpComposeEntry));
+    unsigned* order = (unsigned*)tp_retirement_compose_allocate(state->arena, (uint64_t)capacity * 2 * sizeof(unsigned));
     unsigned count = 0;
     int valid = entries && order;
     for (unsigned i = 0; valid && i < request->prior_count; ++i)
@@ -2152,15 +2615,16 @@ static int tp_compose_seal(TpComposeState* state)
                                      index);
         }
     }
+    /* Unique paths (sorted by path), then the name order the root binds. */
     for (unsigned i = 0; valid && i < count; ++i) order[i] = i;
-    valid = valid && tp_compose_sort(order, count, entries[0].name, sizeof(TpComposeEntry));
-    for (unsigned i = 1; valid && i < count; ++i)
-        valid = strcmp(entries[order[i - 1]].name, entries[order[i]].name) < 0;
-    for (unsigned i = 0; valid && i < count; ++i)
-        for (unsigned j = i + 1; valid && j < count; ++j) valid = strcmp(entries[i].path, entries[j].path) != 0;
+    if (valid) tp_compose_sort(order, order + capacity, count, entries[0].path, sizeof(TpComposeEntry));
+    for (unsigned i = 1; valid && i < count; ++i) valid = strcmp(entries[order[i - 1]].path, entries[order[i]].path) < 0;
+    for (unsigned i = 0; valid && i < count; ++i) order[i] = i;
+    if (valid) tp_compose_sort(order, order + capacity, count, entries[0].name, sizeof(TpComposeEntry));
+    for (unsigned i = 1; valid && i < count; ++i) valid = strcmp(entries[order[i - 1]].name, entries[order[i]].name) < 0;
     /* The files array is hashed alone for the root and embedded verbatim. */
     size_t array_capacity = (size_t)count * TP_COMPOSE_SEAL_ENTRY_BYTES + 16, array_length = 0;
-    char* array = valid ? (char*)malloc(array_capacity) : NULL;
+    char* array = valid ? (char*)tp_retirement_compose_allocate(state->arena, array_capacity) : NULL;
     valid = valid && array;
     for (unsigned i = 0; valid && i <= count; ++i)
     {
@@ -2193,23 +2657,21 @@ static int tp_compose_seal(TpComposeState* state)
         valid = tp_compose_writer_publish(&writer, &state->sealed);
     }
     state->seal_entries = valid ? count : 0;
-    free(array);
-    free(order);
-    free(entries);
     return valid;
 }
 
 /* ------------------------------------------------------------ entry point */
 
-static int tp_compose_request_check(TpRetirementComposeRequest const* request)
+BUSTER_GLOBAL_LOCAL int tp_compose_request_check(TpRetirementComposeRequest const* request)
 {
     TpRetirementPlan const* plan = request ? request->statistics : NULL;
-    int valid = request && request->store && request->layout && plan && request->sealed_path &&
+    int valid = request && request->store && request->layout && plan && request->declaration && request->sealed_path &&
                 tp_retirement_token(request->job) && tp_retirement_token(request->boot) && request->attempt &&
                 request->bound_at_ns && request->completed_at_ns > request->bound_at_ns &&
                 tp_compose_digest(request->execution_plan_sha256) && tp_compose_digest(request->source_rows_sha256) &&
                 tp_compose_digest(request->result_input_plan_sha256) && tp_compose_digest(request->family_sha256) &&
-                tp_compose_digest(request->post_aa_binding_sha256) && tp_retirement_receipt_path(request->sealed_path) &&
+                tp_compose_digest(request->post_aa_binding_sha256) && tp_compose_digest(request->binding_sha256) &&
+                tp_retirement_receipt_path(request->sealed_path) && !tp_compose_reserved_path(request->sealed_path) &&
                 plan->version == TP_RETIREMENT_STATISTICS_VERSION && plan->frozen_before_samples == 1 && plan->seed &&
                 plan->pairs_per_round >= TP_RETIREMENT_MIN_PAIRS_PER_ROUND &&
                 plan->pairs_per_round <= TP_RETIREMENT_EXECUTION_MAX_PAIRS && !(plan->pairs_per_round & 1) &&
@@ -2219,20 +2681,76 @@ static int tp_compose_request_check(TpRetirementComposeRequest const* request)
     return valid;
 }
 
+/* Working tables sized from the verified family: ratio series, the numeric
+ * observation tables, member samples, line buffers and store indexes. */
+BUSTER_GLOBAL_LOCAL int tp_compose_workspace(TpComposeState* state)
+{
+    TpRetirementComposeRequest const* request = state->request;
+    TpComposeFamily const* family = &state->family;
+    uint64_t units[TP_COMPOSE_OBSERVATIONS] = {family->cells[0], family->cells[0], family->runtime_count,
+                                               family->object_count, family->object_count};
+    int valid = 1;
+    for (unsigned m = 0; valid && m < TP_RETIREMENT_COMPOSE_METRICS; ++m)
+    {
+        state->ratios[m] = (double*)tp_retirement_compose_allocate(state->arena,
+                               (uint64_t)family->cells[m] * state->per_unit * sizeof(double));
+        valid = state->ratios[m] != NULL;
+    }
+    for (unsigned t = 0; valid && t < TP_COMPOSE_OBSERVATIONS; ++t)
+    {
+        state->observations[t] = units[t] ? (uint64_t*)tp_retirement_compose_allocate(state->arena,
+                                     units[t] * state->per_unit * 2 * sizeof(uint64_t)) : NULL;
+        valid = !units[t] || state->observations[t];
+    }
+    uint64_t shard_count = (uint64_t)request->transcript_count + request->sample_counts[0] + request->sample_counts[1];
+    unsigned files = state->store->count;
+    state->files = files;
+    state->shards = valid && shard_count ? (TpComposeShard*)tp_retirement_compose_allocate(state->arena,
+                        shard_count * sizeof(TpComposeShard)) : NULL;
+    state->member_intervals = valid ? (uint64_t*)tp_retirement_compose_allocate(state->arena,
+                                  (uint64_t)TP_RETIREMENT_BATCH_INPUTS * 2 * sizeof(uint64_t)) : NULL;
+    state->line = valid ? (char*)tp_retirement_compose_allocate(state->arena, TP_COMPOSE_LINE_BYTES) : NULL;
+    state->metrics_line = valid ? (char*)tp_retirement_compose_allocate(state->arena,
+                              TP_RETIREMENT_METRICS_LINE_BYTES + 1) : NULL;
+    state->by_path = valid && files ? (unsigned*)tp_retirement_compose_allocate(state->arena,
+                         (uint64_t)files * 3 * sizeof(unsigned)) : NULL;
+    state->classes = valid && files ? (unsigned char*)tp_retirement_compose_allocate(state->arena, files) : NULL;
+    valid = valid && state->shards && state->member_intervals && state->line && state->metrics_line && state->by_path &&
+            state->classes;
+    if (valid)
+    {
+        state->member_memory = state->member_intervals + TP_RETIREMENT_BATCH_INPUTS;
+        state->declared = state->by_path + 2 * (size_t)files;
+        state->transcript = state->shards;
+        state->samples[0] = state->transcript + request->transcript_count;
+        state->samples[1] = state->samples[0] + request->sample_counts[0];
+        for (unsigned i = 0; i < files; ++i) state->by_path[i] = i;
+        tp_compose_sort(state->by_path, state->by_path + files, files, state->store->files[0].path,
+                        sizeof(TpRetirementStoredFile));
+        for (unsigned i = 1; valid && i < files; ++i)
+            valid = strcmp(state->store->files[state->by_path[i - 1]].path, state->store->files[state->by_path[i]].path) < 0;
+    }
+    return valid;
+}
+
 int tp_retirement_compose(TpRetirementComposeRequest const* request, TpRetirementComposeResult* result)
 {
     TpComposeState state = {0};
     char const* stage = "request";
+    char digest[65];
     state.request = request;
     int valid = result && tp_compose_request_check(request) && !request->store->failed && request->store->planned &&
-                !request->store->active;
+                !request->store->active && request->store->count;
     if (result) *result = (TpRetirementComposeResult){0};
     state.store = valid ? request->store : NULL;
     state.pairs = valid ? request->statistics->pairs_per_round : 0;
+    state.per_unit = (uint64_t)TP_RETIREMENT_ROUNDS * state.pairs;
+    state.arena = valid ? tp_compose_arena() : NULL;
+    valid = valid && state.arena;
     if (valid)
     {
         stage = "family";
-        valid = tp_compose_family_build(request->layout, &state.family);
+        valid = tp_compose_family_build(request->layout, &state.family, state.arena);
     }
     TpRetirementComposeShape shape = {request ? request->layout : NULL, state.pairs,
                                       request ? request->code_count : 0, request ? request->prior_count : 0};
@@ -2241,22 +2759,17 @@ int tp_retirement_compose(TpRetirementComposeRequest const* request, TpRetiremen
         stage = "bounds";
         valid = tp_compose_bounds_of(&shape, &state.family, &state.bounds) &&
                 request->statistics->bootstrap_members_per_scope == state.family.bootstrap &&
-                request->statistics->cell_members_per_scope == state.family.cells_total;
+                request->statistics->cell_members_per_scope == state.family.cells_total &&
+                tp_compose_workspace(&state);
     }
-    uint64_t per_unit = (uint64_t)TP_RETIREMENT_ROUNDS * state.pairs;
-    for (unsigned m = 0; valid && m < TP_RETIREMENT_COMPOSE_METRICS; ++m)
-    {
-        state.ratios[m] = (double*)malloc((size_t)(state.family.cells[m] * per_unit) * sizeof(double));
-        valid = state.ratios[m] != NULL;
-    }
-    size_t shard_count = valid ? (size_t)request->transcript_count + request->sample_counts[0] + request->sample_counts[1] : 0;
-    state.shards = valid && shard_count ? (TpComposeShard*)calloc(shard_count, sizeof(*state.shards)) : NULL;
-    valid = valid && state.shards;
     if (valid)
     {
-        state.transcript = state.shards;
-        state.samples[0] = state.transcript + request->transcript_count;
-        state.samples[1] = state.samples[0] + request->sample_counts[0];
+        stage = "retained";
+        valid = request->store->retained_bound && tp_compose_declaration_digest(request->declaration, digest) &&
+                !strcmp(digest, request->store->retained_sha256);
+    }
+    if (valid)
+    {
         stage = "inventory";
         valid = tp_compose_inventory(&state);
     }
@@ -2265,9 +2778,9 @@ int tp_retirement_compose(TpRetirementComposeRequest const* request, TpRetiremen
     {
         stage = "metrics-shards";
         valid = tp_compose_tiling_init(&state.timed, state.store, request->metrics_paths, request->metrics_count,
-                                       timed_tag) &&
+                                       state.metrics_line, timed_tag) &&
                 tp_compose_tiling_init(&state.untimed_tiling, state.store, request->untimed_metrics_paths,
-                                       request->untimed_metrics_count, untimed_tag) &&
+                                       request->untimed_metrics_count, state.metrics_line, untimed_tag) &&
                 (!request->metrics_count || !request->untimed_metrics_count || strcmp(timed_tag, untimed_tag));
     }
     if (valid)
@@ -2301,12 +2814,12 @@ int tp_retirement_compose(TpRetirementComposeRequest const* request, TpRetiremen
         valid = tp_compose_context(&state);
     }
     /* Every input is verified: settle the reservation to the exact final
-     * inventory, then publish the composer's outputs. */
+     * inventory (only bounded-kind slack may be released), then publish the
+     * composer's outputs. */
     if (valid)
     {
         stage = "settle";
-        valid = request->later_files <= TP_RETIREMENT_STORE_FILES &&
-                tp_retirement_store_settle(state.store, state.store->count + state.bounds.files + request->later_files);
+        valid = tp_retirement_store_settle(state.store, state.store->count + state.bounds.files);
     }
     if (valid)
     {
@@ -2335,6 +2848,11 @@ int tp_retirement_compose(TpRetirementComposeRequest const* request, TpRetiremen
     }
     if (valid)
     {
+        stage = "retained-manifest";
+        valid = tp_compose_retained(&state);
+    }
+    if (valid)
+    {
         stage = "bundle";
         valid = tp_compose_bundle(&state);
     }
@@ -2346,7 +2864,7 @@ int tp_retirement_compose(TpRetirementComposeRequest const* request, TpRetiremen
     if (valid)
     {
         stage = "validate";
-        valid = request->later_files || tp_retirement_store_validate(state.store);
+        valid = tp_retirement_store_validate(state.store);
     }
     if (valid)
     {
@@ -2358,9 +2876,13 @@ int tp_retirement_compose(TpRetirementComposeRequest const* request, TpRetiremen
         result->series = state.series;
         result->replay = state.replay;
         result->code = state.code;
+        result->retained = state.retained;
         result->members = state.family.count;
         result->seal_entries = state.seal_entries;
+        result->retained_files = state.retained_files;
         result->invocations = state.invocations;
+        result->untimed_records = state.untimed_records;
+        result->untimed_production = state.untimed_production;
     }
     else
     {
@@ -2369,9 +2891,7 @@ int tp_retirement_compose(TpRetirementComposeRequest const* request, TpRetiremen
         tp_compose_tiling_abandon(&state.untimed_tiling);
         if (request && request->store) request->store->failed = 1;
     }
-    for (unsigned m = 0; m < TP_RETIREMENT_COMPOSE_METRICS; ++m) free(state.ratios[m]);
-    free(state.shards);
-    tp_compose_family_free(&state.family);
+    if (state.arena) arena_destroy(state.arena, 1);
     return valid;
 }
 #endif

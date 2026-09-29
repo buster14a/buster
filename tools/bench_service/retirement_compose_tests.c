@@ -1,35 +1,44 @@
 /* #881-E composer fixtures and command-line driver (Linux only).
  *
- * Link with retirement_compose.c, retirement_result.c (built with
- * BUSTER_RETIREMENT_STORE_TEST) and tools/throughput/shared.c. Three modes:
+ * Link with retirement_compose.c, retirement_compose_json.c,
+ * retirement_result.c (built with BUSTER_RETIREMENT_STORE_TEST) and
+ * tools/throughput/shared.c. Modes:
  *   (no arguments)                 native fail-closed fixtures, printed as
  *                                  `COMPOSE_TEST assertions=N failures=N`
- *   compose SPEC                   plan a fresh store, import lane D's stream
+ *   compose SPEC                   plan a fresh store with the declared
+ *                                  retained files, import lane D's stream
  *                                  files, compose, optionally issue the
  *                                  producer authority, print COMPOSE_RESULT
+ *   canonical FILE                 print a JSON document's canonical bytes
+ *   context BINDING RAW            print _execution_context(binding, RAW)
  *   retirement-replay --input I --output O
  *                                  a stub adapter for the native fixtures only
- * The Python end-to-end test (retirement_compose_test.py) drives `compose`
- * with the reviewed adapter and runs the binding validator on the output.
+ *                                  (a `stub-mode` file in its directory selects
+ *                                  a slow or malformed run)
+ * The Python end-to-end test (retirement_compose_test.py) drives these with
+ * the reviewed adapter and runs the binding validator on the output.
  * No fixture here is service admission or performance evidence.
  *
- * Map: Driver, driver_parse, driver_plan, driver_import, driver_compose,
- * fixture_generate, test_compose_success, test_compose_refusals,
+ * Map: Driver, driver_parse, driver_plan, driver_import_all, driver_compose,
+ * driver_main, stub_adapter, fixture_streams, fixture_start, fixture_clean,
+ * test_canonical_json, test_compose_success, test_compose_refusals,
  * test_budget_and_settle, test_handoff.
  */
 #define _GNU_SOURCE 1
 #include "retirement_compose.h"
 #ifdef __linux__
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 extern unsigned tp_retirement_store_test_sync_calls, tp_retirement_store_test_fail_sync;
-static unsigned assertions, failures;
+BUSTER_GLOBAL_LOCAL unsigned assertions, failures;
 #define CHECK(value) do { ++assertions; if (!(value)) { ++failures; fprintf(stderr, "COMPOSE_TEST line=%d: %s\n", __LINE__, #value); } } while (0)
 
 #define DRIVER_ROWS 64u
@@ -37,6 +46,18 @@ static unsigned assertions, failures;
 #define DRIVER_FILES 64u
 #define DRIVER_PRIOR 128u
 #define DRIVER_PATH 512u
+#define DRIVER_LINE 4096u
+#define DRIVER_WORDS 16u
+/* Every driver owns one arena for its tables and file copies. */
+#define DRIVER_ARENA_BYTES (UINT64_C(1) << 30)
+#define DRIVER_READ_BYTES (UINT64_C(64) << 20)
+/* The store root also holds the binding and three reserved controls. */
+#define DRIVER_EXTERNAL_ENTRIES (TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES + 1u)
+/* The stub adapter's slow mode outlives the fixture's adapter limit. */
+#define STUB_SLOW_SECONDS 30
+#define FIXTURE_ADAPTER_TIMEOUT_NS UINT64_C(300000000)
+#define FIXTURE_PAIRS 60u
+#define FIXTURE_DIRECTORY_DEPTH 16u
 
 typedef struct DriverFile
 {
@@ -59,15 +80,26 @@ typedef struct DriverPrior
     uint64_t bytes;
 } DriverPrior;
 
+typedef struct DriverRetained
+{
+    char kind[TP_RETIREMENT_COMPOSE_KIND_BYTES + 1];
+    char prefix[TP_RETIREMENT_STORE_PATH_BYTES + 1];
+    char suffix[TP_RETIREMENT_STORE_PATH_BYTES + 1];
+    int group;
+} DriverRetained;
+
 typedef struct Driver
 {
-    char source[DRIVER_PATH], store_path[DRIVER_PATH], evidence[DRIVER_PATH], scratch[DRIVER_PATH];
-    char adapter[DRIVER_PATH], authority_path[DRIVER_PATH], context_path[DRIVER_PATH];
-    char job[129], boot[129], sealed[TP_RETIREMENT_STORE_PATH_BYTES + 1];
+    Arena* arena;
+    char source[DRIVER_PATH], store_path[DRIVER_PATH], scratch[DRIVER_PATH];
+    char adapter[DRIVER_PATH], adapter_sha256[65], authority_path[DRIVER_PATH];
+    char binding[TP_RETIREMENT_STORE_PATH_BYTES + 1], binding_sha256[65];
+    char job[TP_RETIREMENT_STORE_TOKEN_CAPACITY], boot[TP_RETIREMENT_STORE_TOKEN_CAPACITY];
+    char sealed[TP_RETIREMENT_STORE_PATH_BYTES + 1];
     char digests[5][65];
     char dimensions[DRIVER_ROWS][TP_RETIREMENT_COMPOSE_DIMENSIONS][65];
-    int source_fd, store_fd, evidence_fd, scratch_fd, authority_fd;
-    uint64_t attempt, bound_at_ns, completed_at_ns, metrics_header, metrics_input;
+    int source_fd, store_fd, scratch_fd, authority_fd;
+    uint64_t attempt, bound_at_ns, completed_at_ns, metrics_header, metrics_input, timeout_ns;
     TpRetirementComposeRow rows[DRIVER_ROWS];
     unsigned group_kinds[DRIVER_GROUPS], group_inputs[DRIVER_GROUPS], group_count, row_count;
     unsigned untimed_kinds[DRIVER_GROUPS], untimed_inputs[DRIVER_GROUPS], untimed_count, population_rows;
@@ -75,12 +107,16 @@ typedef struct Driver
     unsigned code_count;
     TpRetirementComposePartition partitions[2][TP_RETIREMENT_COMPOSE_PARTITIONS];
     unsigned partition_counts[2];
-    DriverList transcript, samples[2], metrics, untimed, untimed_metrics, retained;
+    /* Sealed inputs, then retained files (exact declarations and group
+     * members): every list is imported into the store. */
+    DriverList transcript, samples[2], metrics, untimed, untimed_metrics, retained_files;
+    DriverRetained retained_text[TP_RETIREMENT_COMPOSE_RETAINED_ENTRIES];
+    TpRetirementComposeRetained retained[TP_RETIREMENT_COMPOSE_RETAINED_ENTRIES];
+    unsigned retained_count;
     DriverPrior prior_storage[DRIVER_PRIOR];
     TpRetirementComposeClosure prior[DRIVER_PRIOR];
     unsigned prior_count;
-    unsigned char* context;
-    size_t context_bytes;
+    TpRetirementComposeDeclaration declaration;
     TpRetirementPlan statistics;
     TpRetirementComposeLayout layout;
     TpRetirementStore store;
@@ -90,37 +126,43 @@ typedef struct Driver
     TpRetirementReceiptAuthority authority;
 } Driver;
 
-static void driver_init(Driver* driver)
+BUSTER_GLOBAL_LOCAL Driver* driver_create(void)
 {
-    memset(driver, 0, sizeof(*driver));
-    driver->source_fd = driver->store_fd = driver->evidence_fd = driver->scratch_fd = driver->authority_fd = -1;
-    driver->store.root = -1;
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = DRIVER_ARENA_BYTES, .flags = {.no_pool = 1}});
+    Driver* driver = arena ? (Driver*)tp_retirement_compose_allocate(arena, sizeof(Driver)) : NULL;
+    if (driver)
+    {
+        driver->arena = arena;
+        driver->source_fd = driver->store_fd = driver->scratch_fd = driver->authority_fd = -1;
+        driver->store.root = -1;
+    }
+    else if (arena) arena_destroy(arena, 1);
+    return driver;
 }
 
-static void driver_close(Driver* driver)
+BUSTER_GLOBAL_LOCAL void driver_destroy(Driver* driver)
 {
-    tp_retirement_store_close(&driver->store);
-    int* descriptors[] = {&driver->source_fd, &driver->store_fd, &driver->evidence_fd, &driver->scratch_fd,
-                          &driver->authority_fd};
-    for (unsigned i = 0; i < sizeof(descriptors) / sizeof(descriptors[0]); ++i)
-        if (*descriptors[i] >= 0)
-        {
-            close(*descriptors[i]);
-            *descriptors[i] = -1;
-        }
-    free(driver->files);
-    driver->files = NULL;
-    free(driver->context);
-    driver->context = NULL;
+    if (driver)
+    {
+        tp_retirement_store_close(&driver->store);
+        int* descriptors[] = {&driver->source_fd, &driver->store_fd, &driver->scratch_fd, &driver->authority_fd};
+        for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(descriptors); ++i)
+            if (*descriptors[i] >= 0)
+            {
+                close(*descriptors[i]);
+                *descriptors[i] = -1;
+            }
+        arena_destroy(driver->arena, 1);
+    }
 }
 
-static int driver_directory(char const* path)
+BUSTER_GLOBAL_LOCAL int driver_directory(char const* path)
 {
     int fd = path && path[0] ? open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
     return fd;
 }
 
-static int driver_list_add(DriverList* list, char const* path, char const* source)
+BUSTER_GLOBAL_LOCAL int driver_list_add(DriverList* list, char const* path, char const* source)
 {
     int valid = list->count < DRIVER_FILES && path && strlen(path) <= TP_RETIREMENT_STORE_PATH_BYTES &&
                 (!source || strlen(source) < DRIVER_PATH);
@@ -135,7 +177,7 @@ static int driver_list_add(DriverList* list, char const* path, char const* sourc
     return valid;
 }
 
-static int driver_list_remove(DriverList* list, char const* path)
+BUSTER_GLOBAL_LOCAL int driver_list_remove(DriverList* list, char const* path)
 {
     unsigned found = list->count;
     for (unsigned i = 0; i < list->count; ++i)
@@ -150,57 +192,88 @@ static int driver_list_remove(DriverList* list, char const* path)
     return valid;
 }
 
-static int driver_kind(char const* text, unsigned* kind)
+BUSTER_GLOBAL_LOCAL int driver_kind(char const* text, unsigned* kind)
 {
     int valid = text && (!strcmp(text, "object") || !strcmp(text, "singleton"));
     if (valid) *kind = !strcmp(text, "object") ? TP_RETIREMENT_GROUP_OBJECT : TP_RETIREMENT_GROUP_SINGLETON;
     return valid;
 }
 
-static int driver_digest_copy(char output[65], char const* text)
+BUSTER_GLOBAL_LOCAL int driver_digest_copy(char output[65], char const* text)
 {
     int valid = text && strlen(text) == 64;
     if (valid) strcpy(output, text);
     return valid;
 }
 
-/* One whitespace-separated directive per line; see the file header of
- * retirement_compose_test.py for the directives it writes. */
-static int driver_parse(Driver* driver, char const* spec)
+BUSTER_GLOBAL_LOCAL int driver_copy(char* output, size_t capacity, char const* text)
+{
+    int valid = text && strlen(text) < capacity;
+    if (valid) strcpy(output, text);
+    return valid;
+}
+
+/* A retained declaration entry: `reserved` or an unreserved byte bound. */
+BUSTER_GLOBAL_LOCAL int driver_retain(Driver* driver, char const* kind, char const* prefix, char const* suffix,
+                                      unsigned files_max, char const* reservation)
+{
+    unsigned index = driver->retained_count;
+    int valid = index < TP_RETIREMENT_COMPOSE_RETAINED_ENTRIES;
+    DriverRetained* text = valid ? driver->retained_text + index : NULL;
+    valid = valid && driver_copy(text->kind, sizeof(text->kind), kind) &&
+            driver_copy(text->prefix, sizeof(text->prefix), prefix) &&
+            (!suffix || driver_copy(text->suffix, sizeof(text->suffix), suffix));
+    if (valid)
+    {
+        int reserved = !strcmp(reservation, "reserved");
+        text->group = suffix != NULL;
+        driver->retained[index] = (TpRetirementComposeRetained){text->kind, text->prefix, suffix ? text->suffix : NULL,
+            files_max, (unsigned)reserved, reserved ? 0 : strtoull(reservation, NULL, 10)};
+        ++driver->retained_count;
+    }
+    return valid;
+}
+
+/* One whitespace-separated directive per line; retirement_compose_test.py
+ * writes: source store scratch adapter authority binding sealed identity
+ * digests statistics population metrics-budget group untimed-group row code
+ * partition transcript samples metrics untimed untimed-metrics retain-file
+ * retain-declared (declared, never imported) retain-group retain-member prior
+ * timeout. */
+BUSTER_GLOBAL_LOCAL int driver_parse(Driver* driver, char const* spec)
 {
     FILE* input = fopen(spec, "rb");
     int valid = input != NULL;
-    char line[4096];
+    char line[DRIVER_LINE];
     while (valid && fgets(line, sizeof(line), input))
     {
-        char* words[16] = {0};
+        char* words[DRIVER_WORDS] = {0};
         unsigned count = 0;
-        for (char* token = strtok(line, " \t\r\n"); token && count < 16; token = strtok(NULL, " \t\r\n"))
+        char* state = NULL;
+        for (char* token = strtok_r(line, " \t\r\n", &state); token && count < DRIVER_WORDS;
+             token = strtok_r(NULL, " \t\r\n", &state))
             words[count++] = token;
         char const* key = count ? words[0] : "";
-        if (!count) continue;
-        if (!strcmp(key, "source") && count == 2) valid = strlen(words[1]) < DRIVER_PATH && strcpy(driver->source, words[1]);
-        else if (!strcmp(key, "store") && count == 2) valid = strlen(words[1]) < DRIVER_PATH && strcpy(driver->store_path, words[1]);
-        else if (!strcmp(key, "evidence") && count == 2) valid = strlen(words[1]) < DRIVER_PATH && strcpy(driver->evidence, words[1]);
-        else if (!strcmp(key, "scratch") && count == 2) valid = strlen(words[1]) < DRIVER_PATH && strcpy(driver->scratch, words[1]);
-        else if (!strcmp(key, "adapter") && count == 2) valid = strlen(words[1]) < DRIVER_PATH && strcpy(driver->adapter, words[1]);
+        if (!count) valid = 1;
+        else if (!strcmp(key, "source") && count == 2) valid = driver_copy(driver->source, DRIVER_PATH, words[1]);
+        else if (!strcmp(key, "store") && count == 2) valid = driver_copy(driver->store_path, DRIVER_PATH, words[1]);
+        else if (!strcmp(key, "scratch") && count == 2) valid = driver_copy(driver->scratch, DRIVER_PATH, words[1]);
+        else if (!strcmp(key, "adapter") && count == 3)
+            valid = driver_copy(driver->adapter, DRIVER_PATH, words[1]) && driver_digest_copy(driver->adapter_sha256, words[2]);
         else if (!strcmp(key, "authority") && count == 2)
-            valid = strlen(words[1]) < DRIVER_PATH && strcpy(driver->authority_path, words[1]);
-        else if (!strcmp(key, "context") && count == 2)
-            valid = strlen(words[1]) < DRIVER_PATH && strcpy(driver->context_path, words[1]);
-        else if (!strcmp(key, "sealed") && count == 2)
-            valid = strlen(words[1]) <= TP_RETIREMENT_STORE_PATH_BYTES && strcpy(driver->sealed, words[1]);
+            valid = driver_copy(driver->authority_path, DRIVER_PATH, words[1]);
+        else if (!strcmp(key, "binding") && count == 3)
+            valid = driver_copy(driver->binding, sizeof(driver->binding), words[1]) &&
+                    driver_digest_copy(driver->binding_sha256, words[2]);
+        else if (!strcmp(key, "sealed") && count == 2) valid = driver_copy(driver->sealed, sizeof(driver->sealed), words[1]);
+        else if (!strcmp(key, "timeout") && count == 2) driver->timeout_ns = strtoull(words[1], NULL, 10);
         else if (!strcmp(key, "identity") && count == 6)
         {
-            valid = strlen(words[1]) <= 128 && strlen(words[3]) <= 128;
-            if (valid)
-            {
-                strcpy(driver->job, words[1]);
-                strcpy(driver->boot, words[3]);
-                driver->attempt = strtoull(words[2], NULL, 10);
-                driver->bound_at_ns = strtoull(words[4], NULL, 10);
-                driver->completed_at_ns = strtoull(words[5], NULL, 10);
-            }
+            valid = driver_copy(driver->job, sizeof(driver->job), words[1]) &&
+                    driver_copy(driver->boot, sizeof(driver->boot), words[3]);
+            driver->attempt = strtoull(words[2], NULL, 10);
+            driver->bound_at_ns = strtoull(words[4], NULL, 10);
+            driver->completed_at_ns = strtoull(words[5], NULL, 10);
         }
         else if (!strcmp(key, "digests") && count == 6)
             for (unsigned i = 0; valid && i < 5; ++i) valid = driver_digest_copy(driver->digests[i], words[i + 1]);
@@ -233,10 +306,7 @@ static int driver_parse(Driver* driver, char const* spec)
             unsigned index = driver->row_count;
             valid = index < DRIVER_ROWS;
             for (unsigned d = 0; valid && d < TP_RETIREMENT_COMPOSE_DIMENSIONS; ++d)
-            {
-                valid = strlen(words[4 + d]) < 65;
-                if (valid) strcpy(driver->dimensions[index][d], words[4 + d]);
-            }
+                valid = driver_copy(driver->dimensions[index][d], 65, words[4 + d]);
             if (valid)
             {
                 TpRetirementComposeRow* row = driver->rows + index;
@@ -267,13 +337,12 @@ static int driver_parse(Driver* driver, char const* spec)
         {
             unsigned population = !strcmp(words[1], "batches");
             unsigned index = driver->partition_counts[population];
-            valid = (population || !strcmp(words[1], "rows")) && index < TP_RETIREMENT_COMPOSE_PARTITIONS &&
-                    strlen(words[2]) <= TP_RETIREMENT_COMPOSE_NAME_BYTES && strlen(words[3]) <= TP_RETIREMENT_STORE_PATH_BYTES;
+            valid = (population || !strcmp(words[1], "rows")) && index < TP_RETIREMENT_COMPOSE_PARTITIONS;
+            TpRetirementComposePartition* partition = valid ? driver->partitions[population] + index : NULL;
+            valid = valid && driver_copy(partition->identity, sizeof(partition->identity), words[2]) &&
+                    driver_copy(partition->path, sizeof(partition->path), words[3]);
             if (valid)
             {
-                TpRetirementComposePartition* partition = driver->partitions[population] + index;
-                strcpy(partition->identity, words[2]);
-                strcpy(partition->path, words[3]);
                 partition->start = strtoull(words[4], NULL, 10);
                 partition->records = strtoull(words[5], NULL, 10);
                 ++driver->partition_counts[population];
@@ -290,17 +359,23 @@ static int driver_parse(Driver* driver, char const* spec)
             valid = !driver->untimed.count && driver_list_add(&driver->untimed, words[1], count == 3 ? words[2] : NULL);
         else if (!strcmp(key, "untimed-metrics") && (count == 2 || count == 3))
             valid = driver_list_add(&driver->untimed_metrics, words[1], count == 3 ? words[2] : NULL);
-        else if (!strcmp(key, "retained") && (count == 2 || count == 3))
-            valid = driver_list_add(&driver->retained, words[1], count == 3 ? words[2] : NULL);
+        else if (!strcmp(key, "retain-file") && (count == 4 || count == 5))
+            valid = driver_retain(driver, words[1], words[2], NULL, 1, words[3]) &&
+                    driver_list_add(&driver->retained_files, words[2], count == 5 ? words[4] : NULL);
+        else if (!strcmp(key, "retain-declared") && count == 4)
+            valid = driver_retain(driver, words[1], words[2], NULL, 1, words[3]);
+        else if (!strcmp(key, "retain-group") && count == 6)
+            valid = words[3][0] == '=' && driver_retain(driver, words[1], words[2], words[3] + 1,
+                                                        (unsigned)strtoul(words[4], NULL, 10), words[5]);
+        else if (!strcmp(key, "retain-member") && (count == 2 || count == 3))
+            valid = driver_list_add(&driver->retained_files, words[1], count == 3 ? words[2] : NULL);
         else if (!strcmp(key, "prior") && count == 5)
         {
             DriverPrior* prior = driver->prior_count < DRIVER_PRIOR ? driver->prior_storage + driver->prior_count : NULL;
-            valid = prior && strlen(words[1]) <= TP_RETIREMENT_COMPOSE_NAME_BYTES &&
-                    strlen(words[2]) <= TP_RETIREMENT_STORE_PATH_BYTES && driver_digest_copy(prior->sha256, words[4]);
+            valid = prior && driver_copy(prior->name, sizeof(prior->name), words[1]) &&
+                    driver_copy(prior->path, sizeof(prior->path), words[2]) && driver_digest_copy(prior->sha256, words[4]);
             if (valid)
             {
-                strcpy(prior->name, words[1]);
-                strcpy(prior->path, words[2]);
                 prior->bytes = strtoull(words[3], NULL, 10);
                 ++driver->prior_count;
             }
@@ -312,7 +387,7 @@ static int driver_parse(Driver* driver, char const* spec)
     return valid;
 }
 
-static int driver_file_size(int root, char const* path, uint64_t* bytes)
+BUSTER_GLOBAL_LOCAL int driver_file_size(int root, char const* path, uint64_t* bytes)
 {
     struct stat info = {0};
     int valid = fstatat(root, path, &info, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(info.st_mode) && info.st_size > 0;
@@ -320,10 +395,30 @@ static int driver_file_size(int root, char const* path, uint64_t* bytes)
     return valid;
 }
 
-/* Reserve the store before any timing: both campaign stages from the frozen
- * shape and the reviewed metrics bounds, the composer outputs and the
- * retained files. */
-static int driver_plan(Driver* driver)
+/* The declaration, prior closure and layout views over the parsed text. */
+BUSTER_GLOBAL_LOCAL void driver_views(Driver* driver)
+{
+    uint64_t prior_bytes = 0;
+    for (unsigned i = 0; i < driver->prior_count; ++i)
+    {
+        DriverPrior const* prior = driver->prior_storage + i;
+        driver->prior[i] = (TpRetirementComposeClosure){prior->name, prior->path, prior->bytes, prior->sha256};
+        prior_bytes += prior->bytes;
+    }
+    for (unsigned i = 0; i < driver->retained_count; ++i)
+    {
+        DriverRetained const* text = driver->retained_text + i;
+        driver->retained[i].kind = text->kind;
+        driver->retained[i].prefix = text->prefix;
+        driver->retained[i].suffix = text->group ? text->suffix : NULL;
+    }
+    driver->declaration = (TpRetirementComposeDeclaration){driver->retained, driver->retained_count,
+                                                           driver->prior_count, prior_bytes};
+    driver->layout = (TpRetirementComposeLayout){driver->rows, driver->group_kinds, driver->row_count,
+                                                 driver->group_count, driver->population_rows, driver->untimed_count};
+}
+
+BUSTER_GLOBAL_LOCAL int driver_capacity(Driver* driver, TpRetirementCampaignCapacity* capacity)
 {
     TpRetirementCampaignShape shape = {driver->group_count, 0, driver->row_count, 0,
                                        driver->statistics.pairs_per_round, driver->untimed_count, 0, 0, 0, 0};
@@ -349,26 +444,30 @@ static int driver_plan(Driver* driver)
             if (bound > shape.metrics_artifact_max) shape.metrics_artifact_max = bound;
         }
     }
+    int valid = tp_retirement_campaign_capacity(&shape, capacity);
+    return valid;
+}
+
+/* Reserve the store before any timing: both campaign stages from the frozen
+ * shape and the reviewed metrics bounds, the composer outputs, the retained
+ * declaration and, as external entries, the prior closure and binding. */
+BUSTER_GLOBAL_LOCAL int driver_plan(Driver* driver)
+{
     TpRetirementCampaignCapacity capacity;
     TpRetirementCampaignStorePlan plan;
+    driver_views(driver);
     TpRetirementComposeShape compose = {&driver->layout, driver->statistics.pairs_per_round, driver->code_count,
                                         driver->prior_count};
-    uint64_t retained_bytes = 0;
-    int valid = tp_retirement_campaign_capacity(&shape, &capacity);
-    for (unsigned i = 0; valid && i < driver->retained.count; ++i)
-    {
-        uint64_t bytes = 0;
-        valid = driver_file_size(driver->source_fd, driver->retained.files[i].source, &bytes);
-        retained_bytes += bytes;
-    }
-    valid = valid && tp_retirement_compose_plan(&driver->store, &capacity, &compose, driver->retained.count,
-                                                retained_bytes, TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES, 0, &plan);
+    uint64_t binding = 0;
+    int valid = driver_capacity(driver, &capacity) && driver_file_size(driver->store_fd, driver->binding, &binding) &&
+                tp_retirement_compose_plan(&driver->store, &capacity, &compose, &driver->declaration,
+                                           DRIVER_EXTERNAL_ENTRIES, binding, &plan);
     return valid;
 }
 
 /* Copy one of lane D's stream files into the planned store, as the in-unit
  * driver does when it writes into a pending store stream. */
-static int driver_import(Driver* driver, DriverFile const* file)
+BUSTER_GLOBAL_LOCAL int driver_import(Driver* driver, DriverFile const* file)
 {
     int fd = openat(driver->source_fd, file->source, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     FILE* input = fd >= 0 ? fdopen(fd, "rb") : NULL;
@@ -379,10 +478,10 @@ static int driver_import(Driver* driver, DriverFile const* file)
     sha256_init(&hash);
     uint64_t bytes = 0;
     unsigned char buffer[65536];
-    while (valid)
+    size_t count = valid ? 1 : 0;
+    while (valid && count)
     {
-        size_t count = fread(buffer, 1, sizeof(buffer), input);
-        if (!count) break;
+        count = fread(buffer, 1, sizeof(buffer), input);
         valid = fwrite(buffer, 1, count, pending.stream) == count;
         sha256_add(&hash, buffer, (u64)count);
         bytes += count;
@@ -399,22 +498,24 @@ static int driver_import(Driver* driver, DriverFile const* file)
     return valid;
 }
 
-static int driver_import_all(Driver* driver)
+BUSTER_GLOBAL_LOCAL int driver_import_all(Driver* driver)
 {
     DriverList* lists[] = {&driver->transcript, &driver->samples[0], &driver->samples[1], &driver->metrics,
-                           &driver->untimed, &driver->untimed_metrics, &driver->retained};
+                           &driver->untimed, &driver->untimed_metrics, &driver->retained_files};
     int valid = 1;
-    for (unsigned l = 0; valid && l < sizeof(lists) / sizeof(lists[0]); ++l)
+    for (unsigned l = 0; valid && l < BUSTER_ARRAY_LENGTH(lists); ++l)
         for (unsigned i = 0; valid && i < lists[l]->count; ++i) valid = driver_import(driver, lists[l]->files + i);
     return valid;
 }
 
-static int driver_read_file(char const* path, unsigned char** bytes, size_t* length)
+/* A whole regular file into the arena (at most DRIVER_READ_BYTES). */
+BUSTER_GLOBAL_LOCAL int driver_read_file(Arena* arena, char const* path, unsigned char** bytes, size_t* length)
 {
     FILE* input = fopen(path, "rb");
     long size = -1;
-    int valid = input && fseek(input, 0, SEEK_END) == 0 && (size = ftell(input)) > 0 && fseek(input, 0, SEEK_SET) == 0;
-    *bytes = valid ? (unsigned char*)malloc((size_t)size) : NULL;
+    int valid = input && fseek(input, 0, SEEK_END) == 0 && (size = ftell(input)) > 0 &&
+                (uint64_t)size <= DRIVER_READ_BYTES && fseek(input, 0, SEEK_SET) == 0;
+    *bytes = valid ? (unsigned char*)tp_retirement_compose_allocate(arena, (uint64_t)size) : NULL;
     valid = valid && *bytes && fread(*bytes, 1, (size_t)size, input) == (size_t)size;
     *length = valid ? (size_t)size : 0;
     if (input) fclose(input);
@@ -422,37 +523,33 @@ static int driver_read_file(char const* path, unsigned char** bytes, size_t* len
 }
 
 /* Open every directory, the store and the request structures. */
-static int driver_open(Driver* driver)
+BUSTER_GLOBAL_LOCAL int driver_open(Driver* driver)
 {
     driver->source_fd = driver_directory(driver->source);
     driver->store_fd = driver_directory(driver->store_path);
-    driver->evidence_fd = driver_directory(driver->evidence[0] ? driver->evidence : driver->store_path);
     driver->scratch_fd = driver_directory(driver->scratch);
     driver->authority_fd = driver->authority_path[0] ? driver_directory(driver->authority_path) : -1;
-    driver->files = (TpRetirementStoredFile*)calloc(TP_RETIREMENT_STORE_FILES, sizeof(*driver->files));
-    int valid = driver->source_fd >= 0 && driver->store_fd >= 0 && driver->evidence_fd >= 0 &&
-                driver->scratch_fd >= 0 && (!driver->authority_path[0] || driver->authority_fd >= 0) && driver->files &&
-                driver_read_file(driver->context_path, &driver->context, &driver->context_bytes) &&
+    driver->files = (TpRetirementStoredFile*)tp_retirement_compose_allocate(driver->arena,
+                        (uint64_t)TP_RETIREMENT_STORE_FILES * sizeof(TpRetirementStoredFile));
+    int valid = driver->source_fd >= 0 && driver->store_fd >= 0 && driver->scratch_fd >= 0 &&
+                (!driver->authority_path[0] || driver->authority_fd >= 0) && driver->files &&
                 tp_retirement_store_open(&driver->store, driver->store_fd, driver->files, TP_RETIREMENT_STORE_FILES);
-    for (unsigned i = 0; i < driver->prior_count; ++i)
-        driver->prior[i] = (TpRetirementComposeClosure){driver->prior_storage[i].name, driver->prior_storage[i].path,
-                                                        driver->prior_storage[i].bytes, driver->prior_storage[i].sha256};
-    driver->layout = (TpRetirementComposeLayout){driver->rows, driver->group_kinds, driver->row_count,
-                                                 driver->group_count, driver->population_rows, driver->untimed_count};
+    driver_views(driver);
     return valid;
 }
 
-static void driver_request(Driver* driver)
+BUSTER_GLOBAL_LOCAL void driver_request(Driver* driver)
 {
     TpRetirementComposeRequest* request = &driver->request;
     *request = (TpRetirementComposeRequest){
-        .store = &driver->store, .evidence_root = driver->evidence_fd, .scratch_root = driver->scratch_fd,
-        .adapter_path = driver->adapter, .layout = &driver->layout, .statistics = &driver->statistics,
-        .job = driver->job, .boot = driver->boot, .attempt = driver->attempt, .bound_at_ns = driver->bound_at_ns,
+        .store = &driver->store, .scratch_root = driver->scratch_fd, .adapter_path = driver->adapter,
+        .adapter_sha256 = driver->adapter_sha256, .adapter_timeout_ns = driver->timeout_ns, .layout = &driver->layout,
+        .statistics = &driver->statistics, .declaration = &driver->declaration, .job = driver->job,
+        .boot = driver->boot, .attempt = driver->attempt, .bound_at_ns = driver->bound_at_ns,
         .completed_at_ns = driver->completed_at_ns, .execution_plan_sha256 = driver->digests[0],
         .source_rows_sha256 = driver->digests[1], .result_input_plan_sha256 = driver->digests[2],
         .family_sha256 = driver->digests[3], .post_aa_binding_sha256 = driver->digests[4],
-        .context_template = driver->context, .context_template_bytes = driver->context_bytes,
+        .binding_path = driver->binding, .binding_sha256 = driver->binding_sha256,
         .partitions = {driver->partitions[0], driver->partitions[1]},
         .partition_counts = {driver->partition_counts[0], driver->partition_counts[1]},
         .transcript_paths = driver->transcript.paths, .transcript_count = driver->transcript.count,
@@ -462,11 +559,10 @@ static void driver_request(Driver* driver)
         .untimed_path = driver->untimed.count ? driver->untimed.paths[0] : NULL,
         .untimed_metrics_paths = driver->untimed_metrics.paths, .untimed_metrics_count = driver->untimed_metrics.count,
         .code = driver->code, .code_count = driver->code_count, .prior = driver->prior,
-        .prior_count = driver->prior_count, .retained_paths = driver->retained.paths,
-        .retained_count = driver->retained.count, .sealed_path = driver->sealed};
+        .prior_count = driver->prior_count, .sealed_path = driver->sealed};
 }
 
-static int driver_compose(Driver* driver)
+BUSTER_GLOBAL_LOCAL int driver_compose(Driver* driver)
 {
     driver_request(driver);
     int valid = tp_retirement_compose(&driver->request, &driver->result);
@@ -477,22 +573,17 @@ static int driver_compose(Driver* driver)
     return valid;
 }
 
-static void driver_artifact(char const* name, TpRetirementComposeArtifact const* artifact, int last)
+BUSTER_GLOBAL_LOCAL void driver_artifact(char const* name, TpRetirementComposeArtifact const* artifact, int last)
 {
     printf("\"%s\":{\"bytes\":%" PRIu64 ",\"path\":\"%s\",\"sha256\":\"%s\"}%s", name, artifact->bytes, artifact->path,
            artifact->sha256, last ? "" : ",");
 }
 
-static int driver_main(char const* spec)
+BUSTER_GLOBAL_LOCAL int driver_main(char const* spec)
 {
-    Driver* driver = (Driver*)malloc(sizeof(Driver));
-    int valid = driver != NULL;
-    if (valid)
-    {
-        driver_init(driver);
-        valid = driver_parse(driver, spec) && driver_open(driver) && driver_plan(driver) && driver_import_all(driver) &&
-                driver_compose(driver);
-    }
+    Driver* driver = driver_create();
+    int valid = driver && driver_parse(driver, spec) && driver_open(driver) && driver_plan(driver) &&
+                driver_import_all(driver) && driver_compose(driver);
     if (valid)
     {
         TpRetirementComposeResult const* result = &driver->result;
@@ -503,82 +594,156 @@ static int driver_main(char const* spec)
                result->context_sha256, result->invocations, result->members, result->raw_measurements_sha256);
         driver_artifact("receipt", &result->receipt, 0);
         driver_artifact("replay", &result->replay, 0);
-        printf("\"seal_entries\":%u,", result->seal_entries);
+        driver_artifact("retained", &result->retained, 0);
+        printf("\"retained_files\":%u,\"seal_entries\":%u,", result->retained_files, result->seal_entries);
         driver_artifact("sealed", &result->sealed, 0);
-        driver_artifact("series", &result->series, 1);
+        driver_artifact("series", &result->series, 0);
+        printf("\"untimed_production\":%" PRIu64 ",\"untimed_records\":%" PRIu64, result->untimed_production,
+               result->untimed_records);
         if (driver->authority_fd >= 0)
-            printf(",\"authority\":{\"authority_sha256\":\"%s\",\"identity_sha256\":\"%s\",\"receipt_sha256\":\"%s\"}",
-                   driver->authority.authority_sha256, driver->authority.identity_sha256, driver->authority.receipt_sha256);
+            printf(",\"authority\":{\"attempt\":%" PRIu64 ",\"authority_sha256\":\"%s\",\"job\":\"%s\"}",
+                   driver->authority.attempt, driver->authority.authority_sha256, driver->authority.job);
         printf("}\n");
     }
-    else fprintf(stderr, "COMPOSE_RESULT refused\n");
-    if (driver)
-    {
-        driver_close(driver);
-        free(driver);
-    }
+    else fprintf(stderr, "COMPOSE_RESULT refused stage=%s\n",
+                 driver && driver->result.refused ? driver->result.refused : "driver");
+    driver_destroy(driver);
     return valid ? 0 : 1;
 }
 
-/* A stub for the native fixtures only: one valid member per series member.
- * The reviewed adapter replaces it in the Python end-to-end test. */
-static int stub_adapter(char const* input_path, char const* output_path)
+/* `canonical FILE` or `context FILE RAW`: the canonical bytes on stdout. */
+BUSTER_GLOBAL_LOCAL int driver_canonical(char const* path, char const* raw)
 {
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = DRIVER_ARENA_BYTES, .flags = {.no_pool = 1}});
+    unsigned char* bytes = NULL;
+    size_t length = 0, output_length = 0;
+    char* output = NULL;
+    int valid = arena && driver_read_file(arena, path, &bytes, &length) &&
+                (raw ? tp_retirement_compose_execution_context(bytes, length, raw, arena, &output, &output_length) :
+                       tp_retirement_compose_json_canonical(bytes, length, arena, &output, &output_length)) &&
+                fwrite(output, 1, output_length, stdout) == output_length && fflush(stdout) == 0;
+    if (arena) arena_destroy(arena, 1);
+    return valid ? 0 : 1;
+}
+
+/* A stub for the native fixtures only: one structurally valid result per
+ * series member, or (per `stub-mode`) a slow run or a wrong family index.
+ * The reviewed adapter replaces it in the Python end-to-end test. */
+BUSTER_GLOBAL_LOCAL int stub_adapter(char const* input_path, char const* output_path)
+{
+    char mode[32] = {0};
+    FILE* selector = fopen("stub-mode", "rb");
+    if (selector)
+    {
+        if (!fgets(mode, sizeof(mode), selector)) mode[0] = 0;
+        fclose(selector);
+    }
+    if (!strncmp(mode, "slow", 4))
+    {
+        struct timespec pause = {STUB_SLOW_SECONDS, 0};
+        nanosleep(&pause, NULL);
+    }
     FILE* input = fopen(input_path, "rb");
     FILE* output = input ? fopen(output_path, "wb") : NULL;
     int valid = input && output;
-    char line[4096];
-    unsigned members = 0;
+    char line[DRIVER_LINE];
+    unsigned members = 0, bootstrap = 0, cells = 0, resamples = 0, pairs = 0, seed_version = 0, total = 0;
+    unsigned long long seed = 0;
+    valid = valid && fgets(line, sizeof(line), input) &&
+            sscanf(line, "version=%u seed=%llu bootstrap_members=%u cell_members=%u pairs=%u resamples=%u frozen=1 members=%u",
+                   &seed_version, &seed, &bootstrap, &cells, &pairs, &resamples, &total) == 7;
     if (valid) fputs("{\"schema\":\"buster-native-retirement-statistics-replay-v1\",\"version\":1,\"members\":[", output);
     while (valid && fgets(line, sizeof(line), input))
     {
         char name[TP_RETIREMENT_COMPOSE_MEMBER_BYTES];
-        if (sscanf(line, "member=%127s", name) == 1)
-            fprintf(output, "%s{\"member\":\"%s\",\"metric\":0,\"kind\":0,\"family_index\":0,\"outcome\":\"pass\","
-                    "\"valid\":true}", members++ ? "," : "", name);
+        unsigned metric = 0, kind = 0, family = 0, member_cells = 0, member_pairs = 0, member_resamples = 0;
+        double limit = 0.0;
+        if (sscanf(line, "member=%127s metric=%u kind=%u family=%u cells=%u pairs=%u resamples=%u limit=%lf", name,
+                   &metric, &kind, &family, &member_cells, &member_pairs, &member_resamples, &limit) == 8)
+        {
+            double alpha = 0.05 / (2.0 * 3.0 * 2.0 * (double)(kind ? cells : bootstrap));
+            if (!strncmp(mode, "wrong-index", 11) && !members) family += 1;
+            fprintf(output, "%s{\"member\":\"%s\",\"metric\":%u,\"kind\":%u,\"family_index\":%u,\"outcome\":\"pass\","
+                    "\"valid\":true,\"resampled\":%s,\"resamples\":%u,\"tail_alpha\":%.17g,"
+                    "\"round\":[{\"estimate\":1.0,\"lower\":0.99,\"upper\":1.001},"
+                    "{\"estimate\":1.0,\"lower\":0.99,\"upper\":1.001}],"
+                    "\"pooled\":{\"estimate\":1.0,\"lower\":0.995,\"upper\":1.0005}}",
+                    members++ ? "," : "", name, metric, kind, family, kind ? "false" : "true", member_resamples, alpha);
+        }
     }
     if (valid) fputs("]}\n", output);
     if (output && fclose(output) != 0) valid = 0;
     if (input) fclose(input);
-    return valid && members ? 0 : 2;
+    return valid && members == total ? 0 : 2;
 }
 
 /* ---------------------------------------------------------------- fixture */
 
-static char const digest_a[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-static char const digest_b[] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-static char const digest_c[] = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-static char const digest_e[] = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-static char self_path[DRIVER_PATH];
+BUSTER_GLOBAL_LOCAL char const digest_a[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+BUSTER_GLOBAL_LOCAL char const digest_b[] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+BUSTER_GLOBAL_LOCAL char const digest_c[] = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+BUSTER_GLOBAL_LOCAL char const digest_e[] = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+BUSTER_GLOBAL_LOCAL char const empty_sha256[] = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+BUSTER_GLOBAL_LOCAL char self_path[DRIVER_PATH], self_sha256[65];
+
+typedef enum FixtureMutation
+{
+    FIXTURE_CLEAN,
+    FIXTURE_HALVED_WALL,
+    FIXTURE_MEMBER_MEMORY
+} FixtureMutation;
 
 typedef struct Fixture
 {
     char root[96];
     char source[128], store[128], scratch[128], authority[128], queue[128];
+    FixtureMutation mutation;
     Driver* driver;
 } Fixture;
 
-static void fixture_clean(char const* path)
+/* Remove a directory tree with an explicit stack of open directories. */
+BUSTER_GLOBAL_LOCAL void fixture_clean(char const* path)
 {
-    DIR* directory = opendir(path);
-    struct dirent* entry;
-    while (directory && (entry = readdir(directory)) != NULL)
-        if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, ".."))
+    DIR* stack[FIXTURE_DIRECTORY_DEPTH];
+    unsigned depth = 0;
+    int root = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    DIR* first = root >= 0 ? fdopendir(root) : NULL;
+    if (root >= 0 && !first) close(root);
+    if (first) stack[depth++] = first;
+    while (depth)
+    {
+        DIR* directory = stack[depth - 1];
+        struct dirent* entry = readdir(directory);
+        if (!entry)
         {
-            char child[512];
-            snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
-            struct stat info;
-            if (lstat(child, &info) == 0 && S_ISDIR(info.st_mode))
-            {
-                fixture_clean(child);
-                rmdir(child);
-            }
-            else unlink(child);
+            closedir(directory);
+            --depth;
+            /* The now-empty child is removed from its parent's listing. */
         }
-    if (directory) closedir(directory);
+        else if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, ".."))
+        {
+            int parent = dirfd(directory);
+            struct stat info;
+            int is_directory = fstatat(parent, entry->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(info.st_mode);
+            if (is_directory && unlinkat(parent, entry->d_name, AT_REMOVEDIR) != 0 &&
+                (errno == ENOTEMPTY || errno == EEXIST) && depth < FIXTURE_DIRECTORY_DEPTH)
+            {
+                int child = openat(parent, entry->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                DIR* opened = child >= 0 ? fdopendir(child) : NULL;
+                if (child >= 0 && !opened) close(child);
+                if (opened)
+                {
+                    stack[depth++] = opened;
+                    /* Revisit the parent after the child empties. */
+                    rewinddir(directory);
+                }
+            }
+            else if (!is_directory) unlinkat(parent, entry->d_name, 0);
+        }
+    }
 }
 
-static int fixture_write(char const* directory, char const* name, void const* bytes, size_t length)
+BUSTER_GLOBAL_LOCAL int fixture_write(char const* directory, char const* name, void const* bytes, size_t length)
 {
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", directory, name);
@@ -588,7 +753,7 @@ static int fixture_write(char const* directory, char const* name, void const* by
     return valid;
 }
 
-static void fixture_digest(void const* bytes, size_t length, char output[65])
+BUSTER_GLOBAL_LOCAL void fixture_digest(void const* bytes, size_t length, char output[65])
 {
     Sha256 hash;
     sha256_init(&hash);
@@ -596,7 +761,8 @@ static void fixture_digest(void const* bytes, size_t length, char output[65])
     sha256_finish_hex(&hash, (char8*)output);
 }
 
-static int fixture_prior(Fixture* fixture, char const* name, char const* path, char const* body, char digest[65])
+BUSTER_GLOBAL_LOCAL int fixture_prior(Fixture* fixture, char const* name, char const* path, char const* body,
+                                      char digest[65])
 {
     Driver* driver = fixture->driver;
     DriverPrior* prior = driver->prior_storage + driver->prior_count;
@@ -610,16 +776,54 @@ static int fixture_prior(Fixture* fixture, char const* name, char const* path, c
     return valid;
 }
 
+/* One object batch's metrics bytes: a header and one member input whose
+ * interval and arena high-water become that member's sample. */
+BUSTER_GLOBAL_LOCAL size_t fixture_metrics(char* output, size_t capacity, uint64_t interval, uint64_t arena_peak)
+{
+    size_t used = (size_t)snprintf(output, capacity, "CC_METRICS version=1 schema=buster-cc-metrics inputs=1 records=1 "
+        "ok=1 rejected=0 failed=0 not_run=0 prebuilt=0 error=driver.none exit_status=0 action=object "
+        "target=x86_64-linux allocator=none compile_jobs=1 compilation_workers=1 intervals=serial keep_going=1 "
+        "function_sizes=0 wall_ns=%" PRIu64 " peak_rss_bytes=1048576\nCC_METRICS_INPUT", interval + 20);
+    for (unsigned field = 0; field < TP_METRICS_I_COUNT && used < capacity; ++field)
+    {
+        char const* name = tp_retirement_metrics_input_fields[field];
+        unsigned kind = tp_retirement_metrics_kind(name);
+        uint64_t number = field == TP_METRICS_I_VERSION || field == TP_METRICS_I_MEASURED ? 1 :
+                          field == TP_METRICS_I_START ? 10 : field == TP_METRICS_I_END ? 10 + interval :
+                          field == TP_METRICS_I_TOTAL ? interval : field == TP_METRICS_I_ARENA_PEAK ? arena_peak : 0;
+        if (kind == 1)
+            used += (size_t)snprintf(output + used, capacity - used, " %s=%s", name,
+                                     field == TP_METRICS_I_STATUS ? "ok" : "driver.none");
+        else if (kind == 2) used += (size_t)snprintf(output + used, capacity - used, " %s=%s", name, empty_sha256);
+        else if (kind == 3) used += (size_t)snprintf(output + used, capacity - used, " %s=-", name);
+        else used += (size_t)snprintf(output + used, capacity - used, " %s=%" PRIu64, name, number);
+    }
+    if (used < capacity) used += (size_t)snprintf(output + used, capacity - used, "\n");
+    return used < capacity ? used : 0;
+}
+
+/* Sample-phase observations by (unit, round, pair, variant). */
+typedef struct FixtureObservations
+{
+    uint64_t row_wall[2][TP_RETIREMENT_ROUNDS][FIXTURE_PAIRS][2], row_memory[2][TP_RETIREMENT_ROUNDS][FIXTURE_PAIRS][2];
+    uint64_t runtime[TP_RETIREMENT_ROUNDS][FIXTURE_PAIRS][2];
+    uint64_t batch_wall[TP_RETIREMENT_ROUNDS][FIXTURE_PAIRS][2], batch_rss[TP_RETIREMENT_ROUNDS][FIXTURE_PAIRS][2];
+} FixtureObservations;
+
 /* Lane D's streams for one A1 layout: an object batch group (census row 0),
  * a singleton link row with runtime (row 1) and one untimed object group
- * (cross-target code row 2), written with D's own encoders and cursor. */
-static int fixture_streams(Fixture* fixture, uint64_t* completed_at)
+ * (cross-target code row 2), written with D's own encoders and cursor. Every
+ * numeric sample is the observation D's collector derives from the same
+ * invocation: its supervised interval and RSS, or the member's metrics. */
+BUSTER_GLOBAL_LOCAL int fixture_streams(Fixture* fixture, uint64_t* completed_at)
 {
     Driver* driver = fixture->driver;
     unsigned runtime_rows[1] = {1}, workspace[7];
     TpRetirementExecution execution;
-    int valid = tp_retirement_execution_init(&execution, driver->statistics.seed, 2, runtime_rows, 1, 3, 60,
-                                             workspace, 7);
+    FixtureObservations* seen = (FixtureObservations*)tp_retirement_compose_allocate(driver->arena,
+                                                                                    sizeof(FixtureObservations));
+    int valid = seen && tp_retirement_execution_init(&execution, driver->statistics.seed, 2, runtime_rows, 1, 3,
+                                                     FIXTURE_PAIRS, workspace, 7);
     char path[512];
     snprintf(path, sizeof(path), "%s/retirement-execution-ab-0000.jsonl", fixture->source);
     FILE* transcript = fopen(path, "wb");
@@ -631,24 +835,44 @@ static int fixture_streams(Fixture* fixture, uint64_t* completed_at)
     TpRetirementInvocation invocation;
     while (valid && tp_retirement_execution_peek(&execution, &invocation) == TP_RETIREMENT_NEXT_READY)
     {
-        TpProcessObservation observed = {1000 + invocation.sequence, 7000 + invocation.sequence, now + 1, now + 101, 1};
+        uint64_t elapsed = 1000 + invocation.sequence * 37 % 900, rss = 4096 + invocation.sequence % 13 * 64;
+        uint64_t interval = elapsed / 2, arena_peak = 65536 + invocation.sequence;
+        TpProcessObservation observed = {1000 + invocation.sequence, 7000 + invocation.sequence, now + 1,
+                                         now + 1 + elapsed, 1};
         TpProcess process = {0};
-        process.wall_seconds = 100e-9;
-        process.peak_rss_bytes = 4096;
+        process.wall_seconds = (double)elapsed * 1e-9;
+        process.peak_rss_bytes = (double)rss;
         TpRetirementMetricsArtifact artifact;
         int object = !invocation.kind && invocation.group == 0;
         if (object)
         {
-            char body[96];
-            int length = snprintf(body, sizeof(body), "CC_METRICS fixture sequence=%" PRIu64 "\n", invocation.sequence);
-            valid = tp_retirement_metrics_shards_append(&metrics, (unsigned char const*)body, (uint64_t)length, &artifact);
+            char body[DRIVER_LINE];
+            size_t length = fixture_metrics(body, sizeof(body), interval, arena_peak);
+            valid = length && tp_retirement_metrics_shards_append(&metrics, (unsigned char const*)body, length, &artifact);
+        }
+        if (valid && invocation.phase)
+        {
+            unsigned r = (unsigned)invocation.round, p = (unsigned)invocation.pair, v = invocation.variant;
+            if (invocation.kind) seen->runtime[r][p][v] = elapsed;
+            else if (object)
+            {
+                seen->batch_wall[r][p][v] = elapsed;
+                seen->batch_rss[r][p][v] = rss;
+                seen->row_wall[0][r][p][v] = interval;
+                seen->row_memory[0][r][p][v] = arena_peak;
+            }
+            else
+            {
+                seen->row_wall[1][r][p][v] = elapsed;
+                seen->row_memory[1][r][p][v] = rss;
+            }
         }
         TpRetirementOutput output = {digest_a, digest_b, digest_c, object ? &artifact : NULL, 0};
         char line[TP_RETIREMENT_EXECUTION_LINE_CAP];
         size_t count = valid ? tp_retirement_execution_record(line, sizeof(line), &invocation, &observed, &process,
                                                               &output, driver->job, driver->attempt, driver->boot, 2) : 0;
         valid = count && fwrite(line, 1, count, transcript) == count && tp_retirement_execution_commit(&execution, 1);
-        now += 200;
+        now += elapsed + 100;
     }
     TpRetirementShardFile last;
     valid = valid && tp_retirement_execution_complete(&execution) && tp_retirement_metrics_shards_finish(&metrics, &last);
@@ -662,20 +886,26 @@ static int fixture_streams(Fixture* fixture, uint64_t* completed_at)
     FILE* batches = fopen(path, "wb");
     valid = valid && rows && batches;
     for (unsigned unit = 0; valid && unit < 2; ++unit)
-        for (unsigned round = 0; valid && round < 2; ++round)
-            for (unsigned pair = 0; valid && pair < 60; ++pair)
+        for (unsigned round = 0; valid && round < TP_RETIREMENT_ROUNDS; ++round)
+            for (unsigned pair = 0; valid && pair < FIXTURE_PAIRS; ++pair)
             {
-                uint64_t values[TP_RETIREMENT_SAMPLE_VALUES] = {1000 + pair, 1001 + pair + round, 4096, 4100 + unit,
-                    unit ? 2000 + pair : 0, unit ? 2002 + pair : 0, 0};
+                uint64_t values[TP_RETIREMENT_SAMPLE_VALUES] = {seen->row_wall[unit][round][pair][0],
+                    seen->row_wall[unit][round][pair][1], seen->row_memory[unit][round][pair][0],
+                    seen->row_memory[unit][round][pair][1], unit ? seen->runtime[round][pair][0] : 0,
+                    unit ? seen->runtime[round][pair][1] : 0, 0};
+                if (fixture->mutation == FIXTURE_HALVED_WALL && !unit && !round && pair == 3) values[1] /= 2;
+                if (fixture->mutation == FIXTURE_MEMBER_MEMORY && !unit && round && pair == 5) values[3] += 1;
                 char line[TP_RETIREMENT_SAMPLE_LINE_CAP];
                 size_t count = tp_retirement_sample_record(line, sizeof(line), unit, round, pair,
                                                            unit ? TP_RETIREMENT_SAMPLE_RUNTIME : 0, values);
                 valid = count && fwrite(line, 1, count, rows) == count;
             }
-    for (unsigned round = 0; valid && round < 2; ++round)
-        for (unsigned pair = 0; valid && pair < 60; ++pair)
+    for (unsigned round = 0; valid && round < TP_RETIREMENT_ROUNDS; ++round)
+        for (unsigned pair = 0; valid && pair < FIXTURE_PAIRS; ++pair)
         {
-            uint64_t values[TP_RETIREMENT_SAMPLE_VALUES] = {5000 + pair, 5003 + pair, 8192, 8200, 0, 0, 0};
+            uint64_t values[TP_RETIREMENT_SAMPLE_VALUES] = {seen->batch_wall[round][pair][0],
+                seen->batch_wall[round][pair][1], seen->batch_rss[round][pair][0], seen->batch_rss[round][pair][1],
+                0, 0, 0};
             char line[TP_RETIREMENT_SAMPLE_LINE_CAP];
             size_t count = tp_retirement_batch_record(line, sizeof(line), 0, round, pair, values);
             valid = count && fwrite(line, 1, count, batches) == count;
@@ -699,11 +929,12 @@ static int fixture_streams(Fixture* fixture, uint64_t* completed_at)
         batch.group_kind = TP_RETIREMENT_GROUP_OBJECT;
         TpProcessObservation observed = {90000 + variant, 99000 + variant, *completed_at + 10 + variant * 100,
                                          *completed_at + 60 + variant * 100, 1};
-        char body[64];
-        int length = snprintf(body, sizeof(body), "CC_METRICS untimed variant=%u\n", variant);
+        char body[DRIVER_LINE];
+        size_t length = fixture_metrics(body, sizeof(body), 40, 32768);
         TpRetirementMetricsArtifact artifact;
         char line[TP_RETIREMENT_UNTIMED_LINE_CAP];
-        valid = tp_retirement_metrics_shards_append(&untimed_metrics, (unsigned char const*)body, (uint64_t)length, &artifact);
+        valid = length && tp_retirement_metrics_shards_append(&untimed_metrics, (unsigned char const*)body, length,
+                                                              &artifact);
         size_t count = valid ? tp_retirement_untimed_record(line, sizeof(line), &batch, &observed, digest_a, digest_b,
                                                             digest_c, &artifact, driver->job, driver->attempt,
                                                             driver->boot) : 0;
@@ -712,10 +943,13 @@ static int fixture_streams(Fixture* fixture, uint64_t* completed_at)
     valid = valid && tp_retirement_metrics_shards_finish(&untimed_metrics, &last);
     if (untimed && fclose(untimed) != 0) valid = 0;
     if (untimed_stream && fclose(untimed_stream) != 0) valid = 0;
+    /* Retained, unsealed evidence: a lifecycle record and a failure log. */
+    valid = valid && fixture_write(fixture->source, "retirement-lifecycle.txt", "lifecycle\n", 10) &&
+            fixture_write(fixture->source, "retirement-failure-0000.log", "failure\n", 8);
     return valid;
 }
 
-static void fixture_row(Driver* driver, unsigned id, unsigned group, unsigned runtime, char const* stage)
+BUSTER_GLOBAL_LOCAL void fixture_row(Driver* driver, unsigned id, unsigned group, unsigned runtime, char const* stage)
 {
     unsigned index = driver->row_count++;
     char const* values[TP_RETIREMENT_COMPOSE_DIMENSIONS] = {"x86_64-unknown-linux-gnu", "baseline", "none",
@@ -731,7 +965,7 @@ static void fixture_row(Driver* driver, unsigned id, unsigned group, unsigned ru
     }
 }
 
-static void fixture_code(Driver* driver, unsigned row, uint64_t baseline, uint64_t candidate)
+BUSTER_GLOBAL_LOCAL void fixture_code(Driver* driver, unsigned row, uint64_t baseline, uint64_t candidate)
 {
     TpRetirementComposeCode* code = driver->code + driver->code_count++;
     code->row = row;
@@ -748,32 +982,68 @@ static void fixture_code(Driver* driver, unsigned row, uint64_t baseline, uint64
     }
 }
 
+/* The post-A/A binding the context derives from: escapes, non-ASCII text,
+ * floats and nested values exercise the canonical writer. */
+BUSTER_GLOBAL_LOCAL int fixture_binding(Fixture* fixture, char const* post)
+{
+    Driver* driver = fixture->driver;
+    char body[DRIVER_LINE];
+    int length = snprintf(body, sizeof(body),
+        "{\"workflow\": {\"records\": {\"oracle\": {\"sha256\": \"%s\"}, \"admission\": {\"sha256\": \"%s\"}},\n"
+        " \"phases\": {\"pre_sample_plan\": {\"sha256\": \"%s\"}, \"post_aa_binding\": {\"sha256\": \"%s\"}}},\n"
+        " \"support\": {\"root_sha256\": \"%s\", \"files\": []},\n"
+        " \"subjects\": {\"candidate\": {\"binary\": \"cand\\u00e9\"}, \"baseline\": {\"binary\": \"base \\\"q\\\"\"}},\n"
+        " \"measurement\": {\"ratio\": 1.50, \"list\": [1e2, 0.1, -0, true, null, 12345678901234567890]},\n"
+        " \"execution\": {\"service\": \"synthetic\\n\", \"tab\": \"\\t\"}}\n",
+        digest_a, digest_b, digest_c, post, digest_e);
+    int valid = length > 0 && (size_t)length < sizeof(body) && fixture_write(fixture->store, "binding.json", body,
+                                                                               (size_t)length);
+    if (valid)
+    {
+        strcpy(driver->binding, "binding.json");
+        fixture_digest(body, (size_t)length, driver->binding_sha256);
+    }
+    return valid;
+}
+
+/* The adapter is this executable; its digest is computed once. */
+BUSTER_GLOBAL_LOCAL int fixture_self(void)
+{
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = DRIVER_ARENA_BYTES, .flags = {.no_pool = 1}});
+    unsigned char* bytes = NULL;
+    size_t length = 0;
+    int valid = arena && driver_read_file(arena, self_path, &bytes, &length);
+    if (valid) fixture_digest(bytes, length, self_sha256);
+    if (arena) arena_destroy(arena, 1);
+    return valid;
+}
+
 /* A complete driver over fresh private directories; the caller may mutate
  * the request before driver_open/plan/import/compose. */
-static int fixture_start(Fixture* fixture)
+BUSTER_GLOBAL_LOCAL int fixture_start(Fixture* fixture, FixtureMutation mutation)
 {
     memset(fixture, 0, sizeof(*fixture));
+    fixture->mutation = mutation;
     strcpy(fixture->root, "/tmp/buster-retirement-compose-XXXXXX");
     int valid = mkdtemp(fixture->root) != NULL;
     char const* names[] = {"source", "store", "scratch", "authority", "queue"};
     char* paths[] = {fixture->source, fixture->store, fixture->scratch, fixture->authority, fixture->queue};
-    for (unsigned i = 0; valid && i < 5; ++i)
+    for (unsigned i = 0; valid && i < BUSTER_ARRAY_LENGTH(names); ++i)
     {
         snprintf(paths[i], 128, "%s/%s", fixture->root, names[i]);
         valid = mkdir(paths[i], 0700) == 0;
     }
-    fixture->driver = valid ? (Driver*)malloc(sizeof(Driver)) : NULL;
+    fixture->driver = valid ? driver_create() : NULL;
     valid = valid && fixture->driver;
     Driver* driver = fixture->driver;
     if (valid)
     {
-        driver_init(driver);
         strcpy(driver->source, fixture->source);
         strcpy(driver->store_path, fixture->store);
         strcpy(driver->scratch, fixture->scratch);
         strcpy(driver->adapter, self_path);
+        strcpy(driver->adapter_sha256, self_sha256);
         strcpy(driver->authority_path, fixture->authority);
-        snprintf(driver->context_path, sizeof(driver->context_path), "%s/context.json", fixture->source);
         strcpy(driver->job, "job-7");
         strcpy(driver->boot, "boot-a");
         strcpy(driver->sealed, "retirement-sealed-result.json");
@@ -795,14 +1065,13 @@ static int fixture_start(Fixture* fixture)
         fixture_code(driver, 0, 100, 101);
         fixture_code(driver, 1, 200, 200);
         fixture_code(driver, 2, 300, 299);
-        driver->layout = (TpRetirementComposeLayout){driver->rows, driver->group_kinds, driver->row_count,
-                                                     driver->group_count, driver->population_rows, driver->untimed_count};
-        TpRetirementComposeShape shape = {&driver->layout, 60, driver->code_count, 4};
+        driver_views(driver);
+        TpRetirementComposeShape shape = {&driver->layout, FIXTURE_PAIRS, driver->code_count, 4};
         TpRetirementComposeBounds bounds;
         valid = tp_retirement_compose_bounds(&shape, &bounds);
         driver->statistics = (TpRetirementPlan){.seed = 20260929, .version = TP_RETIREMENT_STATISTICS_VERSION,
             .bootstrap_members_per_scope = bounds.bootstrap_members, .cell_members_per_scope = bounds.cell_members,
-            .pairs_per_round = 60, .resamples = TP_RETIREMENT_MIN_RESAMPLES, .frozen_before_samples = 1};
+            .pairs_per_round = FIXTURE_PAIRS, .resamples = TP_RETIREMENT_MIN_RESAMPLES, .frozen_before_samples = 1};
     }
     uint64_t completed = 0;
     valid = valid && fixture_streams(fixture, &completed);
@@ -815,40 +1084,49 @@ static int fixture_start(Fixture* fixture)
                 fixture_prior(fixture, "workflow.execution_plan", "plan.json", "{\"plan\":1}\n", driver->digests[0]) &&
                 fixture_prior(fixture, "workflow.records.result_input_plan", "result-plan.json", "{\"input\":1}\n",
                               driver->digests[2]) &&
-                fixture_prior(fixture, "workflow.phases.post_aa_binding", "post.json", "{\"post\":1}\n", driver->digests[4]);
-        char context[256];
-        int length = snprintf(context, sizeof(context),
-            "{\"post_aa_binding_sha256\":\"%s\",\"raw_measurements_sha256\":\"%064d\"}", driver->digests[4], 0);
-        valid = valid && fixture_write(fixture->source, "context.json", context, (size_t)length);
+                fixture_prior(fixture, "workflow.phases.post_aa_binding", "post.json", "{\"post\":1}\n", driver->digests[4]) &&
+                fixture_binding(fixture, driver->digests[4]);
         TpRetirementComposePartition* rows = &driver->partitions[0][0];
         TpRetirementComposePartition* batches = &driver->partitions[1][0];
         strcpy(rows->identity, "rows-0");
         strcpy(rows->path, "retirement-rows-manifest.json");
-        rows->records = 240;
+        rows->records = 2 * TP_RETIREMENT_ROUNDS * FIXTURE_PAIRS;
         strcpy(batches->identity, "batches-0");
         strcpy(batches->path, "retirement-batches-manifest.json");
-        batches->records = 120;
+        batches->records = TP_RETIREMENT_ROUNDS * FIXTURE_PAIRS;
         driver->partition_counts[0] = driver->partition_counts[1] = 1;
+        /* The A/A stage is retained evidence (copies suffice here: the
+         * composer never reads it), plus a lifecycle record and a failure
+         * log group. */
         valid = valid && driver_list_add(&driver->transcript, "retirement-execution-ab-0000.jsonl", NULL) &&
                 driver_list_add(&driver->samples[0], "retirement-samples-0000.jsonl", NULL) &&
                 driver_list_add(&driver->samples[1], "retirement-batches-0000.jsonl", NULL) &&
                 driver_list_add(&driver->metrics, "retirement-metrics-ab-0000.txt", NULL) &&
                 driver_list_add(&driver->untimed, "retirement-untimed-batches.jsonl", NULL) &&
-                driver_list_add(&driver->untimed_metrics, "retirement-metrics-untimed-0000.txt", NULL);
+                driver_list_add(&driver->untimed_metrics, "retirement-metrics-untimed-0000.txt", NULL) &&
+                driver_retain(driver, "transcript", "retirement-execution-aa-0000.jsonl", NULL, 1, "reserved") &&
+                driver_list_add(&driver->retained_files, "retirement-execution-aa-0000.jsonl",
+                                "retirement-execution-ab-0000.jsonl") &&
+                driver_retain(driver, "samples", "retirement-samples-aa-0000.jsonl", NULL, 1, "reserved") &&
+                driver_list_add(&driver->retained_files, "retirement-samples-aa-0000.jsonl", "retirement-samples-0000.jsonl") &&
+                driver_retain(driver, "samples", "retirement-batches-aa-0000.jsonl", NULL, 1, "reserved") &&
+                driver_list_add(&driver->retained_files, "retirement-batches-aa-0000.jsonl", "retirement-batches-0000.jsonl") &&
+                driver_retain(driver, "metrics", "retirement-metrics-aa-", ".txt", 4, "reserved") &&
+                driver_list_add(&driver->retained_files, "retirement-metrics-aa-0000.txt", "retirement-metrics-ab-0000.txt") &&
+                driver_retain(driver, "record", "retirement-lifecycle.txt", NULL, 1, "4096") &&
+                driver_list_add(&driver->retained_files, "retirement-lifecycle.txt", NULL) &&
+                driver_retain(driver, "log", "retirement-failure-", ".log", 4, "4096") &&
+                driver_list_add(&driver->retained_files, "retirement-failure-0000.log", NULL);
     }
     tp_retirement_store_test_fail_sync = 0;
     tp_retirement_store_test_sync_calls = 0;
     return valid;
 }
 
-static void fixture_stop(Fixture* fixture)
+BUSTER_GLOBAL_LOCAL void fixture_stop(Fixture* fixture)
 {
-    if (fixture->driver)
-    {
-        driver_close(fixture->driver);
-        free(fixture->driver);
-        fixture->driver = NULL;
-    }
+    driver_destroy(fixture->driver);
+    fixture->driver = NULL;
     if (fixture->root[0])
     {
         fixture_clean(fixture->root);
@@ -857,20 +1135,20 @@ static void fixture_stop(Fixture* fixture)
     tp_retirement_store_test_fail_sync = 0;
 }
 
-static int fixture_ready(Fixture* fixture)
+BUSTER_GLOBAL_LOCAL int fixture_ready(Fixture* fixture)
 {
-    int valid = fixture_start(fixture) && driver_open(fixture->driver) && driver_plan(fixture->driver) &&
+    int valid = fixture_start(fixture, FIXTURE_CLEAN) && driver_open(fixture->driver) && driver_plan(fixture->driver) &&
                 driver_import_all(fixture->driver);
     return valid;
 }
 
 /* ------------------------------------------------------------------ tests */
 
-static int file_contains(int root, char const* path, char const* needle)
+BUSTER_GLOBAL_LOCAL int file_contains(Arena* arena, int root, char const* path, char const* needle)
 {
     enum { FILE_CONTAINS_BYTES = 1 << 22 };
     int fd = openat(root, path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    char* buffer = (char*)malloc(FILE_CONTAINS_BYTES);
+    char* buffer = (char*)tp_retirement_compose_allocate(arena, FILE_CONTAINS_BYTES);
     size_t used = 0;
     ssize_t count = 1;
     while (fd >= 0 && buffer && count > 0 && used < FILE_CONTAINS_BYTES - 1)
@@ -881,11 +1159,69 @@ static int file_contains(int root, char const* path, char const* needle)
     if (fd >= 0) close(fd);
     if (buffer) buffer[used] = 0;
     int found = buffer && used && strstr(buffer, needle) != NULL;
-    free(buffer);
     return found;
 }
 
-static void test_compose_success(void)
+/* One canonical-writer vector: the expected bytes, or NULL for a refusal. */
+BUSTER_GLOBAL_LOCAL int canonical_is(Arena* arena, char const* input, char const* expected)
+{
+    char* output = NULL;
+    size_t length = 0;
+    int valid = tp_retirement_compose_json_canonical((unsigned char const*)input, strlen(input), arena, &output, &length);
+    int matched = expected ? valid && length == strlen(expected) && !memcmp(output, expected, length) : !valid;
+    if (!matched) fprintf(stderr, "COMPOSE_TEST canonical input=%s output=%.*s\n", input, valid ? (int)length : 0,
+                          valid ? output : "");
+    return matched;
+}
+
+BUSTER_GLOBAL_LOCAL void test_canonical_json(void)
+{
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = DRIVER_ARENA_BYTES, .flags = {.no_pool = 1}});
+    CHECK(arena != NULL);
+    CHECK(canonical_is(arena, "{\"b\":1,\"a\":[1.0,-0,1e16,0.0001,1E-5,\"x\\u00e9\\n\\\"\",true,null]}",
+                       "{\"a\":[1.0,0,1e+16,0.0001,1e-05,\"x\xc3\xa9\\n\\\"\",true,null],\"b\":1}"));
+    CHECK(canonical_is(arena, " { \"z\" : { \"b\" : 2 , \"a\" : 1 } , \"y\" : [ { \"d\" : 0 , \"c\" : -1.5 } ] } ",
+                       "{\"y\":[{\"c\":-1.5,\"d\":0}],\"z\":{\"a\":1,\"b\":2}}"));
+    CHECK(canonical_is(arena, "[\"\\ud83d\\ude00\",\"\\u0001\\u001f\\t\\/\",\"\x7f\"]",
+                       "[\"\xf0\x9f\x98\x80\",\"\\u0001\\u001f\\t/\",\"\x7f\"]"));
+    CHECK(canonical_is(arena, "{\"\xc3\xa9\":1,\"z\":2,\"\":3}", "{\"\":3,\"z\":2,\"\xc3\xa9\":1}"));
+    CHECK(canonical_is(arena, "[123456789012345678901234567890,-7,0.1,100.0,1.5e300,5e-324,123456789012345680.0,-0.0,1e5]",
+                       "[123456789012345678901234567890,-7,0.1,100.0,1.5e+300,5e-324,1.2345678901234568e+17,-0.0,"
+                       "100000.0]"));
+    CHECK(canonical_is(arena, "{}", "{}"));
+    CHECK(canonical_is(arena, "[[],{}]", "[[],{}]"));
+    /* Refusals: duplicate keys, lone surrogates, raw controls, non-finite or
+     * malformed numbers, trailing commas, bad UTF-8 and trailing bytes. */
+    CHECK(canonical_is(arena, "{\"a\":1,\"a\":2}", NULL));
+    CHECK(canonical_is(arena, "[\"\\ud800\"]", NULL));
+    CHECK(canonical_is(arena, "[\"\\udc00\"]", NULL));
+    CHECK(canonical_is(arena, "[\"a\x01\"]", NULL));
+    CHECK(canonical_is(arena, "[NaN]", NULL));
+    CHECK(canonical_is(arena, "[1e400]", NULL));
+    CHECK(canonical_is(arena, "[01]", NULL));
+    CHECK(canonical_is(arena, "[1.]", NULL));
+    CHECK(canonical_is(arena, "[1,]", NULL));
+    CHECK(canonical_is(arena, "{\"a\":1,}", NULL));
+    CHECK(canonical_is(arena, "[\"\xc0\xaf\"]", NULL));
+    CHECK(canonical_is(arena, "[\"\xed\xa0\x80\"]", NULL));
+    CHECK(canonical_is(arena, "[1] 2", NULL));
+    CHECK(canonical_is(arena, "", NULL));
+    char deep[601];
+    memset(deep, '[', 300);
+    memset(deep + 300, ']', 300);
+    deep[600] = 0;
+    CHECK(canonical_is(arena, deep, NULL));
+    /* Python's repr(float) at the fixed/exponent boundaries. */
+    char repr[TP_RETIREMENT_COMPOSE_REPR_BYTES];
+    CHECK(tp_retirement_compose_float_repr(1e16, repr) && !strcmp(repr, "1e+16"));
+    CHECK(tp_retirement_compose_float_repr(9999999999999998.0, repr) && !strcmp(repr, "9999999999999998.0"));
+    CHECK(tp_retirement_compose_float_repr(0.0001, repr) && !strcmp(repr, "0.0001"));
+    CHECK(tp_retirement_compose_float_repr(0.00001, repr) && !strcmp(repr, "1e-05"));
+    CHECK(tp_retirement_compose_float_repr(-2.5, repr) && !strcmp(repr, "-2.5"));
+    if (arena) arena_destroy(arena, 1);
+}
+
+BUSTER_GLOBAL_LOCAL void test_compose_success(void)
 {
     Fixture fixture;
     CHECK(fixture_ready(&fixture));
@@ -895,23 +1231,58 @@ static void test_compose_success(void)
     /* (G + U) * 2 * (warmups + rounds * pairs) = 3 * 2 * 122. */
     CHECK(result->invocations == 732);
     CHECK(result->seal_entries == 4 + 5 + 1 + 1 + 1 + 1 + 2 + 2);
+    CHECK(result->retained_files == 6 && result->untimed_records == 2 && result->untimed_production == 0);
     CHECK(tp_retirement_store_validate(&driver->store));
     CHECK(driver->store.count == driver->store.planned_files);
-    CHECK(file_contains(driver->store_fd, TP_RETIREMENT_EXECUTION_RECEIPT_PATH, result->context_sha256));
-    CHECK(file_contains(driver->store_fd, TP_RETIREMENT_COMPOSE_BUNDLE_PATH, result->raw_measurements_sha256));
-    CHECK(file_contains(driver->store_fd, TP_RETIREMENT_COMPOSE_BUNDLE_PATH, "\"untimed_batches\":{\"bytes\":"));
-    CHECK(file_contains(driver->store_fd, "retirement-sealed-result.json", "\"name\":\"untimed.metrics_shard.0\""));
-    CHECK(file_contains(driver->store_fd, "retirement-sealed-result.json", "\"name\":\"result_input.shard.batches-0000\""));
-    CHECK(file_contains(driver->store_fd, "retirement-rows-manifest.json", "\"identity\":\"samples-0000\""));
-    CHECK(file_contains(driver->store_fd, TP_RETIREMENT_COMPOSE_SERIES_PATH, "member=generated_runtime/cell/row=1 metric=2 kind=1"));
+    CHECK(file_contains(driver->arena, driver->store_fd, TP_RETIREMENT_EXECUTION_RECEIPT_PATH, result->context_sha256));
+    CHECK(file_contains(driver->arena, driver->store_fd, TP_RETIREMENT_COMPOSE_BUNDLE_PATH,
+                        result->raw_measurements_sha256));
+    CHECK(file_contains(driver->arena, driver->store_fd, TP_RETIREMENT_COMPOSE_BUNDLE_PATH,
+                        "\"untimed_batches\":{\"bytes\":"));
+    CHECK(file_contains(driver->arena, driver->store_fd, "retirement-sealed-result.json",
+                        "\"name\":\"untimed.metrics_shard.0\""));
+    CHECK(file_contains(driver->arena, driver->store_fd, "retirement-sealed-result.json",
+                        "\"name\":\"result_input.shard.batches-0000\""));
+    CHECK(file_contains(driver->arena, driver->store_fd, "retirement-rows-manifest.json", "\"identity\":\"samples-0000\""));
+    CHECK(file_contains(driver->arena, driver->store_fd, TP_RETIREMENT_COMPOSE_SERIES_PATH,
+                        "member=generated_runtime/cell/row=1 metric=2 kind=1"));
     /* Code summary: rows 0..2 with 101/100, 200/200 and 299/300. */
-    CHECK(file_contains(driver->store_fd, TP_RETIREMENT_COMPOSE_BUNDLE_PATH,
+    CHECK(file_contains(driver->arena, driver->store_fd, TP_RETIREMENT_COMPOSE_BUNDLE_PATH,
                         "\"aggregate_pass\":true,\"aggregate_ratio\":1.0,\"per_cell_max_ratio\":1.01,\"per_cell_pass\":true"));
-    /* The producer's private authority and the scratch copy is removed. */
+    /* The retained manifest lists every unsealed file, in path order, and
+     * the producer authority binds its digest. */
+    CHECK(file_contains(driver->arena, driver->store_fd, TP_RETIREMENT_RETAINED_MANIFEST_PATH,
+                        "retirement-batches-aa-0000.jsonl\ntranscript "));
+    CHECK(file_contains(driver->arena, driver->store_fd, TP_RETIREMENT_RETAINED_MANIFEST_PATH,
+                        " 8 retirement-failure-0000.log\n"));
+    CHECK(!file_contains(driver->arena, driver->store_fd, TP_RETIREMENT_RETAINED_MANIFEST_PATH,
+                         "retirement-execution-ab-0000.jsonl"));
+    CHECK(!strcmp(driver->authority.retained_sha256, result->retained.sha256));
     CHECK(driver->authority.authority_sha256[0] != 0);
+    /* The context is the canonical _execution_context of binding.json. */
+    char const expected_context_prefix[] = "{\"admission_sha256\":\"bbbb";
+    char* context = NULL;
+    size_t context_length = 0;
+    unsigned char* binding = NULL;
+    size_t binding_length = 0;
+    char path[512], context_sha256[65];
+    snprintf(path, sizeof(path), "%s/binding.json", fixture.store);
+    CHECK(driver_read_file(driver->arena, path, &binding, &binding_length) &&
+          tp_retirement_compose_execution_context(binding, binding_length, result->raw_measurements_sha256,
+                                                  driver->arena, &context, &context_length));
+    if (context)
+    {
+        fixture_digest(context, context_length, context_sha256);
+        CHECK(!strcmp(context_sha256, result->context_sha256));
+        CHECK(!strncmp(context, expected_context_prefix, strlen(expected_context_prefix)));
+        CHECK(strstr(context, "\"baseline\":{\"binary\":\"base \\\"q\\\"\"},\"candidate\":{\"binary\":\"cand\xc3\xa9\"},"
+                              "\"execution\":{\"service\":\"synthetic\\n\",\"tab\":\"\\t\"},\"measurement\":{\"list\":"
+                              "[100.0,0.1,0,true,null,12345678901234567890],\"ratio\":1.5}") != NULL);
+    }
+    /* The scratch copy is removed, and a second composition cannot
+     * overwrite the sealed outputs. */
     struct stat info;
     CHECK(fstatat(driver->scratch_fd, TP_RETIREMENT_COMPOSE_SERIES_PATH, &info, 0) != 0);
-    /* A second composition cannot overwrite the sealed outputs. */
     TpRetirementComposeResult again;
     CHECK(!tp_retirement_compose(&driver->request, &again));
     fixture_stop(&fixture);
@@ -919,25 +1290,35 @@ static void test_compose_success(void)
 
 typedef enum Refusal
 {
-    REFUSE_MISSING_SHARD, REFUSE_EXTRA_FILE, REFUSE_EXTRA_METRICS, REFUSE_PRIOR_DIGEST, REFUSE_CONTEXT,
+    REFUSE_MISSING_SHARD, REFUSE_EXTRA_FILE, REFUSE_EXTRA_METRICS, REFUSE_PRIOR_DIGEST, REFUSE_BINDING_DIGEST,
     REFUSE_JOB, REFUSE_PLAN_DIGEST, REFUSE_FAMILY_COUNT, REFUSE_UNPLANNED, REFUSE_PARTITION, REFUSE_TRANSCRIPT_ORDER,
-    REFUSE_SAMPLE_ORDER, REFUSE_UNTIMED_MISSING, REFUSE_ADAPTER, REFUSE_WINDOW, REFUSE_COUNT
+    REFUSE_SAMPLE_ORDER, REFUSE_UNTIMED_MISSING, REFUSE_ADAPTER, REFUSE_WINDOW, REFUSE_DROPPED_RETAINED,
+    REFUSE_DECLARATION_CHANGED, REFUSE_HALVED_WALL, REFUSE_MEMBER_MEMORY, REFUSE_ADAPTER_DIGEST,
+    REFUSE_ADAPTER_TIMEOUT, REFUSE_ADAPTER_OUTPUT, REFUSE_GROUP_GAP, REFUSE_BINDING_POST, REFUSE_PRIOR_COUNT,
+    REFUSE_COUNT
 } Refusal;
 
+BUSTER_GLOBAL_LOCAL char const* const refusal_stages[REFUSE_COUNT] = {"inventory", "inventory", "transcript", "prior",
+    "context", "transcript", "prior", "bounds", "request", "partitions", "transcript", "samples", "untimed", "adapter",
+    "transcript", "inventory", "retained", "samples", "samples", "adapter", "adapter", "adapter", "inventory", "context",
+    "prior"};
+
 /* Swap two lines of a source stream file before import. */
-static int fixture_swap_lines(Fixture* fixture, char const* name, unsigned first, unsigned second)
+BUSTER_GLOBAL_LOCAL int fixture_swap_lines(Fixture* fixture, char const* name, unsigned first, unsigned second)
 {
+    Arena* arena = fixture->driver->arena;
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", fixture->source, name);
     unsigned char* bytes = NULL;
     size_t length = 0;
-    int valid = driver_read_file(path, &bytes, &length);
-    size_t starts[4096];
+    int valid = driver_read_file(arena, path, &bytes, &length);
+    size_t* starts = valid ? (size_t*)tp_retirement_compose_allocate(arena, (uint64_t)(length + 1) * sizeof(size_t)) : NULL;
     unsigned lines = 0;
-    for (size_t i = 0; valid && i < length && lines < 4096; ++i)
+    valid = valid && starts;
+    for (size_t i = 0; valid && i < length; ++i)
         if (!i || bytes[i - 1] == '\n') starts[lines++] = i;
     valid = valid && first < second && second < lines;
-    unsigned char* copy = valid ? (unsigned char*)malloc(length) : NULL;
+    unsigned char* copy = valid ? (unsigned char*)tp_retirement_compose_allocate(arena, length) : NULL;
     valid = valid && copy;
     size_t used = 0;
     for (unsigned line = 0; valid && line < lines; ++line)
@@ -948,15 +1329,15 @@ static int fixture_swap_lines(Fixture* fixture, char const* name, unsigned first
         used += end - starts[from];
     }
     valid = valid && used == length && fixture_write(fixture->source, name, copy, length);
-    free(copy);
-    free(bytes);
     return valid;
 }
 
-static void test_compose_refusal(Refusal refusal)
+BUSTER_GLOBAL_LOCAL void test_compose_refusal(Refusal refusal)
 {
     Fixture fixture;
-    int started = fixture_start(&fixture);
+    FixtureMutation mutation = refusal == REFUSE_HALVED_WALL ? FIXTURE_HALVED_WALL :
+                               refusal == REFUSE_MEMBER_MEMORY ? FIXTURE_MEMBER_MEMORY : FIXTURE_CLEAN;
+    int started = fixture_start(&fixture, mutation);
     CHECK(started);
     Driver* driver = fixture.driver;
     int ready = started;
@@ -965,7 +1346,12 @@ static void test_compose_refusal(Refusal refusal)
                 driver_list_add(&driver->metrics, "retirement-metrics-ab-0001.txt", NULL);
     if (ready && refusal == REFUSE_EXTRA_FILE)
         ready = fixture_write(fixture.source, "retirement-extra.log", "log\n", 4) &&
-                driver_list_add(&driver->retained, "retirement-extra.log", NULL);
+                driver_list_add(&driver->retained_files, "retirement-extra.log", NULL);
+    if (ready && refusal == REFUSE_GROUP_GAP)
+        ready = fixture_write(fixture.source, "retirement-failure-0002.log", "log\n", 4) &&
+                driver_list_add(&driver->retained_files, "retirement-failure-0002.log", NULL);
+    if (ready && refusal == REFUSE_DROPPED_RETAINED)
+        ready = driver_list_remove(&driver->retained_files, "retirement-execution-aa-0000.jsonl");
     if (ready && refusal == REFUSE_TRANSCRIPT_ORDER)
         ready = fixture_swap_lines(&fixture, "retirement-execution-ab-0000.jsonl", 20, 21);
     if (ready && refusal == REFUSE_SAMPLE_ORDER)
@@ -976,12 +1362,18 @@ static void test_compose_refusal(Refusal refusal)
         snprintf(path, sizeof(path), "%s/retirement-untimed-batches.jsonl", fixture.source);
         unsigned char* bytes = NULL;
         size_t length = 0;
-        ready = driver_read_file(path, &bytes, &length);
+        ready = driver_read_file(driver->arena, path, &bytes, &length);
         unsigned char* newline = ready ? (unsigned char*)memchr(bytes, '\n', length) : NULL;
         ready = newline && fixture_write(fixture.source, "retirement-untimed-batches.jsonl", bytes,
                                          (size_t)(newline - bytes) + 1);
-        free(bytes);
     }
+    if (ready && refusal == REFUSE_BINDING_POST) ready = fixture_binding(&fixture, digest_c);
+    if (ready && refusal == REFUSE_ADAPTER_TIMEOUT)
+    {
+        ready = fixture_write(fixture.scratch, "stub-mode", "slow\n", 5);
+        driver->timeout_ns = FIXTURE_ADAPTER_TIMEOUT_NS;
+    }
+    if (ready && refusal == REFUSE_ADAPTER_OUTPUT) ready = fixture_write(fixture.scratch, "stub-mode", "wrong-index\n", 12);
     if (ready && refusal == REFUSE_WINDOW) driver->completed_at_ns = driver->bound_at_ns + 5000;
     ready = ready && driver_open(driver);
     if (ready && refusal != REFUSE_UNPLANNED) ready = driver_plan(driver);
@@ -994,14 +1386,11 @@ static void test_compose_refusal(Refusal refusal)
         case REFUSE_MISSING_SHARD:
             CHECK(driver_list_add(&driver->samples[1], "retirement-batches-0001.jsonl", NULL));
             break;
-        case REFUSE_EXTRA_FILE:
-            CHECK(driver_list_remove(&driver->retained, "retirement-extra.log"));
-            break;
         case REFUSE_PRIOR_DIGEST:
             driver->prior_storage[0].sha256[0] = driver->prior_storage[0].sha256[0] == 'f' ? 'e' : 'f';
             break;
-        case REFUSE_CONTEXT:
-            driver->context[driver->context_bytes - 3] = '1';
+        case REFUSE_BINDING_DIGEST:
+            driver->binding_sha256[0] = driver->binding_sha256[0] == 'f' ? 'e' : 'f';
             break;
         case REFUSE_JOB:
             strcpy(driver->job, "job-8");
@@ -1013,22 +1402,28 @@ static void test_compose_refusal(Refusal refusal)
             driver->statistics.bootstrap_members_per_scope += 1;
             break;
         case REFUSE_PARTITION:
-            driver->partitions[0][0].records = 239;
+            driver->partitions[0][0].records -= 1;
             break;
         case REFUSE_ADAPTER:
             strcpy(driver->adapter, "/nonexistent/retirement-replay");
             break;
+        case REFUSE_DECLARATION_CHANGED:
+            driver->retained[4].bytes_max += 1;
+            break;
+        case REFUSE_ADAPTER_DIGEST:
+            driver->adapter_sha256[0] = driver->adapter_sha256[0] == 'f' ? 'e' : 'f';
+            break;
+        case REFUSE_PRIOR_COUNT:
+            --driver->prior_count;
+            break;
         default:
             break;
         }
-        static char const* const stages[REFUSE_COUNT] = {"inventory", "inventory", "transcript", "prior", "context",
-            "transcript", "prior", "bounds", "request", "partitions", "transcript", "samples", "untimed", "adapter",
-            "transcript"};
         CHECK(!driver_compose(driver));
-        CHECK(driver->result.refused && !strcmp(driver->result.refused, stages[refusal]));
-        if (driver->result.refused && strcmp(driver->result.refused, stages[refusal]))
+        CHECK(driver->result.refused && !strcmp(driver->result.refused, refusal_stages[refusal]));
+        if (driver->result.refused && strcmp(driver->result.refused, refusal_stages[refusal]))
             fprintf(stderr, "COMPOSE_TEST refusal=%u stage=%s\n", (unsigned)refusal, driver->result.refused);
-        /* The refused attempt is poisoned and published nothing new. */
+        /* The refused attempt is poisoned and published no sealed result. */
         CHECK(driver->store.failed);
         struct stat info;
         CHECK(fstatat(driver->store_fd, "retirement-sealed-result.json", &info, AT_SYMLINK_NOFOLLOW) != 0);
@@ -1036,84 +1431,128 @@ static void test_compose_refusal(Refusal refusal)
     fixture_stop(&fixture);
 }
 
-static void test_compose_refusals(void)
+BUSTER_GLOBAL_LOCAL void test_compose_refusals(void)
 {
     for (unsigned refusal = 0; refusal < REFUSE_COUNT; ++refusal) test_compose_refusal((Refusal)refusal);
 }
 
-static void test_budget_and_settle(void)
+BUSTER_GLOBAL_LOCAL int reopen_store(Driver* driver)
+{
+    tp_retirement_store_close(&driver->store);
+    int valid = tp_retirement_store_open(&driver->store, driver->store_fd, driver->files, TP_RETIREMENT_STORE_FILES);
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL void test_budget_and_settle(void)
 {
     /* A family whose single adapter input exceeds the per-file store cap is
      * refused before any timing. */
-    static TpRetirementComposeRow rows[4000];
-    static unsigned kinds[4000];
-    char const* values[TP_RETIREMENT_COMPOSE_DIMENSIONS] = {"x86_64-unknown-linux-gnu", "baseline", "none",
-                                                           "direct-ssa", "0", "link"};
-    for (unsigned i = 0; i < 4000; ++i)
+    enum { LARGE_ROWS = 4000 };
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = DRIVER_ARENA_BYTES, .flags = {.no_pool = 1}});
+    TpRetirementComposeRow* rows = arena ? (TpRetirementComposeRow*)tp_retirement_compose_allocate(arena,
+                                        LARGE_ROWS * sizeof(TpRetirementComposeRow)) : NULL;
+    unsigned* kinds = arena ? (unsigned*)tp_retirement_compose_allocate(arena, LARGE_ROWS * sizeof(unsigned)) : NULL;
+    CHECK(rows && kinds);
+    if (rows && kinds)
     {
-        rows[i] = (TpRetirementComposeRow){i, i, i == 0, {values[0], values[1], values[2], values[3], values[4], values[5]}};
-        kinds[i] = TP_RETIREMENT_GROUP_SINGLETON;
+        char const* values[TP_RETIREMENT_COMPOSE_DIMENSIONS] = {"x86_64-unknown-linux-gnu", "baseline", "none",
+                                                               "direct-ssa", "0", "link"};
+        for (unsigned i = 0; i < LARGE_ROWS; ++i)
+        {
+            rows[i] = (TpRetirementComposeRow){i, i, i == 0, {values[0], values[1], values[2], values[3], values[4],
+                                                              values[5]}};
+            kinds[i] = TP_RETIREMENT_GROUP_SINGLETON;
+        }
+        kinds[1] = TP_RETIREMENT_GROUP_OBJECT;
+        rows[1].dimensions[5] = "object";
+        TpRetirementComposeLayout large = {rows, kinds, LARGE_ROWS, LARGE_ROWS, LARGE_ROWS, 0};
+        TpRetirementComposeShape shape = {&large, TP_RETIREMENT_EXECUTION_MAX_PAIRS, 1, 1};
+        TpRetirementComposeBounds bounds;
+        CHECK(!tp_retirement_compose_bounds(&shape, &bounds));
+        shape.pairs = FIXTURE_PAIRS;
+        TpRetirementComposeLayout small = {rows, kinds, 2, 2, LARGE_ROWS, 0};
+        shape.layout = &small;
+        CHECK(tp_retirement_compose_bounds(&shape, &bounds));
+        shape.pairs = FIXTURE_PAIRS + 1;
+        CHECK(!tp_retirement_compose_bounds(&shape, &bounds));
+        /* A layout with no runtime row has no generated-runtime cells. */
+        rows[0].runtime = 0;
+        shape.pairs = FIXTURE_PAIRS;
+        CHECK(!tp_retirement_compose_bounds(&shape, &bounds));
+        rows[0].runtime = 1;
     }
-    kinds[1] = TP_RETIREMENT_GROUP_OBJECT;
-    rows[1].dimensions[5] = "object";
-    TpRetirementComposeLayout large = {rows, kinds, 4000, 4000, 4000, 0};
-    TpRetirementComposeShape shape = {&large, 254, 1, 1};
-    TpRetirementComposeBounds bounds;
-    CHECK(!tp_retirement_compose_bounds(&shape, &bounds));
-    shape.pairs = 60;
-    TpRetirementComposeLayout small = {rows, kinds, 2, 2, 4000, 0};
-    shape.layout = &small;
-    CHECK(tp_retirement_compose_bounds(&shape, &bounds));
-    shape.pairs = 61;
-    CHECK(!tp_retirement_compose_bounds(&shape, &bounds));
-    /* A layout with no runtime row has no generated-runtime cells. */
-    rows[0].runtime = 0;
-    shape.pairs = 60;
-    CHECK(!tp_retirement_compose_bounds(&shape, &bounds));
-    rows[0].runtime = 1;
+    if (arena) arena_destroy(arena, 1);
 
     Fixture fixture;
-    CHECK(fixture_start(&fixture) && driver_open(fixture.driver));
+    CHECK(fixture_start(&fixture, FIXTURE_CLEAN) && driver_open(fixture.driver));
     Driver* driver = fixture.driver;
-    /* The plan refuses a retained-file reservation beyond the store. */
-    TpRetirementCampaignShape campaign = {2, 1, 2, 1, 60, 1, 1, 4096 + 16384, 4096 + 16384, 4096 + 16384};
     TpRetirementCampaignCapacity capacity;
     TpRetirementCampaignStorePlan plan;
-    TpRetirementComposeShape compose = {&driver->layout, 60, driver->code_count, driver->prior_count};
-    CHECK(tp_retirement_campaign_capacity(&campaign, &capacity));
-    CHECK(!tp_retirement_compose_plan(&driver->store, &capacity, &compose, TP_RETIREMENT_STORE_FILES, 0, 3, 0, &plan));
-    tp_retirement_store_close(&driver->store);
-    CHECK(tp_retirement_store_open(&driver->store, driver->store_fd, driver->files, TP_RETIREMENT_STORE_FILES));
-    CHECK(tp_retirement_compose_plan(&driver->store, &capacity, &compose, 0, 0, 3, 0, &plan));
-    /* Settle only lowers the reservation, never below the published count. */
-    unsigned planned = driver->store.planned_files;
+    TpRetirementComposeShape compose = {&driver->layout, FIXTURE_PAIRS, driver->code_count, driver->prior_count};
+    CHECK(driver_capacity(driver, &capacity));
+    /* The plan refuses a malformed declaration, a prior count other than
+     * the shape's, and a retained reservation beyond the store. */
+    TpRetirementComposeRetained saved = driver->retained[4];
+    driver->retained[4].kind = "Record";
+    CHECK(!tp_retirement_compose_plan(&driver->store, &capacity, &compose, &driver->declaration, 3, 0, &plan));
+    driver->retained[4] = saved;
+    CHECK(reopen_store(driver));
+    compose.prior_entries = driver->prior_count + 1;
+    CHECK(!tp_retirement_compose_plan(&driver->store, &capacity, &compose, &driver->declaration, 3, 0, &plan));
+    compose.prior_entries = driver->prior_count;
+    CHECK(reopen_store(driver));
+    driver->retained[5].files_max = TP_RETIREMENT_COMPOSE_GROUP_FILES;
+    driver->retained[5].bytes_max = 1;
+    CHECK(!tp_retirement_compose_plan(&driver->store, &capacity, &compose, &driver->declaration, 3, 0, &plan));
+    driver->retained[5].files_max = 4;
+    driver->retained[5].bytes_max = 4096;
+    CHECK(reopen_store(driver));
+    CHECK(tp_retirement_compose_plan(&driver->store, &capacity, &compose, &driver->declaration, 3, 0, &plan));
+    /* Bound and retain are fixed once, before any publication. */
+    CHECK(!tp_retirement_store_retain(&driver->store, digest_a));
+    CHECK(reopen_store(driver));
+    CHECK(tp_retirement_compose_plan(&driver->store, &capacity, &compose, &driver->declaration, 3, 0, &plan));
+    CHECK(!tp_retirement_store_bound(&driver->store, 1));
+    /* Settle only lowers the reservation, never below the published count,
+     * and releases only upper-bounded slack: the exact kinds remain. */
+    CHECK(reopen_store(driver));
+    CHECK(tp_retirement_compose_plan(&driver->store, &capacity, &compose, &driver->declaration, 3, 0, &plan));
+    unsigned planned = driver->store.planned_files, bounded = driver->store.bounded_files;
+    CHECK(bounded && bounded < planned);
     CHECK(!tp_retirement_store_settle(&driver->store, planned + 1));
-    tp_retirement_store_close(&driver->store);
-    CHECK(tp_retirement_store_open(&driver->store, driver->store_fd, driver->files, TP_RETIREMENT_STORE_FILES));
-    CHECK(tp_retirement_compose_plan(&driver->store, &capacity, &compose, 0, 0, 3, 0, &plan));
-    CHECK(driver_import(driver, driver->transcript.files) && driver_import(driver, driver->samples[0].files));
-    CHECK(!tp_retirement_store_settle(&driver->store, 1));
-    tp_retirement_store_close(&driver->store);
-    CHECK(tp_retirement_store_open(&driver->store, driver->store_fd, driver->files, TP_RETIREMENT_STORE_FILES));
-    CHECK(tp_retirement_compose_plan(&driver->store, &capacity, &compose, 0, 0, 3, 0, &plan));
-    CHECK(driver_import(driver, driver->metrics.files));
-    CHECK(!tp_retirement_store_validate(&driver->store));
-    tp_retirement_store_close(&driver->store);
-    CHECK(tp_retirement_store_open(&driver->store, driver->store_fd, driver->files, TP_RETIREMENT_STORE_FILES));
-    CHECK(tp_retirement_compose_plan(&driver->store, &capacity, &compose, 0, 0, 3, 0, &plan));
+    CHECK(reopen_store(driver));
+    CHECK(tp_retirement_compose_plan(&driver->store, &capacity, &compose, &driver->declaration, 3, 0, &plan));
+    CHECK(!tp_retirement_store_settle(&driver->store, planned - bounded - 1));
+    CHECK(reopen_store(driver));
+    CHECK(tp_retirement_compose_plan(&driver->store, &capacity, &compose, &driver->declaration, 3, 0, &plan));
     CHECK(driver_import(driver, driver->untimed.files));
-    CHECK(tp_retirement_store_settle(&driver->store, 1));
-    CHECK(tp_retirement_store_validate(&driver->store));
+    CHECK(tp_retirement_store_settle(&driver->store, planned - bounded));
+    CHECK(driver->store.bounded_files == 0 && driver->store.planned_files == planned - bounded);
     fixture_stop(&fixture);
 }
 
-static int handoff_ready(Fixture* fixture)
+BUSTER_GLOBAL_LOCAL int handoff_ready(Fixture* fixture)
 {
     int valid = fixture_ready(fixture) && driver_compose(fixture->driver);
     return valid;
 }
 
-static void test_handoff(void)
+BUSTER_GLOBAL_LOCAL TpRetirementAuthorityState handoff_state(Driver* driver, int queue)
+{
+    TpRetirementAuthorityState state = tp_retirement_store_authority_state(driver->store_fd, queue, 7, 3,
+        driver->digests[0], driver->result.context_sha256, &driver->authority);
+    return state;
+}
+
+BUSTER_GLOBAL_LOCAL int handoff(Driver* driver, int queue, uint64_t job, uint64_t attempt, char const* context,
+                                TpRetirementAuthorityJournal* journal)
+{
+    int valid = tp_retirement_store_authority_handoff(driver->store_fd, driver->authority_fd, queue, job, attempt,
+                                                      driver->digests[0], context, &driver->authority, journal);
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL void test_handoff(void)
 {
     Fixture fixture;
     CHECK(handoff_ready(&fixture));
@@ -1121,37 +1560,44 @@ static void test_handoff(void)
     int queue = driver_directory(fixture.queue);
     TpRetirementAuthorityJournal journal;
     char const* context = driver->result.context_sha256;
-    CHECK(tp_retirement_store_authority_state(driver->store_fd, queue, 7, 3, driver->digests[0], context,
-                                              &driver->authority) == TP_RETIREMENT_AUTHORITY_ABSENT);
+    CHECK(handoff_state(driver, queue) == TP_RETIREMENT_AUTHORITY_ABSENT);
     /* The authenticated handoff's identities must be the authority's. */
-    CHECK(!tp_retirement_store_authority_handoff(driver->store_fd, driver->authority_fd, queue, 8, 3,
-                                                 driver->digests[0], context, &driver->authority, &journal));
-    CHECK(!tp_retirement_store_authority_handoff(driver->store_fd, driver->authority_fd, queue, 7, 4,
-                                                 driver->digests[0], context, &driver->authority, &journal));
+    CHECK(!handoff(driver, queue, 8, 3, context, &journal));
+    CHECK(!handoff(driver, queue, 7, 4, context, &journal));
     /* The pre-sample context is never the final authority context. */
-    CHECK(!tp_retirement_store_authority_handoff(driver->store_fd, driver->authority_fd, queue, 7, 3,
-                                                 driver->digests[0], driver->result.raw_measurements_sha256,
-                                                 &driver->authority, &journal));
-    CHECK(tp_retirement_store_authority_state(driver->store_fd, queue, 7, 3, driver->digests[0], context,
-                                              &driver->authority) == TP_RETIREMENT_AUTHORITY_ABSENT);
-    CHECK(tp_retirement_store_authority_handoff(driver->store_fd, driver->authority_fd, queue, 7, 3,
-                                                driver->digests[0], context, &driver->authority, &journal));
+    CHECK(!handoff(driver, queue, 7, 3, driver->result.raw_measurements_sha256, &journal));
+    CHECK(handoff_state(driver, queue) == TP_RETIREMENT_AUTHORITY_ABSENT);
+    CHECK(handoff(driver, queue, 7, 3, context, &journal));
     CHECK(!strcmp(journal.path, "authority-job-7-3.journal") && journal.bytes > 0);
-    CHECK(tp_retirement_store_authority_state(driver->store_fd, queue, 7, 3, driver->digests[0], context,
-                                              &driver->authority) == TP_RETIREMENT_AUTHORITY_COMPLETE);
+    CHECK(handoff_state(driver, queue) == TP_RETIREMENT_AUTHORITY_COMPLETE);
     /* A retry never overwrites the sealed copy or journal. */
     struct stat before, after;
     CHECK(fstatat(queue, journal.path, &before, AT_SYMLINK_NOFOLLOW) == 0);
-    CHECK(!tp_retirement_store_authority_handoff(driver->store_fd, driver->authority_fd, queue, 7, 3,
-                                                 driver->digests[0], context, &driver->authority, &journal));
+    CHECK(!handoff(driver, queue, 7, 3, context, &journal));
     CHECK(fstatat(queue, "authority-job-7-3.journal", &after, AT_SYMLINK_NOFOLLOW) == 0 &&
           after.st_ino == before.st_ino && after.st_size == before.st_size);
-    CHECK(tp_retirement_store_authority_state(driver->store_fd, queue, 7, 3, driver->digests[0], context,
-                                              &driver->authority) == TP_RETIREMENT_AUTHORITY_COMPLETE);
-    /* A removed transcript shard makes the completed handoff unreadable. */
+    CHECK(handoff_state(driver, queue) == TP_RETIREMENT_AUTHORITY_COMPLETE);
+    /* The link/unlink crash window: a final name beside its `.pending`
+     * temporary is a crash prefix, never complete. */
+    CHECK(linkat(queue, "authority-job-7-3.journal", queue, "authority-job-7-3.journal.pending", 0) == 0);
+    CHECK(handoff_state(driver, queue) == TP_RETIREMENT_AUTHORITY_INCOMPLETE);
+    CHECK(unlinkat(queue, "authority-job-7-3.journal.pending", 0) == 0);
+    CHECK(handoff_state(driver, queue) == TP_RETIREMENT_AUTHORITY_COMPLETE);
+    /* Losing a retained A/A file after completion damages the handoff: both
+     * names exist but the authority no longer reopens. */
+    CHECK(unlinkat(driver->store_fd, "retirement-execution-aa-0000.jsonl", 0) == 0);
+    CHECK(handoff_state(driver, queue) == TP_RETIREMENT_AUTHORITY_DAMAGED);
+    close(queue);
+    fixture_stop(&fixture);
+
+    /* A removed sealed transcript shard damages it too. */
+    CHECK(handoff_ready(&fixture));
+    driver = fixture.driver;
+    queue = driver_directory(fixture.queue);
+    context = driver->result.context_sha256;
+    CHECK(handoff(driver, queue, 7, 3, context, &journal));
     CHECK(unlinkat(driver->store_fd, "retirement-execution-ab-0000.jsonl", 0) == 0);
-    CHECK(tp_retirement_store_authority_state(driver->store_fd, queue, 7, 3, driver->digests[0], context,
-                                              &driver->authority) == TP_RETIREMENT_AUTHORITY_INCOMPLETE);
+    CHECK(handoff_state(driver, queue) == TP_RETIREMENT_AUTHORITY_DAMAGED);
     close(queue);
     fixture_stop(&fixture);
 
@@ -1163,35 +1609,37 @@ static void test_handoff(void)
     context = driver->result.context_sha256;
     CHECK(tp_retirement_store_authority_copy(driver->store_fd, driver->authority_fd, queue, driver->job, 3,
                                              driver->digests[0], context, &driver->authority));
-    CHECK(tp_retirement_store_authority_state(driver->store_fd, queue, 7, 3, driver->digests[0], context,
-                                              &driver->authority) == TP_RETIREMENT_AUTHORITY_INCOMPLETE);
-    CHECK(!tp_retirement_store_authority_handoff(driver->store_fd, driver->authority_fd, queue, 7, 3,
-                                                 driver->digests[0], context, &driver->authority, &journal));
-    CHECK(tp_retirement_store_authority_state(driver->store_fd, queue, 7, 3, driver->digests[0], context,
-                                              &driver->authority) == TP_RETIREMENT_AUTHORITY_INCOMPLETE);
+    CHECK(handoff_state(driver, queue) == TP_RETIREMENT_AUTHORITY_INCOMPLETE);
+    CHECK(!handoff(driver, queue, 7, 3, context, &journal));
+    CHECK(handoff_state(driver, queue) == TP_RETIREMENT_AUTHORITY_INCOMPLETE);
     close(queue);
     fixture_stop(&fixture);
 
-    /* A failed journal sync leaves a pending prefix: incomplete, not ACKable. */
-    CHECK(handoff_ready(&fixture));
-    driver = fixture.driver;
-    queue = driver_directory(fixture.queue);
-    context = driver->result.context_sha256;
-    tp_retirement_store_test_sync_calls = 0;
-    /* authority_copy syncs: pending dir, file, link dir, unlink dir (4);
-     * the journal's first sync is its pending directory entry. */
-    tp_retirement_store_test_fail_sync = 5;
-    CHECK(!tp_retirement_store_authority_handoff(driver->store_fd, driver->authority_fd, queue, 7, 3,
-                                                 driver->digests[0], context, &driver->authority, &journal));
-    tp_retirement_store_test_fail_sync = 0;
-    CHECK(journal.path[0] == 0);
-    CHECK(tp_retirement_store_authority_state(driver->store_fd, queue, 7, 3, driver->digests[0], context,
-                                              &driver->authority) == TP_RETIREMENT_AUTHORITY_INCOMPLETE);
-    close(queue);
-    fixture_stop(&fixture);
+    /* Failed journal syncs: at its pending entry (no final name) and after
+     * its link (final and `.pending` both present). authority_copy syncs
+     * four times (pending entry, file, link, unlink); the journal's syncs
+     * follow in the same order. Neither prefix is ACKable. */
+    for (unsigned failing = 5; failing <= 7; failing += 2)
+    {
+        CHECK(handoff_ready(&fixture));
+        driver = fixture.driver;
+        queue = driver_directory(fixture.queue);
+        context = driver->result.context_sha256;
+        tp_retirement_store_test_sync_calls = 0;
+        tp_retirement_store_test_fail_sync = failing;
+        CHECK(!handoff(driver, queue, 7, 3, context, &journal));
+        tp_retirement_store_test_fail_sync = 0;
+        CHECK(journal.path[0] == 0);
+        struct stat pending;
+        CHECK(fstatat(queue, "authority-job-7-3.journal.pending", &pending, AT_SYMLINK_NOFOLLOW) == 0);
+        CHECK((fstatat(queue, "authority-job-7-3.journal", &pending, AT_SYMLINK_NOFOLLOW) == 0) == (failing == 7));
+        CHECK(handoff_state(driver, queue) == TP_RETIREMENT_AUTHORITY_INCOMPLETE);
+        close(queue);
+        fixture_stop(&fixture);
+    }
 
     /* No producer authority: nothing is copied or journalled. */
-    CHECK(fixture_start(&fixture));
+    CHECK(fixture_start(&fixture, FIXTURE_CLEAN));
     driver = fixture.driver;
     driver->authority_path[0] = 0;
     CHECK(driver_open(driver) && driver_plan(driver) && driver_import_all(driver) && driver_compose(driver));
@@ -1204,6 +1652,7 @@ static void test_handoff(void)
     strcpy(forged.context_sha256, driver->result.context_sha256);
     strcpy(forged.receipt_sha256, driver->result.receipt.sha256);
     strcpy(forged.identity_sha256, digest_a);
+    strcpy(forged.retained_sha256, driver->result.retained.sha256);
     strcpy(forged.authority_sha256, digest_b);
     CHECK(!tp_retirement_store_authority_handoff(driver->store_fd, authority, queue, 7, 3, driver->digests[0],
                                                  driver->result.context_sha256, &forged, &journal));
@@ -1218,6 +1667,8 @@ int main(int argc, char** argv)
 {
     int result = 0;
     if (argc == 3 && !strcmp(argv[1], "compose")) result = driver_main(argv[2]);
+    else if (argc == 3 && !strcmp(argv[1], "canonical")) result = driver_canonical(argv[2], NULL);
+    else if (argc == 4 && !strcmp(argv[1], "context")) result = driver_canonical(argv[2], argv[3]);
     else if (argc == 6 && !strcmp(argv[1], "retirement-replay") && !strcmp(argv[2], "--input") &&
              !strcmp(argv[4], "--output"))
         result = stub_adapter(argv[3], argv[5]);
@@ -1226,6 +1677,8 @@ int main(int argc, char** argv)
         ssize_t length = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
         CHECK(length > 0 && (size_t)length < sizeof(self_path) - 1);
         if (length > 0) self_path[length] = 0;
+        CHECK(fixture_self());
+        test_canonical_json();
         test_compose_success();
         test_compose_refusals();
         test_budget_and_settle();

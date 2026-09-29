@@ -3,7 +3,8 @@
  * handoff. begin/publish create and seal one file without replacement;
  * validate rereads every sealed inode. receipt_authority returns a reference
  * for the private service channel, never an authority embedded in the bundle.
- * read/settle serve the #881-E composer (retirement_compose.h);
+ * read/settle/bound/retain serve the #881-E composer (retirement_compose.h),
+ * which also publishes the retained manifest the authority binds;
  * authority_handoff/authority_state are the coordinator's copy-and-journal
  * call site before its final ACK.
  * Definitions live in tools/bench_service/retirement_result.c.
@@ -11,6 +12,7 @@
 #ifndef BUSTER_THROUGHPUT_RETIREMENT_STORE_H
 #define BUSTER_THROUGHPUT_RETIREMENT_STORE_H
 #ifdef __linux__
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/stat.h>
@@ -24,6 +26,14 @@
  * equal TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS (checked in retirement_campaign.h). */
 #define TP_RETIREMENT_STORE_RECEIPT_SHARD_RECORDS 65536u
 #define TP_RETIREMENT_EXECUTION_RECEIPT_PATH "retirement-execution-receipt.json"
+/* The composer's inventory of every retained (unsealed) store file. */
+#define TP_RETIREMENT_RETAINED_MANIFEST_PATH "retirement-retained-manifest.txt"
+#define TP_RETIREMENT_RETAINED_MANIFEST_HEADER "BQ-RETIREMENT-RETAINED-V1\n"
+/* A SHA-256 hex string plus NUL, and a job/boot token plus NUL. */
+#define TP_RETIREMENT_STORE_SHA256_CAPACITY 65u
+#define TP_RETIREMENT_STORE_TOKEN_CAPACITY 129u
+/* The authority field for an attempt without a retained manifest. */
+#define TP_RETIREMENT_STORE_NO_RETAINED "0000000000000000000000000000000000000000000000000000000000000000"
 
 typedef struct TpRetirementStoredFile
 {
@@ -44,8 +54,13 @@ typedef struct TpRetirementStore
     struct stat root_identity;
     TpRetirementStoredFile* files;
     unsigned count, capacity, planned_files, external_entries;
+    /* The part of planned_files reserved for upper-bounded kinds (metrics
+     * and untimed shards, failure logs); settle may release only this. */
+    unsigned bounded_files;
     uint64_t total, planned_bytes, external_bytes;
-    int active, failed, authority_issued, planned;
+    int active, failed, authority_issued, planned, retained_bound;
+    /* The digest of the retained-file declaration fixed before timing. */
+    char retained_sha256[TP_RETIREMENT_STORE_SHA256_CAPACITY];
 } TpRetirementStore;
 
 typedef struct TpRetirementPending
@@ -62,8 +77,14 @@ typedef struct TpRetirementReceiptAuthority
 {
     /* The service must persist and send this on its authenticated private
      * channel. Copying these fields into a bundle does not authenticate it. */
-    char job[129], plan_sha256[65], context_sha256[65], receipt_sha256[65];
-    char identity_sha256[65], authority_sha256[65];
+    char job[TP_RETIREMENT_STORE_TOKEN_CAPACITY];
+    char plan_sha256[TP_RETIREMENT_STORE_SHA256_CAPACITY], context_sha256[TP_RETIREMENT_STORE_SHA256_CAPACITY];
+    char receipt_sha256[TP_RETIREMENT_STORE_SHA256_CAPACITY], identity_sha256[TP_RETIREMENT_STORE_SHA256_CAPACITY];
+    /* The retained manifest's digest (TP_RETIREMENT_STORE_NO_RETAINED when
+     * the attempt published none): a fresh consumer reopens every file it
+     * lists, so the unsealed A/A evidence is bound by the authority too. */
+    char retained_sha256[TP_RETIREMENT_STORE_SHA256_CAPACITY];
+    char authority_sha256[TP_RETIREMENT_STORE_SHA256_CAPACITY];
     uint64_t attempt;
 } TpRetirementReceiptAuthority;
 
@@ -77,6 +98,11 @@ int tp_retirement_store_open(TpRetirementStore* store, int root,
  * store ceilings (see tp_retirement_campaign_store_preflight). */
 int tp_retirement_store_plan(TpRetirementStore* store, unsigned owned_files, uint64_t owned_bytes,
                              unsigned external_entries, uint64_t external_bytes);
+/* After plan and before any publication: mark how many planned files are
+ * upper-bound slack (bounded kinds) and bind the retained-file declaration.
+ * Each may be set once. */
+int tp_retirement_store_bound(TpRetirementStore* store, unsigned bounded_files);
+int tp_retirement_store_retain(TpRetirementStore* store, char const* declaration_sha256);
 int tp_retirement_store_begin(TpRetirementStore* store, char const* path,
                               uint64_t limit, TpRetirementPending* pending);
 int tp_retirement_store_publish(TpRetirementStore* store, TpRetirementPending* pending,
@@ -106,7 +132,8 @@ int tp_retirement_store_authority_reopen(int result_root, int authority_root,
  * result using that copy. The caller keeps the trusted fields outside the
  * bundle and journals the queue reference before acknowledging the attempt.
  * A failed copy leaves a pending or sealed collision; it is never retried by
- * overwriting or deleting that evidence. */
+ * overwriting or deleting that evidence, and a copy whose name or temporary
+ * already exists is refused before anything is created. */
 int tp_retirement_store_authority_copy(int result_root, int authority_root,
     int queue_authority_root, char const* job, uint64_t attempt,
     char const* plan_sha256, char const* final_context_sha256,
@@ -119,8 +146,18 @@ int tp_retirement_store_read(TpRetirementStore* store, char const* path, TpRetir
 /* The plan reserves upper bounds before timing (metrics shard counts are only
  * bounded, never exact). Once every remaining output is known, settle lowers
  * the reservation to the exact final inventory; validate then requires
- * exactly that many files. It never raises the reservation. */
+ * exactly that many files. It never raises the reservation, and it may release
+ * at most the bounded slack: an exact kind (a retained or sealed file) can
+ * never be settled away. */
 int tp_retirement_store_settle(TpRetirementStore* store, unsigned exact_files);
+/* The `job-<id>` label of the queue's numeric job identity. */
+static inline int tp_retirement_store_job_label(char output[TP_RETIREMENT_STORE_TOKEN_CAPACITY], uint64_t job)
+{
+    int length = output && job ? snprintf(output, TP_RETIREMENT_STORE_TOKEN_CAPACITY, "job-%" PRIu64, job) : -1;
+    int valid = length > 0 && length < (int)TP_RETIREMENT_STORE_TOKEN_CAPACITY;
+    if (!valid && output) output[0] = 0;
+    return valid;
+}
 
 /* The coordinator's authority call site (#1023 / #1021). Call it in the
  * worker only after the private phase handoff has been authenticated, with
@@ -130,7 +167,10 @@ int tp_retirement_store_settle(TpRetirementStore* store, unsigned exact_files);
  * then durably publishes one journal record beside it without replacement and
  * reopens both. Only after it returns 1 may the worker send its final ACK and
  * release the lease. Any failure leaves the published evidence in place; a
- * retry never overwrites or deletes it. */
+ * retry never overwrites or deletes it: when the copy, the journal or either
+ * `.pending` temporary already exists it refuses before creating anything,
+ * so a retry cannot degrade a complete handoff. The copy's authority binds
+ * the retained manifest, so the handoff reopens every retained A/A file. */
 typedef struct TpRetirementAuthorityJournal
 {
     char path[TP_RETIREMENT_STORE_PATH_BYTES + 1];
@@ -143,6 +183,7 @@ typedef enum TpRetirementAuthorityState
     TP_RETIREMENT_AUTHORITY_INVALID,
     TP_RETIREMENT_AUTHORITY_ABSENT,
     TP_RETIREMENT_AUTHORITY_INCOMPLETE,
+    TP_RETIREMENT_AUTHORITY_DAMAGED,
     TP_RETIREMENT_AUTHORITY_COMPLETE
 } TpRetirementAuthorityState;
 
@@ -152,9 +193,12 @@ int tp_retirement_store_authority_handoff(int result_root, int authority_root, i
     TpRetirementReceiptAuthority const* trusted, TpRetirementAuthorityJournal* journal);
 /* Restart classification of the queue-private root for one attempt:
  * COMPLETE when the copied authority and its journal both reopen against the
- * result; INCOMPLETE when any of them exists without the other or fails to
- * reopen (the attempt must be poisoned, its evidence retained); ABSENT when
- * neither exists. It never repairs or completes a partial handoff. */
+ * result; INCOMPLETE for a crash prefix (one name without the other, or a
+ * `.pending` temporary left by the link/unlink window); DAMAGED when both
+ * final names exist without a temporary but either fails to reopen (later
+ * tampering or loss of the result); ABSENT when nothing exists. INCOMPLETE and
+ * DAMAGED attempts must be poisoned with their evidence retained. It never
+ * repairs or completes a handoff. */
 TpRetirementAuthorityState tp_retirement_store_authority_state(int result_root, int queue_authority_root,
     uint64_t authenticated_job, uint64_t authenticated_attempt,
     char const* plan_sha256, char const* final_context_sha256,
