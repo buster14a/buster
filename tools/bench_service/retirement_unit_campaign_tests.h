@@ -59,10 +59,16 @@ typedef struct BqPrepCampaign
     BqRetirementCorrectness* gate;
     BqRetirementTrustedRow* rows;
     BqRetirementRowFact* facts;
+    /* The validator's timed partition of the pinned rows, which the gate's
+     * frozen batch groups follow. */
+    BqRetirementDocumentPopulation population;
+    BqRetirementDocumentPartition partition;
     TpRetirementBatchInput inputs[BQ_PREP_CAMPAIGN_CAP];
-    char fixtures[BQ_PREP_CAMPAIGN_CAP][32], leaves[BQ_PREP_CAMPAIGN_CAP][32];
-    TpRetirementBatchContract contract;
-    BqRetirementBatchGroup group;
+    char fixtures[BQ_PREP_CAMPAIGN_CAP][64], leaves[BQ_PREP_CAMPAIGN_CAP][32];
+    TpRetirementBatchContract contracts[BQ_PREP_CAMPAIGN_CAP];
+    BqRetirementBatchGroup frozen[BQ_PREP_CAMPAIGN_CAP];
+    char object_outputs[BQ_PREP_CAMPAIGN_CAP][65];
+    unsigned frozen_count;
     TpRetirementCampaignBudget budget;
     TpRetirementCampaignReview review;
     unsigned group_stages[BQ_PREP_CAMPAIGN_CAP];
@@ -75,7 +81,7 @@ typedef struct BqPrepCampaign
     char words[2][2 * BQ_PREP_CAMPAIGN_CAP][32];
     char command_sha[2][2 * BQ_PREP_CAMPAIGN_CAP][65];
     char* environment[2];
-    char artifact_sha[65], batch_output[65], object_output[65], budget_sha[65];
+    char artifact_sha[65], batch_output[65], budget_sha[65];
     BqPrepCampaignStage stages[2];
     TpRetirementCampaign campaign;
     TpRetirementCampaignCommand snapshots[4 * BQ_PREP_CAMPAIGN_CAP];
@@ -129,6 +135,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_release(BqPrepCampaign* campaign)
     bq_retirement_campaign_ready_release(&campaign->ready);
     if (campaign->unit_gate.owned) BQ_PREP_CHECK(bq_retirement_unit_gate_release(&campaign->unit_gate));
     bq_check_test_evidence_release(&campaign->evidence);
+    bq_retirement_documents_partition_release(&campaign->partition);
+    bq_retirement_documents_population_release(&campaign->population);
     campaign->gate = NULL;
     campaign->rows = NULL;
     campaign->facts = NULL;
@@ -159,11 +167,11 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_commands(BqPrepCampaign* campaign)
                 argv[1] = campaign->words[stage][index];
                 argv[2] = NULL;
                 char const* output = runtime ? campaign->rows[row].independent_oracle_sha256 :
-                                     object ? campaign->object_output : campaign->batch_output;
+                                     object ? campaign->object_outputs[slot] : campaign->batch_output;
                 campaign->commands[stage][index] = (TpRetirementMeasuredCommand){.unit = runtime ? row : slot,
                     .kind = runtime, .variant = variant, .argument_count = 2, .arguments = argv,
                     .environment = campaign->environment, .environment_count = 1, .directory = "/tmp",
-                    .artifact = runtime || object ? NULL : argv[1], .batch = object ? &campaign->contract : NULL,
+                    .artifact = runtime || object ? NULL : argv[1], .batch = object ? &campaign->contracts[slot] : NULL,
                     .timeout_seconds = 2, .command_sha256 = campaign->command_sha[stage][index],
                     .output_sha256 = output};
                 ok = ok && tp_retirement_command_hash(&campaign->commands[stage][index],
@@ -175,15 +183,22 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_commands(BqPrepCampaign* campaign)
 /* The row evidence lane B's step 9 issuer joins (bq_retirement_unit_gate),
  * over the projection's own rows (population hash unchanged): B's passing
  * test evidence for every row (bq_check_test_evidence), with this campaign's
- * commands for the timed rows. Every native-target compiler-eligible object
- * row is in one frozen object batch group, every other timed row a
- * singleton, runtime for the singleton rows the reference oracle observed.
- * The issuer then runs the installed stand-in required checks and grants the
- * #509 batch authority; nothing here writes it. */
-BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_evidence(BqPrepCampaign* campaign, BqRetirementProjection const* projection)
+ * commands for the timed rows. The timed groups are the validator's
+ * partition of the pinned rows (bq_retirement_documents_partition): object
+ * rows sharing a configuration and frozen argv form one frozen batch group
+ * (members first, in row order, each input the row's identity fixture),
+ * every timed link or self-host row is a singleton, runtime for the
+ * singletons the reference oracle observed. The issuer then runs the
+ * installed stand-in required checks and grants the #509 batch authority;
+ * nothing here writes it. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_evidence(BqPrepCampaign* campaign, BqRetirementProjection const* projection,
+    int installed, String8 profile)
 {
     u32 count = projection->prepared.rows;
-    bool ok = bq_check_test_evidence(projection, &campaign->evidence);
+    bool ok = bq_check_test_evidence(projection, &campaign->evidence) &&
+        bq_retirement_documents_population(installed, profile, projection->rows, count,
+            projection->prepared.native_target, &campaign->population) == BQ_OK &&
+        bq_retirement_documents_partition(&campaign->population, 0, &campaign->partition);
     campaign->rows = campaign->evidence.rows;
     campaign->facts = campaign->evidence.facts;
     campaign->environment[0] = "LC_ALL=C";
@@ -194,7 +209,7 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_evidence(BqPrepCampaign* campaign, BqR
     char const* objects[] = {campaign->artifact_sha};
     ok = ok && tp_retirement_batch_output_digest(objects, 1, campaign->batch_output) &&
         tp_retirement_budget_digest(&campaign->budget, campaign->budget_sha);
-    u32 object_group = UINT32_MAX;
+    /* The timed rows in ascending order (the samples' dense rows). */
     for (u32 row = 0; ok && row < count; row += 1)
     {
         campaign->facts[row].row = row;
@@ -203,7 +218,7 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_evidence(BqPrepCampaign* campaign, BqR
         if (!(trusted->compiler_eligible && trusted->target == projection->prepared.native_target)) continue;
         bool object = trusted->stage == BQ_RETIREMENT_STAGE_OBJECT;
         bool runtime = !object && trusted->independent_oracle_sha256[0];
-        ok = campaign->timed < BQ_PREP_CAMPAIGN_CAP && campaign->groups < BQ_PREP_CAMPAIGN_CAP;
+        ok = campaign->timed < BQ_PREP_CAMPAIGN_CAP;
         if (!ok) break;
         u32 dense = campaign->timed++;
         campaign->row_ids[dense] = row;
@@ -211,58 +226,64 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_evidence(BqPrepCampaign* campaign, BqR
         campaign->facts[row].compiler_eligible = 1;
         campaign->facts[row].runtime_eligible = runtime;
         if (runtime) campaign->runtime[campaign->runtime_count++] = row;
-        if (object)
+    }
+    /* The partition's groups: their kinds, stages, dense members and, for an
+     * object group, its frozen contract over its members' fixtures. */
+    BqRetirementDocumentPartition const* partition = &campaign->partition;
+    ok = ok && partition->count < BQ_PREP_CAMPAIGN_CAP && partition->row_count == campaign->timed;
+    u32 used = 0;
+    for (u32 group = 0; ok && group < partition->count; group += 1)
+    {
+        u32 first = partition->rows[partition->first[group]];
+        bool object = partition->object[group] != 0;
+        campaign->kinds[group] = object ? TP_RETIREMENT_GROUP_OBJECT : TP_RETIREMENT_GROUP_SINGLETON;
+        campaign->group_row[group] = first;
+        campaign->group_stages[group] = object ? TP_RETIREMENT_BUDGET_STAGE_OBJECT :
+            campaign->rows[first].stage == BQ_RETIREMENT_STAGE_LINK ? TP_RETIREMENT_BUDGET_STAGE_LINK :
+            TP_RETIREMENT_BUDGET_STAGE_SELF_HOST;
+        campaign->offsets[group] = used;
+        u32 start = campaign->objects;
+        for (u32 member = partition->first[group]; ok && member < partition->first[group + 1]; member += 1)
         {
+            u32 row = partition->rows[member], dense = 0;
+            while (dense < campaign->timed && campaign->row_ids[dense] != row) dense += 1;
+            ok = dense < campaign->timed;
+            campaign->members[used++] = dense;
+            if (!ok || !object) continue;
             u32 input = campaign->objects++;
-            snprintf(campaign->fixtures[input], 32, "tests/r%u.c", row);
-            snprintf(campaign->leaves[input], 32, "r%u.o", row);
+            String8 fixture = bq_retirement_document_value(&campaign->population, row, BQ_RETIREMENT_DOCUMENT_FIXTURE);
+            ok = fixture.length < sizeof(campaign->fixtures[input]);
+            if (ok) memcpy(campaign->fixtures[input], fixture.pointer, (size_t)fixture.length);
+            if (ok) campaign->fixtures[input][fixture.length] = 0;
+            snprintf(campaign->leaves[input], sizeof(campaign->leaves[input]), "r%u.o", row);
             campaign->inputs[input] = (TpRetirementBatchInput){campaign->fixtures[input], "ok", "driver.none", empty,
                 campaign->artifact_sha, campaign->leaves[input], 1, row};
-            if (object_group == UINT32_MAX)
-            {
-                object_group = campaign->groups++;
-                campaign->kinds[object_group] = TP_RETIREMENT_GROUP_OBJECT;
-                campaign->group_row[object_group] = row;
-                campaign->group_stages[object_group] = TP_RETIREMENT_BUDGET_STAGE_OBJECT;
-            }
         }
-        else
+        if (ok && object)
         {
-            u32 group = campaign->groups++;
-            campaign->kinds[group] = TP_RETIREMENT_GROUP_SINGLETON;
-            campaign->group_row[group] = row;
-            campaign->group_stages[group] = trusted->stage == BQ_RETIREMENT_STAGE_LINK ?
-                TP_RETIREMENT_BUDGET_STAGE_LINK : TP_RETIREMENT_BUDGET_STAGE_SELF_HOST;
+            campaign->contracts[group] = (TpRetirementBatchContract){"x86_64-linux", "none", "batch.metrics",
+                campaign->inputs + start, campaign->objects - start, 0, 0};
+            ok = tp_retirement_budget_metrics_bytes(&campaign->budget, campaign->objects - start,
+                    &campaign->contracts[group].metrics_bytes_max) &&
+                tp_retirement_batch_contract_output(&campaign->contracts[group], campaign->object_outputs[group]);
         }
     }
-    /* Dense groups in order of their smallest member; members as dense rows. */
-    u32 used = 0;
+    campaign->groups = ok ? partition->count : 0;
+    campaign->offsets[campaign->groups] = used;
+    ok = ok && used == campaign->timed && campaign->groups && campaign->runtime_count && bq_prep_campaign_commands(campaign);
+    /* Row facts and trusted commands are the A/B stage's frozen commands;
+     * each object group has its own batch key. */
     for (u32 group = 0; ok && group < campaign->groups; group += 1)
     {
-        campaign->offsets[group] = used;
-        for (u32 dense = 0; dense < campaign->timed; dense += 1)
-        {
-            BqRetirementTrustedRow const* trusted = &campaign->rows[campaign->row_ids[dense]];
-            bool member = campaign->kinds[group] == TP_RETIREMENT_GROUP_OBJECT ?
-                trusted->stage == BQ_RETIREMENT_STAGE_OBJECT : campaign->row_ids[dense] == campaign->group_row[group];
-            if (member) campaign->members[used++] = dense;
-        }
-    }
-    campaign->offsets[campaign->groups] = used;
-    ok = ok && used == campaign->timed && campaign->groups && campaign->runtime_count;
-    campaign->contract = (TpRetirementBatchContract){"x86_64-linux", "none", "batch.metrics", campaign->inputs,
-        campaign->objects, 0, 0};
-    ok = ok && (!campaign->objects ||
-        (tp_retirement_budget_metrics_bytes(&campaign->budget, campaign->objects, &campaign->contract.metrics_bytes_max) &&
-         tp_retirement_batch_contract_output(&campaign->contract, campaign->object_output))) &&
-        bq_prep_campaign_commands(campaign);
-    /* Row facts and trusted commands are the A/B stage's frozen commands. */
-    for (u32 group = 0; ok && group < campaign->groups; group += 1)
+        char key[SHA256_HEX_CAPACITY], seed[32];
+        int length = snprintf(seed, sizeof(seed), "prep-batch-key-%u", group);
+        bq_digest(seed, (u32)length, (char8*)key);
         for (u32 dense = campaign->offsets[group]; dense < campaign->offsets[group + 1]; dense += 1)
         {
             u32 row = campaign->row_ids[campaign->members[dense]];
             BqRetirementTrustedRow* trusted = &campaign->rows[row];
-            memset(trusted->batch_key_sha256, campaign->kinds[group] == TP_RETIREMENT_GROUP_OBJECT ? 'c' : 0, 64);
+            if (campaign->kinds[group] == TP_RETIREMENT_GROUP_OBJECT) memcpy(trusted->batch_key_sha256, key, 65);
+            else memset(trusted->batch_key_sha256, 0, 65);
             for (u32 side = 0; side < 2; side += 1)
             {
                 BqRetirementObservedSide* observed = &campaign->facts[row].side[side];
@@ -271,6 +292,14 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_evidence(BqPrepCampaign* campaign, BqR
                 memcpy(observed->artifact_sha256, campaign->artifact_sha, 65);
             }
         }
+        if (campaign->kinds[group] == TP_RETIREMENT_GROUP_OBJECT)
+        {
+            BqRetirementBatchGroup* frozen = &campaign->frozen[campaign->frozen_count++];
+            *frozen = (BqRetirementBatchGroup){{campaign->contracts[group], campaign->contracts[group]}, {{0}}};
+            memcpy(frozen->command_sha256[0], campaign->command_sha[1][group * 2], 65);
+            memcpy(frozen->command_sha256[1], campaign->command_sha[1][group * 2 + 1], 65);
+        }
+    }
     for (u32 runtime = 0; ok && runtime < campaign->runtime_count; runtime += 1)
         for (u32 side = 0; side < 2; side += 1)
         {
@@ -278,14 +307,8 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_evidence(BqPrepCampaign* campaign, BqR
             memcpy(campaign->facts[campaign->runtime[runtime]].side[side].runtime_command_sha256, command, 65);
             memcpy(campaign->rows[campaign->runtime[runtime]].runtime_command_sha256[side], command, 65);
         }
-    if (ok && campaign->objects)
-    {
-        campaign->group = (BqRetirementBatchGroup){{campaign->contract, campaign->contract}, {{0}}};
-        memcpy(campaign->group.command_sha256[0], campaign->command_sha[1][object_group * 2], 65);
-        memcpy(campaign->group.command_sha256[1], campaign->command_sha[1][object_group * 2 + 1], 65);
-    }
-    campaign->evidence.evidence.groups = campaign->objects ? &campaign->group : NULL;
-    campaign->evidence.evidence.group_count = campaign->objects ? 1u : 0u;
+    campaign->evidence.evidence.groups = campaign->frozen_count ? campaign->frozen : NULL;
+    campaign->evidence.evidence.group_count = campaign->frozen_count;
     /* The v3 A/A second-command aggregate, one entry per timed group. */
     Sha256 hash;
     sha256_init(&hash);
@@ -1097,7 +1120,8 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_issue(BqPrepOracleFixture* fixture, Bq
     BqCheckTestSpec specs[BQ_CHECK_TEST_CHECKS];
     bq_check_test_specs(specs, projection->prepared.object_rows, eligible, projection->prepared.native_target);
     char pin[256] = {0};
-    bool ok = bq_prep_campaign_evidence(campaign, projection) &&
+    bool ok = bq_prep_campaign_evidence(campaign, projection, fixture->installed_fd,
+                                        string_from_pointer(fixture->profile)) &&
         bq_check_test_install(fixture->recipes, &unit->preparation, projection, specs, BQ_CHECK_TEST_CHECKS, 0, pin,
                               sizeof(pin)) && strlen(fixture->profile) + strlen(pin) < sizeof(fixture->profile);
     if (ok) strcat(fixture->profile, pin);
@@ -1118,6 +1142,182 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_issue(BqPrepOracleFixture* fixture, Bq
         campaign->facts = campaign->unit_gate.facts;
     }
     return ok && bq_retirement_correctness_ready(campaign->gate);
+}
+
+/* A new document file `name` in `directory`, opened for writing. */
+BUSTER_GLOBAL_LOCAL FILE* bq_prep_campaign_document_open(int directory, char const* name)
+{
+    int file = openat(directory, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    FILE* stream = file >= 0 ? fdopen(file, "wb") : NULL;
+    if (!stream && file >= 0) close(file);
+    return stream;
+}
+
+/* The pre-sample and post-A/A documents the unit writes, accepted by the
+ * validator itself: the documents, the pinned performance rows and the
+ * expected context go to a scratch directory and
+ * retirement_unit_documents_test.py runs the validator's own checks
+ * (_performance_rows_with_sources, _check_execution_plan, _result_input_plan,
+ * _workflow_phase and the pre-sample and post-A/A field joins) over them.
+ * The untimed batches are synthetic (one per untimed group and variant, the
+ * reproductions the gate's artifacts): they are never launched here. */
+BUSTER_GLOBAL_LOCAL void bq_prep_campaign_documents(BqPrepCampaignAttempt* context, BqPrepCampaign* campaign)
+{
+    BqRetirementCorrectness const* gate = campaign->gate;
+    String8 profile = string_from_pointer(context->profile);
+    BqRetirementDocumentPopulation population = {0};
+    BqRetirementDocumentPartition timed = {0}, untimed = {0};
+    BqRetirementUnitCampaignPins pins = {0};
+    TpRetirementPlan plan = {0};
+    BqRetirementDocumentFamily family = {0};
+    char support[SHA256_HEX_CAPACITY] = {0}, manifest[SHA256_HEX_CAPACITY] = {0}, rows_pin[SHA256_HEX_CAPACITY] = {0};
+    bool ok = bq_retirement_documents_population(context->fixture->installed_fd, profile, gate->trusted_rows,
+            gate->prepared.rows, gate->prepared.native_target, &population) == BQ_OK &&
+        bq_retirement_documents_partition(&population, 0, &timed) &&
+        bq_retirement_documents_partition(&population, 1, &untimed) &&
+        bq_retirement_documents_family(&population, &timed, &family) &&
+        bq_retirement_unit_campaign_pins(profile, &pins) && bq_retirement_unit_campaign_plan(gate, &pins, &plan) &&
+        bq_retirement_profile_sha(profile, S8("support-declaration-sha256="), support) &&
+        bq_retirement_profile_sha(profile, S8("census-manifest-sha256="), manifest) &&
+        bq_retirement_profile_sha(profile, S8("census-rows-sha256="), rows_pin);
+    /* The plan's counts are the derived family's; the partition is the
+     * gate's frozen batch groups. */
+    BQ_PREP_CHECK(ok && plan.bootstrap_members_per_scope == family.bootstrap_members &&
+                  plan.cell_members_per_scope == family.cell_members && timed.count == campaign->groups &&
+                  timed.object_groups == gate->batch_group_count && untimed.count);
+    u32 groups = untimed.count;
+    TpRetirementUntimedBatch* batches = calloc((size_t)groups * 4u + 1u, sizeof(*batches));
+    unsigned* untimed_rows = calloc((size_t)groups + 1u, sizeof(*untimed_rows));
+    TpRetirementCodeRow* codes = calloc((size_t)untimed.row_count + 1u, sizeof(*codes));
+    TpRetirementBatchContract* contracts = calloc((size_t)groups + 1u, sizeof(*contracts));
+    TpRetirementBatchInput* inputs = calloc((size_t)untimed.row_count + 1u, sizeof(*inputs));
+    char (*fixtures)[64] = calloc((size_t)untimed.row_count + 1u, sizeof(*fixtures));
+    char (*commands)[65] = calloc((size_t)groups * 2u + 1u, sizeof(*commands));
+    ok = ok && batches && untimed_rows && codes && contracts && inputs && fixtures && commands;
+    static char const empty[] = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    for (u32 group = 0; ok && group < groups; group += 1)
+    {
+        bool object = untimed.object[group] != 0;
+        u32 first = untimed.first[group], members = untimed.first[group + 1] - first;
+        for (u32 member = 0; ok && member < members; member += 1)
+        {
+            u32 row = untimed.rows[first + member];
+            String8 fixture = bq_retirement_document_value(&population, row, BQ_RETIREMENT_DOCUMENT_FIXTURE);
+            ok = fixture.length < sizeof(fixtures[0]);
+            if (ok) memcpy(fixtures[first + member], fixture.pointer, (size_t)fixture.length);
+            inputs[first + member] = (TpRetirementBatchInput){fixtures[first + member], "ok", "driver.none", empty,
+                gate->facts[row].side[0].artifact_sha256, "untimed.o", 1, row};
+            codes[first + member].row = row;
+            for (u32 side = 0; side < 2; side += 1)
+            {
+                memcpy(codes[first + member].sides[side].artifact_sha256, gate->facts[row].side[side].artifact_sha256, 65);
+                memcpy(codes[first + member].sides[side].reproduction_sha256,
+                       gate->facts[row].side[side].artifact_sha256, 65);
+            }
+        }
+        if (object)
+        {
+            contracts[group] = (TpRetirementBatchContract){"x86_64-linux", "none", "untimed.metrics", inputs + first,
+                members, 0, 0};
+            ok = ok && tp_retirement_budget_metrics_bytes(&campaign->budget, members, &contracts[group].metrics_bytes_max);
+        }
+        else untimed_rows[group] = untimed.rows[first];
+        for (u32 variant = 0; ok && variant < 2; variant += 1)
+        {
+            char seed[48];
+            int length = snprintf(seed, sizeof(seed), "untimed-command-%u-%u", group, variant);
+            bq_digest(seed, (u32)length, (char8*)commands[group * 2 + variant]);
+            TpRetirementMeasuredCommand command = {.unit = group, .variant = variant,
+                .command_sha256 = commands[group * 2 + variant], .batch = object ? &contracts[group] : NULL};
+            for (u32 purpose = 0; purpose < 2; purpose += 1)
+                batches[(group * 2 + variant) * 2 + purpose] = (TpRetirementUntimedBatch){command, group, variant,
+                    purpose, object ? TP_RETIREMENT_GROUP_OBJECT : TP_RETIREMENT_GROUP_SINGLETON};
+        }
+    }
+    /* Codes in ascending row order. */
+    for (u32 entry = 1; ok && entry < untimed.row_count; entry += 1)
+    {
+        TpRetirementCodeRow moving = codes[entry];
+        u32 at = entry;
+        while (at && codes[at - 1].row > moving.row)
+        {
+            codes[at] = codes[at - 1];
+            at -= 1;
+        }
+        codes[at] = moving;
+    }
+    BqRetirementDocumentInputs inputs_view = {gate, &population, &timed, &untimed, &campaign->budget, &plan, batches,
+        groups * 4u, untimed_rows, codes, untimed.row_count, 2, support, manifest, rows_pin};
+    char root[] = "/tmp/bq-retirement-unit-documents-XXXXXX";
+    bool made = ok && mkdtemp(root) != NULL;
+    int directory = made ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    static char const* const names[5] = {"oracle.json", "execution-plan.json", "result-input-plan.json",
+        "pre-sample-plan.json", "post-aa-binding.json"};
+    BqRetirementDocumentDescriptor descriptors[5];
+    memset(descriptors, 0, sizeof(descriptors));
+    BqRetirementDocumentManifest manifests[2][BQ_RETIREMENT_DOCUMENT_PARTITIONS];
+    unsigned manifest_counts[2] = {0, 0};
+    static char const aa_admission[] = "abababababababababababababababababababababababababababababababab";
+    for (u32 index = 0; directory >= 3 && index < 5; index += 1)
+    {
+        FILE* stream = bq_prep_campaign_document_open(directory, names[index]);
+        BqRetirementDocumentPhase phase = {&family, descriptors[2].sha256, names[1], &descriptors[1],
+            descriptors[3].sha256, aa_admission};
+        bool written = stream &&
+            (index == 0 ? bq_retirement_documents_oracle(stream, &inputs_view, &descriptors[0]) :
+             index == 1 ? bq_retirement_documents_execution_plan(stream, &inputs_view, &descriptors[1]) :
+             index == 2 ? bq_retirement_documents_result_input_plan(stream, &inputs_view, manifests, manifest_counts,
+                                                                    &descriptors[2]) :
+             bq_retirement_documents_phase(stream, &inputs_view, &phase, index == 4, &descriptors[index]));
+        if (stream && fclose(stream) != 0) written = false;
+        if (!written) fprintf(stderr, "RETIREMENT_PREP document %s was not written\n", names[index]);
+        BQ_PREP_CHECK(written);
+    }
+    /* The expected context: the census the rows were pinned from, and the
+     * values the unit derived (the test rederives every one it can). */
+    FILE* expected = directory >= 3 ? bq_prep_campaign_document_open(directory, "context.json") : NULL;
+    if (expected)
+    {
+        fprintf(expected, "{\"census\":\"%s\",\"cpu\":2,\"seed\":%" PRIu64 ",\"pairs_per_round\":%u,\"resamples\":%u,"
+                "\"bootstrap_members_per_scope\":%u,\"cell_members_per_scope\":%u,\"family_sha256\":\"%s\","
+                "\"support_declaration_sha256\":\"%s\",\"manifest_sha256\":\"%s\",\"rows_sha256\":\"%s\","
+                "\"object_row_count\":%u,\"aa_admission_sha256\":\"%s\",\"performance_rows_sha256\":\"%s\","
+                "\"manifest_counts\":[%u,%u],\"documents\":{",
+                context->fixture->census, plan.seed, plan.pairs_per_round, plan.resamples, family.bootstrap_members, family.cell_members,
+                family.sha256, support, manifest, rows_pin, gate->prepared.object_rows, aa_admission,
+                population.performance_rows_sha256, manifest_counts[0], manifest_counts[1]);
+        for (u32 index = 0; index < 5; index += 1)
+            fprintf(expected, "%s\"%s\":{\"path\":\"%s\",\"bytes\":%" PRIu64 ",\"sha256\":\"%s\"}", index ? "," : "",
+                    names[index], names[index], descriptors[index].bytes, descriptors[index].sha256);
+        fprintf(expected, "}}\n");
+        BQ_PREP_CHECK(fclose(expected) == 0);
+    }
+    char* argv[] = {"python3", "tools/bench_service/retirement_unit_documents_test.py", root, NULL};
+    bool accepted = directory >= 3 && bq_prep_test_run(argv);
+    if (!accepted) fprintf(stderr, "RETIREMENT_PREP the validator refused the unit's documents in %s\n", root);
+    BQ_PREP_CHECK(accepted);
+    /* A document over a gate row whose sealed identity changed is refused
+     * by the population join (the documents never bind unsealed rows). */
+    BqRetirementDocumentPopulation other = {0};
+    char* identity = campaign->rows[campaign->row_ids[0]].identity_sha256;
+    char saved = identity[0];
+    identity[0] = saved == '0' ? '1' : '0';
+    BQ_PREP_CHECK(campaign->rows == gate->trusted_rows &&
+                  bq_retirement_documents_population(context->fixture->installed_fd, profile, gate->trusted_rows,
+                  gate->prepared.rows, gate->prepared.native_target, &other) == BQ_SOURCE_MISMATCH && !other.rows);
+    identity[0] = saved;
+    if (directory >= 0) BQ_PREP_CHECK(close(directory) == 0);
+    if (made && accepted) bq_prep_test_cleanup(root);
+    free(batches);
+    free(untimed_rows);
+    free(codes);
+    free(contracts);
+    free(inputs);
+    free(fixtures);
+    free(commands);
+    bq_retirement_documents_partition_release(&timed);
+    bq_retirement_documents_partition_release(&untimed);
+    bq_retirement_documents_population_release(&population);
 }
 
 BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_campaign(void)
@@ -1144,20 +1344,26 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_campaign(void)
     {
         context->fixture = fixture;
         context->attempt = success;
+        /* The bootstrap pin is the derived family's count, as the validator
+         * requires of rules.sampling. */
+        BqRetirementDocumentFamily family = {0};
+        ok = bq_retirement_documents_family(&campaign->population, &campaign->partition, &family);
         int length = snprintf(context->profile, sizeof(context->profile),
-            "%scampaign-seed=7\ncampaign-pairs=60\ncampaign-resamples=100000\ncampaign-bootstrap-members=5\n"
-            "campaign-budget-sha256=%s\n", fixture->profile, campaign->budget_sha);
-        ok = length > 0 && (size_t)length < sizeof(context->profile);
+            "%scampaign-seed=7\ncampaign-pairs=60\ncampaign-resamples=100000\ncampaign-bootstrap-members=%u\n"
+            "campaign-budget-sha256=%s\n", fixture->profile, family.bootstrap_members, campaign->budget_sha);
+        ok = ok && length > 0 && (size_t)length < sizeof(context->profile);
         context->unit = (BqRetirementCampaignUnitStore){success->attempt.store, fixture->workspaces_fd,
             fixture->installed_fd, string_from_pointer(fixture->workspaces), string_from_pointer(context->profile),
             S8("self-test"), fixture->driver, fixture->toolchain_root, fixture->broker, fixture->workspaces};
-        BQ_PREP_CHECK(ok && campaign->timed > campaign->groups && campaign->objects && campaign->runtime_count == 2);
+        BQ_PREP_CHECK(ok && campaign->timed == campaign->partition.row_count && campaign->objects &&
+                      campaign->frozen_count && campaign->runtime_count == 2);
     }
     if (ok)
     {
         bq_prep_campaign_imports(context, campaign, cancel);
         bq_prep_campaign_ready_cases(context, campaign, &oracle);
         bq_prep_campaign_timed_rows(context, campaign);
+        bq_prep_campaign_documents(context, campaign);
         /* One import under SETTLING, then every bind on that pair. */
         BqPhaseChannel phases;
         pid_t peer = bq_prep_campaign_channel(&phases, success->attempt.job.id, success->attempt.job.token, 2);

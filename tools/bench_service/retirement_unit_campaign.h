@@ -692,11 +692,11 @@ typedef struct BqRetirementUnitCampaignStreams
  * work directory's file system) retains each untimed production object as
  * `code-<row>-<variant>.o`; rows maps each untimed singleton group to its
  * row (object groups name their rows in their contracts); codes (capacity
- * entries) receives one entry per code-eligible row of the gate, both
+ * entries) receives one entry per code-observed row of the gate, both
  * variants: the untimed rows from their production object and
  * reproduction, the timed rows from their first A/B artifact (every timed
  * launch reproduces its frozen output digest). The set must be exactly the
- * gate's code-eligible rows, and each side must equal the gate's artifact,
+ * gate's code-observed rows, and each side must equal the gate's artifact,
  * code-section digest and size where the gate has them. */
 typedef struct BqRetirementUnitCampaignCode
 {
@@ -1075,8 +1075,13 @@ static inline int bq_retirement_unit_campaign_untimed_retire(BqRetirementUnitCam
     return ok;
 }
 
-/* Sorted by row, then exactly the gate's code-eligible rows (untimed only,
- * or every row with `timed`), each side agreeing with the gate. */
+/* Sorted by row, then exactly the gate's code-observed rows (untimed only,
+ * or every row with `timed`), each side agreeing with the gate. A row's code
+ * is observed when it is compile-eligible (the validator's _code_observed:
+ * its oracle parsed the code section, a zero baseline included), which is
+ * wider than the gate's code_eligible (a nonzero baseline section): the
+ * validator's untimed groups and code records cover every code-observed
+ * row. */
 static inline int bq_retirement_unit_campaign_codes_sealed(BqRetirementUnitCampaign* driver, int timed)
 {
     BqRetirementCorrectness const* gate = driver->gate;
@@ -1097,7 +1102,8 @@ static inline int bq_retirement_unit_campaign_codes_sealed(BqRetirementUnitCampa
     unsigned matched = 0;
     for (uint32_t row = 0; ok && row < gate->prepared.rows; ++row)
     {
-        if (!gate->facts[row].code_eligible || (!timed && bq_retirement_unit_campaign_timed_row(gate, row))) continue;
+        if (!gate->trusted_rows[row].compiler_eligible || (!timed && bq_retirement_unit_campaign_timed_row(gate, row)))
+            continue;
         TpRetirementCodeRow const* entry = matched < driver->code_count ? &driver->codes[matched] : NULL;
         ok = entry && entry->row == row && bq_retirement_unit_campaign_code_fact(gate, row, 0, &entry->sides[0]) &&
             bq_retirement_unit_campaign_code_fact(gate, row, 1, &entry->sides[1]);
@@ -1108,7 +1114,7 @@ static inline int bq_retirement_unit_campaign_codes_sealed(BqRetirementUnitCampa
 }
 
 /* After a successful A/B compiler launch: the first artifact of each
- * code-eligible timed row and variant is observed before it is retired (the
+ * code-observed timed row and variant is observed before it is retired (the
  * launch already required the command's frozen output digest). */
 static inline int bq_retirement_unit_campaign_timed_code(BqRetirementUnitCampaign* driver,
     TpRetirementSamples const* samples, TpRetirementInvocation const* invocation,
@@ -1123,7 +1129,7 @@ static inline int bq_retirement_unit_campaign_timed_code(BqRetirementUnitCampaig
         char const* leaf = input ? (input->member ? input->artifact : NULL) : command->artifact;
         unsigned first = samples->groups[invocation->group].first;
         unsigned row = input ? input->row : samples->rows[samples->members[first]].id;
-        if (!leaf || row >= gate->prepared.rows || !gate->facts[row].code_eligible) continue;
+        if (!leaf || row >= gate->prepared.rows || !gate->trusted_rows[row].compiler_eligible) continue;
         TpRetirementCodeRow* entry = bq_retirement_unit_campaign_code_entry(driver, row);
         TpRetirementCodeSide* side = entry ? &entry->sides[invocation->variant] : NULL;
         ok = side != NULL;
@@ -1144,7 +1150,7 @@ static inline int bq_retirement_unit_campaign_timed_code(BqRetirementUnitCampaig
  * store-based import holds), its group shape the reviewed one. Each untimed
  * row's code side is observed from the retained production object and the
  * reproduction before any scratch output is retired, and the observed rows
- * must be exactly gate's code-eligible untimed rows (the gate is the unit
+ * must be exactly gate's code-observed untimed rows (the gate is the unit
  * gate's correctness gate the import joined; attach requires the binding to
  * use the same one). The runner rejects an order or window violation and
  * finish requires every reproduction. */
@@ -1508,7 +1514,7 @@ static inline int bq_retirement_unit_campaign_freeze(BqRetirementUnitCampaign* d
     return ok;
 }
 
-/* READY: every code-eligible row of the gate has its code facts (untimed
+/* READY: every code-observed row of the gate has its code facts (untimed
  * and timed), then the collected campaign's post-sample context. The result
  * is then available for lane E's composition and the producer authority
  * handoff; MEASURED is not sent yet. */
@@ -1590,7 +1596,7 @@ static inline int bq_retirement_unit_campaign_measured(BqRetirementUnitCampaign*
  * driver: the campaign's job, attempt and boot, its pre-sample binding and
  * A/B completion times, the frozen #619 plan, D's plan, pre-sample, post-A/A
  * and post-sample digests, the untimed record stream, the code facts of
- * every code-eligible row (ascending), and the per-stage log chains
+ * every code-observed row (ascending), and the per-stage log chains
  * (0 untimed, 1 A/A, 2 A/B), which the post-A/A and post-sample digests
  * bind. After MEASURED it also carries the confirmed sealed-result and
  * authority digests and the measured digest over them. The driver writes no

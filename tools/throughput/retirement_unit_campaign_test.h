@@ -185,7 +185,7 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
     Sha256 hash;
     sha256_init(&hash); sha256_add(&hash, artifact, artifact_bytes); sha256_finish_hex(&hash, fixture->artifact_sha);
     /* The fixture compiler's artifact, parsed once: its code-section facts
-     * are the gate's for every code-eligible row. */
+     * are the gate's for every code-observed (compile-eligible) row. */
     int probe = ok ? openat(fixture->cwd, "code-probe.bin", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600) : -1;
     ok = ok && probe >= 3 && write(probe, artifact, artifact_bytes) == (ssize_t)artifact_bytes &&
         tp_retirement_code_observe(probe, probe, &fixture->code_side);
@@ -330,16 +330,18 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
     for (unsigned row = 0; row < 7; ++row) fixture->trusted[row].row = fixture->facts[row].row = row;
     for (unsigned row = 4; ok && row < 6; ++row)
     {
-        fixture->trusted[row].compiler_eligible = 1;
+        fixture->trusted[row].compiler_eligible = fixture->trusted[row].code_obligation = 1;
         fixture->trusted[row].stage = BQ_RETIREMENT_STAGE_OBJECT;
         fixture->trusted[row].target = BQ_RETIREMENT_NATIVE_TIMED_TARGET;
         memcpy(fixture->trusted[row].batch_key_sha256, batch_key, sizeof(batch_key));
-        fixture->facts[row].compiler_eligible = 1;
+        fixture->facts[row].compiler_eligible = fixture->facts[row].code_eligible = 1;
         for (unsigned variant = 0; variant < 2; ++variant)
         {
             memcpy(fixture->trusted[row].compiler_command_sha256[variant], fixture->command_sha[1][variant], 65);
             memcpy(fixture->facts[row].side[variant].compiler_command_sha256, fixture->command_sha[1][variant], 65);
             memcpy(fixture->facts[row].side[variant].artifact_sha256, fixture->artifact_sha, 65);
+            memcpy(fixture->facts[row].side[variant].code_sha256, fixture->code_side.code_sha256, 65);
+            fixture->facts[row].side[variant].code_bytes = fixture->code_side.code_bytes;
         }
     }
     fixture->trusted[3].compiler_eligible = fixture->trusted[3].code_obligation = 1;
@@ -961,10 +963,11 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
               result.completed_at_ns > bound && !memcmp(&result.plan, &plan, sizeof(plan)) &&
               !strcmp(result.plan_sha256, plan_sha) && !strcmp(result.context_sha256, context_sha) &&
               !strcmp(result.post_aa_sha256, driver.post_aa_sha256) &&
-              !strcmp(result.post_context_sha256, driver.post_context_sha256) && result.code_count == 2 &&
-              result.codes[0].row == 3 && result.codes[1].row == 6 &&
-              !strcmp(result.codes[1].sides[1].code_sha256, fixture->code_side.code_sha256) &&
-              result.codes[1].sides[0].code_bytes == fixture->code_side.code_bytes &&
+              !strcmp(result.post_context_sha256, driver.post_context_sha256) && result.code_count == 4 &&
+              result.codes[0].row == 3 && result.codes[1].row == 4 && result.codes[2].row == 5 &&
+              result.codes[3].row == 6 &&
+              !strcmp(result.codes[3].sides[1].code_sha256, fixture->code_side.code_sha256) &&
+              result.codes[3].sides[0].code_bytes == fixture->code_side.code_bytes &&
               result.codes == fixture->codes && result.untimed_records.records == 4 && result.launches[0] == 4 &&
               result.launches[1] == 732 && result.launches[2] == 732 &&
               tp_retirement_digest(result.log_chain_sha256[0]) && tp_retirement_digest(result.log_chain_sha256[1]) &&
@@ -1010,7 +1013,7 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
         }
         /* MEASURED recorded the two confirmed digests over the post-sample one. */
         char measured[65];
-        CHECK(bq_retirement_unit_campaign_result(&driver, &result) && result.code_count == 2 &&
+        CHECK(bq_retirement_unit_campaign_result(&driver, &result) && result.code_count == 4 &&
               !strcmp(result.sealed_result_sha256, test_unit_campaign_receipt) &&
               !strcmp(result.authority_sha256, test_unit_campaign_ready) &&
               bq_retirement_unit_campaign_measured_digest(driver.post_context_sha256, test_unit_campaign_receipt,

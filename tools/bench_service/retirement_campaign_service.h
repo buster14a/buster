@@ -57,6 +57,7 @@
 #include "retirement_campaign_binding.h"
 #include "retirement_unit.h"
 #include "retirement_unit_campaign.h"
+#include "retirement_unit_documents.h"
 
 #ifdef __linux__
 /* Everything the campaign freeze consumes besides the held binaries. */
@@ -564,29 +565,6 @@ static inline BqError bq_retirement_campaign_service_import_unit(BqRetirementSto
     return result;
 }
 
-/* The pinned #508 performance-row artifact's canonical prefix, as
- * bq_retirement_performance_rows_derive accepts it. */
-#define BQ_RETIREMENT_CAMPAIGN_ROWS_PREFIX "{\"row_identity_fields\":[\"fixture\",\"target\",\"target_abi\",\"cpu\"," \
-    "\"cpu_features\",\"allocator\",\"frontend_lowering\",\"PIC\",\"fixture_recipe\",\"compile_obligation\"," \
-    "\"link_obligation\",\"execution_obligation\",\"diagnostic_obligation\",\"argv_evidence\",\"artifact_stage\"]," \
-    "\"rows\":["
-
-/* One population row's six slice dimensions, from its rows.tsv columns
- * (target 3, cpu 5, allocator 7, frontend_lowering 8, PIC 9) and its stage. */
-static inline int bq_retirement_campaign_row_dimensions(String8 const fields[17], String8 stage,
-    TpRetirementTimedRow* row)
-{
-    String8 values[TP_RETIREMENT_TIMED_DIMENSIONS] = {fields[3], fields[5], fields[7], fields[8], fields[9], stage};
-    int ok = 1;
-    for (u32 index = 0; ok && index < TP_RETIREMENT_TIMED_DIMENSIONS; index += 1)
-    {
-        ok = values[index].length && values[index].length <= TP_RETIREMENT_TIMED_DIMENSION_BYTES;
-        if (ok) memcpy(row->dimensions[index], values[index].pointer, (size_t)values[index].length);
-        if (ok) row->dimensions[index][values[index].length] = 0;
-    }
-    return ok;
-}
-
 /* Each timed row's campaign batch-group ordinal: groups in ascending order
  * of their smallest member, a timed object row in the frozen group that
  * names it as a member, every other timed row a singleton. */
@@ -620,64 +598,42 @@ static inline int bq_retirement_campaign_timed_groups_assign(BqRetirementCorrect
 
 /* Lane E's per-timed-row layout: the native-host timed projection of the
  * sealed gate, in ascending row order, with each row's campaign group,
- * runtime flag and six dimension values. The values come from the pinned
- * performance-row artifact (read through the installed census and its
- * profile pin); each declared row's identity is recomputed from its fields
- * and must be the gate row's sealed identity, so every value is the one the
- * gate authenticated. rows needs one entry per timed row. */
+ * runtime flag and six dimension values (target, cpu, allocator,
+ * frontend_lowering, PIC, artifact_stage). The values come from the pinned
+ * performance-row artifact (bq_retirement_documents_population: read through
+ * the installed census and its profile pin, each declared row's identity
+ * recomputed from its fields and required to be the gate row's sealed
+ * identity), so every value is one the gate authenticated. rows needs one
+ * entry per timed row. */
 static inline BqError bq_retirement_campaign_service_timed_rows(BqRetirementCampaignUnitStore const* unit,
     BqRetirementCorrectness const* gate, TpRetirementTimedRow* rows, unsigned capacity, unsigned* count)
 {
-    BqRetirementCensusFiles census;
-    for (u32 index = 0; index < BQ_RETIREMENT_CENSUS_FILE_COUNT; index += 1) census.descriptors[index] = -1;
-    u8* population = NULL;
-    u64 length = 0;
-    char population_sha256[SHA256_HEX_CAPACITY] = {0};
-    bool opened = unit && gate && rows && count && bq_retirement_correctness_ready(gate) &&
-        bq_retirement_unit_census_open(unit->installed, &census) == BQ_OK;
-    bool ok = opened && bq_retirement_validator_read_pinned(census.descriptors[BQ_RETIREMENT_CENSUS_PERFORMANCE_ROWS],
-        unit->profile, S8("performance-rows-sha256="), BQ_RETIREMENT_POPULATION_BYTES_CAP, &population, &length,
-        population_sha256);
-    if (opened && !bq_retirement_unit_census_close(&census)) ok = false;
-    char (*storage)[BQ_RETIREMENT_POPULATION_FIELD_CAP] = ok ? calloc(17, sizeof(*storage)) : NULL;
-    BqRetirementPopulationCursor cursor = {(String8){(char8*)population, length}, 0, ok && storage};
-    bq_retirement_population_literal(&cursor, S8(BQ_RETIREMENT_CAMPAIGN_ROWS_PREFIX));
-    u32 declared_rows = 0;
+    static unsigned const fields[TP_RETIREMENT_TIMED_DIMENSIONS] = {BQ_RETIREMENT_DOCUMENT_TARGET,
+        BQ_RETIREMENT_DOCUMENT_CPU, BQ_RETIREMENT_DOCUMENT_ALLOCATOR, BQ_RETIREMENT_DOCUMENT_FRONTEND,
+        BQ_RETIREMENT_DOCUMENT_PIC, BQ_RETIREMENT_DOCUMENT_STAGE};
+    BqRetirementDocumentPopulation population = {0};
+    int ok = unit && gate && rows && count && bq_retirement_correctness_ready(gate) &&
+        bq_retirement_documents_population(unit->installed, unit->profile, gate->trusted_rows, gate->prepared.rows,
+            gate->prepared.native_target, &population) == BQ_OK;
     unsigned timed = 0;
-    bool more = cursor.ok;
-    while (cursor.ok && more)
+    for (u32 row = 0; ok && row < gate->prepared.rows; row += 1)
     {
-        String8 fields[17] = {0};
-        String8 stage = {0}, code_section = {0}, runtime_oracle = {0};
-        bool metrics[4] = {0};
-        u64 declared = 0;
-        char identity[SHA256_HEX_CAPACITY] = {0};
-        bq_retirement_population_row(&cursor, &declared, storage, fields, &stage, &code_section, &runtime_oracle,
-                                     metrics);
-        BqRetirementTrustedRow const* trusted = declared_rows < gate->prepared.rows ?
-            &gate->trusted_rows[declared_rows] : NULL;
-        cursor.ok = cursor.ok && trusted && declared == declared_rows &&
-            bq_retirement_census_stage_identity_sha256(fields, stage, identity) &&
-            !memcmp(identity, trusted->identity_sha256, SHA256_HEX_CAPACITY);
-        if (cursor.ok && trusted->compiler_eligible && trusted->target == gate->prepared.native_target)
+        if (!(gate->trusted_rows[row].compiler_eligible && gate->trusted_rows[row].target == gate->prepared.native_target))
+            continue;
+        ok = timed < capacity;
+        if (ok) rows[timed] = (TpRetirementTimedRow){.id = row, .runtime = gate->facts[row].runtime_eligible ? 1u : 0u};
+        for (u32 index = 0; ok && index < TP_RETIREMENT_TIMED_DIMENSIONS; index += 1)
         {
-            cursor.ok = timed < capacity;
-            if (cursor.ok)
-            {
-                rows[timed] = (TpRetirementTimedRow){.id = declared_rows,
-                    .runtime = gate->facts[declared_rows].runtime_eligible ? 1u : 0u};
-                cursor.ok = bq_retirement_campaign_row_dimensions(fields, stage, &rows[timed]);
-                timed += 1;
-            }
+            String8 value = bq_retirement_document_value(&population, row, fields[index]);
+            ok = value.length && value.length <= TP_RETIREMENT_TIMED_DIMENSION_BYTES;
+            if (ok) memcpy(rows[timed].dimensions[index], value.pointer, (size_t)value.length);
+            if (ok) rows[timed].dimensions[index][value.length] = 0;
         }
-        declared_rows += cursor.ok;
-        more = cursor.ok && cursor.offset < length && population[cursor.offset] == ',';
-        if (more) cursor.offset += 1;
+        timed += ok;
     }
-    ok = cursor.ok && declared_rows == gate->prepared.rows && timed == bq_retirement_campaign_timed_rows(gate) &&
-        bq_retirement_campaign_timed_groups_assign(gate, rows, timed);
-    free(storage);
-    free(population);
+    ok = ok && timed == bq_retirement_campaign_timed_rows(gate) && bq_retirement_campaign_timed_groups_assign(gate, rows,
+                                                                                                             timed);
+    bq_retirement_documents_population_release(&population);
     if (count) *count = ok ? timed : 0;
     BqError result = ok ? BQ_OK : BQ_SOURCE_MISMATCH;
     return result;
