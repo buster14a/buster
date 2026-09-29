@@ -5,137 +5,46 @@ on:
 permissions:
   contents: read
 jobs:
-  paired:
+  refined:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 8f67df736f13d4edc055110a7a6d619a00a22eaf
+          ref: 913feee112a340e9847c6c8401337dbfd63d15c6
           persist-credentials: false
-      - name: Set up independent controls and observation-only C hooks
+      - name: Recover exact experiment scripts and unchanged production source
         shell: bash
         run: |
           set -euo pipefail
           OUT="$RUNNER_TEMP/error-cause-paired"
           mkdir -p "$OUT" .cache/recovery-probe
           git rev-parse HEAD 'HEAD^{tree}' | tee "$OUT/identity.txt"
-          printf 'workflow=%s run=%s attempt=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" | tee -a "$OUT/identity.txt"
+          printf 'production_base=8f67df736f13d4edc055110a7a6d619a00a22eaf workflow=%s run=%s attempt=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" | tee -a "$OUT/identity.txt"
+          test "$(git rev-parse HEAD:src/buster/lib/compiler/frontend/c/c_parse.c)" = 5dca683abd22e6f73e53554952c2686fcd4d8a1f
           clang --version | tee -a "$OUT/identity.txt"
           python3 - <<'PY'
-          import os,json
+          import os,textwrap,json
           from pathlib import Path
           out=Path(os.environ['RUNNER_TEMP'])/'error-cause-paired'
-          families={
-            'global_semi': ('typedef int Count;\nCount total = 3;\nint use(Count x) { return x + total; }\nint later(void) { return 7; }\n', '3;', '3'),
-            'local_init': ('int calc(void) {\n  int x = 3;\n  return x + 1;\n}\nint later(void) { return 7; }\n', '= 3;', '= ;'),
-            'local_semi': ('int calc(void) {\n  int x = 3;\n  return x + 1;\n}\nint later(void) { return 7; }\n', '3;', '3'),
-            'call_paren': ('int add(int a, int b) { return a + b; }\nint calc(void) { return add(1, 2); }\nint later(void) { return 7; }\n', 'add(1, 2)', 'add(1, 2'),
-            'unknown_name': ('int calc(int value) { return value + 1; }\nint later(void) { return 7; }\n', 'return value', 'return vlaue'),
-            'enum_init': ('int external(void);\nenum { BAD = 3 };\nint use(void) { return BAD; }\nint later(void) { return 7; }\n', 'BAD = 3', 'BAD = external()'),
-            'typedef_decl': ('typedef int Index;\nIndex value = 3;\nint use(Index x) { return x + value; }\nint later(void) { return 7; }\n', 'int Index;', 'int Index'),
-            'aggregate_init': ('struct Pair { int a; int b; };\nstruct Pair pair = { 1, 2 };\nint use(void) { return pair.a; }\nint later(void) { return 7; }\n', '1, 2', '1 2'),
+          workflow=Path('.github/workflows/error-cause-research.yml').read_text()
+          setup=textwrap.dedent(workflow.split("          python3 - <<'PY'\n",1)[1].split('          PY\n',1)[0])
+          runner=textwrap.dedent(workflow.split('          cat > "$OUT/run.py" <<\'PY\'\n',1)[1].split('          PY\n',1)[0])
+          (out/'setup.py').write_text(setup)
+          (out/'run.py').write_text(runner)
+          exec(compile(setup,'setup.py','exec'))
+          cases=json.loads((out/'cases.json').read_text())
+          extra={
+            'bound_error_without_stray':'int calc(void) { int bad[bound_unknown], keep = sibling_unknown; return 0; }\nint later(void) { return 7; }\n',
+            'dependent_use_remaining':'int calc(void) { int bad extra; return bad; }\nint later(void) { return later_unknown; }\n',
+            'stray_with_nested_bound':'int calc(void) { int bad extra[bound_unknown]; return 0; }\nint later(void) { return later_unknown; }\n',
           }
-          tail='int later(void) { return 7; }\nint sentinel(int n) { int stable = n + 1; return stable; }\n'
-          local={
-            'stray_local': ('int bad;', 'int bad extra;'),
-            'comma_local': ('int bad, right;', 'int bad right;'),
-            'stray_pointer': ('int *bad;', 'int *bad extra;'),
-            'stray_array': ('int bad[2];', 'int bad[2] extra;'),
-            'stray_typedef': ('typedef int Local;', 'typedef int Local extra;'),
-            'sibling_retained': ('int bad, keep = 7;', 'int bad extra, keep = 7;'),
-          }
-          for name,(good,bad) in local.items():
-            body='int calc(void) {\n  '+good+'\n  int after = 4;\n  return '+('keep + after' if name=='sibling_retained' else 'after')+';\n}\n'+tail
-            families[name]=(body,good,bad)
-          families['bound_typedef']=('typedef int Index;\nint calc(void) {\n Index bad;\n int after = 4;\n return after;\n}\n'+tail,'Index bad;','Index bad extra;')
-          cases=[]
-          for family,(good,old,new) in families.items():
-            assert good.count(old)==1,(family,old)
-            bad=good.replace(old,new,1)
-            for variant,text in {'valid':good,'single':bad,'independent':bad.replace('return 7;', 'return later_unknown;')+'int separate(void) { return separate_unknown; }\n'}.items():
-              cases.append({'case':family+'-'+variant,'family':family,'variant':variant,'source':text})
-          controls={
-            'two_bad_declarators':'int calc(void) { int bad extra, other extra2; int after = 4; return after; }\n'+tail,
-            'bad_then_unknown_sibling':'int calc(void) { int bad extra, keep = sibling_unknown; return 0; }\n'+tail,
-            'unknown_sibling_then_bad':'int calc(void) { int keep = sibling_unknown, bad extra; return 0; }\n'+tail,
-            'valid_sibling_before_after':'int calc(void) { int first = 1, bad extra, last = 2; return first + last; }\n'+tail,
-            'unknown_initializer_bad_declarator':'int calc(void) { int bad extra = initializer_unknown; return 0; }\n'+tail,
-            'missing_semi_then_real_error':'int calc(void) { int x = 3\nreturn same_function_unknown; }\n'+tail,
-            'independent_only':'int calc(void) { return first_unknown; }\nint later(void) { return later_unknown; }\nint separate(void) { return separate_unknown; }\n',
-            'shadow_preserved':'int value = 9;\nint calc(void) { int value extra; { int value = 4; } return value; }\n'+tail,
-            'unknown_in_array_bound':'int calc(void) { int bad[bound_unknown] extra, keep = sibling_unknown; return 0; }\n'+tail,
-            'enum_specifier_preserved':'int calc(void) { enum Local { LOCAL = 7 } bad extra, keep = LOCAL; return keep; }\n'+tail,
-            'genuine_duplicate_sibling':'int calc(void) { int first = 1, bad extra, first = 2; return first; }\n'+tail,
-            'two_errors_separate_statements':'int calc(void) { int a extra; int b extra2; return statement_unknown; }\n'+tail,
-          }
-          for name,text in controls.items():cases.append({'case':name,'family':name,'variant':'negative-control','source':text})
+          cases += [{'case':name,'family':name,'variant':'negative-control','source':text} for name,text in extra.items()]
           (out/'cases.json').write_text(json.dumps(cases,indent=2))
-          p=Path('src/buster/lib/compiler/frontend/c/c_parse.c')
-          text=p.read_text()
-          old='    return c_analyze_semantics_core(arena, preprocess, syntax, true);'
-          assert text.count(old)==1
-          hook=r'''    CAnalysisResult observed = c_analyze_semantics_core(arena, preprocess, syntax, true);
-              fprintf(stderr, "@@S\t%u\t%u\t%u\t%u\t%u\n", (unsigned)observed.declaration_count, (unsigned)observed.entity_count, (unsigned)observed.identifier_use_count, (unsigned)observed.diagnostic_count, (unsigned)observed.analysis_complete);
-              for (u32 ri = 0; ri < observed.entity_count; ri += 1)
-              {
-                  CEntity const* re = &observed.entities[ri];
-                  fprintf(stderr, "@@E\t%u\t%u\t%u\t%u\t%u\t%u\t%.*s\n", (unsigned)ri, (unsigned)re->kind, (unsigned)re->scope.value, (unsigned)re->type.value, (unsigned)re->location.line, (unsigned)re->location.column, (int)re->name.length, (char const*)re->name.pointer);
-              }
-              for (u32 ri = 0; ri < observed.identifier_use_count; ri += 1)
-              {
-                  CIdentifierUse const* ru = &observed.identifier_uses[ri];
-                  String8 rn = c_token_spelling(preprocess.spelling_base, preprocess.tokens[ru->token_index]);
-                  CSourceLocation rl = c_preprocess_token_location(&preprocess, preprocess.tokens[ru->token_index]);
-                  fprintf(stderr, "@@U\t%u\t%u\t%u\t%u\t%.*s\n", (unsigned)ru->entity.value, (unsigned)ru->scope.value, (unsigned)rl.line, (unsigned)rl.column, (int)rn.length, (char const*)rn.pointer);
-              }
-              return observed;'''
-          p.write_text('#include <stdio.h>\n'+text.replace(old,hook))
-          p=Path('src/buster/lib/compiler/driver/driver.c');text=p.read_text()
-          old='        CompilerDiagnostic diagnostic = compiler_driver_c_diagnostic(preprocess, diagnostics[index], path);'
-          assert text.count(old)==1
-          hook=r'''        CDiagnostic const* rd = &diagnostics[index];
-                  fprintf(stderr, "@@D\t%u\t%u\t%u\t%u\t%u\t%u\t%.*s\n", (unsigned)index, (unsigned)rd->kind, (unsigned)rd->severity, (unsigned)rd->location.line, (unsigned)rd->location.column, (unsigned)rd->location.offset, (int)rd->message.length, (char const*)rd->message.pointer);
-          '''+old
-          text=text.replace(old,hook)
-          old='    CParserResult syntax = c_parse_ast(arena, preprocess);'
-          assert text.count(old)==1
-          hook=old+r'''
-              fprintf(stderr, "@@A\t%u\t%u\n", (unsigned)syntax.declaration_count, (unsigned)syntax.diagnostic_count);
-              for (CParserDeclaration const* rp = syntax.first_declaration; rp; rp = rp->next)
-              {
-                  fprintf(stderr, "@@P\t%u\t%u\t%u\t%u\t%u\n", (unsigned)rp->kind, (unsigned)rp->token_start, (unsigned)rp->token_count, (unsigned)rp->body_start, (unsigned)rp->body_token_count);
-              }'''
-          p.write_text('#include <stdio.h>\n'+text.replace(old,hook))
           PY
           git diff -- src > "$OUT/observation.patch"
-          cat > "$OUT/run.py" <<'PY'
-          import sys,os,json,subprocess,hashlib
-          from pathlib import Path
-          out=Path(__file__).parent
-          variant=sys.argv[1];ide=sys.argv[2]
-          rows=[]
-          for case in json.loads((out/'cases.json').read_text()):
-            src=out/(case['case']+'.c');src.write_text(case['source'])
-            for mode in ('syntax','object'):
-              obj=out/(case['case']+'.o')
-              if obj.exists(): obj.unlink()
-              argv=[ide,'cc','-nostdinc','-std=c17','-march=baseline']
-              argv+=['-fsyntax-only'] if mode=='syntax' else ['-c','-g0','-o',str(obj)]
-              argv.append(str(src))
-              row={'case':case['case'],'mode':mode,'argv':argv,'source_sha256':hashlib.sha256(src.read_bytes()).hexdigest()}
-              try:
-                p=subprocess.run(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20)
-                stderr=p.stderr.decode('utf-8','replace')
-                row.update(status=p.returncode,stdout=p.stdout.decode('utf-8','replace'),stderr=stderr,trace=[s.split('\t') for s in stderr.splitlines() if s.startswith('@@')],rendered='\n'.join(s for s in stderr.splitlines() if not s.startswith('@@')),object_sha256=hashlib.sha256(obj.read_bytes()).hexdigest() if obj.exists() else None)
-              except subprocess.TimeoutExpired:
-                row['timeout']=True
-              rows.append(row)
-              print(json.dumps({k:v for k,v in row.items() if k not in ('stderr','argv')}),flush=True)
-          (out/(variant+'.json')).write_text(json.dumps(rows,indent=2))
-          PY
-      - name: Build observed baseline and execute controlled edits
+      - name: Execute observed baseline
         shell: bash
         run: |
           set -euo pipefail
@@ -146,7 +55,7 @@ jobs:
           .cache/recovery-probe/build build --config Release --build-directory build-probe -t ide
           sha256sum build-probe/Release/ide | tee "$OUT/baseline-binary.sha256"
           python3 "$OUT/run.py" baseline "$PWD/build-probe/Release/ide"
-      - name: Apply one narrow diagnostic prototype and repeat exactly
+      - name: Execute bounded plain-name recovery prototype
         shell: bash
         run: |
           set -euo pipefail
@@ -157,28 +66,21 @@ jobs:
           from pathlib import Path
           out=Path(os.environ['RUNNER_TEMP'])/'error-cause-paired'
           p=Path('src/buster/lib/compiler/frontend/c/c_parse.c');before=p.read_text()
-          old='''        if (index != suffix_end)
-                  {
-                      c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[index]),
-                                         C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("unexpected token after declarator"));
-                      return false;
-                  }'''
-          old='\n'.join(s[10:] if s.startswith('          ') else s for s in old.splitlines()) if False else old
-          # Match exact source indentation independently of YAML indentation.
           start=before.index('BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Arena* arena,')
           pos=before.index('        if (index != suffix_end)',start)
           stop=before.index('        if (!is_typedef)',pos)
           old=before[pos:stop]
           assert old.count('return false;')==1 and 'unexpected token after declarator' in old
-          replacement=r'''            if (suffix_end == segment_end)
+          replacement='''            // Research prototype: no bound, parameter, attribute or initializer expression is discarded.
+                      if (suffix_end == segment_end && name_index == segment_start && index == name_index + 1 &&
+                          segment_end == index + 1 && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
                       {
-                          fprintf(stderr, "@@R\t%u\t%u\t%u\n", (unsigned)segment_start, (unsigned)segment_end, (unsigned)end);
+                          fprintf(stderr, "@@R\\t%u\\t%u\\t%u\\n", (unsigned)segment_start, (unsigned)segment_end, (unsigned)end);
                           segment_start = segment_end + 1;
                           continue;
                       }
                       return false;'''
           replacement='\n'.join(line[10:] if line.startswith('          ') else line for line in replacement.splitlines())
-          # Formatting is not semantic; the patch is confined to this failure branch.
           after=before[:pos]+old.replace('            return false;',replacement)+before[stop:]
           assert after!=before
           p.write_text(after)
@@ -193,24 +95,21 @@ jobs:
           from pathlib import Path
           out=Path(os.environ['RUNNER_TEMP'])/'error-cause-paired'
           a=json.loads((out/'baseline.json').read_text());b=json.loads((out/'candidate.json').read_text())
-          assert len(a)==len(b)
-          report=[]
+          assert len(a)==len(b)==120
+          summary=[]
           for x,y in zip(a,b):
               assert (x['case'],x['mode'])==(y['case'],y['mode'])
               dx=[r for r in x.get('trace',[]) if r[0]=='@@D'];dy=[r for r in y.get('trace',[]) if r[0]=='@@D']
-              row={'case':x['case'],'mode':x['mode'],'baseline_status':x.get('status'),'candidate_status':y.get('status'),'before_diagnostics':dx,'after_diagnostics':dy,'recovery_hits':sum(r[0]=='@@R' for r in y.get('trace',[])),'object_equal':x.get('object_sha256')==y.get('object_sha256')}
-              report.append(row)
-          (out/'paired-summary.json').write_text(json.dumps(report,indent=2))
-          print(json.dumps(report,indent=2))
-          with (out/'sha256.txt').open('w') as f:
-              for p in sorted(out.glob('*')):
-                  if p.is_file() and p.name not in ('sha256.txt','candidate.log'):f.write(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n')
+              summary.append({'case':x['case'],'mode':x['mode'],'baseline_status':x.get('status'),'candidate_status':y.get('status'),'before_diagnostics':dx,'after_diagnostics':dy,'recovery_hits':sum(r[0]=='@@R' for r in y.get('trace',[])),'object_equal':x.get('object_sha256')==y.get('object_sha256')})
+          (out/'paired-summary.json').write_text(json.dumps(summary,indent=2))
+          print(json.dumps(summary,indent=2))
+          (out/'sha256.txt').write_text('\n'.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name for p in sorted(out.glob('*')) if p.is_file() and p.name not in ('sha256.txt','candidate.log'))+'\n')
           PY
-      - name: Preserve all evidence including failed builds
+      - name: Preserve research evidence including rejected controls
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: error-cause-paired-${{ github.run_id }}
+          name: error-cause-refined-${{ github.run_id }}
           path: ${{ runner.temp }}/error-cause-paired
           if-no-files-found: error
           retention-days: 14
