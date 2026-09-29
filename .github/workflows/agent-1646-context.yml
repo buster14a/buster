@@ -38,19 +38,26 @@ jobs:
             src/buster/tests/compiler/driver/driver_fast_test.c
           git diff --check
 
+      - name: Build the hosted validation driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o /tmp/buster-build
+
       - name: Build and run the full Release test suite
         id: test_all
         shell: bash
         run: |
           set -o pipefail
-          ./build.sh build --config Release -t test_all 2>&1 | tee /tmp/issue-1646-test-all.log
+          /tmp/buster-build build --config Release -t test_all 2>&1 | tee /tmp/issue-1646-test-all.log
 
       - name: Verify the self-host fixed point
         id: self_host
         shell: bash
         run: |
           set -o pipefail
-          ./build.sh test_self_host --config Release 2>&1 | tee /tmp/issue-1646-self-host.log
+          /tmp/buster-build test_self_host --config Release 2>&1 | tee /tmp/issue-1646-self-host.log
 
       - name: Commit formatting
         if: ${{ success() }}
@@ -79,9 +86,9 @@ jobs:
             printf 'test_all_outcome=%s\n' '${{ steps.test_all.outcome }}'
             printf 'self_host_outcome=%s\n' '${{ steps.self_host.outcome }}'
             printf '\n===== test_all tail =====\n'
-            tail -n 400 /tmp/issue-1646-test-all.log 2>/dev/null || true
+            tail -n 500 /tmp/issue-1646-test-all.log 2>/dev/null || true
             printf '\n===== self_host tail =====\n'
-            tail -n 400 /tmp/issue-1646-self-host.log 2>/dev/null || true
+            tail -n 500 /tmp/issue-1646-self-host.log 2>/dev/null || true
           } > .agent/test-1646.log
           git restore src/buster/lib/compiler/frontend/c/c_internal.h \
                       src/buster/lib/compiler/frontend/c/c_parse.c \
