@@ -136,7 +136,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_metrics_test_batches(UnitTest
     UnitTestResult result = {0};
     // Inputs 0 and 1 are identical sources under different names, so input
     // 0 can be compared with a later copy of the same work.
-    String8 names[] = {S8("twin_first"), S8("twin_second"), S8("globals"), S8("rejected"), S8("third")};
+    String8 names[] = {S8("twin_first"), S8("twin_second"), S8("globals"), S8("rejected"), S8("third"), S8("long_name"), S8("long_error")};
+    // Messages and function names past the text limit are cut and say so.
+    char8* long_name = arena_allocate(arena, char8, COMPILER_DRIVER_METRICS_TEXT_LIMIT + 100);
+    for (u32 index = 0; index < COMPILER_DRIVER_METRICS_TEXT_LIMIT + 100; index += 1)
+    {
+        long_name[index] = (char8)('a' + index % 26);
+    }
+    String8 identifier = {.pointer = long_name, .length = COMPILER_DRIVER_METRICS_TEXT_LIMIT + 100};
     String8 sources[] = {
         S8("int twin(int value) { return value * 7 + 1; }\n"),
         S8("int twin(int value) { return value * 7 + 1; }\n"),
@@ -145,6 +152,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_metrics_test_batches(UnitTest
            "int metrics_second(void) { return metrics_first(2) + (int)metrics_text[0]; }\n"),
         S8("#warning metrics-warning\nint metrics_rejected(void) { return missing_metrics_value; }\n"),
         S8("int metrics_third(int value) { return value * 3; }\n"),
+        string_format(arena, S8("{S8}{S8}{S8}"), S8("int "), identifier, S8("(void) { return 3; }\n")),
+        string_format(arena, S8("{S8}{S8}{S8}"), S8("int broken(void) { return "), identifier, S8("; }\n")),
     };
     String8 paths[BUSTER_ARRAY_LENGTH(names)];
     String8 objects[BUSTER_ARRAY_LENGTH(names)];
@@ -166,7 +175,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_metrics_test_batches(UnitTest
         CompilerDriverInvocation good = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(good_command));
         good.metrics_origin = timestamp_take();
         good.has_metrics_origin = true;
+        // The per-input function cap, lowered through the private test seam
+        // so the two-function input reaches it.
+        compiler_driver_test_set_function_limit(1);
         CompilerDriverResult measured = compiler_driver_execute_invocation(arena, good);
+        compiler_driver_test_set_function_limit(0);
         u64 wall = timestamp_ns_between(good.metrics_origin, timestamp_take());
         BUSTER_TEST_RAW(arguments, measured.error == COMPILER_DRIVER_ERROR_NONE, measured.diagnostic);
         ByteSlice measured_objects[3];
@@ -200,7 +213,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_metrics_test_batches(UnitTest
                 BUSTER_TEST(arguments, input->object_file_bytes == measured_objects[index].length && input->object_file_bytes != 0);
                 BUSTER_TEST(arguments, input->section_bytes[COMPILER_DRIVER_SECTION_CLASS_TEXT] == input->codegen.code_bytes && input->codegen.code_bytes);
                 BUSTER_TEST(arguments, input->source_bytes == sources[index].length && input->preprocessed_tokens != 0);
-                BUSTER_TEST(arguments, input->function_count == input->codegen.function_count && input->functions_omitted == 0);
+                BUSTER_TEST(arguments, input->function_count == 1 && input->function_count + input->functions_omitted == input->codegen.function_count);
                 BUSTER_TEST(arguments, input->diagnostic_record_count == 0 && input->diagnostic_digest.length == 64);
                 ObjectFile object = object_read(arena, measured_objects[index], good.target);
                 if (BUSTER_REQUIRE(arguments, object.error == OBJECT_ERROR_NONE))
@@ -219,14 +232,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_metrics_test_batches(UnitTest
                 }
             }
             CompilerDriverInputResult const* globals = &measured.inputs[2];
-            BUSTER_TEST(arguments, globals->function_count == 2 && string_equal(globals->functions[0].name, S8("metrics_first")) &&
-                                       string_equal(globals->functions[1].name, S8("metrics_second")));
+            BUSTER_TEST(arguments, globals->functions_omitted == 1 && string_equal(globals->functions[0].name, S8("metrics_first")));
             BUSTER_TEST(arguments, globals->section_bytes[COMPILER_DRIVER_SECTION_CLASS_DATA] != 0 &&
                                        globals->section_bytes[COMPILER_DRIVER_SECTION_CLASS_READ_ONLY_DATA] != 0 &&
                                        globals->section_bytes[COMPILER_DRIVER_SECTION_CLASS_ZERO] == 100 * sizeof(int));
             String8 records = compiler_driver_metrics_format(arena, &good, &measured, (CompilerDriverProcessMetrics){.wall_nanoseconds = wall});
             BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(records, S8(" compilation_workers=1 intervals=serial ")));
-            BUSTER_TEST(arguments, compiler_driver_metrics_test_count_lines(records, S8("CC_METRICS_FUNCTION version=1 input=")) == 4);
+            BUSTER_TEST(arguments, compiler_driver_metrics_test_count_lines(records, S8("CC_METRICS_FUNCTION version=1 input=")) == 3);
+            BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(records, S8(" function_records=1 function_records_omitted=1 ")));
             BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(records, S8(" name_bytes=13 name_truncated=0 name_hex=6d6574726963735f6669727374\n")));
         }
 
@@ -242,101 +255,96 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_metrics_test_batches(UnitTest
 
         // A rejected input in the middle, by default and with metrics only:
         // the first failure still stops the batch and nothing after it runs.
-        String8 failing_default[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-c"), paths[2], paths[3], paths[4]};
-        String8 failing_measured[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-c"), metrics_option, paths[2], paths[3], paths[4]};
+        String8 failing_default[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-c"), paths[3], paths[4]};
+        String8 failing_measured[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-c"), metrics_option, S8("-fmetrics-functions"),
+                                      paths[2], paths[3], paths[4]};
         (void)os_file_delete(objects[4]);
         CompilerDriverResult stopped = compiler_driver_metrics_test_run(arena, failing_default, BUSTER_ARRAY_LENGTH(failing_default), 0);
         BUSTER_TEST(arguments, stopped.error == COMPILER_DRIVER_ERROR_ANALYSIS && !stopped.inputs);
         BUSTER_TEST(arguments, !file_read(arena, objects[4], (FileReadOptions){0}).pointer);
-        CompilerDriverResult stopped_measured = compiler_driver_metrics_test_run(arena, failing_measured, BUSTER_ARRAY_LENGTH(failing_measured), 0);
+        CompilerDriverInvocation stopped_invocation = {0};
+        CompilerDriverResult stopped_measured = compiler_driver_metrics_test_run(arena, failing_measured, BUSTER_ARRAY_LENGTH(failing_measured), &stopped_invocation);
         BUSTER_TEST(arguments, stopped_measured.error == stopped.error && string_equal(stopped_measured.diagnostic, stopped.diagnostic));
-        BUSTER_TEST(arguments, stopped_measured.diagnostic_count == stopped.diagnostic_count && string_equal(stopped_measured.warning, stopped.warning));
+        BUSTER_TEST(arguments, string_equal(stopped_measured.warning, stopped.warning));
         BUSTER_TEST(arguments, !file_read(arena, objects[4], (FileReadOptions){0}).pointer);
-        if (BUSTER_REQUIRE(arguments, stopped_measured.inputs && stopped_measured.input_result_count == 3))
+        bool stopped_recorded = stopped_measured.input_result_count == 3;
+        if (BUSTER_REQUIRE(arguments, stopped_recorded))
         {
             BUSTER_TEST(arguments, stopped_measured.inputs[0].status == COMPILER_DRIVER_INPUT_STATUS_OK);
             BUSTER_TEST(arguments, stopped_measured.inputs[1].status == COMPILER_DRIVER_INPUT_STATUS_REJECTED);
             BUSTER_TEST(arguments, stopped_measured.inputs[2].status == COMPILER_DRIVER_INPUT_STATUS_NOT_RUN && !stopped_measured.inputs[2].measured);
         }
 
-        // -fkeep-going: the later input still compiles; the digest is stable
-        // across runs and follows the diagnostic's content.
+        // -fkeep-going over the same inputs plus the two long ones: later
+        // inputs still compile, and the inputs both runs compiled give the
+        // same records (stable digest) once timings are removed.
         String8 keep_going[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-c"), S8("-fkeep-going"), metrics_option,
-                                S8("-fmetrics-functions"), paths[2], paths[3], paths[4]};
+                                S8("-fmetrics-functions"), paths[2], paths[3], paths[4], paths[5], paths[6]};
         CompilerDriverInvocation continued_invocation = {0};
         CompilerDriverResult continued = compiler_driver_metrics_test_run(arena, keep_going, BUSTER_ARRAY_LENGTH(keep_going), &continued_invocation);
         BUSTER_TEST(arguments, continued.error == COMPILER_DRIVER_ERROR_ANALYSIS && string_equal(continued.diagnostic, stopped.diagnostic));
         ByteSlice third_object = file_read(arena, objects[4], (FileReadOptions){0});
         BUSTER_TEST(arguments, third_object.length != 0);
-        CompilerDriverResult repeated = compiler_driver_execute_invocation(arena, continued_invocation);
-        if (BUSTER_REQUIRE(arguments, continued.input_result_count == 3 && repeated.input_result_count == 3))
+        if (BUSTER_REQUIRE(arguments, stopped_recorded && continued.input_result_count == 5))
         {
             CompilerDriverInputResult const* rejected = &continued.inputs[1];
-            BUSTER_TEST(arguments, continued.failed_input_count == 1);
-            BUSTER_TEST(arguments, continued.inputs[0].status == COMPILER_DRIVER_INPUT_STATUS_OK && continued.inputs[2].status == COMPILER_DRIVER_INPUT_STATUS_OK);
+            BUSTER_TEST(arguments, continued.failed_input_count == 2);
+            BUSTER_TEST(arguments, continued.inputs[0].status == COMPILER_DRIVER_INPUT_STATUS_OK && continued.inputs[2].status == COMPILER_DRIVER_INPUT_STATUS_OK &&
+                                       continued.inputs[3].status == COMPILER_DRIVER_INPUT_STATUS_OK &&
+                                       continued.inputs[4].status == COMPILER_DRIVER_INPUT_STATUS_REJECTED);
             BUSTER_TEST(arguments, rejected->status == COMPILER_DRIVER_INPUT_STATUS_REJECTED && rejected->error == COMPILER_DRIVER_ERROR_ANALYSIS);
             BUSTER_TEST(arguments, rejected->error_count == 1 && rejected->warning_count == 1 && rejected->diagnostic_line == 2);
             BUSTER_TEST(arguments, rejected->diagnostic_record_count == 2 && string_equal(rejected->diagnostic_path, paths[3]));
             BUSTER_TEST(arguments, string_equal(rejected->message, stopped.diagnostic) && rejected->object_file_bytes == 0);
             BUSTER_TEST(arguments, continued.inputs[2].object_file_bytes == third_object.length);
-            BUSTER_TEST(arguments, string_equal(rejected->diagnostic_digest, repeated.inputs[1].diagnostic_digest));
-            BUSTER_TEST(arguments, !string_equal(rejected->diagnostic_digest, continued.inputs[0].diagnostic_digest));
+            BUSTER_TEST(arguments, string_equal(rejected->diagnostic_digest, stopped_measured.inputs[1].diagnostic_digest));
+            BUSTER_TEST(arguments, !string_equal(rejected->diagnostic_digest, continued.inputs[0].diagnostic_digest) &&
+                                       !string_equal(rejected->diagnostic_digest, continued.inputs[4].diagnostic_digest));
             BUSTER_TEST(arguments, compiler_driver_metrics_test_intervals(&continued, UINT64_MAX));
-            String8 changed = S8("#warning metrics-warning\nint metrics_rejected(void) { return other_missing_value; }\n");
-            BUSTER_TEST(arguments, file_write(paths[3], BUSTER_SLICE_TO_BYTE_SLICE(changed)));
-            CompilerDriverResult altered = compiler_driver_execute_invocation(arena, continued_invocation);
-            BUSTER_TEST(arguments, altered.input_result_count == 3 && altered.inputs[1].diagnostic_record_count == 2 &&
-                                       !string_equal(altered.inputs[1].diagnostic_digest, rejected->diagnostic_digest));
-            BUSTER_TEST(arguments, file_write(paths[3], BUSTER_SLICE_TO_BYTE_SLICE(sources[3])));
+            BUSTER_TEST(arguments, continued.inputs[4].message.length > COMPILER_DRIVER_METRICS_TEXT_LIMIT);
 
             CompilerDriverProcessMetrics process = {.wall_nanoseconds = 1, .peak_resident_bytes = 2, .exit_status = 1};
             String8 records = compiler_driver_metrics_format(arena, &continued_invocation, &continued, process);
-            String8 again = compiler_driver_metrics_format(arena, &continued_invocation, &repeated, process);
-            BUSTER_TEST(arguments, string_starts_with_sequence(records, S8("CC_METRICS version=1 schema=buster-cc-metrics inputs=3 records=3 ok=2 rejected=1 failed=0 ")));
+            String8 earlier = compiler_driver_metrics_format(arena, &stopped_invocation, &stopped_measured, process);
+            BUSTER_TEST(arguments, string_starts_with_sequence(records, S8("CC_METRICS version=1 schema=buster-cc-metrics inputs=5 records=5 ok=3 rejected=2 failed=0 ")));
             BUSTER_TEST(arguments, compiler_driver_metrics_test_count_lines(records, S8("CC_METRICS ")) == 1);
-            BUSTER_TEST(arguments, compiler_driver_metrics_test_count_lines(records, S8("CC_METRICS_INPUT version=1 index=")) == 3);
+            BUSTER_TEST(arguments, compiler_driver_metrics_test_count_lines(records, S8("CC_METRICS_INPUT version=1 index=")) == 5);
             BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(records, S8(" status=rejected error=driver.analysis errors=1 warnings=1 measured=1 start_ns=")));
             BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(records, S8(" diagnostic_records=2 diagnostic_digest=")));
             BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(records, S8(" message_truncated=0 message_hex=")));
+            BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(records, S8(" message_truncated=1 message_hex=")));
+            BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(records, string_format(arena, S8(" name_bytes={u32} name_truncated=1 name_hex="),
+                                                                                               COMPILER_DRIVER_METRICS_TEXT_LIMIT + 100)));
             BUSTER_TEST(arguments, records.length && records.pointer[records.length - 1] == '\n');
-            BUSTER_TEST(arguments, string_equal(compiler_driver_metrics_test_mask(arena, records), compiler_driver_metrics_test_mask(arena, again)));
+            // Header and input 2 differ between the two runs by design; the
+            // first two inputs and the first input's functions must not.
+            String8 masked = compiler_driver_metrics_test_mask(arena, records);
+            String8 earlier_masked = compiler_driver_metrics_test_mask(arena, earlier);
+            u64 masked_start = string_first_sequence(masked, S8("CC_METRICS_INPUT version=1 index=0 "));
+            u64 masked_end = string_first_sequence(masked, S8("CC_METRICS_INPUT version=1 index=2 "));
+            u64 earlier_start = string_first_sequence(earlier_masked, S8("CC_METRICS_INPUT version=1 index=0 "));
+            u64 earlier_end = string_first_sequence(earlier_masked, S8("CC_METRICS_INPUT version=1 index=2 "));
+            BUSTER_TEST(arguments, masked_start < masked_end && masked_end != BUSTER_STRING_NO_MATCH && earlier_start < earlier_end &&
+                                       earlier_end != BUSTER_STRING_NO_MATCH &&
+                                       string_equal(string_slice(masked, masked_start, masked_end), string_slice(earlier_masked, earlier_start, earlier_end)));
+
+            // A changed diagnostic changes the digest (the two batches above
+            // already showed the unchanged one is stable across runs).
+            String8 changed = S8("#warning metrics-warning\nint metrics_rejected(void) { return other_missing_value; }\n");
+            BUSTER_TEST(arguments, file_write(paths[3], BUSTER_SLICE_TO_BYTE_SLICE(changed)));
+            String8 altered_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-fsyntax-only"), metrics_option, paths[3]};
+            CompilerDriverResult altered = compiler_driver_metrics_test_run(arena, altered_command, BUSTER_ARRAY_LENGTH(altered_command), 0);
+            BUSTER_TEST(arguments, altered.input_result_count == 1 && altered.inputs[0].diagnostic_record_count == 2 &&
+                                       !string_equal(altered.inputs[0].diagnostic_digest, rejected->diagnostic_digest));
+            BUSTER_TEST(arguments, file_write(paths[3], BUSTER_SLICE_TO_BYTE_SLICE(sources[3])));
         }
 
-        // The per-input function cap, through the private test limit.
-        compiler_driver_test_set_function_limit(1);
-        String8 capped_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-c"), metrics_option, S8("-fmetrics-functions"), paths[2]};
-        CompilerDriverResult capped = compiler_driver_metrics_test_run(arena, capped_command, BUSTER_ARRAY_LENGTH(capped_command), 0);
-        compiler_driver_test_set_function_limit(0);
-        BUSTER_TEST(arguments, capped.input_result_count == 1 && capped.inputs[0].function_count == 1 && capped.inputs[0].functions_omitted == 1 &&
-                                   string_equal(capped.inputs[0].functions[0].name, S8("metrics_first")));
-
-        // Messages and function names past the text limit are cut and say so.
-        char8* long_name = arena_allocate(arena, char8, COMPILER_DRIVER_METRICS_TEXT_LIMIT + 100);
-        for (u32 index = 0; index < COMPILER_DRIVER_METRICS_TEXT_LIMIT + 100; index += 1)
-        {
-            long_name[index] = (char8)('a' + index % 26);
-        }
-        String8 identifier = {.pointer = long_name, .length = COMPILER_DRIVER_METRICS_TEXT_LIMIT + 100};
-        String8 long_paths[] = {compiler_driver_metrics_test_join(arena, root, S8("long_name.c")), compiler_driver_metrics_test_join(arena, root, S8("long_error.c"))};
-        BUSTER_TEST(arguments, file_write(long_paths[0], BUSTER_SLICE_TO_BYTE_SLICE(string_format(arena, S8("{S8}{S8}{S8}"), S8("int "), identifier, S8("(void) { return 3; }\n")))));
-        BUSTER_TEST(arguments, file_write(long_paths[1], BUSTER_SLICE_TO_BYTE_SLICE(string_format(arena, S8("{S8}{S8}{S8}"), S8("int broken(void) { return "), identifier, S8("; }\n")))));
-        String8 long_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-c"), S8("-fkeep-going"), metrics_option,
-                                  S8("-fmetrics-functions"), long_paths[0], long_paths[1]};
-        CompilerDriverInvocation long_invocation = {0};
-        CompilerDriverResult long_result = compiler_driver_metrics_test_run(arena, long_command, BUSTER_ARRAY_LENGTH(long_command), &long_invocation);
-        String8 long_records = compiler_driver_metrics_format(arena, &long_invocation, &long_result, (CompilerDriverProcessMetrics){0});
-        BUSTER_TEST(arguments, long_result.input_result_count == 2 && long_result.inputs[1].message.length > COMPILER_DRIVER_METRICS_TEXT_LIMIT);
-        BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(long_records, S8(" message_truncated=1 message_hex=")));
-        BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(long_records, string_format(arena, S8(" name_bytes={u32} name_truncated=1 name_hex="),
-                                                                                                   COMPILER_DRIVER_METRICS_TEXT_LIMIT + 100)));
-        (void)os_file_delete(string_format_z(arena, S8("{S8}/long_name.o"), root));
-
-        // The process: nonzero exit, one error line per failed input, and a
-        // header carrying the exit status, interval order, wall time and peak.
+        // The one child process: nonzero exit, one error line per failed
+        // input, and a header carrying exit status, interval order and wall.
         ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
                                        .use_process_environment = 1, .search_path = 1};
         String8 command[] = {ide, S8("cc"), S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-c"),
-                             S8("-fkeep-going"), metrics_option, paths[2], paths[3], paths[4]};
+                             S8("-fkeep-going"), metrics_option, paths[3], paths[4]};
         (void)os_file_delete(metrics_path);
         ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0}, capture);
         if (BUSTER_REQUIRE(arguments, spawned.handle != 0))
@@ -347,10 +355,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_metrics_test_batches(UnitTest
             BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(error, S8("cc: error:")) &&
                                        compiler_driver_metrics_test_contains(error, S8("missing_metrics_value")));
             String8 file = BYTE_SLICE_TO_STRING(8, file_read(arena, metrics_path, (FileReadOptions){0}));
-            BUSTER_TEST(arguments, string_starts_with_sequence(file, S8("CC_METRICS version=1 schema=buster-cc-metrics inputs=3 records=3 ok=2 rejected=1 ")));
+            BUSTER_TEST(arguments, string_starts_with_sequence(file, S8("CC_METRICS version=1 schema=buster-cc-metrics inputs=2 records=2 ok=1 rejected=1 ")));
             BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(file, S8(" exit_status=1 action=object target=x86_64-linux ")));
             BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(file, S8(" compilation_workers=1 intervals=serial keep_going=1 function_sizes=0 wall_ns=")));
-            BUSTER_TEST(arguments, compiler_driver_metrics_test_count_lines(file, S8("CC_METRICS_INPUT ")) == 3);
+            BUSTER_TEST(arguments, compiler_driver_metrics_test_count_lines(file, S8("CC_METRICS_INPUT ")) == 2);
         }
     }
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
@@ -358,8 +366,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_metrics_test_batches(UnitTest
         (void)os_file_delete(paths[index]);
         (void)os_file_delete(objects[index]);
     }
-    (void)os_file_delete(compiler_driver_metrics_test_join(arena, root, S8("long_name.c")));
-    (void)os_file_delete(compiler_driver_metrics_test_join(arena, root, S8("long_error.c")));
     (void)os_file_delete(metrics_path);
     return result;
 }

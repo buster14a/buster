@@ -95,8 +95,8 @@ interval opens the driver runs `compiler_prewarm()` and
 metadata tables, about 20 ms that used to land in input 0's `codegen` phase),
 and primes first-touch page faults: it commits and touches a pooled TU arena
 (`COMPILER_DRIVER_METRICS_TU_PRIME_BYTES`, which the first unit's arena
-reuses), the calling thread's scratch arenas and the result arena. No warm-up
-input is needed. Residual first-input effects are cache warmth only; on
+reuses) and the calling thread's scratch arenas once per thread, plus the
+result arena when a single input compiles in it. No warm-up input is needed. Residual first-input effects are cache warmth only; on
 identical inputs input 0 stays within a small factor of a later copy, which
 `compiler_driver_test_input_metrics` bounds. Lane workers' own arenas are not
 primed.

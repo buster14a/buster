@@ -4481,9 +4481,11 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_unit_lane(void* argument)
 // First-touch page faults are setup too: a fresh TU arena mapping and the
 // thread's scratch arenas fault their pages in the first unit and are reused
 // by every later one. Priming commits and touches a bounded prefix of each
-// (a pooled TU arena that the first unit's arena_create takes back, the
-// scratch arenas, and the result arena a single input compiles in) before
-// the first interval. Lane workers' own arenas are not primed.
+// (a pooled TU arena that the first unit's arena_create takes back, and the
+// scratch arenas) once per thread, and of the result arena when a single
+// input compiles in it, before the first interval. The pages stay committed
+// (pooling and scratch rewinds never decommit), so later invocations on the
+// same thread skip it. Lane workers' own arenas are not primed.
 #define COMPILER_DRIVER_METRICS_TU_PRIME_BYTES BUSTER_MB(4)
 #define COMPILER_DRIVER_METRICS_SCRATCH_PRIME_BYTES BUSTER_MB(1)
 
@@ -4495,25 +4497,34 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_prime_arena(Arena* arena, u64 bytes)
     arena_set_position(arena, position);
 }
 
-BUSTER_GLOBAL_LOCAL void compiler_driver_prime_arenas(Arena* result_arena)
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool compiler_driver_thread_arenas_primed;
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_prime_arenas(Arena* result_arena, bool result_arena_is_unit)
 {
-    Arena* pooled = arena_create((ArenaCreation){
-        .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
-        .flags = {.pool_reuse = 1},
-    });
-    if (pooled)
+    if (!compiler_driver_thread_arenas_primed)
     {
-        compiler_driver_prime_arena(pooled, COMPILER_DRIVER_METRICS_TU_PRIME_BYTES);
-        arena_destroy(pooled, 1);
-    }
-    compiler_driver_prime_arena(result_arena, COMPILER_DRIVER_METRICS_TU_PRIME_BYTES);
-    ThreadContext* context = thread_context_selected();
-    for (u32 slot = 0; slot < (u32)SCRATCH_ARENA_COUNT && context; slot += 1)
-    {
-        if (context->arenas[slot] && context->arenas[slot] != result_arena)
+        Arena* pooled = arena_create((ArenaCreation){
+            .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
+            .flags = {.pool_reuse = 1},
+        });
+        if (pooled)
         {
-            compiler_driver_prime_arena(context->arenas[slot], COMPILER_DRIVER_METRICS_SCRATCH_PRIME_BYTES);
+            compiler_driver_prime_arena(pooled, COMPILER_DRIVER_METRICS_TU_PRIME_BYTES);
+            arena_destroy(pooled, 1);
         }
+        ThreadContext* context = thread_context_selected();
+        for (u32 slot = 0; slot < (u32)SCRATCH_ARENA_COUNT && context; slot += 1)
+        {
+            if (context->arenas[slot] && context->arenas[slot] != result_arena)
+            {
+                compiler_driver_prime_arena(context->arenas[slot], COMPILER_DRIVER_METRICS_SCRATCH_PRIME_BYTES);
+            }
+        }
+        compiler_driver_thread_arenas_primed = true;
+    }
+    if (result_arena_is_unit)
+    {
+        compiler_driver_prime_arena(result_arena, COMPILER_DRIVER_METRICS_TU_PRIME_BYTES);
     }
 }
 
@@ -4739,7 +4750,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         // work: fill it before any measured interval opens.
         compiler_prewarm();
         codegen_prewarm_for_target(invocation.target);
-        compiler_driver_prime_arenas(arena);
+        compiler_driver_prime_arenas(arena, invocation.input_count == 1);
     }
     if (invocation.input_count <= 1 && !invocation.library_count &&
         (!invocation.input_count || (!compiler_driver_object_input(invocation.input_paths[0]) && !compiler_driver_archive_input(invocation.input_paths[0]))))
