@@ -24,14 +24,15 @@
 #define BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_ORACLE_TESTS_H
 
 #define BQ_PREP_ORACLE_ROWS 192u
-/* The emitted population: 192 object rows, then link@16, self-host@17
- * (native), link@64 (foreign target) and self-host@0 (untimed). */
+/* The emitted population: 192 object rows, then link@0, self-host@1
+ * (native), link@64 (foreign target) and self-host@16 (untimed). */
 #define BQ_PREP_ORACLE_POPULATION 196u
-/* Native-runtime stage rows, hence reference rows: link@16, self-host@17. */
+/* Native-runtime stage rows, hence reference rows: link@0, self-host@1. */
 #define BQ_PREP_ORACLE_REFERENCES 2u
-/* aarch64-unknown-linux-gnu: the fixture ledger makes every x86_64-linux row
- * unavailable, so the fixture template names another native target. */
-#define BQ_PREP_ORACLE_NATIVE_TARGET 5u
+/* (A1) The pinned native-host timed target, x86_64-unknown-linux-gnu: only
+ * its rows are timed or carry generated runtime, so the fixture ledger makes
+ * the aarch64-linux rows unavailable instead and the template names it. */
+#define BQ_PREP_ORACLE_NATIVE_TARGET BQ_RETIREMENT_NATIVE_TIMED_TARGET
 #define BQ_PREP_ORACLE_UNIT_SOURCE "int unit(void) { return 1; }\n"
 
 typedef struct BqPrepOracleFixture
@@ -979,7 +980,10 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_oracle(void)
      * population joined to the pinned census, never from a caller, and equal
      * the Python reference (census row, stage, runtime, configuration). */
     BqPrepOracleAttempt* success = calloc(1, sizeof(*success));
-    ok = ok && success && bq_prep_test_oracle_attempt(fixture, 81, cancel[0], success);
+    /* Only a begun attempt holds descriptors: closing the zeroed one after a
+     * failed setup would close descriptor 0 and corrupt later suites. */
+    bool attempted = ok && success;
+    ok = attempted && bq_prep_test_oracle_attempt(fixture, 81, cancel[0], success);
     BQ_PREP_CHECK(ok);
     BqRetirementProjection* projection = success ? &success->projection : NULL;
     u32 const population = BQ_PREP_ORACLE_POPULATION;
@@ -1001,16 +1005,17 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_oracle(void)
                       (index >= BQ_PREP_ORACLE_ROWS || row->census_row == index));
     }
     /* Each stage row names the census row its declaration carries. */
-    BQ_PREP_CHECK(ok && projection->rows[192].census_row == 16 && projection->rows[193].census_row == 17 &&
-                  projection->rows[194].census_row == 64 && projection->rows[195].census_row == 0 &&
+    BQ_PREP_CHECK(ok && projection->rows[192].census_row == 0 && projection->rows[193].census_row == 1 &&
+                  projection->rows[194].census_row == 64 && projection->rows[195].census_row == 16 &&
                   projection->rows[192].stage == BQ_RETIREMENT_STAGE_LINK &&
                   projection->rows[195].stage == BQ_RETIREMENT_STAGE_SELF_HOST &&
-                  strcmp(projection->rows[192].identity_sha256, projection->rows[16].identity_sha256) &&
+                  projection->rows[192].target == BQ_PREP_ORACLE_NATIVE_TARGET &&
+                  strcmp(projection->rows[192].identity_sha256, projection->rows[0].identity_sha256) &&
                   strcmp(projection->rows[192].identity_sha256, projection->rows[194].identity_sha256) &&
                   projection->rows[194].compiler_eligible && projection->rows[194].target != BQ_PREP_ORACLE_NATIVE_TARGET &&
                   !projection->rows[195].compiler_eligible && projection->rows[195].skip_proof_sha256[0] &&
-                  !strcmp(projection->rows[195].skip_proof_sha256, projection->rows[0].skip_proof_sha256) &&
-                  !projection->rows[0].compiler_eligible && !projection->rows[0].independent_oracle_sha256[0]);
+                  !strcmp(projection->rows[195].skip_proof_sha256, projection->rows[16].skip_proof_sha256) &&
+                  !projection->rows[16].compiler_eligible && !projection->rows[16].independent_oracle_sha256[0]);
 
     BqRetirementProjection refused = {0};
     BqRetirementStore store = ok ? success->attempt.store : (BqRetirementStore){-1};
@@ -1108,7 +1113,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_oracle(void)
                       projection->rows[192].independent_oracle_sha256[0] &&
                       projection->rows[193].independent_oracle_sha256[0] &&
                       !projection->rows[194].independent_oracle_sha256[0] &&
-                      !projection->rows[16].independent_oracle_sha256[0]);
+                      !projection->rows[0].independent_oracle_sha256[0]);
         char const* outputs[] = {"reference-00000000", "reference-00000001", "reference-receipt-00000001",
                                  "oracle-output-0", "oracle-output-1"};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(outputs); index += 1)
@@ -1175,7 +1180,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_oracle(void)
         free(pairs);
         BQ_PREP_CHECK(bq_prep_test_live_children() == 0);
     }
-    if (success) BQ_PREP_CHECK(bq_prep_test_oracle_attempt_close(success));
+    if (attempted) BQ_PREP_CHECK(bq_prep_test_oracle_attempt_close(success));
     free(success);
 
     /* Cancellation (the SIGTERM self-pipe, written here by SIGALRM) and

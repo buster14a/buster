@@ -964,9 +964,12 @@ sequence on a separate real-A tree:
   It also writes a #508 performance-row population built the way the
   binding test builds one, which the binding's own parser accepts, and that
   module's `expected_population` for it. The population has a native `link`
-  row on census row 16, a native `self-host-stage1` row on census row 17, a
+  row on census row 0, a native `self-host-stage1` row on census row 1, a
   foreign-target `link` row on census row 64 and an untimed
-  `self-host-stage1` row on census row 0.
+  `self-host-stage1` row on census row 16. (A1) The native target is the
+  pinned native-host timed target `x86_64-unknown-linux-gnu`, since the
+  binding rejects generated runtime on any other target; the fixture ledger
+  therefore makes the `aarch64-unknown-linux-gnu` rows (16 to 31) unavailable.
 - **Sources.** The baseline snapshot also holds the census subject's bytes
   at `tests/unit.c`. This is the reference source.
 - **Toolchain.** `bin/clang` is a copy of the host compiler.

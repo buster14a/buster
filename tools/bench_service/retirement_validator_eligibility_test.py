@@ -29,12 +29,16 @@ import native_retirement_performance_binding as binding
 
 
 EXPECTED_PROBE_OUTPUT = "VALIDATOR_ELIGIBILITY rows=192 eligible=160 skipped=32"
+# (A1) Only compiler-eligible rows on the pinned native-host target
+# (binding.NATIVE_TIMED_TARGET, x86_64-unknown-linux-gnu) are timed or carry
+# generated runtime, so the unavailable ledger record names another target
+# (census rows 16..31) and leaves the native-host rows 0..15 admitted.
 INAPPLICABLE_RECORD = (
     "tests/unit.c", "x86_64-apple-ios", "platform-inapplicable",
     "source-registration-test",
 )
 UNAVAILABLE_RECORD = (
-    "tests/unit.c", "x86_64-unknown-linux-gnu", "unavailable", "missing-native-oracle",
+    "tests/unit.c", "aarch64-unknown-linux-gnu", "unavailable", "missing-native-oracle",
 )
 
 
@@ -135,9 +139,9 @@ def run_validator(shards, output):
     require(report.get("rows_validated") == 192,
             "fixture does not cover its complete 192-row matrix")
     require(report.get("applicability_skip_rows") ==
-            list(range(16)) + list(range(128, 144)),
+            list(range(16, 32)) + list(range(128, 144)),
             "validator did not derive the source-ledger unavailable and platform skip sets")
-    require(report.get("acceptance_failure_rows") == list(range(16)),
+    require(report.get("acceptance_failure_rows") == list(range(16, 32)),
             "validator acceptance failures do not match the unavailable ledger rows")
     require(report.get("clean_acceptance") is False,
             "validator did not retain the unresolved unavailable acceptance state")
@@ -372,12 +376,14 @@ def expect_missing_profile_pin_rejected(probe, artifacts, key):
 # census object row in census order, then declared link and
 # self-host-stage1 rows, each carrying one census row's identity. The C
 # service imports this artifact instead of inventing stage rows. Declared
-# here: native link and self-host rows on two eligible aarch64-linux rows, a
-# foreign-target link row and an untimed (source-ledger skipped) self-host row.
-POPULATION_NATIVE_TARGET = "aarch64-unknown-linux-gnu"
-POPULATION_NATIVE_TARGET_ID = 5
-POPULATION_STAGE_ROWS = (("link", 16), ("self-host-stage1", 17), ("link", 64),
-                         ("self-host-stage1", 0))
+# here: native link and self-host rows on two eligible native-host
+# (x86_64-linux) rows, a foreign-target link row and an untimed (source-ledger
+# skipped) self-host row. (A1) The native target is the pinned timed target:
+# the binding rejects generated runtime on any other target.
+POPULATION_NATIVE_TARGET = binding.NATIVE_TIMED_TARGET
+POPULATION_NATIVE_TARGET_ID = 11
+POPULATION_STAGE_ROWS = (("link", 0), ("self-host-stage1", 1), ("link", 64),
+                         ("self-host-stage1", 16))
 POPULATION_STAGE_IDS = {"object": 1, "link": 2, "self-host-stage1": 3}
 
 
@@ -564,7 +570,7 @@ def execute(probe):
         projection_evidence = independently_replay_python(
             fixture.root, report, fixture.shards[0])
 
-        expected_skips = set(range(16)) | set(range(128, 144))
+        expected_skips = set(range(16, 32)) | set(range(128, 144))
         require(projection_evidence["artifacts"][1]["path"] == "applicability-skips.tsv",
                 "independent Python replay did not bind the expected skip artifact")
         require(set(report["applicability_skip_rows"]) == expected_skips,
@@ -626,7 +632,7 @@ def execute(probe):
             expect_tamper_rejected(
                 probe, artifacts, artifacts["report"],
                 lambda data, field=field: mutate_report(data, lambda report:
-                    report[field].append(17)),
+                    report[field].append(1)),
                 f"nonempty {field}")
         expect_tamper_rejected(
             probe, artifacts, artifacts["report"],
@@ -635,10 +641,10 @@ def execute(probe):
             "clean-acceptance summary")
 
         wrong_acceptance = mutate_applicability_cell(
-            artifacts["applicability"].read_bytes(), 17, {"acceptance_failure": "1"})
+            artifacts["applicability"].read_bytes(), 1, {"acceptance_failure": "1"})
         wrong_acceptance_report = mutate_report(
             artifacts["report"].read_bytes(), lambda report:
-                report["acceptance_failure_rows"].append(17))
+                report["acceptance_failure_rows"].append(1))
         wrong_acceptance_report = rebind_applicability_digest(wrong_acceptance_report,
                                                               wrong_acceptance)
         expect_tamper_rejected_many(probe, artifacts,
@@ -646,10 +652,10 @@ def execute(probe):
             "acceptance failure outside the unavailable class")
 
         missing_unavailable_failure = mutate_applicability_cell(
-            artifacts["applicability"].read_bytes(), 0, {"acceptance_failure": "0"})
+            artifacts["applicability"].read_bytes(), 16, {"acceptance_failure": "0"})
         missing_unavailable_report = mutate_report(
             artifacts["report"].read_bytes(), lambda report:
-                report["acceptance_failure_rows"].remove(0))
+                report["acceptance_failure_rows"].remove(16))
         missing_unavailable_report = rebind_applicability_digest(
             missing_unavailable_report, missing_unavailable_failure)
         expect_tamper_rejected_many(probe, artifacts,
@@ -657,19 +663,19 @@ def execute(probe):
             "missing acceptance failure for an unavailable row")
 
         absent_ledger_classification = mutate_applicability_cell(
-            artifacts["applicability"].read_bytes(), 17,
+            artifacts["applicability"].read_bytes(), 1,
             {"applicability": "unavailable", "admission": "unavailable",
              "reason": "compile-obligation-not-admitted", "ownership": "admission",
              "acceptance_failure": "1"})
         def classify_unledgered_row_unavailable(report):
             for key in ("applicability_rows_by_class", "admission_rows_by_class"):
-                report[key]["admitted-supported"].remove(17)
-                report[key]["unavailable"].append(17)
+                report[key]["admitted-supported"].remove(1)
+                report[key]["unavailable"].append(1)
                 report[key]["unavailable"].sort()
             for key in ("applicability_counts", "admission_counts"):
                 report[key]["admitted-supported"] -= 1
                 report[key]["unavailable"] += 1
-            report["acceptance_failure_rows"].append(17)
+            report["acceptance_failure_rows"].append(1)
             report["acceptance_failure_rows"].sort()
         absent_ledger_report = mutate_report(artifacts["report"].read_bytes(),
                                             classify_unledgered_row_unavailable)
@@ -679,12 +685,12 @@ def execute(probe):
             {"applicability": absent_ledger_classification, "report": absent_ledger_report},
             "unledgered row reclassification")
 
-        changed_manifest = mutate_manifest_gap_summary(artifacts["manifest"].read_bytes(), [17])
+        changed_manifest = mutate_manifest_gap_summary(artifacts["manifest"].read_bytes(), [1])
         changed_report = mutate_report(artifacts["report"].read_bytes(), lambda report: (
-            report.__setitem__("supported_gap_rows", [17]),
+            report.__setitem__("supported_gap_rows", [1]),
             report.__setitem__("supported_gap_count", 1),
             report.__setitem__("supported_gap_sha256",
-                               contract_test.contract.canonical_rows_digest([17])),
+                               contract_test.contract.canonical_rows_digest([1])),
             report.__setitem__("manifest_identity_sha256",
                 contract_test.contract.manifest_identity_digest(
                     dict(line.split("=", 1) for line in changed_manifest.decode("ascii").splitlines())))))
