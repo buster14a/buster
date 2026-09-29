@@ -1,0 +1,33 @@
+name: Isolated allocation checker research
+
+on:
+  push:
+    branches: [codex/125-allocation-checker-probe]
+    paths:
+      - tools/research/ra_*
+      - .github/workflows/allocation-checker-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Check independent prototype and real placement adapter
+        shell: bash
+        env:
+          RA_PROBE_HOSTED_BENCH: '1'
+        run: bash tools/research/ra_probe_run.sh "$RUNNER_TEMP/ra-probe"
+      - name: Retain exact diagnostic evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: allocation-checker-research
+          path: ${{ runner.temp }}/ra-probe/*.txt
+          if-no-files-found: error
