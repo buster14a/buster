@@ -110,7 +110,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     BqRetirementRowFact facts[7] = {0};
     BqRetirementCorrectness gate = {0};
     gate.prepared.rows = gate.rows_done = 7;
-    gate.prepared.native_target = 1;
+    gate.prepared.native_target = BQ_RETIREMENT_NATIVE_TIMED_TARGET;
     gate.eligible_rows = 1;
     gate.finished = 1;
     gate.trusted_rows = trusted;
@@ -136,7 +136,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     }
     trusted[6].compiler_eligible = trusted[6].code_obligation = 1;
     trusted[6].stage = BQ_RETIREMENT_STAGE_LINK;
-    trusted[6].target = 1;
+    trusted[6].target = BQ_RETIREMENT_NATIVE_TIMED_TARGET;
     facts[6].runtime_eligible = facts[6].code_eligible = 1;
     memcpy(trusted[6].independent_oracle_sha256, runtime_sha, 65);
     for (unsigned variant = 0; variant < 2; ++variant)
@@ -151,7 +151,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     /* The fixture precommits the second baseline label, whose distinct path
      * gives it a different command hash from the first A/A label. */
     sha256_init(&hash);
-    static char const second_domain[] = "bq-retirement-aa-second-commands-v1";
+    static char const second_domain[] = BQ_RETIREMENT_AA_SECOND_COMMANDS_DOMAIN;
     sha256_add(&hash, second_domain, sizeof(second_domain) - 1);
     uint8_t ordinal[4] = {6, 0, 0, 0}, applicable_runtime = 1;
     sha256_add(&hash, ordinal, sizeof(ordinal));
@@ -207,11 +207,16 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         test_sample_close(&aa);
         test_sample_close(&ab);
     }
-    /* (A1) The gate cannot supply an object row's frozen batch contract, and
-     * a cross-target row is never timed; either fails closed before timing. */
-    for (unsigned scenario = 0; scenario < 2; ++scenario)
+    /* (A1) The gate cannot supply an object row's frozen batch contract, a
+     * cross-target row is never timed, and the gate's native target must be
+     * the pinned x86_64-unknown-linux-gnu index, even when the rows agree
+     * with it; each fails closed before timing. */
+    for (unsigned scenario = 0; scenario < 2 + 12; ++scenario)
     {
-        if (scenario) trusted[6].target = 2;
+        unsigned other = scenario - 2 + 1;
+        if (scenario >= 2 && other == BQ_RETIREMENT_NATIVE_TIMED_TARGET) continue;
+        if (scenario >= 2) gate.prepared.native_target = trusted[6].target = other;
+        else if (scenario) trusted[6].target = 2;
         else trusted[6].stage = BQ_RETIREMENT_STAGE_OBJECT;
         bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
         CHECK(test_retirement_campaign_open(&aa, &ab, cpu));
@@ -221,7 +226,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
             &held, 1, 2, commands[0], commands[1], snapshots, 8, identities, 2, identity, identity) &&
             campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID && aa.samples.failed && !binding.campaign);
         trusted[6].stage = BQ_RETIREMENT_STAGE_LINK;
-        trusted[6].target = 1;
+        trusted[6].target = gate.prepared.native_target = BQ_RETIREMENT_NATIVE_TIMED_TARGET;
         bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
         test_sample_close(&aa);
         test_sample_close(&ab);
@@ -232,7 +237,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     CHECK(bq_retirement_campaign_bind_held(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
         &held, 1, 2, commands[0], commands[1], snapshots, 8,
         identities, 2, identity, identity));
-    CHECK(binding.campaign == &campaign && binding.gate == &gate && binding.timed_rows == 1 &&
+    CHECK(binding.campaign == &campaign && binding.gate == &gate && bq_retirement_campaign_timed_rows(&gate) == 1 &&
           !strcmp(binding.sealed_sha256, gate.sealed_sha256));
     CHECK(campaign.phase == TP_RETIREMENT_CAMPAIGN_AA && campaign.runtime_rows[0] == 6 &&
           campaign.group_shapes[0] == ((1u << 1) | TP_RETIREMENT_GROUP_SINGLETON) &&
@@ -514,6 +519,43 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     held.verified.binary_sha256[1][0] = held_binary_digit;
     if (held_guard_log >= 3)
         CHECK(close(held_guard_log) == 0 && unlinkat(cwd, "child.log", 0) == 0);
+    test_sample_close(&aa);
+    test_sample_close(&ab);
+
+    /* Every launch recounts the timed projection from the sealed gate rows:
+     * a row that becomes timed after the first child stops the next one,
+     * even without a reseal. */
+    CHECK(test_retirement_campaign_open(&aa, &ab, cpu));
+    campaign = (TpRetirementCampaign){0};
+    binding = (BqRetirementCampaignBinding){0};
+    CHECK(bq_retirement_campaign_bind_held(&binding, &gate, &campaign, &plan,
+        &aa.samples, &ab.samples, &held, 1, 2, commands[0], commands[1],
+        snapshots, 8, identities, 2, identity, identity));
+    {
+        TpRetirementInvocation first;
+        CHECK(tp_retirement_execution_peek(&aa.execution, &first) == TP_RETIREMENT_NEXT_READY);
+        unsigned index = first.kind * 2 + first.variant;
+        int recount_log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        TpProcessInputs recount_inputs = {binary, cwd, recount_log, environment};
+        TpRetirementMeasurementResult recount_result;
+        CHECK(recount_log >= 3 && bq_retirement_campaign_run(&binding, &commands[0][index],
+            &recount_inputs, cwd, &recount_result) && aa.execution.sequence == 1);
+        if (recount_log >= 3) CHECK(close(recount_log) == 0 && unlinkat(cwd, "child.log", 0) == 0);
+        CHECK(unlinkat(cwd, commands[0][index].artifact, 0) == 0);
+        trusted[5].compiler_eligible = 1;
+        trusted[5].target = BQ_RETIREMENT_NATIVE_TIMED_TARGET;
+        CHECK(tp_retirement_execution_peek(&aa.execution, &first) == TP_RETIREMENT_NEXT_READY);
+        index = first.kind * 2 + first.variant;
+        recount_log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        recount_inputs.log = recount_log;
+        CHECK(recount_log >= 3 && !bq_retirement_campaign_run(&binding, &commands[0][index],
+            &recount_inputs, cwd, &recount_result) &&
+            recount_result.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID &&
+            campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID && aa.execution.sequence == 1);
+        if (recount_log >= 3) CHECK(close(recount_log) == 0 && unlinkat(cwd, "child.log", 0) == 0);
+        trusted[5].compiler_eligible = 0;
+        trusted[5].target = 0;
+    }
     test_sample_close(&aa);
     test_sample_close(&ab);
 

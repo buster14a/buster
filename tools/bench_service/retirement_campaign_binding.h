@@ -28,9 +28,25 @@ typedef struct BqRetirementCampaignBinding
     BqRetirementHeldBinaries const* held_binaries;
     TpRetirementExecutable held_executables[2];
     uint64_t job_id, attempt_token;
-    uint32_t timed_rows;
     char sealed_sha256[65];
 } BqRetirementCampaignBinding;
+
+/* (A1) The pinned native-host timed target, x86_64-unknown-linux-gnu: the
+ * gate's one-based index in the validator's TARGETS order. */
+#define BQ_RETIREMENT_NATIVE_TIMED_TARGET 11u
+/* The A/A second-command commitment's domain. v2: it covers the timed rows
+ * only, each a singleton group (v1 covered every compiler-eligible row). */
+#define BQ_RETIREMENT_AA_SECOND_COMMANDS_DOMAIN "bq-retirement-aa-second-commands-v2"
+
+/* The timed projection's size, recomputed from the sealed gate rows. */
+static uint32_t bq_retirement_campaign_timed_rows(BqRetirementCorrectness const* gate)
+{
+    uint32_t count = 0;
+    for (uint32_t i = 0; gate && gate->trusted_rows && i < gate->prepared.rows; i += 1)
+        count += gate->trusted_rows[i].compiler_eligible &&
+            gate->trusted_rows[i].target == gate->prepared.native_target;
+    return count;
+}
 
 /* The transcript label is the private `job-<queue id>` convention used by
  * existing execution receipt readers. This seam derives it from its numeric
@@ -194,10 +210,11 @@ static int bq_retirement_campaign_bind(BqRetirementCampaignBinding* binding,
     unsigned groups = execution ? execution->groups : 0, group = 0, runtime = 0;
     Sha256 second_hash;
     sha256_init(&second_hash);
-    static char const second_domain[] = "bq-retirement-aa-second-commands-v1";
+    static char const second_domain[] = BQ_RETIREMENT_AA_SECOND_COMMANDS_DOMAIN;
     sha256_add(&second_hash, second_domain, sizeof(second_domain) - 1);
     int ok = binding && !binding->campaign && gate &&
         bq_retirement_correctness_ready(gate) && execution &&
+        gate->prepared.native_target == BQ_RETIREMENT_NATIVE_TIMED_TARGET &&
         baseline && candidate && baseline->valid && candidate->valid &&
         !strcmp(baseline->sha256, gate->prepared.binary_sha256[0]) &&
         !strcmp(candidate->sha256, gate->prepared.binary_sha256[1]) &&
@@ -276,7 +293,6 @@ static int bq_retirement_campaign_bind(BqRetirementCampaignBinding* binding,
     {
         binding->gate = gate;
         binding->campaign = campaign;
-        binding->timed_rows = groups;
         memcpy(binding->sealed_sha256, gate->sealed_sha256, sizeof(binding->sealed_sha256));
     }
     if (!ok)
@@ -305,7 +321,8 @@ static int bq_retirement_campaign_run(BqRetirementCampaignBinding const* binding
         gate->finished && !gate->failed &&
         !memcmp(binding->sealed_sha256, gate->sealed_sha256, sizeof(binding->sealed_sha256)) &&
         campaign->population_rows == gate->prepared.rows &&
-        binding->timed_rows && campaign->groups == binding->timed_rows;
+        gate->prepared.native_target == BQ_RETIREMENT_NATIVE_TIMED_TARGET &&
+        campaign->groups == bq_retirement_campaign_timed_rows(gate);
     if (ok) ok = bq_retirement_campaign_held_matches(binding);
     if (ok && !execution->sequence)
         ok = bq_retirement_correctness_ready(gate) &&

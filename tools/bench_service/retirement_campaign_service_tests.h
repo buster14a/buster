@@ -114,7 +114,7 @@ static bool bq_campaign_service_fixture_init(BqCampaignServiceFixture* fixture,
         BqRetirementRowFact* fact = &fixture->facts[6];
         trusted->compiler_eligible = trusted->code_obligation = 1;
         trusted->stage = BQ_RETIREMENT_STAGE_LINK;
-        trusted->target = 1;
+        trusted->target = BQ_RETIREMENT_NATIVE_TIMED_TARGET;
         fact->compiler_eligible = fact->code_eligible = 1;
         for (u32 side = 0; side < 2; side += 1)
         {
@@ -132,7 +132,7 @@ static bool bq_campaign_service_fixture_init(BqCampaignServiceFixture* fixture,
         prepared_gate->census_sha256[64] = 0;
         prepared_gate->rows = 7;
         prepared_gate->object_rows = 7;
-        prepared_gate->native_target = 1;
+        prepared_gate->native_target = BQ_RETIREMENT_NATIVE_TIMED_TARGET;
         for (u32 side = 0; side < 2; side += 1)
         {
             ok = ok && !memcmp(preparation->subjects[side].manifest_sha256,
@@ -144,7 +144,7 @@ static bool bq_campaign_service_fixture_init(BqCampaignServiceFixture* fixture,
         }
         Sha256 second_hash;
         sha256_init(&second_hash);
-        static char const second_domain[] = "bq-retirement-aa-second-commands-v1";
+        static char const second_domain[] = BQ_RETIREMENT_AA_SECOND_COMMANDS_DOMAIN;
         sha256_add(&second_hash, second_domain, sizeof(second_domain) - 1);
         uint8_t ordinal[4] = {6, 0, 0, 0}, applicable_runtime = 0;
         sha256_add(&second_hash, ordinal, sizeof(ordinal));

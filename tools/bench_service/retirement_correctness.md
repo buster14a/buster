@@ -240,7 +240,7 @@ The second A/A baseline label can have a distinct output path. Before `begin`,
 the importer also authenticates its compiler and applicable runtime commands
 from the frozen service plan and commits their aggregate SHA-256 in
 `aa_second_commands_sha256`. The byte stream starts with the ASCII domain
-`bq-retirement-aa-second-commands-v1` without a terminator. For each timed row
+`bq-retirement-aa-second-commands-v2` without a terminator. For each timed row
 (A1: compiler eligible on the native target) in canonical order it appends its
 four-byte little-endian row ID, the 64
 ASCII lowercase hex bytes of the second A/A compiler command digest, one byte
@@ -278,7 +278,11 @@ from the active authenticated queue job; this lower-level seam does not read
 queue state or reimport records itself.
 
 (A1) The campaign covers only the native-host timed projection: compiler
-eligible rows on the native target. Each timed link or self-host row binds as
+eligible rows on the native target, which must be the pinned
+`x86_64-unknown-linux-gnu` index (`BQ_RETIREMENT_NATIVE_TIMED_TARGET`, 11 in
+one-based `TARGETS` order); any other gate target is refused. Every launch
+recounts the timed rows from the sealed gate and compares them with the frozen
+group count. Each timed link or self-host row binds as
 its own singleton batch group against its per-row compiler and runtime
 commands; the group's frozen output digest covers that row's one artifact.
 The gate holds per-row facts only, with no frozen batch command, input order,
