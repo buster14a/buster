@@ -983,6 +983,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         return PROCESS_RESULT_FAILED;
     }
     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, compiler_state.cc_arguments);
+    // The metrics clock starts after argument parsing: reading it earlier
+    // would cost every compile a clock read to learn the option was absent.
+    // Per-input offsets and wall_ns share this origin.
+    bool write_metrics = invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.metrics_output_path.length != 0;
+    if (write_metrics)
+    {
+        invocation.metrics_origin = timestamp_take();
+        invocation.has_metrics_origin = true;
+    }
     CompilerDriverResult compile = compiler_driver_execute_invocation(arena, invocation);
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     if (compile.warning.length)
@@ -991,7 +1000,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     }
     if (compile.error != COMPILER_DRIVER_ERROR_NONE)
     {
-        compiler_print_diagnostic(S8("cc: error: {S8}\n"), compile.diagnostic);
+        // Under -fkeep-going every failed input reports its own first error;
+        // a failure outside any input (a link, an argument) keeps one line.
+        u32 reported = 0;
+        for (u32 index = 0; index < compile.input_result_count && invocation.keep_going; index += 1)
+        {
+            CompilerDriverInputResult const* input = &compile.inputs[index];
+            if (input->status == COMPILER_DRIVER_INPUT_STATUS_REJECTED || input->status == COMPILER_DRIVER_INPUT_STATUS_FAILED)
+            {
+                compiler_print_diagnostic(S8("cc: error: {S8}\n"), input->message.length ? input->message : input->diagnostic_code);
+                reported += 1;
+            }
+        }
+        if (!reported)
+        {
+            compiler_print_diagnostic(S8("cc: error: {S8}\n"), compile.diagnostic);
+        }
         result = PROCESS_RESULT_FAILED;
     }
     else if (!invocation.output_path.length)
@@ -1142,6 +1166,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          record.codegen.function.value, codegen_fallback_reason_string(record.codegen.reason), compiler_census_stage(record.codegen.reason),
                          record.codegen.opcode < IR_OPCODE_COUNT ? (u32)record.codegen.opcode : UINT32_MAX, record.line, record.column,
                          compiler_census_hex(arena, record.source), compiler_census_hex(arena, record.function));
+        }
+    }
+    // Written last so wall_ns covers everything this invocation printed. An
+    // unwritable metrics file fails the process like an unwritable -o.
+    if (write_metrics)
+    {
+        CompilerDriverProcessMetrics process = {
+            .wall_nanoseconds = timestamp_ns_between(invocation.metrics_origin, timestamp_take()),
+            .peak_resident_bytes = os_get_peak_resident_memory_size(),
+            .exit_status = result == PROCESS_RESULT_SUCCESS ? 0 : 1,
+        };
+        String8 records = compiler_driver_metrics_format(arena, &invocation, &compile, process);
+        if (!file_publish(invocation.metrics_output_path, BUSTER_SLICE_TO_BYTE_SLICE(records)))
+        {
+            compiler_print_diagnostic(S8("cc: error: could not write {S8}\n"), invocation.metrics_output_path);
+            result = PROCESS_RESULT_FAILED;
         }
     }
     arena_destroy(arena, 1);
