@@ -15,9 +15,13 @@ permissions:
   statuses: read
   checks: write
 
-# Candidate heads retain ordinary cancellation. A main push has an exact-SHA
-# group and is never externally cancelled: tools/main_push_maintenance.py makes
-# an already-superseded push a successful no-op and converges a mid-run move.
+env:
+  MAIN_PUSH_MAINTENANCE_SHA256: 118669698721ecc0d5da220d598bdf87afa172111dac784b6142e1f82a251ce5
+
+# Candidate heads retain ordinary cancellation. Main pushes use exact-SHA groups
+# so GitHub cannot cancel or replace an older pending run. The push-only helper
+# orders the maintenance job through the Actions API before it mutates state.
+# See docs/main-push-maintenance.md for the ordering and failure contract.
 concurrency:
   group: api-migration-policy-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
@@ -38,6 +42,20 @@ jobs:
             echo '::error::Required validation is disabled; refusing a skipped admission check.'
             exit 1
           fi
+      - name: Check out exact combined maintenance authority
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: authority
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify main-push maintenance authority
+        shell: bash
+        working-directory: authority
+        run: >-
+          printf '%s  %s\n' "$MAIN_PUSH_MAINTENANCE_SHA256"
+          tools/main_push_maintenance.py |
+          sha256sum --check --strict
       - name: Check out exact candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -51,10 +69,6 @@ jobs:
       - name: Test the migration audit
         working-directory: candidate
         run: python3 -B tools/api_migration_audit_test.py -v
-      - name: Test main-push maintenance policy
-        working-directory: candidate
-        run: python3 -B tools/main_push_maintenance_test.py -v
-
   native-retirement-admission:
     name: Native retirement merge admission
     if: ${{ github.server_url == 'https://github.com' }}
@@ -201,5 +215,9 @@ jobs:
           python3 -B tools/main_push_maintenance.py invalidate-native-retirement \
             --repository "$GITHUB_REPOSITORY" \
             --event-main "$GITHUB_SHA" \
+            --workflow "api-migration-policy.yml" \
+            --run-number "$GITHUB_RUN_NUMBER" \
+            --predecessor-job "Native retirement merge admission" \
+            --wait-seconds 1800 \
             --details-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             | tee "$RUNNER_TEMP/native-retirement-invalidation.json"

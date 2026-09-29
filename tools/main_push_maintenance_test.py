@@ -1,256 +1,291 @@
 #!/usr/bin/env python3
-"""Regression tests for neutral, convergent main-push maintenance."""
+"""Regression tests for neutral, ordered main-push maintenance."""
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
-import sys
-
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = Path(__file__).with_name("main_push_maintenance.py")
-SPEC = importlib.util.spec_from_file_location("main_push_maintenance", MODULE_PATH)
+SPEC = importlib.util.spec_from_file_location(
+    "main_push_maintenance", Path(__file__).with_name("main_push_maintenance.py")
+)
 assert SPEC is not None and SPEC.loader is not None
-MAINTENANCE = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = MAINTENANCE
-SPEC.loader.exec_module(MAINTENANCE)
+M = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = M
+SPEC.loader.exec_module(M)
 
 
-class SequenceApi:
+class InventoryApi:
     repository = "buster14a/buster"
 
-    def __init__(self, heads: list[str]):
+    def __init__(self, inventories=None, jobs=None):
+        self.inventories = list(inventories or [[]])
+        self.jobs = jobs or {}
+        self.reads = 0
+
+    def request(self, path, **_query):
+        if path.startswith("actions/workflows/") and path.endswith("/runs"):
+            index = min(self.reads, len(self.inventories) - 1)
+            self.reads += 1
+            return {"workflow_runs": self.inventories[index]}
+        match = M.re.fullmatch(r"actions/runs/([1-9][0-9]*)/jobs", path)
+        if match:
+            return {"jobs": self.jobs.get(int(match.group(1)), [])}
+        raise AssertionError(path)
+
+
+class MainApi:
+    repository = "buster14a/buster"
+
+    def __init__(self, heads):
         self.heads = list(heads)
         self.last = self.heads[-1]
+        self.posts = []
 
-    def request(self, path: str, **_kwargs):
-        if path != "git/ref/heads/main":
-            raise AssertionError(path)
-        value = self.heads.pop(0) if self.heads else self.last
-        self.last = value
-        return {"object": {"sha": value}}
+    def request(self, path, *, method="GET", body=None, **_query):
+        if path == "git/ref/heads/main" and method == "GET":
+            value = self.heads.pop(0) if self.heads else self.last
+            self.last = value
+            return {"object": {"sha": value}}
+        if method != "GET":
+            self.posts.append((path, method, body))
+            return {"id": len(self.posts)}
+        raise AssertionError(path)
+
+    def all(self, path, **query):
+        raise AssertionError((path, query))
+
+
+def workflow_run(run_id, number, sha, status="in_progress"):
+    return {
+        "id": run_id, "run_number": number, "event": "push",
+        "head_branch": "main", "head_sha": sha, "status": status,
+    }
+
+
+def workflow_job(name, status):
+    return {"name": name, "status": status}
+
+
+class OrderingTests(unittest.TestCase):
+    A, B, C = "a" * 40, "b" * 40, "c" * 40
+    WORKFLOW, JOB = "merge-conflict-preflight.yml", "Exact merge-tree preflight"
+
+    def test_waits_for_only_the_older_target_job(self):
+        older = workflow_run(101, 1, self.A)
+        api = InventoryApi(
+            inventories=[[older], [dict(older, status="completed")]],
+            jobs={101: [workflow_job(self.JOB, "in_progress")]},
+        )
+        waited = M.wait_predecessors(
+            api, self.WORKFLOW, 2, self.JOB, 1,
+            poll=0, clear_reads=1, sleep=lambda _seconds: None,
+        )
+        self.assertEqual(waited, [{"id": 101, "run_number": 1, "head_sha": self.A}])
+        unrelated = InventoryApi(
+            inventories=[[older]],
+            jobs={101: [workflow_job(self.JOB, "completed"),
+                        workflow_job("unrelated", "in_progress")]},
+        )
+        self.assertEqual(M.wait_predecessors(
+            unrelated, self.WORKFLOW, 2, self.JOB, 0,
+            poll=0, clear_reads=1, sleep=lambda _seconds: None,
+        ), [])
+
+    def test_queued_job_and_exact_successor_identity(self):
+        queued = workflow_run(101, 1, self.A, "queued")
+        self.assertEqual(M._predecessors(
+            InventoryApi([[queued]]), self.WORKFLOW, 2, self.JOB
+        )[0]["id"], 101)
+        api = InventoryApi([[
+            workflow_run(102, 2, self.B),
+            workflow_run(103, 3, self.C, "queued"),
+        ]])
+        self.assertEqual(M._successor(api, self.WORKFLOW, 1, self.C), {
+            "id": 103, "run_number": 3, "status": "queued", "head_sha": self.C,
+        })
+        self.assertIsNone(M._successor(api, self.WORKFLOW, 3, self.C))
 
 
 class ReconcileTests(unittest.TestCase):
-    A = "a" * 40
-    B = "b" * 40
-    C = "c" * 40
+    A, B, C = "a" * 40, "b" * 40, "c" * 40
 
     @staticmethod
-    def action(status: int = 0, retryable: bool = False):
-        calls = []
-
-        def run(main: str, _index: int):
+    def action(calls, status=0, movement=False):
+        def invoke(main):
             calls.append(main)
-            return MAINTENANCE.ActionResult(
-                status, main, retryable, {"main": main, "status": status}
-            )
+            return M.Action(status, main, movement, {"main": main})
+        return invoke
 
-        return calls, run
+    @staticmethod
+    def successor(calls):
+        def find(main):
+            calls.append(main)
+            return {"id": len(calls), "run_number": 10 + len(calls),
+                    "status": "queued", "head_sha": main}
+        return find
 
-    def test_push_already_superseded_is_a_green_noop(self):
-        calls, action = self.action()
-        result = MAINTENANCE.reconcile(self.A, lambda: self.C, action)
-        self.assertEqual(result.status, 0)
-        self.assertEqual(result.report["status"], "superseded")
-        self.assertEqual(result.report["current_main"], self.C)
-        self.assertEqual(calls, [])
-
-    def test_three_rapid_pushes_converge_to_the_latest_revision(self):
-        calls, action = self.action()
-        heads = iter((self.A, self.C, self.C))
-        result = MAINTENANCE.reconcile(self.A, lambda: next(heads), action)
-        self.assertEqual(result.status, 0)
-        self.assertEqual(result.report["status"], "current")
-        self.assertEqual(result.report["current_main"], self.C)
-        self.assertEqual(calls, [self.A, self.C])
+    def test_three_rapid_pushes_leave_latest_authoritative(self):
+        actions, successors = [], []
+        first = M.reconcile(
+            self.A, iter((self.A, self.C)).__next__,
+            self.action(actions), self.successor(successors),
+        )
+        middle = M.reconcile(
+            self.B, lambda: self.C,
+            self.action(actions), self.successor(successors),
+        )
+        latest = M.reconcile(
+            self.C, iter((self.C, self.C)).__next__,
+            self.action(actions), self.successor(successors),
+        )
         self.assertEqual(
-            [(row["requested_main"], row["observed_main"])
-             for row in result.report["attempts"]],
-            [(self.A, self.C), (self.C, self.C)],
+            [(row[0], row[1]["status"]) for row in (first, middle, latest)],
+            [(0, "superseded-after-action"),
+             (0, "superseded-before-action"), (0, "current")],
         )
+        self.assertEqual(actions, [self.A, self.C])
+        self.assertEqual(successors, [self.C, self.C])
 
-        middle_calls, middle_action = self.action()
-        middle = MAINTENANCE.reconcile(self.B, lambda: self.C, middle_action)
-        self.assertEqual(middle.status, 0)
-        self.assertEqual(middle.report["status"], "superseded")
-        self.assertEqual(middle_calls, [])
-
-        latest_calls, latest_action = self.action()
-        latest_heads = iter((self.C, self.C))
-        latest = MAINTENANCE.reconcile(
-            self.C, lambda: next(latest_heads), latest_action
+    def test_only_explicit_movement_is_neutral(self):
+        generic = M.reconcile(
+            self.A, iter((self.A, self.B)).__next__,
+            self.action([], 7, False), self.successor([]),
         )
-        self.assertEqual(latest.status, 0)
-        self.assertEqual(latest_calls, [self.C])
-
-    def test_real_action_failure_is_not_reclassified_as_superseded(self):
-        calls, action = self.action(status=7, retryable=False)
-        heads = iter((self.A, self.B))
-        result = MAINTENANCE.reconcile(self.A, lambda: next(heads), action)
-        self.assertEqual(result.status, 7)
-        self.assertEqual(result.report["status"], "failed")
-        self.assertEqual(calls, [self.A])
-
-    def test_only_explicit_default_branch_movement_is_retryable(self):
-        movement = {
-            "failed": [{
-                "scope": "default_branch",
-                "stage": "recheck",
-                "error": {"message": (
-                    "default branch moved during snapshot refresh: " +
-                    self.A + " -> " + self.B
-                )},
-            }],
-        }
-        self.assertTrue(MAINTENANCE._movement_only(movement))
-        failure = json.loads(json.dumps(movement))
-        failure["failed"][0]["scope"] = "pull_request"
-        self.assertFalse(MAINTENANCE._movement_only(failure))
-        failure = json.loads(json.dumps(movement))
-        failure["failed"].append({
+        moved = M.reconcile(
+            self.A, iter((self.A, self.B)).__next__,
+            self.action([], 2, True), self.successor([]),
+        )
+        self.assertEqual((generic[0], generic[1]["status"]), (7, "failed"))
+        self.assertEqual((moved[0], moved[1]["status"]),
+                         (0, "superseded-after-action"))
+        report = {"failed": [{
+            "scope": "default_branch", "stage": "recheck",
+            "error": {"message": "default branch moved during snapshot refresh"},
+        }]}
+        self.assertTrue(M._movement_only(report))
+        report["failed"].append({
             "scope": "refresh", "stage": "publish",
-            "error": {"message": "status POST failed"},
+            "error": {"message": "POST failed"},
         })
-        self.assertFalse(MAINTENANCE._movement_only(failure))
+        self.assertFalse(M._movement_only(report))
 
 
-class ActionIntegrationTests(unittest.TestCase):
-    A = "a" * 40
-    C = "c" * 40
+class IntegrationTests(unittest.TestCase):
+    A, C = "a" * 40, "c" * 40
 
-    def test_refresh_promotes_only_the_stable_attempt(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            report_dir = root / "reports"
-            summary = root / "summary.md"
-            api = SequenceApi([self.A, self.C, self.C])
-            calls = []
+    @staticmethod
+    def ordering(successor=None):
+        return (
+            mock.patch.object(M, "wait_predecessors", return_value=[]),
+            mock.patch.object(M, "wait_successor", return_value=successor or {
+                "id": 3, "run_number": 3, "status": "queued", "head_sha": "c" * 40,
+            }),
+        )
 
-            def refresh_event(_repo, _api, _event, attempt_dir, attempt_summary,
-                              _context):
-                calls.append(attempt_dir.name)
-                attempt_summary.write_text("attempt " + attempt_dir.name + "\n")
-                if len(calls) == 1:
-                    payload = {
-                        "main": self.A,
-                        "failed": [{
-                            "scope": "default_branch",
-                            "stage": "recheck",
-                            "error": {"message": (
-                                "default branch moved during snapshot refresh: " +
-                                self.A + " -> " + self.C
-                            )},
-                        }],
-                    }
-                    status = 2
-                else:
-                    payload = {"main": self.C, "failed": [], "coverage_complete": True}
-                    status = 0
-                (attempt_dir / "refresh.json").write_text(json.dumps(payload))
-                (attempt_dir / "result.json").write_text(json.dumps({"main": payload["main"]}))
-                return status
+    def test_refresh_promotes_current_but_retains_moved_attempt(self):
+        for moved in (False, True):
+            with self.subTest(moved=moved), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                reports, summary = root / "reports", root / "summary.md"
+                api = MainApi([self.A, self.C if moved else self.A])
 
-            with mock.patch.object(
-                    MAINTENANCE.refresh, "refresh_event", side_effect=refresh_event):
-                status = MAINTENANCE.refresh_main_push(
-                    root, api, {"repository": {"default_branch": "main"}},
-                    self.A, report_dir, summary,
-                    MAINTENANCE.preflight.STATUS_CONTEXT,
+                def refresh_event(_repo, _api, _event, attempt, attempt_summary, _context):
+                    failures = [] if not moved else [{
+                        "scope": "default_branch", "stage": "recheck",
+                        "error": {"message": "default branch moved during snapshot refresh"},
+                    }]
+                    payload = {"main": self.A, "failed": failures}
+                    attempt_summary.write_text("attempt summary\n")
+                    (attempt / "refresh.json").write_text(json.dumps(payload))
+                    return 2 if moved else 0
+
+                predecessor, successor = self.ordering()
+                with predecessor, successor, mock.patch.object(
+                        M.refresh, "refresh_event", side_effect=refresh_event):
+                    status = M.refresh_push(
+                        root, api, {"repository": {"default_branch": "main"}},
+                        self.A, reports, summary, M.preflight.STATUS_CONTEXT,
+                        "merge-conflict-preflight.yml", 1,
+                        "Exact merge-tree preflight", 30,
+                    )
+                self.assertEqual(status, 0)
+                maintenance = json.loads(
+                    (reports / "main-push-maintenance.json").read_text())
+                self.assertEqual(
+                    maintenance["status"],
+                    "superseded-after-action" if moved else "current",
                 )
-            self.assertEqual(status, 0)
-            self.assertEqual(calls, ["attempt-1", "attempt-2"])
-            self.assertEqual(json.loads((report_dir / "refresh.json").read_text())["main"],
-                             self.C)
-            self.assertEqual(json.loads((report_dir / "result.json").read_text())["main"],
-                             self.C)
-            maintenance = json.loads(
-                (report_dir / "main-push-maintenance.json").read_text())
-            self.assertEqual(maintenance["status"], "current")
-            self.assertEqual(maintenance["current_main"], self.C)
-            self.assertIn("attempt attempt-2", summary.read_text())
-            self.assertNotIn("attempt attempt-1", summary.read_text())
+                self.assertEqual((reports / "refresh.json").exists(), not moved)
+                self.assertTrue((reports / "attempt/refresh.json").exists())
+                self.assertEqual("attempt summary" in summary.read_text(), not moved)
 
-    def test_native_invalidation_replays_after_main_moves(self):
-        api = SequenceApi([self.A, self.C, self.C])
-        calls = []
+    def test_invalidation_blocks_a_stale_write_and_noops_when_superseded(self):
+        api = MainApi([self.A, self.C, self.C])
 
-        def invalidate(_api, main, _details):
-            calls.append(main)
-            return {
-                "schema": MAINTENANCE.retirement.SCHEMA,
-                "status": "invalidated",
-                "main": main,
-                "pull_requests": [{"pull_request": 1}],
-            }
+        def invalidate(guarded, main, _details):
+            guarded.request("check-runs", method="POST", body={"name": "gate"})
+            self.fail("stale mutation succeeded")
 
-        with mock.patch.object(
-                MAINTENANCE.retirement, "invalidate_stale", side_effect=invalidate):
-            status, report = MAINTENANCE.invalidate_main_push(
-                api, self.A, "https://github.com/buster14a/buster/actions/runs/1"
+        predecessor, successor = self.ordering()
+        with predecessor, successor, mock.patch.object(
+                M.retirement, "invalidate_stale", side_effect=invalidate):
+            status, report = M.invalidate_push(
+                api, self.A, "https://example.invalid/run/1",
+                "api-migration-policy.yml", 1,
+                "Native retirement merge admission", 30,
             )
         self.assertEqual(status, 0)
-        self.assertEqual(calls, [self.A, self.C])
-        self.assertEqual(report["main"], self.C)
-        self.assertEqual(report["maintenance"]["status"], "current")
+        self.assertEqual(api.posts, [])
+        self.assertEqual(report["status"], "superseded-after-action")
+        self.assertEqual(report["partial_writes"], [])
 
-    def test_superseded_native_invalidation_does_not_write(self):
-        api = SequenceApi([self.C])
-        with mock.patch.object(MAINTENANCE.retirement, "invalidate_stale") as invalidate:
-            status, report = MAINTENANCE.invalidate_main_push(
-                api, self.A, "https://github.com/buster14a/buster/actions/runs/1"
+        superseded = MainApi([self.C])
+        predecessor, successor = self.ordering()
+        with predecessor, successor, mock.patch.object(
+                M.retirement, "invalidate_stale") as invalidator:
+            status, report = M.invalidate_push(
+                superseded, self.A, "https://example.invalid/run/1",
+                "api-migration-policy.yml", 1,
+                "Native retirement merge admission", 30,
             )
         self.assertEqual(status, 0)
-        invalidate.assert_not_called()
-        self.assertEqual(report["status"], "superseded")
-        self.assertEqual(report["main"], self.C)
+        invalidator.assert_not_called()
+        self.assertEqual(report["status"], "superseded-before-action")
 
 
-class WorkflowPolicyTests(unittest.TestCase):
-    def test_push_concurrency_is_exact_sha_and_non_cancelling(self):
-        api_workflow = (ROOT / ".github/workflows/api-migration-policy.yml").read_text()
-        preflight_workflow = (
-            ROOT / ".github/workflows/merge-conflict-preflight.yml").read_text()
-        for workflow in (api_workflow, preflight_workflow):
+class WorkflowTests(unittest.TestCase):
+    def test_exact_sha_policy_ordering_and_trust_pin(self):
+        api = (ROOT / ".github/workflows/api-migration-policy.yml").read_text()
+        preflight = (ROOT / ".github/workflows/merge-conflict-preflight.yml").read_text()
+        regression = (
+            ROOT / ".github/workflows/merge-conflict-preflight-regression.yml"
+        ).read_text()
+        for workflow in (api, preflight):
             self.assertIn("github.event_name == 'push' && github.sha", workflow)
             self.assertIn(
-                "cancel-in-progress: ${{ github.event_name != 'push' }}", workflow)
-        self.assertIn("github.event.pull_request.number", api_workflow)
-        self.assertIn("github.event.merge_group.head_sha", api_workflow)
-        self.assertIn("github.event.workflow_run.id", preflight_workflow)
-        self.assertIn("github.event.merge_group.head_sha", preflight_workflow)
-
-        shas = ("1" * 40, "2" * 40, "3" * 40)
-        api_groups = {"api-migration-policy-push-" + sha for sha in shas}
-        preflight_groups = {
-            "merge-conflict-preflight-push-" + sha for sha in shas
-        }
-        self.assertEqual(len(api_groups), 3)
-        self.assertEqual(len(preflight_groups), 3)
-
-    def test_workflows_route_push_side_effects_through_reconciler(self):
-        api_workflow = (ROOT / ".github/workflows/api-migration-policy.yml").read_text()
-        preflight_workflow = (
-            ROOT / ".github/workflows/merge-conflict-preflight.yml").read_text()
-        regression = (
-            ROOT / ".github/workflows/merge-conflict-preflight-regression.yml").read_text()
+                "cancel-in-progress: ${{ github.event_name != 'push' }}", workflow
+            )
+        self.assertIn('--predecessor-job "Native retirement merge admission"', api)
+        self.assertIn('--predecessor-job "Exact merge-tree preflight"', preflight)
+        self.assertIn("actions: read", preflight)
         self.assertIn(
-            "tools/main_push_maintenance.py invalidate-native-retirement",
-            api_workflow,
+            "github.event_name == 'push' && github.sha || "
+            "github.event.repository.default_branch", preflight,
         )
-        self.assertIn(
-            "tools/main_push_maintenance.py refresh-merge-conflicts",
-            preflight_workflow,
-        )
-        self.assertIn("tools/main_push_maintenance_test.py -v", api_workflow)
         self.assertIn("tools/main_push_maintenance_test.py -v", regression)
-        self.assertIn("tools/merge_conflict_preflight_refresh.py", preflight_workflow)
-        self.assertIn("github.event_name == 'workflow_dispatch'", preflight_workflow)
+        digest = hashlib.sha256(
+            (ROOT / "tools/main_push_maintenance.py").read_bytes()
+        ).hexdigest()
+        self.assertIn("MAIN_PUSH_MAINTENANCE_SHA256: " + digest, api)
+        self.assertIn("sha256sum --check --strict", api)
 
 
 if __name__ == "__main__":

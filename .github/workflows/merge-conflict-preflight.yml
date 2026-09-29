@@ -13,9 +13,10 @@ on:
 permissions:
   contents: read
 
-# Candidate and workflow-run inputs retain ordinary cancellation. A main push
-# has an exact-SHA group and is never externally cancelled; the reconciler turns
-# an obsolete push into a green no-op and repeats a sweep if main moves mid-run.
+# Candidate and workflow-run inputs retain ordinary cancellation. Main pushes
+# use exact-SHA groups so GitHub cannot cancel or replace an older pending run.
+# The push-only helper orders publication through the Actions API.
+# See docs/main-push-maintenance.md for the ordering and failure contract.
 concurrency:
   group: merge-conflict-preflight-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.event.workflow_run.id || github.event.merge_group.head_sha || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
@@ -32,17 +33,18 @@ jobs:
           (github.event_name != 'workflow_run' || github.event.workflow_run.pull_requests[0]) }}
     permissions:
       contents: read
+      actions: read
       pull-requests: read
       statuses: write
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      # All routes execute trusted current-main code. Candidate objects are
-      # fetched only into private refs and consumed by read-only git plumbing.
-      - name: Check out trusted current main
+      # Push maintenance executes the exact event revision. Other routes use
+      # trusted current main; candidate objects remain read-only inputs.
+      - name: Check out trusted maintenance authority
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.event_name == 'push' && github.sha || github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
       - name: Refresh default-branch pull-request snapshot after main push
@@ -55,6 +57,10 @@ jobs:
           --event-path "$GITHUB_EVENT_PATH"
           --repository "$GITHUB_REPOSITORY"
           --event-main "$GITHUB_SHA"
+          --workflow "merge-conflict-preflight.yml"
+          --run-number "$GITHUB_RUN_NUMBER"
+          --predecessor-job "Exact merge-tree preflight"
+          --wait-seconds 600
           --report-dir evidence/merge-conflict-preflight
           --summary "$GITHUB_STEP_SUMMARY"
       - name: Refresh default-branch pull-request snapshot manually

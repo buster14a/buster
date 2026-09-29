@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Keep default-branch maintenance green and converged across rapid main pushes.
-
-GitHub concurrency can cancel both the running invocation and an older pending
-invocation.  The workflows therefore key push runs by exact SHA and use this
-module to arbitrate shared maintenance state.  A push that is already obsolete
-is a successful no-op.  A run that observes main move after it started repeats
-only the same fixed maintenance action against the newer exact revision.
-"""
+"""Order and neutralize superseded push-to-main maintenance."""
 
 from __future__ import annotations
 
@@ -18,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import sys
+import time
 import urllib.parse
 
 import merge_conflict_preflight as preflight
@@ -26,109 +20,196 @@ import native_retirement_merge_gate as retirement
 
 
 SCHEMA = "buster-main-push-maintenance-v1"
-MAX_RECONCILE_ATTEMPTS = 4
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
+MAX_PAGES = 10
+POLL_SECONDS = 2.0
+SUCCESSOR_WAIT_SECONDS = 120.0
 
 
 class MaintenanceError(Exception):
-    """A main-push maintenance invocation cannot be classified safely."""
+    """A push-maintenance result cannot be classified safely."""
+
+
+class MainMoved(MaintenanceError):
+    def __init__(self, expected: str, observed: str):
+        super().__init__(f"main moved before publication: {expected} -> {observed}")
+        self.observed = observed
 
 
 @dataclass(frozen=True)
-class ActionResult:
+class Action:
     status: int
     main: str
-    retryable_if_moved: bool
+    movement_only: bool
     payload: dict
-    evidence_dir: Path | None = None
-    summary_path: Path | None = None
+    directory: Path | None = None
+    summary: Path | None = None
 
 
-@dataclass(frozen=True)
-class ReconcileResult:
-    status: int
-    report: dict
-    action: ActionResult | None
+class GuardedApi:
+    """Delegate reads; prove the expected main before every mutation."""
+
+    def __init__(self, api, expected: str):
+        self.api = api
+        self.repository = api.repository
+        self.expected = _sha(expected, "guarded main")
+        self.posts = []
+
+    def all(self, path: str, **query):
+        return self.api.all(path, **query)
+
+    def request(self, path: str, *, method: str = "GET", body=None, **query):
+        if method != "GET":
+            observed = _main(self.api)
+            if observed != self.expected:
+                raise MainMoved(self.expected, observed)
+        result = self.api.request(path, method=method, body=body, **query)
+        if method != "GET":
+            self.posts.append({"path": path, "method": method, "body": body})
+        return result
 
 
-def _sha(value: object, label: str) -> str:
+def _sha(value, label: str) -> str:
     if not isinstance(value, str) or HEX40.fullmatch(value) is None:
-        raise MaintenanceError(f"{label} is not a canonical commit SHA: {value!r}")
+        raise MaintenanceError(f"{label} is not a commit SHA: {value!r}")
     return value
 
 
-def _main_head(api: preflight.GitHubApi, branch: str = "main") -> str:
-    encoded = urllib.parse.quote(branch, safe="")
-    value = api.request("git/ref/heads/" + encoded)
-    object_value = value.get("object") if isinstance(value, dict) else None
-    sha = object_value.get("sha") if isinstance(object_value, dict) else None
-    return _sha(sha, "live default branch")
+def _positive(value, label: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise MaintenanceError(f"{label} is not positive: {value!r}")
+    return value
 
 
-def _attempt_record(index: int, requested: str, result: ActionResult,
-                    observed: str) -> dict:
-    return {
-        "attempt": index,
-        "requested_main": requested,
-        "action_main": result.main,
-        "observed_main": observed,
-        "action_status": result.status,
-        "retryable_if_moved": result.retryable_if_moved,
-    }
+def _main(api) -> str:
+    value = api.request("git/ref/heads/main")
+    obj = value.get("object") if isinstance(value, dict) else None
+    return _sha(obj.get("sha") if isinstance(obj, dict) else None, "live main")
 
 
-def reconcile(event_main: str, read_main, action,
-              max_attempts: int = MAX_RECONCILE_ATTEMPTS) -> ReconcileResult:
-    """Run one maintenance action until its published revision is still current."""
-    event_main = _sha(event_main, "push event main")
-    current = _sha(read_main(), "initial live main")
-    attempts: list[dict] = []
-    if current != event_main:
-        report = {
-            "schema": SCHEMA,
-            "status": "superseded",
-            "event_main": event_main,
-            "current_main": current,
-            "attempts": attempts,
-        }
-        return ReconcileResult(0, report, None)
+def _pages(api, path: str, key: str, **query) -> list[dict]:
+    rows = []
+    for page in range(1, MAX_PAGES + 1):
+        value = api.request(path, per_page=100, page=page, **query)
+        batch = value.get(key) if isinstance(value, dict) else None
+        if not isinstance(batch, list) or not all(isinstance(row, dict) for row in batch):
+            raise MaintenanceError(f"{key} inventory is malformed")
+        rows.extend(batch)
+        if len(batch) < 100:
+            return rows
+    raise MaintenanceError(f"{key} pagination limit reached")
 
-    last: ActionResult | None = None
-    status = 2
-    for index in range(1, max_attempts + 1):
-        requested = current
-        last = action(requested, index)
-        observed = _sha(read_main(), "post-action live main")
-        attempts.append(_attempt_record(index, requested, last, observed))
-        if last.status != 0:
-            if last.retryable_if_moved and observed != last.main:
-                current = observed
-                continue
-            status = last.status
-            current = observed
-            break
-        if observed == last.main:
-            status = 0
-            current = observed
-            break
-        current = observed
-    else:
-        status = 2
 
-    if status == 0:
-        outcome = "current"
-    elif len(attempts) >= max_attempts and attempts[-1]["observed_main"] != attempts[-1]["action_main"]:
-        outcome = "unstable"
-    else:
-        outcome = "failed"
-    report = {
-        "schema": SCHEMA,
-        "status": outcome,
-        "event_main": event_main,
-        "current_main": current,
-        "attempts": attempts,
-    }
-    return ReconcileResult(status, report, last)
+def _runs(api, workflow: str) -> list[dict]:
+    if not workflow or "/" in workflow:
+        raise MaintenanceError(f"workflow must be a file name: {workflow!r}")
+    name = urllib.parse.quote(workflow, safe="")
+    return _pages(
+        api, f"actions/workflows/{name}/runs", "workflow_runs",
+        event="push", branch="main",
+    )
+
+
+def _jobs(api, run_id: int) -> list[dict]:
+    return _pages(
+        api, f"actions/runs/{_positive(run_id, 'run id')}/jobs", "jobs",
+        filter="all",
+    )
+
+
+def _identity(run: dict) -> tuple[int, int, str, str, str]:
+    values = (
+        _positive(run.get("id"), "run id"),
+        _positive(run.get("run_number"), "run number"),
+        run.get("event"),
+        run.get("head_branch"),
+        run.get("status"),
+    )
+    if not all(isinstance(value, str) for value in values[2:]):
+        raise MaintenanceError("workflow run omits event, branch, or status")
+    return values
+
+
+def _job_pending(api, run: dict, target: str) -> bool:
+    run_id, _number, _event, _branch, status = _identity(run)
+    if status == "completed":
+        return False
+    matches = [job for job in _jobs(api, run_id) if job.get("name") == target]
+    if not matches:
+        return True
+    for job in matches:
+        status = job.get("status")
+        if not isinstance(status, str):
+            raise MaintenanceError("target job omits status")
+        if status != "completed":
+            return True
+    return False
+
+
+def _predecessors(api, workflow: str, number: int, target: str) -> list[dict]:
+    number = _positive(number, "current run number")
+    blocked = []
+    for run in _runs(api, workflow):
+        run_id, run_number, event, branch, _status = _identity(run)
+        if event != "push" or branch != "main" or run_number >= number:
+            continue
+        if _job_pending(api, run, target):
+            blocked.append({
+                "id": run_id,
+                "run_number": run_number,
+                "head_sha": _sha(run.get("head_sha"), "predecessor head"),
+            })
+    return sorted(blocked, key=lambda row: (row["run_number"], row["id"]))
+
+
+def wait_predecessors(api, workflow: str, number: int, target: str,
+                      seconds: float, *, poll: float = POLL_SECONDS,
+                      clear_reads: int = 2, sleep=time.sleep,
+                      clock=time.monotonic) -> list[dict]:
+    if seconds < 0 or poll < 0 or clear_reads <= 0:
+        raise MaintenanceError("invalid predecessor wait policy")
+    deadline = clock() + seconds
+    observed = {}
+    clear = 0
+    while True:
+        blocked = _predecessors(api, workflow, number, target)
+        observed.update((row["id"], row) for row in blocked)
+        clear = clear + 1 if not blocked else 0
+        if clear >= clear_reads:
+            return sorted(observed.values(), key=lambda row: (row["run_number"], row["id"]))
+        remaining = deadline - clock()
+        if remaining <= 0:
+            ids = ", ".join(str(row["id"]) for row in blocked) or "unstable inventory"
+            raise MaintenanceError("timed out waiting for predecessor runs: " + ids)
+        sleep(min(poll, remaining))
+
+
+def _successor(api, workflow: str, number: int, head: str) -> dict | None:
+    matches = []
+    for run in _runs(api, workflow):
+        run_id, run_number, event, branch, status = _identity(run)
+        if (event == "push" and branch == "main" and run_number > number and
+                run.get("head_sha") == head):
+            matches.append({
+                "id": run_id, "run_number": run_number,
+                "status": status, "head_sha": head,
+            })
+    return min(matches, key=lambda row: (row["run_number"], row["id"])) if matches else None
+
+
+def wait_successor(api, workflow: str, number: int, head: str,
+                   seconds: float, *, poll: float = POLL_SECONDS,
+                   sleep=time.sleep, clock=time.monotonic) -> dict:
+    deadline = clock() + seconds
+    while True:
+        result = _successor(api, workflow, _positive(number, "current run number"),
+                            _sha(head, "successor head"))
+        if result is not None:
+            return result
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise MaintenanceError("main advanced without a successor run for " + head)
+        sleep(min(poll, remaining))
 
 
 def _movement_only(report: dict) -> bool:
@@ -146,144 +227,209 @@ def _movement_only(report: dict) -> bool:
     return True
 
 
-def _prepare_attempt(root: Path, index: int) -> tuple[Path, Path]:
-    attempt = root / f"attempt-{index}"
-    if attempt.exists():
-        shutil.rmtree(attempt)
-    attempt.mkdir(parents=True)
-    return attempt, attempt / "summary.md"
+def reconcile(event_main: str, read_main, action, successor) -> tuple[int, dict, Action | None]:
+    event_main = _sha(event_main, "push event main")
+    current = _sha(read_main(), "initial live main")
+    if current != event_main:
+        report = {
+            "schema": SCHEMA, "status": "superseded-before-action",
+            "event_main": event_main, "current_main": current,
+            "attempts": [], "successor": successor(current),
+        }
+        return 0, report, None
+
+    result = action(event_main)
+    observed = _sha(read_main(), "post-action live main")
+    next_run = successor(observed) if observed != event_main else None
+    if result.status == 0:
+        status = 0
+        outcome = "current" if observed == event_main else "superseded-after-action"
+    elif observed != result.main and result.movement_only:
+        status, outcome = 0, "superseded-after-action"
+    else:
+        status, outcome = result.status, "failed"
+    report = {
+        "schema": SCHEMA, "status": outcome,
+        "event_main": event_main, "current_main": observed,
+        "attempts": [{
+            "action_main": result.main,
+            "observed_main": observed,
+            "action_status": result.status,
+            "movement_only": result.movement_only,
+        }],
+    }
+    if next_run is not None:
+        report["successor"] = next_run
+    return status, report, result
 
 
-def _promote_attempt(action: ActionResult | None, report_dir: Path,
-                     summary: Path | None) -> None:
-    if action is None or action.evidence_dir is None:
+def _ordered(api, workflow: str, number: int, target: str, seconds: float,
+             event_main: str, action) -> tuple[int, dict, Action | None]:
+    waited = wait_predecessors(api, workflow, number, target, seconds)
+    successor = lambda head: wait_successor(
+        api, workflow, number, head, min(seconds, SUCCESSOR_WAIT_SECONDS)
+    )
+    status, report, result = reconcile(event_main, lambda: _main(api), action, successor)
+    report["ordering"] = {
+        "workflow": workflow, "run_number": number, "target_job": target,
+        "predecessors_waited": waited,
+    }
+    return status, report, result
+
+
+def _attempt(root: Path) -> tuple[Path, Path]:
+    directory = root / "attempt"
+    if directory.exists():
+        shutil.rmtree(directory)
+    directory.mkdir(parents=True)
+    return directory, directory / "summary.md"
+
+
+def _promote(result: Action | None, report: dict, root: Path,
+             summary: Path | None) -> None:
+    if (result is None or result.directory is None or
+            report["status"] not in ("current", "failed")):
         return
-    for path in action.evidence_dir.iterdir():
-        if path.is_file() and path != action.summary_path:
-            shutil.copy2(path, report_dir / path.name)
-    if summary is not None and action.summary_path is not None and action.summary_path.exists():
+    for path in result.directory.iterdir():
+        if path.is_file() and path != result.summary:
+            shutil.copy2(path, root / path.name)
+    if summary is not None and result.summary is not None and result.summary.exists():
         summary.parent.mkdir(parents=True, exist_ok=True)
-        with summary.open("a", encoding="utf-8") as destination:
-            destination.write(action.summary_path.read_text(encoding="utf-8"))
+        with summary.open("a", encoding="utf-8") as output:
+            output.write(result.summary.read_text(encoding="utf-8"))
 
 
-def _write_maintenance_report(report_dir: Path, report: dict,
-                              summary: Path | None, action: str) -> None:
-    report_dir.mkdir(parents=True, exist_ok=True)
-    (report_dir / "main-push-maintenance.json").write_text(
+def _record(root: Path, summary: Path | None, report: dict, action: str) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "main-push-maintenance.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     if summary is not None:
-        summary.parent.mkdir(parents=True, exist_ok=True)
         with summary.open("a", encoding="utf-8") as output:
-            output.write("\n### Main-push maintenance\n\n")
-            output.write(f"- Action: `{action}`\n")
-            output.write(f"- Event main: `{report['event_main']}`\n")
-            output.write(f"- Current main: `{report['current_main']}`\n")
-            output.write(f"- Result: **{report['status']}**\n")
-            output.write(f"- Attempts: {len(report['attempts'])}\n")
+            output.write(
+                "\n### Main-push maintenance\n\n"
+                f"- Action: `{action}`\n"
+                f"- Event main: `{report['event_main']}`\n"
+                f"- Current main: `{report['current_main']}`\n"
+                f"- Result: **{report['status']}**\n"
+            )
 
 
-def refresh_main_push(repo: Path, api: preflight.GitHubApi, event: dict,
-                      event_main: str, report_dir: Path, summary: Path | None,
-                      context: str) -> int:
-    report_dir.mkdir(parents=True, exist_ok=True)
+def refresh_push(repo: Path, api, event: dict, event_main: str, root: Path,
+                 summary: Path | None, context: str, workflow: str,
+                 number: int, target: str, seconds: float) -> int:
+    root.mkdir(parents=True, exist_ok=True)
 
-    def action(requested_main: str, index: int) -> ActionResult:
-        attempt_dir, attempt_summary = _prepare_attempt(report_dir, index)
+    def action(requested: str) -> Action:
+        directory, attempt_summary = _attempt(root)
         status = refresh.refresh_event(
-            repo, api, event, attempt_dir, attempt_summary, context
+            repo, api, event, directory, attempt_summary, context
         )
-        refresh_path = attempt_dir / "refresh.json"
-        if not refresh_path.exists():
-            raise MaintenanceError("merge-conflict refresh produced no refresh.json")
-        payload = json.loads(refresh_path.read_text(encoding="utf-8"))
-        action_main = payload.get("main")
-        if not isinstance(action_main, str) or HEX40.fullmatch(action_main) is None:
-            action_main = requested_main
-        return ActionResult(
-            status, action_main, status != 0 and _movement_only(payload), payload,
-            attempt_dir, attempt_summary,
-        )
+        path = directory / "refresh.json"
+        if not path.exists():
+            raise MaintenanceError("snapshot refresh produced no refresh.json")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        main = payload.get("main")
+        if not isinstance(main, str) or HEX40.fullmatch(main) is None:
+            main = requested
+        return Action(status, main, status != 0 and _movement_only(payload),
+                      payload, directory, attempt_summary)
 
-    result = reconcile(event_main, lambda: _main_head(api), action)
-    _promote_attempt(result.action, report_dir, summary)
-    _write_maintenance_report(
-        report_dir, result.report, summary, "merge-conflict-preflight-refresh"
+    status, report, result = _ordered(
+        api, workflow, number, target, seconds, event_main, action
     )
-    return result.status
+    _promote(result, report, root, summary)
+    _record(root, summary, report, "merge-conflict-preflight-refresh")
+    return status
 
 
-def invalidate_main_push(api: preflight.GitHubApi, event_main: str,
-                         details_url: str) -> tuple[int, dict]:
-    def action(main: str, _index: int) -> ActionResult:
-        payload = retirement.invalidate_stale(api, main, details_url)
-        return ActionResult(0, main, False, payload)
+def invalidate_push(api, event_main: str, details_url: str, workflow: str,
+                    number: int, target: str, seconds: float) -> tuple[int, dict]:
+    def action(main: str) -> Action:
+        guarded = GuardedApi(api, main)
+        try:
+            payload = retirement.invalidate_stale(guarded, main, details_url)
+            return Action(0, main, False, payload)
+        except MainMoved as moved:
+            return Action(2, main, True, {
+                "schema": retirement.SCHEMA,
+                "status": "superseded-during-invalidation",
+                "main": main, "observed_main": moved.observed,
+                "pull_requests": [], "partial_writes": guarded.posts,
+            })
 
-    result = reconcile(event_main, lambda: _main_head(api), action)
-    if result.action is None:
+    status, report, result = _ordered(
+        api, workflow, number, target, seconds, event_main, action
+    )
+    if result is None:
         payload = {
-            "schema": retirement.SCHEMA,
-            "status": "superseded",
-            "main": result.report["current_main"],
-            "pull_requests": [],
+            "schema": retirement.SCHEMA, "status": report["status"],
+            "main": report["current_main"], "pull_requests": [],
         }
     else:
-        payload = dict(result.action.payload)
-        if result.status != 0:
-            payload["status"] = "maintenance-" + result.report["status"]
-    payload["maintenance"] = result.report
-    return result.status, payload
+        payload = dict(result.payload)
+        if report["status"] != "current":
+            payload["status"] = report["status"]
+    payload["maintenance"] = report
+    return status, payload
 
 
-def _parser() -> argparse.ArgumentParser:
+def _order_args(parser) -> None:
+    parser.add_argument("--workflow", required=True)
+    parser.add_argument("--run-number", type=int, required=True)
+    parser.add_argument("--predecessor-job", required=True)
+    parser.add_argument("--wait-seconds", type=float, required=True)
+
+
+def _parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--api-url", default=os.environ.get("GITHUB_API_URL", "https://api.github.com")
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    refresh_parser = subparsers.add_parser("refresh-merge-conflicts")
-    refresh_parser.add_argument("--repo", type=Path, default=Path("."))
-    refresh_parser.add_argument("--event-path", type=Path, required=True)
-    refresh_parser.add_argument("--repository", required=True)
-    refresh_parser.add_argument("--event-main", required=True)
-    refresh_parser.add_argument("--report-dir", type=Path, required=True)
-    refresh_parser.add_argument("--summary", type=Path)
-    refresh_parser.add_argument("--context", default=preflight.STATUS_CONTEXT)
-
-    invalidate_parser = subparsers.add_parser("invalidate-native-retirement")
-    invalidate_parser.add_argument("--repository", required=True)
-    invalidate_parser.add_argument("--event-main", required=True)
-    invalidate_parser.add_argument("--details-url", required=True)
+    commands = parser.add_subparsers(dest="command", required=True)
+    snapshot = commands.add_parser("refresh-merge-conflicts")
+    snapshot.add_argument("--repo", type=Path, default=Path("."))
+    snapshot.add_argument("--event-path", type=Path, required=True)
+    snapshot.add_argument("--repository", required=True)
+    snapshot.add_argument("--event-main", required=True)
+    snapshot.add_argument("--report-dir", type=Path, required=True)
+    snapshot.add_argument("--summary", type=Path)
+    snapshot.add_argument("--context", default=preflight.STATUS_CONTEXT)
+    _order_args(snapshot)
+    invalidation = commands.add_parser("invalidate-native-retirement")
+    invalidation.add_argument("--repository", required=True)
+    invalidation.add_argument("--event-main", required=True)
+    invalidation.add_argument("--details-url", required=True)
+    _order_args(invalidation)
     return parser
 
 
 def main(argv=None) -> int:
     arguments = _parser().parse_args(argv)
-    status = 2
     try:
         api = preflight.GitHubApi(
-            arguments.repository,
-            os.environ.get("GITHUB_TOKEN", ""),
+            arguments.repository, os.environ.get("GITHUB_TOKEN", ""),
             arguments.api_url,
         )
         if arguments.command == "refresh-merge-conflicts":
-            event = preflight._event(arguments.event_path)
-            status = refresh_main_push(
-                arguments.repo, api, event, arguments.event_main,
-                arguments.report_dir, arguments.summary, arguments.context,
+            status = refresh_push(
+                arguments.repo, api, preflight._event(arguments.event_path),
+                arguments.event_main, arguments.report_dir, arguments.summary,
+                arguments.context, arguments.workflow, arguments.run_number,
+                arguments.predecessor_job, arguments.wait_seconds,
             )
         else:
-            status, report = invalidate_main_push(
-                api, arguments.event_main, arguments.details_url
+            status, report = invalidate_push(
+                api, arguments.event_main, arguments.details_url,
+                arguments.workflow, arguments.run_number,
+                arguments.predecessor_job, arguments.wait_seconds,
             )
             print(json.dumps(report, indent=2, sort_keys=True))
+        return status
     except (MaintenanceError, preflight.PreflightError, retirement.AdmissionError,
             OSError, TypeError, ValueError, json.JSONDecodeError) as error:
         print("main-push maintenance failure: " + str(error), file=sys.stderr)
-        status = 2
-    return status
+        return 2
 
 
 if __name__ == "__main__":
