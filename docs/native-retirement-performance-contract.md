@@ -7,17 +7,23 @@ backend retirement in [#36](https://github.com/buster14a/buster/issues/36). It
 does not claim that a candidate has passed.
 
 **Amendment A1 (batched native-host sampling).** The maintainer's decision
-recorded in [#36](https://github.com/buster14a/buster/issues/36) changes the
-unit of compiler sampling before any binding record exists. The timed
+[recorded in #36](https://github.com/buster14a/buster/issues/36#issuecomment-5887192510)
+on 2026-09-29 changes the unit of compiler sampling before any binding record
+exists. The timed
 population becomes the native-host configurations only
 (`x86_64-unknown-linux-gnu` × four allocators × two frontend lowerings × two
 PIC modes), and one timed compiler process compiles a whole batch group of
 fixtures while a per-input metrics record supplies each fixture's observation.
-Paragraphs changed by A1 are marked `(A1)`. The decision ID, every threshold,
-the two-round/60-pair minimum, two warmups, blocked AB/BA order, A/A-then-A/B
-sequence, the statistical estimator, family construction rule, simultaneous
-Bonferroni bounds and the four outcomes are unchanged. Every change that the
-unit-of-sampling change forces is stated where it applies.
+The same decision adds two explicit policy changes. The batch process wall
+time and peak RSS become a gated **batch process metric pair**, whose cells
+are object batch groups under the existing compiler limits. That changes the
+statistical family's membership, not its construction rule. The code-section
+byte gate is also kept on every target, including rows that are never timed.
+Paragraphs changed by A1 are marked `(A1)`. The decision ID, every existing
+threshold, the two-round/60-pair minimum, two warmups, blocked AB/BA order,
+A/A-then-A/B sequence, the statistical estimator, family construction rule,
+simultaneous Bonferroni bounds and the four outcomes are unchanged. Every
+change that the unit-of-sampling change forces is stated where it applies.
 
 This contract reuses the native throughput harness, the support manifest from
 [#508](https://github.com/buster14a/buster/issues/508), semantic acceptance from
@@ -88,8 +94,10 @@ root recomputes, all of the following:
   pairs per round for every timed fixture row, two warmups, blocked AB/BA
   order of batch groups (A1), retained samples,
   #619 median-of-two-pair-block geometric-mean aggregation across both rounds
-  and pooled analysis, exact code-byte aggregation measured once per variant
-  and row with a repeated-batch determinism check (A1), native-oracle-only
+  and pooled analysis, the batch process metric pair over object batch
+  groups (A1), exact code-byte aggregation measured once per variant and
+  code-eligible row on every target with a reproduction check (A1),
+  native-oracle-only
   runtime and deterministic code-section scope,
   simultaneous one-sided 95% Bonferroni bounds, fail-closed invalid data, and
   the four allowed outcomes.
@@ -121,9 +129,10 @@ keep their census meaning, so the artifact and its #508 producer are
 unchanged. The **timed projection** is derived, never supplied: a row is timed
 exactly when it is compiler eligible and its target is the pinned native-host
 target `x86_64-unknown-linux-gnu`, which must also equal the admitted host
-profile's native target. Rows outside the timed projection are
-correctness-only (#508/#509) and enter no timing schedule, result-input
-population, code-byte ratio or statistical family. Runtime eligibility must name
+profile's native target. Rows outside the timed projection are never timed
+and enter no timing schedule, result-input population or statistical family.
+Code-section byte eligibility is not limited to the timed projection: every
+code-eligible row on every target enters the exact code-byte ratio. Runtime eligibility must name
 an independent native executable oracle; code eligibility must name
 deterministic code sections. The bound `population.source_digests` must identify
 the complete #508 output, including its versioned performance declaration;
@@ -222,7 +231,7 @@ them:
 - object production, compile-and-link, and the frozen Buster self-host stage-1
   executable build as distinct compiler-latency cells;
 - generated code-section bytes for every deterministic object/executable row
-  in the timed projection (A1);
+  on every target, timed or not (A1: kept by the maintainer's decision);
 - generated-program runtime only for rows with a deterministic executable
   workload and an independently passing correctness oracle.
 
@@ -239,8 +248,10 @@ multi-input `-c` path, so it is its own singleton group whose one process is
 that row's requested work.
 
 (A1, replaces "Cross-target rows can satisfy compile time, peak RSS, and
-code-byte obligations") Cross-target rows are correctness-only and are never
-timed. They also never masquerade as native generated-runtime evidence.
+code-byte obligations") Cross-target rows are never timed. They satisfy only
+the code-byte obligation, from deterministic artifacts produced outside timing
+(see Measurements). They also never masquerade as native generated-runtime
+evidence.
 Emulation, link-only, object-only, and native execution are separate
 classifications. Instrumented,
 sanitized, Debug, self-built, or test-embedded compilers remain correctness or
@@ -264,7 +275,9 @@ invalid, not wins.
 | --- | --- | --- | --- |
 | Compiler wall time (A1) | Object row: that fixture's per-input wall interval, in monotonic nanoseconds, from its per-input metrics record inside one batch process of identical requested work, paired per fixture. Singleton link/self-host row: the process from launch through successful wait and final requested artifact, as before | Geometric mean of cell ratios, one equal fixed weight per required cell | Upper simultaneous bound at most `1.05` |
 | Compiler peak memory (A1, replaces compiler peak RSS as the per-cell metric) | Object row: that fixture's per-input arena high-water bytes (committed bytes, never reserved address space or allocation requests) from the same per-input record. Singleton link/self-host row: OS child high-water bytes, as before. Never cross-OS values | Geometric mean of cell ratios, one equal fixed weight per required cell | Upper simultaneous bound at most `1.05` |
-| Generated code bytes (A1) | Exact sum of executable/code section payload bytes in the deterministic artifact, measured once per (variant, row); total file bytes remain diagnostic | Ratio of candidate sum to baseline sum, so each baseline code byte has fixed weight | Exact ratio at most `1.01` in every cell |
+| Batch compiler wall time (A1, new) | Object batch group: the whole batch process of one variant, from launch through successful wait, paired per batch. Singleton link/self-host groups are not cells, because their process is already the row's compiler wall time | Geometric mean of cell ratios, one equal fixed weight per required object batch group | Upper simultaneous bound at most `1.05` |
+| Batch compiler peak RSS (A1, new) | Object batch group: the batch process's OS child high-water bytes, from the same process. Singleton groups are not cells, as above. Never cross-OS values | Geometric mean of cell ratios, one equal fixed weight per required object batch group | Upper simultaneous bound at most `1.05` |
+| Generated code bytes (A1) | Exact sum of executable/code section payload bytes in the deterministic artifact, measured once per (variant, row) for every code-eligible row on every target; total file bytes remain diagnostic | Ratio of candidate sum to baseline sum, so each baseline code byte has fixed weight | Exact ratio at most `1.01` in every cell |
 | Generated-program runtime | Fresh pinned process executing identical validated logical work; paired elapsed seconds, with workload result checked after every run | Geometric mean of cell ratios, one equal fixed weight per required executable cell | Upper simultaneous bound at most `1.03` |
 
 (A1) A fixture's per-input wall interval covers all of that input's work in the
@@ -274,28 +287,38 @@ record's phase timings are diagnostic, and their sum must not exceed the
 interval. Metrics serialization, driver setup and process teardown fall
 outside every per-input interval.
 
-(A1) The **batch process metrics** are the batch process wall time (launch
-through successful wait) and its OS child peak RSS. They are recorded for every
-warmup and sample and paired by batch in the same blocked order. They are
-published as paired ratios with per-round block medians, and startup is
-reported explicitly as process wall minus the sum of the per-input intervals.
-They are retained evidence, not
-statistical-family members: they carry no threshold and do not enter the
-verdict, because adding them would change the family construction. Their
-figures are never divided among fixtures or folded into per-fixture samples.
-A timed batch whose process metric is missing, zero or inconsistent with its
-per-input intervals is invalid.
+(A1) The **batch process metric pair** (batch compiler wall time and batch
+compiler peak RSS) gates what per-input records cannot see: process startup,
+driver setup, teardown and process-global memory such as lazily grown shared
+tables. Both are recorded for every warmup and sample batch, and both variable
+metrics are paired by batch in the same blocked order. Their cells are the
+object batch groups, and they are statistical-family members under the same
+construction rule as every other variable metric. Their figures are never
+divided among fixtures or folded into per-fixture samples, and per-fixture
+figures are never summed into them. Startup, reported as process wall time
+minus the sum of the per-input intervals, remains diagnostic. A timed batch
+whose process metric is missing, zero or inconsistent with its per-input
+intervals is invalid.
 
 (A1) Code bytes are deterministic, so the independent code-section reader parses
-one frozen artifact per (variant, row) outside timing. Every warmup and sample
-batch must then reproduce, for each of its fixtures, an object byte-identical
-(same SHA-256) to that frozen artifact. The first mismatch makes the experiment
-invalid for nondeterminism. Code-byte observations are no longer repeated in
-every pair.
+one frozen artifact per (variant, code-eligible row) outside timing. The bound
+subject binary produces that artifact with the row's frozen argv; it may be the
+artifact that the service's correctness run already produced for that variant
+and row. For a timed row, every warmup and sample batch must then reproduce, for
+each of its fixtures, an object byte-identical (same SHA-256) to that frozen
+artifact. For a row that is never timed, one further independent compile by the
+same subject binary must reproduce it byte-identically. Untimed rows may be
+compiled in untimed batches of the same form (one configuration and frozen
+argv per batch, multi-input `-c`, frozen order). Each input's object in such a
+batch is that row's artifact, and that input's frozen oracle status and
+diagnostics must still match. The first mismatch makes
+the experiment invalid for nondeterminism. Code-byte observations are no longer
+repeated in every pair.
 
 The primary aggregate upper bound is `1.02` for compiler wall time, `1.02` for
-peak memory (A1: formerly named peak RSS), `1.01` for generated code bytes, and
-`1.03` for generated runtime.
+peak memory (A1: formerly named peak RSS), `1.02` for batch compiler wall time
+(A1), `1.02` for batch compiler peak RSS (A1), `1.01` for generated code bytes,
+and `1.03` for generated runtime.
 Code bytes are deterministic and use the observed exact ratio rather than a
 fabricated confidence interval. A deterministic zero-byte candidate code
 payload is retained as the integer observation `0` and is valid against a
@@ -308,14 +331,16 @@ substituted.
 
 Aggregate results are also recomputed separately for every target, target CPU,
 mode, frontend configuration, and artifact stage. Every slice must satisfy the
-same primary aggregate limit. Wall/memory cells additionally satisfy their 5%
-per-workload guard. Code bytes and generated runtime use their tighter 1% and 3%
+same primary aggregate limit. Wall/memory cells, and batch wall/RSS group
+cells (A1), additionally satisfy their 5% per-workload guard. Code bytes and generated runtime use their tighter 1% and 3%
 limits in every cell. Thus neither an overall mean nor a large workload can hide
 a required target, mode, small workload, or stage regression. No positive result
 in generated code or runtime offsets a wall-time or memory failure. (A1) Over
 the timed projection, the target dimension has the single native-host value.
 That slice is kept rather than removed, so the family construction rule stays
-unchanged.
+unchanged. The batch metric pair uses the same slice dimensions; its target
+and stage slices each have a single value (native host, object stage). Code
+bytes keep all twelve target slices.
 
 The requested-work denominator comes from #508 and is immutable. Reports retain
 both requested and actually performed source bytes, preprocessing tokens,
@@ -376,7 +401,9 @@ pair; the first order and shuffled batch-group order (A1; formerly "cell
 order") come from a recorded positive fixed seed. Reject serial drift, order
 effects, multimodal
 thermal/frequency behavior, or an interval too broad to adjudicate the declared
-budgets. #426 owns the concrete empirical admission calculation and its tested
+budgets. (A1) The batch metric pair is a family member, so its object batch
+group cells face the same A/A drift, order, multimodality and precision
+checks. #426 owns the concrete empirical admission calculation and its tested
 version; it may require a larger fixed sample count, up to the harness limit,
 but may not reduce 60 pairs per round or use an odd pair count.
 
@@ -394,8 +421,9 @@ self-host stage groups. Let `U` be the number of runtime-eligible timed rows,
 `N` the number of result-input rows and `P` the frozen pairs per round. Each
 of the A/A and A/B collections then launches `G * 2 * (2 + 2P)` compiler batch
 processes and `U * 2 * (2 + 2P)` runtime processes, and writes `N * 2P`
-numeric records. At `P = 60` that is `244 G` batch processes per collection
-and `488 G` across A/A and A/B.
+row records plus `B * 2P` batch records, where `B` is the number of object
+batch groups. At `P = 60` that is `244 G` batch processes per collection and
+`488 G` across A/A and A/B.
 
 These are estimates, not an admitted budget. The 16 principal
 `compiler-default` groups give `488 * 16 = 7,808` batch processes. On the
@@ -414,15 +442,19 @@ replaced by a reviewed budget bound into the admitted service recipe. That
 budget is computed from a measured upper bound per batch (by group size) and
 per runtime process, multiplied by the counts above, plus the authenticated
 fixed-phase bounds. Preflight rejects the job before any timing if the
-reviewed budget cannot hold the derived counts.
+reviewed budget cannot hold the derived counts. The untimed cross-target
+code-byte artifacts (A1) cost two batches per variant and untimed batch
+group, outside timing but inside the whole-job reservation and budget.
 
 ## Uncertainty and verdict
 
 For wall time, peak memory (A1: formerly RSS), and generated runtime, the #619
 statistics implementation forms candidate/baseline ratios and publishes
-medians plus one-sided bounds. (A1) Cells remain timed fixture rows. The
-statistics consume per-fixture observations taken from per-input records, never
-batch process metrics. A fixture's pair `(round, pair)` is its batch group's
+medians plus one-sided bounds. (A1) Wall time and peak memory cells remain
+timed fixture rows, whose observations come from per-input records. Batch
+compiler wall time and peak RSS (A1) are the fourth and fifth variable metrics.
+Their cells are object batch groups, and their observations are the batch
+processes' own figures, paired by batch. A fixture's pair `(round, pair)` is its batch group's
 batch pair `(round, pair)` and inherits that batch's AB/BA orientation.
 Each cell is grouped into adjacent two-pair AB/BA blocks; each block statistic
 is the equal-weight geometric mean of its two paired ratios across the member's
@@ -434,7 +466,8 @@ estimates are medians of those block statistics. Bootstrap members resample
 whole paired blocks (the same draw for every cell),
 while exact cells use the defined distribution-free block-median interval. The
 complete family comprises every required aggregate, approved target/CPU/mode/
-frontend/stage slice, and exact cell for all three variable metrics. One logical
+frontend/stage slice, and exact cell for every variable metric (A1: five,
+formerly three). One logical
 scope-free member is assessed exactly once by `tp_retirement_assess`; that call
 emits round-1, round-2 and pooled bounds. There are no separate per-scope calls.
 Bounds are simultaneous at family confidence 95% using the predeclared
@@ -478,8 +511,18 @@ batch coordinate (object rows) or its own process coordinate (singleton
 stage rows and runtime). Records carry `compiler_wall_time`,
 `compiler_peak_memory` and, where eligible, `generated_runtime`. They no
 longer carry `generated_code_bytes`. The sealed result instead binds one
-code-byte record per code-eligible timed row, holding the frozen baseline and
-candidate code-section bytes and digests. The code-byte summary is computed
+code-byte record per code-eligible row on every target, holding the frozen
+baseline and candidate code-section bytes and digests and the reproduction
+digest.
+
+(A1) The batch metric pair has its own result-input population: every object
+batch group, in ascending group ordinal. It uses the same coordinate schema,
+with record identity `group-round-pair` and the linear ordinal
+`(group_ordinal * rounds + round) * pairs + pair`. Each record carries
+`compiler_batch_wall_time` and `compiler_batch_peak_rss`, and its
+`(round, pair)` is the batch coordinate. It is streamed through the same #615
+verifier as its own contiguous partition set, and the sealed result binds its
+manifest and shard digests. The code-byte summary is computed
 from those records. The native-host population is far below the 16,777,216
 record cap (one partition at any admitted pair count). The 39,518,208-record
 ceiling, the three-partition bound and the 254-pair collection maximum are
@@ -571,7 +614,9 @@ the expected batch exit status. For a batched object row, the row contract's
 compiler-command digest is its group's batch command digest. Its
 output-artifact digest remains that fixture's own object, and its code facts
 remain the once-parsed frozen artifact. Rows outside the timed projection carry
-explicit null timing and code fields. Each control binds its expected status
+explicit null timing fields. Where code eligible, they bind the frozen
+artifact, its reproduction digest and its code facts; otherwise their code
+fields are null too. Each control binds its expected status
 and diagnostic digest.
 
 The schedule is the versioned #619
@@ -622,7 +667,8 @@ observation; a positive number alone is insufficient.
 
 (A1) A compiler invocation record describes one batch process. It names its
 batch group instead of one canonical row, and its wall seconds and peak-RSS
-bytes are the batch process metrics. Its output digest is the SHA-256 of the
+bytes are the batch process metrics. Each batch metric sample must equal the
+authenticated observation of its batch process. Its output digest is the SHA-256 of the
 ordered per-input object digests, and it adds the `{path,bytes,sha256}` of that
 batch's per-input metrics artifact. Its code-section fields are null because
 code is checked per input against the frozen artifact. The validator streams

@@ -57,8 +57,8 @@ ceiling, the 254-pair maximum, and the lease, supervisor and replay rules.
 **Pins (required follow-up; pin values were deliberately not changed here)**
 - `tools/bench_service/queue.c` (`bq_native_retirement_blocked_profile`) and
   `tools/bench_service/profiles/native-retirement-performance-v1.blocked`:
-  update `contract-sha256`. The old pin is `67fff9a8…a431b0`; the value
-  follows the final approved bytes. `tools/bench_service/tests.c` enforces
+  update `contract-sha256`. The old pin was `67fff9a8…a431b0`; it is now
+  `59fe93e4…331199` (done, after the 2026-09-29 decision). `tools/bench_service/tests.c` enforces
   the pin and fails until it is updated. The `binding-validator-sha256` pin
   changes again when the validator lands; `statistics-sha256` does not if
   `retirement_stats.h` stays untouched.
@@ -185,6 +185,22 @@ ceiling, the 254-pair maximum, and the lease, supervisor and replay rules.
   `TRUST_IMPLEMENTATION_PATHS` file. Update its path and copy lists only if new
   files are added (e.g. the metrics reader), and only through the trusted
   transition.
+
+## Decisions (2026-09-29, #36 comment 5887192510)
+
+- A1 approved.
+- Q2: batch process wall time and peak RSS are their own gated metric pair
+  (`compiler_batch_wall_time`, `compiler_batch_peak_rss`), with object batch
+  groups as cells, under the 1.02 aggregate / 1.05 per-cell limits. This is a
+  family change. `retirement_stats.h` needs `TP_RETIREMENT_VARIABLE_METRICS`
+  = 5, so `statistics-sha256` changes. There is a new `group-round-pair`
+  result-input population, validator members, #619 series and A/A precision.
+- Q3: follows from Q2; batch cells take full A/A qualification.
+- Q9: the cross-target code-byte gate is kept. Untimed code-eligible rows get
+  a frozen artifact plus a reproduction compile (batchable, untimed), and a
+  code record per row on all 12 targets.
+- Q13: the #36 permalink is in the A1 header.
+- Others: the recommended defaults as drafted.
 
 ## (c) Open questions (each with a recommended default)
 
