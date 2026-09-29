@@ -5,9 +5,13 @@ ConditionPathExists=/etc/buster-bench/systemd-broker-lease.identity
 [Service]
 Type=exec
 User=root
-Group=root
+Group=buster-bench
+SupplementaryGroups=buster-bench-candidate
 UMask=0077
-ExecStart=/usr/local/libexec/buster-bench-systemd-broker serve-connection
+# The static entry gate verifies the installed accounts, credentials, empty
+# capabilities, NNP/seccomp, read-only mounts and connected FD0, records one
+# BQ-BROKER-ENTRY-V1 PASS line, then fexecve()s the fixed broker in this PID.
+ExecStart=/usr/local/libexec/buster-bench-broker-entry-gate
 StandardInput=socket
 StandardOutput=journal
 StandardError=journal
