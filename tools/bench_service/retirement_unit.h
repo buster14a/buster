@@ -156,14 +156,16 @@ BUSTER_F_DECL BqError bq_retirement_unit_gate(BqRetirementProjection const* proj
 #define BQ_RETIREMENT_UNIT_READY_DIRECTORY "retirement-ready"
 
 /* Design step 10. Refuses an unadmitted gate with BQ_RECIPE_MISMATCH before
- * touching the attempt, so production writes nothing until #509. Otherwise
- * it rechecks the prepared, built, projected and oracle objects together,
- * seals retirement-work/reference-oracle/ 0500 and rehashes its exact
- * closure, then writes the canonical BQ-RETIREMENT-READY-V1 record into a
- * new retirement-ready/ (O_EXCL temporary, fsync, link to ready-<digest>,
- * unlink, seal 0500, fsync). A second record into one attempt is refused.
- * ready_sha256 receives the record digest, which the coordinator must
- * receive over an authenticated channel for bq_retirement_unit_replay. */
+ * examining any object or the attempt, so production writes nothing until
+ * #509. Otherwise it rechecks the prepared, built, projected and oracle
+ * objects together, seals retirement-work/reference-oracle/ 0500, rehashes
+ * its exact closure against the authority and formats the canonical
+ * BQ-RETIREMENT-READY-V1 record; only then does it create a new, durable
+ * retirement-ready/ and publish the record (O_EXCL temporary, fsync, link
+ * to ready-<digest>, unlink, seal 0500, fsync). A second record into one
+ * attempt is refused. ready_sha256 receives the digest of a published
+ * record, which the coordinator must receive over an authenticated channel
+ * for bq_retirement_unit_replay. */
 BUSTER_F_DECL BqError bq_retirement_unit_ready(BqRetirementUnitPrepared const* prepared,
     BqRetirementUnitBuilt const* built, BqRetirementProjection const* projection,
     BqRetirementUnitOracle const* oracle, BqRetirementUnitGate const* gate, int workspaces,

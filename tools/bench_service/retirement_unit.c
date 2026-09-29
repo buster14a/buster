@@ -59,6 +59,12 @@
  */
 #include "retirement_unit.h"
 
+/* The installed service (build.c passes BQ_SERVICE_INSTALLED for its main.c
+ * and tests.c) must never compile the test-only gate issuer. */
+#if defined(BQ_SERVICE_INSTALLED) && defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
+#error "the installed service must not define BQ_RETIREMENT_CORRECTNESS_TEST_ONLY"
+#endif
+
 BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_file(int directory, char const* name)
 {
     struct stat info = {0};
@@ -1042,7 +1048,9 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_reference_files(int directory, BqRet
 
 /* The references an honest oracle run leaves, from the template and the
  * rehashed reference-oracle/ closure, each runtime command rebuilt from its
- * recorded descriptor numbers; outputs receives each observed output digest. */
+ * recorded descriptor numbers; outputs receives each observed output digest.
+ * The producer runs every reference in one output directory, which is never
+ * the reference binary's descriptor. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_reference_observe(int directory, BqRetirementUnitPrepared const* prepared,
     int const* descriptors, BqRetirementOracleReference* references, char (*outputs)[SHA256_HEX_CAPACITY])
 {
@@ -1062,7 +1070,8 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_reference_observe(int directory, BqR
         memcpy(reference->build_command_sha256, approved->build_command_sha256, SHA256_HEX_CAPACITY);
         memcpy(reference->logical_command_sha256, approved->logical_command_sha256, SHA256_HEX_CAPACITY);
         memcpy(reference->output_name, approved->output_name, BQ_RETIREMENT_OUTPUT_NAME_CAP);
-        ok = bq_retirement_unit_reference_files(directory, prepared, index, digests) &&
+        ok = descriptors[2u * index + 1u] == descriptors[1] && descriptors[2u * index] != descriptors[1] &&
+             bq_retirement_unit_reference_files(directory, prepared, index, digests) &&
              bq_retirement_unit_runtime_sha(policy->plan.rows + index, descriptors[2u * index],
                                             descriptors[2u * index + 1u], reference->command_sha256, logical) &&
              !strcmp(logical, approved->logical_command_sha256);
@@ -1119,51 +1128,50 @@ BqError bq_retirement_unit_ready(BqRetirementUnitPrepared const* prepared, BqRet
 {
     if (ready_sha256) ready_sha256[0] = 0;
     BqRetirementOracleAuthority const* authority = oracle ? &oracle->authority : NULL;
-    char population[SHA256_HEX_CAPACITY] = {0}, attempt_name[64];
-    bool ok = ready_sha256 && prepared && prepared->owned && built && built->owned && projection &&
-              projection->owned && projection->rows && oracle && oracle->owned && oracle->descriptors &&
-              workspaces >= 0 && projection->job_id == prepared->job.id &&
-              projection->attempt_token == prepared->job.token && authority->job_id == prepared->job.id &&
-              authority->attempt_token == prepared->job.token && authority->template == &prepared->policy.template &&
-              authority->ledger.rows == projection->rows &&
-              !strcmp(projection->prepared.preparation_sha256, prepared->preparation_sha256) &&
-              bq_workspace_name(attempt_name, prepared->job.id, prepared->job.token);
-    for (u32 side = 0; ok && side < 2; side += 1)
-        ok = !strcmp(projection->prepared.binary_sha256[side], built->binaries.verified.binary_sha256[side]);
-    ok = ok && bq_retirement_oracle_population_hash(projection->rows, projection->prepared.rows, population) &&
-         !memcmp(population, projection->population_sha256, SHA256_HEX_CAPACITY) &&
-         bq_retirement_oracle_authority_ready(authority) && !strcmp(oracle->attempt_sha256, authority->attempt_sha256);
     BqRetirementUnitReadyFacts facts = {.job = prepared ? &prepared->job : NULL, .projection = projection,
         .authority = authority, .descriptors = oracle ? oracle->descriptors : NULL,
         .binary_record_sha256 = built ? built->binary_record_sha256 : NULL,
         .build_record_sha256 = built ? built->build_record_sha256 : NULL,
         .template_sha256 = prepared ? prepared->policy.template_sha256 : NULL,
         .inventory_sha256 = prepared ? prepared->policy.inventory_sha256 : NULL};
-    ok = ok && bq_retirement_unit_attempt_sha(&prepared->job, facts.attempt_sha256);
-    BqError result = ok ? BQ_OK : BQ_BAD_REQUEST;
-    /* Design step 9 must have admitted this exact attempt; until #509 no
-     * production issuer exists, so nothing below runs in production. */
-    if (result == BQ_OK && !(gate && gate->issuer == BQ_RETIREMENT_UNIT_GATE_ISSUED &&
-                             bq_retirement_unit_gate_sealed(gate->seal_sha256, &facts)))
-        result = BQ_RECIPE_MISMATCH;
+    /* Design step 9 must have admitted this exact attempt. Until #509 no
+     * production issuer or verifier exists, so production refuses here,
+     * before any object or the attempt is examined. */
+    bool admitted = gate && gate->issuer == BQ_RETIREMENT_UNIT_GATE_ISSUED &&
+                    (!prepared || bq_retirement_unit_attempt_sha(&prepared->job, facts.attempt_sha256)) &&
+                    bq_retirement_unit_gate_sealed(gate->seal_sha256, &facts);
+    char population[SHA256_HEX_CAPACITY] = {0};
+    bool ok = admitted && ready_sha256 && prepared && prepared->owned && built && built->owned && projection &&
+              projection->owned && projection->rows && oracle && oracle->owned && oracle->descriptors &&
+              workspaces >= 0 && projection->job_id == prepared->job.id &&
+              projection->attempt_token == prepared->job.token && authority->job_id == prepared->job.id &&
+              authority->attempt_token == prepared->job.token && authority->template == &prepared->policy.template &&
+              authority->ledger.rows == projection->rows &&
+              !strcmp(projection->prepared.preparation_sha256, prepared->preparation_sha256);
+    for (u32 side = 0; ok && side < 2; side += 1)
+        ok = !strcmp(projection->prepared.binary_sha256[side], built->binaries.verified.binary_sha256[side]);
+    ok = ok && bq_retirement_oracle_population_hash(projection->rows, projection->prepared.rows, population) &&
+         !memcmp(population, projection->population_sha256, SHA256_HEX_CAPACITY) &&
+         bq_retirement_oracle_authority_ready(authority) && !strcmp(oracle->attempt_sha256, authority->attempt_sha256);
+    BqError result = !admitted ? BQ_RECIPE_MISMATCH : ok ? BQ_OK : BQ_BAD_REQUEST;
     if (result == BQ_OK) memcpy(facts.gate_sha256, gate->seal_sha256, SHA256_HEX_CAPACITY);
-    int attempt = result == BQ_OK ? openat(workspaces, attempt_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    bool created = false;
-    int ready = attempt >= 0 && bq_workspace_seal(attempt, &prepared->job, false) ?
-                bq_create_inherited_group_directory(attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, 02700, &created) : -1;
-    if (result == BQ_OK && (ready < 0 || !created)) result = BQ_WORKSPACE_MISMATCH;
-    /* Freeze the producer's output directory before hashing what the record
-     * binds, then require the files to be exactly the authority's. */
+    /* Freeze the producer's output directory, require its files to be
+     * exactly the authority's and format the record, all before
+     * retirement-ready/ exists: a failure here leaves the attempt able to
+     * write its record later. */
     int reference = result == BQ_OK ? bq_retirement_unit_attempt_open(workspaces, &prepared->job,
         BQ_RETIREMENT_BUILD_WORK_DIRECTORY, BQ_RETIREMENT_UNIT_REFERENCE_DIRECTORY) : -1;
     if (result == BQ_OK && !(reference >= 0 && bq_owned_directory(reference, true, false) &&
                              fchmod(reference, BQ_RETIREMENT_EXPORT_MODE) == 0 && fsync(reference) == 0))
         result = BQ_WORKSPACE_MISMATCH;
     u32 count = result == BQ_OK ? authority->ledger.count : 0;
+    u32 capacity = BQ_RETIREMENT_UNIT_READY_HEADER_CAP + BQ_RETIREMENT_UNIT_READY_ROW_CAP * count;
     BqRetirementOracleReference* observed = count ? calloc(count, sizeof(*observed)) : NULL;
     char (*outputs)[SHA256_HEX_CAPACITY] = count ? calloc(count, sizeof(*outputs)) : NULL;
+    char* text = count ? malloc(capacity) : NULL;
+    if (result == BQ_OK && !(observed && outputs && text)) result = BQ_IO;
     if (result == BQ_OK)
-        result = observed && outputs && count == prepared->policy.template.reference_count &&
+        result = count == prepared->policy.template.reference_count &&
                  bq_retirement_unit_reference_observe(reference, prepared, oracle->descriptors, observed, outputs) ?
                  BQ_OK : BQ_SOURCE_MISMATCH;
     for (u32 index = 0; result == BQ_OK && index < count; index += 1)
@@ -1176,31 +1184,40 @@ BqError bq_retirement_unit_ready(BqRetirementUnitPrepared const* prepared, BqRet
                     !strcmp(outputs[index], projection->rows[held->row].independent_oracle_sha256);
         if (!same) result = BQ_SOURCE_MISMATCH;
     }
-    u32 capacity = BQ_RETIREMENT_UNIT_READY_HEADER_CAP + BQ_RETIREMENT_UNIT_READY_ROW_CAP * count;
-    char* text = result == BQ_OK ? malloc(capacity) : NULL;
     u32 length = 0;
     char digest[SHA256_HEX_CAPACITY] = {0};
     if (result == BQ_OK)
-        result = text && bq_retirement_unit_ready_format(&facts, text, capacity, &length) ? BQ_OK : BQ_CORRUPT;
-    if (result == BQ_OK)
-    {
-        bq_digest(text, length, (char8*)digest);
-        result = bq_retirement_unit_ready_publish(ready, prepared->job.id, text, length, digest) &&
-                 fsync(attempt) == 0 ? BQ_OK : BQ_IO;
-    }
+        result = bq_retirement_unit_ready_format(&facts, text, capacity, &length) ? BQ_OK : BQ_CORRUPT;
+    if (result == BQ_OK) bq_digest(text, length, (char8*)digest);
+    /* The new directory's entry is made durable in the attempt before the
+     * record is written, so a successful publish needs no later fsync and
+     * returns its digest. */
+    char attempt_name[64];
+    int attempt = result == BQ_OK && bq_workspace_name(attempt_name, prepared->job.id, prepared->job.token) ?
+                  openat(workspaces, attempt_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    bool created = false;
+    int ready = attempt >= 0 && bq_workspace_seal(attempt, &prepared->job, false) ?
+                bq_create_inherited_group_directory(attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, 02700, &created) : -1;
+    if (result == BQ_OK && (ready < 0 || !created)) result = BQ_WORKSPACE_MISMATCH;
+    if (result == BQ_OK && fsync(attempt) != 0) result = BQ_IO;
+    bool published = result == BQ_OK && bq_retirement_unit_ready_publish(ready, prepared->job.id, text, length, digest);
+    if (result == BQ_OK && !published) result = BQ_IO;
     free(text);
     free(outputs);
     free(observed);
-    if (reference >= 0 && close(reference) != 0 && result == BQ_OK) result = BQ_IO;
-    if (ready >= 0 && close(ready) != 0 && result == BQ_OK) result = BQ_IO;
-    if (attempt >= 0 && close(attempt) != 0 && result == BQ_OK) result = BQ_IO;
-    if (result == BQ_OK) memcpy(ready_sha256, digest, SHA256_HEX_CAPACITY);
+    /* result is BQ_OK exactly when the record is published, and a failed
+     * close of a read-only descriptor cannot undo that durable record. */
+    if (reference >= 0) close(reference);
+    if (ready >= 0) close(ready);
+    if (attempt >= 0) close(attempt);
+    if (published) memcpy(ready_sha256, digest, SHA256_HEX_CAPACITY);
     return result;
 }
 
 /* A record's 64-hex value after "\n<key>". Only the build digests, the gate
- * seal and the runtime descriptor numbers are read from the record; the
- * replay recomputes everything else and compares the whole byte stream. */
+ * seal, the runtime descriptor numbers and the command digests they must
+ * rebuild are read from the record; the replay recomputes everything else
+ * and compares the whole byte stream. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_ready_value(char const* text, char const* key,
     char value[SHA256_HEX_CAPACITY])
 {
@@ -1218,18 +1235,51 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_ready_value(char const* text, char c
     return ok;
 }
 
-BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_ready_descriptors(char const* text, u32 count, int* descriptors)
+/* One observed line after "observed=": six canonical decimal fields, four
+ * digests and a name, each bounded by its separator. Keeps the descriptor
+ * numbers and the recorded command digest; returns the line's end. */
+BUSTER_GLOBAL_LOCAL char const* bq_retirement_unit_ready_row(char const* line, u32 index, int descriptors[2],
+    char command[SHA256_HEX_CAPACITY])
+{
+    u64 values[6] = {0};
+    bool ok = true;
+    for (u32 field = 0; ok && field < 10; field += 1)
+    {
+        size_t length = strcspn(line, " \n");
+        ok = length > 0 && line[length] == ' ';
+        if (ok && field < 6)
+        {
+            IntegerParsingU64 parsed = string8_parse_u64_decimal((String8){(char8*)line, length});
+            ok = length <= 10 && parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == length;
+            values[field] = parsed.value;
+        }
+        if (ok && field == 9)
+        {
+            ok = length == 64 && bq_retirement_hex((String8){(char8*)line, 64}, 64);
+            if (ok) memcpy(command, line, 64);
+            command[64] = 0;
+        }
+        if (ok) line += length + 1;
+    }
+    ok = ok && values[0] == index && values[4] <= INT_MAX && values[5] <= INT_MAX;
+    if (ok)
+    {
+        descriptors[0] = (int)values[4];
+        descriptors[1] = (int)values[5];
+    }
+    char const* end = ok ? strchr(line, '\n') : NULL;
+    return end;
+}
+
+/* The observed lines must follow one another, in index order. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_ready_rows(char const* text, u32 count, int* descriptors,
+    char (*commands)[SHA256_HEX_CAPACITY])
 {
     char const* cursor = strstr(text, "\nobserved=");
-    bool ok = true;
-    for (u32 index = 0; ok && index < count; index += 1)
-    {
-        unsigned declared = 0, row = 0, census = 0, target = 0;
-        ok = cursor && sscanf(cursor, "\nobserved=%u %u %u %u %d %d", &declared, &row, &census, &target,
-                              descriptors + 2u * index, descriptors + 2u * index + 1u) == 6 && declared == index;
-        cursor = ok ? strstr(cursor + 1, "\nobserved=") : NULL;
-    }
-    return ok;
+    for (u32 index = 0; cursor && index < count; index += 1)
+        cursor = !strncmp(cursor, "\nobserved=", 10) ?
+                 bq_retirement_unit_ready_row(cursor + 10, index, descriptors + 2u * index, commands[index]) : NULL;
+    return cursor != NULL;
 }
 
 /* Re-import the matched builds and hold both binaries, as the unit's own
@@ -1278,7 +1328,10 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_replay_authority(BqRetirementUnitPre
     {
         BqRetirementTrustedRow* row = references[index].row < projection->prepared.rows ?
                                       projection->rows + references[index].row : NULL;
-        ok = row && !row->independent_oracle_sha256[0];
+        /* authority_next's rule: a reference is neither matched binary. */
+        ok = row && !row->independent_oracle_sha256[0] &&
+             strcmp(references[index].binary_sha256, projection->prepared.binary_sha256[0]) &&
+             strcmp(references[index].binary_sha256, projection->prepared.binary_sha256[1]);
         if (ok) memcpy(row->independent_oracle_sha256, outputs[index], SHA256_HEX_CAPACITY);
     }
     *authority = (BqRetirementOracleAuthority){.template = template, .references = references,
@@ -1335,7 +1388,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_replay_pinned(BqRetirementStore s
     int* descriptors = count ? calloc(2u * (size_t)count, sizeof(*descriptors)) : NULL;
     BqRetirementOracleReference* references = count ? calloc(count, sizeof(*references)) : NULL;
     char (*outputs)[SHA256_HEX_CAPACITY] = count ? calloc(count, sizeof(*outputs)) : NULL;
-    if (result == BQ_OK && !(text && expected && descriptors && references && outputs)) result = BQ_IO;
+    char (*commands)[SHA256_HEX_CAPACITY] = count ? calloc(count, sizeof(*commands)) : NULL;
+    if (result == BQ_OK && !(text && expected && descriptors && references && outputs && commands)) result = BQ_IO;
     if (result == BQ_OK && !(ready >= 0 && bq_retirement_unit_closed(ready, NULL, name, true)))
         result = BQ_WORKSPACE_MISMATCH;
     u32 length = 0;
@@ -1350,7 +1404,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_replay_pinned(BqRetirementStore s
                  bq_retirement_unit_ready_value(text, "binaries=", binary_record) &&
                  bq_retirement_unit_ready_value(text, "matched-builds=", build_record) &&
                  bq_retirement_unit_ready_value(text, "gate=admitted ", gate_seal) &&
-                 bq_retirement_unit_ready_descriptors(text, count, descriptors) ? BQ_OK : BQ_CORRUPT;
+                 bq_retirement_unit_ready_rows(text, count, descriptors, commands) ? BQ_OK : BQ_CORRUPT;
     }
     if (result == BQ_OK)
         result = bq_retirement_unit_built_import(store, &prepared, workspaces, installed, workspace_root, profile,
@@ -1364,6 +1418,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_replay_pinned(BqRetirementStore s
         result = reference >= 0 && bq_retirement_unit_reference_observe(reference, &prepared, descriptors,
                                                                         references, outputs) ?
                  BQ_OK : BQ_SOURCE_MISMATCH;
+    /* Each recorded command digest must be the one its descriptor numbers
+     * rebuild. */
+    for (u32 index = 0; result == BQ_OK && index < count; index += 1)
+        if (strcmp(references[index].command_sha256, commands[index])) result = BQ_SOURCE_MISMATCH;
     BqRetirementOracleAuthority authority = {0};
     if (result == BQ_OK)
         result = bq_retirement_unit_replay_authority(&prepared, &projection, references, outputs, &authority) ?
@@ -1382,6 +1440,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_replay_pinned(BqRetirementStore s
                  expected_length == length && !memcmp(expected, text, length) ? BQ_OK : BQ_CORRUPT;
     if (reference >= 0 && close(reference) != 0 && result == BQ_OK) result = BQ_IO;
     if (ready >= 0 && close(ready) != 0 && result == BQ_OK) result = BQ_IO;
+    free(commands);
     free(outputs);
     free(references);
     free(descriptors);
