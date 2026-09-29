@@ -25,6 +25,12 @@
  *   bq_retirement_unit_oracle       design steps 7-8: oracle authority and
  *                                   reference producer over those rows
  *   bq_retirement_unit_oracle_release
+ *   bq_retirement_unit_gate         design step 9: the correctness gate,
+ *                                   fail-closed until #509
+ *   bq_retirement_unit_ready        design step 10: the durable ready record,
+ *                                   only for an admitted gate
+ *   bq_retirement_unit_replay       coordinator side: re-derive and compare
+ *                                   every digest the record binds
  *
  * Map: bq_retirement_unit_store_closed checks the sealed export's exact
  * contents; bq_retirement_unit_prepare_pinned is the profile seam that the
@@ -37,11 +43,19 @@
  * the profile seams of steps 6 to 8; bq_retirement_unit_source_root holds one
  * of A's materialized copies for the producer and
  * bq_retirement_unit_stop_reason maps a failed step to cancellation or
- * timeout.
+ * timeout. BqRetirementUnitReadyFacts and bq_retirement_unit_ready_format
+ * define the record both sides format; bq_retirement_unit_gate_sealed is the
+ * only gate verifier (the test-only bq_retirement_unit_gate_fixture_admit
+ * issuer exists only under BQ_RETIREMENT_CORRECTNESS_TEST_ONLY);
+ * bq_retirement_unit_reference_observe rehashes reference-oracle/ and
+ * rebuilds each runtime command; bq_retirement_unit_replay_authority rebuilds
+ * the finished oracle authority; bq_retirement_unit_ready_publish is the
+ * temporary-then-link write.
  *
  * The retirement recipe stays unadmitted and bq_worker_unit calls none of
- * these yet. The correctness gate after step 8 stays fail-closed; nothing
- * here is a correctness verdict or a timing fact.
+ * these yet. The correctness gate after step 8 stays fail-closed, so the
+ * ready record is never written in production; nothing here is a
+ * correctness verdict or a timing fact.
  */
 #include "retirement_unit.h"
 
@@ -549,7 +563,11 @@ BqError bq_retirement_unit_project(BqRetirementStore store, BqRetirementUnitPrep
 bool bq_retirement_unit_oracle_release(BqRetirementUnitOracle* oracle)
 {
     bool ok = oracle != NULL;
-    if (oracle && oracle->owned) free(oracle->references);
+    if (oracle && oracle->owned)
+    {
+        free(oracle->references);
+        free(oracle->descriptors);
+    }
     if (oracle) *oracle = (BqRetirementUnitOracle){0};
     return ok;
 }
@@ -644,8 +662,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_oracle_pinned(BqRetirementUnitPre
         calloc(references, sizeof(*reference_workspace)) : NULL;
     BqRetirementReferenceSourceFile* source_workspace = references ?
         calloc(references, sizeof(*source_workspace)) : NULL;
+    int* descriptors = references ? calloc(2u * (size_t)references, sizeof(*descriptors)) : NULL;
     if (result == BQ_OK)
-        result = reference_workspace && source_workspace && policy->plan.count == references &&
+        result = reference_workspace && source_workspace && descriptors && policy->plan.count == references &&
                  bq_retirement_oracle_authority_begin(&oracle->authority, &policy->template, policy->template_sha256,
                      &projection->prepared, projection->rows, reference_workspace, references, prepared->job.id,
                      prepared->job.token) ? BQ_OK : BQ_SOURCE_MISMATCH;
@@ -679,6 +698,11 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_oracle_pinned(BqRetirementUnitPre
         u64 step = bq_retirement_unit_step_deadline(deadline_ns);
         bool built = bq_retirement_reference_producer_next(&producer, cancellation_fd, step, &token) &&
                      bq_retirement_reference_producer_runtime(&producer, token, &runtime);
+        if (built)
+        {
+            descriptors[2u * index] = token->binary;
+            descriptors[2u * index + 1u] = output;
+        }
         bool observed = built && bq_retirement_oracle_authority_next(&oracle->authority, token, &runtime.command,
                                                                      runtime.output, cancellation_fd, step);
         /* step never exceeds deadline_ns, so an expired step is a timeout. */
@@ -700,12 +724,14 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_oracle_pinned(BqRetirementUnitPre
     if (result == BQ_OK)
     {
         oracle->references = reference_workspace;
+        oracle->descriptors = descriptors;
         memcpy(oracle->attempt_sha256, oracle->authority.attempt_sha256, SHA256_HEX_CAPACITY);
         oracle->owned = 1;
     }
     else
     {
         free(reference_workspace);
+        free(descriptors);
         if (fresh) *oracle = (BqRetirementUnitOracle){0};
     }
     return result;
@@ -717,5 +743,663 @@ BqError bq_retirement_unit_oracle(BqRetirementUnitPrepared const* prepared, BqRe
     String8 profile = bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
     BqError result = bq_retirement_unit_oracle_pinned(prepared, projection, workspaces, profile, cancellation_fd,
                                                       deadline_ns, oracle);
+    return result;
+}
+
+/* Correctness gate, ready record and coordinator replay (#1020 PR 4, design
+ * steps 9 and 10). */
+BqError bq_retirement_unit_gate(BqRetirementProjection const* projection, BqRetirementUnitOracle const* oracle,
+                                BqRetirementUnitGate* gate)
+{
+    if (gate) *gate = (BqRetirementUnitGate){0};
+    BqRetirementCorrectness correctness = {0};
+    BqRetirementHeldBinaries held = {.descriptors = {-1, -1}};
+    BqError result = gate && oracle && oracle->owned && bq_retirement_oracle_authority_ready(&oracle->authority) ?
+        bq_retirement_correctness_begin_service(projection, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, &held,
+                                                &correctness) : BQ_BAD_REQUEST;
+    /* No #509 check or row facts exist to finish a begun gate, so even a
+     * begin that succeeded would not be an admission. */
+    if (result == BQ_OK) result = BQ_RECIPE_MISMATCH;
+    if (held.owned) bq_retirement_binaries_release(&held);
+    return result;
+}
+
+/* Header lines, then one observed line per reference (at most ~470 bytes). */
+#define BQ_RETIREMENT_UNIT_READY_HEADER_CAP 4096u
+#define BQ_RETIREMENT_UNIT_READY_ROW_CAP 512u
+/* Set only by an issuer the ready record accepts: today the test fixture. */
+#define BQ_RETIREMENT_UNIT_GATE_ISSUED 1u
+/* The producer's receipt is bounded by its own 1024-byte formatter. */
+#define BQ_RETIREMENT_UNIT_RECEIPT_CAP 1024u
+
+/* Everything one ready record binds. The writer fills it from the live
+ * unit objects, the replay from facts it re-derived itself. */
+typedef struct BqRetirementUnitReadyFacts
+{
+    BqJob const* job;
+    BqRetirementProjection const* projection;
+    BqRetirementOracleAuthority const* authority;
+    int const* descriptors;
+    char const* binary_record_sha256;
+    char const* build_record_sha256;
+    char const* template_sha256;
+    char const* inventory_sha256;
+    char attempt_sha256[SHA256_HEX_CAPACITY];
+    char gate_sha256[SHA256_HEX_CAPACITY];
+} BqRetirementUnitReadyFacts;
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_hex(char const* value)
+{
+    bool ok = value && strnlen(value, SHA256_HEX_CAPACITY) == 64 && bq_retirement_hex(string_from_pointer(value), 64);
+    return ok;
+}
+
+/* The attempt digest is the SHA-256 of the attempt's canonical .identity
+ * seal: job, token, request digest, recipe and both commits. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_attempt_sha(BqJob const* job, char digest[SHA256_HEX_CAPACITY])
+{
+    char bytes[512];
+    u32 size = 0;
+    bool ok = bq_workspace_seal_bytes(job, bytes, &size) && size > 0;
+    if (ok) bq_digest(bytes, size, (char8*)digest);
+    return ok;
+}
+
+#if defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_gate_fixture_seal(BqRetirementUnitReadyFacts const* facts,
+    char digest[SHA256_HEX_CAPACITY])
+{
+    bool ok = facts && facts->projection && facts->authority && bq_retirement_unit_hex(facts->attempt_sha256) &&
+              bq_retirement_unit_hex(facts->projection->prepared.preparation_sha256) &&
+              bq_retirement_unit_hex(facts->projection->population_sha256) &&
+              bq_retirement_unit_hex(facts->authority->attempt_sha256);
+    if (ok)
+    {
+        Sha256 hash;
+        sha256_init(&hash);
+        static char const domain[] = "bq-retirement-unit-gate-fixture-v1";
+        sha256_add(&hash, domain, sizeof(domain) - 1);
+        sha256_add(&hash, facts->attempt_sha256, 64);
+        sha256_add(&hash, facts->projection->prepared.preparation_sha256, 64);
+        sha256_add(&hash, facts->projection->population_sha256, 64);
+        sha256_add(&hash, facts->authority->attempt_sha256, 64);
+        sha256_finish_hex(&hash, digest);
+    }
+    return ok;
+}
+
+/* Test-only stand-in for #509's admitted gate, binding the attempt, A, the
+ * population and the oracle attempt. The service binary never defines
+ * BQ_RETIREMENT_CORRECTNESS_TEST_ONLY, so it has no issuer at all. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_gate_fixture_admit(BqRetirementUnitPrepared const* prepared,
+    BqRetirementProjection const* projection, BqRetirementUnitOracle const* oracle, BqRetirementUnitGate* gate)
+{
+    BqRetirementUnitReadyFacts facts = {.job = prepared ? &prepared->job : NULL, .projection = projection,
+                                        .authority = oracle ? &oracle->authority : NULL};
+    bool ok = gate && prepared && prepared->owned && projection && projection->owned && oracle && oracle->owned &&
+              bq_retirement_unit_attempt_sha(&prepared->job, facts.attempt_sha256) &&
+              bq_retirement_unit_gate_fixture_seal(&facts, gate->seal_sha256);
+    if (gate && !ok) *gate = (BqRetirementUnitGate){0};
+    if (ok) gate->issuer = BQ_RETIREMENT_UNIT_GATE_ISSUED;
+    return ok;
+}
+#endif
+
+/* Whether seal is an admission of exactly these facts. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_gate_sealed(char const seal[SHA256_HEX_CAPACITY],
+    BqRetirementUnitReadyFacts const* facts)
+{
+#if defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
+    char expected[SHA256_HEX_CAPACITY] = {0};
+    bool ok = seal && bq_retirement_unit_gate_fixture_seal(facts, expected) &&
+              !memcmp(expected, seal, SHA256_HEX_CAPACITY);
+#else
+    /* #509: no production gate issues or verifies an admission yet. */
+    BUSTER_UNUSED(seal);
+    BUSTER_UNUSED(facts);
+    bool ok = false;
+#endif
+    return ok;
+}
+
+/* The canonical BQ-RETIREMENT-READY-V1 bytes for facts. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_ready_format(BqRetirementUnitReadyFacts const* facts, char* text,
+    u32 capacity, u32* length)
+{
+    BqRetirementProjection const* projection = facts->projection;
+    BqRetirementPrepared const* prepared = &projection->prepared;
+    BqRetirementOracleAuthority const* authority = facts->authority;
+    char const* digests[] = {facts->attempt_sha256, facts->job->digest, prepared->preparation_sha256,
+        facts->binary_record_sha256, facts->build_record_sha256, prepared->binary_sha256[0],
+        prepared->binary_sha256[1], prepared->support_sha256, prepared->census_sha256,
+        projection->population_sha256, projection->evidence_sha256, facts->template_sha256,
+        facts->inventory_sha256, authority->attempt_sha256, authority->observed_sha256, facts->gate_sha256};
+    bool ok = true;
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(digests); index += 1) ok = bq_retirement_unit_hex(digests[index]);
+    int used = ok ? snprintf(text, capacity, "BQ-RETIREMENT-READY-V1\njob=%" PRIu64 "\nattempt=%" PRIu64
+        "\nattempt-identity=%s\nrequest=%s\npreparation=%s\nbinaries=%s\nmatched-builds=%s\nbinary-base=%s\n"
+        "binary-candidate=%s\nsupport=%s\ncensus=%s\npopulation=%s\nrows=%u\nobject-rows=%u\nnative-target=%u\n"
+        "evidence=%s\ntemplate=%s\ninventory=%s\noracle-attempt=%s\noracle-observed=%s\nobserved-rows=%u\n",
+        (uint64_t)facts->job->id, (uint64_t)facts->job->token, digests[0], digests[1], digests[2], digests[3],
+        digests[4], digests[5], digests[6], digests[7], digests[8], digests[9], prepared->rows,
+        prepared->object_rows, prepared->native_target, digests[10], digests[11], digests[12], digests[13],
+        digests[14], authority->ledger.count) : -1;
+    ok = ok && used > 0 && (u32)used < capacity;
+    for (u32 index = 0; ok && index < authority->ledger.count; index += 1)
+    {
+        BqRetirementOracleReference const* reference = authority->references + index;
+        BqRetirementTrustedRow const* row = reference->row < prepared->rows ? projection->rows + reference->row : NULL;
+        ok = row && bq_retirement_unit_hex(row->independent_oracle_sha256) &&
+             bq_retirement_unit_hex(reference->binary_sha256) &&
+             bq_retirement_unit_hex(reference->build_receipt_sha256) &&
+             bq_retirement_unit_hex(reference->command_sha256) && bq_retirement_oracle_name(reference->output_name);
+        int line = ok ? snprintf(text + used, capacity - (u32)used, "observed=%u %u %u %u %d %d %s %s %s %s %s\n",
+            index, reference->row, reference->census_row, reference->target, facts->descriptors[2u * index],
+            facts->descriptors[2u * index + 1u], row->independent_oracle_sha256, reference->binary_sha256,
+            reference->build_receipt_sha256, reference->command_sha256, reference->output_name) : -1;
+        ok = line > 0 && (u32)line < capacity - (u32)used;
+        if (ok) used += line;
+    }
+    int tail = ok ? snprintf(text + used, capacity - (u32)used, "gate=admitted %s\n", facts->gate_sha256) : -1;
+    ok = ok && tail > 0 && (u32)tail < capacity - (u32)used;
+    *length = ok ? (u32)(used + tail) : 0;
+    return ok;
+}
+
+/* The runtime command bq_retirement_reference_producer_runtime builds for
+ * plan row with these held binary and output directory numbers: concrete is
+ * its /proc/self/fd digest, logical the template's descriptor-free one. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_runtime_sha(BqRetirementReferencePlanRow const* row, int binary,
+    int directory, char concrete[SHA256_HEX_CAPACITY], char logical[SHA256_HEX_CAPACITY])
+{
+    char executable[64], cwd[64];
+    char* arguments[BQ_RETIREMENT_REFERENCE_ARGS_CAP + 1] = {0};
+    char* environment[BQ_RETIREMENT_REFERENCE_ENV_CAP + 1] = {0};
+    int exe_length = snprintf(executable, sizeof(executable), "/proc/self/fd/%d", binary);
+    int cwd_length = snprintf(cwd, sizeof(cwd), "/proc/self/fd/%d", directory);
+    bool ok = binary >= 3 && directory >= 3 && exe_length > 0 && (size_t)exe_length < sizeof(executable) &&
+              cwd_length > 0 && (size_t)cwd_length < sizeof(cwd) && row->runtime_argument_count >= 1 &&
+              row->runtime_argument_count <= BQ_RETIREMENT_REFERENCE_ARGS_CAP &&
+              row->runtime_environment_count <= BQ_RETIREMENT_REFERENCE_ENV_CAP;
+    if (ok)
+    {
+        arguments[0] = executable;
+        for (u32 index = 1; index < row->runtime_argument_count; index += 1)
+            arguments[index] = (char*)row->runtime_arguments[index - 1];
+        for (u32 index = 0; index < row->runtime_environment_count; index += 1)
+            environment[index] = (char*)row->runtime_environment[index];
+        BqRetirementProcessCommand command = {arguments, environment, cwd, row->runtime_argument_count,
+                                              row->runtime_environment_count};
+        ok = tp_retirement_command_fields_hash(command.arguments, command.argument_count, command.directory,
+                                               command.environment, command.environment_count, concrete) &&
+             bq_retirement_oracle_logical_command_hash(&command, logical);
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_hash_file(int directory, char const* name, u64 cap, bool executable,
+    char digest[SHA256_HEX_CAPACITY])
+{
+    int file = bq_retirement_unit_promote(openat(directory, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW));
+    bool ok = file >= 3 && bq_retirement_oracle_file_hash(file, cap, executable, digest);
+    if (file >= 0 && close(file) != 0) ok = false;
+    return ok;
+}
+
+/* One of the producer's names for a template reference: reference-<i>,
+ * reference-log-<i>, reference-receipt-<i> or the row's output name. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_reference_name(BqRetirementOracleTemplate const* template, char const* name)
+{
+    static char const* const kinds[] = {"reference-log-", "reference-receipt-", "reference-"};
+    bool known = false;
+    for (u32 kind = 0; !known && kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+    {
+        size_t prefix = strlen(kinds[kind]);
+        unsigned long index = !strncmp(name, kinds[kind], prefix) && name[prefix] >= '0' && name[prefix] <= '9' ?
+                              strtoul(name + prefix, NULL, 10) : ULONG_MAX;
+        char expected[48];
+        int length = index < template->reference_count ?
+                     snprintf(expected, sizeof(expected), "%s%08lu", kinds[kind], index) : -1;
+        known = length > 0 && (size_t)length < sizeof(expected) && !strcmp(expected, name);
+    }
+    for (u32 index = 0; !known && index < template->reference_count; index += 1)
+        known = !strcmp(name, template->references[index].output_name);
+    return known;
+}
+
+/* directory must be service-owned and private (sealed: exactly 0500) and
+ * hold exactly the expected regular, single-link, service-owned, read-only
+ * files: with a template, the producer's four per reference, else only name,
+ * mode 0400. Names are unique, so every entry known and the expected count
+ * is the exact closure (a colliding expected name falls short). */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_closed(int directory, BqRetirementOracleTemplate const* template,
+    char const* name, bool sealed)
+{
+    struct stat held = {0};
+    bool ok = fstat(directory, &held) == 0 && S_ISDIR(held.st_mode) && held.st_uid == geteuid() &&
+              (held.st_mode & 077) == 0 && (!sealed || (held.st_mode & 07777) == BQ_RETIREMENT_EXPORT_MODE);
+    int listing = ok ? openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    DIR* stream = listing >= 0 ? fdopendir(listing) : NULL;
+    if (!stream && listing >= 0) close(listing);
+    ok = ok && stream != NULL;
+    u64 found = 0;
+    bool more = ok;
+    while (ok && more)
+    {
+        errno = 0;
+        struct dirent* entry = readdir(stream);
+        more = entry != NULL;
+        if (!more) ok = errno == 0;
+        else if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, ".."))
+        {
+            struct stat info = {0};
+            ok = (template ? bq_retirement_unit_reference_name(template, entry->d_name) : !strcmp(entry->d_name, name)) &&
+                 fstatat(directory, entry->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(info.st_mode) &&
+                 info.st_nlink == 1 && info.st_uid == geteuid() && (info.st_mode & 0222) == 0 &&
+                 (template || (info.st_mode & 07777) == 0400);
+            found += 1;
+        }
+    }
+    if (stream && closedir(stream) != 0) ok = false;
+    return ok && found == (template ? 4ull * template->reference_count : 1u);
+}
+
+/* Rehash one reference's binary, log and output, and rebuild its receipt
+ * from the policy: every field but the observed build command, whose
+ * /proc/self/fd paths only the receipt records, must be what the producer
+ * wrote. digests receives the output, binary and receipt SHA-256. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_reference_files(int directory, BqRetirementUnitPrepared const* prepared,
+    u32 index, char digests[3][SHA256_HEX_CAPACITY])
+{
+    BqRetirementReferencePolicy const* policy = &prepared->policy;
+    BqRetirementOracleTemplateRow const* approved = policy->template.references + index;
+    char binary_name[32], log_name[32], receipt_name[32], log_sha256[SHA256_HEX_CAPACITY] = {0};
+    char expected[BQ_RETIREMENT_UNIT_RECEIPT_CAP], receipt[BQ_RETIREMENT_UNIT_RECEIPT_CAP];
+    u32 length = 0;
+    bool ok = snprintf(binary_name, sizeof(binary_name), "reference-%08u", index) > 0 &&
+              snprintf(log_name, sizeof(log_name), "reference-log-%08u", index) > 0 &&
+              snprintf(receipt_name, sizeof(receipt_name), "reference-receipt-%08u", index) > 0 &&
+              bq_retirement_unit_hash_file(directory, binary_name, BQ_RETIREMENT_ORACLE_BINARY_CAP, true, digests[1]) &&
+              bq_retirement_unit_hash_file(directory, log_name, BQ_RETIREMENT_ORACLE_OUTPUT_CAP, false, log_sha256) &&
+              bq_retirement_unit_hash_file(directory, approved->output_name, BQ_RETIREMENT_ORACLE_OUTPUT_CAP, false,
+                                           digests[0]) &&
+              bq_record_read_at(directory, receipt_name, (u8*)receipt, sizeof(receipt), &length) == BQ_OK;
+    int prefix = ok ? snprintf(expected, sizeof(expected), "BQ-RETIREMENT-REFERENCE-BUILD-V1\n"
+        "job=%llu\nattempt=%llu\nrow=%u\ncensus-row=%u\ntarget=%u\npreparation=%s\ntemplate=%s\ninventory=%s\n"
+        "toolchain=%s\nclang=%s\nsource=%s\nbuild-command=%s\nobserved-command=",
+        (unsigned long long)prepared->job.id, (unsigned long long)prepared->job.token, approved->row,
+        approved->census_row, approved->target, prepared->preparation_sha256, policy->template_sha256,
+        policy->inventory_sha256, policy->toolchain_manifest_sha256, policy->plan.clang_sha256,
+        approved->source_sha256, approved->build_command_sha256) : -1;
+    ok = ok && prefix > 0 && (u32)prefix + 64u < length && !memcmp(receipt, expected, (size_t)prefix) &&
+         bq_retirement_hex((String8){(char8*)receipt + prefix, 64}, 64);
+    int suffix = ok ? snprintf(expected, sizeof(expected), "\nbinary=%s\nlog=%s\n", digests[1], log_sha256) : -1;
+    ok = ok && suffix > 0 && (u32)prefix + 64u + (u32)suffix == length &&
+         !memcmp(receipt + prefix + 64, expected, (size_t)suffix);
+    if (ok) bq_digest(receipt, length, (char8*)digests[2]);
+    return ok;
+}
+
+/* The references an honest oracle run leaves, from the template and the
+ * rehashed reference-oracle/ closure, each runtime command rebuilt from its
+ * recorded descriptor numbers; outputs receives each observed output digest. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_reference_observe(int directory, BqRetirementUnitPrepared const* prepared,
+    int const* descriptors, BqRetirementOracleReference* references, char (*outputs)[SHA256_HEX_CAPACITY])
+{
+    BqRetirementReferencePolicy const* policy = &prepared->policy;
+    u32 count = policy->template.reference_count;
+    bool ok = count && policy->plan.count == count && bq_retirement_unit_closed(directory, &policy->template, NULL, true);
+    for (u32 index = 0; ok && index < count; index += 1)
+    {
+        BqRetirementOracleTemplateRow const* approved = policy->template.references + index;
+        BqRetirementOracleReference* reference = references + index;
+        char digests[3][SHA256_HEX_CAPACITY] = {{0}}, logical[SHA256_HEX_CAPACITY] = {0};
+        *reference = (BqRetirementOracleReference){.row = approved->row, .census_row = approved->census_row,
+                                                   .target = approved->target};
+        memcpy(reference->preparation_sha256, prepared->preparation_sha256, SHA256_HEX_CAPACITY);
+        memcpy(reference->source_sha256, approved->source_sha256, SHA256_HEX_CAPACITY);
+        memcpy(reference->configuration_sha256, approved->configuration_sha256, SHA256_HEX_CAPACITY);
+        memcpy(reference->build_command_sha256, approved->build_command_sha256, SHA256_HEX_CAPACITY);
+        memcpy(reference->logical_command_sha256, approved->logical_command_sha256, SHA256_HEX_CAPACITY);
+        memcpy(reference->output_name, approved->output_name, BQ_RETIREMENT_OUTPUT_NAME_CAP);
+        ok = bq_retirement_unit_reference_files(directory, prepared, index, digests) &&
+             bq_retirement_unit_runtime_sha(policy->plan.rows + index, descriptors[2u * index],
+                                            descriptors[2u * index + 1u], reference->command_sha256, logical) &&
+             !strcmp(logical, approved->logical_command_sha256);
+        if (ok)
+        {
+            memcpy(outputs[index], digests[0], SHA256_HEX_CAPACITY);
+            memcpy(reference->binary_sha256, digests[1], SHA256_HEX_CAPACITY);
+            memcpy(reference->build_receipt_sha256, digests[2], SHA256_HEX_CAPACITY);
+        }
+    }
+    return ok;
+}
+
+/* An O_EXCL temporary, fsynced, then linked to its content address and
+ * unlinked. A crash before the link leaves only ready-partial-<id> in an
+ * unsealed directory, one after it two links; the replay rejects both. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_ready_publish(int ready, u64 job_id, char const* text, u32 length,
+    char const digest[SHA256_HEX_CAPACITY])
+{
+    char partial[48], name[80];
+    int named = snprintf(name, sizeof(name), "ready-%s", digest);
+    bool ok = bq_record_name(partial, "ready-partial", job_id) && named > 0 && (size_t)named < sizeof(name);
+    int writer = ok ? openat(ready, partial, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    ok = ok && writer >= 0 && bq_write_all(writer, (u8 const*)text, length) && fchmod(writer, 0400) == 0 &&
+         fsync(writer) == 0;
+    if (writer >= 0 && close(writer) != 0) ok = false;
+    ok = ok && linkat(ready, partial, ready, name, 0) == 0 && unlinkat(ready, partial, 0) == 0 && fsync(ready) == 0 &&
+         bq_retirement_unit_closed(ready, NULL, name, false) && fchmod(ready, BQ_RETIREMENT_EXPORT_MODE) == 0 &&
+         fsync(ready) == 0;
+    return ok;
+}
+
+/* Opens job-<id>-attempt-<token>/[<parent>/]<name> after the attempt seal,
+ * without following links. */
+BUSTER_GLOBAL_LOCAL int bq_retirement_unit_attempt_open(int workspaces, BqJob const* job, char const* parent,
+    char const* name)
+{
+    char attempt_name[64];
+    int attempt = bq_workspace_name(attempt_name, job->id, job->token) ?
+                  openat(workspaces, attempt_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    bool sealed = attempt >= 0 && bq_workspace_seal(attempt, job, false);
+    int middle = sealed && parent ? openat(attempt, parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int base = parent ? middle : sealed ? attempt : -1;
+    int result = base >= 0 ?
+                 bq_retirement_unit_promote(openat(base, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)) : -1;
+    if (middle >= 0) close(middle);
+    if (attempt >= 0) close(attempt);
+    return result;
+}
+
+BqError bq_retirement_unit_ready(BqRetirementUnitPrepared const* prepared, BqRetirementUnitBuilt const* built,
+    BqRetirementProjection const* projection, BqRetirementUnitOracle const* oracle, BqRetirementUnitGate const* gate,
+    int workspaces, char ready_sha256[SHA256_HEX_CAPACITY])
+{
+    if (ready_sha256) ready_sha256[0] = 0;
+    BqRetirementOracleAuthority const* authority = oracle ? &oracle->authority : NULL;
+    char population[SHA256_HEX_CAPACITY] = {0}, attempt_name[64];
+    bool ok = ready_sha256 && prepared && prepared->owned && built && built->owned && projection &&
+              projection->owned && projection->rows && oracle && oracle->owned && oracle->descriptors &&
+              workspaces >= 0 && projection->job_id == prepared->job.id &&
+              projection->attempt_token == prepared->job.token && authority->job_id == prepared->job.id &&
+              authority->attempt_token == prepared->job.token && authority->template == &prepared->policy.template &&
+              authority->ledger.rows == projection->rows &&
+              !strcmp(projection->prepared.preparation_sha256, prepared->preparation_sha256) &&
+              bq_workspace_name(attempt_name, prepared->job.id, prepared->job.token);
+    for (u32 side = 0; ok && side < 2; side += 1)
+        ok = !strcmp(projection->prepared.binary_sha256[side], built->binaries.verified.binary_sha256[side]);
+    ok = ok && bq_retirement_oracle_population_hash(projection->rows, projection->prepared.rows, population) &&
+         !memcmp(population, projection->population_sha256, SHA256_HEX_CAPACITY) &&
+         bq_retirement_oracle_authority_ready(authority) && !strcmp(oracle->attempt_sha256, authority->attempt_sha256);
+    BqRetirementUnitReadyFacts facts = {.job = prepared ? &prepared->job : NULL, .projection = projection,
+        .authority = authority, .descriptors = oracle ? oracle->descriptors : NULL,
+        .binary_record_sha256 = built ? built->binary_record_sha256 : NULL,
+        .build_record_sha256 = built ? built->build_record_sha256 : NULL,
+        .template_sha256 = prepared ? prepared->policy.template_sha256 : NULL,
+        .inventory_sha256 = prepared ? prepared->policy.inventory_sha256 : NULL};
+    ok = ok && bq_retirement_unit_attempt_sha(&prepared->job, facts.attempt_sha256);
+    BqError result = ok ? BQ_OK : BQ_BAD_REQUEST;
+    /* Design step 9 must have admitted this exact attempt; until #509 no
+     * production issuer exists, so nothing below runs in production. */
+    if (result == BQ_OK && !(gate && gate->issuer == BQ_RETIREMENT_UNIT_GATE_ISSUED &&
+                             bq_retirement_unit_gate_sealed(gate->seal_sha256, &facts)))
+        result = BQ_RECIPE_MISMATCH;
+    if (result == BQ_OK) memcpy(facts.gate_sha256, gate->seal_sha256, SHA256_HEX_CAPACITY);
+    int attempt = result == BQ_OK ? openat(workspaces, attempt_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    bool created = false;
+    int ready = attempt >= 0 && bq_workspace_seal(attempt, &prepared->job, false) ?
+                bq_create_inherited_group_directory(attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, 02700, &created) : -1;
+    if (result == BQ_OK && (ready < 0 || !created)) result = BQ_WORKSPACE_MISMATCH;
+    /* Freeze the producer's output directory before hashing what the record
+     * binds, then require the files to be exactly the authority's. */
+    int reference = result == BQ_OK ? bq_retirement_unit_attempt_open(workspaces, &prepared->job,
+        BQ_RETIREMENT_BUILD_WORK_DIRECTORY, BQ_RETIREMENT_UNIT_REFERENCE_DIRECTORY) : -1;
+    if (result == BQ_OK && !(reference >= 0 && bq_owned_directory(reference, true, false) &&
+                             fchmod(reference, BQ_RETIREMENT_EXPORT_MODE) == 0 && fsync(reference) == 0))
+        result = BQ_WORKSPACE_MISMATCH;
+    u32 count = result == BQ_OK ? authority->ledger.count : 0;
+    BqRetirementOracleReference* observed = count ? calloc(count, sizeof(*observed)) : NULL;
+    char (*outputs)[SHA256_HEX_CAPACITY] = count ? calloc(count, sizeof(*outputs)) : NULL;
+    if (result == BQ_OK)
+        result = observed && outputs && count == prepared->policy.template.reference_count &&
+                 bq_retirement_unit_reference_observe(reference, prepared, oracle->descriptors, observed, outputs) ?
+                 BQ_OK : BQ_SOURCE_MISMATCH;
+    for (u32 index = 0; result == BQ_OK && index < count; index += 1)
+    {
+        BqRetirementOracleReference const* held = authority->references + index;
+        bool same = held->row == observed[index].row &&
+                    !strcmp(held->build_receipt_sha256, observed[index].build_receipt_sha256) &&
+                    !strcmp(held->binary_sha256, observed[index].binary_sha256) &&
+                    !strcmp(held->command_sha256, observed[index].command_sha256) &&
+                    !strcmp(outputs[index], projection->rows[held->row].independent_oracle_sha256);
+        if (!same) result = BQ_SOURCE_MISMATCH;
+    }
+    u32 capacity = BQ_RETIREMENT_UNIT_READY_HEADER_CAP + BQ_RETIREMENT_UNIT_READY_ROW_CAP * count;
+    char* text = result == BQ_OK ? malloc(capacity) : NULL;
+    u32 length = 0;
+    char digest[SHA256_HEX_CAPACITY] = {0};
+    if (result == BQ_OK)
+        result = text && bq_retirement_unit_ready_format(&facts, text, capacity, &length) ? BQ_OK : BQ_CORRUPT;
+    if (result == BQ_OK)
+    {
+        bq_digest(text, length, (char8*)digest);
+        result = bq_retirement_unit_ready_publish(ready, prepared->job.id, text, length, digest) &&
+                 fsync(attempt) == 0 ? BQ_OK : BQ_IO;
+    }
+    free(text);
+    free(outputs);
+    free(observed);
+    if (reference >= 0 && close(reference) != 0 && result == BQ_OK) result = BQ_IO;
+    if (ready >= 0 && close(ready) != 0 && result == BQ_OK) result = BQ_IO;
+    if (attempt >= 0 && close(attempt) != 0 && result == BQ_OK) result = BQ_IO;
+    if (result == BQ_OK) memcpy(ready_sha256, digest, SHA256_HEX_CAPACITY);
+    return result;
+}
+
+/* A record's 64-hex value after "\n<key>". Only the build digests, the gate
+ * seal and the runtime descriptor numbers are read from the record; the
+ * replay recomputes everything else and compares the whole byte stream. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_ready_value(char const* text, char const* key,
+    char value[SHA256_HEX_CAPACITY])
+{
+    char pattern[48];
+    int length = snprintf(pattern, sizeof(pattern), "\n%s", key);
+    char const* found = length > 0 && (size_t)length < sizeof(pattern) ? strstr(text, pattern) : NULL;
+    char const* start = found ? found + length : NULL;
+    bool ok = start && strnlen(start, 65) == 65 && start[64] == '\n' &&
+              bq_retirement_hex((String8){(char8*)start, 64}, 64);
+    if (ok)
+    {
+        memcpy(value, start, 64);
+        value[64] = 0;
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_ready_descriptors(char const* text, u32 count, int* descriptors)
+{
+    char const* cursor = strstr(text, "\nobserved=");
+    bool ok = true;
+    for (u32 index = 0; ok && index < count; index += 1)
+    {
+        unsigned declared = 0, row = 0, census = 0, target = 0;
+        ok = cursor && sscanf(cursor, "\nobserved=%u %u %u %u %d %d", &declared, &row, &census, &target,
+                              descriptors + 2u * index, descriptors + 2u * index + 1u) == 6 && declared == index;
+        cursor = ok ? strstr(cursor + 1, "\nobserved=") : NULL;
+    }
+    return ok;
+}
+
+/* Re-import the matched builds and hold both binaries, as the unit's own
+ * build does after it seals retirement-build/. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_built_import(BqRetirementStore store,
+    BqRetirementUnitPrepared const* prepared, int workspaces, int installed, String8 workspace_root, String8 profile,
+    char const* driver, char const* toolchain_root, char const* broker, char const* broker_workspaces,
+    char const binary_record_sha256[SHA256_HEX_CAPACITY], char const build_record_sha256[SHA256_HEX_CAPACITY],
+    BqRetirementUnitBuilt* built)
+{
+    *built = (BqRetirementUnitBuilt){.verified = {.generated_root = -1}, .binaries = {.descriptors = {-1, -1}},
+                                     .owned = 1};
+    BqError result = bq_retirement_unit_build_import_pinned(store, prepared, workspaces, installed, workspace_root,
+        profile, driver, toolchain_root, broker, broker_workspaces, binary_record_sha256, build_record_sha256,
+        &built->verified);
+    int evidence = result == BQ_OK ? bq_retirement_unit_attempt_open(workspaces, &prepared->job, NULL,
+                                                                     BQ_RETIREMENT_UNIT_EVIDENCE_DIRECTORY) : -1;
+    BqRetirementBuildStores stores = {store, {evidence}};
+    if (result == BQ_OK)
+        result = evidence >= 0 && bq_retirement_unit_evidence_closed(evidence, workspaces, &prepared->job, true) ?
+                 bq_retirement_binaries_acquire_stores(stores, &prepared->job, installed, workspaces, profile,
+                     prepared->preparation_sha256, binary_record_sha256, &built->binaries) : BQ_WORKSPACE_MISMATCH;
+    if (evidence >= 0 && close(evidence) != 0 && result == BQ_OK) result = BQ_IO;
+    if (result == BQ_OK)
+    {
+        memcpy(built->binary_record_sha256, binary_record_sha256, SHA256_HEX_CAPACITY);
+        memcpy(built->build_record_sha256, build_record_sha256, SHA256_HEX_CAPACITY);
+    }
+    else bq_retirement_unit_built_release(built);
+    return result;
+}
+
+/* The finished authority an honest oracle run leaves, rebuilt from the
+ * template, the replayed projection and the rehashed references. The
+ * authority's own hashes recompute the ledger spec and seal, the observation
+ * chain and the attempt digest, and authority_ready rechecks them together.
+ * The projection's reference rows receive the observed output digests. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_replay_authority(BqRetirementUnitPrepared const* prepared,
+    BqRetirementProjection* projection, BqRetirementOracleReference* references,
+    char (*outputs)[SHA256_HEX_CAPACITY], BqRetirementOracleAuthority* authority)
+{
+    BqRetirementOracleTemplate const* template = &prepared->policy.template;
+    u32 count = template->reference_count;
+    bool ok = count && projection->prepared.rows == template->population_rows;
+    for (u32 index = 0; ok && index < count; index += 1)
+    {
+        BqRetirementTrustedRow* row = references[index].row < projection->prepared.rows ?
+                                      projection->rows + references[index].row : NULL;
+        ok = row && !row->independent_oracle_sha256[0];
+        if (ok) memcpy(row->independent_oracle_sha256, outputs[index], SHA256_HEX_CAPACITY);
+    }
+    *authority = (BqRetirementOracleAuthority){.template = template, .references = references,
+        .job_id = prepared->job.id, .attempt_token = prepared->job.token, .observed_rows = count};
+    BqRetirementOracleLedger* ledger = &authority->ledger;
+    *ledger = (BqRetirementOracleLedger){.prepared = projection->prepared, .rows = projection->rows,
+        .references = references, .count = count, .done = count, .authority_bound = 1,
+        .job_id = prepared->job.id, .attempt_token = prepared->job.token};
+    memcpy(ledger->template_sha256, prepared->policy.template_sha256, SHA256_HEX_CAPACITY);
+    memcpy(authority->template_sha256, prepared->policy.template_sha256, SHA256_HEX_CAPACITY);
+    memcpy(authority->toolchain_identity_sha256, template->toolchain_identity_sha256, SHA256_HEX_CAPACITY);
+    char progress[SHA256_HEX_CAPACITY] = {0}, next[SHA256_HEX_CAPACITY] = {0};
+    ok = ok && bq_retirement_oracle_spec_hash(&ledger->prepared, references, count, ledger->pinned_sha256) &&
+         bq_retirement_oracle_seal(ledger, ledger->sealed_sha256) &&
+         bq_oracle_authority_observation_seed(authority, progress);
+    for (u32 index = 0; ok && index < count; index += 1)
+    {
+        ok = bq_oracle_authority_observation_step(progress, index, references + index,
+                                                  projection->rows + references[index].row, next);
+        if (ok) memcpy(progress, next, SHA256_HEX_CAPACITY);
+    }
+    if (ok)
+    {
+        memcpy(authority->observed_sha256, progress, SHA256_HEX_CAPACITY);
+        ledger->finished = 1;
+        authority->finished = 1;
+        ok = bq_oracle_authority_attempt_hash(authority, authority->attempt_sha256) &&
+             bq_retirement_oracle_authority_ready(authority);
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_replay_pinned(BqRetirementStore store, int workspaces, int installed,
+    u64 job_id, u64 attempt_token, String8 workspace_root, String8 profile, String8 census_profile,
+    char const* driver, char const* toolchain_root, char const* broker, char const* broker_workspaces,
+    char const preparation_sha256[SHA256_HEX_CAPACITY], char const ready_sha256[SHA256_HEX_CAPACITY])
+{
+    BqRetirementUnitPrepared prepared = {.policy = {.clang = -1, .inventory = -1}};
+    BqRetirementUnitBuilt built = {.verified = {.generated_root = -1}, .binaries = {.descriptors = {-1, -1}}};
+    BqRetirementProjection projection = {0};
+    char name[80];
+    int named = bq_retirement_unit_hex(ready_sha256) ? snprintf(name, sizeof(name), "ready-%s", ready_sha256) : -1;
+    BqError result = named > 0 && (size_t)named < sizeof(name) ? BQ_OK : BQ_BAD_REQUEST;
+    if (result == BQ_OK)
+        result = bq_retirement_unit_prepare_pinned(store, workspaces, installed, job_id, attempt_token, profile,
+                                                   toolchain_root, preparation_sha256, &prepared);
+    /* The sealed record, by its content address. */
+    int ready = result == BQ_OK ? bq_retirement_unit_attempt_open(workspaces, &prepared.job, NULL,
+                                                                  BQ_RETIREMENT_UNIT_READY_DIRECTORY) : -1;
+    u32 count = result == BQ_OK ? prepared.policy.template.reference_count : 0;
+    u32 capacity = BQ_RETIREMENT_UNIT_READY_HEADER_CAP + BQ_RETIREMENT_UNIT_READY_ROW_CAP * count;
+    char* text = result == BQ_OK ? malloc(capacity + 1u) : NULL;
+    char* expected = result == BQ_OK ? malloc(capacity) : NULL;
+    int* descriptors = count ? calloc(2u * (size_t)count, sizeof(*descriptors)) : NULL;
+    BqRetirementOracleReference* references = count ? calloc(count, sizeof(*references)) : NULL;
+    char (*outputs)[SHA256_HEX_CAPACITY] = count ? calloc(count, sizeof(*outputs)) : NULL;
+    if (result == BQ_OK && !(text && expected && descriptors && references && outputs)) result = BQ_IO;
+    if (result == BQ_OK && !(ready >= 0 && bq_retirement_unit_closed(ready, NULL, name, true)))
+        result = BQ_WORKSPACE_MISMATCH;
+    u32 length = 0;
+    if (result == BQ_OK) result = bq_record_read_at(ready, name, (u8*)text, capacity, &length);
+    char digest[SHA256_HEX_CAPACITY] = {0}, binary_record[SHA256_HEX_CAPACITY] = {0};
+    char build_record[SHA256_HEX_CAPACITY] = {0}, gate_seal[SHA256_HEX_CAPACITY] = {0};
+    if (result == BQ_OK)
+    {
+        text[length] = 0;
+        bq_digest(text, length, (char8*)digest);
+        result = !memcmp(digest, ready_sha256, SHA256_HEX_CAPACITY) && strlen(text) == length &&
+                 bq_retirement_unit_ready_value(text, "binaries=", binary_record) &&
+                 bq_retirement_unit_ready_value(text, "matched-builds=", build_record) &&
+                 bq_retirement_unit_ready_value(text, "gate=admitted ", gate_seal) &&
+                 bq_retirement_unit_ready_descriptors(text, count, descriptors) ? BQ_OK : BQ_CORRUPT;
+    }
+    if (result == BQ_OK)
+        result = bq_retirement_unit_built_import(store, &prepared, workspaces, installed, workspace_root, profile,
+            driver, toolchain_root, broker, broker_workspaces, binary_record, build_record, &built);
+    if (result == BQ_OK)
+        result = bq_retirement_unit_project_pinned(store, &prepared, &built, workspaces, installed, workspace_root,
+            profile, census_profile, driver, toolchain_root, broker, broker_workspaces, &projection);
+    int reference = result == BQ_OK ? bq_retirement_unit_attempt_open(workspaces, &prepared.job,
+        BQ_RETIREMENT_BUILD_WORK_DIRECTORY, BQ_RETIREMENT_UNIT_REFERENCE_DIRECTORY) : -1;
+    if (result == BQ_OK)
+        result = reference >= 0 && bq_retirement_unit_reference_observe(reference, &prepared, descriptors,
+                                                                        references, outputs) ?
+                 BQ_OK : BQ_SOURCE_MISMATCH;
+    BqRetirementOracleAuthority authority = {0};
+    if (result == BQ_OK)
+        result = bq_retirement_unit_replay_authority(&prepared, &projection, references, outputs, &authority) ?
+                 BQ_OK : BQ_SOURCE_MISMATCH;
+    BqRetirementUnitReadyFacts facts = {.job = &prepared.job, .projection = &projection, .authority = &authority,
+        .descriptors = descriptors, .binary_record_sha256 = built.binary_record_sha256,
+        .build_record_sha256 = built.build_record_sha256, .template_sha256 = prepared.policy.template_sha256,
+        .inventory_sha256 = prepared.policy.inventory_sha256};
+    if (result == BQ_OK)
+        result = bq_retirement_unit_attempt_sha(&prepared.job, facts.attempt_sha256) &&
+                 bq_retirement_unit_gate_sealed(gate_seal, &facts) ? BQ_OK : BQ_RECIPE_MISMATCH;
+    memcpy(facts.gate_sha256, gate_seal, SHA256_HEX_CAPACITY);
+    u32 expected_length = 0;
+    if (result == BQ_OK)
+        result = bq_retirement_unit_ready_format(&facts, expected, capacity, &expected_length) &&
+                 expected_length == length && !memcmp(expected, text, length) ? BQ_OK : BQ_CORRUPT;
+    if (reference >= 0 && close(reference) != 0 && result == BQ_OK) result = BQ_IO;
+    if (ready >= 0 && close(ready) != 0 && result == BQ_OK) result = BQ_IO;
+    free(outputs);
+    free(references);
+    free(descriptors);
+    free(expected);
+    free(text);
+    if (!bq_retirement_projection_release(&projection) && result == BQ_OK) result = BQ_IO;
+    if (!bq_retirement_unit_built_release(&built) && result == BQ_OK) result = BQ_IO;
+    if (!bq_retirement_unit_release(&prepared) && result == BQ_OK) result = BQ_IO;
+    return result;
+}
+
+BqError bq_retirement_unit_replay(BqRetirementStore store, int workspaces, int installed, u64 job_id,
+    u64 attempt_token, char const preparation_sha256[SHA256_HEX_CAPACITY], char const ready_sha256[SHA256_HEX_CAPACITY])
+{
+    String8 profile = bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
+    BqError result = bq_retirement_unit_replay_pinned(store, workspaces, installed, job_id, attempt_token,
+        S8(BQ_RETIREMENT_STAGE_WORKSPACE_ROOT), profile, S8("full-census"), BQ_RETIREMENT_BUILD_DRIVER,
+        BQ_RETIREMENT_TOOLCHAIN_ROOT, BQ_RETIREMENT_UNIT_BROKER, BQ_RETIREMENT_STAGE_WORKSPACE_ROOT,
+        preparation_sha256, ready_sha256);
     return result;
 }

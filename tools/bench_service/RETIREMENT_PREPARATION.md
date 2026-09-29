@@ -374,8 +374,9 @@ units).
 
 After `bq_retirement_unit_build`, the unit runs design steps 6 to 8 in
 `retirement_unit.c`. Step 9, the correctness gate, stays fail-closed until
-#509 same-attempt receipts exist. The ready record and the coordinator
-replay are the next PR.
+#509 same-attempt receipts exist. Step 10, the ready record, and the
+coordinator replay are described in the
+[next section](#ready-record-and-coordinator-replay-1020).
 
 `bq_retirement_unit_project` is step 6. It performs these steps in order:
 
@@ -508,7 +509,131 @@ references.
 includes `retirement_oracle_authority.c`. The service's adapter therefore
 accepts only the pending token of the live producer bound to that authority.
 `bq_worker_unit` still calls none of these steps, and every recipe gate
-still rejects the job first.
+still rejects the job first. `BqRetirementUnitOracle` also keeps, for each
+reference, the held binary and output directory numbers of its
+`/proc/self/fd` runtime command, so the replay can rebuild that command.
+
+## Ready record and coordinator replay (#1020)
+
+`bq_retirement_unit_gate` is design step 9. It calls
+`bq_retirement_correctness_begin_service` over the sealed projection after a
+finished oracle. That begin still fails closed (`BQ_RECIPE_MISMATCH`, or
+`BQ_SOURCE_MISMATCH` for changed rows), and no #509 check or row facts exist
+to finish a begun gate, so the gate is never admitted in production.
+
+`bq_retirement_unit_ready` is design step 10. It first requires every one of
+these, or returns `BQ_BAD_REQUEST`:
+
+- the prepared, built, projected and oracle objects are live and belong to
+  the same job and attempt;
+- the authority points at the prepared policy's template and the
+  projection's rows;
+- the projection still matches its population seal and names the held
+  binaries;
+- `authority_ready` holds.
+
+It then requires an admitted gate for exactly this attempt, or returns
+`BQ_RECIPE_MISMATCH` before touching the attempt. A gate is admitted only
+when an accepted issuer set it and `bq_retirement_unit_gate_sealed` verifies
+its seal against the attempt's facts. The only issuer is the test fixture
+`bq_retirement_unit_gate_fixture_admit`. It and the fixture seal check that
+the verifier uses exist only under `BQ_RETIREMENT_CORRECTNESS_TEST_ONLY`.
+The service translation unit (`main.c`) never defines that macro, so there
+the verifier always refuses: production writes no ready record until #509
+provides a real issuer. This follows the oracle authority's `TEST_ONLY`
+issuer seam.
+
+With an admitted gate the writer performs these steps in order:
+
+1. It creates `job-<id>-attempt-<token>/retirement-ready/` with the
+   inherited-group helper (mode `02700`). The directory must be new, so a
+   second record into the same attempt is refused.
+2. It seals `retirement-work/reference-oracle/` to `0500` and rehashes its
+   exact closure (below). Each reference's binary, receipt and output must
+   equal the authority's, and each runtime command rebuilt from the recorded
+   descriptor numbers must hash to the authority's concrete command digest.
+3. It formats the canonical record and writes it as `ready-partial-<id>`
+   (`O_EXCL`, mode `0400`, fsynced). It links that file to
+   `ready-<SHA-256 of the record>`, unlinks the temporary, requires the
+   directory to hold exactly that one file, seals it to `0500` and fsyncs it
+   and the attempt.
+
+It returns the record digest. The coordinator must receive that digest over
+an authenticated channel, as it does the other record digests; the channel
+itself belongs to the #923 integrator.
+
+### The record
+
+The record is `BQ-RETIREMENT-READY-V1`, one `key=value` line each, in this
+order:
+
+| Key | Value |
+|---|---|
+| `job`, `attempt` | the job number and attempt token |
+| `attempt-identity` | SHA-256 of the attempt's canonical `.identity` seal |
+| `request` | the canonical request digest |
+| `preparation` | A's preparation record digest |
+| `binaries`, `matched-builds` | the binary and final matched-build record digests |
+| `binary-base`, `binary-candidate` | both frozen executables' SHA-256 |
+| `support`, `census`, `population`, `rows`, `object-rows`, `native-target`, `evidence` | the projection's joined identities, row counts and seals |
+| `template`, `inventory` | the installed reference policy pins |
+| `oracle-attempt`, `oracle-observed` | the authority's attempt digest and observation chain |
+| `observed-rows` | the reference count |
+
+Then one `observed=` line per reference, in template order: index, row,
+census row, target, the runtime command's binary and working-directory
+descriptor numbers, then the output, binary, receipt and concrete command
+SHA-256 values and the output name. The last line is
+`gate=admitted <seal>`.
+
+### Replay
+
+`bq_retirement_unit_replay` runs on the coordinator side, outside the unit,
+and only reads. It takes the attempt's export store, the coordinator's own A
+digest and the authenticated record digest, and performs these steps in
+order:
+
+1. It re-imports A, the toolchain and the reference policy through the
+   unit's prepare, which also checks the export's exact closure.
+2. It requires `retirement-ready/` to be sealed `0500` and to hold exactly
+   `ready-<digest>` as a single-link, owner-read-only regular file. It
+   requires that file's SHA-256 to be the digest.
+3. It reads only these from the record: the two build record digests, the
+   gate seal and each observed row's descriptor numbers. With the build
+   digests it re-imports the matched builds, holds both binaries and reruns
+   the census projection.
+4. It requires `reference-oracle/` to be sealed `0500` and to hold exactly,
+   for each template reference `i`, `reference-<i>`, `reference-log-<i>`,
+   `reference-receipt-<i>` and the template's output name. Each must be a
+   single-link, service-owned, read-only regular file. It rehashes them and
+   rebuilds each receipt from the policy. Only the receipt's observed build
+   command, whose `/proc/self/fd` paths nothing else records, is taken from
+   the file, and it must be hex.
+5. It rebuilds each runtime command from the plan row and the recorded
+   descriptor numbers, and requires its logical digest to equal the
+   template's.
+6. It rebuilds the finished authority from the template, the projection and
+   those observations. It recomputes the ledger's spec and seal, the
+   observation chain and the attempt digest with the authority's own
+   hashes, and then calls `authority_ready`.
+7. It verifies the gate seal against the re-derived facts, formats the
+   record those facts give and requires the stored record to equal it byte
+   for byte.
+
+A missing, extra, symlinked, writable or reordered entry fails closed, as
+does an unsealed directory. A crash between the temporary and the link
+leaves only `ready-partial-<id>` in an unsealed directory, and a crash after
+the link leaves two links; both fail the replay, and the unit refuses to
+write into the leftover directory. The public wrapper uses the compiled
+profile, so the blocked profile fails closed, and without the test macro no
+gate seal verifies.
+
+The replay cannot re-derive two values from anything but the record and the
+receipt. These are the runtime command's descriptor numbers, which it
+rebinds through the command digest and the attempt digest, and the
+receipt's observed build command. The fixture gate seal binds only facts the
+replay recomputes, so anyone could recompute it. The record digest from the
+authenticated channel, and later the #509 gate, anchor the record.
 
 ## Capacity derivation
 
@@ -839,7 +964,30 @@ fixture checks these properties:
   after the first row finished.
 - No descriptor leaks.
 - `worker_linux.c`, `main.c`, `workspace.c` and `queue.c` name none of these
-  entry points.
+  entry points, and `main.c` never defines
+  `BQ_RETIREMENT_CORRECTNESS_TEST_ONLY`.
+
+The same fixture then covers the ready record and the replay
+(`bq_prep_test_unit_ready`):
+
+- The production gate refuses. With that gate, a forged gate or no gate,
+  the writer returns `BQ_RECIPE_MISMATCH` and creates or seals nothing.
+- A fixture gate with a changed seal is refused, and so is a changed row.
+- Through the fixture gate the writer seals one `0400` record under its
+  content address and seals the reference directory. A second record is
+  refused.
+- The replay accepts the record. The blocked profile, another token, a
+  wrong A digest and a wrong record digest each fail.
+- Each header field, each field of an observed row and both gate fields is
+  tampered with, re-addressed under its new digest and passed to the
+  replay with that digest. The same holds for reordered observed rows, an
+  appended line and a changed first line. Every case fails, and the
+  original record is restored.
+- Both crash states fail, and so do an unsealed directory, an extra entry, a
+  symlinked record and a writable record.
+- An unsealed or extended reference directory fails, and so do a missing
+  output and a changed output, receipt or log.
+- Descriptor counts match, and no child is left.
 
 The #1018 completion case builds on an attempt created by the real
 `bq_materialize`, so the attempt is the production `02710` rather than a

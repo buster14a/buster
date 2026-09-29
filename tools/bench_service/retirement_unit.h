@@ -6,9 +6,12 @@
  * builds through the broker launch seam and persists their evidence beside
  * the export. bq_retirement_unit_project imports the B population from
  * #508's pinned performance rows joined to the pinned census, and bq_retirement_unit_oracle runs the oracle
- * authority and the reference producer over that same row array. The
- * correctness gate stays fail-closed, the retirement recipe stays unadmitted
- * and bq_worker_unit calls none of these yet.
+ * authority and the reference producer over that same row array.
+ * bq_retirement_unit_gate is the correctness gate, still fail-closed until
+ * #509; bq_retirement_unit_ready writes the durable ready record only for an
+ * admitted gate, and the coordinator's bq_retirement_unit_replay re-derives
+ * every digest that record binds. The retirement recipe stays unadmitted and
+ * bq_worker_unit calls none of these yet.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_H
@@ -107,6 +110,9 @@ typedef struct BqRetirementUnitOracle
 {
     BqRetirementOracleAuthority authority;
     BqRetirementOracleReference* references;
+    /* Per reference: the held binary and output directory numbers of its
+     * /proc/self/fd runtime command, so the replay can rebuild that command. */
+    int* descriptors;
     char attempt_sha256[SHA256_HEX_CAPACITY];
     u32 owned;
 } BqRetirementUnitOracle;
@@ -128,5 +134,53 @@ BUSTER_F_DECL BqError bq_retirement_unit_oracle(BqRetirementUnitPrepared const* 
     BqRetirementProjection* projection, int workspaces, int cancellation_fd, u64 deadline_ns,
     BqRetirementUnitOracle* oracle);
 BUSTER_F_DECL bool bq_retirement_unit_oracle_release(BqRetirementUnitOracle* oracle);
+
+/* Design step 9's outcome. Only an issuer the ready record accepts can make
+ * one admitted; production has none until #509 same-attempt receipts exist,
+ * so a filled-in struct is never an admission. */
+typedef struct BqRetirementUnitGate
+{
+    char seal_sha256[SHA256_HEX_CAPACITY];
+    u32 issuer;
+} BqRetirementUnitGate;
+
+/* Design step 9: bq_retirement_correctness_begin_service over the sealed
+ * projection, after a finished oracle. It fails closed today
+ * (BQ_RECIPE_MISMATCH, or BQ_SOURCE_MISMATCH for changed rows) and leaves
+ * gate unadmitted; nothing else issues an admitted gate in production. */
+BUSTER_F_DECL BqError bq_retirement_unit_gate(BqRetirementProjection const* projection,
+    BqRetirementUnitOracle const* oracle, BqRetirementUnitGate* gate);
+
+/* Design step 10's unit-written sibling of retirement-build/: one record,
+ * named ready-<its SHA-256>, sealed 0500. */
+#define BQ_RETIREMENT_UNIT_READY_DIRECTORY "retirement-ready"
+
+/* Design step 10. Refuses an unadmitted gate with BQ_RECIPE_MISMATCH before
+ * touching the attempt, so production writes nothing until #509. Otherwise
+ * it rechecks the prepared, built, projected and oracle objects together,
+ * seals retirement-work/reference-oracle/ 0500 and rehashes its exact
+ * closure, then writes the canonical BQ-RETIREMENT-READY-V1 record into a
+ * new retirement-ready/ (O_EXCL temporary, fsync, link to ready-<digest>,
+ * unlink, seal 0500, fsync). A second record into one attempt is refused.
+ * ready_sha256 receives the record digest, which the coordinator must
+ * receive over an authenticated channel for bq_retirement_unit_replay. */
+BUSTER_F_DECL BqError bq_retirement_unit_ready(BqRetirementUnitPrepared const* prepared,
+    BqRetirementUnitBuilt const* built, BqRetirementProjection const* projection,
+    BqRetirementUnitOracle const* oracle, BqRetirementUnitGate const* gate, int workspaces,
+    char ready_sha256[SHA256_HEX_CAPACITY]);
+
+/* Coordinator side, outside the unit and read-only. preparation_sha256 is
+ * the coordinator's own A digest and ready_sha256 the authenticated record
+ * digest. It re-imports A, the toolchain and the reference policy from the
+ * export, the matched builds and both binaries from retirement-build/, the
+ * census projection, and every reference-oracle/ file, rebuilds each runtime
+ * command and the oracle attempt digest, verifies the gate and requires the
+ * stored record to equal, byte for byte, the record those facts format. A
+ * missing, extra, linked, writable or reordered entry fails closed, as does
+ * an unsealed directory or a partial write. Compiled profile: the blocked
+ * profile fails closed, and no production gate verifier exists yet. */
+BUSTER_F_DECL BqError bq_retirement_unit_replay(BqRetirementStore store, int workspaces, int installed,
+    u64 job_id, u64 attempt_token, char const preparation_sha256[SHA256_HEX_CAPACITY],
+    char const ready_sha256[SHA256_HEX_CAPACITY]);
 
 #endif
