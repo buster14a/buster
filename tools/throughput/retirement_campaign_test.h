@@ -12,18 +12,8 @@
 #ifdef __linux__
 static int test_retirement_campaign_capacity_is_zero(TpRetirementCampaignCapacity const* capacity)
 {
-    int zero = capacity && !capacity->compiler_invocations_per_stage &&
-        !capacity->runtime_invocations_per_stage && !capacity->invocations_per_stage &&
-        !capacity->samples_per_stage && !capacity->spool_bytes_per_stage &&
-        !capacity->transcript_bytes_per_stage_upper_bound && !capacity->transcript_shards_per_stage &&
-        !capacity->sample_shards_per_stage && !capacity->sample_partitions_per_stage &&
-        !capacity->total_compiler_invocations && !capacity->total_runtime_invocations &&
-        !capacity->total_invocations && !capacity->total_samples && !capacity->total_spool_bytes &&
-        !capacity->total_transcript_bytes_upper_bound && !capacity->total_transcript_shards &&
-        !capacity->total_sample_shards && !capacity->total_sample_partitions &&
-        !capacity->sample_bytes_per_stage_upper_bound && !capacity->total_sample_bytes_upper_bound &&
-        !capacity->total_shard_files && !capacity->total_payload_bytes_upper_bound;
-    return zero;
+    TpRetirementCampaignCapacity zero = {0};
+    return capacity && !memcmp(capacity, &zero, sizeof(zero));
 }
 
 static int test_retirement_campaign_store_plan_is_zero(TpRetirementCampaignStorePlan const* plan)
@@ -32,6 +22,23 @@ static int test_retirement_campaign_store_plan_is_zero(TpRetirementCampaignStore
         !plan->external_bytes && !plan->entries && !plan->bytes && !plan->remaining_entries &&
         !plan->remaining_bytes;
     return zero;
+}
+
+static int test_retirement_campaign_capacity_shape(unsigned groups, unsigned objects, unsigned rows,
+    unsigned runtime, unsigned pairs, uint64_t metrics_bytes, TpRetirementCampaignCapacity* capacity)
+{
+    TpRetirementCampaignShape shape = {groups, objects, rows, runtime, pairs, metrics_bytes};
+    return tp_retirement_campaign_capacity(&shape, capacity);
+}
+
+/* Both stages of the one-row fixture: census row 6 of 7, a singleton link
+ * group with native runtime. */
+static int test_retirement_campaign_open(TpSampleTest* aa, TpSampleTest* ab, int cpu)
+{
+    int ok = test_sample_open_layout(aa, 1, 6) && test_sample_open_layout(ab, 1, 6);
+    if (aa) aa->transcript.cpu = cpu;
+    if (ab) ab->transcript.cpu = cpu;
+    return ok;
 }
 
 static void test_retirement_campaign(char const* executable_path, char const* root)
@@ -47,7 +54,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     int candidate_binary = open(candidate_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     int cwd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int leak = fcntl(binary, F_DUPFD, 512);
-    char leak_text[32], binary_sha[65], artifact_sha[65], code_sha[65], runtime_sha[65];
+    char leak_text[32], binary_sha[65], artifact_sha[65], code_sha[65], runtime_sha[65], batch_output[65];
     uint64_t binary_bytes = 0;
     snprintf(leak_text, sizeof(leak_text), "%d", leak);
     CHECK(binary >= 3 && candidate_binary >= 3 && cwd >= 3 && leak >= 3 &&
@@ -60,9 +67,13 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     sha256_init(&hash); sha256_add(&hash, artifact, artifact_bytes); sha256_finish_hex(&hash, artifact_sha);
     sha256_init(&hash); sha256_add(&hash, "fixture-code\n", 13); sha256_finish_hex(&hash, code_sha);
     memcpy(runtime_sha, code_sha, sizeof(runtime_sha));
+    char const* objects[] = {artifact_sha};
+    CHECK(tp_retirement_batch_output_digest(objects, 1, batch_output));
     char* environment[] = {"LC_ALL=C", "TP_RETIREMENT_TEST=explicit", NULL};
     char* arguments[2][4][7] = {0};
     char command_sha[2][4][65];
+    /* Per stage: [group 0 baseline, group 0 candidate, runtime row baseline,
+     * runtime row candidate]; G = U = 1 in this fixture. */
     TpRetirementMeasuredCommand commands[2][4] = {0};
     for (unsigned stage = 0; stage < 2; ++stage)
         for (unsigned kind = 0; kind < 2; ++kind)
@@ -74,27 +85,18 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
                 argv[2] = kind ? "runtime" : "compiler";
                 argv[3] = variant ? "artifact-right.bin" : "artifact-left.bin";
                 argv[4] = "ok"; argv[5] = leak_text;
-                commands[stage][index] = (TpRetirementMeasuredCommand){.row = 6,
+                commands[stage][index] = (TpRetirementMeasuredCommand){.unit = kind ? 6 : 0,
                     .kind = kind, .variant = variant, .arguments = argv, .argument_count = 6,
                     .environment = environment, .environment_count = 2, .directory = directory,
                     .artifact = kind ? NULL : argv[3], .timeout_seconds = 2,
                     .command_sha256 = command_sha[stage][index],
-                    .output_sha256 = kind ? runtime_sha : artifact_sha,
-                    .code_section_sha256 = kind ? NULL : code_sha,
-                    .code_section_bytes = kind ? 0 : 13};
+                    .output_sha256 = kind ? runtime_sha : batch_output};
                 CHECK(tp_retirement_command_hash(&commands[stage][index], command_sha[stage][index]));
             }
-    TpSampleTest aa, ab;
-    CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
-    unsigned census_id[] = {6};
-    CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
-        aa.runtime, 1, 60, aa.workspace, 5));
-    CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
-        ab.runtime, 1, 60, ab.workspace, 5));
     int cpu = tp_first_allowed_cpu();
     CHECK(cpu >= 0);
-    aa.transcript.cpu = ab.transcript.cpu = cpu;
-    TpRetirementPlan plan = {.version = TP_RETIREMENT_STATISTICS_VERSION, .seed = 7,
+    TpSampleTest aa, ab;
+    TpRetirementPlan plan = {.version = TP_RETIREMENT_STATISTICS_VERSION, .seed = 1,
         .pairs_per_round = 60, .resamples = TP_RETIREMENT_MIN_RESAMPLES,
         .bootstrap_members_per_scope = 1, .cell_members_per_scope = 1,
         .frozen_before_samples = 1};
@@ -103,11 +105,12 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     BqRetirementCampaignBinding binding = {0};
     BqRetirementHeldBinaries held = {.descriptors = {-1, -1}};
     TpRetirementCampaignCommand snapshots[8];
-    unsigned identities[3];
+    unsigned identities[2];
     BqRetirementTrustedRow trusted[7] = {0};
     BqRetirementRowFact facts[7] = {0};
     BqRetirementCorrectness gate = {0};
     gate.prepared.rows = gate.rows_done = 7;
+    gate.prepared.native_target = 1;
     gate.eligible_rows = 1;
     gate.finished = 1;
     gate.trusted_rows = trusted;
@@ -132,6 +135,8 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         trusted[row].row = facts[row].row = row;
     }
     trusted[6].compiler_eligible = trusted[6].code_obligation = 1;
+    trusted[6].stage = BQ_RETIREMENT_STAGE_LINK;
+    trusted[6].target = 1;
     facts[6].runtime_eligible = facts[6].code_eligible = 1;
     memcpy(trusted[6].independent_oracle_sha256, runtime_sha, 65);
     for (unsigned variant = 0; variant < 2; ++variant)
@@ -156,13 +161,11 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     sha256_finish_hex(&hash, gate.prepared.aa_second_commands_sha256);
     bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
     CHECK(bq_retirement_correctness_ready(&gate));
-    test_sample_close(&aa);
-    test_sample_close(&ab);
     char candidate_identity[SHA256_HEX_CAPACITY];
     memcpy(candidate_identity, held.verified.binary_identity_sha256[1], sizeof(candidate_identity));
     for (unsigned scenario = 0; scenario < 4; ++scenario)
     {
-        CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
+        CHECK(test_retirement_campaign_open(&aa, &ab, cpu));
         if (scenario == 0)
             aa.transcript.attempt = ab.transcript.attempt = 3;
         else if (scenario == 1)
@@ -185,7 +188,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         binding = (BqRetirementCampaignBinding){0};
         CHECK(!bq_retirement_campaign_bind_held(&binding, &gate, &campaign, &plan,
             &aa.samples, &ab.samples, &held, 1, 2, commands[0], commands[1], snapshots, 8,
-            identities, 3, identity, identity) &&
+            identities, 2, identity, identity) &&
             campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID && aa.samples.failed && ab.samples.failed &&
             !aa.execution.sequence && !ab.execution.sequence && !binding.campaign);
         if (scenario == 2)
@@ -204,29 +207,44 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         test_sample_close(&aa);
         test_sample_close(&ab);
     }
-    CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
-    CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
-        aa.runtime, 1, 60, aa.workspace, 5));
-    CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
-        ab.runtime, 1, 60, ab.workspace, 5));
-    aa.transcript.cpu = ab.transcript.cpu = cpu;
+    /* (A1) The gate cannot supply an object row's frozen batch contract, and
+     * a cross-target row is never timed; either fails closed before timing. */
+    for (unsigned scenario = 0; scenario < 2; ++scenario)
+    {
+        if (scenario) trusted[6].target = 2;
+        else trusted[6].stage = BQ_RETIREMENT_STAGE_OBJECT;
+        bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
+        CHECK(test_retirement_campaign_open(&aa, &ab, cpu));
+        campaign = (TpRetirementCampaign){0};
+        binding = (BqRetirementCampaignBinding){0};
+        CHECK(!bq_retirement_campaign_bind_held(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
+            &held, 1, 2, commands[0], commands[1], snapshots, 8, identities, 2, identity, identity) &&
+            campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID && aa.samples.failed && !binding.campaign);
+        trusted[6].stage = BQ_RETIREMENT_STAGE_LINK;
+        trusted[6].target = 1;
+        bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
+        test_sample_close(&aa);
+        test_sample_close(&ab);
+    }
+    CHECK(test_retirement_campaign_open(&aa, &ab, cpu));
     campaign = (TpRetirementCampaign){0};
     binding = (BqRetirementCampaignBinding){0};
     CHECK(bq_retirement_campaign_bind_held(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
         &held, 1, 2, commands[0], commands[1], snapshots, 8,
-        identities, 3, identity, identity));
-    CHECK(binding.campaign == &campaign && binding.gate == &gate &&
+        identities, 2, identity, identity));
+    CHECK(binding.campaign == &campaign && binding.gate == &gate && binding.timed_rows == 1 &&
           !strcmp(binding.sealed_sha256, gate.sealed_sha256));
-    CHECK(campaign.phase == TP_RETIREMENT_CAMPAIGN_AA && campaign.row_ids[0] == 6 &&
+    CHECK(campaign.phase == TP_RETIREMENT_CAMPAIGN_AA && campaign.runtime_rows[0] == 6 &&
+          campaign.group_shapes[0] == ((1u << 1) | TP_RETIREMENT_GROUP_SINGLETON) &&
           campaign.capacity.invocations_per_stage == 488 &&
           campaign.capacity.samples_per_stage == 120 &&
           campaign.capacity.total_invocations == 976 && campaign.capacity.total_samples == 240 &&
           campaign.capacity.spool_bytes_per_stage == 120 * TP_RETIREMENT_SAMPLE_RECORD_BYTES &&
           campaign.capacity.total_spool_bytes == 240 * TP_RETIREMENT_SAMPLE_RECORD_BYTES &&
           campaign.capacity.transcript_shards_per_stage == 1 &&
-          campaign.capacity.total_transcript_shards == 2);
+          campaign.capacity.total_transcript_shards == 2 && !campaign.capacity.total_metrics_artifacts);
     TpRetirementCampaignCapacity large;
-    CHECK(tp_retirement_campaign_capacity(72672, 0, 60, &large) &&
+    CHECK(test_retirement_campaign_capacity_shape(72672, 0, 72672, 0, 60, 0, &large) &&
           large.samples_per_stage == UINT64_C(8720640) &&
           large.total_samples == UINT64_C(17441280) &&
           large.total_sample_partitions == 2 &&
@@ -237,63 +255,79 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
               UINT64_C(17731968) * TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX &&
           large.sample_bytes_per_stage_upper_bound ==
               UINT64_C(8720640) * TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX &&
-          large.total_transcript_bytes_upper_bound == UINT64_C(31988470272) &&
-          large.total_sample_bytes_upper_bound == UINT64_C(7238131200) &&
-          large.total_payload_bytes_upper_bound == UINT64_C(39226601472) &&
+          large.total_transcript_bytes_upper_bound == UINT64_C(36137750784) &&
+          large.total_sample_bytes_upper_bound == UINT64_C(5755622400) &&
+          large.total_payload_bytes_upper_bound == UINT64_C(41893373184) &&
           large.total_transcript_shards == 542 && large.total_sample_shards == 134 &&
-          large.total_shard_files == 676);
-    CHECK(tp_retirement_campaign_capacity(72672, 72672, 60, &large) &&
+          large.total_shard_files == 676 && large.total_payload_files == 676);
+    CHECK(test_retirement_campaign_capacity_shape(72672, 0, 72672, 72672, 60, 0, &large) &&
           large.compiler_invocations_per_stage == UINT64_C(17731968) &&
           large.runtime_invocations_per_stage == UINT64_C(17731968) &&
           large.invocations_per_stage == UINT64_C(35463936) &&
           large.total_invocations == UINT64_C(70927872) &&
           large.total_shard_files == 1218 &&
-          large.total_payload_bytes_upper_bound == UINT64_C(71215071744));
-    CHECK(tp_retirement_campaign_capacity(77762, 0, 60, &large) &&
+          large.total_payload_bytes_upper_bound == UINT64_C(78031123968));
+    CHECK(test_retirement_campaign_capacity_shape(77762, 0, 77762, 0, 60, 0, &large) &&
           large.total_transcript_shards == 580 && large.total_sample_shards == 144 &&
           large.total_shard_files == 724);
-    CHECK(tp_retirement_campaign_capacity(77762, 77762, 60, &large) &&
+    CHECK(test_retirement_campaign_capacity_shape(77762, 0, 77762, 77762, 60, 0, &large) &&
           large.total_transcript_shards == 1160 && large.total_sample_shards == 144 &&
           large.total_shard_files == 1304);
-    /* The full compiler-eligible envelope without runtime rows fits the
-     * 128 GiB store through 198 pairs at the proven maximal line widths. */
-    CHECK(tp_retirement_campaign_capacity(77762, 0, 196, &large) &&
-          large.total_shard_files == 2338 &&
-          large.total_payload_bytes_upper_bound == UINT64_C(135843370944));
-    CHECK(tp_retirement_campaign_capacity(77762, 0, 198, &large) &&
-          large.total_shard_files == 2360 &&
-          large.total_payload_bytes_upper_bound == UINT64_C(137223801968));
-    CHECK(!tp_retirement_campaign_capacity(77762, 0, 200, &large) &&
+    /* All singleton groups without runtime fit the 128 GiB store through 184
+     * pairs at the proven maximal line widths; all runtime-eligible, 98. */
+    CHECK(test_retirement_campaign_capacity_shape(77762, 0, 77762, 0, 184, 0, &large) &&
+          large.total_shard_files == 2196 &&
+          large.total_payload_bytes_upper_bound == UINT64_C(136161262000));
+    CHECK(!test_retirement_campaign_capacity_shape(77762, 0, 77762, 0, 186, 0, &large) &&
           test_retirement_campaign_capacity_is_zero(&large));
-    /* 254 pairs is rejected by the byte check alone: the samples and
-     * invocations fit their collector caps and 3026 shard files leave the
-     * minimum external entries, but 175875870640 bytes exceed 128 GiB. */
-    CHECK(!tp_retirement_campaign_capacity(77762, 0, 254, &large) &&
+    CHECK(test_retirement_campaign_capacity_shape(77762, 0, 77762, 77762, 98, 0, &large) &&
+          large.total_shard_files == 2114 &&
+          large.total_payload_bytes_upper_bound == UINT64_C(135574625472));
+    CHECK(!test_retirement_campaign_capacity_shape(77762, 0, 77762, 77762, 100, 0, &large) &&
+          test_retirement_campaign_capacity_is_zero(&large));
+    CHECK(!test_retirement_campaign_capacity_shape(77762, 0, 77762, 0, 254, 0, &large) &&
           test_retirement_campaign_capacity_is_zero(&large));
     uint64_t entries = 0, bytes = 0;
-    CHECK(tp_retirement_samples_count(77762, 254) == UINT64_C(39503096) &&
-          UINT64_C(79317240) <= (uint64_t)TP_RETIREMENT_TRANSCRIPT_SHARDS * TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS &&
-          2 * (tp_retirement_campaign_ceil_div(UINT64_C(79317240), TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS) +
-               tp_retirement_campaign_ceil_div(UINT64_C(39503096), TP_RETIREMENT_SAMPLE_SHARD_RECORDS)) == 3026 &&
-          2 * (UINT64_C(79317240) * TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX +
-               UINT64_C(39503096) * TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX) == UINT64_C(175875870640));
     CHECK(tp_retirement_campaign_store_fits(3026, TP_RETIREMENT_STORE_TOTAL_BYTES,
               TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES, 0, &entries, &bytes) &&
           entries == 3029 && bytes == TP_RETIREMENT_STORE_TOTAL_BYTES);
-    CHECK(!tp_retirement_campaign_store_fits(3026, UINT64_C(175875870640),
+    CHECK(!tp_retirement_campaign_store_fits(3026, TP_RETIREMENT_STORE_TOTAL_BYTES + 1,
               TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES, 0, &entries, &bytes));
-    /* With every row runtime-eligible the byte ceiling admits 108 pairs. */
-    CHECK(tp_retirement_campaign_capacity(77762, 77762, 108, &large) &&
-          large.total_shard_files == 2328 &&
-          large.total_payload_bytes_upper_bound == UINT64_C(136267640416));
-    CHECK(!tp_retirement_campaign_capacity(77762, 77762, 110, &large) &&
+    CHECK(!tp_retirement_campaign_store_fits(TP_RETIREMENT_STORE_FILES - 2, 1,
+              TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES, 0, &entries, &bytes));
+    /* One metrics artifact per object batch, warmups included, enters the
+     * store plan: two groups, one of them an object batch with a 1 MiB
+     * reviewed artifact bound. */
+    CHECK(test_retirement_campaign_capacity_shape(2, 1, 3, 1, 60, UINT64_C(1048576), &large) &&
+          large.invocations_per_stage == 732 && large.row_samples_per_stage == 360 &&
+          large.batch_samples_per_stage == 120 && large.samples_per_stage == 480 &&
+          large.metrics_artifacts_per_stage == 244 && large.total_metrics_artifacts == 488 &&
+          large.metrics_bytes_per_stage_upper_bound == UINT64_C(255852544) &&
+          large.sample_bytes_per_stage_upper_bound ==
+              360 * TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX + 120 * TP_RETIREMENT_BATCH_RECORD_BYTES_MAX &&
+          large.sample_shards_per_stage == 2 && large.sample_partitions_per_stage == 2 &&
+          large.total_shard_files == 6 && large.total_payload_files == 494 &&
+          large.total_payload_bytes_upper_bound == UINT64_C(513498344));
+    /* Eight object groups fill the 4096-entry store at P=60; the 80 groups of
+     * the full native-host population need 39040 metrics artifacts and fail
+     * closed before any timing. */
+    CHECK(test_retirement_campaign_capacity_shape(10, 8, 18, 2, 60, UINT64_C(1048576), &large) &&
+          large.total_payload_files == 3910);
+    CHECK(!test_retirement_campaign_capacity_shape(11, 9, 20, 2, 60, UINT64_C(1048576), &large) &&
           test_retirement_campaign_capacity_is_zero(&large));
-    CHECK(!tp_retirement_campaign_capacity(77762, 77762, 254, &large) &&
-          test_retirement_campaign_capacity_is_zero(&large));
-    CHECK(!tp_retirement_campaign_capacity(77792, 0, 254, &large));
-    CHECK(!tp_retirement_campaign_capacity(72672, 72672, 254, &large));
-    CHECK(!tp_retirement_campaign_capacity(0, 0, 60, &large));
-    CHECK(!tp_retirement_campaign_capacity(1, 2, 60, &large));
+    CHECK(!test_retirement_campaign_capacity_shape(82, 80, 6578, 2, 60, UINT64_C(1048576), &large));
+    /* Inconsistent shapes are rejected. */
+    CHECK(!test_retirement_campaign_capacity_shape(0, 0, 1, 0, 60, 0, &large));
+    CHECK(!test_retirement_campaign_capacity_shape(1, 0, 1, 2, 60, 0, &large));
+    CHECK(!test_retirement_campaign_capacity_shape(2, 1, 3, 2, 60, 1, &large)); /* Runtime in an object group. */
+    CHECK(!test_retirement_campaign_capacity_shape(2, 3, 3, 0, 60, 1, &large));
+    CHECK(!test_retirement_campaign_capacity_shape(3, 0, 2, 0, 60, 0, &large));
+    CHECK(!test_retirement_campaign_capacity_shape(2, 1, 3, 1, 60, 0, &large));
+    CHECK(!test_retirement_campaign_capacity_shape(2, 1, 3, 1, 60, TP_RETIREMENT_METRICS_ARTIFACT_BYTES + 1, &large));
+    CHECK(!test_retirement_campaign_capacity_shape(1, 0, 1, 0, 60, 1, &large));
+    CHECK(!test_retirement_campaign_capacity_shape(1, 0, 1, 0, 61, 0, &large));
+    CHECK(!test_retirement_campaign_capacity_shape(77792, 0, 77792, 0, 254, 0, &large));
+    CHECK(!tp_retirement_campaign_capacity(NULL, &large) && test_retirement_campaign_capacity_is_zero(&large));
     uint64_t capacity_value = 1;
     CHECK(!tp_retirement_campaign_u64_mul(UINT64_MAX, 2, &capacity_value) && !capacity_value);
     capacity_value = 1;
@@ -301,20 +335,20 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     /* The exact store preflight adds the caller's external reservation. */
     TpRetirementCampaignStorePlan store_plan;
     uint64_t receipt = TP_RETIREMENT_RECEIPT_BYTES;
-    uint64_t spare_bytes = TP_RETIREMENT_STORE_TOTAL_BYTES - UINT64_C(135843370944) - receipt;
-    CHECK(tp_retirement_campaign_capacity(77762, 0, 196, &large));
-    /* The store owns the shards plus the receipt; both are in its plan. */
+    uint64_t spare_bytes = TP_RETIREMENT_STORE_TOTAL_BYTES - UINT64_C(136161262000) - receipt;
+    CHECK(test_retirement_campaign_capacity_shape(77762, 0, 77762, 0, 184, 0, &large));
+    /* The store owns the payload plus the receipt; both are in its plan. */
     CHECK(tp_retirement_campaign_store_preflight(&large, 1, receipt, 3, 1024, &store_plan) &&
-          store_plan.owned_files == 2339 && store_plan.owned_bytes == UINT64_C(135843370944) + receipt &&
+          store_plan.owned_files == 2197 && store_plan.owned_bytes == UINT64_C(136161262000) + receipt &&
           store_plan.external_entries == 3 && store_plan.external_bytes == 1024 &&
-          store_plan.entries == 2342 && store_plan.bytes == UINT64_C(135843370944) + receipt + 1024 &&
-          store_plan.remaining_entries == TP_RETIREMENT_STORE_FILES - 2342 &&
+          store_plan.entries == 2200 && store_plan.bytes == UINT64_C(136161262000) + receipt + 1024 &&
+          store_plan.remaining_entries == TP_RETIREMENT_STORE_FILES - 2200 &&
           store_plan.remaining_bytes == spare_bytes - 1024);
-    CHECK(tp_retirement_campaign_store_preflight(&large, 1, receipt, TP_RETIREMENT_STORE_FILES - 2339,
+    CHECK(tp_retirement_campaign_store_preflight(&large, 1, receipt, TP_RETIREMENT_STORE_FILES - 2197,
               spare_bytes, &store_plan) &&
           store_plan.entries == TP_RETIREMENT_STORE_FILES && !store_plan.remaining_entries &&
           store_plan.bytes == TP_RETIREMENT_STORE_TOTAL_BYTES && !store_plan.remaining_bytes);
-    CHECK(!tp_retirement_campaign_store_preflight(&large, 1, receipt, TP_RETIREMENT_STORE_FILES - 2338, 0,
+    CHECK(!tp_retirement_campaign_store_preflight(&large, 1, receipt, TP_RETIREMENT_STORE_FILES - 2196, 0,
               &store_plan) && test_retirement_campaign_store_plan_is_zero(&store_plan));
     CHECK(!tp_retirement_campaign_store_preflight(&large, 1, receipt, 3, spare_bytes + 1, &store_plan) &&
           test_retirement_campaign_store_plan_is_zero(&store_plan));
@@ -338,9 +372,16 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     mismatched = large;
     --mismatched.total_payload_bytes_upper_bound;
     CHECK(!tp_retirement_campaign_store_preflight(&mismatched, 1, receipt, 3, 0, &store_plan));
+    mismatched = large;
+    ++mismatched.total_payload_files;
+    CHECK(!tp_retirement_campaign_store_preflight(&mismatched, 1, receipt, 3, 0, &store_plan));
     mismatched = (TpRetirementCampaignCapacity){0};
     CHECK(!tp_retirement_campaign_store_preflight(&mismatched, 1, receipt, 3, 0, &store_plan));
-    CHECK(tp_retirement_campaign_capacity(1, 1, 60, &large));
+    /* Metrics artifacts count toward both store ceilings. */
+    CHECK(test_retirement_campaign_capacity_shape(2, 1, 3, 1, 60, UINT64_C(1048576), &large) &&
+          tp_retirement_campaign_store_preflight(&large, 1, receipt, 3, 0, &store_plan) &&
+          store_plan.owned_files == 495 && store_plan.owned_bytes == UINT64_C(513498344) + receipt);
+    CHECK(test_retirement_campaign_capacity_shape(1, 0, 1, 1, 60, 0, &large));
     TpRetirementCampaignDurationBounds bounds = {
         .reservation_ns = 1000000, .materialization_ns = 1000000,
         .baseline_build_ns = 1000000, .candidate_build_ns = 1000000,
@@ -380,7 +421,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     TpRetirementCampaignCapacity inconsistent = large;
     inconsistent.total_invocations += 1;
     CHECK(!tp_retirement_campaign_preflight(&inconsistent, &bounds, &preflight));
-    CHECK(tp_retirement_campaign_capacity(1, 0, 60, &large));
+    CHECK(test_retirement_campaign_capacity_shape(1, 0, 1, 0, 60, 0, &large));
     bounds.runtime_invocation_ns = 0;
     CHECK(tp_retirement_campaign_preflight(&large, &bounds, &preflight) && preflight.fits &&
           !preflight.runtime_invocation_total_ns);
@@ -437,11 +478,10 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     double ratios[120];
     for (unsigned i = 0; i < 120; ++i)
     {
-        uint64_t values[9];
+        uint64_t values[TP_RETIREMENT_SAMPLE_VALUES];
         CHECK(tp_retirement_sample_read(&ab.samples, i, values));
         ratios[i] = (double)values[1] / (double)values[0];
-        CHECK(values[2] && values[3] && values[4] == 13 && values[5] == 13 &&
-              values[6] && values[7]);
+        CHECK(values[2] && values[3] && values[4] && values[5]);
     }
     TpRetirementSeries series = {.ratios = ratios, .ratio_count = 120, .cell_count = 1,
         .observed_pairs = {60, 60}, .member_kind = TP_RETIREMENT_EXACT_CELL_MEMBER,
@@ -452,17 +492,12 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     test_sample_close(&ab);
 
     /* The held-record join is checked again at launch, after freeze. */
-    CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
-    CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
-        aa.runtime, 1, 60, aa.workspace, 5));
-    CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
-        ab.runtime, 1, 60, ab.workspace, 5));
-    aa.transcript.cpu = ab.transcript.cpu = cpu;
+    CHECK(test_retirement_campaign_open(&aa, &ab, cpu));
     campaign = (TpRetirementCampaign){0};
     binding = (BqRetirementCampaignBinding){0};
     CHECK(bq_retirement_campaign_bind_held(&binding, &gate, &campaign, &plan,
         &aa.samples, &ab.samples, &held, 1, 2, commands[0], commands[1],
-        snapshots, 8, identities, 3, identity, identity));
+        snapshots, 8, identities, 2, identity, identity));
     char held_binary_digit = held.verified.binary_sha256[1][0];
     held.verified.binary_sha256[1][0] = held_binary_digit == 'e' ? 'f' : 'e';
     int held_guard_log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
@@ -483,16 +518,11 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     test_sample_close(&ab);
 
     /* The lower-level freeze helper cannot launch without held service files. */
-    CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
-    CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
-        aa.runtime, 1, 60, aa.workspace, 5));
-    CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
-        ab.runtime, 1, 60, ab.workspace, 5));
-    aa.transcript.cpu = ab.transcript.cpu = cpu;
+    CHECK(test_retirement_campaign_open(&aa, &ab, cpu));
     campaign = (TpRetirementCampaign){0};
     binding = (BqRetirementCampaignBinding){0};
     CHECK(bq_retirement_campaign_bind(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
-        &frozen, &frozen, commands[0], commands[1], snapshots, 8, identities, 3, identity, identity));
+        &frozen, &frozen, commands[0], commands[1], snapshots, 8, identities, 2, identity, identity));
     int unheld_log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     TpProcessInputs unheld_inputs = {binary, cwd, unheld_log, environment};
     TpRetirementMeasurementResult unheld_result;
@@ -513,12 +543,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     for (unsigned kind = 0; kind < 2; ++kind)
     {
         unsigned index = kind * 2 + 1;
-        CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
-        CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
-            aa.runtime, 1, 60, aa.workspace, 5));
-        CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
-            ab.runtime, 1, 60, ab.workspace, 5));
-        aa.transcript.cpu = ab.transcript.cpu = cpu;
+        CHECK(test_retirement_campaign_open(&aa, &ab, cpu));
         campaign = (TpRetirementCampaign){0};
         binding = (BqRetirementCampaignBinding){0};
         arguments[0][index][4] = "fail";
@@ -526,7 +551,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         CHECK(bq_retirement_correctness_ready(&gate));
         CHECK(!bq_retirement_campaign_bind(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
             &frozen, &frozen, commands[0], commands[1], snapshots, 8,
-            identities, 3, identity, identity) &&
+            identities, 2, identity, identity) &&
             campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID &&
             aa.samples.failed && ab.samples.failed &&
             !aa.execution.sequence && !ab.execution.sequence && !binding.campaign);
@@ -539,17 +564,12 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
      * self-consistent reseal after freeze cannot start even the first child. */
     for (unsigned scenario = 0; scenario < 2; ++scenario)
     {
-        CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
-        CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
-            aa.runtime, 1, 60, aa.workspace, 5));
-        CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
-            ab.runtime, 1, 60, ab.workspace, 5));
-        aa.transcript.cpu = ab.transcript.cpu = cpu;
+        CHECK(test_retirement_campaign_open(&aa, &ab, cpu));
         campaign = (TpRetirementCampaign){0};
         binding = (BqRetirementCampaignBinding){0};
         CHECK(bq_retirement_campaign_bind_held(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
             &held, 1, 2, commands[0], commands[1], snapshots, 8,
-            identities, 3, identity, identity));
+            identities, 2, identity, identity));
         char original_artifact_digit = facts[6].side[1].artifact_sha256[0];
         facts[6].side[1].artifact_sha256[0] = original_artifact_digit == 'e' ? 'f' : 'e';
         if (scenario) bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
@@ -574,16 +594,11 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     }
 
     /* Mutation of a frozen oracle fails before launch and poisons both stages. */
-    CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
-    CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
-        aa.runtime, 1, 60, aa.workspace, 5));
-    CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
-        ab.runtime, 1, 60, ab.workspace, 5));
-    aa.transcript.cpu = ab.transcript.cpu = cpu;
+    CHECK(test_retirement_campaign_open(&aa, &ab, cpu));
     campaign = (TpRetirementCampaign){0};
     CHECK(tp_retirement_campaign_freeze(&campaign, &plan, &aa.samples, &ab.samples,
         &frozen, &frozen, &frozen, commands[0], commands[1], snapshots, 8,
-        identities, 3, 7, identity, identity));
+        identities, 2, 7, 0, identity, identity));
     int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     TpProcessInputs inputs = {binary, cwd, log, environment};
     TpRetirementMeasurementResult measured;
@@ -591,85 +606,80 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     CHECK(!tp_retirement_campaign_run(&campaign, &commands[0][0], &inputs, cwd, &measured) &&
           campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID && !aa.execution.sequence &&
           !ab.execution.sequence && aa.samples.failed && ab.samples.failed);
-    commands[0][0].output_sha256 = artifact_sha;
+    commands[0][0].output_sha256 = batch_output;
     if (log >= 3) CHECK(close(log) == 0 && unlinkat(cwd, "child.log", 0) == 0);
     test_sample_close(&aa); test_sample_close(&ab);
 
     /* A changed #1020 output oracle cannot be imported into a fresh timed
      * attempt, even if the command still has its original plan digest. */
-    CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
-    CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
-        aa.runtime, 1, 60, aa.workspace, 5));
-    CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
-        ab.runtime, 1, 60, ab.workspace, 5));
-    aa.transcript.cpu = ab.transcript.cpu = cpu;
+    CHECK(test_retirement_campaign_open(&aa, &ab, cpu));
     campaign = (TpRetirementCampaign){0};
-    facts[6].side[1].artifact_sha256[0] = 'e';
+    char saved_artifact_digit = facts[6].side[1].artifact_sha256[0];
+    facts[6].side[1].artifact_sha256[0] = saved_artifact_digit == 'e' ? 'f' : 'e';
     bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
     CHECK(bq_retirement_correctness_ready(&gate));
     binding = (BqRetirementCampaignBinding){0};
     CHECK(!bq_retirement_campaign_bind(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
         &frozen, &frozen, commands[0], commands[1], snapshots, 8,
-        identities, 3, identity, identity) &&
+        identities, 2, identity, identity) &&
         campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID &&
         aa.samples.failed && ab.samples.failed && !aa.execution.sequence);
-    facts[6].side[1].artifact_sha256[0] = 'd';
+    facts[6].side[1].artifact_sha256[0] = saved_artifact_digit;
+    bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
     test_sample_close(&aa); test_sample_close(&ab);
 
     /* No guessed A/A eligibility or partial campaign can reach A/B. */
-    CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
-    CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
-        aa.runtime, 1, 60, aa.workspace, 5));
-    CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
-        ab.runtime, 1, 60, ab.workspace, 5));
-    aa.transcript.cpu = ab.transcript.cpu = cpu;
+    CHECK(test_retirement_campaign_open(&aa, &ab, cpu));
     campaign = (TpRetirementCampaign){0};
     CHECK(tp_retirement_campaign_freeze(&campaign, &plan, &aa.samples, &ab.samples,
         &frozen, &frozen, &frozen, commands[0], commands[1], snapshots, 8,
-        identities, 3, 7, identity, identity));
+        identities, 2, 7, 0, identity, identity));
     TpRetirementShard final;
     CHECK(!tp_retirement_campaign_finish_stage(&campaign, tp_process_monotonic_ns(), &final) &&
           campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID && ab.samples.failed);
     test_sample_close(&aa); test_sample_close(&ab);
 
     /* Every rejected frozen input invalidates this attempt before timing. */
-    for (unsigned scenario = 0; scenario < 7; ++scenario)
+    for (unsigned scenario = 0; scenario < 10; ++scenario)
     {
-        CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
-        CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
-            aa.runtime, 1, 60, aa.workspace, 5));
-        CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
-            ab.runtime, 1, 60, ab.workspace, 5));
-        aa.transcript.cpu = ab.transcript.cpu = cpu;
+        CHECK(test_retirement_campaign_open(&aa, &ab, cpu));
         campaign = (TpRetirementCampaign){0};
         if (scenario == 0) ab.samples.rows[0].metrics ^= TP_RETIREMENT_SAMPLE_RUNTIME;
-        if (scenario == 1) aa.execution.row_ids[0] = 7;
-        if (scenario == 2) ab.execution.runtime_rows[0] = 1;
+        if (scenario == 1) ab.samples.groups[0].kind = TP_RETIREMENT_GROUP_OBJECT;
+        if (scenario == 2) ab.execution.runtime_rows[0] = 5;
         if (scenario == 3) plan.pairs_per_round = 62;
         if (scenario == 4) frozen.valid = 0;
         if (scenario == 6) ab.samples.rows = aa.samples.rows;
+        if (scenario == 7) commands[0][0].exit_status = 1;
+        if (scenario == 8) commands[1][2].unit = 5;
+        if (scenario == 9) commands[0][1].artifact = NULL; /* A singleton group names its artifact. */
         int ok = tp_retirement_campaign_freeze(&campaign, &plan, &aa.samples, &ab.samples,
             &frozen, &frozen, &frozen, commands[0], commands[1], scenario == 5 ? NULL : snapshots, 8,
-            identities, 3, 7, identity, identity);
+            identities, 2, 7, 0, identity, identity);
         CHECK(!ok && campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID &&
               aa.samples.failed && ab.samples.failed && !aa.execution.sequence);
         plan.pairs_per_round = 60;
         frozen.valid = 1;
+        commands[0][0].exit_status = 0;
+        commands[1][2].unit = 6;
+        commands[0][1].artifact = arguments[0][1][3];
         test_sample_close(&aa); test_sample_close(&ab);
     }
+    /* A metrics bound without an object group is an inconsistent shape. */
+    CHECK(test_retirement_campaign_open(&aa, &ab, cpu));
+    campaign = (TpRetirementCampaign){0};
+    CHECK(!tp_retirement_campaign_freeze(&campaign, &plan, &aa.samples, &ab.samples,
+        &frozen, &frozen, &frozen, commands[0], commands[1], snapshots, 8,
+        identities, 2, 7, 1, identity, identity) && campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID);
+    test_sample_close(&aa); test_sample_close(&ab);
 
     /* A changed host observation cannot be retroactively attached to the
      * frozen service plan, even with a valid command and output oracle. */
-    CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
-    CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
-        aa.runtime, 1, 60, aa.workspace, 5));
-    CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
-        ab.runtime, 1, 60, ab.workspace, 5));
-    aa.transcript.cpu = ab.transcript.cpu = cpu;
+    CHECK(test_retirement_campaign_open(&aa, &ab, cpu));
     campaign = (TpRetirementCampaign){0};
     CHECK(tp_retirement_campaign_freeze(&campaign, &plan, &aa.samples, &ab.samples,
         &frozen, &frozen, &frozen, commands[0], commands[1], snapshots, 8,
-        identities, 3, 7, identity, identity));
+        identities, 2, 7, 0, identity, identity));
     aa.transcript.cpu = -1;
     log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     inputs.log = log;

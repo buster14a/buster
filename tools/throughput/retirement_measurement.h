@@ -1,7 +1,12 @@
-/* Native observation boundary for #881.
+/* Native observation boundary for #881 (A1).
  * executable_init hashes a frozen trusted binary outside timing; run binds the
  * actual argv/environment, executes that descriptor, then reads the actual
- * artifact or runtime output before advancing the paired-sample collector.
+ * outputs before advancing the paired-sample collector. A compiler invocation
+ * is one batch process of one frozen group: an object batch must write every
+ * frozen object byte-identical to its frozen artifact and a per-input metrics
+ * file that the strict reader accepts against the frozen oracle; a singleton
+ * link/self-host group writes its one artifact. Code sections are parsed once,
+ * outside timing (tp_retirement_code_observe), never per invocation.
  * The service owns immutable source/cwd trees, private output descriptors,
  * independent correctness/oracles, sandboxing, lease and durable publication.
  * There is no request parser, recipe admission or performance verdict here.
@@ -20,17 +25,22 @@ typedef struct TpRetirementExecutable
     char sha256[65];
 } TpRetirementExecutable;
 
+/* unit is the group ordinal for a compiler batch and the census row for a
+ * runtime process. A singleton compiler group names its final `artifact`; an
+ * object group supplies its frozen `batch` contract. output_sha256 is the
+ * frozen batch output digest (compiler) or independent oracle output (runtime);
+ * exit_status is the frozen batch exit status. */
 typedef struct TpRetirementMeasuredCommand
 {
-    unsigned row, kind, variant, argument_count, environment_count, timeout_seconds;
+    unsigned unit, kind, variant, argument_count, environment_count, timeout_seconds;
     char* const* arguments;
     char* const* environment;
     char const* directory;
     char const* artifact;
+    TpRetirementBatchContract const* batch;
     char const* command_sha256;
     char const* output_sha256;
-    char const* code_section_sha256;
-    uint64_t code_section_bytes;
+    int exit_status;
 } TpRetirementMeasuredCommand;
 
 typedef enum TpRetirementMeasurementStatus
@@ -42,13 +52,16 @@ typedef enum TpRetirementMeasurementStatus
     TP_RETIREMENT_MEASUREMENT_COMPLETE
 } TpRetirementMeasurementStatus;
 
+/* metrics_path is where the caller must publish the metrics bytes (the
+ * transcript names it); it is empty for every other invocation. */
 typedef struct TpRetirementMeasurementResult
 {
     TpRetirementMeasurementStatus status;
     TpProcessObservation observed;
     TpProcess process;
-    uint64_t output_bytes;
-    char output_sha256[65];
+    uint64_t output_bytes, metrics_bytes;
+    char output_sha256[65], metrics_sha256[65];
+    char metrics_path[TP_RETIREMENT_METRICS_PATH_CAP];
 } TpRetirementMeasurementResult;
 
 static int tp_retirement_file_same(struct stat const* a, struct stat const* b)
@@ -124,17 +137,15 @@ static int tp_retirement_executable_init(TpRetirementExecutable* executable, int
     return ok;
 }
 
-/* Read into owned memory instead of mapping a potentially mutable file: a
- * concurrent truncation must fail this invocation, never SIGBUS the collector.
- * Metadata and the independently computed full digest join this inspection to
- * the bytes hashed by measurement_run. No code count supplied by a command is
- * accepted unless it equals the parsed payload below. */
-static int tp_retirement_artifact_file(int descriptor, TpRetirementArtifact* facts)
+/* Read a bounded regular file into owned memory instead of mapping a
+ * potentially mutable file: a concurrent truncation must fail this read,
+ * never SIGBUS the collector. Metadata brackets the read. */
+static unsigned char* tp_retirement_file_read(int descriptor, uint64_t limit, uint64_t* size)
 {
     struct stat before, after;
-    int ok = facts && descriptor >= 3 && fstat(descriptor, &before) == 0 &&
+    int ok = size && descriptor >= 3 && fstat(descriptor, &before) == 0 &&
         S_ISREG(before.st_mode) && before.st_nlink == 1 && before.st_size > 0 &&
-        (uint64_t)before.st_size <= TP_RETIREMENT_ARTIFACT_BYTES;
+        (uint64_t)before.st_size <= limit;
     unsigned char* bytes = ok ? (unsigned char*)malloc((size_t)before.st_size) : NULL;
     ok = ok && bytes;
     uint64_t offset = 0;
@@ -147,10 +158,75 @@ static int tp_retirement_artifact_file(int descriptor, TpRetirementArtifact* fac
         ok = count > 0 && (size_t)count <= wanted;
         if (ok) offset += (uint64_t)count;
     }
-    if (ok) ok = fstat(descriptor, &after) == 0 && tp_retirement_file_same(&before, &after) &&
-        tp_retirement_artifact(bytes, offset, facts);
+    if (ok) ok = fstat(descriptor, &after) == 0 && tp_retirement_file_same(&before, &after);
+    if (!ok)
+    {
+        free(bytes);
+        bytes = NULL;
+    }
+    if (size) *size = ok ? offset : 0;
+    return bytes;
+}
+
+/* Independent inspection of one frozen artifact, outside timing. No code count
+ * supplied by a command is accepted unless it equals the parsed payload. */
+static int tp_retirement_artifact_file(int descriptor, TpRetirementArtifact* facts)
+{
+    uint64_t size = 0;
+    unsigned char* bytes = tp_retirement_file_read(descriptor, TP_RETIREMENT_ARTIFACT_BYTES, &size);
+    int ok = facts && bytes && tp_retirement_artifact(bytes, size, facts);
     if (!ok && facts) *facts = (TpRetirementArtifact){0};
     free(bytes);
+    return ok;
+}
+
+/* The once-per-(variant, row) code fact: parse the frozen artifact's code
+ * sections and require an independent reproduction compile to be
+ * byte-identical. A mismatch is nondeterminism, never a code observation. */
+static inline int tp_retirement_code_observe(int artifact, int reproduction, TpRetirementCodeSide* side)
+{
+    TpRetirementArtifact facts;
+    uint64_t bytes = 0;
+    char digest[65];
+    int ok = side && tp_retirement_artifact_file(artifact, &facts) &&
+        tp_retirement_file_hash(reproduction, digest, &bytes) && bytes == facts.file_bytes &&
+        !strcmp(digest, facts.file_sha256);
+    if (side)
+    {
+        *side = (TpRetirementCodeSide){0};
+        if (ok)
+        {
+            memcpy(side->artifact_sha256, facts.file_sha256, 65);
+            memcpy(side->code_sha256, facts.code_sha256, 65);
+            memcpy(side->reproduction_sha256, digest, 65);
+            side->code_bytes = facts.code_bytes;
+            ok = tp_retirement_code_side(side);
+        }
+        if (!ok) *side = (TpRetirementCodeSide){0};
+    }
+    return ok;
+}
+
+/* Read, hash and strictly check one batch's per-input metrics file. */
+static int tp_retirement_metrics_file(int descriptor, TpRetirementBatchContract const* contract,
+    uint64_t elapsed_ns, TpRetirementMemberSample* members, unsigned member_capacity,
+    char digest[65], uint64_t* size)
+{
+    uint64_t bytes = 0;
+    unsigned char* data = tp_retirement_file_read(descriptor, TP_RETIREMENT_METRICS_ARTIFACT_BYTES, &bytes);
+    int ok = data && digest && size &&
+        tp_retirement_metrics_check(data, bytes, contract, elapsed_ns, members, member_capacity);
+    if (digest) digest[0] = 0;
+    if (size) *size = 0;
+    if (ok)
+    {
+        Sha256 hash;
+        sha256_init(&hash);
+        sha256_add(&hash, data, (u64)bytes);
+        sha256_finish_hex(&hash, digest);
+        *size = bytes;
+    }
+    free(data);
     return ok;
 }
 
@@ -164,22 +240,32 @@ static int tp_retirement_command_hash(TpRetirementMeasuredCommand const* command
 
 static int tp_retirement_artifact_leaf(char const* name)
 {
-    int ok = name && name[0] && strcmp(name, ".") && strcmp(name, "..");
-    for (unsigned i = 0; ok && name[i]; ++i)
-        ok = i < 127 && ((name[i] >= 'a' && name[i] <= 'z') ||
-            (name[i] >= 'A' && name[i] <= 'Z') || (name[i] >= '0' && name[i] <= '9') ||
-            name[i] == '_' || name[i] == '-' || name[i] == '.');
+    return tp_retirement_metrics_leaf(name);
+}
+
+static int tp_retirement_output_absent(int directory, char const* leaf)
+{
+    struct stat existing;
+    int absent = leaf && fstatat(directory, leaf, &existing, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT;
+    return absent;
+}
+
+static int tp_retirement_output_hash(int directory, char const* leaf, char digest[65], uint64_t* bytes)
+{
+    int output = openat(directory, leaf, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    int ok = output >= 0 && tp_retirement_file_hash(output, digest, bytes) && *bytes;
+    if (output >= 0 && close(output) != 0) ok = 0;
+    if (!ok && digest) digest[0] = 0;
     return ok;
 }
 
-/* output_directory is a service-opened private directory. Compiler artifacts
+/* output_directory is a service-opened private directory. Compiler outputs
  * must not exist before launch; no stale output can satisfy the oracle. Runtime
  * output is the fresh log descriptor, which must be empty and positioned at 0.
  * Nothing is removed on either outcome: the caller retains failure evidence
- * and retires successful scratch output before the next invocation.
- * Independent inspection checks actual code-section metrics after timing;
- * full-artifact equality also binds these bytes to the correctness preflight.
- */
+ * and retires successful scratch output before the next invocation. Every
+ * warmup and sample batch must reproduce each frozen object byte for byte;
+ * the first mismatch is nondeterminism and invalidates the attempt. */
 static int tp_retirement_measurement_run(TpRetirementSamples* samples,
     TpRetirementMeasuredCommand const* command, TpRetirementExecutable const* executable,
     TpProcessInputs const* inputs, int output_directory, TpRetirementMeasurementResult* result)
@@ -188,15 +274,19 @@ static int tp_retirement_measurement_run(TpRetirementSamples* samples,
         .process = {.exit_code = -1}};
     TpRetirementInvocation invocation;
     TpRetirementExecution* execution = samples && samples->transcript ? samples->transcript->execution : NULL;
-    struct stat binary, cwd, named_cwd, log, output_root, artifact;
-    char command_digest[65], output_digest[65];
+    struct stat binary, cwd, named_cwd, log, output_root;
+    char command_digest[65], output_digest[65] = {0}, frozen_output[65];
     int ok = result && samples && !samples->failed && !samples->exporting && command && executable &&
         executable->valid && inputs && inputs->executable == executable->descriptor &&
         inputs->environment == command->environment && command->timeout_seconds &&
         command->timeout_seconds <= 86400 && execution &&
         tp_retirement_execution_peek(execution, &invocation) == TP_RETIREMENT_NEXT_READY;
-    if (ok) ok = command->row == invocation.row && command->kind == invocation.kind &&
-        command->variant == invocation.variant && tp_retirement_digest(command->command_sha256) &&
+    TpRetirementSampleGroup const* group = ok && !invocation.kind && invocation.group < samples->group_count ?
+        &samples->groups[invocation.group] : NULL;
+    TpRetirementBatchContract const* batch = command ? command->batch : NULL;
+    if (ok) ok = command->unit == (invocation.kind ? invocation.row : invocation.group) &&
+        command->kind == invocation.kind && command->variant == invocation.variant &&
+        tp_retirement_digest(command->command_sha256) &&
         tp_retirement_digest(command->output_sha256) && tp_retirement_command_hash(command, command_digest) &&
         !strcmp(command_digest, command->command_sha256) &&
         fstat(executable->descriptor, &binary) == 0 && tp_retirement_file_same(&binary, &executable->identity) &&
@@ -206,17 +296,27 @@ static int tp_retirement_measurement_run(TpRetirementSamples* samples,
         fstat(inputs->log, &log) == 0 && S_ISREG(log.st_mode) && log.st_nlink == 1 && !log.st_size &&
         lseek(inputs->log, 0, SEEK_CUR) == 0 && (fcntl(inputs->log, F_GETFL) & O_ACCMODE) == O_RDWR;
     if (ok && !invocation.kind)
-        ok = tp_retirement_artifact_leaf(command->artifact) && output_directory >= 3 &&
-            fstat(output_directory, &output_root) == 0 && S_ISDIR(output_root.st_mode) &&
-            output_root.st_uid == geteuid() && !(output_root.st_mode & 0022) &&
-            fstatat(output_directory, command->artifact, &artifact, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT &&
-            ((samples->rows[invocation.dense].metrics & (TP_RETIREMENT_SAMPLE_CODE |
-                TP_RETIREMENT_SAMPLE_ZERO_BASELINE_CODE)) ?
-                command->code_section_sha256 != NULL : !command->code_section_bytes) &&
-            (command->code_section_sha256 ? tp_retirement_digest(command->code_section_sha256) :
-                                             !command->code_section_bytes);
-    if (ok && invocation.kind)
-        ok = command->artifact == NULL && !command->code_section_bytes && !command->code_section_sha256;
+    {
+        ok = group && output_directory >= 3 && fstat(output_directory, &output_root) == 0 &&
+            S_ISDIR(output_root.st_mode) && output_root.st_uid == geteuid() && !(output_root.st_mode & 0022);
+        if (ok && group->kind == TP_RETIREMENT_GROUP_OBJECT)
+        {
+            ok = !command->artifact && tp_retirement_batch_contract_valid(batch) &&
+                batch->exit_status == (unsigned)command->exit_status &&
+                tp_retirement_batch_contract_output(batch, frozen_output) &&
+                !strcmp(frozen_output, command->output_sha256) &&
+                tp_retirement_output_absent(output_directory, batch->metrics);
+            for (unsigned i = 0; ok && i < batch->input_count; ++i)
+                ok = !batch->inputs[i].artifact || tp_retirement_output_absent(output_directory, batch->inputs[i].artifact);
+            unsigned members = 0;
+            for (unsigned i = 0; ok && i < batch->input_count; ++i) members += batch->inputs[i].member;
+            ok = ok && members == group->count;
+        }
+        else if (ok)
+            ok = !batch && !command->exit_status && tp_retirement_artifact_leaf(command->artifact) &&
+                tp_retirement_output_absent(output_directory, command->artifact);
+    }
+    if (ok && invocation.kind) ok = !command->artifact && !batch && !command->exit_status;
     TpProcessObservation observed = {0};
     TpProcess process = {0};
     if (ok)
@@ -226,40 +326,77 @@ static int tp_retirement_measurement_run(TpRetirementSamples* samples,
             command->timeout_seconds, samples->transcript->cpu, 0, &observed, inputs);
         outcome.process = process;
         outcome.observed = observed;
-        ok = observed.valid && !process.launch_error && !process.exit_code &&
+        ok = observed.valid && !process.launch_error && process.exit_code == command->exit_status &&
             !process.signal_number && !process.timed_out;
     }
-    int output = -1;
+    TpRetirementMemberSample members[TP_RETIREMENT_BATCH_INPUTS];
+    unsigned member_count = 0;
+    char metrics_digest[65] = {0};
+    uint64_t metrics_bytes = 0, bytes = 0;
     if (ok)
     {
         outcome.status = TP_RETIREMENT_MEASUREMENT_OUTPUT_INVALID;
-        output = invocation.kind ? fcntl(inputs->log, F_DUPFD_CLOEXEC, 3) :
-            openat(output_directory, command->artifact, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        if (invocation.kind)
+        {
+            int output = fcntl(inputs->log, F_DUPFD_CLOEXEC, 3);
+            ok = output >= 0 && tp_retirement_file_hash(output, output_digest, &bytes);
+            if (output >= 0 && close(output) != 0) ok = 0;
+        }
+        else if (group->kind == TP_RETIREMENT_GROUP_SINGLETON)
+        {
+            char artifact[65];
+            char const* objects[1] = {artifact};
+            ok = tp_retirement_output_hash(output_directory, command->artifact, artifact, &bytes) &&
+                tp_retirement_batch_output_digest(objects, 1, output_digest);
+        }
+        else
+        {
+            char const* objects[TP_RETIREMENT_BATCH_INPUTS];
+            char (*digests)[65] = (char (*)[65])malloc((size_t)batch->input_count * 65);
+            ok = digests != NULL;
+            for (unsigned i = 0; ok && i < batch->input_count; ++i)
+            {
+                uint64_t object_bytes = 0;
+                objects[i] = batch->inputs[i].artifact ? digests[i] : NULL;
+                if (batch->inputs[i].artifact)
+                    ok = tp_retirement_output_hash(output_directory, batch->inputs[i].artifact, digests[i],
+                        &object_bytes) && !strcmp(digests[i], batch->inputs[i].object_sha256);
+                if (ok) bytes += object_bytes;
+            }
+            ok = ok && tp_retirement_batch_output_digest(objects, batch->input_count, output_digest);
+            free(digests);
+            int metrics = ok ? openat(output_directory, batch->metrics,
+                O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC) : -1;
+            ok = ok && metrics >= 0 && tp_retirement_metrics_file(metrics, batch,
+                observed.finished_ns - observed.started_ns, members, group->count, metrics_digest, &metrics_bytes);
+            if (metrics >= 0 && close(metrics) != 0) ok = 0;
+            member_count = group->count;
+        }
     }
-    uint64_t bytes = 0;
-    if (ok) ok = tp_retirement_file_hash(output, output_digest, &bytes);
     if (ok)
     {
         outcome.output_bytes = bytes;
         memcpy(outcome.output_sha256, output_digest, sizeof(output_digest));
-        ok = (invocation.kind || bytes) && command->code_section_bytes <= bytes &&
-            !strcmp(output_digest, command->output_sha256) &&
+        ok = (invocation.kind || bytes) && !strcmp(output_digest, command->output_sha256) &&
             fstat(executable->descriptor, &binary) == 0 && tp_retirement_file_same(&binary, &executable->identity);
     }
-    if (ok && !invocation.kind)
+    if (ok && metrics_bytes)
     {
-        TpRetirementArtifact facts;
-        ok = tp_retirement_artifact_file(output, &facts) && facts.file_bytes == bytes &&
-            !strcmp(facts.file_sha256, output_digest) && facts.code_bytes == command->code_section_bytes &&
-            (!command->code_section_sha256 || !strcmp(facts.code_sha256, command->code_section_sha256));
+        char instance[65], start[32];
+        snprintf(start, sizeof(start), "%" PRIu64, observed.start_token);
+        ok = tp_retirement_process_instance(instance, samples->transcript->job, samples->transcript->attempt,
+                samples->transcript->boot, observed.pid, start) &&
+            tp_retirement_metrics_path(outcome.metrics_path, instance);
+        outcome.metrics_bytes = metrics_bytes;
+        memcpy(outcome.metrics_sha256, metrics_digest, sizeof(metrics_digest));
     }
-    if (output >= 0 && close(output) != 0) ok = 0;
     if (ok)
     {
         outcome.status = TP_RETIREMENT_MEASUREMENT_COLLECTION_FAILED;
         TpRetirementOutput measured = {executable->sha256, command_digest, output_digest,
-            command->code_section_sha256, command->code_section_bytes};
-        ok = tp_retirement_samples_append(samples, &observed, &process, &measured);
+            metrics_bytes ? metrics_digest : NULL, metrics_bytes, command->exit_status};
+        ok = tp_retirement_samples_append(samples, &observed, &process, &measured,
+            member_count ? members : NULL, member_count);
     }
     if (!ok) tp_retirement_samples_poison(samples);
     else outcome.status = TP_RETIREMENT_MEASUREMENT_COMPLETE;

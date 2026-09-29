@@ -2,6 +2,11 @@
  * authenticate the preparation, correctness gate and held binary record; this
  * adapter joins their facts to the fixed #619 campaign before any timed child
  * starts. The gate's local seal is an integrity check, not service attestation.
+ * (A1) The campaign covers the native-host timed projection. The gate holds
+ * per-row facts only, with no frozen batch command, input order, control
+ * statuses or diagnostic digests, so a timed object row cannot be joined to a
+ * batch group here and the binding fails closed. Timed link and self-host
+ * rows bind as singleton groups against their per-row commands.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_CAMPAIGN_BINDING_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_CAMPAIGN_BINDING_H
@@ -23,6 +28,7 @@ typedef struct BqRetirementCampaignBinding
     BqRetirementHeldBinaries const* held_binaries;
     TpRetirementExecutable held_executables[2];
     uint64_t job_id, attempt_token;
+    uint32_t timed_rows;
     char sealed_sha256[65];
 } BqRetirementCampaignBinding;
 
@@ -185,7 +191,7 @@ static int bq_retirement_campaign_bind(BqRetirementCampaignBinding* binding,
     char const* plan_sha256, char const* context_sha256)
 {
     TpRetirementExecution const* execution = aa && aa->transcript ? aa->transcript->execution : NULL;
-    unsigned dense = 0, runtime = 0;
+    unsigned groups = execution ? execution->groups : 0, group = 0, runtime = 0;
     Sha256 second_hash;
     sha256_init(&second_hash);
     static char const second_domain[] = "bq-retirement-aa-second-commands-v1";
@@ -195,48 +201,49 @@ static int bq_retirement_campaign_bind(BqRetirementCampaignBinding* binding,
         baseline && candidate && baseline->valid && candidate->valid &&
         !strcmp(baseline->sha256, gate->prepared.binary_sha256[0]) &&
         !strcmp(candidate->sha256, gate->prepared.binary_sha256[1]) &&
-        execution->rows == gate->eligible_rows &&
         gate->prepared.rows <= TP_RETIREMENT_MAX_CELLS &&
-        aa_commands && ab_commands && aa && ab && aa->rows && ab->rows;
+        aa_commands && ab_commands && aa && ab && aa->rows && ab->rows &&
+        aa->row_count == groups && ab->row_count == groups && !aa->object_count && !ab->object_count;
     for (uint32_t i = 0; ok && i < gate->prepared.rows; i += 1)
     {
         BqRetirementTrustedRow const* trusted = &gate->trusted_rows[i];
         BqRetirementRowFact const* fact = &gate->facts[i];
-        if (!trusted->compiler_eligible) continue;
-        unsigned metrics = trusted->code_obligation ?
-            (fact->side[0].code_bytes ? TP_RETIREMENT_SAMPLE_CODE : TP_RETIREMENT_SAMPLE_ZERO_BASELINE_CODE) : 0;
-        if (fact->runtime_eligible) metrics |= TP_RETIREMENT_SAMPLE_RUNTIME;
-        ok = dense < execution->rows && trusted->row == i && fact->row == i &&
-            (execution->row_ids ? execution->row_ids[dense] : dense) == i &&
-            aa->rows[dense].metrics == metrics && ab->rows[dense].metrics == metrics;
+        /* (A1) Only the native-host timed projection is timed. */
+        if (!trusted->compiler_eligible || trusted->target != gate->prepared.native_target) continue;
+        unsigned metrics = fact->runtime_eligible ? TP_RETIREMENT_SAMPLE_RUNTIME : 0;
+        unsigned runtime_slot = groups + runtime;
+        /* An object row needs a frozen batch contract the gate cannot supply. */
+        ok = trusted->stage != BQ_RETIREMENT_STAGE_OBJECT && group < groups && trusted->row == i &&
+            fact->row == i && aa->rows[group].id == i && ab->rows[group].id == i &&
+            aa->rows[group].metrics == metrics && ab->rows[group].metrics == metrics &&
+            aa->groups[group].kind == TP_RETIREMENT_GROUP_SINGLETON &&
+            ab->groups[group].kind == TP_RETIREMENT_GROUP_SINGLETON &&
+            aa->members[aa->groups[group].first] == group;
         if (ok && fact->runtime_eligible)
-        {
-            ok = runtime < execution->runtime_count && execution->runtime_rows[runtime] == dense;
-            runtime += 1;
-        }
+            ok = runtime < execution->runtime_count && execution->runtime_rows[runtime] == i;
         for (unsigned stage = 0; ok && stage < 2; stage += 1)
             for (unsigned kind = 0; ok && kind < 2; kind += 1)
                 for (unsigned variant = 0; ok && variant < 2; variant += 1)
                 {
-                    TpRetirementMeasuredCommand const* command =
-                        (stage ? ab_commands : aa_commands) + dense * 4 + kind * 2 + variant;
-                    BqRetirementObservedSide const* side = &fact->side[stage ? variant : 0];
                     if (kind && !fact->runtime_eligible) continue;
+                    TpRetirementMeasuredCommand const* command = (stage ? ab_commands : aa_commands) +
+                        (size_t)(kind ? runtime_slot : group) * TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT + variant;
+                    BqRetirementObservedSide const* side = &fact->side[stage ? variant : 0];
+                    char artifact_output[65] = {0};
+                    char const* objects[1] = {side->artifact_sha256};
+                    ok = kind || tp_retirement_batch_output_digest(objects, 1, artifact_output);
                     /* The second A/A label can use a different output path.
                      * Bind its exact hash through the separately authenticated
-                     * aggregate of baseline-label-2 command identities. */
-                    ok = command->row == i && command->kind == kind && command->variant == variant &&
+                     * aggregate of baseline-label-2 command identities. A
+                     * singleton group's output digest covers its one artifact. */
+                    ok = ok && command->unit == (kind ? i : group) && command->kind == kind &&
+                        command->variant == variant && !command->batch && !command->exit_status &&
                         command->command_sha256 && command->output_sha256 &&
                         (!stage && variant ? tp_retirement_digest(command->command_sha256) :
                          !strcmp(command->command_sha256,
                             kind ? side->runtime_command_sha256 : side->compiler_command_sha256)) &&
                         !strcmp(command->output_sha256, kind ? trusted->independent_oracle_sha256 :
-                                                             side->artifact_sha256);
-                    if (ok && !kind)
-                        ok = command->code_section_bytes == side->code_bytes &&
-                            (trusted->code_obligation ? command->code_section_sha256 &&
-                                !strcmp(command->code_section_sha256, side->code_sha256) :
-                                !command->code_section_sha256);
+                                                             artifact_output);
                 }
         if (ok)
         {
@@ -244,12 +251,14 @@ static int bq_retirement_campaign_bind(BqRetirementCampaignBinding* binding,
                 (uint8_t)(i >> 16), (uint8_t)(i >> 24)};
             uint8_t applicable_runtime = fact->runtime_eligible ? 1 : 0;
             sha256_add(&second_hash, ordinal, sizeof(ordinal));
-            sha256_add(&second_hash, aa_commands[dense * 4 + 1].command_sha256, 64);
+            sha256_add(&second_hash, aa_commands[(size_t)group * TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT + 1].command_sha256, 64);
             sha256_add(&second_hash, &applicable_runtime, sizeof(applicable_runtime));
             if (applicable_runtime)
-                sha256_add(&second_hash, aa_commands[dense * 4 + 3].command_sha256, 64);
+                sha256_add(&second_hash,
+                    aa_commands[(size_t)runtime_slot * TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT + 1].command_sha256, 64);
+            runtime += applicable_runtime;
         }
-        dense += 1;
+        group += 1;
     }
     char second_digest[65] = {0};
     if (ok)
@@ -257,16 +266,17 @@ static int bq_retirement_campaign_bind(BqRetirementCampaignBinding* binding,
         sha256_finish_hex(&second_hash, second_digest);
         ok = !strcmp(second_digest, gate->prepared.aa_second_commands_sha256);
     }
-    if (ok) ok = dense == execution->rows && runtime == execution->runtime_count &&
+    if (ok) ok = group == groups && runtime == execution->runtime_count &&
                   bq_retirement_correctness_ready(gate);
     if (ok)
         ok = tp_retirement_campaign_freeze(campaign, plan, aa, ab, baseline, baseline, candidate,
             aa_commands, ab_commands, command_workspace, command_count, identity_workspace,
-            identity_count, gate->prepared.rows, plan_sha256, context_sha256);
+            identity_count, gate->prepared.rows, 0, plan_sha256, context_sha256);
     if (ok)
     {
         binding->gate = gate;
         binding->campaign = campaign;
+        binding->timed_rows = groups;
         memcpy(binding->sealed_sha256, gate->sealed_sha256, sizeof(binding->sealed_sha256));
     }
     if (!ok)
@@ -295,7 +305,7 @@ static int bq_retirement_campaign_run(BqRetirementCampaignBinding const* binding
         gate->finished && !gate->failed &&
         !memcmp(binding->sealed_sha256, gate->sealed_sha256, sizeof(binding->sealed_sha256)) &&
         campaign->population_rows == gate->prepared.rows &&
-        campaign->rows == gate->eligible_rows;
+        binding->timed_rows && campaign->groups == binding->timed_rows;
     if (ok) ok = bq_retirement_campaign_held_matches(binding);
     if (ok && !execution->sequence)
         ok = bq_retirement_correctness_ready(gate) &&

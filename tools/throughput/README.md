@@ -652,20 +652,20 @@ dedicated-host A/A admission and issues no #36 performance verdict.
 ### Native-retirement invocation evidence
 
 `retirement_execution.h` supplies the native cursor and bounded invocation
-encoder for the existing performance binding's execution transcript. The cursor
-uses `tp_retirement_block_schedule` directly, includes two warmups per variant,
-and exhausts both rounds of compiler invocations before the native-runtime
-campaign. The service supplies the independently authenticated eligible-row
-projection in canonical census order. The cursor copies that sparse row-ID map
-and the runtime subset at initialization; it schedules only eligible compiler
-rows while retaining their original IDs in the invocation transcript and
-result-input records. A duplicate, unsorted, or out-of-range ID is rejected.
-A failed commit
-permanently invalidates the attempt; there is no skip or resume operation. The
-complete population's result-input capacity permits at most 254 pairs per round,
-so this collection boundary rejects 256 even though the statistics kernel can
-analyze that count for a smaller population. It does not change statistical
-limits, family construction, or decisions.
+encoder for the existing performance binding's execution transcript. Under
+contract amendment A1 the compiler campaign runs over the `G` frozen batch
+groups of the native-host timed projection (dense group ordinals, ascending
+smallest member row); the native-runtime campaign runs over the
+runtime-eligible timed rows, identified by their census IDs. The cursor uses
+`tp_retirement_block_schedule` directly, includes two warmups per variant and
+unit, and exhausts both rounds of compiler batches before the runtime campaign.
+It copies the runtime-row map at initialization; an unsorted or out-of-range ID
+is rejected. A failed commit permanently invalidates the attempt; there is no
+skip or resume operation. The complete population's result-input capacity
+permits at most 254 pairs per round, so this collection boundary rejects 256
+even though the statistics kernel can analyze that count for a smaller
+population. It does not change statistical limits, family construction, or
+decisions.
 
 Linux `tp_process_observe` captures a fresh child's PID and `/proc/PID/stat`
 start token while that child is waiting for launch permission. It records the
@@ -692,16 +692,46 @@ from reaching the child, including handles the caller forgot to mark CLOEXEC.
 A kernel that cannot perform that operation fails the invocation. This does
 not install the service sandbox or acquire its lease.
 
-Before compiler launch, the artifact must be absent from the service-opened
-private output directory. Afterwards, the producer opens it relative to that
-descriptor without following links. Runtime output is read from the actual
-child's log descriptor. Both paths hash a regular, single-link file, bounded to
-1 GiB, with identity/size/metadata checks around the read. The observed digest
-must equal the independently prepared oracle. After timing, an independent
-reader in `retirement_artifact.h` parses each compiler artifact and checks the
-code count and digest against the frozen plan. Correct whole-file hashes cannot
-authorize incorrect code metrics. This structural check does not establish
-semantic correctness or native-runtime eligibility.
+A compiler invocation is one batch process of one frozen group. An object
+group's command carries its frozen batch contract: the ordered inputs (timed
+members, then status-checked controls), each input's fixture, oracle status,
+error and diagnostic digest, its frozen object digest and output leaf, the
+`-fmetrics-out` leaf, the metrics target and allocator, and the frozen exit
+status (nonzero only when a control fails). Every output must be absent from
+the service-opened private output directory before launch. Afterwards the
+producer opens each object relative to that descriptor without following
+links and hashes it; each must equal its frozen artifact byte for byte, in
+every warmup and sample batch, or the attempt is invalid for nondeterminism.
+The batch output digest is the SHA-256 of the canonical JSON list of per-input
+object digests (null for an input without an object). A singleton link or
+self-host group writes its one artifact, whose digest list has one entry.
+Runtime output is read from the actual child's log descriptor. All paths hash a
+regular, single-link file, bounded to 1 GiB, with identity/size/metadata checks
+around the read.
+
+`retirement_metrics.h` reads the compiler's own per-input metrics text
+(`docs/agents/driver.md`, #1823) without trusting the compiler: a tagged
+header, one input line per frozen input in order, and each input's function
+lines, with every key in the pinned order. An unknown, missing or reordered
+key, a second version, a non-canonical number, uppercase hex, a truncation flag
+that contradicts its length, a count that disagrees with the lines, a status,
+error or diagnostic digest that differs from the frozen oracle, an object that
+contradicts the oracle, overlapping or out-of-process intervals, a `total_ns`
+that is not the interval, phase timings that exceed it, or a header that is not
+one serial (`intervals=serial`, one worker, one job) continue-on-failure object
+batch rejects the whole batch. The artifact is bounded to 64 MiB and each line
+to 1 MiB. Each member's interval and arena high-water bytes become its wall
+time and peak-memory samples; the process's own wall time and RSS are the batch
+metric pair. The transcript binds the metrics bytes by size and digest at a
+path derived from the supervisor-bound process instance
+(`retirement-metrics-<32 hex>.txt`), which the caller publishes without
+replacement.
+
+Code sections are deterministic, so `tp_retirement_code_observe` parses one
+frozen artifact per (variant, code-eligible row) outside timing with the
+independent reader in `retirement_artifact.h` and requires a byte-identical
+reproduction compile. `retirement_samples.h` encodes those facts as the
+canonical per-row code record set. No invocation re-reports code bytes.
 
 The reader handles little-endian x86-64/AArch64 ELF64 objects and executables,
 COFF objects, PE32+ images and Mach-O64 objects and images. It counts ELF
@@ -719,39 +749,44 @@ against the declared target before accepting a supported row.
 
 Only successful execution and output verification advance the attached sample
 collector. `TpRetirementMeasurementResult` retains the process identity, wait
-status, timeout, observed output digest/size and failure stage for the service's
-failure recorder. A failure poisons the attempt. The helper does not delete
-logs or artifacts; the service must retain failures, retire successful scratch
-files before reuse, and seal evidence durably. It also owns cancellation,
-descendant absence proof and quiet-phase scheduling; these local observations
-are not authenticated service receipts.
+status, timeout, observed output digest/size, the metrics digest, size and
+publication path, and the failure stage for the service's failure recorder. A
+failure poisons the attempt. The helper does not delete logs or artifacts; the
+service must retain failures, retire successful scratch files before reuse,
+and seal evidence durably. It also owns cancellation, descendant absence proof
+and quiet-phase scheduling; these local observations are not authenticated
+service receipts.
 
-The native regression runs a complete one-row fixture through 488 fresh
-compiler/runtime child processes (two warmups and two 60-pair rounds per
-variant), then writes 120 numeric records. These deterministic fixture
-programs are functional tests, not compiler-performance measurements. Python
-independently checks canonical command hashes, every output identity, the
-schedule, process instances, and all numeric joins. Failure controls cover
-nonzero exit, timeout, wrong/missing compiler and runtime output, stale output,
-symlinks/hard links, changed binaries, command/cwd mismatch, inherited handles,
-ambient environment, and retry after failure.
-Artifact cases also reject incorrect code sizes/digests and malformed output
-whose whole-file hash nevertheless matches the supplied oracle. Format tests
-cover both architectures, every truncated fixture prefix, reversed section
-order, overlap, empty code, PE padding and the actual host test executable.
-Independent Python checks decode the saved fixtures without this C reader.
-For a parsed zero-byte candidate section, the invocation retains the empty
-SHA-256 and the paired numeric record retains `0` against a positive baseline.
-If the baseline has zero code bytes, both parsed code observations remain in
-the invocation transcript but the numeric code ratio is absent because it has
-no denominator. Native fixtures exercise both cases with actual child output.
+The native regression runs a complete one-row singleton fixture through 488
+fresh compiler/runtime child processes (two warmups and two 60-pair rounds per
+variant) and writes 120 numeric records, plus a complete object-group fixture
+of 244 fresh batch processes (two members and a rejection control per batch)
+that writes 240 row and 120 batch records and publishes every metrics file.
+These deterministic fixture programs are functional tests, not
+compiler-performance measurements. Python independently checks canonical
+command hashes, every output identity, the schedule, process instances, every
+metrics file through the production validator, and all numeric joins. Failure
+controls cover nonzero or unexpected exit status, timeout, wrong/missing
+compiler and runtime output, stale output, symlinks/hard links, changed
+binaries, command/cwd mismatch, inherited handles, ambient environment, retry
+after failure, a nondeterministic object, a status mismatch, malformed or
+missing metrics, overlapping intervals and a contract that does not match the
+frozen group. Code observation rejects a reproduction that differs from its
+artifact and keeps a parsed zero-byte section as the empty SHA-256. Format
+tests cover both architectures, every truncated fixture prefix, reversed
+section order, overlap, empty code, PE padding and the actual host test
+executable. Independent Python checks decode the saved fixtures without this C
+reader.
 
-The encoder emits the existing canonical JSONL invocation schema in at most
-8,192 bytes. It checks successful child status, required hashes, exact interval
-agreement, compiler RSS, and code-section applicability before emitting bytes.
-Nanosecond serialization uses integer operations and a bounded decimal domain;
-missing runtime RSS is `null`. The native regression fixture is read unchanged
-by the production Python transcript validator, including the sample join:
+The encoder emits the A1 canonical JSONL invocation schema in at most 8,192
+bytes: `group` for a compiler batch or `row` for a runtime process (the other
+is `null`), the frozen `exit_code`, the `metrics_artifact` descriptor of an
+object batch (otherwise `null`), and explicitly `null` code-section fields. It
+checks the child's status against the frozen exit status, required hashes,
+exact interval agreement and compiler RSS before emitting bytes. Nanosecond
+serialization uses integer operations and a bounded decimal domain; missing
+runtime RSS is `null`. The native regression fixture is read unchanged by the
+production Python transcript validator, including the sample join:
 
 ```sh
 ./build.sh bench_throughput self-test
@@ -763,7 +798,7 @@ python3 -W error::ResourceWarning tools/throughput/retirement_execution_test.py 
 `TpRetirementTranscript` couples a successful checked write to advancement of
 that cursor. Shards contain 65,536 records, except for the last shard, and are
 bounded to 64 MiB each and 2,048 shards overall; the 134,217,728-record total
-keeps the nine-digit sequence bound behind the 902-byte maximal line, and a
+keeps the nine-digit sequence bound behind the 1,019-byte maximal line, and a
 wider line is rejected. A shortened intermediate shard,
 overlapping interval, duplicate observation, write/flush error, or premature
 completion permanently invalidates the transcript. A descriptor is returned
@@ -889,46 +924,65 @@ preprocessing/debug-specific case or default corpus expansion is added here.
 
 `retirement_samples.h` extends the invocation writer with an explicitly attached
 `TpRetirementSamples` collector. Initialize it with a fresh exclusive seekable
-spool, per-row workspace, and immutable code/runtime applicability. All
-invocations, including warmups, must advance through its append operation;
-advancing the transcript independently invalidates collection. Runtime
-applicability must match the cursor's copied row map. Caller flags are not an
-admission surface: the eventual installed recipe must derive these facts from
-the independently verified full support population.
+spool, per-row, per-group and member workspaces, and the frozen A1 layout of
+the timed projection: timed rows in census order with their runtime
+applicability, and the batch-group partition (each group's kind and ascending
+members, groups ordered by smallest member, every runtime row a singleton).
+The collector copies and checks the layout's shape; the service derives the
+partition itself from the frozen rows. All invocations, including warmups,
+must advance through its append operation; advancing the transcript
+independently invalidates collection. Caller flags are not an admission
+surface: the eventual installed recipe must derive these facts from the
+independently verified full support population.
 
-Collection preserves the approved execution order, but replay requires numeric
-samples in row/round/pair order. A private 72-byte-per-pair spool bridges these
-orders without allocating the entire experiment. It stores exact nanoseconds,
-RSS, code bytes, runtime and variant order as little-endian integers. It is
-scratch storage, **not a second published result schema**. Per-row in-memory
-compiler/runtime hash states bind observed values to the actual exported bytes;
+One object batch fans out: each member row receives its per-input interval and
+arena high-water bytes (`compiler_wall_time`, `compiler_peak_memory`), and the
+group receives the process wall time and peak RSS (`compiler_batch_wall_time`,
+`compiler_batch_peak_rss`). A singleton group's process is that row's wall time
+and peak memory. Runtime processes supply `generated_runtime`. Collection
+preserves the approved execution order, but replay requires numeric samples in
+unit/round/pair order. A private 56-byte-per-pair spool bridges these orders
+without allocating the entire experiment. It stores exact nanoseconds, memory
+bytes, runtime and variant order as little-endian integers. It is scratch
+storage, **not a second published result schema**. Per-row and per-group
+in-memory hash states bind observed values to the actual exported bytes;
 positive-value mutation, including a mutation after a shard boundary within the
-same row, prevents successful completion. RAM is proportional to rows, while
-the bounded spool is proportional to rows times rounds times pairs.
+same unit, prevents successful completion. RAM is proportional to rows, while
+the bounded spool is proportional to units times rounds times pairs.
 
-Export begins only after the complete invocation transcript finishes. Each
-numeric shard contains 131,072 canonical existing result-input records
-(`TP_RETIREMENT_SAMPLE_SHARD_RECORDS`, independent of the transcript shard
-size), except for the final short shard; 128 shards fill each full manifest
-partition, and a line wider than the proven 415-byte maximum is rejected. Optional metrics are omitted exactly when
-inapplicable; unavailable mandatory observations never become zero. Descriptors
-are emitted only after a successful flush, and an ordered descriptor digest
-binds the complete shard inventory. The writer emits full-cap 16,777,216-record
-manifest partitions, with only the final partition shortened. Each partition
-retains the result reader's 16 GiB bound; the complete collector rejects more
-than 39,518,208 records. No statistical threshold or pinned statistics source
+Export begins only after the complete invocation transcript finishes. It emits
+the `row-round-pair` population first and then the `group-round-pair`
+population of object groups; a shard never mixes them, and one raw digest
+covers both in that order. Each numeric shard contains 131,072 canonical
+records (`TP_RETIREMENT_SAMPLE_SHARD_RECORDS`, independent of the transcript
+shard size), except for each population's final short shard; 128 shards fill
+each full manifest partition, and a line wider than the proven 330-byte row or
+266-byte batch maximum is rejected. Code bytes never enter a pair. Optional
+runtime is omitted exactly when inapplicable; unavailable mandatory
+observations never become zero. Descriptors are emitted only after a
+successful flush, and an ordered descriptor digest per population binds its
+complete shard inventory. The writer emits full-cap 16,777,216-record manifest
+partitions per population (`samples-NNNN` / `batches-NNNN` shards), with only
+each final partition shortened. Each partition retains the result reader's
+16 GiB bound; the union of both populations may not exceed 39,518,208 records
+or three partitions. No statistical threshold or pinned statistics source
 changes.
 
-The native tests write both transcript and numeric sample fixtures. The Python
-replay imports the C-written numeric records through the production sample
-consumer, joins them to every authenticated invocation, and verifies the
-manifest through the production no-follow result reader on POSIX. A real
-131,072-record boundary, deterministic second collection, copied applicability,
-partial collection, bypass, stale state, missing metrics, spool mutation,
-truncation, nonempty destinations, descriptor replacement and buffered disk-full
-failures are covered. The commands above run this coverage in the existing
-native/sanitized harness lanes; Windows does not claim the POSIX-only result
-reader gate.
+The code record set holds one canonical record per code-observed row, in
+ascending row order, with each variant's frozen artifact digest, code-section
+bytes and digest, and its reproduction digest, which must equal the artifact.
+
+The native tests write transcript, numeric sample, metrics and code-record
+fixtures. The Python replay imports the C-written numeric records through the
+production sample consumers, joins them to every authenticated invocation and
+per-input metrics file, and verifies both manifests through the production
+no-follow result reader on POSIX. A real 131,072-record boundary, deterministic
+second collection, copied layout, partial collection, bypass, stale state,
+missing or unexpected metrics, member-count and interval errors, malformed
+layouts, spool mutation, truncation, nonempty destinations, descriptor
+replacement and buffered disk-full failures are covered. The commands above run
+this coverage in the existing native/sanitized harness lanes; Windows does not
+claim the POSIX-only result reader gate.
 
 These are collection primitives, not service admission. The caller still owns
 exclusive file identities, correctness and output-oracle gates, live quiet-phase

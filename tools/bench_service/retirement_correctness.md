@@ -240,8 +240,9 @@ The second A/A baseline label can have a distinct output path. Before `begin`,
 the importer also authenticates its compiler and applicable runtime commands
 from the frozen service plan and commits their aggregate SHA-256 in
 `aa_second_commands_sha256`. The byte stream starts with the ASCII domain
-`bq-retirement-aa-second-commands-v1` without a terminator. For each eligible
-row in canonical order it appends its four-byte little-endian row ID, the 64
+`bq-retirement-aa-second-commands-v1` without a terminator. For each timed row
+(A1: compiler eligible on the native target) in canonical order it appends its
+four-byte little-endian row ID, the 64
 ASCII lowercase hex bytes of the second A/A compiler command digest, one byte
 for runtime applicability (zero or one), and, when applicable, the 64 ASCII
 lowercase hex bytes of the second A/A runtime command digest. The gate seals
@@ -275,6 +276,16 @@ numeric job-ID argument and checks that label and the supplied attempt token
 against both A/A and A/B transcripts. The caller must obtain that ID and token
 from the active authenticated queue job; this lower-level seam does not read
 queue state or reimport records itself.
+
+(A1) The campaign covers only the native-host timed projection: compiler
+eligible rows on the native target. Each timed link or self-host row binds as
+its own singleton batch group against its per-row compiler and runtime
+commands; the group's frozen output digest covers that row's one artifact.
+The gate holds per-row facts only, with no frozen batch command, input order,
+control statuses or per-input diagnostic digests, so a timed object row
+cannot be joined to an object batch group here and the binding fails closed
+(`BQ_RECIPE_MISMATCH` from the queue-aware entry). Freezing object batch
+contracts in the gate is a separate producer step.
 
 `bq_retirement_campaign_run` rejects bindings without held service descriptors
 and rechecks the held record, gate join and transcript identity before launch.

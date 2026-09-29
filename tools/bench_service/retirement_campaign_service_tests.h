@@ -5,13 +5,16 @@
 #include "retirement_campaign_service.h"
 
 #ifdef __linux__
+/* (A1) One timed native link row (census row 6 of 7) is its own singleton
+ * batch group; the gate cannot bind an object row to a batch contract. */
 typedef struct BqCampaignSampleFixture
 {
     TpRetirementExecution execution;
     TpRetirementTranscript transcript;
     TpRetirementSamples samples;
     TpRetirementSampleRow rows[1];
-    unsigned workspace[5], metrics[1];
+    TpRetirementSampleGroup groups[1];
+    unsigned workspace[3], members[1];
     FILE* stream;
     FILE* spool;
     char* environment[2];
@@ -30,9 +33,9 @@ typedef struct BqCampaignServiceFixture
     TpRetirementMeasuredCommand commands[2][4];
     char* arguments[2][2][3];
     char command_sha256[2][2][65];
-    TpRetirementCampaignCommand command_workspace[8];
-    unsigned identity_workspace[3];
-    char artifact_sha256[65], code_sha256[65];
+    TpRetirementCampaignCommand command_workspace[4];
+    unsigned identity_workspace[1];
+    char artifact_sha256[65], code_sha256[65], output_sha256[65];
 } BqCampaignServiceFixture;
 
 static void bq_campaign_service_sample_close(BqCampaignSampleFixture* sample)
@@ -51,16 +54,17 @@ static bool bq_campaign_service_sample_open(BqCampaignSampleFixture* sample,
     sample->stream = tmpfile();
     sample->spool = tmpfile();
     sample->environment[0] = "LC_ALL=C";
-    unsigned row_id = 6;
-    sample->metrics[0] = TP_RETIREMENT_SAMPLE_CODE;
+    static unsigned const row_ids[] = {6}, row_metrics[] = {0};
+    static unsigned const kinds[] = {TP_RETIREMENT_GROUP_SINGLETON}, offsets[] = {0, 1}, members[] = {0};
+    TpRetirementLayout layout = {1, 1, row_ids, row_metrics, kinds, offsets, members};
     bool ok = length > 0 && (size_t)length < sizeof(label) && sample->stream && sample->spool &&
-        tp_retirement_execution_init_rows(&sample->execution, 7, 1, &row_id, 7, NULL, 0, 60,
+        tp_retirement_execution_init(&sample->execution, 7, 1, NULL, 0, 7, 60,
             sample->workspace, BUSTER_ARRAY_LENGTH(sample->workspace)) &&
         tp_retirement_transcript_init(&sample->transcript, &sample->execution, label,
             attempt_token, "boot-fixture", 0, 1000) &&
         tp_retirement_transcript_begin_shard(&sample->transcript, sample->stream) &&
         tp_retirement_samples_init(&sample->samples, &sample->transcript, sample->spool,
-            sample->rows, sample->metrics, 1);
+            &layout, sample->rows, sample->groups, sample->members);
     return ok;
 }
 
@@ -81,7 +85,9 @@ static bool bq_campaign_service_fixture_init(BqCampaignServiceFixture* fixture,
     static char const code[] = "fixture code bytes\n";
     bq_digest(artifact, sizeof(artifact) - 1, (char8*)fixture->artifact_sha256);
     bq_digest(code, sizeof(code) - 1, (char8*)fixture->code_sha256);
+    char const* objects[] = {fixture->artifact_sha256};
     bool ok = preparation && binaries && preparation_sha256 &&
+        tp_retirement_batch_output_digest(objects, 1, fixture->output_sha256) &&
         bq_campaign_service_sample_open(&fixture->samples[0], job_id, attempt_token) &&
         bq_campaign_service_sample_open(&fixture->samples[1], job_id, attempt_token);
     for (u32 stage = 0; ok && stage < 2; stage += 1)
@@ -92,13 +98,12 @@ static bool bq_campaign_service_fixture_init(BqCampaignServiceFixture* fixture,
             if (!stage && variant) argv[0] = "/fixture/base-ide-second-label";
             memcpy(fixture->arguments[stage][variant], argv, sizeof(argv));
             TpRetirementMeasuredCommand* command = &fixture->commands[stage][variant];
-            *command = (TpRetirementMeasuredCommand){.row = 6, .kind = 0, .variant = variant,
+            *command = (TpRetirementMeasuredCommand){.unit = 0, .kind = 0, .variant = variant,
                 .argument_count = 2, .arguments = fixture->arguments[stage][variant],
                 .environment = fixture->samples[stage].environment, .environment_count = 1,
                 .directory = "/tmp", .artifact = argv[1], .timeout_seconds = 2,
                 .command_sha256 = fixture->command_sha256[stage][variant],
-                .output_sha256 = fixture->artifact_sha256,
-                .code_section_sha256 = fixture->code_sha256, .code_section_bytes = sizeof(code) - 1};
+                .output_sha256 = fixture->output_sha256};
             ok = tp_retirement_command_hash(command, fixture->command_sha256[stage][variant]);
         }
     if (ok)
@@ -108,6 +113,8 @@ static bool bq_campaign_service_fixture_init(BqCampaignServiceFixture* fixture,
         BqRetirementTrustedRow* trusted = &fixture->trusted[6];
         BqRetirementRowFact* fact = &fixture->facts[6];
         trusted->compiler_eligible = trusted->code_obligation = 1;
+        trusted->stage = BQ_RETIREMENT_STAGE_LINK;
+        trusted->target = 1;
         fact->compiler_eligible = fact->code_eligible = 1;
         for (u32 side = 0; side < 2; side += 1)
         {
@@ -163,12 +170,20 @@ static BqError bq_campaign_service_attempt(BqQueue* queue, uint64_t job_id,
     uint64_t attempt_token, int installed, int workspaces, String8 profile,
     BqRetirementPreparation const* preparation,
     char const preparation_sha256[SHA256_HEX_CAPACITY],
-    BqRetirementBinaries const* binaries, BqError expected)
+    BqRetirementBinaries const* binaries, bool object_row, BqError expected)
 {
     BqCampaignServiceFixture fixture = {0};
     bool ready = bq_campaign_service_fixture_init(&fixture, preparation, binaries,
         preparation_sha256, job_id, attempt_token);
     BQ_PREP_CHECK(ready);
+    /* (A1) A timed object row has no frozen batch contract in the gate. */
+    if (ready && object_row)
+    {
+        fixture.trusted[6].stage = BQ_RETIREMENT_STAGE_OBJECT;
+        bq_retirement_correctness_seal(&fixture.gate, fixture.gate.sealed_sha256);
+        ready = bq_retirement_correctness_ready(&fixture.gate);
+        BQ_PREP_CHECK(ready);
+    }
     char const* plan_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     char const* context_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     BqError result = ready ? bq_retirement_campaign_service_bind_pinned(queue, job_id,
@@ -312,24 +327,28 @@ static bool bq_retirement_campaign_service_test(int installed, int workspaces,
     if (ok)
         BQ_PREP_CHECK(bq_campaign_service_attempt(&queue, job_id, attempt_token, installed,
             service_workspaces, string_from_pointer(profile), &preparation, preparation_sha256,
-            &binaries, BQ_OK) == BQ_OK);
+            &binaries, false, BQ_OK) == BQ_OK);
+    if (ok)
+        BQ_PREP_CHECK(bq_campaign_service_attempt(&queue, job_id, attempt_token, installed,
+            service_workspaces, string_from_pointer(profile), &preparation, preparation_sha256,
+            &binaries, true, BQ_RECIPE_MISMATCH) == BQ_RECIPE_MISMATCH);
     if (ok)
     {
         BQ_PREP_CHECK(bq_campaign_service_attempt(&queue, job_id + 1, attempt_token,
             installed, service_workspaces, string_from_pointer(profile), &preparation,
-            preparation_sha256, &binaries, BQ_INVALID_TRANSITION) == BQ_INVALID_TRANSITION);
+            preparation_sha256, &binaries, false, BQ_INVALID_TRANSITION) == BQ_INVALID_TRANSITION);
         BQ_PREP_CHECK(bq_campaign_service_attempt(&queue, job_id, attempt_token + 1,
             installed, service_workspaces, string_from_pointer(profile), &preparation,
-            preparation_sha256, &binaries, BQ_INVALID_TRANSITION) == BQ_INVALID_TRANSITION);
+            preparation_sha256, &binaries, false, BQ_INVALID_TRANSITION) == BQ_INVALID_TRANSITION);
         active->phase = BQ_PREPARING;
         BQ_PREP_CHECK(bq_campaign_service_attempt(&queue, job_id, attempt_token, installed,
             service_workspaces, string_from_pointer(profile), &preparation, preparation_sha256,
-            &binaries, BQ_INVALID_TRANSITION) == BQ_INVALID_TRANSITION);
+            &binaries, false, BQ_INVALID_TRANSITION) == BQ_INVALID_TRANSITION);
         active->phase = BQ_MEASURING;
         BQ_PREP_CHECK(bq_campaign_service_mutate_preparation(&queue, job_id));
         BQ_PREP_CHECK(bq_campaign_service_attempt(&queue, job_id, attempt_token, installed,
             service_workspaces, string_from_pointer(profile), &preparation, preparation_sha256,
-            &binaries, BQ_CORRUPT) == BQ_CORRUPT);
+            &binaries, false, BQ_CORRUPT) == BQ_CORRUPT);
     }
     if (root >= 3)
     {
