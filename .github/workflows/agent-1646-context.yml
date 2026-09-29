@@ -16,7 +16,7 @@ jobs:
         with:
           ref: codex/1646-static-assert-message
 
-      - name: Extract focused static-assert context
+      - name: Extract exact functions and expectations
         shell: bash
         run: |
           python3 <<'PY'
@@ -25,73 +25,73 @@ jobs:
           root = Path('.')
           output = []
 
-          def emit_range(path: Path, start: int, end: int) -> None:
+          def function(path: Path, name: str) -> None:
               lines = path.read_text(encoding='utf-8').splitlines()
-              start = max(0, start)
-              end = min(len(lines), end)
-              output.append(f'===== {path.as_posix()} lines {start + 1}-{end} =====')
-              output.extend(f'{index + 1:6}: {lines[index]}' for index in range(start, end))
-              output.append('')
-
-          def emit_function(path: Path, needle: str) -> None:
-              text = path.read_text(encoding='utf-8')
-              lines = text.splitlines()
-              hit = next((i for i, line in enumerate(lines) if needle in line), None)
+              candidates = [i for i, line in enumerate(lines) if name in line and '(' in line]
+              hit = next((i for i in candidates if not lines[i].lstrip().startswith('//')), None)
               if hit is None:
-                  output.append(f'NOT FOUND: {path}: {needle}')
+                  output.append(f'===== NOT FOUND {path}: {name} =====\n')
                   return
               start = hit
-              while start > 0 and not lines[start].lstrip().startswith(('BUSTER_', 'static ', 'void ', 'bool ', 'String8 ', 'C')):
+              while start > 0 and (';' in lines[start] or lines[start].strip() == '' or lines[start].lstrip().startswith('//')):
+                  start -= 1
+              while start > 0 and not any(marker in lines[start] for marker in ('BUSTER_', 'static ', 'bool ', 'void ', 'String8 ', 'UnitTestResult ')):
                   start -= 1
               depth = 0
-              seen_open = False
-              end = hit + 1
+              opened = False
+              end = hit
               for i in range(hit, len(lines)):
                   depth += lines[i].count('{') - lines[i].count('}')
-                  seen_open = seen_open or '{' in lines[i]
-                  if seen_open and depth == 0:
+                  opened |= '{' in lines[i]
+                  if opened and depth == 0:
                       end = i + 1
                       break
-              emit_range(path, max(0, start - 12), min(len(lines), end + 12))
+              output.append(f'===== {path.as_posix()}: {name} ({start + 1}-{end}) =====')
+              output.extend(f'{i + 1:6}: {lines[i]}' for i in range(start, end))
+              output.append('')
 
           parse = root / 'src/buster/lib/compiler/frontend/c/c_parse.c'
-          test = root / 'src/buster/tests/compiler/frontend/c/c_test.c'
+          c_test = root / 'src/buster/tests/compiler/frontend/c/c_test.c'
+          driver_test = root / 'src/buster/tests/compiler/driver/driver_fast_test.c'
 
-          for needle in (
-              'c_parse_static_assert_message(',
-              'c_parse_static_assert_check(',
-              'c_parse_static_assert_evaluate(',
-              'c_parse_token_range_text(',
+          for name in (
+              'c_parse_static_assert_evaluate',
+              'c_parse_static_assert_check',
+              'c_parse_defer_static_assert',
+              'c_parse_validate_deferred_assertions',
           ):
-              emit_function(parse, needle)
+              function(parse, name)
 
-          parse_lines = parse.read_text(encoding='utf-8').splitlines()
+          for name in (
+              'c_test_deferred_assert_positive',
+              'c_test_deferred_assert_false',
+              'c_test_deferred_assert_nonconstant',
+              'c_test_static_assert_nonconstant_quote',
+          ):
+              function(c_test, name)
+
+          function(driver_test, 'compiler_driver_test_local_sizeof_static_asserts')
+
           for needle in (
-              'deferred_static_assert',
-              'C_DIAGNOSTIC_STATIC_ASSERT',
-              'static assertion failed',
               'not a true integer constant expression',
+              'static assertion failed',
+              'C_DIAGNOSTIC_STATIC_ASSERT_FAILED',
+              'C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT',
           ):
-              hits = [i for i, line in enumerate(parse_lines) if needle in line]
-              output.append(f'===== c_parse.c matches: {needle} ({len(hits)}) =====')
-              for hit in hits:
-                  emit_range(parse, hit - 18, hit + 32)
+              output.append(f'===== repository matches: {needle} =====')
+              for path in root.rglob('*'):
+                  if not path.is_file() or '.git' in path.parts or '.agent' in path.parts:
+                      continue
+                  try:
+                      lines = path.read_text(encoding='utf-8').splitlines()
+                  except (UnicodeDecodeError, OSError):
+                      continue
+                  for index, line in enumerate(lines):
+                      if needle in line:
+                          output.append(f'{path.as_posix()}:{index + 1}: {line}')
+              output.append('')
 
-          test_lines = test.read_text(encoding='utf-8').splitlines()
-          hits = [i for i, line in enumerate(test_lines) if 'static_assert' in line.lower() or '_Static_assert' in line]
-          output.append(f'===== c_test.c static-assert matches ({len(hits)}) =====')
-          ranges = []
-          for hit in hits:
-              start = max(0, hit - 45)
-              end = min(len(test_lines), hit + 70)
-              if ranges and start <= ranges[-1][1]:
-                  ranges[-1] = (ranges[-1][0], max(ranges[-1][1], end))
-              else:
-                  ranges.append((start, end))
-          for start, end in ranges:
-              emit_range(test, start, end)
-
-          destination = root / '.agent/issue-1646-focused.txt'
+          destination = root / '.agent/issue-1646-exact.txt'
           destination.parent.mkdir(parents=True, exist_ok=True)
           destination.write_text('\n'.join(output) + '\n', encoding='utf-8')
           print(f'wrote {destination} ({destination.stat().st_size} bytes)')
@@ -102,9 +102,9 @@ jobs:
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add .agent/issue-1646-focused.txt
+          git add .agent/issue-1646-exact.txt
           if git diff --cached --quiet; then
             exit 0
           fi
-          git commit -m "chore: publish focused issue 1646 context"
+          git commit -m "chore: publish exact issue 1646 context"
           git push origin HEAD:codex/1646-static-assert-message
