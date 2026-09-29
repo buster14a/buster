@@ -13,6 +13,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Fixed-budget current-source census and prototype
         run: python3 tools/investigations/1909-memo-layout/run.py
       - name: Preserve every completed or failed observation

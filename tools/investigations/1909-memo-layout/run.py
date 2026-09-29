@@ -7,8 +7,10 @@ import shutil
 import subprocess
 import sys
 
-ROOT = pathlib.Path.cwd()
-OUT = ROOT / 'memo-evidence'
+TRANSPORT = pathlib.Path.cwd()
+ROOT = TRANSPORT / 'memo-subject'
+subprocess.run(['git','worktree','add','--detach',str(ROOT),'8f67df736f13d4edc055110a7a6d619a00a22eaf'],check=True)
+OUT = TRANSPORT / 'memo-evidence'
 OUT.mkdir(exist_ok=True)
 HERE = pathlib.Path(__file__).resolve().parent
 records = []
