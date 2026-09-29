@@ -25,12 +25,65 @@ x86-64 job marked `failure`; investigate that failure separately.
 
 ## Automatic recovery
 
-`.github/workflows/ci-recovery.yml` observes `Buster CI` lifecycle events. It
-becomes active only after landing on the default branch, with the existing
-`GH_ACTIONS_CI_ENABLED=true` setting. Completed ordinary PR runs retain the
-bounded recovery behavior below. An in-progress merge-group run instead starts
-the trusted fail-fast watcher described in the next section. Neither path
-modifies compiler/build policy, runner labels, coverage, or merge requirements.
+Two trusted default-branch workflows observe `Buster CI`. The completion-only
+`.github/workflows/ci-recovery.yml` reviews ordinary PR failures and
+cancellations; `.github/workflows/ci-merge-group-watch.yml` observes only
+in-progress `gh-readonly-queue/main/**` runs. Both retain the same upstream-run
+concurrency key, `GH_ACTIONS_CI_ENABLED` switch and job-level identity checks.
+`GH_ACTIONS_CI_RECOVERY_ENABLED=false` still disables only the recovery job.
+Neither path modifies compiler/build policy, runner labels, coverage, or merge
+requirements. They take effect only after landing on the default branch.
+
+The separate `.github/workflows/ci-recovery-tests.yml` runs both existing
+offline suites for PR and main changes to the two handlers, their helper and
+test sources. The new workflow-shape tests live in
+`.github/scripts/test_ci_recovery_workflows.py` so the frozen native-retirement
+support inventory and tracked `tests/` census stay unchanged. The regression workflow
+has no `workflow_run` trigger and no write credential. This
+preserves the source-change regression coverage without adding a skipped test
+check to every lifecycle delivery.
+
+| Upstream Buster CI notification | Handler workflow invocation | Job check / assigned runner |
+| --- | --- | --- |
+| Same-repository PR success, first or later attempt | Recovery completion | One skipped `recover` check / none |
+| Same-repository PR failure or cancellation, first attempt | Recovery completion | One conditional `recover` check / one if enabled; helper determines retry eligibility |
+| Same-repository PR later attempt, stale or duplicate completion | Recovery completion | One skipped check for later attempt; a duplicate first-attempt delivery may run the helper, whose current-head/attempt checks prevent an extra retry |
+| Main push start or completion | None: `main` is excluded | None / none |
+| Merge-group start, including a rerun | Watcher in-progress | One conditional watcher check / one if enabled and same-repository |
+| Merge-group completion | None: queue branch is excluded from recovery | None / none |
+| Fork completion on a PR branch | Recovery completion | One skipped check / none; same-repository guard |
+| Recovery-policy file changed on a PR or main | Regression test through its path filter | One test check / one if enabled; no privileged lifecycle step |
+
+The branch filters use the **upstream** `workflow_run.head_branch`, not the
+trusted handler's `GITHUB_REF=main`. Run `36537752584` recorded
+`gh-readonly-queue/main/pr-1769-...` for a merge-group Buster CI run; run
+`36541652880` recorded `main` for the subsequent push at the same head SHA.
+The helper still rejects unrelated source events, tags, main, forks, changed
+attempts, obsolete PR heads and non-cancellation failures. A tag delivery, if
+GitHub selects it despite the branch filters, cannot authorize recovery.
+
+Each lifecycle run name identifies the upstream event, branch, SHA, run and
+attempt, and the handler's default-branch SHA. When a job actually runs, its
+summary links both the upstream and handler runs and separates the upstream
+head from the trusted code revision. A skipped check has no runner summary;
+its run title says *recovery review*, not *cancellation*. GitHub's
+[`workflow_run` event](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run)
+still attaches handler checks to the latest default-branch commit. Checking
+out another ref, or adding job-level `if`, does not change that association or
+delete historical checks.
+
+The original handler created three job checks for each notification: `test`,
+`watch-merge-group` and `recover`. Run
+[`36545740179`](https://github.com/buster14a/buster/actions/runs/36545740179)
+is a measured no-op: one workflow invocation, three skipped check records,
+zero jobs assigned to a runner, and zero runner minutes. An ordinary start and
+completion pair could therefore create two invocations and six checks even on
+success. The new event/branch selection predicts one invocation and one
+skipped check for an ordinary PR success, and zero for a main push; a queue
+start predicts one watcher check. These are source-level predictions pending a
+post-merge hosted trace, not measured after counts. The source-change test
+workflow still consumes a runner when it is triggered. [#1808](https://github.com/buster14a/buster/issues/1808)
+tracks the independent, genuinely expensive duplicate queue/main build work.
 
 The default-branch helper `.github/scripts/recover-ci.py` requests at most one
 automatic retry (attempt 2), only when all these conditions hold:
@@ -67,7 +120,7 @@ has `contents: read`.
 
 ## Merge-queue fail-fast
 
-For a `merge_group` Buster CI run, the same default-branch controller starts one
+For a `merge_group` Buster CI run, the trusted watcher starts one
 bounded watcher with job-scoped `actions: write` and `checks: read`. Every 30
 seconds it reads the live main ruleset's required-check names, exact-head
 merge-group run identities, and the corresponding GitHub Actions check runs.
@@ -98,12 +151,18 @@ eight required checks remain the authority for merge admission.
 
 ## Validation and escalation
 
-Run `python3 tests/ci_recovery_test.py` for ordinary PR recovery and
-`python3 .github/scripts/test_merge_queue_fail_fast.py` for required-check
+Run `python3 tests/ci_recovery_test.py` for ordinary PR recovery,
+`python3 .github/scripts/test_ci_recovery_workflows.py` for workflow selection and
+attribution, then `python3 .github/scripts/test_merge_queue_fail_fast.py` for required-check
 failure, optional-check exclusion, exact-head cancellation, and successful
 completion. These offline tests run for PR changes to the controller files.
 They do not prove a live merge-group cancellation; the watcher can execute only
-after this workflow lands on the default branch. Workflow lint covers the YAML.
+after its workflow lands on the default branch. Workflow lint covers the YAML.
+After landing, capture an ordinary PR completion, a main push, and a merge-group
+start/completion with their exact upstream and handler run/attempt IDs. Count
+handler invocations, check records, assigned jobs and runner minutes separately
+against the observed three-skipped-check baseline; verify the required CI and
+preflight checks remain independent and blocking.
 No local compiler build is needed for this workflow-only change.
 
 If attempt 2 is cancelled again, retain its run/job URLs, UTC timestamps,

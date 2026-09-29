@@ -5,10 +5,13 @@ Ownership: GitHub Actions observations only; tools/ci_time.py owns Forgejo's
 very different timestamps/retention repair. No inferred or imputed durations.
 Entry points: collect reads the GitHub REST API; summarize is entirely offline.
 Each workflow-blob/runner-label cohort has its own median and exclusion counts.
+queue-collect/queue-summarize measure runner scheduling across every workflow
+(#1805): queue_collect, queue_summarize, _queue_job_record, _occupancy.
 """
 import argparse
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -42,6 +45,19 @@ STEP_FIELDS = ("name", "status", "conclusion", "started_at", "completed_at")
 API_TIMEOUT_SECONDS = 30.0
 JOB_METADATA_REFRESH_BUDGET_SECONDS = 30.0
 JOB_METADATA_REFRESH_DELAYS_SECONDS = (1.0, 2.0, 4.0)
+# The run search API returns at most 1000 results for one query.
+RUN_SEARCH_RESULT_LIMIT = 1000
+QUEUE_RUN_FIELDS = ("id", "name", "path", "event", "head_sha", "head_branch", "status", "conclusion",
+                    "run_attempt", "created_at", "updated_at", "html_url")
+# Live run listings; a queued run has no runner yet and is still demand.
+LIVE_RUN_STATUSES = ("queued", "in_progress", "waiting", "pending", "requested")
+QUEUE_LISTING_ATTEMPTS = 3
+# Bounded concurrent REST reads; results keep run-ID order.
+QUEUE_FETCH_WORKERS = 8
+# Longest observed CI attempt plus assignment wait; earlier occupancy is incomplete.
+QUEUE_OCCUPANCY_WARMUP_SECONDS = 5400
+QUEUE_JOB_FIELDS = ("id", "run_id", "run_attempt", "head_sha", "name", "status", "conclusion", "created_at",
+                    "started_at", "completed_at", "labels", "runner_id", "runner_name", "runner_group_name")
 
 
 def timestamp(value):
@@ -428,6 +444,299 @@ def collect(args):
             "runs": selected}
 
 
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _complete_pages(repository, path, key, token, limit, live):
+    """Every page of one listing and its reported total, or ValueError.
+
+    Historical listings must reconcile exactly. A live status listing changes
+    while it is paged, so it may end short; callers retain the reported total.
+    """
+    items = []
+    total = None
+    page = 1
+    ended = False
+    while not ended and (total is None or len(items) < total):
+        separator = "&" if "?" in path else "?"
+        batch = api_get(repository, f"{path}{separator}per_page=100&page={page}", token)
+        count = batch.get("total_count")
+        if not isinstance(count, int) or isinstance(count, bool) or not 0 <= count <= limit or \
+                (total is not None and count != total and not live):
+            raise ValueError(f"Missing, changing or over-limit total_count for {path}; narrow the selection")
+        total = count if total is None else total
+        chunk = batch.get(key)
+        if not isinstance(chunk, list):
+            raise ValueError(f"Malformed page for {path}")
+        ended = len(chunk) < 100
+        if not live and ((ended and len(items) + len(chunk) != total) or len(items) + len(chunk) > total):
+            raise ValueError(f"Incomplete pagination for {path}; refusing a partial inventory")
+        items.extend(chunk)
+        page += 1
+    return items, total
+
+
+def _stable_pages(repository, path, key, token, limit):
+    """Retry a listing whose total moved between pages (a job was added to a live run)."""
+    result = None
+    failure = None
+    for _ in range(QUEUE_LISTING_ATTEMPTS):
+        if result is None:
+            try:
+                result = _complete_pages(repository, path, key, token, limit, False)[0]
+            except ValueError as error:
+                failure = error
+    if result is None:
+        raise failure
+    return result
+
+
+def _created_windows(repository, since, until, token):
+    """Split [since, until] until every created= query fits the search result limit."""
+    windows = []
+    pending = [(since, until)]
+    while pending:
+        left, right = pending.pop()
+        query = urllib.parse.urlencode({"created": f"{left.strftime('%Y-%m-%dT%H:%M:%SZ')}.."
+                                                   f"{right.strftime('%Y-%m-%dT%H:%M:%SZ')}", "per_page": 1})
+        count = api_get(repository, "actions/runs?" + query, token).get("total_count")
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ValueError("Missing run total_count")
+        if count <= RUN_SEARCH_RESULT_LIMIT:
+            windows.append((left, right))
+        elif (right - left).total_seconds() < 2:
+            raise ValueError("More than one search page of runs in one second; cannot enumerate completely")
+        else:
+            middle = left + (right - left) / 2
+            middle = middle.replace(microsecond=0)
+            # created= bounds are inclusive and second-granular: keep halves disjoint.
+            pending.append((middle + timedelta(seconds=1), right))
+            pending.append((left, middle))
+    return sorted(windows)
+
+
+def _queue_run_detail(repository, token, run):
+    run["attempts"] = {}
+    latest = run.get("run_attempt") or 1
+    for attempt in range(1, latest + 1):
+        if attempt == latest:
+            detail = run
+        else:
+            detail = api_get(repository, f"actions/runs/{run['id']}/attempts/{attempt}", token)
+        run["attempts"][str(attempt)] = {"run_started_at": detail.get("run_started_at"),
+                                         "status": detail.get("status"), "conclusion": detail.get("conclusion")}
+    jobs = _stable_pages(repository, f"actions/runs/{run['id']}/jobs?filter=all", "jobs", token, RUN_SEARCH_RESULT_LIMIT)
+    run["observed_at"] = _utc_now()
+    run["jobs"] = []
+    for job in jobs:
+        record = {key: job.get(key) for key in QUEUE_JOB_FIELDS}
+        record["step_count"] = len(job.get("steps") or [])
+        run["jobs"].append(record)
+    return run
+
+
+def queue_collect(args):
+    """Runs created in [since, until] plus every currently unfinished run, with all job attempts."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository):
+        raise ValueError("Repository must have owner/name form")
+    since, until = timestamp(args.since), timestamp(args.until)
+    if since is None or until is None or until <= since:
+        raise ValueError("Use timezone-qualified --since earlier than --until")
+    since, until = since.astimezone(timezone.utc).replace(microsecond=0), until.astimezone(timezone.utc).replace(microsecond=0)
+    token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
+    selected = {}
+    listings = []
+    windows = _created_windows(args.repository, since, until, token)
+    queries = [({"created": f"{left.strftime('%Y-%m-%dT%H:%M:%SZ')}..{right.strftime('%Y-%m-%dT%H:%M:%SZ')}"}, False)
+               for left, right in windows]
+    queries += [({"status": status}, True) for status in LIVE_RUN_STATUSES]
+    for query, live in queries:
+        path = "actions/runs?" + urllib.parse.urlencode(query)
+        if live:
+            batch, total = _complete_pages(args.repository, path, "workflow_runs", token, RUN_SEARCH_RESULT_LIMIT, True)
+        else:
+            batch = _stable_pages(args.repository, path, "workflow_runs", token, RUN_SEARCH_RESULT_LIMIT)
+            total = len(batch)
+        listings.append({"query": query, "reported_total": total, "obtained": len(batch), "observed_at": _utc_now()})
+        for run in batch:
+            record = selected.get(run["id"]) or dict({key: run.get(key) for key in QUEUE_RUN_FIELDS},
+                                                     run_started_at=run.get("run_started_at"), selected_by=[])
+            kind = "created" if "created" in query else "live"
+            record["selected_by"] = sorted(set(record["selected_by"]) | {kind})
+            selected[run["id"]] = record
+    runs = [selected[identity] for identity in sorted(selected)]
+    with ThreadPoolExecutor(max_workers=QUEUE_FETCH_WORKERS) as pool:
+        runs = list(pool.map(lambda run: _queue_run_detail(args.repository, token, run), runs))
+    return {"schema": 1, "kind": "queue", "repository": args.repository, "fetched_at": _utc_now(),
+            "window": {"since": since.isoformat(), "until": until.isoformat()}, "listings": listings, "runs": runs}
+
+
+def _percentiles(values):
+    ordered = sorted(values)
+    result = {"n": len(ordered)}
+    if ordered:
+        # Nearest rank: the smallest observation covering the percentile.
+        for label, percent in (("p50", 50), ("p90", 90)):
+            result[label] = ordered[max(0, -(-len(ordered) * percent // 100) - 1)]
+        result["max"] = ordered[-1]
+    return result
+
+
+def runner_family(labels):
+    text = " ".join(labels or ()).lower()
+    result = "other"
+    for family in ("macos", "windows", "ubuntu"):
+        if family in text:
+            result = family
+    return result
+
+
+def _queue_job_record(run, job):
+    """Classify one job; a placeholder started_at without a runner is never execution evidence."""
+    observed = timestamp(run.get("observed_at"))
+    created = timestamp(job.get("created_at"))
+    started = timestamp(job.get("started_at"))
+    completed = timestamp(job.get("completed_at"))
+    attempt = run.get("attempts", {}).get(str(job.get("run_attempt")), {})
+    attempt_start = timestamp(attempt.get("run_started_at"))
+    runner_id = job.get("runner_id")
+    assigned = (isinstance(runner_id, int) and not isinstance(runner_id, bool) and runner_id > 0) or bool(job.get("runner_name"))
+    status = job.get("status")
+    record = {"run_id": run["id"], "run_attempt": job.get("run_attempt"), "job_id": job.get("id"),
+              "head_sha": job.get("head_sha"), "name": job.get("name"), "event": run.get("event"),
+              "workflow": (run.get("path") or "").split("@", 1)[0], "status": status,
+              "conclusion": job.get("conclusion"), "labels": ",".join(sorted(job.get("labels") or [])) or "unlabelled",
+              "family": runner_family(job.get("labels")), "assigned": assigned, "created": created,
+              "observed": observed, "dependency_wait": None, "assignment_wait": None, "execution": None,
+              "busy": None, "waiting": None}
+    if created is not None and attempt_start is not None and created >= attempt_start:
+        record["dependency_wait"] = (created - attempt_start).total_seconds()
+    if assigned and created is not None and started is not None and started >= created:
+        record["assignment_wait"] = (started - created).total_seconds()
+        record["waiting"] = (created, started)
+        end = completed if status == "completed" else observed
+        if end is not None and end >= started:
+            record["busy"] = (started, end)
+            if status == "completed":
+                record["execution"] = (end - started).total_seconds()
+    elif not assigned and created is not None:
+        end = completed if status == "completed" else observed
+        if end is not None and end >= created:
+            record["waiting"] = (created, end)
+    return record
+
+
+def _occupancy(records, begin):
+    """Sweep assigned and waiting intervals; time-weighted occupancy while jobs waited after begin."""
+    events = []
+    for record in records:
+        if record["busy"] is not None:
+            events.append((record["busy"][0], 0, 1, 0))
+            events.append((record["busy"][1], 0, -1, 0))
+        if record["waiting"] is not None and record["waiting"][1] > record["waiting"][0]:
+            events.append((record["waiting"][0], 1, 0, 1))
+            events.append((record["waiting"][1], 1, 0, -1))
+    events.sort(key=lambda event: (event[0], -(event[2] + event[3])))
+    busy = 0
+    waiting = 0
+    peak_busy = 0
+    peak_waiting = 0
+    while_waiting = Counter()
+    previous = None
+    for moment, _, busy_delta, waiting_delta in events:
+        if previous is not None and waiting > 0 and moment > max(previous, begin):
+            while_waiting[busy] += (moment - max(previous, begin)).total_seconds()
+        busy += busy_delta
+        waiting += waiting_delta
+        if moment >= begin:
+            peak_busy = max(peak_busy, busy)
+            peak_waiting = max(peak_waiting, waiting)
+        previous = moment
+    contended = sum(while_waiting.values())
+    return {"measured_from": begin.isoformat(), "peak_occupied": peak_busy, "peak_waiting": peak_waiting, "seconds_with_waiting_jobs": contended,
+            "occupied_while_waiting_seconds": {str(key): value for key, value in sorted(while_waiting.items())},
+            "max_occupied_while_waiting": max(while_waiting) if while_waiting else None}
+
+
+def queue_summarize(data):
+    if data.get("kind") != "queue":
+        raise ValueError("queue-summarize requires queue-collect output")
+    records = []
+    seen = set()
+    for run in data["runs"]:
+        for job in run.get("jobs", []):
+            identity = (job.get("id"), job.get("run_attempt"))
+            if identity in seen:
+                raise ValueError("Duplicate job observation would bias the distribution")
+            seen.add(identity)
+            records.append(_queue_job_record(run, job))
+    groups = defaultdict(list)
+    for record in records:
+        groups[(record["labels"], record["event"])].append(record)
+    rows = []
+    for (labels, event), members in sorted(groups.items()):
+        queued = [record for record in members if not record["assigned"] and record["status"] != "completed"]
+        oldest = None
+        for record in queued:
+            if record["created"] is not None and record["observed"] is not None:
+                age = (record["observed"] - record["created"]).total_seconds()
+                if oldest is None or age > oldest["age_seconds"]:
+                    oldest = {key: record[key] for key in ("run_id", "run_attempt", "job_id", "head_sha", "name", "status")}
+                    oldest.update(created_at=record["created"].isoformat(), observed_at=record["observed"].isoformat(),
+                                  age_seconds=age)
+        rows.append({"labels": labels, "event": event, "family": members[0]["family"], "jobs": len(members),
+                     "dependency_wait_seconds": _percentiles([r["dependency_wait"] for r in members if r["dependency_wait"] is not None]),
+                     "assignment_wait_seconds": _percentiles([r["assignment_wait"] for r in members if r["assignment_wait"] is not None]),
+                     "execution_seconds": _percentiles([r["execution"] for r in members if r["execution"] is not None]),
+                     "runner_seconds": sum(r["execution"] for r in members if r["execution"] is not None),
+                     "active_at_observation": sum(1 for r in members if r["assigned"] and r["status"] == "in_progress"),
+                     "queued_at_observation": len(queued),
+                     "never_assigned_completed": dict(Counter(r["conclusion"] for r in members
+                                                              if not r["assigned"] and r["status"] == "completed")),
+                     "oldest_ready": oldest})
+    families = defaultdict(list)
+    for record in records:
+        families[record["family"]].append(record)
+    since, until = timestamp(data["window"]["since"]), timestamp(data["window"]["until"])
+    # Jobs of runs created before the window are not collected; skip their tail.
+    begin = since + timedelta(seconds=QUEUE_OCCUPANCY_WARMUP_SECONDS)
+    occupancy = {family: _occupancy(members, begin) for family, members in sorted(families.items())} if begin < until else {}
+    outcomes = defaultdict(float)
+    conclusions = {run["id"]: run.get("conclusion") or run.get("status") for run in data["runs"]}
+    for record in records:
+        if record["execution"] is not None:
+            outcomes[(record["family"], record["workflow"], record["event"], conclusions[record["run_id"]])] += record["execution"]
+    runner_seconds = [{"family": family, "workflow": workflow, "event": event, "run_outcome": outcome, "seconds": seconds}
+                      for (family, workflow, event, outcome), seconds in sorted(outcomes.items(), key=lambda item: str(item[0]))]
+    throughput = defaultdict(lambda: {"completed": 0, "success": 0, "latency_seconds": []})
+    for run in data["runs"]:
+        created, updated = timestamp(run.get("created_at")), timestamp(run.get("updated_at"))
+        if "created" in run.get("selected_by", []) and run.get("status") == "completed" and created and updated:
+            row = throughput[((run.get("path") or "").split("@", 1)[0], run.get("event"))]
+            row["completed"] += 1
+            if run.get("conclusion") == "success":
+                row["success"] += 1
+                row["latency_seconds"].append((updated - created).total_seconds())
+    hours = (until - since).total_seconds() / 3600.0
+    completions = [{"workflow": workflow, "event": event, "completed": row["completed"], "success": row["success"],
+                    "success_per_hour": row["success"] / hours,
+                    "success_latency_seconds": _percentiles(row["latency_seconds"])}
+                   for (workflow, event), row in sorted(throughput.items())]
+    return {"schema": 1, "kind": "queue-summary", "repository": data.get("repository"),
+            "fetched_at": data.get("fetched_at"), "window": data["window"], "groups": rows,
+            "occupancy_by_family": occupancy, "runner_seconds_by_run_outcome": runner_seconds,
+            "completions": completions,
+            "unknown": ["organization effective concurrency allowance per runner family",
+                        "demand from other repositories sharing that allowance",
+                        "GitHub hosted-runner fleet provisioning state"],
+            "notes": ["Dependency wait = attempt start to job creation; assignment wait = job creation to runner start.",
+                      "A job without runner_id/runner_name is unassigned; its started_at is a placeholder, not execution.",
+                      "Occupancy starts after a warm-up because runs created before the window are not collected; it counts only this repository's assigned jobs; a flat plateau while jobs wait bounds, "
+                      "but does not identify, the effective allowance.",
+                      "Success latency uses run updated_at of the latest attempt and includes reruns."]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -447,6 +756,14 @@ def main():
     report = sub.add_parser("summarize")
     report.add_argument("input")
     report.add_argument("--output")
+    queue = sub.add_parser("queue-collect", help="Record runner assignment for every workflow in a window")
+    queue.add_argument("--repository", default="buster14a/buster")
+    queue.add_argument("--since", required=True)
+    queue.add_argument("--until", required=True)
+    queue.add_argument("--output", required=True)
+    queue_report = sub.add_parser("queue-summarize")
+    queue_report.add_argument("input")
+    queue_report.add_argument("--output")
     args = parser.parse_args()
     status = 0
     try:
@@ -457,6 +774,10 @@ def main():
         elif args.command == "require-jobs":
             data = require_jobs(args)
             status = 0 if data["success"] else 1
+        elif args.command == "queue-collect":
+            data = queue_collect(args)
+        elif args.command == "queue-summarize":
+            data = queue_summarize(json.loads(Path(args.input).read_text(encoding="utf-8")))
         else:
             data = summarize(json.loads(Path(args.input).read_text(encoding="utf-8")))
         text = json.dumps(data, indent=2) + "\n"

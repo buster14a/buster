@@ -18,6 +18,12 @@ captured stderr diagnostics separately; the retirement census reads its
 reporting a failed compiler invocation. A `-v -E` invocation also prints the
 requested statistics on stdout; use plain `-E` when piping preprocessed C.
 
+With several inputs, only a native link copies each unit's in-memory object
+out of its translation-unit arena into the result arena for `link_objects`.
+Each `-c` unit has already written its own `.o`, and `-S`, `-E`,
+`-fsyntax-only` and `-emit-llvm` finish before the link, so they retain
+nothing per unit and leave `CompilerDriverResult.object` unset.
+
 ## Opt-in native translation-unit lanes
 
 `-fcompile-jobs=N` accepts a positive 32-bit worker request. Omission (or
