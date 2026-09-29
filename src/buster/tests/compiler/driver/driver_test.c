@@ -2339,6 +2339,97 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_coff_section_alignment(U
     return result;
 }
 
+// One function per priority that is both a constructor and a destructor: its
+// .init_array and .fini_array priority groups each become an ELF section
+// with its own RELA table, four section headers per function.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_priority_source(Arena* arena, u32 count)
+{
+    u64 capacity = (u64)count * 96;
+    char8* bytes = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        String8 line = string_format(arena, S8("__attribute__((constructor({u32}), destructor({u32}))) static void f{u32}(void) {{}}\n"), 101 + index,
+                                     101 + index, index);
+        if (line.length <= capacity - length)
+        {
+            memcpy(bytes + length, line.pointer, line.length);
+            length += line.length;
+        }
+    }
+    return (String8){.pointer = bytes, .length = length};
+}
+
+// -c reports what serializing the object cost, and the ELF writer holds to
+// writing each byte of the file once. Past SHN_LORESERVE sections it refuses
+// the object with a diagnostic and leaves the existing output alone; the
+// writer it replaced truncated e_shnum and reported success.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_object_write_limits(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    String8 input = buster_test_temporary_path(arena, S8("buster-object-limit-input"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-object-limit-output"), S8(".o"));
+    String8 command[] = {S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"), output, input};
+    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+    BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+
+    String8 source = S8("int value = 7;\nint entry(void) { return value; }\n");
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+    ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+    ObjectWriteStatistics written = compiled.object_write_statistics;
+    BUSTER_TEST(arguments, bytes.length && written.output_bytes == bytes.length && written.image_bytes_stored == written.output_bytes &&
+                               written.image_bytes_reserved == written.output_bytes && written.retained_bytes == written.output_bytes &&
+                               !written.image_bytes_patched && written.relocation_visits == 3 * (u64)compiled.object.relocation_count &&
+                               written.symbol_visits == 3 * (u64)compiled.object.symbol_count);
+
+    // Sixteen thousand functions outgrow a fixture arena's reservation; the
+    // compiles near the limit get the one `ide cc` gives a translation unit.
+    Arena* limit_arena = arena_create((ArenaCreation){.reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE});
+    if (BUSTER_REQUIRE(arguments, limit_arena != 0))
+    {
+        // Just under the limit the header table is whole: it ends the file,
+        // so its offset plus e_shnum entries must reach exactly the end.
+        source = compiler_driver_test_priority_source(limit_arena, 16300);
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        u64 limit_position = limit_arena->position;
+        compiled = compiler_driver_execute_invocation(limit_arena, invocation);
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+        bytes = file_read(limit_arena, output, (FileReadOptions){0});
+        u64 header_offset = 0;
+        u16 header_count = 0;
+        if (BUSTER_REQUIRE(arguments, bytes.length >= 64))
+        {
+            memcpy(&header_offset, bytes.pointer + 40, sizeof(header_offset));
+            memcpy(&header_count, bytes.pointer + 60, sizeof(header_count));
+            BUSTER_TEST(arguments, header_count > 4 * 16300 && header_count < 0xff00 && header_offset + (u64)header_count * 64 == bytes.length);
+        }
+        arena_set_position(limit_arena, limit_position);
+
+        source = compiler_driver_test_priority_source(limit_arena, 16400);
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        String8 sentinel_text = S8("existing ELF object must survive a refused section count");
+        ByteSlice sentinel = BUSTER_SLICE_TO_BYTE_SLICE(sentinel_text);
+        BUSTER_TEST(arguments, file_write(output, sentinel));
+        CompilerDriverResult rejected = compiler_driver_execute_invocation(limit_arena, invocation);
+        BUSTER_TEST_RAW(arguments, rejected.error == COMPILER_DRIVER_ERROR_OBJECT, rejected.diagnostic);
+        BUSTER_TEST(arguments, rejected.object_error == OBJECT_ERROR_CAPACITY && !rejected.object_write_statistics.output_bytes &&
+                                   !rejected.object_write_statistics.image_bytes_reserved);
+        BUSTER_STRING_TEST(arguments, rejected.diagnostic,
+                           S8("native elf64 object exceeds the object writer's limits (section count, string-table offsets or size)"));
+        ByteSlice after = file_read(limit_arena, output, (FileReadOptions){0});
+        BUSTER_TEST(arguments, after.pointer && after.length == sentinel.length && memcmp(after.pointer, sentinel.pointer, sentinel.length) == 0);
+        BUSTER_TEST(arguments, arena_destroy(limit_arena, 1));
+    }
+    BUSTER_TEST(arguments, os_file_delete(input));
+    BUSTER_TEST(arguments, os_file_delete(output));
+    arena_set_position(arena, position);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9965,6 +10056,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_hexadecimal_output);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_scoped_constant_execution);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_coff_section_alignment);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_write_limits);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unneeded_prototyped_definitions);

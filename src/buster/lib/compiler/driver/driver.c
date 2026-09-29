@@ -3135,12 +3135,15 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
             return;
         }
         ObjectArtifact artifact = object_write(arena, &object, object_format_for_target(invocation.target));
+        result->object_write_statistics = artifact.statistics;
         if (artifact.error != OBJECT_ERROR_NONE)
         {
             result->error = COMPILER_DRIVER_ERROR_OBJECT;
             result->object_error = artifact.error;
-            result->diagnostic = artifact.error == OBJECT_ERROR_UNSUPPORTED_ALIGNMENT
-                                     ? S8("COFF section alignment exceeds the 8192-byte format limit")
+            result->diagnostic = artifact.error == OBJECT_ERROR_UNSUPPORTED_ALIGNMENT ? S8("COFF section alignment exceeds the 8192-byte format limit")
+                                 : artifact.error == OBJECT_ERROR_CAPACITY
+                                     ? string_format(arena, S8("native {S8} object exceeds the object writer's limits (section count, string-table offsets or size)"),
+                                                     object_format_name(artifact.format))
                                      : string_format(arena, S8("native object serialization failed with error {u32}"), (u32)artifact.error);
             return;
         }
@@ -4560,6 +4563,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.fast.instructions_before += unit.fast.instructions_before;
         result.fast.instructions_after += unit.fast.instructions_after;
         codegen_statistics_add(&result.codegen_statistics, &unit.codegen_statistics);
+        object_write_statistics_add(&result.object_write_statistics, &unit.object_write_statistics);
         if (unit.fallback_record_count)
         {
             u64 needed = (u64)result.fallback_record_count + unit.fallback_record_count;
