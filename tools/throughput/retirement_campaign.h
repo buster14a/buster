@@ -809,6 +809,9 @@ static inline int tp_retirement_campaign_finish_stage(TpRetirementCampaign* camp
  * admission; comparing a local digest cannot make a receipt authoritative.
  * Until that handoff lands, production cannot enter A/B. */
 #ifdef TP_RETIREMENT_CAMPAIGN_FIXTURE_AA
+/* Lets a later functional-fixture consumer (retirement_unit_campaign.h) check
+ * that this stand-in was compiled into its translation unit. */
+#define TP_RETIREMENT_CAMPAIGN_FIXTURE_AA_COMPILED 1
 static int tp_retirement_campaign_admit_aa_fixture(TpRetirementCampaign* campaign, int admitted,
     char const* checked_plan_sha256, char const* checked_context_sha256,
     char const* aa_receipt_sha256)
