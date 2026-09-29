@@ -82,9 +82,8 @@ static uint32_t bq_retirement_campaign_timed_groups(BqRetirementCorrectness cons
  * No caller-supplied label participates in this join. */
 static int bq_retirement_campaign_job_label(char output[129], uint64_t job_id)
 {
-    int length = output && job_id ? snprintf(output, 129, "job-%" PRIu64, job_id) : -1;
-    int ok = length > 0 && length < 129;
-    if (!ok && output) output[0] = 0;
+    /* One spelling, shared with the store's authority handoff. */
+    int ok = tp_retirement_store_job_label(output, job_id);
     return ok;
 }
 

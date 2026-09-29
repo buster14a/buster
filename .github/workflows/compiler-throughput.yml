@@ -44,6 +44,12 @@ jobs:
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build
           ./build/build bench_throughput self-test
           python3 -W error::ResourceWarning tools/throughput/retirement_execution_test.py build/throughput-tool-tests
+          if [ "$(uname -s)" = Linux ]; then
+            # #881-E: compose lane D's self-test streams (and the bounded A1
+            # binding fixture) through the Linux result composer.
+            clang -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror -fwrapv -fno-strict-aliasing -funsigned-char -Isrc -DBUSTER_SINGLE_THREADED=1 -DBUSTER_RETIREMENT_STORE_TEST tools/bench_service/retirement_compose_tests.c tools/throughput/shared.c tools/bench_service/retirement_compose.c tools/bench_service/retirement_compose_json.c tools/bench_service/retirement_result.c -lm -o build/retirement-compose-tests
+            python3 -W error tools/bench_service/retirement_compose_test.py build/retirement-compose-tests build/throughput-tool-tests
+          fi
           python3 -W error::ResourceWarning tools/throughput/retirement_capacity_test.py
           python3 -W error::ResourceWarning tools/bench_service/retirement_export_replay_real_test.py build/throughput-tool-tests
           # Compile the optional reporter without rebuilding the full compiler.

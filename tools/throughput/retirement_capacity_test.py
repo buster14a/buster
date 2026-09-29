@@ -247,6 +247,53 @@ class CapacityModelTests(unittest.TestCase):
         self.assertGreater(headroom["per-input-4096"], headroom["per-input-8192"])
         self.assertGreater(headroom["per-input-8192"], 0)
 
+    def test_sharded_adapter_input_fits_at_a1_production_scale(self):
+        # (#1880) The source-derived A1 family: 6,482 timed rows (405 object
+        # members in each of 16 configurations plus a native link and
+        # self-host row, both runtime-eligible), 80 object groups and 13,126
+        # #619 cells. Its single-file series would exceed the 64 MiB per-file
+        # cap; as greedy whole-line shards of at most 64 MiB it fits, and the
+        # composer's outputs fit the store beside both campaign stages.
+        source = self.source
+        self.assertEqual((source["compose_series_shard_bytes"], source["compose_series_line_bytes"]),
+                         (64 * 1024 * 1024, 256))
+        scenarios = self.report["scenarios"]
+        expected = {60: (406_664_536, 7, 16, 477, 15_908_357_125),
+                    254: (1_710_443_864, 26, 35, 1838, 62_553_968_677)}
+        for pairs, (series, shards, files, entries, total) in expected.items():
+            model = scenarios[f"pairs-{pairs}/per-input-4096/runtime-2"]
+            composer, store = model["composer"], model["store_with_composer"]
+            with self.subTest(pairs=pairs):
+                self.assertEqual((model["timed_rows"], model["object_groups"], model["runtime_rows"]),
+                                 (6482, 80, 2))
+                self.assertEqual(composer["family_cells"], 13_126)
+                self.assertEqual(composer["series_lines"], 8 * 13_126 * 2 * pairs)
+                self.assertEqual(composer["series_bytes_upper_bound"], series)
+                self.assertFalse(composer["single_file_series_fits"])
+                self.assertEqual(composer["series_shards_upper_bound"], shards)
+                # Greedy packing: every shard but the last is fuller than
+                # 64 MiB less one maximal line.
+                self.assertLess((shards - 1) * (64 * 1024 * 1024 - 256), series)
+                self.assertEqual(composer["files"], files)
+                self.assertTrue(composer["fits"])
+                self.assertTrue(all(value <= source["store_file_bytes"]
+                                    for name, value in composer["outputs"].items()
+                                    if name != "adapter_input_series"))
+                self.assertEqual((store["entries"], store["entry_cap"]), (entries, 4093))
+                self.assertEqual((store["bytes"], store["byte_cap"]), (total, 128 * 1024 ** 3))
+                self.assertTrue(store["fits"])
+        # The composer mirror agrees with the C bounds of the exact family
+        # (retirement_compose_tests.c test_production_capacity: 60 aggregate
+        # and slice members), which differ only in the bootstrap members.
+        model = scenarios["pairs-254/per-input-4096/runtime-2"]
+        exact = capacity.composer_model(model, self.report["population"]["code_rows"], source,
+                                        bootstrap_members=60)
+        self.assertEqual((exact["family_members_upper_bound"], exact["series_bytes_upper_bound"],
+                          exact["series_shards_upper_bound"]), (13_186, 1_710_438_664, 26))
+        self.assertEqual(self.report["population"]["code_rows"], 6482 + 11 * 16 * 405)
+        text = capacity.render_text(self.report)
+        self.assertIn("pairs-254/per-input-4096/runtime-2 composer series_bytes<=1710443864 series_shards<=26", text)
+
     def test_report_keeps_the_recipe_blocked_and_the_budget_unpinned(self):
         self.assertEqual(self.report["source"]["profile_status"], "blocked")
         self.assertFalse(self.report["source"]["campaign_budget_pinned"])

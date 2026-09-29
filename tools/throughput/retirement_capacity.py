@@ -31,6 +31,12 @@ The per-input metrics bound and the time bounds are reviewed pins set at
 integration time; the report shows which values fit the store and states the
 largest per-input metrics bound that fits at the 254-pair maximum as an
 explicit assumption the reviewed budget must satisfy, never a measurement.
+
+It also mirrors tools/bench_service/retirement_compose.c's
+``tp_compose_bounds_of`` (``composer_model``): the composer's outputs,
+including the #619 statistics adapter input, which (#1880) is a manifest over
+greedy whole-line series shards of at most one 64 MiB store file each, so
+the whole A1 family's series fits the per-file cap as some tens of entries.
 """
 
 import argparse
@@ -153,6 +159,8 @@ REPORT_INPUTS = [
     "tools/native_retirement_performance_binding.py",
     "tools/native_retirement_performance_schema.py",
     "tools/native_retirement_result_input.py",
+    "tools/bench_service/retirement_compose.c",
+    "tools/bench_service/retirement_compose.h",
     "tools/throughput/retirement_budget.h",
     "tools/throughput/retirement_campaign.h",
     "tools/throughput/retirement_capacity.py",
@@ -184,6 +192,8 @@ def source_limits(root):
     untimed = tools / "retirement_untimed.h"
     budget = tools / "retirement_budget.h"
     command = tools / "retirement_command.h"
+    compose_c = root / "tools/bench_service/retirement_compose.c"
+    compose_h = root / "tools/bench_service/retirement_compose.h"
     source = {
         "rounds": source_define(stats, "TP_RETIREMENT_ROUNDS"),
         "minimum_pairs": source_define(stats, "TP_RETIREMENT_MIN_PAIRS_PER_ROUND"),
@@ -217,7 +227,42 @@ def source_limits(root):
         "store_files": source_define(store, "TP_RETIREMENT_STORE_FILES"),
         "store_file_bytes": source_product(store, "TP_RETIREMENT_STORE_FILE_BYTES"),
         "store_total_bytes": source_product(store, "TP_RETIREMENT_STORE_TOTAL_BYTES"),
+        "receipt_bytes": source_product(execution, "TP_RETIREMENT_RECEIPT_BYTES"),
+        "code_record_bytes_max": source_define(samples, "TP_RETIREMENT_CODE_RECORD_BYTES_MAX"),
+        "maximum_cells": source_define(stats, "TP_RETIREMENT_MAX_CELLS"),
+        "compose_dimensions": source_define(compose_h, "TP_RETIREMENT_COMPOSE_DIMENSIONS"),
+        "compose_bootstrap_members": source_define(compose_h, "TP_RETIREMENT_COMPOSE_BOOTSTRAP_MEMBERS"),
+        "compose_cell_members": source_define(compose_h, "TP_RETIREMENT_COMPOSE_CELL_MEMBERS"),
+        "compose_partitions": source_define(compose_h, "TP_RETIREMENT_COMPOSE_PARTITIONS"),
+        "compose_fixed_outputs": source_define(compose_h, "TP_RETIREMENT_COMPOSE_FIXED_OUTPUTS"),
+        "compose_series_shard_cap": source_define(compose_h, "TP_RETIREMENT_COMPOSE_SERIES_SHARDS"),
+        "compose_ratio_line_bytes": source_define(compose_c, "TP_COMPOSE_RATIO_LINE_BYTES"),
+        "compose_member_line_bytes": source_define(compose_c, "TP_COMPOSE_MEMBER_LINE_BYTES"),
+        "compose_series_header_bytes": source_define(compose_c, "TP_COMPOSE_SERIES_HEADER_BYTES"),
+        "compose_series_end_bytes": source_define(compose_c, "TP_COMPOSE_SERIES_END_BYTES"),
+        "compose_series_line_bytes": source_define(compose_c, "TP_COMPOSE_SERIES_LINE_BYTES"),
+        "compose_series_manifest_fixed_bytes": source_define(compose_c, "TP_COMPOSE_SERIES_MANIFEST_FIXED_BYTES"),
+        "compose_series_manifest_line_bytes": source_define(compose_c, "TP_COMPOSE_SERIES_MANIFEST_LINE_BYTES"),
+        "compose_replay_member_bytes": source_define(compose_c, "TP_COMPOSE_REPLAY_MEMBER_BYTES"),
+        "compose_replay_fixed_bytes": source_define(compose_c, "TP_COMPOSE_REPLAY_FIXED_BYTES"),
+        "compose_manifest_fixed_bytes": source_define(compose_c, "TP_COMPOSE_MANIFEST_FIXED_BYTES"),
+        "compose_manifest_shard_bytes": source_define(compose_c, "TP_COMPOSE_MANIFEST_SHARD_BYTES"),
+        "compose_bundle_bytes": source_define(compose_c, "TP_COMPOSE_BUNDLE_BYTES"),
+        "compose_seal_fixed_bytes": source_define(compose_c, "TP_COMPOSE_SEAL_FIXED_BYTES"),
+        "compose_seal_entry_bytes": source_define(compose_c, "TP_COMPOSE_SEAL_ENTRY_BYTES"),
+        "compose_retained_line_bytes": source_define(compose_c, "TP_COMPOSE_RETAINED_LINE_BYTES"),
     }
+    retained_header = re.findall(r'^#define\s+TP_RETIREMENT_RETAINED_MANIFEST_HEADER\s+"([^"]*)\\n"\s*$',
+                                 store.read_text(encoding="utf-8"), re.MULTILINE)
+    if len(retained_header) != 1:
+        raise ValueError("could not read the retained manifest header from retirement_store.h")
+    # sizeof of the C string literal: its text, the LF and the NUL.
+    source["retained_manifest_header_size"] = len(retained_header[0]) + 2
+    series_shard = re.findall(r"^#define\s+TP_RETIREMENT_COMPOSE_SERIES_SHARD_BYTES\s+(\S+)\s*$",
+                              compose_h.read_text(encoding="utf-8"), re.MULTILINE)
+    if series_shard != ["TP_RETIREMENT_STORE_FILE_BYTES"]:
+        raise ValueError("the composer's series shard is not one store file")
+    source["compose_series_shard_bytes"] = source["store_file_bytes"]
     derivation = re.search(r'#define TP_RETIREMENT_BUDGET_DERIVATION((?:\s*\\\n\s*"[^"]*")+)',
                            budget.read_text(encoding="utf-8"))
     if not derivation:
@@ -342,6 +387,85 @@ def campaign_model(groups, runtime_rows, pairs, untimed, per_input, source, head
                 and payload_bytes <= source["store_total_bytes"],
         "entries_if_each_metrics_artifact_were_a_store_file": unsharded_files,
         "external_entries_and_bytes_excluded": True,
+    }
+
+
+def composer_model(model, code_rows, source, prior_entries=0, bootstrap_members=None):
+    """Mirror tp_compose_bounds_of (tools/bench_service/retirement_compose.c).
+
+    The family's cells are the timed rows (wall time and peak memory), the
+    runtime rows and the object groups (the batch pair); aggregates and
+    slices depend on dimension values the model does not carry, so they are
+    taken at the #619 bootstrap cap unless ``bootstrap_members`` is given.
+    The series (the #619 adapter input stream) is bounded by its maximal line
+    widths and split (#1880) into greedy whole-line shards of at most one
+    store file: every shard but the last holds more than ``shard - line_max``
+    bytes. ``prior_entries`` sizes the sealed record, as the composer's shape
+    does. Returns every output's bound, the files (series shards included)
+    and whether each output fits its caps.
+    """
+    per_unit = checked_product(source["rounds"], model["pairs_per_round"])
+    rows, runtime, objects = model["timed_rows"], model["runtime_rows"], model["object_groups"]
+    manifests = manifest_count = 0
+    for records in (rows * per_unit, objects * per_unit):
+        partitions = ceil_div(records, source["sample_partition_records"])
+        manifest_count += partitions
+        manifests += (partitions * source["compose_manifest_fixed_bytes"]
+                      + ceil_div(records, source["sample_records_per_shard"])
+                      * source["compose_manifest_shard_bytes"])
+    cells = [rows, rows, runtime, objects, objects]
+    bootstrap = source["compose_bootstrap_members"] if bootstrap_members is None else bootstrap_members
+    members = bootstrap + sum(cells)
+    lines = checked_product(source["compose_dimensions"] + 2, sum(cells), per_unit)
+    series = (source["compose_series_header_bytes"]
+              + members * (source["compose_member_line_bytes"] + source["compose_series_end_bytes"])
+              + lines * source["compose_ratio_line_bytes"])
+    shard_bytes = source["compose_series_shard_bytes"]
+    series_shards = 1 + (series - 1) // (shard_bytes - source["compose_series_line_bytes"] + 1)
+    outputs = {
+        "result_input_manifests": manifests,
+        "code_records": code_rows * source["code_record_bytes_max"],
+        "adapter_input_series": series,
+        "adapter_input_manifest": (source["compose_series_manifest_fixed_bytes"]
+                                   + series_shards * source["compose_series_manifest_line_bytes"]),
+        "adapter_output": source["compose_replay_fixed_bytes"] + members * source["compose_replay_member_bytes"],
+        "result_bundle": source["compose_bundle_bytes"],
+        "execution_receipt": source["receipt_bytes"],
+        "retained_manifest": (source["retained_manifest_header_size"]
+                              + source["store_files"] * source["compose_retained_line_bytes"]),
+        "sealed_result": (source["compose_seal_fixed_bytes"]
+                          + (prior_entries + source["store_files"]) * source["compose_seal_entry_bytes"]),
+    }
+    single_files = {name: value for name, value in outputs.items() if name != "adapter_input_series"}
+    family_fits = (all(cells) and sum(cells) <= source["compose_cell_members"]
+                   and rows <= source["maximum_cells"] and 0 < code_rows <= source["maximum_cells"]
+                   and manifest_count <= source["compose_partitions"])
+    return {
+        "family_cells": sum(cells), "family_members_upper_bound": members,
+        "series_lines": lines, "series_bytes_upper_bound": series,
+        "series_shard_bytes": shard_bytes, "series_shards_upper_bound": series_shards,
+        "single_file_series_fits": series <= source["store_file_bytes"],
+        "outputs": outputs,
+        "files": manifest_count + source["compose_fixed_outputs"] + series_shards,
+        "bytes_upper_bound": sum(outputs.values()),
+        "fits": (family_fits and series_shards <= source["compose_series_shard_cap"]
+                 and all(value <= source["store_file_bytes"] for value in single_files.values())),
+    }
+
+
+def store_with_composer(model, composer, source):
+    """The whole store: both campaign stages' payload plus the composer's
+    outputs, against the entries left after the minimum external entries and
+    the 128 GiB total (external entries, the prior closure and retained
+    declarations are the caller's and excluded, as in ``campaign_model``)."""
+    entries = model["payload_files"] + composer["files"]
+    total = model["payload_bytes_upper_bound"] + composer["bytes_upper_bound"]
+    return {
+        "entries": entries, "entry_cap": model["entry_cap_after_minimum_external_entries"],
+        "bytes": total, "byte_cap": source["store_total_bytes"],
+        "fits": (model["fits"] and composer["fits"]
+                 and entries <= model["entry_cap_after_minimum_external_entries"]
+                 and total <= source["store_total_bytes"]),
     }
 
 
@@ -536,11 +660,20 @@ def build_report(root, require_committed=True, performance_rows=None):
     if largest_inputs > source["batch_inputs"] or largest_list > source["input_list_bytes"] \
             or largest_inputs > source["input_list_arguments"]:
         raise ValueError("a batch's input list exceeds the response-file bounds")
+    # Code bytes are recorded once per code-observed row on every target: the
+    # timed rows and every untimed group's members.
+    code_rows = sum(group["members"] for group in timed) + sum(group["members"] for group in untimed)
     scenarios = {}
     for pairs in (source["minimum_pairs"], source["maximum_pairs"]):
         for per_input in (4096, 8192, 16384):
             for runtime in sorted({0, runtime_rows}):
                 model = campaign_model(timed, runtime, pairs, untimed, per_input, source)
+                if runtime:
+                    # The #619 family needs a runtime cell; without one the
+                    # composer refuses, so only runtime-bearing scenarios
+                    # carry its outputs.
+                    model["composer"] = composer_model(model, code_rows, source)
+                    model["store_with_composer"] = store_with_composer(model, model["composer"], source)
                 scenarios[f"pairs-{pairs}/per-input-{per_input}/runtime-{runtime}"] = model
     maxima = {f"pairs-{pairs}": maximum_fitting_per_input(timed, runtime_rows, pairs, untimed, source)
               for pairs in (source["minimum_pairs"], source["maximum_pairs"])}
@@ -574,6 +707,7 @@ def build_report(root, require_committed=True, performance_rows=None):
             "timed_rows_envelope": sum(group["members"] for group in timed),
             "untimed_groups": len(untimed),
             "untimed_singleton_groups": sum(group["kind"] == "singleton" for group in untimed),
+            "code_rows": code_rows,
             "largest_batch_inputs": largest_inputs,
             "largest_input_list_bytes": largest_list,
             "batch_argv_is_constant_in_inputs": True,
@@ -630,6 +764,14 @@ def render_text(report):
             f"payload_bytes={model['payload_bytes_upper_bound']}/{model['store_total_bytes']} "
             f"verdict={'fits' if model['fits'] else 'rejected'} "
             f"unsharded_entries={model['entries_if_each_metrics_artifact_were_a_store_file']}")
+        if "composer" in model:
+            composer, store = model["composer"], model["store_with_composer"]
+            lines.append(
+                f"{name} composer series_bytes<={composer['series_bytes_upper_bound']} "
+                f"series_shards<={composer['series_shards_upper_bound']} composer_files={composer['files']} "
+                f"store_entries={store['entries']}/{store['entry_cap']} "
+                f"store_bytes={store['bytes']}/{store['byte_cap']} "
+                f"verdict={'fits' if store['fits'] else 'rejected'}")
     maxima = report["maximum_fitting_per_input_metrics_bound"]
     budget = report["reviewed_budget"]
     lines.extend([

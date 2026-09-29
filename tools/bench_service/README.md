@@ -362,11 +362,160 @@ foundation linkage used by the throughput tool. There is no new dependency,
 measurement loop or general-purpose testing framework.
 
 On Linux, both service self-test commands also build and run the private
-retirement preparation, correctness and durable-store fixtures, plus the
-offline export/replay Python test. The throughput self-test registers the
+retirement preparation, correctness, durable-store and result-composer
+fixtures, the composer's end-to-end binding-validator test and the offline
+export/replay Python test. The throughput self-test registers the
 fixed-campaign child fixture. These tests check the combined adapters; they do
 not replace a complete service-owned producer, authenticated receipt handoff,
 physical A/A qualification or an admitted retirement recipe.
+
+### Retirement result composition (#881-E)
+
+`retirement_result.c` (the durable store), `retirement_compose.c` (the result
+composer, `retirement_compose.h`) and `retirement_compose_json.c` (its strict
+JSON reader and Python-exact canonical writer, `retirement_compose_json.h`)
+are separate translation units linked into the service. The service order is:
+
+1. Before any timing, `tp_retirement_compose_plan` derives the statistical
+   family from the frozen timed layout, bounds every composer output and
+   reserves both campaign stages, the composer outputs, the unreserved
+   retained kinds of the caller's `TpRetirementComposeDeclaration` and, as
+   external entries, the prior closure. It marks the upper-bounded kinds
+   (every metrics shard, each retained group and the #619 series shards
+   beyond the first) as the only slack settle may
+   release (`tp_retirement_store_bound`) and binds the declaration's digest
+   into the store (`tp_retirement_store_retain`). A declaration names each
+   retained file kind: an exact path (the A/A transcript and sample shards,
+   whose counts the campaign capacity fixes; lifecycle records) or a
+   `<prefix>NNNN<suffix>` group numbered from 0000 with a file cap (the A/A
+   metrics shards; failure logs). Lane D keeps only failure logs (successful
+   per-launch logs are deleted under its 4096-entry cap), so the log group is
+   bounded, not exact. The #619 adapter input is sharded (#1880; its format
+   is described below), so the series' shard count is bounded here; a family
+   that would need more than `TP_RETIREMENT_COMPOSE_SERIES_SHARDS` shards, or
+   any other output above the 64 MiB store file cap, is refused before
+   timing.
+2. Lane D publishes its A/A stage, A/B transcript shards, row/batch numeric
+   shards, per-batch metrics shards, untimed batch records and retained files
+   into that store.
+3. `tp_retirement_compose` requires the declaration digest to be the one bound
+   at plan time, every store file to be a declared sealed input or to match
+   exactly one declaration entry, every exact retained file to exist and every
+   group to be contiguous within its cap. It rehashes each input through its
+   sealed inode, replays the frozen #619 schedule with D's cursor, checks
+   process-instance bindings, interval windows, metrics-shard tiling and
+   untimed reproduction coverage, and joins every numeric sample to the
+   observation that produced it: a singleton or batch sample is D's encoding of
+   the supervised interval and RSS, an object member's sample is its metrics
+   input's interval and arena high-water (members are a batch's first inputs,
+   in census order). The A/A stage's retained metrics shards (its writer tag)
+   must be tiled, in order and completely, by its retained transcripts'
+   metrics artifacts, so a trailing unreferenced A/A shard is refused. It
+   rehashes the prior closure below the store root (the
+   evidence root is the store root; entry count and bytes are exactly those
+   reserved) and derives the post-sample `_execution_context` in C from the
+   authenticated post-A/A binding document with the streamed numeric digest.
+   It plans the canonical series shards from the joined ratios
+   (`tp_compose_series_plan`), then settles the reservation
+   (`tp_retirement_store_settle` releases only bounded slack, keeping exactly
+   the shards it will write) and publishes the #615 manifests, the code record
+   set, the statistics input (its shards, then their manifest), the output of
+   the reviewed `bench_throughput
+   retirement-replay` adapter (executed from the descriptor whose digest the
+   request authenticates, under a wall-clock limit, its JSON checked member by
+   member), the post-sample execution receipt, the retained manifest (every
+   unsealed file's kind, digest, size and path), the result bundle and the
+   `workflow.phases.sealed_result` record. Any refusal poisons the store and
+   names the failing stage; nothing is repaired or overwritten.
+4. The producer issues `tp_retirement_store_receipt_authority` for the composed
+   context; the authority binds the retained manifest's digest (the sealed
+   record's schema is fixed, so the unsealed A/A evidence is bound there).
+   After the private phase handoff is authenticated, the worker calls
+   `tp_retirement_store_authority_handoff` with the handoff's numeric job and
+   attempt; it refuses if any earlier record or temporary exists, copies the
+   authority to the queue-private root, publishes and reopens a journal record
+   (reopening every retained file), and only its success permits the final ACK
+   and lease release. `tp_retirement_store_authority_state` classifies a
+   restart as complete, incomplete (a crash prefix, including a `.pending`
+   temporary beside a final name), damaged (both records present but no longer
+   reopening) or absent; incomplete and damaged attempts are poisoned with
+   their evidence kept.
+
+The composer consumes, per timed row, its census id, batch group, runtime
+eligibility and the six frozen dimension values (target, cpu, allocator,
+frontend_lowering, PIC, artifact_stage); per code-observed row, each variant's
+artifact, reproduction and code-section digests and code-section bytes; the
+plan-v3 execution-plan digest and partitions; and the retained declaration.
+Lane D's driver does not emit these yet: its unit must pass them from the
+frozen layout, execution plan and result-input plan it already authenticates
+(no adapter derives them from the binding here).
+
+`retirement_compose_test.py` composes the bounded A1 binding fixture and runs
+the unchanged validator end to end, with the receipt trust root read from the
+producer's authority file; it compares the C canonical writer with
+`json.dumps` and the validator's `_execution_context`, and checks that a
+halved sample, a dropped retained file and a changed binding are refused.
+It composes and validates twice: at the production 64 MiB shard size (one
+series shard) and at a fixture-only 4 KiB size (`series-shard-bytes`, with the
+validator's size patched to match) that spans several shards; tampering with
+the manifest or a shard is refused.
+Given the throughput self-test directory it also composes lane D's own
+C-encoded full-invocation fixture (CI runs this after `bench_throughput
+self-test` on Linux). None of this is service admission or performance
+evidence, and the recipe stays blocked.
+
+**The #619 statistics adapter input (#1880).**
+`sealed_result_bundle.adapter_input` names the series manifest
+(`retirement-statistics-series.txt`), not the series itself: at A1 scale the
+single series stream (header line, then per family member a member line, its
+ratio lines and `end`) is about 407 MB at 60 pairs and 1.7 GB at 254 pairs,
+above the 64 MiB per-file cap that neither the store nor the bundle raises.
+The stream, the statistics, the family and the thresholds are unchanged; only
+its storage is sharded, in the way the transcripts and metrics already are.
+
+- **Shards.** `retirement-statistics-series-NNNN.txt`, beside the manifest,
+  from 0000. The canonical split is greedy over whole LF lines: each shard is
+  at most 64 MiB (`TP_RETIREMENT_COMPOSE_SERIES_SHARD_BYTES`, one store file),
+  a shard ends only where the next line would not fit, and no line is split.
+  The header line therefore opens shard 0 (it is not in the manifest), and
+  the shards' concatenation is byte for byte the former single file.
+- **Manifest.** ASCII, one LF-terminated line each:
+
+  ```text
+  BQ-RETIREMENT-STATISTICS-SERIES-V1
+  series bytes=<total> sha256=<hex> shards=<count> shard_bytes=67108864
+  shard=<index> offset=<offset> bytes=<bytes> sha256=<hex> path=<leaf>
+  ```
+
+  one shard line per shard in series order: indexes from 0, offsets
+  contiguous from 0 with no gap or overlap, every shard nonempty and within
+  `shard_bytes`, each leaf the canonical `retirement-statistics-series-NNNN.txt`
+  of its index, and shard bytes summing to the series. Numbers have one
+  spelling (no sign or leading zero) and nothing follows the last line.
+- **Store.** Each shard and the manifest are store entries with their own
+  path, bytes and SHA-256, and sealed-closure members
+  (`workflow.adapter_input` for the manifest,
+  `workflow.adapter_input.shard.<index>` for each shard). The plan reserves
+  `1 + (series_bound - 1) / (64 MiB - 255)` shards (every shard but the last
+  holds more than 64 MiB less the 256-byte longest line); the A1 family
+  (6,482 timed rows, 80 object groups, 13,126 cells) needs at most 7 at 60
+  pairs and 26 at 254 pairs.
+- **Readers.** The binding validator (`_adapter_series_manifest`,
+  `_AdapterSeriesStream`, `_check_adapter_series`) requires the approved
+  64 MiB shard size, streams every shard in order, rehashes each shard and
+  the joined series from the bytes it parses, and refuses a reordered,
+  missing, duplicated or truncated shard, an offset gap, a line split across
+  shards or a non-maximal (non-canonical) split. `bench_throughput
+  retirement-replay --input` takes the manifest and applies the same checks,
+  naming the broken rule in its refusal (it accepts any shard size from
+  4 KiB to 64 MiB, so its own tests and the fixture-only composer size can
+  span several small shards; the validator alone pins 64 MiB, so a smaller
+  size cannot pass validation). Each rule has a test that fails when the rule
+  is removed.
+- **Composer scratch.** The adapter reads scratch copies; after it exits the
+  composer rehashes the manifest and every shard copy against the sealed
+  store files and refuses any difference. It removes the scratch copies it
+  created on success and on every refusal after the series began.
 
 Linux supervisor deadline coverage lives in `worker_deadline_tests.c`. Timed
 commands use explicit `exec` so the test retains an owned direct child rather

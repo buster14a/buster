@@ -581,6 +581,17 @@ for both. `retirement-replay` binds each member's metric token prefix
 (`compiler_wall_time`, `compiler_peak_memory`, `generated_runtime`,
 `compiler_batch_wall_time`, `compiler_batch_peak_rss`) to its index and rejects
 a member presented under another metric's index.
+Its `--input` is the (#1880) series manifest, not the series: the unchanged
+series stream is split greedily over whole lines into shards
+`retirement-statistics-series-NNNN.txt` beside the manifest, which binds
+their order, offsets, bytes and SHA-256 and the joined series' bytes and
+SHA-256. The adapter rehashes every shard and the joined series as it parses
+them and refuses, naming the rule (`TpSeriesReader.refused`), a reordered,
+missing, duplicated, oversized or truncated shard, an offset gap, a count or
+leaf that is not canonical, a non-canonical number, a trailing manifest
+line, a line split across shards and a non-canonical split (`tp_series_open`,
+`tp_series_line`); the format is
+described in `tools/bench_service/README.md` under the composer.
 
 The complete declared family contains all overall aggregates, required slices
 and cells of those five metrics. It is split before measurement
@@ -838,7 +849,14 @@ and 60.8 GB (of 4,093 and 128 GiB); 8 KiB needs 3,523 entries and 118.5 GB;
 the largest bound that fits at 254 pairs is 9,472 bytes per input (37,888 at
 60 pairs), which the report states as an explicit assumption the measured
 metrics sizes must satisfy. Without sharding the same campaign would need
-166,779 entries. `retirement_capacity_test.py` runs in the Compiler throughput
+166,779 entries. The model also mirrors the result composer's bounds
+(`composer_model`, `tp_compose_bounds_of`): the source-derived family of
+6,482 timed rows, 80 object groups and 13,126 #619 cells has a statistics
+series of at most 406,664,536 bytes at 60 pairs and 1,710,443,864 at 254
+(above the 64 MiB per-file cap as one file), stored (#1880) as at most 7 and
+26 series shards; with the composer's outputs the whole store needs at most
+477 entries and 15.9 GB at 60 pairs and 1,838 entries and 62.6 GB at 254
+pairs (4 KiB per input). `retirement_capacity_test.py` runs in the Compiler throughput
 workflow beside `retirement_execution_test.py`.
 These are envelopes, not an admitted size or a host rate:
 

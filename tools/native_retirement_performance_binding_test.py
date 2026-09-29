@@ -2,13 +2,13 @@
 """Offline tests for the fail-closed native-retirement binding validator."""
 
 import copy
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import csv
 import hashlib
 import importlib.util
 import io
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sqlite3
@@ -26,6 +26,28 @@ SPEC = importlib.util.spec_from_file_location(
 binding = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(binding)
 RETIREMENT_SCHEMA = binding.RETIREMENT_SCHEMA
+
+
+def sharded_series(put, manifest_path, series, shard_bytes=None):
+    """Publish ``series`` as the (#1880) adapter input: its canonical shards
+    ``retirement-statistics-series-NNNN.txt`` beside the manifest at
+    ``manifest_path`` (one series per directory), each through
+    ``put(path, data)``. Returns the manifest's descriptor."""
+    directory = PurePosixPath(manifest_path).parent
+    shards = binding.adapter_series_shards(series, shard_bytes)
+    for index, data in enumerate(shards):
+        put((directory / binding.ADAPTER_SERIES_LEAF_FORMAT.format(index)).as_posix(), data)
+    return put(manifest_path, binding.adapter_series_manifest(shards, shard_bytes))
+
+
+def file_put(root):
+    """A ``put`` writing below ``root`` and returning the descriptor."""
+    def put(path, data):
+        target = Path(root) / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        return {"path": path, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    return put
 
 
 class BindingTests(unittest.TestCase):
@@ -565,9 +587,9 @@ class BindingTests(unittest.TestCase):
             "schema": "buster-native-retirement-statistics-replay-v1", "version": 1,
             "members": adapter_calls,
         })
-        adapter_input = artifact(
-            "results/statistics-series.txt",
-            "version=1 seed=20260913 bootstrap_members=1 cell_members=1 pairs=60 resamples=100000 frozen=1 members=0\n")
+        adapter_input = sharded_series(
+            artifact, "results/statistics-series.txt",
+            b"version=1 seed=20260913 bootstrap_members=1 cell_members=1 pairs=60 resamples=100000 frozen=1 members=0\n")
         raw_measurements_sha256 = hashlib.sha256(sample_record_bytes).hexdigest()
         invocation_sha256 = binding._family_invocation_digest(family)
         sealed_result_bundle = json_artifact("results/sealed-result.bundle", {
@@ -1008,14 +1030,32 @@ class BindingTests(unittest.TestCase):
                         f"cells={cells} pairs=60 resamples={resamples} limit={limit}\n")
                     lines.extend("ratio=1\n" for _ in range(120))
                     lines.append("end\n")
-            series = root / "series.txt"
-            series.write_text("".join(lines), encoding="utf-8")
+            put = file_put(root)
+            series_bytes = "".join(lines).encode("utf-8")
+            sharded_series(put, "main/series.txt", series_bytes)
+            series = root / "main/series.txt"
             output = root / "result.json"
             replay = subprocess.run(
                 [str(executable), "retirement-replay", "--input", str(series),
                  "--output", str(output)], check=False, capture_output=True, text=True)
             self.assertEqual(replay.returncode, 0, replay.stderr)
             result = json.loads(output.read_text(encoding="utf-8"))
+            # (#1880) The same series split into several smaller canonical
+            # shards yields byte-identical statistics; the adapter reads the
+            # manifest's shard size, which the validator pins to 64 MiB.
+            sharded_series(put, "small/series.txt", series_bytes, shard_bytes=4096)
+            self.assertTrue((root / "small/retirement-statistics-series-0002.txt").is_file())
+            small = subprocess.run(
+                [str(executable), "retirement-replay", "--input", str(root / "small/series.txt"),
+                 "--output", str(root / "small.json")], check=False, capture_output=True, text=True)
+            self.assertEqual(small.returncode, 0, small.stderr)
+            self.assertEqual((root / "small.json").read_bytes(), output.read_bytes())
+            # A single-file series (no manifest) is not an adapter input.
+            (root / "plain.series").write_bytes(series_bytes)
+            plain = subprocess.run(
+                [str(executable), "retirement-replay", "--input", str(root / "plain.series"),
+                 "--output", str(root / "plain.json")], check=False, capture_output=True, text=True)
+            self.assertNotEqual(plain.returncode, 0)
             self.assertEqual(result["schema"],
                              "buster-native-retirement-statistics-replay-v1")
             self.assertEqual(len(result["members"]), 10)
@@ -1023,20 +1063,19 @@ class BindingTests(unittest.TestCase):
             self.assertEqual({item["resamples"] for item in result["members"]}, {0, 100000})
             self.assertEqual({item["metric"] for item in result["members"]}, {0, 1, 2, 3, 4})
             # A batch member presented under another metric's seed domain fails.
-            swapped = root / "swapped.series"
-            swapped.write_text("".join(lines).replace(
+            swapped = root / "swapped/series.txt"
+            sharded_series(put, "swapped/series.txt", "".join(lines).replace(
                 "member=compiler_batch_peak_rss/aggregate metric=4",
-                "member=compiler_batch_peak_rss/aggregate metric=3", 1), encoding="utf-8")
+                "member=compiler_batch_peak_rss/aggregate metric=3", 1).encode("utf-8"))
             rejected = subprocess.run(
                 [str(executable), "retirement-replay", "--input", str(swapped),
                  "--output", str(root / "swapped.json")],
                 check=False, capture_output=True, text=True)
             self.assertNotEqual(rejected.returncode, 0)
-            oversized = root / "oversized.series"
-            oversized.write_text(
-                "version=1 seed=20260913 bootstrap_members=1 cell_members=1 "
-                "pairs=60 resamples=4294967295 frozen=1 members=2\n",
-                encoding="utf-8")
+            oversized = root / "oversized/series.txt"
+            sharded_series(put, "oversized/series.txt",
+                           b"version=1 seed=20260913 bootstrap_members=1 cell_members=1 "
+                           b"pairs=60 resamples=4294967295 frozen=1 members=2\n")
             rejected = subprocess.run(
                 [str(executable), "retirement-replay", "--input", str(oversized),
                  "--output", str(root / "oversized.json")],
@@ -1385,12 +1424,12 @@ class BindingTests(unittest.TestCase):
                         series_lines.append(f"ratio={ratio!r}\n")
             series_lines.append("end\n")
         series_data = "".join(series_lines).encode("utf-8")
-        adapter_input_descriptor = put("results/statistics-series.txt", series_data)
+        adapter_input_descriptor = sharded_series(put, "results/statistics-series.txt", series_data)
         with tempfile.TemporaryDirectory(prefix="retirement-e2e-adapter-") as adapter_directory:
             adapter_directory = Path(adapter_directory)
             trusted_input = adapter_directory / "series.txt"
             trusted_output = adapter_directory / "result.json"
-            trusted_input.write_bytes(series_data)
+            sharded_series(file_put(adapter_directory), "series.txt", series_data)
             executable, source_digest, source_closure_digest, toolchain_digest, build_command = \
                 binding._compile_trusted_retirement_adapter(adapter_directory)
             process = subprocess.run(
@@ -1713,16 +1752,20 @@ class BindingTests(unittest.TestCase):
                             ratio = "1.1" if changed_ratio and sample_index == 0 else "1.0"
                             lines.append(f"ratio={ratio}\n")
                         lines.append("end\n")
-                    path.write_text("".join(lines), encoding="utf-8")
+                    data = "".join(lines).encode("utf-8")
+                    sharded_series(file_put(root), path.relative_to(root).as_posix(), data)
+                    return data
 
                 def artifact(path):
-                    return {"path": path.name, "bytes": path.stat().st_size,
+                    return {"path": path.relative_to(root).as_posix(), "bytes": path.stat().st_size,
                             "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
-                valid = root / "valid.series"
-                write_series(valid)
+                # One series per directory: shard leaves are canonical.
+                valid = root / "valid" / "series.txt"
+                series_bytes = write_series(valid)
                 binding._check_adapter_series(root, artifact(valid), family, parsed, rules,
                                               connection)
+                self._check_series_shard_refusals(root, series_bytes, family, parsed, rules, connection)
                 cases = (
                     ("widened", {"changed_member": members[0][0]}),
                     ("widened-batch", {"changed_member": "compiler_batch_wall_time/aggregate"}),
@@ -1733,7 +1776,7 @@ class BindingTests(unittest.TestCase):
                     ("batch-cells", {"changed_cells": "compiler_batch_peak_rss/aggregate"}),
                 )
                 for name, change in cases:
-                    path = root / f"{name}.series"
+                    path = root / name / "series.txt"
                     write_series(path, **change)
                     with self.subTest(case=name), self.assertRaises(ValueError):
                         binding._check_adapter_series(root, artifact(path), family, parsed,
@@ -1745,6 +1788,136 @@ class BindingTests(unittest.TestCase):
                                                   rules, connection)
             finally:
                 connection.close()
+
+    def _check_series_shard_refusals(self, root, series, family, parsed, rules, connection):
+        """(#1880) The validator streams and joins every canonical shard and
+        refuses each broken rule for its own reason: a reordered, missing,
+        duplicated, oversized or truncated shard, a manifest gap, a count
+        that differs from the shard lines, a non-canonical leaf, a
+        non-canonical split, a line split across shards, a shard that ends
+        before or after its manifest bytes, a replaced shard, a joined-digest
+        mismatch and any shard size other than the approved 64 MiB."""
+        shard_bytes = 4096
+        shards = binding.adapter_series_shards(series, shard_bytes)
+        self.assertGreaterEqual(len(shards), 4)
+        self.assertTrue(all(len(shard) <= shard_bytes and shard.endswith(b"\n") for shard in shards))
+        self.assertEqual(b"".join(shards), series)
+        self.assertTrue(shards[0].startswith(b"version=1 "))
+        total = hashlib.sha256(series).hexdigest()
+        put = file_put(root)
+        leaf = binding.ADAPTER_SERIES_LEAF_FORMAT.format
+
+        def publish(case, entries, total_bytes=len(series), total_sha256=total, cap=shard_bytes, count=None,
+                    files=None):
+            """One series per directory. entries: manifest (index, offset,
+            data, leaf) in order; files: the leaf -> bytes actually written
+            (by default each entry's data under its leaf)."""
+            for name, data in (files if files is not None else {e[3]: e[2] for e in entries}).items():
+                put(f"{case}/{name}", data)
+            lines = [binding.ADAPTER_SERIES_MANIFEST_HEADER,
+                     f"series bytes={total_bytes} sha256={total_sha256} "
+                     f"shards={len(entries) if count is None else count} shard_bytes={cap}"]
+            lines += [f"shard={index} offset={offset} bytes={len(data)} "
+                      f"sha256={hashlib.sha256(data).hexdigest()} path={name}"
+                      for index, offset, data, name in entries]
+            return put(f"{case}/series.txt", ("\n".join(lines) + "\n").encode("ascii"))
+
+        def canonical(parts=None):
+            parts = shards if parts is None else parts
+            entries, offset = [], 0
+            for index, data in enumerate(parts):
+                entries.append((index, offset, data, leaf(index)))
+                offset += len(data)
+            return entries
+
+        def check(descriptor):
+            binding._check_adapter_series(root, descriptor, family, parsed, rules, connection)
+
+        with mock.patch.object(binding, "ADAPTER_SERIES_SHARD_BYTES", shard_bytes):
+            check(publish("canonical", canonical()))
+            # The helper's canonical manifest is byte-identical.
+            self.assertEqual((root / "canonical/series.txt").read_bytes(),
+                             binding.adapter_series_manifest(shards, shard_bytes))
+            entries = canonical()
+            files = {name: data for _index, _offset, data, name in entries}
+            first_line = shards[1].index(b"\n") + 1
+            renumbered = canonical([shards[1], shards[0]] + shards[2:])
+            missing = [entries[0]] + [(index - 1, offset - len(shards[1]), data, leaf(index - 1))
+                                      for index, offset, data, _name in entries[2:]]
+            shifted = [(index + 1, offset + len(shards[1]), data, leaf(index + 1))
+                       for index, offset, data, _name in entries[2:]]
+            duplicated = entries[:2] + [(2, entries[2][1], shards[1], leaf(1))] + shifted
+            copied = entries[:2] + [(2, entries[2][1], shards[1], leaf(2))] + shifted
+            oversized_parts = binding.adapter_series_shards(series, 2 * shard_bytes)
+            cases = {
+                "reordered": (publish("reordered", [entries[1], entries[0]] + entries[2:], files=files),
+                              "not in series order"),
+                "reordered-renumbered": (publish("renumbered", renumbered), "header is malformed"),
+                "missing": (publish("missing", missing), "do not cover the whole series"),
+                "duplicated-leaf": (publish("duplicated", duplicated), "names one shard twice"),
+                "duplicated-copy": (publish("copied", copied), "do not cover the whole series"),
+                "gap": (publish("gap", entries[:1] + [(i, o + 1, d, n) for i, o, d, n in entries[1:]]),
+                        "gap or overlap"),
+                "early-split": (publish("early", canonical([shards[0], shards[1][:first_line],
+                                                           shards[1][first_line:]] + shards[2:])),
+                                "not canonically packed"),
+                "straddle": (publish("straddle", canonical([shards[0][:-3], shards[0][-3:] + shards[1]]
+                                                           + shards[2:])), "line boundary"),
+                "shard-size": (publish("size", canonical(), cap=8192), "approved series shard size"),
+                "oversized-shard": (publish("oversized", canonical(oversized_parts)),
+                                    "exceeds the series shard size"),
+                "count-short": (publish("count-short", canonical(), count=len(shards) - 1),
+                                "shard count differs from its shard lines"),
+                "count-long": (publish("count-long", canonical(), count=len(shards) + 1),
+                               "shard count differs from its shard lines"),
+                "leaf-name": (publish("leaf-name", entries[:1] + [(1, entries[1][1], shards[1], "shard-1.txt")]
+                                      + entries[2:]), "canonical series shard leaf"),
+                "leaf-case": (publish("leaf-case", entries[:1] + [(1, entries[1][1], shards[1],
+                                                                  leaf(1).upper())] + entries[2:]),
+                              "canonical series shard leaf"),
+                "leaf-slash": (publish("leaf-slash", entries[:1] + [(1, entries[1][1], shards[1],
+                                                                    "x/" + leaf(1))] + entries[2:],
+                                       files=files), "canonical series shard leaf"),
+                "digest": (publish("digest", canonical(), total_sha256="0" * 64), "joined shards differ"),
+            }
+            for name, (descriptor, message) in cases.items():
+                with self.subTest(defect=name), self.assertRaisesRegex(ValueError, message):
+                    check(descriptor)
+            # A shard truncated after its manifest was sealed, and one whose
+            # manifest entry was rewritten to the truncated bytes.
+            truncated = publish("truncated", canonical())
+            (root / "truncated" / leaf(1)).write_bytes(shards[1][:-1])
+            with self.assertRaisesRegex(ValueError, "byte count does not match evidence"):
+                check(truncated)
+            with self.assertRaisesRegex(ValueError, "line boundary"):
+                check(publish("cut", canonical([shards[0], shards[1][:-1]] + shards[2:]),
+                              total_bytes=len(series) - 1))
+            # A replaced shard of the same size fails its streamed digest:
+            # "ratio=01." parses to the same ratio, so only the digest differs.
+            replaced = publish("replaced", canonical())
+            changed = shards[2].replace(b"ratio=1.0\n", b"ratio=01.\n", 1)
+            self.assertNotEqual(changed, shards[2])
+            (root / "replaced" / leaf(2)).write_bytes(changed)
+            with self.assertRaisesRegex(ValueError, "truncated or differs"):
+                check(replaced)
+            # End of shard: a shard that ends before or runs past its manifest
+            # bytes (the file changed after its size was checked).
+            ending = publish("ending", canonical())
+            manifest = binding._adapter_series_manifest(root, ending)
+            for name, size, message in (("early-end", 1, "truncated or differs"),
+                                        ("late-end", -1, "longer than its manifest")):
+                claimed = dict(manifest, shards=[dict(item) for item in manifest["shards"]])
+                claimed["shards"][1]["bytes"] += size
+                stream = binding._AdapterSeriesStream(root, claimed, "series")
+                with self.subTest(end=name), closing(stream), \
+                        mock.patch.object(binding, "_check_evidence_file",
+                                          side_effect=lambda r, a, n: Path(r) / a["path"]), \
+                        self.assertRaisesRegex(ValueError, message):
+                    while stream.readline():
+                        pass
+        # Without the fixture patch the small shards are refused outright.
+        with self.assertRaisesRegex(ValueError, "approved series shard size"):
+            check(publish("unpatched", canonical()))
 
     def test_code_byte_summary_uses_integer_per_cell_gates(self):
         parsed, _family, _rules = self._series_join_fixture()

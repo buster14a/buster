@@ -58,12 +58,12 @@ typedef struct TpProcess
     int exit_code, signal_number, timed_out, launch_error;
 } TpProcess;
 
-static int tp_mkdir(char const* path)
+static inline int tp_mkdir(char const* path)
 {
     return os_make_directory_attempt(string_from_pointer(path));
 }
 
-static int tp_absolute(char const* path, char out[TP_PATH_CAP])
+static inline int tp_absolute(char const* path, char out[TP_PATH_CAP])
 {
     TemporalArena temp = scratch_begin(0, 0);
     String8 absolute = os_path_absolute_lexical(temp.arena, string_from_pointer(path), true);
@@ -78,7 +78,7 @@ static int tp_absolute(char const* path, char out[TP_PATH_CAP])
 #include <psapi.h>
 #include <direct.h>
 
-static int tp_first_allowed_cpu(void)
+static inline int tp_first_allowed_cpu(void)
 {
     DWORD_PTR process_mask = 0, system_mask = 0;
     int cpu = -1;
@@ -90,7 +90,7 @@ static int tp_first_allowed_cpu(void)
     return cpu;
 }
 
-static TpProcess tp_process(char* const* args, char const* directory, char const* log_path,
+static inline TpProcess tp_process(char* const* args, char const* directory, char const* log_path,
                             unsigned timeout_seconds, int cpu, int counters)
 {
     TpProcess result = {0};
@@ -233,7 +233,7 @@ static void tp_alarm_handler(int signal_number)
     }
 }
 
-static int tp_first_allowed_cpu(void)
+static inline int tp_first_allowed_cpu(void)
 {
     int cpu = -1;
 #ifdef __linux__
@@ -646,7 +646,7 @@ static TpProcess tp_process_observe(char* const* args, char const* directory, ch
     return result;
 }
 
-static TpProcess tp_process(char* const* args, char const* directory, char const* log_path,
+static inline TpProcess tp_process(char* const* args, char const* directory, char const* log_path,
                             unsigned timeout_seconds, int cpu, int counters)
 {
     TpProcess result = tp_process_observe(args, directory, log_path, timeout_seconds, cpu, counters, NULL);
