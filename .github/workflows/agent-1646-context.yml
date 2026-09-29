@@ -9,42 +9,52 @@ permissions:
   contents: write
 
 jobs:
-  diagnose-fix:
+  apply-fix:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: codex/1646-static-assert-message
 
-      - name: Run guarded repair and capture output
+      - name: Apply guarded repair
         shell: bash
         run: |
           set +e
-          cat .agent/apply-1646.0 .agent/apply-1646.1 .agent/apply-1646.2 .agent/apply-1646.3 .agent/apply-1646.4 \
-            | base64 --decode > /tmp/apply-1646.py 2> .agent/apply-1646.log
+          : > .agent/apply-1646.log
+          python3 -m py_compile .agent/apply_1646.py >> .agent/apply-1646.log 2>&1
           status=$?
           if [ "$status" -eq 0 ]; then
-            python3 -m py_compile /tmp/apply-1646.py >> .agent/apply-1646.log 2>&1
+            python3 .agent/apply_1646.py >> .agent/apply-1646.log 2>&1
             status=$?
           fi
           if [ "$status" -eq 0 ]; then
-            python3 /tmp/apply-1646.py >> .agent/apply-1646.log 2>&1
+            grep -R -n 'static assertion expression is not a true integer constant expression' src/buster >> .agent/apply-1646.log 2>&1
+            if [ "$?" -eq 0 ]; then
+              echo 'obsolete deferred diagnostic remains' >> .agent/apply-1646.log
+              status=1
+            fi
+          fi
+          if [ "$status" -eq 0 ]; then
+            git diff --check >> .agent/apply-1646.log 2>&1
             status=$?
           fi
-          printf '\nexit_status=%s\nscript_sha256=' "$status" >> .agent/apply-1646.log
-          sha256sum /tmp/apply-1646.py | cut -d' ' -f1 >> .agent/apply-1646.log
-          git restore src/buster/lib/compiler/frontend/c/c_internal.h \
-                      src/buster/lib/compiler/frontend/c/c_parse.c \
-                      src/buster/lib/compiler/frontend/c/c_gen.c \
-                      src/buster/tests/compiler/frontend/c/c_test.c \
-                      src/buster/tests/compiler/driver/driver_fast_test.c
-
-      - name: Publish diagnostic
-        shell: bash
-        run: |
-          set -euo pipefail
+          printf '\nexit_status=%s\n' "$status" >> .agent/apply-1646.log
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add .agent/apply-1646.log
-          git commit -m 'chore: publish issue 1646 repair diagnostic'
+          if [ "$status" -eq 0 ]; then
+            git add src/buster/lib/compiler/frontend/c/c_internal.h \
+                    src/buster/lib/compiler/frontend/c/c_parse.c \
+                    src/buster/lib/compiler/frontend/c/c_gen.c \
+                    src/buster/tests/compiler/frontend/c/c_test.c \
+                    src/buster/tests/compiler/driver/driver_fast_test.c
+            git commit -m 'c: preserve deferred static assertion diagnostics'
+          else
+            git restore src/buster/lib/compiler/frontend/c/c_internal.h \
+                        src/buster/lib/compiler/frontend/c/c_parse.c \
+                        src/buster/lib/compiler/frontend/c/c_gen.c \
+                        src/buster/tests/compiler/frontend/c/c_test.c \
+                        src/buster/tests/compiler/driver/driver_fast_test.c
+            git add .agent/apply-1646.log
+            git commit -m 'chore: publish issue 1646 repair diagnostic'
+          fi
           git push origin HEAD:codex/1646-static-assert-message
