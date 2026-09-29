@@ -171,9 +171,12 @@ still fail-closed `begin_service` accepts only that sealed projection; it does
 not acquire launchable binary descriptors or call the correctness-gate begin
 function. Even a valid full-census projection returns `BQ_RECIPE_MISMATCH`
 until the #509 authority joins are implemented. The per-row
-`configuration_sha256` join above is in place. Missing facts include independent verification of
-per-row compiler/runtime argv/cwd/environment and CPU provenance, an
-authenticated #509 required-check list and receipt bytes/digests, and
+`configuration_sha256` join above is in place, and the #509 required-check
+list and same-attempt receipts come from the installed required-check
+authority and the in-unit runner
+([step 9](RETIREMENT_PREPARATION.md#step-9-509-receipts-and-the-gate-issuer-1020)).
+Missing facts include independent verification of per-row compiler/runtime
+argv/cwd/environment and CPU provenance (the row-plan authority), and
 independent-oracle bytes/digest from an admitted producer. The gate can validate
 that a caller's check digest matches its caller-supplied expected digest; this
 import does not establish where that expectation or receipt came from. It also

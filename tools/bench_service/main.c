@@ -17,11 +17,12 @@
  * The in-unit lane-B caller (retirement_unit.c: project, oracle authority and
  * reference producer, #1020 PR 3) is linked here, so the oracle adapter
  * accepts only live tokens this unit's reference producer issued. The
- * correctness gate stays fail-closed until #509 receipts are joined, so the
- * ready record (#1020 PR 4) has no admitted gate to write for; this unit must
- * never define BQ_RETIREMENT_CORRECTNESS_TEST_ONLY, whose fixture is the only
- * gate issuer. bq_worker_unit still calls none of the worker-unit B steps:
- * the recipe gates reject the job first. */
+ * correctness gate runs the installed #509 required checks
+ * (retirement_check_runner.c) but refuses without a pinned authority and row
+ * evidence, which has no producer yet, so the ready record (#1020 PR 4) has
+ * no issued gate to write for; this unit must never define
+ * BQ_RETIREMENT_CORRECTNESS_TEST_ONLY. bq_worker_unit still calls none of the
+ * worker-unit B steps: the recipe gates reject the job first. */
 #include "retirement_correctness.c"
 #include "retirement_correctness_service.c"
 #include "retirement_artifact_service.c"
@@ -30,6 +31,7 @@
 #include "retirement_oracle_authority.c"
 #include "retirement_reference_producer.c"
 #include "retirement_reference_template.c"
+#include "retirement_check_runner.c"
 #include "retirement_unit.c"
 #endif
 #include "worker_linux.c"

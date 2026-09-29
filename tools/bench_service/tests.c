@@ -5549,9 +5549,10 @@ BUSTER_GLOBAL_LOCAL void bq_test_large_source_manifest(void)
 
 #ifdef __linux__
 /* #1020 PR 4 in the service's own build (BQ_SERVICE_INSTALLED, without
- * BQ_RETIREMENT_CORRECTNESS_TEST_ONLY): no gate issuer is compiled in, so the
- * verifier refuses a well-formed seal over well-formed facts, and the ready
- * writer refuses an issuer-marked gate before any attempt I/O. */
+ * BQ_RETIREMENT_CORRECTNESS_TEST_ONLY): the step 9 verifier refuses a
+ * well-formed seal over facts without the #509 check digests, and the ready
+ * writer refuses an issuer-marked gate it does not own before any attempt
+ * I/O. */
 BUSTER_GLOBAL_LOCAL void bq_test_retirement_ready_refused(void)
 {
 #if !defined(BQ_SERVICE_INSTALLED) || defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)

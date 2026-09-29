@@ -6,6 +6,7 @@
 #define main bq_service_cli_main
 #include "main.c"
 #undef main
+#include <regex.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/time.h>
@@ -3261,12 +3262,14 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_reference_policy(int installed, char const
 }
 
 #include "retirement_campaign_service_tests.h"
+#include "retirement_check_runner_tests.h"
 #include "retirement_unit_oracle_tests.h"
 #include "worker_budget_crosscheck_tests.h"
 
 int main(void)
 {
     bq_test_worker_budget_crosscheck();
+    bq_check_test_runner();
     bq_prep_test_support_population();
     bq_prep_test_raw_census_boundary();
     bq_prep_test_unit_oracle();

@@ -1,7 +1,9 @@
 /* #1020 pre-timing correctness join. begin authenticates the shape of the
  * imported complete population; check and row poison on the first failure;
- * batches freezes the (A1) object batch-group contracts; finish seals every
- * source/check/row/output/batch fact; ready checks the seal again.
+ * batches freezes the (A1) object batch-group contracts; authorize grants the
+ * #509 batch authority with the required-check authority's digest (its only
+ * writer); finish seals every source/check/row/output/batch/authority fact;
+ * ready checks the seal again.
  * The service must obtain the input and receipt digests from trusted sources
  * and execute/replay their content before calling these private entry points.
  */
@@ -196,6 +198,7 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_correctness_seal(BqRetirementCorrectness 
     bq_retirement_correctness_number(&hash, gate->batch_group_count);
     bq_retirement_correctness_text(&hash, gate->batch_groups_sha256);
     bq_retirement_correctness_number(&hash, gate->batch_authority);
+    bq_retirement_correctness_text(&hash, gate->authority_sha256);
     bq_retirement_correctness_text(&hash, gate->checks_sha256);
     sha256_finish_hex(&hash, digest);
 }
@@ -576,6 +579,21 @@ bool bq_retirement_correctness_batches(BqRetirementCorrectness* gate,
         gate->batch_group_count = count;
         gate->batches_frozen = 1;
         memcpy(gate->batch_groups_sha256, snapshot, sizeof(snapshot));
+    }
+    else if (gate) gate->failed = 1;
+    return ok;
+}
+
+bool bq_retirement_correctness_authorize(BqRetirementCorrectness* gate, char const authority_sha256[65])
+{
+    bool ok = gate && !gate->failed && !gate->finished && !gate->batch_authority && gate->batches_frozen &&
+        gate->checks_done == gate->check_count && gate->rows_done == gate->prepared.rows &&
+        gate->seen_kinds == gate->required_kinds && bq_retirement_correctness_batches_unchanged(gate) &&
+        bq_retirement_correctness_digest(authority_sha256);
+    if (ok)
+    {
+        gate->batch_authority = 1;
+        memcpy(gate->authority_sha256, authority_sha256, 65);
     }
     else if (gate) gate->failed = 1;
     return ok;

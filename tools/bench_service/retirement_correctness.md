@@ -141,11 +141,19 @@ The miniature and synthetic-capacity fixtures do not establish that proof.
 The required-check array must enumerate every applicable #509 native semantic
 lane, supported configuration matrix, no-fallback/census validation, self-host
 and fixed-point gate. The gate checks equality with the expected digest supplied
-in each required-check record and seals both expected and observed values, but
-the current service importer does not authenticate the required-check list or
-receipt bytes/digest against a separate authority. A digest obtained from the
-candidate or downloaded result is not a trusted receipt. Any required host
-unavailable at qualification leaves the campaign blocked.
+in each required-check record and seals both expected and observed values. The
+required-check list and each expected receipt digest now come from the
+installed, profile-pinned #509 authority
+(`bq_retirement_required_checks_import`), and the in-unit runner
+(`retirement_check_runner.c`) produces the observed same-attempt receipts with
+the held binaries; see
+[step 9](RETIREMENT_PREPARATION.md#step-9-509-receipts-and-the-gate-issuer-1020).
+The blocked profile has no authority pin. A digest obtained from the candidate
+or downloaded result is not a trusted receipt. Any required host unavailable
+at qualification leaves the campaign blocked: each of the six #509 native
+semantic hosts must be covered by native evidence on the unit's native target
+or by the hosted acceptance record for A's exact candidate commit and tree,
+and emulated, compile-only and link-only checks never cover a host.
 
 `retirement_oracle_authority.{h,c}` separates the private reference-output
 producer's immutable policy from same-attempt observations. The installed
@@ -337,7 +345,11 @@ a metrics shard writer per stage, and the budget's metrics bound in every
 object contract; the queue-aware entry reads the pin from the compiled profile
 key `campaign-budget-sha256=`, which the blocked profile does not carry, so it
 returns `BQ_RECIPE_MISMATCH`. Object groups also need the gate's sealed #509
-authority flag (`batch_authority`), which only the future #509 importer sets:
+authority flag (`batch_authority`). Its one writer is
+`bq_retirement_correctness_authorize`, which records the #509 authority digest
+under the gate seal; only the step 9 issuer (`bq_retirement_unit_gate_admit` in
+`retirement_unit.c`) calls it, after every same-attempt receipt, row fact and
+frozen batch group has joined:
 without it `bind`, `bind_held` and the pinned entry refuse every campaign with
 an object group, even under a profile that pins the budget.
 
