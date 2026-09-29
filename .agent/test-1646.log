@@ -2,6 +2,7 @@ test_all_outcome=failure
 self_host_outcome=skipped
 
 ===== test_all tail =====
-error: tcc was not found in PATH
+In file included from build.c:68:
+src/buster/lib/string.c:1020: error: array type expected
 
 ===== self_host tail =====
