@@ -28,6 +28,9 @@ from typing import Any, Iterable, Mapping, Sequence
 
 IDENTITY_SCHEMA = "buster.native-observation.identity.v1"
 TOOLCHAIN_SCHEMA = "buster.native-observation.toolchain.v1"
+TOOLCHAIN_DEGRADED_SCHEMA = "buster.native-observation.toolchain-degraded.v1"
+TOOLCHAIN_NAMES = ("compiler", "cmake", "ninja")
+IDENTITY_PROBE_TIMEOUT_SECONDS = 20
 PHASE_SCHEMA = "buster.native-observation.phase.v1"
 OBSERVATION_SCHEMA = "buster.native-observation.v1"
 ENRICHED_SCHEMA = "buster.native-observation.enriched.v1"
@@ -201,7 +204,7 @@ def command_identity(command: Sequence[str]) -> dict[str, Any]:
     except OSError:
         resolved_path = resolved
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=20, check=False)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=IDENTITY_PROBE_TIMEOUT_SECONDS, check=False)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ObservationError(f"cannot identify {' '.join(command)}: {error}") from error
     output = (result.stdout + result.stderr).strip()
@@ -457,23 +460,51 @@ def record_phase(root: Path, record: dict[str, Any]) -> None:
 
 
 def write_toolchain(args: argparse.Namespace) -> int:
+    # A failed identity probe (for example a cold macOS xcrun shim exceeding
+    # the probe budget) happens before any observed phase starts.  It degrades
+    # the timing evidence, never the tested command: no toolchain.json is
+    # written, the failure is appended to toolchain-degraded.json, and a later
+    # step may probe again.  Finalization publishes the sample as
+    # comparison-ineligible instead of failing a correct job.
     root = Path(args.root)
     identity = validate_identity(load_json(root / "identity.json"))
-    toolchain = {
-        "schema": TOOLCHAIN_SCHEMA,
-        "identity_sha256": sha256_bytes(canonical_bytes(identity)),
-        "compiler": command_identity([args.compiler, "--version"]),
-        "cmake": command_identity([args.cmake, "--version"]),
-        "ninja": command_identity([args.ninja, "--version"]),
-        "recorded_utc": utc_now(),
-    }
-    atomic_write(root / "toolchain.json", canonical_bytes(toolchain))
-    print(
-        "NATIVE_TOOLCHAIN "
-        + " ".join(
-            f"{name}={shlex.quote(toolchain[name]['first_line'])}" for name in ("compiler", "cmake", "ninja")
+    identity_sha = sha256_bytes(canonical_bytes(identity))
+    commands = {"compiler": args.compiler, "cmake": args.cmake, "ninja": args.ninja}
+    entries: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    for name in TOOLCHAIN_NAMES:
+        try:
+            entries[name] = command_identity([commands[name], "--version"])
+        except ObservationError as error:
+            errors[name] = str(error)
+    recorded_utc = utc_now()
+    if errors:
+        degraded_path = root / "toolchain-degraded.json"
+        attempts: list[Any] = []
+        if degraded_path.exists():
+            attempts = validate_toolchain_degraded(load_json(degraded_path), identity_sha)["attempts"]
+        attempts.append({"errors": errors, "recorded_utc": recorded_utc})
+        degraded = {
+            "schema": TOOLCHAIN_DEGRADED_SCHEMA,
+            "identity_sha256": identity_sha,
+            "attempts": attempts,
+        }
+        atomic_write(degraded_path, canonical_bytes(degraded))
+        message = "; ".join(f"{name}: {errors[name]}" for name in sorted(errors))
+        print(f"::warning title=Native toolchain identity degraded::{message}")
+        print("NATIVE_TOOLCHAIN_DEGRADED " + canonical_bytes(degraded).decode("utf-8").strip(), flush=True)
+    else:
+        toolchain = {
+            "schema": TOOLCHAIN_SCHEMA,
+            "identity_sha256": identity_sha,
+            **entries,
+            "recorded_utc": recorded_utc,
+        }
+        atomic_write(root / "toolchain.json", canonical_bytes(toolchain))
+        print(
+            "NATIVE_TOOLCHAIN "
+            + " ".join(f"{name}={shlex.quote(toolchain[name]['first_line'])}" for name in TOOLCHAIN_NAMES)
         )
-    )
     return 0
 
 
@@ -594,6 +625,29 @@ def validate_toolchain(value: Any, identity_sha: str) -> dict[str, Any]:
     return value
 
 
+def validate_toolchain_degraded(value: Any, identity_sha: str) -> dict[str, Any]:
+    value = strict_object(
+        value,
+        where="toolchain-degraded",
+        required=("schema", "identity_sha256", "attempts"),
+    )
+    if value["schema"] != TOOLCHAIN_DEGRADED_SCHEMA or value["identity_sha256"] != identity_sha:
+        raise ObservationError("toolchain-degraded identity binding mismatch")
+    attempts = value["attempts"]
+    if not isinstance(attempts, list) or not attempts:
+        raise ObservationError("toolchain-degraded.attempts must be a non-empty list")
+    for index, attempt in enumerate(attempts):
+        where = f"toolchain-degraded.attempts[{index}]"
+        attempt = strict_object(attempt, where=where, required=("errors", "recorded_utc"))
+        errors = attempt["errors"]
+        if not isinstance(errors, dict) or not errors or set(errors) - set(TOOLCHAIN_NAMES):
+            raise ObservationError(f"{where}.errors must name failed toolchain probes")
+        for name, message in errors.items():
+            strict_string(message, where=f"{where}.errors.{name}")
+        parse_utc(attempt["recorded_utc"], where=f"{where}.recorded_utc")
+    return value
+
+
 def validate_phase(value: Any, identity_sha: str, source: Path) -> dict[str, Any]:
     value = strict_object(
         value,
@@ -695,12 +749,24 @@ def finalize(args: argparse.Namespace) -> int:
     identity_sha = sha256_bytes(canonical_bytes(identity))
     toolchain: dict[str, Any] | None = None
     toolchain_error = ""
+    toolchain_degraded: dict[str, Any] | None = None
+    degraded_path = root / "toolchain-degraded.json"
+    if degraded_path.exists():
+        toolchain_degraded = validate_toolchain_degraded(load_json(degraded_path), identity_sha)
+    toolchain_path = root / "toolchain.json"
     try:
-        toolchain = validate_toolchain(load_json(root / "toolchain.json"), identity_sha)
+        toolchain = validate_toolchain(load_json(toolchain_path), identity_sha)
     except ObservationError as error:
-        if expect_complete:
+        # Only a recorded probe failure excuses absent identity evidence; a
+        # missing record without one, or a corrupt record, still fails closed.
+        if expect_complete and (toolchain_degraded is None or toolchain_path.exists()):
             raise
         toolchain_error = str(error)
+        if toolchain_degraded is not None:
+            last = toolchain_degraded["attempts"][-1]["errors"]
+            toolchain_error = "identity probe degraded: " + "; ".join(
+                f"{name}: {last[name]}" for name in sorted(last)
+            )
 
     # The handoff is the process-local validation and digesting of the exact
     # directory passed to upload-artifact. The action's network duration remains
@@ -762,6 +828,7 @@ def finalize(args: argparse.Namespace) -> int:
         "identity": identity,
         "toolchain": toolchain,
         "toolchain_error": toolchain_error,
+        "toolchain_degraded": toolchain_degraded,
         "identity_sha256": identity_sha,
         "complete": complete,
         "correctness_outcome": "success" if expect_complete else "non-success",
