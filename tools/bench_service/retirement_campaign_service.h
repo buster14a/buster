@@ -28,9 +28,12 @@
  *       the driver's attach.
  * bq_retirement_campaign_service_timed_rows gives lane E's composer each
  * timed row's group, runtime flag and six dimension values from the pinned
- * performance rows, joined to the gate's sealed row identities; the census
- * parser it reuses (retirement_correctness_service.c) must also precede this
- * header.
+ * performance rows, joined to the gate's sealed row identities, and
+ * bq_retirement_documents_population parses those rows for it and for the
+ * driver's workflow documents (retirement_unit_documents.h); the census
+ * parser they reuse (retirement_correctness_service.c) must also precede
+ * this header. retirement_unit_handoff.h maps the READY driver onto lane E's
+ * composer request.
  *
  * Shared tail: bq_retirement_campaign_service_gate_matches (A and both
  * source manifests against the gate), bq_retirement_campaign_service_bind_verified
@@ -57,7 +60,7 @@
 #include "retirement_campaign_binding.h"
 #include "retirement_unit.h"
 #include "retirement_unit_campaign.h"
-#include "retirement_unit_documents.h"
+#include "retirement_unit_handoff.h"
 
 #ifdef __linux__
 /* Everything the campaign freeze consumes besides the held binaries. */
@@ -594,6 +597,92 @@ static inline int bq_retirement_campaign_timed_groups_assign(BqRetirementCorrect
     free(ordinals);
     ok = ok && next == bq_retirement_campaign_timed_groups(gate);
     return ok;
+}
+
+/* The pinned #508 performance-row artifact's canonical prefix, as
+ * bq_retirement_performance_rows_derive accepts it. */
+#define BQ_RETIREMENT_CAMPAIGN_ROWS_PREFIX "{\"row_identity_fields\":[\"fixture\",\"target\",\"target_abi\",\"cpu\"," \
+    "\"cpu_features\",\"allocator\",\"frontend_lowering\",\"PIC\",\"fixture_recipe\",\"compile_obligation\"," \
+    "\"link_obligation\",\"execution_obligation\",\"diagnostic_obligation\",\"argv_evidence\",\"artifact_stage\"]," \
+    "\"rows\":["
+/* The pinned rows through the installed census and the profile pin; each
+ * declared row's identity must be the trusted row's sealed identity. */
+static inline BqError bq_retirement_documents_population(int installed, String8 profile,
+    BqRetirementTrustedRow const* trusted, uint32_t trusted_count, uint32_t native_target,
+    BqRetirementDocumentPopulation* population)
+{
+    BqRetirementCensusFiles census;
+    for (u32 index = 0; index < BQ_RETIREMENT_CENSUS_FILE_COUNT; index += 1) census.descriptors[index] = -1;
+    u8* text = NULL;
+    u64 length = 0;
+    bool fresh = population && !population->rows && !population->pool;
+    if (fresh) *population = (BqRetirementDocumentPopulation){.native_target = native_target};
+    bool opened = fresh && trusted && trusted_count && bq_retirement_unit_census_open(installed, &census) == BQ_OK;
+    bool ok = opened && bq_retirement_validator_read_pinned(census.descriptors[BQ_RETIREMENT_CENSUS_PERFORMANCE_ROWS],
+        profile, S8("performance-rows-sha256="), BQ_RETIREMENT_POPULATION_BYTES_CAP, &text, &length,
+        population->performance_rows_sha256);
+    if (opened && !bq_retirement_unit_census_close(&census)) ok = false;
+    char (*storage)[BQ_RETIREMENT_POPULATION_FIELD_CAP] = ok ? calloc(17, sizeof(*storage)) : NULL;
+    if (ok)
+    {
+        population->rows = calloc(trusted_count, sizeof(*population->rows));
+        population->pool_capacity = length + 1u;
+        population->pool = malloc((size_t)population->pool_capacity);
+    }
+    ok = ok && storage && population->rows && population->pool;
+    BqRetirementPopulationCursor cursor = {(String8){(char8*)text, length}, 0, ok};
+    bq_retirement_population_literal(&cursor, S8(BQ_RETIREMENT_CAMPAIGN_ROWS_PREFIX));
+    /* rows.tsv columns in ROW_IDENTITY_FIELDS order (16 argv_evidence; the
+     * stage is the artifact_stage value). */
+    static unsigned const columns[BQ_RETIREMENT_DOCUMENT_FIELDS - 1] = {2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16};
+    uint32_t declared_rows = 0;
+    bool more = cursor.ok;
+    while (cursor.ok && more)
+    {
+        String8 fields[17] = {0};
+        String8 stage = {0}, code_section = {0}, runtime_oracle = {0};
+        bool metrics[4] = {0};
+        u64 declared = 0;
+        char identity[SHA256_HEX_CAPACITY] = {0};
+        bq_retirement_population_row(&cursor, &declared, storage, fields, &stage, &code_section, &runtime_oracle,
+                                     metrics);
+        cursor.ok = cursor.ok && declared_rows < trusted_count && declared == declared_rows &&
+            bq_retirement_census_stage_identity_sha256(fields, stage, identity) &&
+            !memcmp(identity, trusted[declared_rows].identity_sha256, SHA256_HEX_CAPACITY);
+        BqRetirementDocumentRow* row = cursor.ok ? &population->rows[declared_rows] : NULL;
+        for (unsigned field = 0; row && cursor.ok && field < BQ_RETIREMENT_DOCUMENT_FIELDS; ++field)
+        {
+            String8 value = field + 1 < BQ_RETIREMENT_DOCUMENT_FIELDS ? fields[columns[field]] : stage;
+            cursor.ok = value.length <= population->pool_capacity - population->pool_used;
+            if (cursor.ok)
+            {
+                memcpy(population->pool + population->pool_used, value.pointer, (size_t)value.length);
+                row->offset[field] = (uint32_t)population->pool_used;
+                row->length[field] = (uint32_t)value.length;
+                population->pool_used += value.length;
+            }
+        }
+        if (row && cursor.ok)
+        {
+            row->compile = metrics[0];
+            row->code = metrics[2];
+            row->runtime = metrics[3];
+            row->marker = string_equal(code_section, S8("deterministic-code-section")) ? 2u :
+                string_equal(code_section, S8("deterministic-zero-baseline-code-section")) ? 1u : 0u;
+            cursor.ok = row->compile == (trusted[declared_rows].compiler_eligible != 0) &&
+                row->compile == (row->marker != 0);
+        }
+        declared_rows += cursor.ok;
+        more = cursor.ok && cursor.offset < length && text[cursor.offset] == ',';
+        if (more) cursor.offset += 1;
+    }
+    ok = cursor.ok && declared_rows == trusted_count;
+    free(storage);
+    free(text);
+    if (ok) population->count = declared_rows;
+    else if (fresh) bq_retirement_documents_population_release(population);
+    BqError result = ok ? BQ_OK : BQ_SOURCE_MISMATCH;
+    return result;
 }
 
 /* Lane E's per-timed-row layout: the native-host timed projection of the

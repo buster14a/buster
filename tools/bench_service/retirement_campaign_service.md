@@ -8,8 +8,10 @@ manifests against the ready correctness gate),
 `bq_retirement_campaign_service_bind_verified` (the compiled profile's
 `campaign-budget-sha256=` pin, then `bq_retirement_campaign_bind_held`) and
 `bq_retirement_campaign_service_refuse` (a refusal leaves nothing bound and
-poisons both stages). No entry is called by the production worker, and the
-recipe stays blocked.
+poisons both stages). `retirement_unit_campaign.h` is the in-unit driver,
+`retirement_unit_documents.h` writes its workflow documents and
+`retirement_unit_handoff.h` maps its result onto lane E's composer request.
+No entry is called by the production worker, and the recipe stays blocked.
 
 ## Queue entry
 
@@ -151,13 +153,66 @@ digest, the budget, the positional digest of every frozen A/A and A/B command,
 the sealed untimed record stream and the host/transcript identity (job,
 attempt, boot, CPU, pre-sample binding time). The campaign freezes this
 pre-sample digest. After A/A, `bq_retirement_unit_campaign_post_aa` chains it
-to the A/A transcript shard chain, numeric digest, metrics totals and the
+and the pre-sample plan document's digest to the A/A transcript shard chain,
+numeric digest, metrics totals, the untimed and A/A launch-log chains and the
 campaign's post-A/A identities; the fixture admission must present it.
 `bq_retirement_unit_campaign_post_context` exists only for a completely
 collected campaign whose frozen context is the pre-sample digest; it chains it
-to both stages' transcript shard chains, numeric digests and metrics totals.
-The post-sample digest is not the validator's `_execution_context`, which
-lane E's composer derives.
+to both stages' transcript shard chains, numeric digests and metrics totals
+and to all three launch-log chains. The post-sample digest is not the
+validator's `_execution_context`, which lane E's composer derives.
+
+## Workflow documents
+
+`retirement_unit_documents.h` writes the validator's workflow documents as
+its canonical JSON (`json.dumps(sort_keys=True, separators=(",", ":"))`),
+hashing each while it is streamed: the oracle records
+(`workflow.records.oracle`), the plan-v3 execution plan
+(`workflow.execution_plan`), the result-input plan v3
+(`workflow.records.result_input_plan`) and the pre-sample and post-A/A phase
+documents. The pinned performance rows are parsed by
+`bq_retirement_documents_population` (in `retirement_campaign_service.h`,
+through the installed census and its profile pin, each row's identity
+recomputed and required to be the gate's). From them the header derives the
+validator's timed and untimed partitions (`_batch_groups`, `_untimed_groups`)
+and the statistical family (`_derive_statistical_family`: its digest and both
+per-scope counts), then joins the timed object groups to the gate's frozen
+batch groups, the singletons to their rows' commands, and the untimed groups
+to the untimed production batches and their observed reproductions. Every
+field comes from the pinned rows, the sealed gate, the frozen plan and pins,
+the reviewed budget, the untimed batches and the observed code facts.
+
+The driver writes them in two steps, into the evidence root the caller passes
+(`BqRetirementUnitCampaignDocumentSources`; the leaves are
+`bq_retirement_unit_campaign_document_paths`, created, never replaced, and
+synced). `bq_retirement_unit_campaign_documents` runs after attach and before
+A/A: it rederives the partitions and family, requires every pinned row's
+canonical identity (`bq_retirement_document_identity`) to be the gate's
+sealed one, the timed partition to be the campaign's groups and the gate's
+frozen batch groups, the family counts to be the plan's, the budget digest to
+be the campaign's and the performance-rows pin to be the parsed rows' digest,
+and writes the oracle, execution-plan, result-input and pre-sample documents.
+The A/A stage refuses until they exist. `bq_retirement_unit_campaign_post_aa_
+document` runs after the A/A admission: the post-A/A binding over the same
+sources and the admission receipt digest the admission step recorded. The
+A/B freeze refuses until it exists.
+
+The admitted digest cannot be the validator's post-A/A document: that
+document binds the admission receipt (`aa_admission_sha256`), so it exists
+only after the admission. The admission names D's post-A/A evidence digest
+instead, which binds the pre-sample plan document (and through it the
+execution plan, the result-input plan and the family), and the post-A/A
+document then binds the admission receipt and the pre-sample plan.
+
+The preparation runner writes all five documents from the issued unit gate
+over the real census fixture and runs `retirement_unit_documents_test.py`,
+which rederives the sources from the census files and applies the validator's
+own checks (`_performance_rows_with_sources`, `_family_member_counts`,
+`_check_execution_plan`, `_result_input_plan`, `_workflow_phase` and the
+pre-sample and post-A/A field joins; the oracle-record and result-population
+conditions are inline in `_check_workflow_evidence_open`, so the script
+repeats them) and requires every document to be canonical. A tampered plan is
+refused.
 
 ## In-unit driver
 
@@ -172,8 +227,13 @@ the attempt:
    objects are linked into the service's code directory as
    `code-<row>-<variant>.o`; after each reproduction the retained object and
    the reproduction are observed (`tp_retirement_code_observe`) before any
-   scratch output is retired. The result carries one `TpRetirementCodeRow`
-   per untimed row, both variants, in ascending row order.
+   scratch output is retired. The observed rows must be exactly the gate's
+   code-observed untimed rows: every compile-eligible row, whose oracle parsed
+   its code section, a zero baseline included (the validator's
+   `_code_observed`; the gate's `code_eligible` is narrower, a nonzero
+   baseline section). Each side must equal the gate's artifact, code-section
+   digest and size. The driver keeps the batches, their singleton rows and
+   the reviewed budget (borrowed) for its documents.
 3. `bq_retirement_unit_campaign_measuring`: the MEASURING acknowledgement.
 4. The store bind (above), then lane E's `tp_retirement_compose_plan` over
    the frozen capacity, then `bq_retirement_unit_campaign_attach`, which takes
@@ -186,31 +246,52 @@ the attempt:
    before timing) equal the plan's, and the store plan reserves both stages'
    payload plus at least the execution receipt within the store ceilings
    (`bq_retirement_unit_campaign_store_planned`).
-5. `bq_retirement_unit_campaign_stage` (A/A): every cursor item runs its
+5. `bq_retirement_unit_campaign_documents`: the oracle, execution-plan,
+   result-input and pre-sample documents (above).
+6. `bq_retirement_unit_campaign_stage` (A/A): every cursor item runs its
    frozen command on the held descriptor of its stage and variant through
    `bq_retirement_campaign_run`; transcript and metrics shards rotate onto
    service-supplied streams; then the metrics writer, transcript and numeric
    export finish, the stage must be ready and the post-A/A digest is formed.
-6. `bq_retirement_unit_campaign_admit`: production has no authority (no
+7. `bq_retirement_unit_campaign_admit`: production has no authority (no
    approved #426 A/A decision, no #1021 one-use capability), so it refuses and
    leaves the attempt awaiting one. Only the functional fixture build
    (`BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA`, rejected with
    `BQ_SERVICE_INSTALLED`, as is the campaign's own fixture macro) enters A/B
    through the campaign's fixture stand-in, and only with this campaign's
-   plan, pre-sample and post-A/A digests.
-7. `bq_retirement_unit_campaign_freeze`: before the first candidate child, the
-   held join, sealed gate, frozen plan and context, finished A/A evidence and
-   untouched A/B stage are rechecked.
-8. `bq_retirement_unit_campaign_stage` (A/B).
-9. `bq_retirement_unit_campaign_ready`: the post-sample context; the driver is
-   READY and `bq_retirement_unit_campaign_result` returns what lane E's
-   composer takes from it: job, attempt, boot, the pre-sample binding and A/B
-   completion times, the frozen #619 plan, D's plan, pre-sample, post-A/A and
-   post-sample digests, the untimed record stream, the untimed code rows and
-   the per-stage log chains. The driver writes no execution receipt.
-10. `bq_retirement_unit_campaign_measured`: only after the caller confirms the
+   plan, pre-sample and post-A/A digests. It records the admission receipt
+   digest.
+8. `bq_retirement_unit_campaign_post_aa_document`: the post-A/A binding.
+9. `bq_retirement_unit_campaign_freeze`: before the first candidate child, the
+   post-A/A document, held join, sealed gate, frozen plan and context,
+   finished A/A evidence and untouched A/B stage are rechecked.
+10. `bq_retirement_unit_campaign_stage` (A/B). After each successful compiler
+    launch, the first artifact of every code-observed timed row and variant
+    is observed and must equal the gate's facts.
+11. `bq_retirement_unit_campaign_ready`: the code facts of every
+    code-observed row, then the post-sample context; the driver is READY and
+    `bq_retirement_unit_campaign_result` returns what lane E's composer takes
+    from it: job, attempt, boot, the pre-sample binding and A/B completion
+    times, the frozen #619 plan, D's plan, pre-sample, post-A/A and
+    post-sample digests, the untimed record stream, the code rows, the
+    per-stage log chains, the five documents' sizes and digests (their paths
+    are fixed), the result-input partitions and the family, source rows and
+    admission receipt digests. The driver writes no execution receipt.
+12. `bq_retirement_unit_campaign_measured`: only after the caller confirms the
     composed sealed result and the producer authority handoff, the MEASURED
-    acknowledgement. A failed or incomplete campaign never sends it.
+    acknowledgement, recording both confirmed digests and a measured digest
+    over them and the post-sample digest. A failed or incomplete campaign
+    never sends it.
+
+`retirement_unit_handoff.h` maps a READY driver onto lane E's
+`TpRetirementComposeRequest`: each `TpRetirementTimedRow` becomes a
+`TpRetirementComposeRow` (its dimension pointers point into it) after it is
+joined to the campaign's frozen sample row, the campaign groups' kinds form
+the layout, and the plan, identity and window, document digests, partitions,
+code facts and the A/A metrics tag fill the request; D's five documents are
+prior-closure entries under the validator's names. The caller supplies the
+rest (store, scratch, adapter, retained declaration, stream paths, the #511
+binding document and the rest of the prior closure).
 
 Every launch is refused when its timeout could outlive the absolute deadline
 (a frozen timeout is never shortened) and when the cancellation descriptor is
@@ -254,8 +335,16 @@ other family counts, another held file with the same bytes, a missing or short
 result-store plan, an early freeze, cancellation before the first A/A launch
 (with its coordinates), A/B without admission or freeze, a denied, stale or
 wrong post-A/A admission, a freeze after an A/B launch and an invalid handoff.
-Its plan tests refuse `U = 0` and object-group members out of order or after
-a control input.
+Its pinned rows are an in-memory population: the driver writes the five
+documents into a scratch evidence root (their sizes and digests, the
+post-A/A document's receipt and pre-sample joins and the partitions are
+checked), and the A/A stage refuses without them, as does the documents step
+for a row identity that is not the sealed one, a split object group, an
+existing document or a wrong performance-rows pin, the post-A/A step for a
+changed rows pin and the freeze without the post-A/A document. The READY
+driver is mapped onto lane E's request and each mapped field is checked; a
+timed row outside the frozen layout is refused. Its plan tests refuse
+`U = 0` and object-group members out of order or after a control input.
 
 `retirement_unit_campaign_tests.h` uses the real unit-oracle attempt and its
 ready record. It covers the ready import, the template and inventory compare,
@@ -291,13 +380,19 @@ never a verdict.
   gate yet; the driver checks them only against the reviewed shapes.
 - The frozen #426 pins and the admission capability (#1021) remain
   integration work.
-- Lane E: `TpRetirementCodeRow` has the layout of `TpRetirementComposeCode`,
-  `TpRetirementTimedRow` supplies `TpRetirementComposeRow` (its dimension
-  pointers can point into it) and `TpRetirementFamilyCounts` carries the two
-  `TpRetirementComposeBounds` family counts; E can adopt these shared types.
-  D does not produce the validator's plan-v3 execution-plan digest or its
-  partitions: D's plan digest is its own candidate-independent schedule
-  digest, and D's post-sample digest is not `_execution_context`.
+- Lane E: D cannot derive the stream paths (the service creates and names
+  every stream), the #511 binding document and its digest (the binding
+  writer's), or the rest of the prior closure; the handoff leaves them to the
+  caller. D's plan digest remains its own candidate-independent schedule
+  digest and its post-sample digest is not `_execution_context`.
+- Lane B's #1895 row-plan layout: B's measured commands run the side binary
+  at fd 3 or 4, A's two roots at fds 5 and 6 and the work directory at fd 7,
+  with cwd `/proc/self/fd/7`. D launches through `TpProcessInputs`: the held
+  descriptor by `fexecve`, cwd the work directory descriptor, and no A roots,
+  so its command digests do not yet reproduce that layout.
+- The A/B freeze's `execution->sequence` check is implied by
+  `!samples[1]->collected` on every reachable path, so no test can fail it
+  alone; it stays as a defensive recheck.
 - The driver supplies streams in index order; the store must name transcript
   shards so they sort in that order. Stage metrics tags are `aa` and `ab`
   (freeze refuses `untimed`).

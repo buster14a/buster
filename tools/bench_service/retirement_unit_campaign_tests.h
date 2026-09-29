@@ -1185,6 +1185,14 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_documents(BqPrepCampaignAttempt* conte
     BQ_PREP_CHECK(ok && plan.bootstrap_members_per_scope == family.bootstrap_members &&
                   plan.cell_members_per_scope == family.cell_members && timed.count == campaign->groups &&
                   timed.object_groups == gate->batch_group_count && untimed.count);
+    /* Every row's canonical identity (the driver's census-free join) is the
+     * identity the gate sealed from the census. */
+    for (u32 row = 0; ok && row < population.count; row += 1)
+    {
+        char identity[SHA256_HEX_CAPACITY];
+        BQ_PREP_CHECK(bq_retirement_document_identity(&population, row, identity) &&
+                      !strcmp(identity, gate->trusted_rows[row].identity_sha256));
+    }
     u32 groups = untimed.count;
     TpRetirementUntimedBatch* batches = calloc((size_t)groups * 4u + 1u, sizeof(*batches));
     unsigned* untimed_rows = calloc((size_t)groups + 1u, sizeof(*untimed_rows));
@@ -1255,7 +1263,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_documents(BqPrepCampaignAttempt* conte
         "pre-sample-plan.json", "post-aa-binding.json"};
     BqRetirementDocumentDescriptor descriptors[5];
     memset(descriptors, 0, sizeof(descriptors));
-    BqRetirementDocumentManifest manifests[2][BQ_RETIREMENT_DOCUMENT_PARTITIONS];
+    BqRetirementUnitCampaignPartition manifests[2][BQ_RETIREMENT_DOCUMENT_PARTITIONS];
     unsigned manifest_counts[2] = {0, 0};
     static char const aa_admission[] = "abababababababababababababababababababababababababababababababab";
     for (u32 index = 0; directory >= 3 && index < 5; index += 1)

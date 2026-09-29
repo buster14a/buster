@@ -25,11 +25,17 @@
  *                                          compare its plan and context, and
  *                                          require lane E's family counts and
  *                                          result-store plan
+ *   bq_retirement_unit_campaign_documents  (retirement_unit_documents.h) the
+ *                                          oracle, execution, result-input and
+ *                                          pre-sample documents, before A/A
  *   bq_retirement_unit_campaign_stage      A/A (then, after freeze, A/B): the
  *                                          exact held descriptors in cursor
  *                                          order, shards, metrics, export;
  *                                          after A/A the post-A/A binding
  *   bq_retirement_unit_campaign_admit      A/A admission (fixture only)
+ *   bq_retirement_unit_campaign_post_aa_document  (retirement_unit_documents.h)
+ *                                          the post-A/A binding over the
+ *                                          admission receipt
  *   bq_retirement_unit_campaign_freeze     A/B launch freeze
  *   bq_retirement_unit_campaign_ready      post-sample context; the result is
  *                                          ready for lane E
@@ -115,6 +121,26 @@
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_LOG BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_PREFIX "0000" BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_SUFFIX
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_LOGS_MAX 1u
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_BYTES_MAX (UINT64_C(1) << 20)
+/* The validator's workflow documents the unit writes
+ * (retirement_unit_documents.h), in the order it writes them, and their
+ * leaves in the evidence root: the oracle records, the plan-v3 execution
+ * plan, the result-input plan and the pre-sample plan before any timed
+ * child; the post-A/A binding after the A/A admission (it binds the
+ * admission receipt). */
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS 5u
+enum
+{
+    BQ_RETIREMENT_UNIT_CAMPAIGN_ORACLE,
+    BQ_RETIREMENT_UNIT_CAMPAIGN_EXECUTION_PLAN,
+    BQ_RETIREMENT_UNIT_CAMPAIGN_RESULT_INPUT_PLAN,
+    BQ_RETIREMENT_UNIT_CAMPAIGN_PRE_SAMPLE,
+    BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA
+};
+static char const* const bq_retirement_unit_campaign_document_paths[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS] = {
+    "retirement-oracle.json", "retirement-execution-plan.json", "retirement-result-input-plan.json",
+    "retirement-pre-sample-plan.json", "retirement-post-aa-binding.json"};
+/* #615's three-partition bound across both result populations. */
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_PARTITIONS 3u
 
 typedef struct BqRetirementUnitCampaignPins
 {
@@ -537,17 +563,21 @@ static inline int bq_retirement_unit_campaign_post_context(TpRetirementCampaign 
     return ok;
 }
 
-/* The post-A/A evidence digest: the frozen pre-sample context chained to the
- * finished A/A stage (its transcript shard chain, numeric and shard
- * descriptors and metrics totals) and to the untimed and A/A launch-log
- * chains. It exists only while the campaign awaits A/A admission with a
- * ready A/A stage; the admission must name it. */
+/* The post-A/A evidence digest: the frozen pre-sample context and the
+ * pre-sample plan document (which binds the execution plan, the result-input
+ * plan and the family) chained to the finished A/A stage (its transcript
+ * shard chain, numeric and shard descriptors and metrics totals) and to the
+ * untimed and A/A launch-log chains. It exists only while the campaign awaits
+ * A/A admission with a ready A/A stage; the admission must name it. The
+ * validator's post-A/A binding document cannot be the admitted digest: it
+ * binds the admission receipt, so it is written after admission
+ * (retirement_unit_documents.h) and the A/B freeze requires it. */
 static inline int bq_retirement_unit_campaign_post_aa(TpRetirementCampaign const* campaign, char const* pre_context,
-    char const shard_chain[65], char const log_chains[2][65], char digest[65])
+    char const* pre_sample_plan, char const shard_chain[65], char const log_chains[2][65], char digest[65])
 {
     TpRetirementSamples const* samples = campaign ? campaign->samples[0] : NULL;
     int ok = campaign && samples && digest && pre_context && shard_chain && log_chains &&
-        tp_retirement_digest(pre_context) && tp_retirement_digest(shard_chain) &&
+        tp_retirement_digest(pre_context) && tp_retirement_digest(pre_sample_plan) && tp_retirement_digest(shard_chain) &&
         tp_retirement_digest(log_chains[0]) && tp_retirement_digest(log_chains[1]) &&
         campaign->phase == TP_RETIREMENT_CAMPAIGN_AWAIT_AA &&
         !strcmp(campaign->context_sha256, pre_context) && tp_retirement_campaign_stage_ready(campaign, 0);
@@ -558,6 +588,7 @@ static inline int bq_retirement_unit_campaign_post_aa(TpRetirementCampaign const
         static char const domain[] = BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA_DOMAIN;
         sha256_add(&hash, domain, sizeof(domain) - 1);
         bq_retirement_unit_campaign_text(&hash, "pre-sample", pre_context);
+        bq_retirement_unit_campaign_text(&hash, "pre-sample-plan", pre_sample_plan);
         bq_retirement_unit_campaign_text(&hash, "plan", campaign->plan_sha256);
         bq_retirement_unit_campaign_text(&hash, "transcript-shards", shard_chain);
         bq_retirement_unit_campaign_text(&hash, "untimed-logs", log_chains[0]);
@@ -706,6 +737,22 @@ typedef struct BqRetirementUnitCampaignCode
     int code_directory;
 } BqRetirementUnitCampaignCode;
 
+/* One written workflow document: its size and SHA-256 (its path is
+ * bq_retirement_unit_campaign_document_paths). */
+typedef struct BqRetirementUnitCampaignDocument
+{
+    uint64_t bytes;
+    char sha256[65];
+} BqRetirementUnitCampaignDocument;
+
+/* One predeclared #615 partition of the result-input plan: identity, store
+ * path, first record and record count. */
+typedef struct BqRetirementUnitCampaignPartition
+{
+    char identity[32], path[64];
+    uint64_t start, records;
+} BqRetirementUnitCampaignPartition;
+
 /* Zero-initialize. The phase channel, the untimed runner, the held binaries,
  * the ready record, the code workspace and the binding are borrowed and must
  * outlive the driver. */
@@ -716,6 +763,19 @@ typedef struct BqRetirementUnitCampaign
     BqRetirementCampaignBinding const* binding;
     TpRetirementUntimed* untimed;
     TpRetirementCodeRow* codes;
+    /* The untimed batches, their singleton rows and the reviewed budget the
+     * untimed step ran on (borrowed): the documents bind them. */
+    TpRetirementUntimedBatch const* untimed_batches;
+    unsigned const* untimed_rows;
+    TpRetirementCampaignBudget const* budget;
+    unsigned untimed_batch_count;
+    /* The workflow documents written so far (documented of them, in order),
+     * the result-input partitions (0 rows, 1 batches), the family and source
+     * rows digests they bind and the A/A admission receipt digest. */
+    BqRetirementUnitCampaignDocument documents[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS];
+    BqRetirementUnitCampaignPartition partitions[2][BQ_RETIREMENT_UNIT_CAMPAIGN_PARTITIONS];
+    unsigned partition_counts[2], documented;
+    char family_sha256[65], source_rows_sha256[65], aa_admission_sha256[65];
     TpRetirementExecutable untimed_executables[2];
     TpRetirementPlan plan;
     BqRetirementUnitCampaignFailure failure;
@@ -1175,6 +1235,10 @@ static inline int bq_retirement_unit_campaign_untimed(BqRetirementUnitCampaign* 
         driver->codes = code->codes;
         driver->code_capacity = code->capacity;
         driver->code_count = 0;
+        driver->untimed_batches = batches;
+        driver->untimed_batch_count = count;
+        driver->untimed_rows = code->rows;
+        driver->budget = review->budget;
     }
     for (unsigned side = 0; ok && side < 2; ++side)
     {
@@ -1370,6 +1434,7 @@ static inline int bq_retirement_unit_campaign_stage(BqRetirementUnitCampaign* dr
     TpRetirementExecution* execution = samples ? samples->transcript->execution : NULL;
     int ok = driver && campaign && commands && streams &&
         (driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_BOUND || driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_FROZEN) &&
+        driver->documented == (stage ? BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS : BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA) &&
         campaign->phase == (stage ? TP_RETIREMENT_CAMPAIGN_AB : TP_RETIREMENT_CAMPAIGN_AA) &&
         command_count == (size_t)(campaign->groups + campaign->runtime_count) * TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT &&
         streams->sample_count >= campaign->capacity.sample_shards_per_stage;
@@ -1446,7 +1511,7 @@ static inline int bq_retirement_unit_campaign_stage(BqRetirementUnitCampaign* dr
         sha256_finish_hex(&copy, driver->shard_chain_sha256[stage]);
         bq_retirement_unit_campaign_log_seal(driver, 1 + stage);
         ok = stage || bq_retirement_unit_campaign_post_aa(campaign, driver->context_sha256,
-            driver->shard_chain_sha256[0], (char const (*)[65])driver->log_chain_sha256, driver->post_aa_sha256);
+            driver->documents[BQ_RETIREMENT_UNIT_CAMPAIGN_PRE_SAMPLE].sha256, driver->shard_chain_sha256[0], (char const (*)[65])driver->log_chain_sha256, driver->post_aa_sha256);
     }
     if (ok) driver->step = stage ? BQ_RETIREMENT_UNIT_CAMPAIGN_AB : BQ_RETIREMENT_UNIT_CAMPAIGN_AA;
     else bq_retirement_unit_campaign_fail(driver);
@@ -1480,10 +1545,14 @@ static inline int bq_retirement_unit_campaign_admit(BqRetirementUnitCampaign* dr
     ok = ok && admission->plan_sha256 && admission->context_sha256 && admission->post_aa_sha256 &&
         !strcmp(admission->plan_sha256, driver->plan_sha256) &&
         !strcmp(admission->context_sha256, driver->context_sha256) &&
-        !strcmp(admission->post_aa_sha256, driver->post_aa_sha256) &&
+        !strcmp(admission->post_aa_sha256, driver->post_aa_sha256) && tp_retirement_digest(admission->receipt_sha256) &&
         tp_retirement_campaign_admit_aa_fixture(campaign, admission->admitted, admission->plan_sha256,
             admission->context_sha256, admission->receipt_sha256);
-    if (ok) driver->step = BQ_RETIREMENT_UNIT_CAMPAIGN_ADMITTED;
+    if (ok)
+    {
+        memcpy(driver->aa_admission_sha256, admission->receipt_sha256, 65);
+        driver->step = BQ_RETIREMENT_UNIT_CAMPAIGN_ADMITTED;
+    }
     else bq_retirement_unit_campaign_fail(driver);
 #else
     /* #426 has no approved empirical A/A decision and #1021 no launch
@@ -1493,14 +1562,16 @@ static inline int bq_retirement_unit_campaign_admit(BqRetirementUnitCampaign* dr
     return ok;
 }
 
-/* The A/B launch freeze, after admission and before the first candidate
- * child: the held join, the sealed gate, the frozen plan and context, the
- * finished A/A evidence and an untouched A/B stage are all rechecked. */
+/* The A/B launch freeze, after admission and the post-A/A binding document,
+ * before the first candidate child: the held join, the sealed gate, the
+ * frozen plan and context, the finished A/A evidence and an untouched A/B
+ * stage are all rechecked. */
 static inline int bq_retirement_unit_campaign_freeze(BqRetirementUnitCampaign* driver)
 {
     BqRetirementCampaignBinding const* binding = driver ? driver->binding : NULL;
     TpRetirementCampaign* campaign = binding ? binding->campaign : NULL;
     int ok = driver && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_ADMITTED && campaign &&
+        driver->documented == BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS &&
         campaign->phase == TP_RETIREMENT_CAMPAIGN_AB && bq_retirement_campaign_held_matches(binding) &&
         bq_retirement_correctness_ready(binding->gate) &&
         !memcmp(binding->sealed_sha256, binding->gate->sealed_sha256, sizeof(binding->sealed_sha256)) &&
@@ -1596,9 +1667,10 @@ static inline int bq_retirement_unit_campaign_measured(BqRetirementUnitCampaign*
  * driver: the campaign's job, attempt and boot, its pre-sample binding and
  * A/B completion times, the frozen #619 plan, D's plan, pre-sample, post-A/A
  * and post-sample digests, the untimed record stream, the code facts of
- * every code-observed row (ascending), and the per-stage log chains
+ * every code-observed row (ascending), the per-stage log chains
  * (0 untimed, 1 A/A, 2 A/B), which the post-A/A and post-sample digests
- * bind. After MEASURED it also carries the confirmed sealed-result and
+ * bind, and the five workflow documents with the partitions and digests
+ * they bind (retirement_unit_handoff.h maps them onto lane E's request). After MEASURED it also carries the confirmed sealed-result and
  * authority digests and the measured digest over them. The driver writes no
  * receipt: the composer writes the post-sample one. */
 typedef struct BqRetirementUnitCampaignResult
@@ -1613,6 +1685,14 @@ typedef struct BqRetirementUnitCampaignResult
     char plan_sha256[65], context_sha256[65], post_aa_sha256[65], post_context_sha256[65];
     char log_chain_sha256[3][65];
     char sealed_result_sha256[65], authority_sha256[65], measured_sha256[65];
+    /* The five workflow documents (their paths are
+     * bq_retirement_unit_campaign_document_paths, below the evidence root),
+     * the result-input partitions, and the family, source rows and A/A
+     * admission receipt digests they bind. */
+    BqRetirementUnitCampaignDocument documents[BQ_RETIREMENT_UNIT_CAMPAIGN_DOCUMENTS];
+    BqRetirementUnitCampaignPartition partitions[2][BQ_RETIREMENT_UNIT_CAMPAIGN_PARTITIONS];
+    unsigned partition_counts[2];
+    char family_sha256[65], source_rows_sha256[65], aa_admission_sha256[65];
 } BqRetirementUnitCampaignResult;
 
 static inline int bq_retirement_unit_campaign_result(BqRetirementUnitCampaign const* driver,
@@ -1645,6 +1725,12 @@ static inline int bq_retirement_unit_campaign_result(BqRetirementUnitCampaign co
             memcpy(result->sealed_result_sha256, driver->sealed_result_sha256, 65);
             memcpy(result->authority_sha256, driver->authority_sha256, 65);
             memcpy(result->measured_sha256, driver->measured_sha256, 65);
+            memcpy(result->documents, driver->documents, sizeof(result->documents));
+            memcpy(result->partitions, driver->partitions, sizeof(result->partitions));
+            memcpy(result->partition_counts, driver->partition_counts, sizeof(result->partition_counts));
+            memcpy(result->family_sha256, driver->family_sha256, 65);
+            memcpy(result->source_rows_sha256, driver->source_rows_sha256, 65);
+            memcpy(result->aa_admission_sha256, driver->aa_admission_sha256, 65);
         }
     }
     return ok;
