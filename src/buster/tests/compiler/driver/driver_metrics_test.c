@@ -8,10 +8,12 @@
 // compiler_driver_test_input_metrics_lanes checks input order and link
 // suppression on the serial and -fcompile-jobs link paths.
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_metrics_test_join(Arena* arena, String8 directory, String8 name)
 {
     return string_format_z(arena, S8("{S8}/{S8}"), directory, name);
 }
+#endif
 
 // The records with every field that legitimately differs between runs
 // removed: timings and interval offsets, the process peak, the worker
@@ -51,6 +53,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_metrics_test_mask(Arena* arena, Stri
     return (String8){.pointer = output, .length = length};
 }
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL u64 compiler_driver_metrics_test_count_lines(String8 text, String8 prefix)
 {
     u64 result = 0;
@@ -68,6 +71,7 @@ BUSTER_GLOBAL_LOCAL u64 compiler_driver_metrics_test_count_lines(String8 text, S
     }
     return result;
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_metrics_test_contains(String8 text, String8 needle)
 {
@@ -79,6 +83,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_metrics_test_same_bytes(ByteSlice a, By
     return a.pointer && b.pointer && a.length && a.length == b.length && memory_compare(a.pointer, b.pointer, a.length);
 }
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_metrics_test_run(Arena* arena, String8* command, u64 count, CompilerDriverInvocation* parsed)
 {
     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command, .length = count});
@@ -88,6 +93,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_metrics_test_run(Arena*
     }
     return compiler_driver_execute_invocation(arena, invocation);
 }
+#endif
 
 // Serial records: each interval closed, ordered after the previous one,
 // partitioned exactly by its phases, and inside [0, wall].
