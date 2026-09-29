@@ -45,6 +45,14 @@ jobs:
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
             -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o /tmp/buster-build
 
+      - name: Generate the Release build graph
+        id: generate
+        shell: bash
+        run: |
+          set -o pipefail
+          /tmp/buster-build generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF \
+            2>&1 | tee /tmp/issue-1646-generate.log
+
       - name: Build and run the full Release test suite
         id: test_all
         shell: bash
@@ -83,10 +91,13 @@ jobs:
         run: |
           set -euo pipefail
           {
+            printf 'generate_outcome=%s\n' '${{ steps.generate.outcome }}'
             printf 'test_all_outcome=%s\n' '${{ steps.test_all.outcome }}'
             printf 'self_host_outcome=%s\n' '${{ steps.self_host.outcome }}'
+            printf '\n===== generate tail =====\n'
+            tail -n 300 /tmp/issue-1646-generate.log 2>/dev/null || true
             printf '\n===== test_all tail =====\n'
-            tail -n 500 /tmp/issue-1646-test-all.log 2>/dev/null || true
+            tail -n 700 /tmp/issue-1646-test-all.log 2>/dev/null || true
             printf '\n===== self_host tail =====\n'
             tail -n 500 /tmp/issue-1646-self-host.log 2>/dev/null || true
           } > .agent/test-1646.log
