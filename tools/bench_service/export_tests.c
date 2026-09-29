@@ -82,6 +82,68 @@ BUSTER_GLOBAL_LOCAL void bq_test_export_socket(BqQueue* queue, char const* queue
     }
 }
 
+/* #1024: the chunk-index cache must never outlive the spool it verified.
+ * With the cache warm, a self-consistent rewrite (chunk bytes and their index
+ * digest changed together, so the per-chunk check alone would pass) must force
+ * a full index check against the receipt and fail. A byte-identical spool on a
+ * new inode must also be rechecked in full before the cache is reused. The
+ * named spool is restored to the caller's `spool` inode before returning. */
+BUSTER_GLOBAL_LOCAL void bq_test_export_cached_spool(BqQueue* queue, int spool, char const* sealed,
+                                                     BqPacket const* request, u64 total)
+{
+    BqPacket response;
+    u64 checks = bq_export_index_full_checks;
+    BQ_CHECK(bq_transport_dispatch(queue, request->bytes, request->size, &response) == BQ_OK &&
+             bq_export_index_full_checks == checks);
+    u8 original[BQ_EXPORT_CHUNK_CAP], forged[BQ_EXPORT_CHUNK_CAP];
+    char original_index[64], forged_index[SHA256_HEX_CAPACITY];
+    u32 count = (u32)(total < BQ_EXPORT_CHUNK_CAP ? total : BQ_EXPORT_CHUNK_CAP);
+    bool read = pread(spool, original, count, BQ_EXPORT_DATA_OFFSET) == (ssize_t)count &&
+                pread(spool, original_index, 64, BQ_EXPORT_RECEIPT_CAP) == 64;
+    BQ_CHECK(read && count > 0);
+    if (read && count > 0)
+    {
+        memcpy(forged, original, count);
+        forged[0] ^= 0x5a;
+        bq_digest(forged, count, forged_index);
+        BQ_CHECK(pwrite(spool, forged, count, BQ_EXPORT_DATA_OFFSET) == (ssize_t)count &&
+                 pwrite(spool, forged_index, 64, BQ_EXPORT_RECEIPT_CAP) == 64 && fchmod(spool, 0400) == 0);
+        checks = bq_export_index_full_checks;
+        BQ_CHECK(bq_transport_dispatch(queue, request->bytes, request->size, &response) == BQ_EXPORT_CORRUPT &&
+                 bq_export_index_full_checks == checks + 1);
+        BQ_CHECK(pwrite(spool, original, count, BQ_EXPORT_DATA_OFFSET) == (ssize_t)count &&
+                 pwrite(spool, original_index, 64, BQ_EXPORT_RECEIPT_CAP) == 64 && fchmod(spool, 0400) == 0 &&
+                 bq_transport_dispatch(queue, request->bytes, request->size, &response) == BQ_OK);
+    }
+    /* Replace the name with a byte-identical copy on a new inode. */
+    struct stat info = {0};
+    BQ_CHECK(fstat(spool, &info) == 0 && renameat(queue->directory_fd, sealed, queue->directory_fd,
+                                                   "export-cache-original.hold") == 0);
+    int copy = openat(queue->directory_fd, sealed, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    BQ_CHECK(copy >= 0);
+    for (u64 offset = 0; copy >= 0 && offset < (u64)info.st_size;)
+    {
+        u8 bytes[BQ_EXPORT_CHUNK_CAP];
+        u64 remaining = (u64)info.st_size - offset;
+        size_t chunk = remaining < sizeof(bytes) ? (size_t)remaining : sizeof(bytes);
+        bool moved = pread(spool, bytes, chunk, (off_t)offset) == (ssize_t)chunk &&
+                     pwrite(copy, bytes, chunk, (off_t)offset) == (ssize_t)chunk;
+        BQ_CHECK(moved);
+        offset = moved ? offset + chunk : (u64)info.st_size;
+    }
+    if (copy >= 0)
+    {
+        BQ_CHECK(fchmod(copy, 0400) == 0 && close(copy) == 0);
+        checks = bq_export_index_full_checks;
+        BQ_CHECK(bq_transport_dispatch(queue, request->bytes, request->size, &response) == BQ_OK &&
+                 bq_export_index_full_checks == checks + 1);
+        BQ_CHECK(bq_transport_dispatch(queue, request->bytes, request->size, &response) == BQ_OK &&
+                 bq_export_index_full_checks == checks + 1);
+        BQ_CHECK(unlinkat(queue->directory_fd, sealed, 0) == 0);
+    }
+    BQ_CHECK(renameat(queue->directory_fd, "export-cache-original.hold", queue->directory_fd, sealed) == 0);
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_export(bool success)
 {
     BqWorkerFixture fixture;
@@ -267,6 +329,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_export(bool success)
             bq_export_test_mutation_fd = -1;
             BQ_CHECK(pwrite(spool, &saved, 1, BQ_EXPORT_DATA_OFFSET) == 1 &&
                      bq_transport_dispatch(queue, request.bytes, request.size, &response) == BQ_OK);
+            bq_test_export_cached_spool(queue, spool, sealed, &request, total);
             u8 changed = 0xff;
             BQ_CHECK(pwrite(spool, &changed, 1, BQ_EXPORT_DATA_OFFSET) == 1 && fchmod(spool, 0400) == 0);
             BQ_CHECK(bq_transport_dispatch(queue, request.bytes, request.size, &response) == BQ_EXPORT_CORRUPT);
@@ -319,6 +382,11 @@ BUSTER_GLOBAL_LOCAL void bq_test_export_inventory(void)
         BQ_CHECK(renameat(root, "replacement", root, "regular") == 0);
         BQ_CHECK(linkat(root, "regular", root, "alias", 0) == 0 && bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_CORRUPT);
         BQ_CHECK(unlinkat(root, "alias", 0) == 0);
+        /* A full 64 MiB A1 metrics or transcript shard is exactly one
+         * admissible entry: only a larger file is oversized. */
+        BQ_CHECK(ftruncate(file, (off_t)BQ_WORKER_BUNDLE_FILE_CAP) == 0 &&
+                 bq_export_inventory(root, inventory, BQ_EXPORT_RETIREMENT_TOTAL_CAP, deadline) == BQ_OK &&
+                 inventory->files == 1 && inventory->bytes == BQ_WORKER_BUNDLE_FILE_CAP);
         BQ_CHECK(ftruncate(file, (off_t)BQ_WORKER_BUNDLE_FILE_CAP + 1) == 0 &&
                  bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_OVERSIZED);
         BQ_CHECK(ftruncate(file, 1) == 0);
