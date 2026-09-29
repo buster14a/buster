@@ -26,11 +26,11 @@ BUSTER_GLOBAL_LOCAL char const bq_native_retirement_blocked_profile[] =
     "support-declaration=docs/native-retirement-support-v1.tsv\n"
     "support-declaration-sha256=932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82\n"
     "binding-validator=tools/native_retirement_performance_binding.py\n"
-    "binding-validator-sha256=2d3c97e5f31b6af5dc5cdfe7a956b7ea7910fd61a5c71ebab7be29e725ec4d95\n"
+    "binding-validator-sha256=c08e6463b56a0290c2ff071ac90b232b86ee40881b4f5ec75bf56b61f18ec41c\n"
     "binding-schema=tools/native_retirement_performance_schema.py\n"
     "binding-schema-sha256=e19a5cf1114997ddf4a71cf47f8da4125777b49441d1a48d012bab7f2bb8e6a3\n"
     "statistics=tools/throughput/retirement_stats.h\n"
-    "statistics-sha256=72a7c6aa80c46bb4246865a2991b34e2dfbc4ce2db9547d5b69143712383e6c8\n"
+    "statistics-sha256=b95349118f14456abb9d85191615c6e0b9cd595e7761081c6bc0dacddb8a34dd\n"
     "requires=qualified-9700x-service,predeclared-execution-plan,bound-subjects,durable-replay\n";
 
 u32 bq_u32(u8 const* bytes)
