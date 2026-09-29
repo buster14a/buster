@@ -7714,6 +7714,14 @@ BUSTER_C_SHARED bool c_parse_type_qualifier_word(String8 spelling, CType* type)
     return false;
 }
 
+// Clang's nullability qualifiers stand wherever a pointer qualifier may,
+// including an array parameter's brackets (`[_Nonnull 3]` in Bionic). They
+// affect diagnostics, not the C object representation, so they set no flag.
+BUSTER_C_INTERNAL bool c_parse_nullability_word(String8 spelling)
+{
+    return string_equal(spelling, S8("_Nonnull")) || string_equal(spelling, S8("_Nullable")) || string_equal(spelling, S8("_Null_unspecified"));
+}
+
 BUSTER_C_SHARED u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 index, u32 end);
 
 // Skips the run of `_Alignas ( ... )` alignment specifiers at `index`. An
@@ -10452,8 +10460,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                         {
                             String8 spelling = c_token_spelling(preprocess.spelling_base, token);
                             CType ignored = {0};
-                            if (c_parse_type_qualifier_word(spelling, &ignored) || string_equal(spelling, S8("_Nonnull")) ||
-                                string_equal(spelling, S8("_Nullable")) || string_equal(spelling, S8("_Null_unspecified")))
+                            if (c_parse_type_qualifier_word(spelling, &ignored) || c_parse_nullability_word(spelling))
                             {
                                 missing_name += 1;
                                 continue;
@@ -13224,15 +13231,7 @@ BUSTER_C_SHARED CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessR
                 break;
             }
             String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[*index]);
-            if (c_parse_type_qualifier_word(spelling, &pointer))
-            {
-            }
-            else if (string_equal(spelling, S8("_Nonnull")) || string_equal(spelling, S8("_Nullable")) || string_equal(spelling, S8("_Null_unspecified")))
-            {
-                /* Nullability affects diagnostics, not the C object
-                   representation. */
-            }
-            else
+            if (!c_parse_type_qualifier_word(spelling, &pointer) && !c_parse_nullability_word(spelling))
             {
                 break;
             }
@@ -13264,8 +13263,7 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult p
                     break;
                 }
                 String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
-                if (c_parse_type_qualifier_word(spelling, &ignored) || string_equal(spelling, S8("_Nonnull")) || string_equal(spelling, S8("_Nullable")) ||
-                    string_equal(spelling, S8("_Null_unspecified")))
+                if (c_parse_type_qualifier_word(spelling, &ignored) || c_parse_nullability_word(spelling))
                 {
                     index += 1;
                     continue;
@@ -13400,7 +13398,8 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
             bool is_static_word = string_equal(bound_spelling, S8("static"));
             is_static |= is_static_word;
             CType bound_qualifiers = {0};
-            if (!is_static_word && !(bound_token.kind == C_TOKEN_IDENTIFIER && c_parse_type_qualifier_word(bound_spelling, &bound_qualifiers)))
+            if (!is_static_word && !(bound_token.kind == C_TOKEN_IDENTIFIER && (c_parse_type_qualifier_word(bound_spelling, &bound_qualifiers) ||
+                                                                                   c_parse_nullability_word(bound_spelling))))
             {
                 bound_word_index = token_index;
                 bound_word_count += 1;
@@ -24186,8 +24185,8 @@ BUSTER_C_INTERNAL void c_parse_validate_alignment_redeclarations(CTypeParseMachi
     }
 }
 
-// Every recorded array bound is one expression once its `static` and
-// qualifier words are set aside; `[]` and `[*]` have none to check.
+// Every recorded array bound is one expression once its `static`, qualifier
+// and nullability words are set aside; `[]` and `[*]` have none to check.
 BUSTER_C_INTERNAL void c_parse_validate_array_bound_syntax(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess)
 {
     u32 bound_count = result->array_bound_count;
@@ -24200,7 +24199,8 @@ BUSTER_C_INTERNAL void c_parse_validate_array_bound_syntax(CTypeParseMachine* ma
         CType qualifiers = {0};
         while (start < end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
                (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("static")) ||
-                c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[start], &qualifiers)))
+                c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[start], &qualifiers) ||
+                c_parse_nullability_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]))))
         {
             start += 1;
         }
