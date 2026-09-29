@@ -1,0 +1,98 @@
+name: Optimization effort research probe
+
+# Disposable branch-only research. No production or admission policy changes.
+on:
+  push:
+    branches: [codex/47-effort-policy-probe]
+    paths:
+      - 'tests/optimization_effort_probe/**'
+      - '.github/workflows/optimization-effort-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: ${{ github.repository == 'buster14a/buster' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      BUSTER_TEST_JOBS: '1'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Prepare frozen source and fixture identities
+        run: |
+          set -euo pipefail
+          mkdir -p evidence .ci-tools
+          git rev-parse HEAD > evidence/probe-revision.txt
+          cp tests/optimization_effort_probe/manifest.json evidence/manifest.json
+          sha256sum tests/optimization_effort_probe/*.{py,patch,json} > evidence/probe-files.sha256
+          git fetch --depth=1 origin 8f67df736f13d4edc055110a7a6d619a00a22eaf
+          git worktree add --detach "$RUNNER_TEMP/effort-source" 8f67df736f13d4edc055110a7a6d619a00a22eaf
+          printf '%s\n' "$RUNNER_TEMP/effort-source" > evidence/source-root.txt
+          clang --version > evidence/clang-version.txt
+          uname -a > evidence/host.txt
+          lscpu >> evidence/host.txt
+      - name: Build ordinary trusted main and preserve fixed point
+        id: ordinary
+        run: |
+          set -euo pipefail
+          probe_root="$PWD"
+          cd "$RUNNER_TEMP/effort-source"
+          test "$(git rev-parse HEAD)" = 8f67df736f13d4edc055110a7a6d619a00a22eaf
+          test -z "$(git diff --name-only)"
+          mkdir -p .ci-tools
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o .ci-tools/build
+          .ci-tools/build generate --ci --cc clang --linker DEFAULT 2>&1 | tee "$probe_root/evidence/generate.log"
+          .ci-tools/build build --config Release -t ide 2>&1 | tee "$probe_root/evidence/trusted-build.log"
+          cp build/Release/ide "$probe_root/evidence/trusted-ide"
+          cp build/compile_commands.json "$probe_root/evidence/trusted-compile-commands.json"
+          sha256sum "$probe_root/evidence/trusted-ide" > "$probe_root/evidence/trusted-ide.sha256"
+          .ci-tools/build test_self_host --config Release 2>&1 | tee "$probe_root/evidence/trusted-self-host.log"
+      - name: Build observer baseline and candidate serially in same root
+        id: observers
+        if: ${{ !cancelled() && steps.ordinary.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          probe_root="$PWD"
+          cd "$RUNNER_TEMP/effort-source"
+          git apply "$probe_root/tests/optimization_effort_probe/baseline.patch"
+          git diff > "$probe_root/evidence/baseline-source.patch"
+          .ci-tools/build build --config Release -t ide 2>&1 | tee "$probe_root/evidence/baseline-build.log"
+          cp build/Release/ide "$probe_root/evidence/baseline-ide"
+          git restore src/buster/lib/compiler/codegen/register_allocator_quality.c
+          git apply "$probe_root/tests/optimization_effort_probe/candidate.patch"
+          git diff > "$probe_root/evidence/candidate-source.patch"
+          .ci-tools/build build --config Release -t ide 2>&1 | tee "$probe_root/evidence/candidate-build.log"
+          cp build/Release/ide "$probe_root/evidence/candidate-ide"
+          sha256sum "$probe_root/evidence/baseline-ide" "$probe_root/evidence/candidate-ide" > "$probe_root/evidence/observers.sha256"
+      - name: Frozen design and held-out identity and independent execution
+        if: ${{ !cancelled() && steps.observers.outcome == 'success' }}
+        run: |
+          python3 tests/optimization_effort_probe/run.py \
+            --trusted evidence/trusted-ide --baseline evidence/baseline-ide \
+            --candidate evidence/candidate-ide --host-cc clang --output evidence/probe
+      - name: Focused registered tests on both observers
+        if: ${{ !cancelled() && steps.observers.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          probe_root="$PWD"
+          cd "$RUNNER_TEMP/effort-source"
+          "$probe_root/evidence/baseline-ide" test --module=machine_tests,ir_tests,compiler_driver_tests --verbose=1 --ci=1 2>&1 | tee "$probe_root/evidence/baseline-tests.log"
+          "$probe_root/evidence/candidate-ide" test --module=machine_tests,ir_tests,compiler_driver_tests --verbose=1 --ci=1 2>&1 | tee "$probe_root/evidence/candidate-tests.log"
+      - name: Preserve ordinary candidate fixed point
+        if: ${{ !cancelled() && steps.observers.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          cd "$RUNNER_TEMP/effort-source"
+          .ci-tools/build test_self_host --config Release 2>&1 | tee "$GITHUB_WORKSPACE/evidence/candidate-self-host.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: optimization-effort-${{ github.sha }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 14
+          if-no-files-found: error

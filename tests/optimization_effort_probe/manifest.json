@@ -1,0 +1,44 @@
+{
+  "revision": "8f67df736f13d4edc055110a7a6d619a00a22eaf",
+  "policy": "Explicit QUALITY only: reuse valid FAST baseline iff spill_count == 0 and reload_count == 0; no tuning thresholds.",
+  "fixtures": [
+    {
+      "path": "design/leaf.c",
+      "split": "design"
+    },
+    {
+      "path": "design/pressure.c",
+      "split": "design"
+    },
+    {
+      "path": "heldout/calls.c",
+      "split": "heldout"
+    },
+    {
+      "path": "heldout/loops.c",
+      "split": "heldout"
+    },
+    {
+      "path": "heldout/switch.c",
+      "split": "heldout"
+    },
+    {
+      "path": "heldout/vector.c",
+      "split": "heldout"
+    },
+    {
+      "path": "heldout/volatile.c",
+      "split": "heldout"
+    }
+  ],
+  "sha256": {
+    "design/leaf.c": "6338b64d9a98b5bba7c3e7e3a6b7f0f041848d4f686acbffa04dcc8ae68c186a",
+    "design/pressure.c": "097479bf4ab4f9b581d25a98c5a08c1bf14f782a2cfb62a30dce32886dc5595c",
+    "heldout/calls.c": "9c80f01c9f1d3e1585b9719683998bd300ad7dc95cc167c4bb99a8b6d97cbc02",
+    "heldout/loops.c": "155cd430474f49aceaaa6fd18c820d445b0c1f43c2dc3dc4adeab310da25cae4",
+    "heldout/switch.c": "407b6116ed0ee5273d85e6ed943f183fbf9a7e445acbd67271f8b6b430ce381a",
+    "heldout/vector.c": "99d38821a6a9d231033b1b259c6d78af99afb1191a4a0190b0d9d3345889a898",
+    "heldout/volatile.c": "2db775ba6dd36692d8ce5c448984808ab45da1aca8e44e0e503af8f479a97ac8",
+    "driver.c": "3a6e6d84361f42c012f0661b5786f9fcbb773f58dad9fed2d7b9b15f69ea73a2"
+  }
+}

@@ -1,0 +1,39 @@
+--- a/src/buster/lib/compiler/codegen/register_allocator_quality.c
++++ b/src/buster/lib/compiler/codegen/register_allocator_quality.c
+@@ -5,6 +5,9 @@
+ #include <buster/lib/compiler/codegen/machine.h>
+ #include <buster/lib/simd.h>
+ #include <buster/lib/compiler/codegen/register_allocator_quality_internal.h>
++#include <buster/lib/string.h>
++
++BUSTER_CT_CHECK(sizeof(MachineQualityInterval) == 24);
+ 
+ #if BUSTER_BENCH_ALLOCATIONS
+ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL MachineQualityCensus machine_quality_census_totals;
+@@ -394,8 +397,15 @@
+     // and heuristics guessing at this were measurably worse than the
+     // truth (2026-08-09ai).
+     MachineStackPlacement baseline = machine_fast_placement_build_prepassed(arena, function, &prepass, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+-    if (!baseline.valid)
+-    {
++    // Isolated diagnostic record: requested payload, not RSS or timing.
++    string_print(S8("EFFORT_DIAGNOSTIC variant=candidate rows={u32} values={u32} valid={u32} spills={u32} reloads={u32} eligible={u32} skip={u32} avoided_payload={u64} interval_size={u32}\n"),
++                 function->instruction_count, register_count, (u32)baseline.valid, baseline.spill_count, baseline.reload_count,
++                 (u32)(baseline.valid && !baseline.spill_count && !baseline.reload_count), (u32)(baseline.valid && !baseline.spill_count && !baseline.reload_count),
++                 (baseline.valid && !baseline.spill_count && !baseline.reload_count) ? 4ULL * BUSTER_MAX(function->instruction_count, 1u) + 16ULL * BUSTER_MAX(register_count, 1u) + 24ULL * MACHINE_QUALITY_MAXIMUM_CANDIDATES : 0ULL,
++                 (u32)sizeof(MachineQualityInterval));
++    if (!baseline.valid || (!baseline.spill_count && !baseline.reload_count))
++    {
++        if (baseline.valid) BUSTER_QUALITY_COUNT(empty_candidate_functions, 1);
+         scratch_end(scratch);
+         return baseline;
+     }
+@@ -489,6 +499,8 @@
+     {
+         machine_quality_heap_sift(heap, heap_count, root - 1);
+     }
++    string_print(S8("EFFORT_HEAP rows={u32} values={u32} eligible={u32} candidates={u32}\n"),
++                 function->instruction_count, register_count, (u32)(baseline.valid && !baseline.spill_count && !baseline.reload_count), heap_count);
+     BUSTER_QUALITY_COUNT(candidates, heap_count);
+     BUSTER_QUALITY_COUNT(candidate_cap_functions, heap_count == MACHINE_QUALITY_MAXIMUM_CANDIDATES);
+     if (!heap_count || !function->instruction_count)
