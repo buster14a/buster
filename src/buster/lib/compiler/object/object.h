@@ -160,6 +160,13 @@ typedef enum ObjectRelocationKind
     // R_X86_64_CODE_4_GOTPCRELX: the relaxable REX2 spelling.  The
     // instruction begins four bytes before its relocated field.
     OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX,
+    // R_AARCH64_ADR_GOT_PAGE and R_AARCH64_LD64_GOT_LO12_NC: an ADRP of the
+    // page holding the symbol's GOT slot and the 64-bit LDR of that slot.
+    // LLVM reaches every extern-weak symbol this way, even under -fno-pic.
+    // The reader keeps the LDR with a zero offset; object_aarch64_elf_page_relocate
+    // resolves the pair by relaxation to ADRP/ADD of the symbol itself.
+    OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21,
+    OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
@@ -168,6 +175,10 @@ typedef enum ObjectRelocationKind
 // holding the symbol's address. Ask this instead of naming all three
 // wherever only that shared contract matters.
 BUSTER_F_DECL bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind);
+
+// The four AArch64 ELF page-address kinds object_aarch64_elf_page_relocate
+// accepts: the direct ADRP/ADD pair and the GOT ADRP/LDR pair.
+BUSTER_F_DECL bool object_relocation_kind_is_aarch64_elf_page(ObjectRelocationKind kind);
 
 // Apply the ordinary Windows ARM64 PAGEBASE_REL21/PAGEOFFSET_12A contract to
 // one canonical instruction.  The reader removes COFF's inline addend; the
@@ -320,12 +331,39 @@ struct ObjectFile
     u32* initializer_priorities[2];
 };
 
+// The work one object_write call did, counted where it happened rather than
+// estimated. "Visits" are reads of an input record by any loop, validation
+// included, so visits over count is the number of passes. Image bytes are
+// counted at every store, and `image_bytes_patched` counts stores over bytes
+// already stored, so a result with no patched bytes and as many stored bytes
+// as `output_bytes` wrote every byte of the file once. `scratch_bytes` is
+// every other arena byte the writer requested, released or not: tables,
+// copies, formatted names. `retained_bytes` is what the call left allocated
+// in the caller's arena, image included. object_write_statistics_add sums
+// them over the translation units of one invocation.
+typedef struct ObjectWriteStatistics ObjectWriteStatistics;
+struct ObjectWriteStatistics
+{
+    u64 section_visits;
+    u64 symbol_visits;
+    u64 relocation_visits;
+    u64 image_bytes_reserved;
+    u64 image_bytes_stored;
+    u64 image_bytes_zeroed;
+    u64 image_bytes_patched;
+    u64 payload_bytes_copied;
+    u64 scratch_bytes;
+    u64 retained_bytes;
+    u64 output_bytes;
+};
+
 typedef struct ObjectArtifact ObjectArtifact;
 struct ObjectArtifact
 {
     ByteSlice bytes;
     ObjectError error;
     ObjectFormat format;
+    ObjectWriteStatistics statistics;
 };
 
 typedef struct ObjectArchive ObjectArchive;
@@ -347,6 +385,8 @@ struct ObjectExecutable
 };
 
 BUSTER_F_DECL ObjectFormat object_format_for_target(Target target);
+BUSTER_F_DECL String8 object_format_name(ObjectFormat format);
+BUSTER_F_DECL void object_write_statistics_add(ObjectWriteStatistics* total, ObjectWriteStatistics const* unit);
 BUSTER_F_DECL ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program, CodegenModule* module, Target target);
 BUSTER_F_DECL String8 object_print_assembly(Arena* arena, ObjectFile* object);
 BUSTER_F_DECL ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat format);

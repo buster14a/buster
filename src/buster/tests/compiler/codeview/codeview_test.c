@@ -687,6 +687,7 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     DebugVariable global_variable = {
         .name = S8("global_value"),
         .linkage_name = S8("global_value"),
+        .symbol = {.value = 7},
         .type = 0,
         .kind = DEBUG_VARIABLE_GLOBAL,
     };
@@ -707,6 +708,13 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
                                                                       .machine = CODEVIEW_MACHINE_X64,
                                                                   });
     BUSTER_TEST(arguments, globals_built.valid && globals_built.relocation_count == 2);
+    // Both named relocations carry the variable's program symbol, which the
+    // object writer resolves without rehashing the linkage name.
+    for (u32 index = 0; globals_built.valid && index < globals_built.relocation_count; index += 1)
+    {
+        BUSTER_TEST(arguments, string_equal(globals_built.relocations[index].symbol_name, S8("global_value")) &&
+                                   globals_built.relocations[index].symbol.value == 7);
+    }
     return result;
 }
 #endif

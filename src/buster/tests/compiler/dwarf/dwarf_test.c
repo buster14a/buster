@@ -1077,6 +1077,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
         DebugVariable dwarf_global = {
             .name = S8("global_value"),
             .linkage_name = S8("global_value"),
+            .symbol = {.value = 7},
             .type = 0,
             .kind = DEBUG_VARIABLE_GLOBAL,
         };
@@ -1100,6 +1101,16 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
                                                                         .language = 0x000c,
                                                                     });
         BUSTER_TEST(arguments, globals_built.valid && globals_built.sections[DWARF_SECTION_INFO].length > 16);
+        // The address relocation names the variable and carries its program
+        // symbol, which the object writer resolves without the name.
+        u32 global_address_relocations = 0;
+        for (u32 index = 0; globals_built.valid && index < globals_built.relocation_count; index += 1)
+        {
+            DwarfRelocation relocation = globals_built.relocations[index];
+            global_address_relocations += relocation.symbol_address && string_equal(relocation.symbol_name, S8("global_value")) &&
+                                          relocation.symbol.value == 7;
+        }
+        BUSTER_TEST(arguments, global_address_relocations == 1);
 
         CodegenUnwindAction x64_actions[] = {
             {.code_offset = 1, .kind = CODEGEN_UNWIND_ACTION_PUSH_REGISTER, .register_index = 5},

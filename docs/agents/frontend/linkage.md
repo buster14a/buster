@@ -20,6 +20,20 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   (GitHub #363); object parsing alone is not runtime-unwind evidence.
   Its metadata checker accepts both SAVE_NONVOL slot widths, rejects truncated
   saves, and keeps saved-register offsets separate from stack-allocation sizes.
+- **Program-symbol identity crosses the object boundary.**
+  `object_from_canonical_codegen_module` resolves a relocation's `IrSymbolId`
+  through `entry_by_symbol`. Entries map to their own index; globals and
+  aliases are seeded with the definition their link name resolves to (the
+  first definition carrying it), which the name-index build records as it
+  places each definition, so their references hash no name. Externs keep the
+  name path, whose first lookup also claims the insertion slot it ended on.
+  DWARF `DW_OP_addr` and CodeView `S_GDATA32` relocations carry the
+  variable's `IrSymbolId` and resolve through the same map when it names a
+  definition; the name path remains for everything else. Non-optimized
+  builds cross-check every such answer against the name lookup, and
+  `compiler_driver_test_debug_global_relocations` pins the first-definition
+  contract with block-scope statics, an asm label, a completed tentative
+  definition and a block-scope extern on ELF x86-64, ELF AArch64 and COFF.
 - **Merged file-backed sections have zeroed background bytes.** `link_objects`
   initializes alignment gaps and each input's virtual tail before copying its
   data, so reused arenas produce the same bytes as fresh mappings. The zeroed

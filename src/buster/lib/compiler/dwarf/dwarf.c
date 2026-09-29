@@ -1462,6 +1462,7 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_global(DwarfModelWriter* writer, Debug
                                           .address = true,
                                           .symbol_address = true,
                                           .symbol_name = variable->linkage_name.length ? variable->linkage_name : variable->name,
+                                          .symbol = variable->symbol,
                                       });
     dwarf_emit_u64(&writer->info, 0);
     dwarf_emit_u8(&writer->info, 1);
