@@ -240,12 +240,14 @@ The second A/A baseline label can have a distinct output path. Before `begin`,
 the importer also authenticates its compiler and applicable runtime commands
 from the frozen service plan and commits their aggregate SHA-256 in
 `aa_second_commands_sha256`. The byte stream starts with the ASCII domain
-`bq-retirement-aa-second-commands-v2` without a terminator. For each timed row
-(A1: compiler eligible on the native target) in canonical order it appends its
-four-byte little-endian row ID, the 64
-ASCII lowercase hex bytes of the second A/A compiler command digest, one byte
-for runtime applicability (zero or one), and, when applicable, the 64 ASCII
-lowercase hex bytes of the second A/A runtime command digest. The gate seals
+`bq-retirement-aa-second-commands-v3` without a terminator. For each timed
+batch group (A1: over the rows compiler eligible on the native target) in dense
+group order, which is ascending smallest member row, it appends that row's
+four-byte little-endian ID, the 64 ASCII lowercase hex bytes of the group's
+second A/A compiler (batch) command digest, one byte for runtime applicability
+(zero or one; always zero for an object group), and, when applicable, the 64
+ASCII lowercase hex bytes of the second A/A runtime command digest. A
+singleton group's entry is the v2 per-row entry. The gate seals
 this commitment and the A→D binder compares it before freezing any campaign.
 The aggregate has no authority on its own: the service importer must verify
 the frozen plan independently of candidate or request supplied values.
@@ -259,6 +261,9 @@ the frozen plan independently of candidate or request supplied values.
    invocation may run while a check is missing or failed.
 3. Call `row` once per canonical row, in increasing `row` order, with genuine
    observations or an explicit empty untimed fact. Failure poisons the gate.
+   (A1) Then call `batches` once with the frozen plan-v3 object batch groups
+   of the timed projection (an empty list when there are no timed object
+   rows); see below.
 4. Call `finish` once. `ready` rehashes the preparation, declarations, receipt
    digests and all row facts. It is a structural check, not authorization to
    launch: the service must authenticate all underlying producers, compare
@@ -281,21 +286,44 @@ queue state or reimport records itself.
 eligible rows on the native target, which must be the pinned
 `x86_64-unknown-linux-gnu` index (`BQ_RETIREMENT_NATIVE_TIMED_TARGET`, 11 in
 one-based `TARGETS` order); any other gate target is refused. Every launch
-recounts the timed rows from the sealed gate and compares them with the frozen
-group count. Each timed link or self-host row binds as
-its own singleton batch group against its per-row compiler and runtime
-commands; the group's frozen output digest covers that row's one artifact.
-The gate holds per-row facts only, with no frozen batch command, input order,
-control statuses or per-input diagnostic digests, so a timed object row
-cannot be joined to an object batch group here and the binding fails closed
-(`BQ_RECIPE_MISMATCH` from the queue-aware entry). Freezing object batch
-contracts in the gate is a separate producer step.
+recounts the timed groups from the sealed gate (one per timed link or
+self-host row plus the frozen object groups, whose members must be exactly the
+timed object rows) and compares them with the frozen group count. Each timed
+link or self-host row binds as its own singleton batch group against its
+per-row compiler and runtime commands; the group's frozen output digest covers
+that row's one artifact.
 
-The campaign stays fail-closed until that separate change (review item M4)
-lands. It must add frozen batch contracts to the gate, replace the fixed
-one-hour worker budget with a reviewed campaign budget, and pack per-input
-metrics files into bounded shards so that a full campaign fits the 4,096-entry
-evidence store. This branch admits and runs no campaign.
+(A1, M4) `bq_retirement_correctness_batches` freezes the plan-v3 object batch
+groups in the gate, once, after every row fact and before `finish`. Each
+`BqRetirementBatchGroup` holds, for the A/B baseline and candidate sides, the
+complete batch contract (ordered inputs: timed members in ascending row order,
+then status-checked controls; statuses, errors, diagnostic digests, each side's
+object digests, output leaves, the metrics leaf, the response-file input list
+and the reviewed metrics bound) and that side's batch command digest. The
+importer derives the partition from the frozen rows; the gate checks it: both
+sides agree on everything but object digests; every member is a compiler
+eligible, native-target object row assigned to exactly one group; groups are
+ordered by their smallest member; each member's trusted and observed compiler
+command equals its side's batch command and its observed artifact equals that
+side's frozen object digest; a control names no row or a row outside the timed
+projection; and every timed object row is covered. The seal covers each side's
+contract digest and batch command. A timed object row outside every frozen
+group still fails closed (`BQ_RECIPE_MISMATCH` from the queue-aware entry).
+
+The binder walks the timed rows in ascending order: the first member of a
+frozen group opens that object group at its dense position, and every command
+for it must carry the frozen contract (same contract digest), the frozen batch
+command (the second A/A label excepted), the frozen batch output digest and
+exit status. Freeze then requires the reviewed campaign budget and its pin
+(`throughput/retirement_budget.h`), a metrics shard writer per stage, and the
+budget's metrics bound in every object contract; the queue-aware entry reads
+the pin from the compiled profile key `campaign-budget-sha256=`, which the
+blocked profile does not carry, so it returns `BQ_RECIPE_MISMATCH`.
+
+The campaign stays fail-closed: frozen batch contracts, the reviewed budget
+and sharded metrics are in place, but the recipe stays blocked until #509
+supplies correctness authority, the integration pins the reviewed budget, and
+a production caller exists. This branch admits and runs no campaign.
 
 `bq_retirement_campaign_run` rejects bindings without held service descriptors
 and rechecks the held record, gate join and transcript identity before launch.

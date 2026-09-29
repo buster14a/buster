@@ -696,8 +696,10 @@ A compiler invocation is one batch process of one frozen group. An object
 group's command carries its frozen batch contract: the ordered inputs (timed
 members, then status-checked controls), each input's fixture, oracle status,
 error and diagnostic digest, its frozen object digest and output leaf, the
-`-fmetrics-out` leaf, the metrics target and allocator, and the frozen exit
-status (nonzero only when a control fails). Every output must be absent from
+`-fmetrics-out` leaf, the metrics target and allocator, the frozen exit
+status (nonzero only when a control fails), and the group's reviewed
+per-artifact metrics bound (`metrics_bytes_max`, from the pinned campaign
+budget; a larger artifact rejects the batch). Every output must be absent from
 the service-opened private output directory before launch. Afterwards the
 producer opens each object relative to that descriptor without following
 links and hashes it; each must equal its frozen artifact byte for byte, in
@@ -720,14 +722,99 @@ Runtime output is read from the actual child's log descriptor. All paths hash a
 regular, single-link file, bounded to 1 GiB, with identity/size/metadata checks
 around the read.
 
-The A1 compiler campaign is fail-closed until a separate reviewed change
-(tracked as review item M4) supplies three missing pieces: a reviewed worker
-budget replacing the fixed one-hour budget, which cannot hold the full
-invocation count; packing per-input metrics files into bounded shards, since a
-full campaign writes one file per object batch invocation (244 per group at 60
-pairs) and exceeds the 4,096-entry evidence store; and frozen batch contracts
-in the correctness gate. Until then the service refuses object groups and no
-campaign is admitted or run.
+A batch passes its inputs as one digest-bound `@file` response file (A1's
+recorded Q10 default; `docs/agents/driver.md`, "Response files"), so a batch of
+any size keeps its argv inside the unchanged 256-argument / 64 KiB command
+caps. `tp_retirement_batch_input_list` writes the canonical list: one line per
+frozen input in contract order, inside double quotes, with a backslash before
+every `"` and `\`; the driver's tokenizer returns exactly that order. An input
+beginning with `@` (nesting, which the driver refuses) or `-` (an option) is
+not a valid contract input, and the list stays within the driver's 4 MiB and
+65,536-argument bounds. The file is named `retirement-inputs-<sha256>.rsp` by
+its own digest, so the batch command digest, which covers the `@<leaf>`
+argument, binds the list bytes; the contract digest (v2) also covers it.
+`tp_retirement_batch_input_list_write` creates the read-only file without
+replacement in the service directory, which must be the batch's cwd (objects
+are `cwd/basename.o`). Before launch and again after the child exits, the
+measurement requires exactly one `@<leaf>` argument, no fixture path on the
+argv, and a read-only, service-owned file whose bytes equal the canonical
+list. The validator recomputes the canonical list from the frozen member order
+and controls, tokenizes it with the driver's grammar, and requires the plan's
+`input_list_sha256` to be its digest.
+
+(M4) Per-batch metrics artifacts are packed into metrics shards, the way the
+transcript and numeric samples are sharded, so a full campaign fits the
+4,096-entry store. `TpRetirementMetricsShards` owns one writer tag (`aa`, `ab`,
+`untimed`, ...) and appends each accepted artifact to the current shard
+`retirement-metrics-<tag>-<NNNN>.txt`, returning its shard, offset, length and
+SHA-256; every artifact therefore stays individually addressable and
+authenticated. A shard is one store entry of at most 64 MiB (the store's file
+cap), so the 1 MiB line and 64 MiB artifact bounds are unchanged. Rotation is
+greedy and internal: an artifact that does not fit the remaining bytes starts
+the next shard on the service-supplied spare stream, and the completed shard's
+descriptor must be taken before the next rotation. Any two consecutive shards
+then exceed one shard's capacity, so a writer of `T` bytes has at most
+`2 * ceil(T / 64 MiB)` shards, which is the store preflight's entry bound. A
+stage with object groups attaches its writer to its collector before freeze,
+and a batch whose reviewed bound exceeds the remaining room needs a spare
+stream before it may launch. The validator streams each artifact's range from
+its shard, requires artifacts to tile each shard contiguously in record order
+(a shard starts at offset 0, is never revisited, and holds no trailing bytes;
+timed and untimed batches never share one), and seals the shards, not one
+entry per batch.
+
+(M4) Amendment A1 replaces the fixed one-hour worker budget with a reviewed
+budget bound into the admitted service recipe. `retirement_budget.h` holds the
+record: the reviewed whole-job ceiling, the authenticated fixed-phase bounds, a
+measured upper bound per batch process by group size (ascending input-count
+classes with nondecreasing bounds), a measured bound per runtime process, and
+the reviewed metrics bound (a header plus a per-input bound). Its canonical
+text names the derivation formula, and its SHA-256 is the recipe profile's
+`campaign-budget-sha256=` pin; a strict decoder admits only the canonical
+bytes. `tp_retirement_budget_preflight` derives
+`fixed + stages * (settling + export) + sum over groups of stages * 2 * (W + R * P) * batch(inputs)
++ U * stages * 2 * (W + R * P) * runtime + sum over untimed groups of 4 * batch(inputs)` and rejects,
+before timing, a job the reviewed ceiling cannot hold, a group larger than every
+class, a missing bound or overflow. `tp_retirement_campaign_freeze` takes the
+budget and its pin, requires the digest to equal the pin and every object
+contract to carry the budget's metrics bound for its input count, sizes the
+metrics shards from those bounds, and runs the budget preflight; the numeric
+bounds are integration-time pins, and the blocked profile has no pin, so the
+queue-aware bind fails closed.
+
+(A1) Untimed code-artifact batches: `retirement_untimed.h` runs, per untimed
+group and variant, at most one production batch and exactly one reproduction
+batch, in (group, variant, purpose) order, each a fresh process on the admitted
+CPU inside the job reservation but outside the timed collection window. It
+writes the sealed records the validator checks (command, executable, exit
+status, supervisor-bound process instance, PID, start token, interval, batch
+output digest and the metrics artifact in the `untimed` shards) and requires
+both reproductions for every group before it finishes.
+
+The campaign remains fail-closed: the correctness gate now freezes object
+batch contracts (see `tools/bench_service/retirement_correctness.md`), but the
+recipe stays blocked until #509 supplies correctness authority, the reviewed
+budget pin is set at integration time, and the service integration lands.
+
+`tp_retirement_campaign_capacity` and `tools/throughput/retirement_capacity.py`
+(an arithmetic mirror over the checked-in sources, with
+`retirement_capacity_test.py`) size an A1 campaign: `(G + U) * 2 * (2 + 2P)`
+invocations per stage, both result populations, the metrics shards of both
+stages and the untimed batches with their shards and record file. From the
+support declaration, the 16 native-host configurations give 80 object groups
+(compiler-default of up to 416 inputs with every registered control appended,
+c23 of 4, and three single-fixture recipes) plus 2 stage singletons, and 880
+untimed cross-target groups. With a reviewed per-input metrics bound of 4 KiB
+the whole campaign at the 254-pair maximum needs at most 1,803 store entries
+and 60.8 GB (of 4,093 and 128 GiB); 8 KiB needs 3,523 entries and 118.5 GB;
+the largest bound that fits at 254 pairs is 9,472 bytes per input (37,888 at
+60 pairs). Without sharding the same campaign would need 166,779 entries.
+These are envelopes, not an admitted size or a host rate:
+
+```sh
+python3 tools/throughput/retirement_capacity.py
+python3 tools/throughput/retirement_capacity_test.py
+```
 
 `retirement_metrics.h` reads the compiler's own per-input metrics text
 (`docs/agents/driver.md`, #1823) without trusting the compiler: a tagged
@@ -739,13 +826,12 @@ error or diagnostic digest that differs from the frozen oracle, an object that
 contradicts the oracle, overlapping or out-of-process intervals, a `total_ns`
 that is not the interval, phase timings that exceed it, or a header that is not
 one serial (`intervals=serial`, one worker, one job) continue-on-failure object
-batch rejects the whole batch. The artifact is bounded to 64 MiB and each line
-to 1 MiB. Each member's interval and arena high-water bytes become its wall
-time and peak-memory samples; the process's own wall time and RSS are the batch
-metric pair. The transcript binds the metrics bytes by size and digest at a
-path derived from the supervisor-bound process instance
-(`retirement-metrics-<32 hex>.txt`), which the caller publishes without
-replacement.
+batch rejects the whole batch. The artifact is bounded by its group's reviewed
+bound, at most 64 MiB, and each line to 1 MiB. Each member's interval and arena
+high-water bytes become its wall time and peak-memory samples; the process's
+own wall time and RSS are the batch metric pair. The transcript binds the
+metrics bytes by shard, offset, length and digest; the caller publishes each
+completed shard without replacement.
 
 Code sections are deterministic, so `tp_retirement_code_observe` parses one
 frozen artifact per (variant, code-eligible row) outside timing with the
@@ -769,8 +855,8 @@ against the declared target before accepting a supported row.
 
 Only successful execution and output verification advance the attached sample
 collector. `TpRetirementMeasurementResult` retains the process identity, wait
-status, timeout, observed output digest/size, the metrics digest, size and
-publication path, and the failure stage for the service's failure recorder. A
+status, timeout, observed output digest/size, the metrics artifact's shard,
+offset, length and digest, and the failure stage for the service's failure recorder. A
 failure poisons the attempt. The helper does not delete logs or artifacts; the
 service must retain failures, retire successful scratch files before reuse,
 and seal evidence durably. It also owns cancellation, descendant absence proof
@@ -780,18 +866,25 @@ service receipts.
 The native regression runs a complete one-row singleton fixture through 488
 fresh compiler/runtime child processes (two warmups and two 60-pair rounds per
 variant) and writes 120 numeric records, plus a complete object-group fixture
-of 244 fresh batch processes (two members and a rejection control per batch)
-that writes 240 row and 120 batch records and publishes every metrics file.
+of 244 fresh batch processes (two members and a rejection control per batch,
+named only through the response file) that writes 240 row and 120 batch
+records and packs every metrics artifact into one metrics shard, and four
+untimed production/reproduction batches with their sealed records.
 These deterministic fixture programs are functional tests, not
 compiler-performance measurements. Python independently checks canonical
 command hashes, every output identity, the schedule, process instances, every
-metrics file through the production validator, and all numeric joins. Failure
+metrics artifact's shard range through the production validator, the response
+file's digest and tokenized order, the untimed records, and all numeric joins. Failure
 controls cover nonzero or unexpected exit status, timeout, wrong/missing
 compiler and runtime output, stale output, symlinks/hard links, changed
 binaries, command/cwd mismatch, inherited handles, ambient environment, retry
 after failure, a nondeterministic object, a status mismatch, malformed or
-missing metrics, overlapping intervals and a contract that does not match the
-frozen group. Code observation rejects a reproduction that differs from its
+missing metrics, overlapping intervals, a contract that does not match the
+frozen group, a fixture path on the argv, a forged, writable or second
+response file, a missing metrics shard writer or spare, metrics above the
+reviewed bound, an output directory that is not the cwd, and untimed batches
+out of order, without reproduction, inside the timed window or before the
+reservation. Code observation rejects a reproduction that differs from its
 artifact and keeps a parsed zero-byte section as the empty SHA-256. Format
 tests cover both architectures, every truncated fixture prefix, reversed
 section order, overlap, empty code, PE padding and the actual host test
@@ -800,8 +893,9 @@ reader.
 
 The encoder emits the A1 canonical JSONL invocation schema in at most 8,192
 bytes: `group` for a compiler batch or `row` for a runtime process (the other
-is `null`), the frozen `exit_code`, the `metrics_artifact` descriptor of an
-object batch (otherwise `null`), and explicitly `null` code-section fields. It
+is `null`), the frozen `exit_code`, the `metrics_artifact` descriptor
+`{bytes, offset, path, sha256}` of an object batch (otherwise `null`), and
+explicitly `null` code-section fields. It
 checks the child's status against the frozen exit status, required hashes,
 exact interval agreement and compiler RSS before emitting bytes. Nanosecond
 serialization uses integer operations and a bounded decimal domain; missing
@@ -818,7 +912,7 @@ python3 -W error::ResourceWarning tools/throughput/retirement_execution_test.py 
 `TpRetirementTranscript` couples a successful checked write to advancement of
 that cursor. Shards contain 65,536 records, except for the last shard, and are
 bounded to 64 MiB each and 2,048 shards overall; the 134,217,728-record total
-keeps the nine-digit sequence bound behind the 1,019-byte maximal line, and a
+keeps the nine-digit sequence bound behind the 1,018-byte maximal line, and a
 wider line is rejected. A shortened intermediate shard,
 overlapping interval, duplicate observation, write/flush error, or premature
 completion permanently invalidates the transcript. A descriptor is returned
