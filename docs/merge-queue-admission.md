@@ -185,10 +185,8 @@ Report admission time in three separate parts:
 - **Build/test queue delay:** runner assignment for the six gates themselves.
 
 This change does not explain or fix host-specific assignment delay (#1805). The
-native-retirement rebind closure is dispatched from trusted main only after
-the exact predecessor lands (#1811). It makes a zero-second preflight and does
-not hold a runner during speculative queue waits. The required native
-admission job still uses `wait-base` until its separate producer transition.
+native-retirement admission producer and optional rebinding transitions are
+tracked in #1818 and #1820, respectively.
 
 ## Exact identities and fail-closed evidence
 
