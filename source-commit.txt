@@ -1,0 +1,26 @@
+commit 12e6dfe83680bd636e4ed32c2c08a66cf4b4ab57
+tree 42fdf0b4f8c960d5d2fdc8d222ef62f36e3d58ab
+parent 352f2929103160e4132e0d0d4d98fda3ef24ec61
+author Claude <noreply@anthropic.com> 1790720811 +0000
+committer Claude <noreply@anthropic.com> 1790720811 +0000
+gpgsig -----BEGIN SSH SIGNATURE-----
+ U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrLzsfFISF4by8Q+FKz27YpkK1USsBB+m
+ amu1QkJnbDsAAAADZ2l0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQINNxW9k
+ o5BoGQdPQRN6DUgFSQEwz2LqZjMVbKizIqoWjxPulvcCMZTdgIj6Tvrwt1ZWjLcsedYeQVmNFyz8
+ jAE=
+ -----END SSH SIGNATURE-----
+
+    ci: accept broker request v2 frames in the #1162 slice consumers
+    
+    #881-C (#1878) grew BqBrokerRequest from 176 to 184 bytes, but the hosted
+    broker evidence validator, which the per-activation entry consumer reuses,
+    still required recv == 176. Every v2 REQUEST record is therefore refused:
+    replaying run 36635011178's two real records gives "parsed request has wrong
+    frame size". The validator now requires REQUEST_FRAME_BYTES (184); its
+    frozen producer capture is normalized to the v2 size like its pid and uid,
+    and the version-1 size is a new negative case. The slice's failure-path
+    broker-state probe also built a version-1 request, so it always printed
+    request=0 state=0; it now uses BQ_BROKER_VERSION.
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_01Q9M4GYYanQp5yVnRShjmby

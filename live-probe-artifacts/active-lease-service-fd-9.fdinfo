@@ -1,0 +1,5 @@
+pos:	0
+flags:	0504002
+mnt_id:	519
+ino:	9200667
+lock:	1: FLOCK  ADVISORY  WRITE 710 00:30:9200667 0 EOF

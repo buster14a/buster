@@ -1,0 +1,12 @@
+{
+  "expected_root_device": 30,
+  "expected_root_inode": 8283,
+  "expected_slice_device": 30,
+  "expected_slice_inode": 10116,
+  "root": "/sys/fs/cgroup",
+  "root_device": 30,
+  "root_inode": 8283,
+  "slice": "/sys/fs/cgroup/buster.slice/buster-bench.slice",
+  "slice_device": 30,
+  "slice_inode": 10116
+}

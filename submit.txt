@@ -1,0 +1,2 @@
+job=1 token=0 sequence=0 phase=queued outcome=none validity=not-evaluated cancel-requested=0 reconciliation=0 pending=0 retained=0 request-sha256=a8e49c9d2743b5e1514cdb4eb0b80bfffa12493184e362fa9fab778901d386f2 failure=ok
+result-bound=0 statistical-decision=not-evaluated

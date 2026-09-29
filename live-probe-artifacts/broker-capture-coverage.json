@@ -1,0 +1,42 @@
+{
+  "captures": [
+    {
+      "cgroup_capture": true,
+      "process_capture": true,
+      "process_capture_reason": null,
+      "unit": "buster-bench-systemd-broker@0-757-65000.service"
+    },
+    {
+      "cgroup_capture": true,
+      "process_capture": true,
+      "process_capture_reason": null,
+      "unit": "buster-bench-systemd-broker@3-831-65000.service"
+    },
+    {
+      "cgroup_capture": false,
+      "process_capture": false,
+      "process_capture_reason": "unavailable: MainPID is zero",
+      "unit": "buster-bench-systemd-broker@5-864-0.service"
+    },
+    {
+      "cgroup_capture": false,
+      "process_capture": false,
+      "process_capture_reason": "unavailable: MainPID is zero",
+      "unit": "buster-bench-systemd-broker@6-888-65000.service"
+    },
+    {
+      "cgroup_capture": false,
+      "process_capture": false,
+      "process_capture_reason": "unavailable: MainPID is zero",
+      "unit": "buster-bench-systemd-broker@7-900-65000.service"
+    }
+  ],
+  "limitation": "only instances still listed after the live probe are captured; exited instances are not inferred",
+  "listed_units": [
+    "buster-bench-systemd-broker@0-757-65000.service",
+    "buster-bench-systemd-broker@3-831-65000.service",
+    "buster-bench-systemd-broker@5-864-0.service",
+    "buster-bench-systemd-broker@6-888-65000.service",
+    "buster-bench-systemd-broker@7-900-65000.service"
+  ]
+}

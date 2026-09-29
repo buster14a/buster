@@ -1,0 +1,37 @@
+{
+  "lease_parent": {
+    "device": 48,
+    "gid": 65000,
+    "inode": 9199798,
+    "mode": 456,
+    "uid": 65000
+  },
+  "lease_receipt_parent": {
+    "device": 48,
+    "gid": 0,
+    "inode": 9199776,
+    "mode": 365,
+    "uid": 0
+  },
+  "result_leaf": {
+    "device": 48,
+    "gid": 65000,
+    "inode": 9438065,
+    "mode": 448,
+    "uid": 65000
+  },
+  "results": {
+    "device": 48,
+    "gid": 65000,
+    "inode": 9199800,
+    "mode": 456,
+    "uid": 65000
+  },
+  "workspaces": {
+    "device": 48,
+    "gid": 65001,
+    "inode": 9199799,
+    "mode": 1480,
+    "uid": 65000
+  }
+}
