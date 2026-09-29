@@ -36627,6 +36627,7 @@ BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 argumen
 #define BENCH_SERVICE_RECIPE_BUNDLE_CAP (8u * 1024u * 1024u)
 #define BENCH_SERVICE_RECIPE_BUNDLE_ENTRY_CAP 4096u
 #include "tools/bench_service/phase_channel.h"
+#include "tools/bench_service/systemd_runtime.h"
 
 #define BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP (64ull * 1024 * 1024)
 #define BENCH_SERVICE_RECIPE_BUNDLE_TOTAL_CAP (512ull * 1024 * 1024)
@@ -39278,7 +39279,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_retirement_recipe_add(Arena* are
                 descriptor.length == arguments.pointer[7].length && descriptor.value >= 3 &&
                 descriptor.value <= INT_MAX && deadline.status == INTEGER_PARSING_SUCCESS &&
                 deadline.length == arguments.pointer[8].length && now &&
-                deadline.value > now && deadline.value - now <= UINT64_C(3600000000000);
+                deadline.value > now && deadline.value - now <= BQ_SYSTEMD_RETIREMENT_DEADLINE_MAX_NS;
         for (u64 index = 0; valid && index < preparation.length; index += 1)
         {
             u8 byte = preparation.pointer[index];

@@ -77,6 +77,9 @@ Each fixed recipe stage helper uses a deterministic unit name linked with
 transient unit is placed in `buster-bench.slice` and
 repeats the admitted CPU, memory, swap, task and runtime limits; the
 coordinator observes the same properties on the outer unit before continuing.
+A retirement stage takes its runtime limit from the outer unit's effective
+value, which the broker reads back; no stage request names one (see
+[SYSTEMD_BROKER.md](deploy/SYSTEMD_BROKER.md#unit-runtime-limits-881-c)).
 
 For a fresh real job the server acquires the cooperative host lease before FIFO
 reservation and materialization. It transfers the descriptor over a private,
@@ -92,11 +95,49 @@ failure evidence becomes durable, while TERM/KILL escalation runs, until
 the queue job. Uncertain cleanup transfers its reference to quarantine. No
 later queue job can reserve while any of those steps is uncertain.
 
+A coordinator that restarts loses its own reference, so the live unit's
+references are the only ones left holding the lease. Right after it adopts the
+lease, `worker-unit` forks a lease keeper. The keeper holds a reference to the
+same open-file description for the unit's whole life and serves a reverse
+handoff on `<workspace>/results/.lease-return/<job>-<attempt>`, outside the
+result root. Every stage unit has that directory in `InaccessiblePaths`, so a
+stage running as `buster-bench` cannot reach a keeper and receive (and unlock)
+the lease description. The keeper also refuses any peer whose cgroup lies under
+`buster-bench.slice`, read from `/proc/<pid>/cgroup`, and, where the kernel
+provides `SO_PEERPIDFD`, re-checked against the peer's pidfd so a reused PID
+cannot stand in. A recovering coordinator reclaims that reference before it
+sends any signal (`bq_worker_lease_reclaim`), with a connect bounded by the
+five-second handoff deadline. The keeper answers only a same-credential peer
+whose request names the exact lease path, job and attempt, and the coordinator
+adopts the descriptor only if it is the reference holding the lock. The keeper
+calls `listen` itself, so the coordinator's peer credentials name the keeper;
+in production the coordinator requires that peer to be inside the outer unit's
+exact cgroup. So when TERM closes every unit reference, the coordinator still
+holds the lease and no other coordinator can take it. If the keeper socket
+exists but cannot hand the lease back, the unit is left unsignalled and the job
+stays quarantined. Only a unit that bound no keeper, or one that was already
+empty before recovery started (its references closed while no coordinator
+ran), keeps the old path: acquire once the unit is empty, where contention is
+`busy`. A leftover keeper socket is removed once the unit is proven empty or
+the boot has changed.
+
+A keeper that died while its unit is alive leaves a socket that refuses
+connections. That is deliberately not treated as "no keeper": the recipe
+still holds the lease through its inherited reference, so signalling the unit
+would reopen the gap. The job stays quarantined until the unit ends, which its
+`RuntimeMax` bounds. An operator may end it sooner by stopping it through the
+broker as the service account
+(`buster-bench-systemd-broker signal buster-bench-<job>-<attempt>.service KILL`). The next recovery then sees it empty, acquires once
+empty, purges the stale socket and reconciles. The lease is released at the
+unit's exit in that case, so do not admit other host work until reconciliation
+is recorded.
+
 Cleanup sends TERM, polls descriptor-validated recursive population every
 100 ms for the configured 10-second grace, then sends KILL and polls for at
 most another 10 seconds. Once the outer unit can no longer launch work, the
-coordinator retains the host lease (or reacquires it when recovering without
-an existing descriptor), enumerates every deterministic stage name, validates
+coordinator retains the host lease (reclaimed from the keeper before TERM, or
+reacquired only on the fallback path above), enumerates every deterministic
+stage name, validates
 any surviving stage's boot, invocation, relationship and
 cgroup identity, directly applies the same TERM/KILL escalation, and proves all
 five stage units and cgroups absent. It reaps the service helper only after
@@ -252,10 +293,25 @@ admitted recipe: the record in `tools/throughput/retirement_budget.h`
 separate untimed bounds measured on the slowest untimed target, a runtime
 bound and the reviewed metrics bound, plus its derivation), pinned by the
 profile key `campaign-budget-sha256=`. Campaign freeze rejects a job that the
-reviewed ceiling cannot hold before any timing. The blocked profile carries no
-pin, the smoke unit keeps its one-hour limit, and wiring the retirement unit's
-runtime limit to the reviewed ceiling is integration work, so the blocked
-recipe is not admitted on a capacity assumption.
+reviewed ceiling cannot hold before any timing. The smoke unit keeps its
+one-hour limit. For a retirement job, once the reserved job is known and
+before preparation or launch, the coordinator reads the installed budget
+record (`BqWorkerConfig.retirement_budget`). It authenticates the exact bytes
+against the pin and takes the reviewed ceiling, rounded down to whole
+seconds, as both the outer unit's `RuntimeMaxSec` and the absolute execution
+deadline counted from lease acquisition (`bq_worker_retirement_runtime`). The
+ceiling already includes the record's fixed-phase bounds, so those bounds are
+a floor it must cover, not an addition to it. The value must lie in the
+broker's one-minute to 72-hour range. The recipe entry (`build.c`), the oracle
+adapter and the reference producer accept a deadline at most
+`BQ_SYSTEMD_RETIREMENT_DEADLINE_MAX_NS` (that 72-hour maximum) away, so the
+derived deadline is never refused downstream. The effective configuration carries it
+to the outer unit's readback and broker request, and each retirement stage
+inherits it. A missing record, the blocked profile's missing pin, a digest
+mismatch or an out-of-range ceiling fails the job before launch. The recipe
+therefore stays blocked, and it is not admitted on a capacity assumption.
+Integration still has to install the record, pin it in the admitted profile
+and set `retirement_budget`.
 
 The production systemd path is Linux-only. Windows and macOS return
 `unsupported`; those builds still compile the bounded codec and portable

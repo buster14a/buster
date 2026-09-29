@@ -56,6 +56,54 @@ recursive stop proof. Signals start no unit. The remaining gap is a
 `systemd-run` killed after it asked PID1 to start the unit but before PID1
 registered it; the readback can then come too early.
 
+### Unit runtime limits (#881-C)
+
+The typed request (version 2) carries a recipe selector and a runtime limit
+in microseconds; `systemd_runtime.h` holds the shared bounds and parser. Smoke
+requests (`start-outer` and the five smoke stages) and every signal carry
+neither, and their units keep `RuntimeMaxSec=3600000000us` byte for byte. The
+retirement outer unit is started with
+
+```text
+start-retirement-outer <job> <attempt> <base> <candidate> <runtime-usec>
+```
+
+where the coordinator derives the limit from the authenticated campaign
+budget ceiling (`bq_worker_retirement_runtime` in `worker_linux.c`). The broker
+refuses an absent, zero, fractional-second or out-of-range value; the closed
+range is one minute to 72 hours. That command runs `worker-unit` with the
+retirement recipe name, which `worker-unit` still refuses while the recipe is
+blocked. A retirement stage request never names a limit. Before building its
+command the broker reads the outer unit back (`bq_broker_parent_runtime`): the
+exact loaded `buster-bench` unit of the same job and attempt, whose invocation
+and control group match the instance record, whose gated `ExecStart` runs
+`worker-unit` with the retirement recipe, and whose effective `RuntimeMaxUSec`
+is in range. The stage gets exactly that value. The relay deadline is the
+unit's limit plus 100 seconds (3,700,000 ms for smoke). A signal accepts
+`RuntimeMaxUSec` only as the broker could have installed it: the smoke hour, a
+bounded value on a retirement stage, or a bounded value on an outer unit that
+runs the retirement recipe. `systemctl show` timespan text such as
+`2h 24min` is parsed numerically.
+
+A real-systemd slice still has to show a retirement outer and one stage
+reading back the derived `RuntimeMaxUSec`, and a signal accepting it. The
+self-test covers command construction and readback parsing only.
+
+**Upgrade together.** Version 2 changes the request frame for every
+operation, smoke included (176 to 184 bytes), and the broker accepts only
+exactly its own version. Install the service and the broker from the same
+reviewed revision in one step, with dispatch disabled and no live outer or
+stage unit. A mixed pair refuses every start and signal, including cleanup
+signals for units the older pair started, so drain first; do not upgrade
+around a quarantined job.
+
+Every stage unit, smoke and retirement alike, also lists
+`/var/lib/buster-bench/workspaces/results/.lease-return` in
+`InaccessiblePaths`. That directory holds each outer unit's lease-keeper socket
+(see the service README), which the keeper creates before the recipe can start
+any stage; a stage running as `buster-bench` therefore cannot reach it and
+obtain the lease description.
+
 ### Retirement matched-build stages (#1020)
 
 Besides the five smoke stages, the broker has four typed stages for the
@@ -100,13 +148,14 @@ installs exactly these four before `execv`. The smoke stages keep
 constant, never a request field.
 
 The unit properties are the same as for the smoke build stages: the same
-slice, `AllowedCPUs`, memory, tasks and runtime limits, `PartOf`, `BindsTo`
-and `After` on the outer unit, `--collect`, and the same common sandbox. That
+slice, `AllowedCPUs`, memory and tasks limits, `PartOf`, `BindsTo` and `After`
+on the outer unit, `--collect`, and the same common sandbox. The runtime limit
+is the outer unit's inherited one (see the section above). That
 sandbox includes `NoNewPrivileges=yes`, `ProtectSystem=strict`,
 `MemoryDenyWriteExecute=yes`, `RestrictSUIDSGID=yes`, empty capability sets,
 `PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX` and the
 `@system-service` system-call filter. `InaccessiblePaths` covers the queue,
-the lease and the attempt's result directory. Baseline stages have
+the lease, the attempt's result directory and the lease-keeper directory. Baseline stages have
 `ReadOnlyPaths=<attempt>/base/source <attempt>/candidate/source`. Candidate
 stages have `ReadOnlyPaths=<attempt>/base/source <attempt>/base/build
 <attempt>/candidate/source`. The only differences from the smoke stages are
@@ -146,7 +195,8 @@ gap.
 with `TERM` or `KILL` only, under the same identity checks as other stage
 units: exact user, slice, limits, sandbox readback, `PartOf`, `BindsTo`,
 `After`, and a gated `ExecStart` naming the gate, the stage number, the role's
-credentials, the build driver and the verb. No pre-gate legacy form exists
+credentials, the build driver and the verb. Its runtime limit may be the smoke
+hour or a bounded retirement value. No pre-gate legacy form exists
 for these units, so a direct `ExecStart` of the driver is refused. Any other
 retirement-like name is not a unit name the broker recognizes.
 

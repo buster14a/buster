@@ -9,6 +9,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "retirement_correctness_oracle.h"
+#include "systemd_runtime.h"
 #include "../throughput/retirement_command.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -24,7 +25,8 @@
 #define BQ_RETIREMENT_ORACLE_BINARY_CAP (512u * 1024u * 1024u)
 #define BQ_RETIREMENT_ORACLE_OUTPUT_CAP (16u * 1024u * 1024u)
 #define BQ_RETIREMENT_ORACLE_RECEIPT_CAP (1024u * 1024u)
-#define BQ_RETIREMENT_ORACLE_MAX_DEADLINE_NS UINT64_C(3600000000000)
+/* The shared retirement deadline bound (systemd_runtime.h). */
+#define BQ_RETIREMENT_ORACLE_MAX_DEADLINE_NS BQ_SYSTEMD_RETIREMENT_DEADLINE_MAX_NS
 
 BUSTER_GLOBAL_LOCAL bool bq_retirement_oracle_hex(char const value[65])
 {
