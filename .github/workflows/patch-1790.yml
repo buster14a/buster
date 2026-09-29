@@ -23,7 +23,19 @@ jobs:
 
       - name: Apply candidate patch
         shell: bash
-        run: python3 .github/scripts/patch_1790.py
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          path = Path('.github/scripts/patch_1790.py')
+          text = path.read_text(encoding='utf-8')
+          old = 'updated, count = re.subn(pattern, replacement, text, count=1, flags=re.MULTILINE | re.DOTALL)'
+          new = 'updated, count = re.subn(pattern, lambda _match: replacement, text, count=1, flags=re.MULTILINE | re.DOTALL)'
+          if text.count(old) != 1:
+              raise SystemExit('literal regex replacement seam not found exactly once')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PYTHON
+          python3 .github/scripts/patch_1790.py
 
       - name: Run focused workflow regressions
         shell: bash
