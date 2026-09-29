@@ -134,6 +134,16 @@ Record an audit with `tools/new_audit.py`: it writes one new file under
 `docs/performance-audits/` and nothing else. Never add a line to the closed
 index in `PERFORMANCE_AUDITS.md`, and never rewrite an existing audit.
 
+## Project license reporting
+
+When scanning, researching, auditing, or comparing projects, include each
+project's license in the report and any resulting GitHub issue or PR. Verify
+it from license files or authoritative repository metadata at the inspected
+revision, and cite the source; include the SPDX identifier when available.
+Distinguish dual/multiple licenses and relevant component-specific licenses
+rather than presenting one license as covering everything. Explicitly mark
+missing, ambiguous, or unverified licenses; do not guess from public access.
+
 ## Forge, issues, and pull requests
 
 Identify the owning project/component and existing issue before work. Follow
