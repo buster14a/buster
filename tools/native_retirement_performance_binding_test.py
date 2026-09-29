@@ -1270,6 +1270,11 @@ class BindingTests(unittest.TestCase):
             "statistical_family": family,
             "source_digests": binding._artifact_digest_map(record["support"]),
         })
+        # The A/A admission qualifies exactly this bounded family.
+        aa_descriptor = record["execution"]["host"]["aa_admission_receipt"]
+        aa_value = json.loads(contents[aa_descriptor["path"]].decode())
+        aa_value["family_sha256"] = family["sha256"]
+        aa_descriptor.update(put(aa_descriptor["path"], json_data(aa_value)))
         counts = binding._family_member_counts(family)
         record["rules"]["sampling"].update({
             "bootstrap_members_per_scope": counts["bootstrap_members_per_scope"],
@@ -1475,7 +1480,8 @@ class BindingTests(unittest.TestCase):
             code_records = InvocationEvidenceTests.code_records(
                 execution_root, execution_plan, parsed)
             untimed_batches = InvocationEvidenceTests.untimed_batches(
-                execution_root, execution_plan, parsed, ("production", "reproduction"))
+                execution_root, execution_plan, parsed, ("production", "reproduction"),
+                record=record, receipt=execution_receipt)
             self.assertEqual(untimed_batches["records"], 4)
             for path in sorted((execution_root / "execution").rglob("*")):
                 if path.is_file():
@@ -1927,6 +1933,18 @@ class BindingTests(unittest.TestCase):
         binding._check_batch_recipe_flags(rows, inputs)
         inputs["tests/basic_c_other.c"]["fixture_flags"] = "-std=c23"
         with self.assertRaisesRegex(ValueError, "disagree on frozen recipe flags"):
+            binding._check_batch_recipe_flags(rows, inputs)
+        # Untimed code-artifact batches use the same one-argv form.
+        inputs["tests/basic_c_other.c"]["fixture_flags"] = ""
+        cross = copy.deepcopy(rows[2])
+        cross["row"] = 4
+        cross["identity"]["fixture"] = "tests/basic_c_cross.c"
+        rows.append(cross)
+        self.assertEqual([group["rows"] for group in binding._untimed_groups(rows)], [[2, 4]])
+        inputs[cross["identity"]["fixture"]] = {"fixture_flags": ""}
+        binding._check_batch_recipe_flags(rows, inputs)
+        inputs[cross["identity"]["fixture"]]["fixture_flags"] = "-std=c23"
+        with self.assertRaisesRegex(ValueError, "untimed batch group 0 members disagree"):
             binding._check_batch_recipe_flags(rows, inputs)
 
     def test_cross_target_timing_is_rejected(self):

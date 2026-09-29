@@ -1854,14 +1854,18 @@ def _check_batch_recipe_flags(parsed, inputs_by_path):
     """(A1) One batch process compiles every member with one frozen argv.
 
     Members already share a recipe name and CPU; they must also share the
-    #508 recipe flags that ``inputs.tsv`` records for their fixtures.
+    #508 recipe flags that ``inputs.tsv`` records for their fixtures.  The
+    untimed code-artifact batches use the same one-argv form, so their
+    groups are held to the same rule.
     """
     row_by_id = {row["row"]: row for row in parsed}
-    for group in _batch_groups(parsed):
-        flags = {inputs_by_path[row_by_id[row]["identity"]["fixture"]]["fixture_flags"]
-                 for row in group["rows"]}
-        if len(flags) != 1:
-            _fail(f"batch group {group['group']} members disagree on frozen recipe flags")
+    for kind, groups in (("batch", _batch_groups(parsed)),
+                         ("untimed batch", _untimed_groups(parsed))):
+        for group in groups:
+            flags = {inputs_by_path[row_by_id[row]["identity"]["fixture"]]["fixture_flags"]
+                     for row in group["rows"]}
+            if len(flags) != 1:
+                _fail(f"{kind} group {group['group']} members disagree on frozen recipe flags")
 
 
 def _check_support_output(root, binding, row_data, native_target=None):
@@ -3008,10 +3012,11 @@ def _check_batch_metrics(root, descriptor, contract, frozen_inputs, exit_status,
     members = {}
     previous_end = 0
     for expected, record in zip(frozen_inputs, records):
-        path = record["path_hex"].decode("utf-8", errors="strict") \
-            if record["path_hex"].isascii() else None
-        if path is None or not (path == expected["fixture"]
-                                or path.endswith("/" + expected["fixture"])):
+        # The recorded input path is exactly the frozen fixture path given on
+        # the batch argv: printable ASCII, no `..` component, no suffix match.
+        raw = record["path_hex"]
+        path = raw.decode("ascii") if raw and all(0x20 <= byte <= 0x7e for byte in raw) else None
+        if path is None or ".." in path.split("/") or path != expected["fixture"]:
             _fail(f"{name} inputs do not follow the frozen batch input order")
         if record["status"] != expected["status"] or record["error"] != expected["error"] \
                 or record["diagnostic_digest"] != expected["diagnostic_sha256"] \
@@ -3164,6 +3169,7 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
     count = 0
     process_instances = set()
     metrics_paths = set()
+    metrics_digests = set()
     observations = _execution_trace_records(root, shards, expected_count)
     try:
         for value in observations:
@@ -3224,6 +3230,9 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
                     if metrics_artifact["path"] in metrics_paths:
                         _fail("batch invocation reuses another batch's per-input metrics artifact")
                     metrics_paths.add(metrics_artifact["path"])
+                    if metrics_artifact["sha256"] in metrics_digests:
+                        _fail("batch invocation reuses another batch's per-input metrics content")
+                    metrics_digests.add(metrics_artifact["sha256"])
                     contract = group_contracts[group["group"]]
                     frozen_inputs = _frozen_batch_inputs(contract, row_contracts, row_by_id,
                                                          variant, "artifact_sha256")
@@ -3300,6 +3309,11 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
         _fail("execution transcript is missing required warmups or timed invocations")
     return {"receipt_sha256": trusted_receipt_sha256, "invocations": count,
             "job_id": receipt["job_id"], "attempt": receipt["attempt"],
+            "boot_id": receipt["boot_id"], "bound_at_ns": receipt["bound_at_ns"],
+            "completed_at_ns": receipt["completed_at_ns"],
+            "process_instances": frozenset(process_instances),
+            "metrics_paths": frozenset(metrics_paths),
+            "metrics_digests": frozenset(metrics_digests),
             "row_contracts": row_contracts, "untimed_contracts": untimed_contracts}
 
 
@@ -3449,8 +3463,10 @@ def _check_code_records(root, descriptor, parsed, row_contracts):
 
 
 UNTIMED_BATCH_PURPOSES = ("production", "reproduction")
-UNTIMED_BATCH_FIELDS = ("command_sha256", "exit_status", "group", "metrics_artifact",
-                        "output_sha256", "purpose", "variant")
+UNTIMED_BATCH_FIELDS = ("command_sha256", "executable_sha256", "exit_status", "finished_ns",
+                        "group", "metrics_artifact", "output_sha256", "pid",
+                        "process_instance_sha256", "process_start_token", "purpose",
+                        "started_ns", "variant")
 
 
 def _untimed_batch_records(root, descriptor, groups):
@@ -3473,23 +3489,35 @@ def _untimed_batch_records(root, descriptor, groups):
                                         "untimed batch records"))
 
 
-def _check_untimed_batches(root, descriptor, parsed, row_contracts, untimed_contracts):
+def _check_untimed_batches(root, descriptor, parsed, row_contracts, untimed_contracts,
+                           binding, execution):
     """Authenticate the untimed code-artifact batches outside timing.
 
     (A1) Each untimed group and variant has exactly one reproduction batch
     and at most one production batch (a production artifact may come from
-    the correctness run instead).  Each batch uses the frozen command and
-    exit status; its compiler metrics carry every member's frozen status and
-    diagnostic digest; and its objects equal the frozen artifacts
-    (production) or reproduction digests (reproduction).  These batches are
-    not timed invocations and never enter the ``(G + U)`` transcript.
+    the correctness run instead).  Each batch uses the frozen command, exit
+    status and subject binary; its compiler metrics carry every member's
+    frozen status and diagnostic digest; and its objects equal the frozen
+    artifacts (production) or reproduction digests (reproduction).  These
+    batches are not timed invocations and never enter the ``(G + U)``
+    transcript.  Independence: each batch is its own supervisor-bound process
+    instance, distinct from every timed and untimed invocation (so a
+    reproduction is never its production batch); its interval lies outside
+    the timed collection window and overlaps no other untimed batch; and no
+    metrics artifact path or content is shared with any other batch.
+    ``execution`` is the checked transcript result: its receipt identity and
+    the timed process instances, metrics paths and metrics digests.
     """
     groups = _untimed_groups(parsed)
     row_by_id = {row["row"]: row for row in parsed}
     records = _untimed_batch_records(root, descriptor, groups)
     seen = set()
     last = None
-    paths = set()
+    instances = set(execution["process_instances"])
+    paths = set(execution["metrics_paths"])
+    digests = set(execution["metrics_digests"])
+    production_instances = {}
+    intervals = []
     for index, record in enumerate(records):
         record = _keys(record, UNTIMED_BATCH_FIELDS, "untimed batch record")
         if type(record["group"]) is not int or not 0 <= record["group"] < len(groups) \
@@ -3509,6 +3537,30 @@ def _check_untimed_batches(root, descriptor, parsed, row_contracts, untimed_cont
                 or type(record["exit_status"]) is not int \
                 or record["exit_status"] != side["exit_status"]:
             _fail("untimed batch command or exit status differs from its frozen contract")
+        if record["executable_sha256"] != binding["subjects"][record["variant"]]["binary"]["sha256"]:
+            _fail("untimed batch did not run its variant's bound subject binary")
+        for field in ("pid", "started_ns", "finished_ns"):
+            _positive_int(record[field], f"untimed batch record.{field}")
+        _token(record["process_start_token"], "untimed batch record.process_start_token")
+        _sha(record["process_instance_sha256"], "untimed batch record.process_instance_sha256")
+        instance = _process_instance_digest(execution["job_id"], execution["attempt"],
+                                            execution["boot_id"], record["pid"],
+                                            record["process_start_token"])
+        if record["process_instance_sha256"] != instance:
+            _fail("untimed batch process identity is not supervisor-bound")
+        if instance in instances:
+            _fail("untimed batch reuses a timed or untimed invocation's process instance")
+        instances.add(instance)
+        if record["purpose"] == "production":
+            production_instances[key[:2]] = instance
+        elif production_instances.get(key[:2]) == instance:
+            _fail("untimed reproduction batch is its production batch's process")
+        if record["finished_ns"] <= record["started_ns"]:
+            _fail("untimed batch interval is empty or reversed")
+        if record["started_ns"] <= execution["completed_at_ns"] \
+                and record["finished_ns"] >= execution["bound_at_ns"]:
+            _fail("untimed batch overlaps the timed collection window")
+        intervals.append((record["started_ns"], record["finished_ns"]))
         object_field = ("artifact_sha256" if record["purpose"] == "production"
                         else "reproduction_sha256")
         frozen_inputs = _frozen_batch_inputs(contract, row_contracts, row_by_id,
@@ -3521,8 +3573,12 @@ def _check_untimed_batches(root, descriptor, parsed, row_contracts, untimed_cont
             if metrics_artifact["path"] in paths:
                 _fail("untimed batch reuses another batch's per-input metrics artifact")
             paths.add(metrics_artifact["path"])
+            if metrics_artifact["sha256"] in digests:
+                _fail("untimed batch reuses another batch's per-input metrics content")
+            digests.add(metrics_artifact["sha256"])
             _check_batch_metrics(root, metrics_artifact, contract, frozen_inputs,
-                                 record["exit_status"], group["identity"]["target"], None,
+                                 record["exit_status"], group["identity"]["target"],
+                                 record["finished_ns"] - record["started_ns"],
                                  f"untimed batch metrics {index}")
         elif record["metrics_artifact"] is not None:
             _fail("untimed singleton stage batch cannot carry a per-input metrics artifact")
@@ -3530,6 +3586,10 @@ def _check_untimed_batches(root, descriptor, parsed, row_contracts, untimed_cont
                 [item["object_sha256"] for item in frozen_inputs]):
             _fail("untimed batch objects differ from their frozen artifacts or reproduction "
                   "digests (nondeterminism)")
+    intervals.sort()
+    for previous, current in zip(intervals, intervals[1:]):
+        if current[0] <= previous[1]:
+            _fail("untimed batches overlap one another")
     for group in groups:
         for variant in range(2):
             if (group["group"], variant, 1) not in seen:
@@ -4372,7 +4432,8 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
     code_facts = _check_code_records(root, result_bundle["code_records"], parsed,
                                      execution["row_contracts"])
     _check_untimed_batches(root, result_bundle["untimed_batches"], parsed,
-                           execution["row_contracts"], execution["untimed_contracts"])
+                           execution["row_contracts"], execution["untimed_contracts"],
+                           binding, execution)
     code_summary = _code_bytes_summary(parsed, code_facts)
     if result_bundle["code_bytes_summary"] != code_summary:
         _fail("sealed result bundle code-byte summary differs from the code records")

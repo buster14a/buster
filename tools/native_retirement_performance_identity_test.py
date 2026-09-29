@@ -190,14 +190,15 @@ class PerformanceIdentityTests(unittest.TestCase):
                 self.check_plan(Path(directory), pairs, sample_rows, groups)
 
     def test_current_population_over_cap_cannot_be_rescued_by_more_shards(self):
-        # The immutable ceiling is kept: the full census at 256 pairs, even
-        # ignoring the native projection, is rejected before any sample.
+        # The immutable ceiling is kept: the full census at the 254-pair
+        # collection maximum, even ignoring the native projection, is rejected
+        # before any sample (256 pairs is now refused by the pair maximum).
         sample_rows = self.object_rows + len(binding.STAGES) - 1
-        required = sample_rows * 2 * 256
+        required = sample_rows * 2 * binding.SAMPLING_MAX_PAIRS
         self.assertGreater(required, binding.RESULT_INPUT_MAX_TOTAL_RECORDS)
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "immutable total-record ceiling"):
-                self.check_plan(Path(directory), 256, sample_rows, 1)
+                self.check_plan(Path(directory), binding.SAMPLING_MAX_PAIRS, sample_rows, 1)
 
 
 class ReviewBoundaryTests(unittest.TestCase):
@@ -481,9 +482,11 @@ class InvocationEvidenceTests(unittest.TestCase):
                         arenas[row] = samples[row_key]["compiler_peak_memory"][variant]
                     fixtures = ([row_by_id[row]["identity"]["fixture"] for row in group["rows"]]
                                 + [item["fixture"] for item in contract["controls"]])
+                    # The header RSS is diagnostic; varying it per batch keeps
+                    # every metrics artifact's content distinct.
                     metrics = cls.cc_metrics(contract, fixtures,
                                              int(round(seconds * 1_000_000_000)) - 1,
-                                             intervals, arenas, rss,
+                                             intervals, arenas, rss + event["sequence"],
                                              contract[variant]["exit_status"])
                     objects = ([plan_rows[row][variant]["artifact_sha256"]
                                 for row in group["rows"]]
@@ -541,8 +544,12 @@ class InvocationEvidenceTests(unittest.TestCase):
 
     @classmethod
     def untimed_batches(cls, root, plan_descriptor, parsed, purposes=("reproduction",),
-                        mutate=None, path="execution/untimed-batches.jsonl"):
-        """Write the untimed code-artifact batch records and their metrics."""
+                        mutate=None, path="execution/untimed-batches.jsonl", *, record, receipt):
+        """Write the untimed code-artifact batch records and their metrics.
+
+        Each batch is its own supervisor-bound process of the variant's
+        subject binary, serially after the timed collection window.
+        """
         plan = json.loads((root / plan_descriptor["path"]).read_text())
         rows = {item["row"]: item for item in plan["rows"]}
         row_by_id = {row["row"]: row for row in parsed}
@@ -555,11 +562,14 @@ class InvocationEvidenceTests(unittest.TestCase):
                     field = "artifact_sha256" if purpose == "production" else "reproduction_sha256"
                     objects = [rows[row][variant][field] for row in members]
                     metrics_artifact = None
+                    index = len(lines)
                     if object_group:
+                        # The header RSS differs per batch, so no two metrics
+                        # artifacts share content.
                         metrics = cls.cc_metrics(
                             contract, [row_by_id[row]["identity"]["fixture"] for row in members],
                             5_000_000, {row: 1000 for row in members},
-                            {row: 8192 for row in members}, 65536,
+                            {row: 8192 for row in members}, 65536 + index,
                             contract[variant]["exit_status"])
                         value = {"metrics": metrics, "objects": objects}
                         if mutate is not None:
@@ -568,12 +578,22 @@ class InvocationEvidenceTests(unittest.TestCase):
                             root, f"execution/untimed/{contract['group']}-{variant}-{purpose}.txt",
                             cls.cc_metrics_bytes(value["metrics"]))
                         objects = value["objects"]
+                    pid = 900000 + index
+                    token = f"untimed-process-{index}"
+                    started = receipt["completed_at_ns"] + 10_000_000 * (index + 1)
                     lines.append({"command_sha256": contract[variant]["command_sha256"],
+                                  "executable_sha256": record["subjects"][variant]["binary"]["sha256"],
                                   "exit_status": contract[variant]["exit_status"],
+                                  "finished_ns": started + 5_000_001,
                                   "group": contract["group"],
                                   "metrics_artifact": metrics_artifact,
                                   "output_sha256": binding._batch_output_digest(objects),
-                                  "purpose": purpose, "variant": variant})
+                                  "pid": pid,
+                                  "process_instance_sha256": binding._process_instance_digest(
+                                      receipt["job_id"], receipt["attempt"], receipt["boot_id"],
+                                      pid, token),
+                                  "process_start_token": token,
+                                  "purpose": purpose, "started_ns": started, "variant": variant})
         if not lines:
             return None
         data = b"".join((json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -1305,6 +1325,15 @@ class InvocationEvidenceTests(unittest.TestCase):
             metrics["inputs"][0]["path_hex"] = "ABCD"
         self.assert_metrics_rejected(upper_hex, "lowercase hex")
 
+        # The input path is exactly the frozen fixture path: no prefix or
+        # suffix match, no `..` component, printable bytes only.
+        for change in (lambda path: b"/checkout/" + path, lambda path: b"src/../" + path,
+                       lambda path: path + b"\n", lambda path: path.replace(b"/", b"\x01", 1),
+                       lambda path: path.split(b"/", 1)[1], lambda path: b""):
+            def rewrite(metrics, change=change):
+                metrics["inputs"][0]["path_hex"] = change(metrics["inputs"][0]["path_hex"])
+            self.assert_metrics_rejected(rewrite, "frozen batch input order")
+
         def stray_function(metrics):
             metrics["functions"][0][0]["input"] = 1
         self.assert_metrics_rejected(stray_function, "function records do not follow")
@@ -1456,6 +1485,14 @@ class InvocationEvidenceTests(unittest.TestCase):
             binding.NATIVE_TIMED_TARGET)
         return rows, untimed
 
+    def untimed(self, purposes, mutate=None):
+        return self.untimed_batches(self.root, self.plan, self.rows, purposes, mutate,
+                                    record=self.record, receipt=self.receipt)
+
+    def check_untimed(self, descriptor, rows, untimed, execution=None):
+        return binding._check_untimed_batches(self.root, descriptor, self.rows, rows, untimed,
+                                              self.record, execution or self.check())
+
     def test_untimed_code_artifact_batches_are_sealed_and_checked(self):
         # (A1) Untimed code rows need their frozen oracle status/diagnostics and
         # a byte-identical reproduction, from batches outside the timed count.
@@ -1465,18 +1502,15 @@ class InvocationEvidenceTests(unittest.TestCase):
         rows, untimed = self.untimed_contracts()
         self.assertEqual(self.check()["invocations"], (2 + 1) * 2 * (2 + 2 * 60))
         for purposes in (("reproduction",), ("production", "reproduction")):
-            descriptor = self.untimed_batches(self.root, self.plan, self.rows, purposes)
-            records = binding._check_untimed_batches(self.root, descriptor, self.rows, rows,
-                                                     untimed)
+            descriptor = self.untimed(purposes)
+            records = self.check_untimed(descriptor, rows, untimed)
             self.assertEqual([(record["variant"], record["purpose"]) for record in records],
                              [(variant, purpose) for variant in ("baseline", "candidate")
                               for purpose in purposes])
         with self.assertRaisesRegex(ValueError, "lacks its untimed code-artifact batch records"):
-            binding._check_untimed_batches(self.root, None, self.rows, rows, untimed)
+            self.check_untimed(None, rows, untimed)
         with self.assertRaisesRegex(ValueError, "lacks its reproduction batch"):
-            binding._check_untimed_batches(
-                self.root, self.untimed_batches(self.root, self.plan, self.rows, ("production",)),
-                self.rows, rows, untimed)
+            self.check_untimed(self.untimed(("production",)), rows, untimed)
 
         def status(group, variant, purpose, value):
             value["metrics"]["inputs"][0]["diagnostic_digest"] = "e" * 64
@@ -1499,12 +1533,11 @@ class InvocationEvidenceTests(unittest.TestCase):
                 def selected(group, variant, which, value, mutate=mutate, purpose=purpose):
                     if variant == "candidate" and which == purpose:
                         mutate(group, variant, which, value)
-                descriptor = self.untimed_batches(self.root, self.plan, self.rows,
-                                                  ("production", "reproduction"), selected)
+                descriptor = self.untimed(("production", "reproduction"), selected)
                 with self.subTest(message=message, purpose=purpose), \
                         self.assertRaisesRegex(ValueError, message):
-                    binding._check_untimed_batches(self.root, descriptor, self.rows, rows, untimed)
-        good = self.untimed_batches(self.root, self.plan, self.rows, ("reproduction",))
+                    self.check_untimed(descriptor, rows, untimed)
+        good = self.untimed(("reproduction",))
         lines = [json.loads(line) for line in (self.root / good["path"]).read_bytes().splitlines()]
         for change, message in (
                 (lambda value: value[0].update(command_sha256="e" * 64), "frozen contract"),
@@ -1521,7 +1554,72 @@ class InvocationEvidenceTests(unittest.TestCase):
             descriptor = {**self.put(self.root, "execution/untimed-bad.jsonl", data),
                           "records": len(candidate)}
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
-                binding._check_untimed_batches(self.root, descriptor, self.rows, rows, untimed)
+                self.check_untimed(descriptor, rows, untimed)
+
+    def test_untimed_batches_prove_binary_and_process_independence(self):
+        # (A1 review M2/L6) Each untimed batch runs the variant's subject binary
+        # as its own supervisor-bound process, outside the timed window, and
+        # shares no metrics path or content with any other batch.
+        self.add_untimed_rows()
+        self.attach()
+        rows, untimed = self.untimed_contracts()
+        execution = self.check()
+        good = self.untimed(("production", "reproduction"))
+        self.assertEqual(len(self.check_untimed(good, rows, untimed, execution)), 4)
+        lines = [json.loads(line) for line in (self.root / good["path"]).read_bytes().splitlines()]
+        timed = next(event for event in self.events if event["metrics_artifact"] is not None)
+        copied = self.put(self.root, "execution/untimed/copied.txt",
+                          (self.root / lines[0]["metrics_artifact"]["path"]).read_bytes())
+
+        def rebind(record, pid, token):
+            record.update(pid=pid, process_start_token=token,
+                          process_instance_sha256=binding._process_instance_digest(
+                              self.receipt["job_id"], self.receipt["attempt"],
+                              self.receipt["boot_id"], pid, token))
+
+        cases = (
+            (lambda value: value[0].update(executable_sha256=self.record["subjects"]["candidate"]
+                                           ["binary"]["sha256"]), "bound subject binary"),
+            (lambda value: value[0].update(pid=value[0]["pid"] + 1), "not supervisor-bound"),
+            (lambda value: rebind(value[0], timed["pid"], timed["process_start_token"]),
+             "reuses a timed or untimed invocation's process instance"),
+            # A reproduction that is its production batch's process.
+            (lambda value: rebind(value[1], value[0]["pid"], value[0]["process_start_token"]),
+             "reuses a timed or untimed invocation's process instance"),
+            (lambda value: value[0].update(started_ns=self.receipt["bound_at_ns"] + 1,
+                                           finished_ns=self.receipt["bound_at_ns"] + 5_000_002),
+             "timed collection window"),
+            (lambda value: value[0].update(finished_ns=value[0]["started_ns"]), "empty or reversed"),
+            (lambda value: value[1].update(started_ns=value[0]["started_ns"],
+                                           finished_ns=value[0]["finished_ns"]),
+             "overlap one another"),
+            (lambda value: value[0].update(finished_ns=value[0]["started_ns"] + 100),
+             "header is not one serial"),
+            (lambda value: value[1].update(metrics_artifact=copied), "per-input metrics content"),
+            (lambda value: value[0].update(metrics_artifact=dict(timed["metrics_artifact"])),
+             "reuses another batch's per-input metrics artifact"),
+            (lambda value: value[0].pop("process_start_token"), "missing fields"),
+        )
+        for change, message in cases:
+            candidate = copy.deepcopy(lines)
+            change(candidate)
+            data = b"".join((json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                            for item in candidate)
+            descriptor = {**self.put(self.root, "execution/untimed-bad.jsonl", data),
+                          "records": len(candidate)}
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                self.check_untimed(descriptor, rows, untimed, execution)
+
+    def test_timed_batches_never_share_metrics_content(self):
+        batches = [index for index, event in enumerate(self.events)
+                   if event["metrics_artifact"] is not None]
+        events = copy.deepcopy(self.events)
+        first, later = events[batches[0]], events[batches[-1]]
+        duplicate = self.put(self.root, "execution/metrics/duplicate.txt",
+                             (self.root / first["metrics_artifact"]["path"]).read_bytes())
+        later["metrics_artifact"] = duplicate
+        with self.assertRaisesRegex(ValueError, "per-input metrics content"):
+            self.check(self.write_transcript(self.root, self.receipt, events))
 
     def test_untimed_group_contracts_are_the_derived_partition(self):
         self.add_untimed_rows()
