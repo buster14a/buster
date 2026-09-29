@@ -480,8 +480,11 @@ unit cannot reach the queue, the supervisor exports the verified preparation
 record and the request into a sealed `retirement/` directory of the attempt
 workspace. The unit-side importer and matched-build runner in
 `retirement_unit.c` are compiled but not yet called. The runner sends both
-subjects' build stages through typed broker `start-stage` requests, which the
-installed broker does not yet accept; see
+subjects' build stages through typed broker `start-stage` requests. The broker
+source now defines those four stages (see
+[SYSTEMD_BROKER.md](deploy/SYSTEMD_BROKER.md#retirement-matched-build-stages-1020)),
+but the installed broker does not accept them until LOCAL installs the
+reviewed binaries; see
 [RETIREMENT_PREPARATION.md](RETIREMENT_PREPARATION.md#worker-unit-handoff-1020)
 and [unit-side matched builds](RETIREMENT_PREPARATION.md#unit-side-matched-builds-1020).
 

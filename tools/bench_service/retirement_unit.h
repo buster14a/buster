@@ -53,14 +53,19 @@ typedef struct BqRetirementUnitBuilt
     u32 owned;
 } BqRetirementUnitBuilt;
 
-/* store is the export prepare used. Requires the PREPARING acknowledgement
+/* store is the export prepare used. workspace_root must be exactly
+ * BQ_RETIREMENT_STAGE_WORKSPACE_ROOT, the broker's fixed root, or the build
+ * returns BQ_WORKSPACE_MISMATCH before the channel. Requires the PREPARING acknowledgement
  * before the first child (sent here unless phases already holds it), then
  * runs baseline and candidate generate/build through the broker. A readable
  * cancellation_fd (the SIGTERM self-pipe) or deadline_ns (CLOCK_MONOTONIC,
- * the lease handoff's execution deadline) kills and reaps the running stage,
- * proves its process group absent and returns BQ_WORKER_CANCEL_SIGNAL or
- * BQ_WORKER_TIMEOUT (BQ_CLEANUP_FAILED if absence is not proven). Uses the
- * compiled profile, so it fails closed with the blocked profile. */
+ * the lease handoff's execution deadline) asks the broker to KILL the
+ * running stage unit and reaps the broker CLI, whose relayed exit is the
+ * absence proof (bq_retirement_matched_build_cancel), then returns
+ * BQ_WORKER_CANCEL_SIGNAL or BQ_WORKER_TIMEOUT (BQ_CLEANUP_FAILED if absence
+ * is not proven). A stage that settles other than exit 0 with complete
+ * capture takes the same KILL and proof before its failure is recorded.
+ * Uses the compiled profile, so it fails closed with the blocked profile. */
 BUSTER_F_DECL BqError bq_retirement_unit_build(BqRetirementStore store, BqRetirementUnitPrepared const* prepared,
     int workspaces, int installed, String8 workspace_root, BqPhaseChannel* phases, int cancellation_fd,
     u64 deadline_ns, BqRetirementUnitBuilt* built);

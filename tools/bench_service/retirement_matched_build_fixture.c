@@ -17,16 +17,25 @@
 #include <unistd.h>
 
 /* Stand-in for the systemd broker CLI (#1020): installed beside the fixture
- * driver as fixture-broker, it records each typed request in broker-launches
- * and runs the matching stage itself as the test user. It derives the
- * workspace, attempt, source cwd, build path and umask from its own location
- * and the typed fields, as the real broker derives them from constants; the
- * real broker instead starts a sandboxed stage unit as the stage user. */
+ * driver as fixture-broker, it records each typed request in broker-launches.
+ * start-stage behaves like the broker relaying systemd-run --wait: it forks
+ * the matching stage as the test user (the "unit", whose pid it records in
+ * <root>/<unit>.pid), waits for it, removes the record (--collect) and exits
+ * with the stage's status. signal ... KILL SIGKILLs a recorded unit and exits
+ * 0, or exits 126 when no unit is recorded, as the broker refuses a unit that
+ * is not loaded. It derives the workspace, attempt, source cwd, build path
+ * and umask from its own location and the typed fields, as the real broker
+ * derives them from constants; the real broker instead starts a sandboxed
+ * stage unit as the stage user whose only writable path is that
+ * service-created configured root. Cleanup regressions select behaviour by
+ * job: 65 creates its unit only after 300 ms, 66 ignores KILL while
+ * reporting success, 68 relays BQ_RETIREMENT_STAGE_UNPROVEN_STATUS (125)
+ * after its stage and 71 refuses the start with 126 before any unit. */
 static int fixture_broker(int argc, char** argv)
 {
     static char const* const stages[] = {"retirement-base-generate", "retirement-base-build",
         "retirement-candidate-generate", "retirement-candidate-build"};
-    char root[512], record[1024], line[640];
+    char root[512], record[1024], line[640], unit[768];
     char const* slash = strrchr(argv[0], '/');
     size_t length = slash ? (size_t)(slash - argv[0]) : 0;
     bool ok = length > 0 && length < sizeof(root);
@@ -46,12 +55,26 @@ static int fixture_broker(int argc, char** argv)
     int stage = -1;
     for (int index = 0; ok && argc == 7 && index < 4; index += 1)
         if (!strcmp(argv[4], stages[index])) stage = index;
-    int result = ok && argc == 4 && !strcmp(argv[1], "signal") ? 0 : 126;
-    if (ok && stage >= 0)
+    int unit_length = !ok ? -1 : argc == 7 ? snprintf(unit, sizeof(unit), "%s/buster-bench-%s-%s-%s.service.pid",
+                      root, argv[2], argv[3], argv[4]) : snprintf(unit, sizeof(unit), "%s/%s.pid", root, argv[2]);
+    ok = ok && unit_length > 0 && (size_t)unit_length < sizeof(unit) && (argc == 4 || !strchr(argv[4], '/'));
+    int result = 126;
+    if (ok && argc == 4 && !strcmp(argv[1], "signal") && !strchr(argv[2], '/'))
+    {
+        char text[32] = {0};
+        int pid_file = open(unit, O_RDONLY | O_CLOEXEC);
+        ssize_t count = pid_file >= 0 ? read(pid_file, text, sizeof(text) - 1) : -1;
+        if (pid_file >= 0) close(pid_file);
+        long pid = count > 0 ? strtol(text, NULL, 10) : 0;
+        bool ignored = !strncmp(argv[2], "buster-bench-66-", 16);
+        result = pid > 1 && (ignored || kill((pid_t)pid, SIGKILL) == 0) ? 0 : 126;
+    }
+    if (ok && stage >= 0 && strcmp(argv[2], "71"))
     {
         char driver[640], build[640], source[700];
         int driver_length = snprintf(driver, sizeof(driver), "%s/fixture-driver", root);
-        int build_length = snprintf(build, sizeof(build), "%s/job-%s-attempt-%s/matched-build", root, argv[2], argv[3]);
+        int build_length = snprintf(build, sizeof(build), "%s/job-%s-attempt-%s/%s/matched-build", root, argv[2],
+                                    argv[3], stage < 2 ? "base/build" : "candidate");
         int source_length = snprintf(source, sizeof(source), "%s/job-%s-attempt-%s/%s/source", root, argv[2],
                                      argv[3], stage < 2 ? "base" : "candidate");
         char* generate[] = {driver, "generate", "--build-directory", build, "--config", "Release", "--cc", "clang",
@@ -59,14 +82,33 @@ static int fixture_broker(int argc, char** argv)
             "--no-sanitize", "--no-time-trace", "--no-instrument", "--no-lto", NULL};
         char* compile[] = {driver, "build", "--build-directory", build, "--config", "Release", "-t", "ide", "--",
             "-j1", NULL};
-        if (driver_length > 0 && (size_t)driver_length < sizeof(driver) && build_length > 0 &&
-            (size_t)build_length < sizeof(build) && source_length > 0 && (size_t)source_length < sizeof(source) &&
-            chdir(source) == 0)
+        bool paths = driver_length > 0 && (size_t)driver_length < sizeof(driver) && build_length > 0 &&
+                     (size_t)build_length < sizeof(build) && source_length > 0 && (size_t)source_length < sizeof(source);
+        struct timespec late = {0, 300000000};
+        if (paths && !strcmp(argv[2], "65")) nanosleep(&late, NULL);
+        pid_t child = paths ? fork() : -1;
+        if (child == 0)
         {
-            umask(stage < 2 ? 0077 : 0007);
-            execv(driver, stage & 1 ? compile : generate);
+            if (chdir(source) == 0)
+            {
+                umask(stage < 2 ? 0077 : 0007);
+                execv(driver, stage & 1 ? compile : generate);
+            }
+            _exit(127);
         }
-        result = 127;
+        char pid_text[32];
+        int pid_length = snprintf(pid_text, sizeof(pid_text), "%ld\n", (long)child);
+        int pid_file = child > 0 ? open(unit, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600) : -1;
+        bool recorded = pid_file >= 0 && write(pid_file, pid_text, (size_t)pid_length) == (ssize_t)pid_length;
+        if (pid_file >= 0 && close(pid_file) != 0) recorded = false;
+        int status = 0;
+        pid_t waited = -1;
+        do { if (child > 0) waited = waitpid(child, &status, 0); }
+        while (waited < 0 && errno == EINTR);
+        unlink(unit);
+        result = !recorded || waited != child ? 127 : WIFEXITED(status) ? WEXITSTATUS(status) :
+                 128 + WTERMSIG(status);
+        if (!strcmp(argv[2], "68")) result = 125;
     }
     return result;
 }
@@ -102,15 +144,19 @@ int main(int argc, char** argv)
              * record or dependent timed child follows a failed generate. */
             bool probe = strstr(argv[3], "driver-exec-probe") != NULL;
             bool no_leak = !probe || (fcntl(90, F_GETFD) < 0 && errno == EBADF);
-            /* One zero-exit candidate generate deliberately leaves the old
-             * configured root intact to test the no-op/cache rejection. */
-            bool stale_candidate = candidate && strstr(argv[3], "job-46-attempt-56") != NULL;
-            result = !no_leak ? 6 : strstr(argv[3], "job-30-attempt-40") ? 5 :
-                     stale_candidate || mkdir(argv[3], 0700) == 0 ? 0 : 1;
+            /* Like the real driver in a broker stage, whose configured root
+             * is a bind mount it cannot replace: fill the root in place, or
+             * create it when a probe names a fresh path. */
+            struct stat root_info = {0};
+            bool root = mkdir(argv[3], 0700) == 0 ||
+                        (errno == EEXIST && lstat(argv[3], &root_info) == 0 && S_ISDIR(root_info.st_mode));
+            result = !no_leak ? 6 : strstr(argv[3], "job-30-attempt-40") || strstr(argv[3], "job-67-attempt-") ? 5 :
+                     root ? 0 : 1;
             puts(result ? "fixture generate failed" : "fixture generated");
-            /* Jobs 63 and 64 hang in generate after recording their pid, for
+            /* Jobs 63 to 66 hang in generate after recording their pid, for
              * the unit's cancellation and deadline cleanup regressions. */
-            if (!result && (strstr(argv[3], "job-63-attempt-") || strstr(argv[3], "job-64-attempt-")))
+            if (!result && (strstr(argv[3], "job-63-attempt-") || strstr(argv[3], "job-64-attempt-") ||
+                            strstr(argv[3], "job-65-attempt-") || strstr(argv[3], "job-66-attempt-")))
             {
                 char pid_path[600];
                 int pid_length = snprintf(pid_path, sizeof(pid_path), "%s/pid", argv[3]);
@@ -124,7 +170,7 @@ int main(int argc, char** argv)
                     nanosleep(&pause, NULL);
                 }
             }
-            if (!result && strstr(argv[3], "job-39-attempt-49"))
+            if (!result && (strstr(argv[3], "job-39-attempt-49") || strstr(argv[3], "job-69-attempt-")))
             {
                 char flood[8192];
                 memset(flood, 'x', sizeof(flood));

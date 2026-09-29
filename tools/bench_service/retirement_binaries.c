@@ -12,9 +12,38 @@
 #define BQ_RETIREMENT_BINARY_BYTES_CAP (512ull * 1024ull * 1024ull)
 #define BQ_RETIREMENT_BINARIES_RECORD_CAP 1024u
 
+/* The attempt is the materializer's traversable 02710 workspace: owned by the
+ * service and writable by nobody else, so no other identity can rename the
+ * private work directory beneath it. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_attempt_directory(int attempt)
+{
+    struct stat info = {0};
+    bool ok = attempt >= 0 && fstat(attempt, &info) == 0 && S_ISDIR(info.st_mode) &&
+              info.st_uid == geteuid() && (info.st_mode & 022) == 0;
+    return ok;
+}
+
+/* Open job-<id>-attempt-<token>/retirement-work, which must be service-owned
+ * and private. Returns -1 on any mismatch; the caller closes the result. */
+BUSTER_GLOBAL_LOCAL int bq_retirement_work_open(int workspaces, BqJob const* job)
+{
+    char name[64];
+    int attempt = bq_workspace_name(name, job->id, job->token) ?
+                  openat(workspaces, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int work = bq_retirement_attempt_directory(attempt) ?
+               openat(attempt, BQ_RETIREMENT_BUILD_WORK_DIRECTORY, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat info = {0};
+    bool ok = work >= 0 && fstat(work, &info) == 0 && info.st_uid == geteuid() &&
+              bq_owned_directory(work, true, false);
+    if (attempt >= 0 && close(attempt) != 0) ok = false;
+    if (!ok && work >= 0) close(work);
+    return ok ? work : -1;
+}
+
 /* Check the exact frozen output closure through a fresh cursor. Reopening the
- * held directory leaves its caller's cursor untouched on repeated readback. */
-BUSTER_GLOBAL_LOCAL bool bq_retirement_binary_directory(int attempt, int directory,
+ * held directory leaves its caller's cursor untouched on repeated readback.
+ * parent is the private work directory that names trusted-build. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_binary_directory(int parent, int directory,
     char identity_sha256[SHA256_HEX_CAPACITY])
 {
     struct stat held = {0}, named = {0};
@@ -45,7 +74,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_binary_directory(int attempt, int directo
         if (ok) seen |= bit;
     }
     if (entries && closedir(entries) != 0) ok = false;
-    ok = ok && seen == 3 && fstatat(attempt, "trusted-build", &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+    ok = ok && seen == 3 && fstatat(parent, "trusted-build", &named, AT_SYMLINK_NOFOLLOW) == 0 &&
          S_ISDIR(named.st_mode) && held.st_dev == named.st_dev && held.st_ino == named.st_ino &&
          bq_owned_directory(directory, true, true);
     if (ok)
@@ -164,15 +193,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_binaries_observe(BqRetirementBuildStor
     BqRetirementPreparation prepared = {0};
     BqError result = bq_retirement_preparation_import_pinned(stores.preparation, job, installed,
                                                                workspaces, profile, preparation_sha256, &prepared);
-    int attempt = -1, directory = -1;
+    int work = -1, directory = -1;
     if (result == BQ_OK)
     {
-        char name[64];
-        bool path = bq_workspace_name(name, job->id, job->token);
-        attempt = path ? openat(workspaces, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-        directory = attempt >= 0 && bq_owned_directory(attempt, true, false) ?
-                    openat(attempt, "trusted-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-        result = directory >= 0 && bq_retirement_binary_directory(attempt, directory,
+        work = bq_retirement_work_open(workspaces, job);
+        directory = work >= 0 ?
+                    openat(work, "trusted-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        result = directory >= 0 && bq_retirement_binary_directory(work, directory,
                       observed->directory_identity_sha256) ? BQ_OK : BQ_SOURCE_MISMATCH;
     }
     for (u32 side = 0; result == BQ_OK && side < 2; side += 1)
@@ -184,12 +211,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_binaries_observe(BqRetirementBuildStor
     if (result == BQ_OK)
     {
         char identity[SHA256_HEX_CAPACITY] = {0};
-        result = bq_retirement_binary_directory(attempt, directory, identity) &&
+        result = bq_retirement_binary_directory(work, directory, identity) &&
                  !memcmp(identity, observed->directory_identity_sha256, SHA256_HEX_CAPACITY) ?
                  BQ_OK : BQ_SOURCE_MISMATCH;
     }
     if (directory >= 0 && close(directory) != 0 && result == BQ_OK) result = BQ_IO;
-    if (attempt >= 0 && close(attempt) != 0 && result == BQ_OK) result = BQ_IO;
+    if (work >= 0 && close(work) != 0 && result == BQ_OK) result = BQ_IO;
     if (result == BQ_OK)
     {
         BqRetirementPreparation repeated = {0};
@@ -345,16 +372,14 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_binaries_acquire_stores(BqRetirementBu
     if (result == BQ_OK)
         result = bq_retirement_binaries_import_stores(stores, job, installed, workspaces, profile,
                                                        preparation_sha256, record_sha256, &verified);
-    int attempt = -1, directory = -1;
+    int work = -1, directory = -1;
     if (result == BQ_OK)
     {
-        char name[64];
-        attempt = bq_workspace_name(name, job->id, job->token) ?
-                  openat(workspaces, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-        directory = attempt >= 0 && bq_owned_directory(attempt, true, false) ?
-                    openat(attempt, "trusted-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        work = bq_retirement_work_open(workspaces, job);
+        directory = work >= 0 ?
+                    openat(work, "trusted-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
         char identity[SHA256_HEX_CAPACITY] = {0};
-        result = directory >= 0 && bq_retirement_binary_directory(attempt, directory, identity) &&
+        result = directory >= 0 && bq_retirement_binary_directory(work, directory, identity) &&
                  !memcmp(identity, verified.directory_identity_sha256, SHA256_HEX_CAPACITY) ?
                  BQ_OK : BQ_SOURCE_MISMATCH;
     }
@@ -370,12 +395,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_binaries_acquire_stores(BqRetirementBu
     if (result == BQ_OK)
     {
         char identity[SHA256_HEX_CAPACITY] = {0};
-        result = bq_retirement_binary_directory(attempt, directory, identity) &&
+        result = bq_retirement_binary_directory(work, directory, identity) &&
                  !memcmp(identity, verified.directory_identity_sha256, SHA256_HEX_CAPACITY) ?
                  BQ_OK : BQ_SOURCE_MISMATCH;
     }
     if (directory >= 0 && close(directory) != 0 && result == BQ_OK) result = BQ_IO;
-    if (attempt >= 0 && close(attempt) != 0 && result == BQ_OK) result = BQ_IO;
+    if (work >= 0 && close(work) != 0 && result == BQ_OK) result = BQ_IO;
     if (result == BQ_OK)
     {
         BqRetirementBinaries current = {0};

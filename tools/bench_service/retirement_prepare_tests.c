@@ -1070,8 +1070,11 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const
     record_digest[0] = 0;
     BqRetirementBinaries imported = {0};
     String8 pinned = string_from_pointer(profile);
-    BQ_PREP_CHECK(mkdirat(attempt, "trusted-build", 0700) == 0);
-    int directory = openat(attempt, "trusted-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    /* The frozen outputs live in the helper's private work directory. */
+    BQ_PREP_CHECK(mkdirat(attempt, BQ_RETIREMENT_BUILD_WORK_DIRECTORY, 0700) == 0);
+    int work = openat(attempt, BQ_RETIREMENT_BUILD_WORK_DIRECTORY, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(work >= 0 && mkdirat(work, "trusted-build", 0700) == 0);
+    int directory = openat(work, "trusted-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     BQ_PREP_CHECK(directory >= 0 && bq_prep_test_binary(directory, "base-ide", "compiler A\n") &&
                   fchmod(directory, 0500) == 0);
     BQ_PREP_CHECK(bq_retirement_binaries_record_pinned(queue, job, installed, workspaces, pinned,
@@ -1104,9 +1107,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const
                   bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
                   preparation_digest, record_digest, &imported) == BQ_OK);
     BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
-                  renameat(attempt, "trusted-build", attempt, "held-trusted-build") == 0 &&
-                  mkdirat(attempt, "trusted-build", 0700) == 0);
-    int replacement_directory = openat(attempt, "trusted-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                  renameat(work, "trusted-build", work, "held-trusted-build") == 0 &&
+                  mkdirat(work, "trusted-build", 0700) == 0);
+    int replacement_directory = openat(work, "trusted-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     BQ_PREP_CHECK(replacement_directory >= 0 &&
                   renameat(directory, "base-ide", replacement_directory, "base-ide") == 0 &&
                   renameat(directory, "candidate-ide", replacement_directory, "candidate-ide") == 0 &&
@@ -1118,8 +1121,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const
                   fchmod(directory, 0700) == 0 &&
                   renameat(replacement_directory, "base-ide", directory, "base-ide") == 0 &&
                   renameat(replacement_directory, "candidate-ide", directory, "candidate-ide") == 0 &&
-                  unlinkat(attempt, "trusted-build", AT_REMOVEDIR) == 0 &&
-                  renameat(attempt, "held-trusted-build", attempt, "trusted-build") == 0 &&
+                  unlinkat(work, "trusted-build", AT_REMOVEDIR) == 0 &&
+                  renameat(work, "held-trusted-build", work, "trusted-build") == 0 &&
                   fchmod(directory, 0500) == 0 &&
                   bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
                   preparation_digest, record_digest, &imported) == BQ_OK);
@@ -1143,7 +1146,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const
                   preparation_digest, second) != BQ_OK && !second[0]);
 
     BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
-                  renameat(directory, "base-ide", attempt, "held-base-ide") == 0 &&
+                  renameat(directory, "base-ide", work, "held-base-ide") == 0 &&
                   bq_prep_test_binary(directory, "base-ide", "compiler A\n") &&
                   fchmod(directory, 0500) == 0);
     BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
@@ -1151,19 +1154,19 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const
                   !imported.preparation_sha256[0]);
     BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
                   unlinkat(directory, "base-ide", 0) == 0 &&
-                  renameat(attempt, "held-base-ide", directory, "base-ide") == 0 &&
+                  renameat(work, "held-base-ide", directory, "base-ide") == 0 &&
                   fchmod(directory, 0500) == 0);
     BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
                   preparation_digest, record_digest, &imported) == BQ_OK);
     BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
-                  renameat(directory, "candidate-ide", attempt, "held-candidate-ide") == 0 &&
+                  renameat(directory, "candidate-ide", work, "held-candidate-ide") == 0 &&
                   symlinkat("base-ide", directory, "candidate-ide") == 0 && fchmod(directory, 0500) == 0);
     BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
                   preparation_digest, record_digest, &imported) == BQ_SOURCE_MISMATCH &&
                   !imported.preparation_sha256[0]);
     BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
                   unlinkat(directory, "candidate-ide", 0) == 0 &&
-                  renameat(attempt, "held-candidate-ide", directory, "candidate-ide") == 0 &&
+                  renameat(work, "held-candidate-ide", directory, "candidate-ide") == 0 &&
                   fchmod(directory, 0500) == 0);
     BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
                   preparation_digest, record_digest, &imported) == BQ_OK);
@@ -1242,7 +1245,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const
     struct stat pinned_info = {0}, after_swap = {0};
     BQ_PREP_CHECK(held.descriptors[0] >= 0 && fstat(held.descriptors[0], &pinned_info) == 0 &&
                   directory >= 0 && fchmod(directory, 0700) == 0 &&
-                  renameat(directory, "base-ide", attempt, "held-base-ide") == 0 &&
+                  renameat(directory, "base-ide", work, "held-base-ide") == 0 &&
                   bq_prep_test_binary(directory, "base-ide", "compiler A\n") &&
                   fchmod(directory, 0500) == 0);
     char original[12] = {0};
@@ -1259,7 +1262,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const
                   !refused.verified.preparation_sha256[0]);
     BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
                   unlinkat(directory, "base-ide", 0) == 0 &&
-                  renameat(attempt, "held-base-ide", directory, "base-ide") == 0 &&
+                  renameat(work, "held-base-ide", directory, "base-ide") == 0 &&
                   fchmod(directory, 0500) == 0);
     int old_descriptor = held.descriptors[0];
     bq_retirement_binaries_release(&held);
@@ -1271,6 +1274,28 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const
     bq_retirement_binaries_release(&held);
     if (binary >= 0) close(binary);
     if (directory >= 0) close(directory);
+    if (work >= 0) close(work);
+}
+
+/* Copy an executable fixture byte for byte (mode 0500), so its digest pin
+ * still matches at the new path. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_copy_file(char const* from, char const* to)
+{
+    int input = open(from, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int output = input >= 0 ? open(to, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0700) : -1;
+    bool ok = input >= 0 && output >= 0;
+    u8 bytes[16384];
+    ssize_t count = 1;
+    while (ok && count > 0)
+    {
+        count = read(input, bytes, sizeof(bytes));
+        if (count < 0 && errno == EINTR) { count = 1; continue; }
+        ok = count >= 0 && (count == 0 || bq_write_all(output, bytes, (u32)count));
+    }
+    ok = ok && fchmod(output, 0500) == 0 && fsync(output) == 0;
+    if (output >= 0 && close(output) != 0) ok = false;
+    if (input >= 0 && close(input) != 0) ok = false;
+    return ok;
 }
 
 BUSTER_GLOBAL_LOCAL bool bq_prep_test_compile_driver(char const* driver_path)
@@ -1362,8 +1387,8 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_held_exec_fd(BqRetirementMatchedBuild* bui
         BqRetirementBuildProcess unlaunched = {0};
         struct stat absent = {0};
         ok = !bq_retirement_matched_build_launch(build, &unlaunched) && build->failed &&
-            !unlaunched.state && fstatat(attempt, "build-log-0", &absent, AT_SYMLINK_NOFOLLOW) < 0 &&
-            errno == ENOENT;
+            !unlaunched.state && fstatat(attempt, BQ_RETIREMENT_BUILD_WORK_DIRECTORY "/build-log-0", &absent,
+                                         AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT;
     }
     if (parent_valid && fchmod(parent, (parent_info.st_mode & 07777) | S_IWUSR) != 0) ok = false;
     if (source_replaced && unlinkat(parent, "source", 0) != 0) ok = false;
@@ -1406,15 +1431,24 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_run_stage(BqRetirementMatchedBuild* build,
     return ok;
 }
 
+/* The directory that names a subject's configured root: base/build for the
+ * baseline, candidate/ for the candidate (retirement_stage.h). */
+BUSTER_GLOBAL_LOCAL int bq_prep_test_root_parent(int attempt, u32 side)
+{
+    int parent = openat(attempt, side ? BQ_RETIREMENT_STAGE_CANDIDATE_PARENT : BQ_RETIREMENT_STAGE_BASE_PARENT,
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    return parent;
+}
+
 /* Preserve the produced executable inode while replacing the configured build
  * root. A path-only freeze would otherwise accept the same bytes from a root
- * that the reaped child never used. */
-BUSTER_GLOBAL_LOCAL bool bq_prep_test_swap_build_root(int attempt)
+ * that the reaped child never used. parent names the root. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_swap_build_root(int parent)
 {
-    bool ok = renameat(attempt, "matched-build", attempt, "held-build") == 0 &&
-              mkdirat(attempt, "matched-build", 0700) == 0;
-    int held = ok ? openat(attempt, "held-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    int replacement = ok ? openat(attempt, "matched-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    bool ok = renameat(parent, "matched-build", parent, "held-build") == 0 &&
+              mkdirat(parent, "matched-build", 0700) == 0;
+    int held = ok ? openat(parent, "held-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int replacement = ok ? openat(parent, "matched-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     ok = ok && held >= 3 && replacement >= 3 && mkdirat(replacement, "Release", 0700) == 0;
     int old_release = ok ? openat(held, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     int new_release = ok ? openat(replacement, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
@@ -1588,7 +1622,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
             ok = mkdirat(attempt, subject_name, 0700) == 0;
             int subject = ok ? openat(attempt, subject_name,
                 O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-            ok = ok && subject >= 0 && mkdirat(subject, "source", 02750) == 0;
+            ok = ok && subject >= 0 && mkdirat(subject, "source", 02750) == 0 && mkdirat(subject, "build", 0700) == 0;
             int source = ok ? openat(subject, "source",
                 O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
             if (ok)
@@ -1628,8 +1662,15 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
         BqRetirementBuildStage command = {0};
         BQ_PREP_CHECK(bq_retirement_matched_build_stage(&build, &command) &&
             command.argc == 16 && !strcmp(command.argv[7], "clang") &&
-            !strcmp(command.argv[3], build.build) && !strcmp(command.cwd, build.source[0]) &&
+            !strcmp(command.argv[3], build.build[0]) && !strcmp(command.cwd, build.source[0]) &&
             !strcmp(command.env[0], checked.path) && command.file_umask == 0077);
+        /* begin made the private work directory; the roots do not exist yet. */
+        int work = openat(attempt, BQ_RETIREMENT_BUILD_WORK_DIRECTORY, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        struct stat layout = {0};
+        BQ_PREP_CHECK(work >= 0 && bq_owned_directory(work, true, false) &&
+            fstatat(attempt, BQ_RETIREMENT_STAGE_BASE_PARENT "/matched-build", &layout, AT_SYMLINK_NOFOLLOW) != 0 &&
+            fstatat(attempt, BQ_RETIREMENT_STAGE_CANDIDATE_PARENT "/matched-build", &layout,
+                    AT_SYMLINK_NOFOLLOW) != 0);
         if (trial == 1 || trial == 6)
             BQ_PREP_CHECK(bq_prep_test_held_exec_fd(&build, driver_path, workspace_path,
                 attempt, &command, trial == 6) &&
@@ -1705,11 +1746,23 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                     chmod(tool_bin, 0555) == 0 && bq_retirement_toolchain_recheck(&checked));
                 break;
             }
-            if (trial && trial != 16 && stage == 2)
-                ok = renameat(attempt, "matched-build", attempt, "old-build") == 0;
+            /* A candidate root present before its generate (a stale or
+             * planted configuration) is refused before any log or child. */
+            if (trial == 16 && stage == 2)
+            {
+                int parent = bq_prep_test_root_parent(attempt, 1);
+                BQ_PREP_CHECK(parent >= 3 && mkdirat(parent, "matched-build", 0700) == 0);
+                if (parent >= 0) close(parent);
+                BqRetirementBuildProcess refused = {0};
+                struct stat absent = {0};
+                BQ_PREP_CHECK(!bq_retirement_matched_build_launch(&build, &refused) && build.failed &&
+                    !refused.process && !refused.state &&
+                    fstatat(work, "build-log-2", &absent, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT);
+                break;
+            }
             if ((trial == 10 && stage == 1) || (trial == 11 && stage == 3))
             {
-                int root = bq_open_absolute_directory(string_from_pointer(build.build));
+                int root = bq_open_absolute_directory(string_from_pointer(build.build[stage / 2u]));
                 BQ_PREP_CHECK(root >= 3 && mkdirat(root, "Release", 0700) == 0);
                 int release = root >= 3 ? openat(root, "Release",
                     O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
@@ -1726,19 +1779,21 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                 char log_name[32];
                 snprintf(log_name, sizeof(log_name), "build-log-%u", stage);
                 struct stat log_stat = {0};
-                BQ_PREP_CHECK(fstatat(attempt, log_name, &log_stat, AT_SYMLINK_NOFOLLOW) != 0 &&
+                BQ_PREP_CHECK(fstatat(work, log_name, &log_stat, AT_SYMLINK_NOFOLLOW) != 0 &&
                     errno == ENOENT);
                 break;
             }
             if ((trial == 14 && stage == 1) || (trial == 15 && stage == 3))
             {
                 int held = build.generated_root;
+                int parent = bq_prep_test_root_parent(attempt, stage / 2u);
                 struct stat previous = {0}, replacement = {0};
-                BQ_PREP_CHECK(held >= 3 && fstat(held, &previous) == 0 &&
-                    renameat(attempt, "matched-build", attempt, "held-generated") == 0 &&
-                    mkdirat(attempt, "matched-build", 0700) == 0);
-                int substituted = openat(attempt, "matched-build",
+                BQ_PREP_CHECK(held >= 3 && parent >= 3 && fstat(held, &previous) == 0 &&
+                    renameat(parent, "matched-build", parent, "held-generated") == 0 &&
+                    mkdirat(parent, "matched-build", 0700) == 0);
+                int substituted = openat(parent, "matched-build",
                     O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                if (parent >= 0) close(parent);
                 BQ_PREP_CHECK(substituted >= 3 && fstat(substituted, &replacement) == 0 &&
                     (previous.st_dev != replacement.st_dev || previous.st_ino != replacement.st_ino));
                 if (substituted >= 0) close(substituted);
@@ -1750,13 +1805,13 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                 char log_name[32];
                 snprintf(log_name, sizeof(log_name), "build-log-%u", stage);
                 struct stat absent = {0};
-                BQ_PREP_CHECK(fstatat(attempt, log_name, &absent, AT_SYMLINK_NOFOLLOW) != 0 &&
+                BQ_PREP_CHECK(fstatat(work, log_name, &absent, AT_SYMLINK_NOFOLLOW) != 0 &&
                     errno == ENOENT);
                 break;
             }
             BqRetirementBuildStage current = {0};
             ok = ok && bq_retirement_matched_build_stage(&build, &current) &&
-                 !strcmp(current.argv[3], command.argv[3]) &&
+                 !strcmp(current.argv[3], build.build[stage / 2u]) &&
                  current.file_umask == (stage < 2 ? 0077 : 0007);
             BqRetirementBuildProcess process = {0};
             int exit_code = -1;
@@ -1771,10 +1826,12 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                 if ((trial == 12 && stage == 1) || (trial == 13 && stage == 3))
                 {
                     struct stat original = {0}, replacement_stat = {0};
-                    BQ_PREP_CHECK(held_root >= 3 && fstat(held_root, &original) == 0 &&
-                        bq_prep_test_swap_build_root(attempt));
-                    int replacement = openat(attempt, "matched-build",
-                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                    int parent = bq_prep_test_root_parent(attempt, stage / 2u);
+                    BQ_PREP_CHECK(held_root >= 3 && parent >= 3 && fstat(held_root, &original) == 0 &&
+                        bq_prep_test_swap_build_root(parent));
+                    int replacement = parent >= 0 ? openat(parent, "matched-build",
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+                    if (parent >= 0) close(parent);
                     BQ_PREP_CHECK(replacement >= 3 && fstat(replacement, &replacement_stat) == 0 &&
                         (original.st_dev != replacement_stat.st_dev ||
                          original.st_ino != replacement_stat.st_ino) &&
@@ -1785,19 +1842,26 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                 if (trial == 5)
                 {
                     int replacement = -1;
-                    BQ_PREP_CHECK(renameat(attempt, process.name, attempt, "held-build-log") == 0);
-                    replacement = openat(attempt, process.name,
+                    BQ_PREP_CHECK(renameat(work, process.name, work, "held-build-log") == 0);
+                    replacement = openat(work, process.name,
                         O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
                     BQ_PREP_CHECK(replacement >= 3 && fchmod(replacement, 0400) == 0);
                     if (replacement >= 0) close(replacement);
                 }
-                uid_t candidate = ((trial == 2 && stage == 3) ||
-                                   (trial == 17 && stage == 2)) ? geteuid() + 1 : geteuid();
+                /* A generated root whose mode changed (here, the candidate
+                 * root opened to everyone) is not the root this helper made. */
+                if (trial == 17 && stage == 2)
+                {
+                    int parent = bq_prep_test_root_parent(attempt, 1);
+                    BQ_PREP_CHECK(parent >= 3 && fchmodat(parent, "matched-build", 0777, 0) == 0);
+                    if (parent >= 0) close(parent);
+                }
+                uid_t candidate = trial == 2 && stage == 3 ? geteuid() + 1 : geteuid();
                 BqError expected = !trial ? BQ_WORKER_FAILED :
                                    trial == 4 || trial == 5 ? BQ_WORKER_FAILED :
                                    ((trial == 2 || trial == 13) && stage == 3) ||
                                    (trial == 12 && stage == 1) ||
-                                   ((trial == 16 || trial == 17) && stage == 2) ?
+                                   (trial == 17 && stage == 2) ?
                                    BQ_SOURCE_MISMATCH : BQ_OK;
                 BQ_PREP_CHECK(bq_retirement_matched_build_complete_pinned(queue, &job,
                     installed, workspaces, pinned, &process, candidate, &build) == expected &&
@@ -1816,7 +1880,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
             }
             bq_retirement_matched_build_abort(&process);
             if (trial == 4 || trial == 5 || (trial == 12 && stage == 1) ||
-                ((trial == 16 || trial == 17) && stage == 2)) break;
+                (trial == 17 && stage == 2)) break;
         }
         BQ_PREP_CHECK(ok);
         if (trial != 1)
@@ -1892,7 +1956,19 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                 driver_path, toolchain_root, preparation_digest, build.binary_record_sha256,
                 build.build_record_sha256, &observed) == BQ_CORRUPT && !observed.preparation_sha256[0]);
         }
+        if (trial == 1)
+        {
+            /* Each subject built in its own service-created root. */
+            struct stat base_root = {0}, candidate_root = {0};
+            BQ_PREP_CHECK(fstatat(attempt, BQ_RETIREMENT_STAGE_BASE_PARENT "/matched-build", &base_root,
+                                  AT_SYMLINK_NOFOLLOW) == 0 && base_root.st_uid == geteuid() &&
+                          (base_root.st_mode & 07777) == BQ_RETIREMENT_BUILD_BASE_ROOT_MODE &&
+                          fstatat(attempt, BQ_RETIREMENT_STAGE_CANDIDATE_PARENT "/matched-build", &candidate_root,
+                                  AT_SYMLINK_NOFOLLOW) == 0 && candidate_root.st_uid == geteuid() &&
+                          (candidate_root.st_mode & 07777) == BQ_RETIREMENT_BUILD_CANDIDATE_ROOT_MODE);
+        }
         BQ_PREP_CHECK(bq_retirement_matched_build_release(&build) && build.generated_root == -1);
+        if (work >= 0) close(work);
         if (attempt >= 0) close(attempt);
     }
 }
@@ -2266,7 +2342,7 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_unit_attempt(BqQueue* queue, BqJob const* 
         char const* subject_name = side ? "candidate" : "base";
         ok = mkdirat(out->attempt, subject_name, 0700) == 0;
         int subject = ok ? openat(out->attempt, subject_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-        ok = ok && subject >= 0 && mkdirat(subject, "source", 02750) == 0;
+        ok = ok && subject >= 0 && mkdirat(subject, "source", 02750) == 0 && mkdirat(subject, "build", 0700) == 0;
         int source = ok ? openat(subject, "source", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
         ok = ok && source >= 0 && bq_copy_manifest(installed, source, bq_field(&out->job.request, 3 + side),
                                                    BQ_RETIREMENT_SOURCE_MANIFEST_CAP) &&
@@ -2328,6 +2404,144 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_flip_sealed(int parent, char const* direct
     return ok;
 }
 
+/* A broker-launched baseline generate of a fresh real-A attempt, driven
+ * through the matched-build API so cleanup is called directly. */
+typedef struct BqPrepBrokerStage
+{
+    BqPrepUnitAttempt attempt;
+    BqRetirementMatchedBuild build;
+    BqRetirementBuildProcess process;
+    int evidence;
+} BqPrepBrokerStage;
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_broker_launch(BqQueue* queue, BqJob const* original, u64 id, int installed,
+    int workspaces, BqRetirementPreparation const* original_preparation, char const* pinned,
+    char const* toolchain_root, char const* driver, char const* broker, char const* workspace_path,
+    BqPrepBrokerStage* out)
+{
+    *out = (BqPrepBrokerStage){.build = {.generated_root = -1}, .evidence = -1};
+    bool created = false;
+    bool ok = bq_prep_test_unit_attempt(queue, original, id, installed, workspaces, original_preparation, pinned,
+                                        toolchain_root, &out->attempt);
+    out->evidence = ok ? bq_create_inherited_group_directory(out->attempt.attempt,
+                             BQ_RETIREMENT_UNIT_EVIDENCE_DIRECTORY, 02700, &created) : -1;
+    BqRetirementBuildStores stores = {out->attempt.store, {out->evidence}};
+    ok = ok && out->evidence >= 0 && created &&
+         bq_retirement_matched_build_begin_stores(stores, &out->attempt.job, installed, workspaces,
+             string_from_pointer(workspace_path), string_from_pointer(pinned), driver, toolchain_root, broker,
+             workspace_path, out->attempt.digest, true, &out->build) == BQ_OK &&
+         bq_retirement_matched_build_launch(&out->build, &out->process);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_broker_close(BqPrepBrokerStage* stage)
+{
+    bq_retirement_matched_build_abort(&stage->process);
+    bool ok = stage->process.state == 0 && bq_retirement_matched_build_release(&stage->build);
+    if (stage->evidence >= 0 && close(stage->evidence) != 0) ok = false;
+    stage->evidence = -1;
+    return bq_prep_test_unit_attempt_close(&stage->attempt) && ok;
+}
+
+/* The broker's "signal <unit> KILL" requests for this job's baseline generate. */
+BUSTER_GLOBAL_LOCAL u32 bq_prep_test_kill_requests(char const* launches, u64 id)
+{
+    char text[16384], expected[160];
+    bq_prep_test_read_text(launches, text, sizeof(text));
+    int length = snprintf(expected, sizeof(expected), "signal buster-bench-%" PRIu64 "-%" PRIu64
+                          "-retirement-base-generate.service KILL\n", (uint64_t)id, (uint64_t)id + 10u);
+    u32 count = 0;
+    for (char* at = length > 0 ? strstr(text, expected) : NULL; at; at = strstr(at + length, expected)) count += 1;
+    return count;
+}
+
+/* The pid a hanging fixture generate recorded in its configured root, or 0. */
+BUSTER_GLOBAL_LOCAL long bq_prep_test_driver_pid(char const* workspace_path, u64 id)
+{
+    char path[512], text[32];
+    int length = snprintf(path, sizeof(path), "%s/job-%" PRIu64 "-attempt-%" PRIu64
+                          "/" BQ_RETIREMENT_STAGE_BASE_PARENT "/matched-build/pid",
+                          workspace_path, (uint64_t)id, (uint64_t)id + 10u);
+    long pid = length > 0 && (size_t)length < sizeof(path) && bq_prep_test_read_text(path, text, sizeof(text)) ?
+               strtol(text, NULL, 10) : 0;
+    return pid;
+}
+
+/* Gone, or a zombie left for a reaper outside this test, within a second. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_pid_gone(long pid)
+{
+    bool gone = false;
+    for (u32 attempt = 0; pid > 1 && !gone && attempt < 100; attempt += 1)
+    {
+        char path[64], text[512];
+        errno = 0;
+        gone = kill((pid_t)pid, 0) != 0 && errno == ESRCH;
+        int length = snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
+        char* state = !gone && length > 0 && (size_t)length < sizeof(path) &&
+                      bq_prep_test_read_text(path, text, sizeof(text)) ? strrchr(text, ')') : NULL;
+        if (state && state[1] == ' ' && state[2] == 'Z') gone = true;
+        struct timespec pause = {0, 10000000};
+        if (!gone) nanosleep(&pause, NULL);
+    }
+    return gone;
+}
+
+/* BROKER cleanup (#1020, #1785): the held child is only the broker CLI, so
+ * absence is its relayed exit after the broker KILL, never the CLI's process
+ * group or the KILL's own result. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_broker_cleanup(BqQueue* queue, BqJob const* original, int installed,
+    int workspaces, BqRetirementPreparation const* original_preparation, char const* pinned,
+    char const* toolchain_root, char const* driver, char const* broker, char const* workspace_path,
+    char const* launches)
+{
+    /* Already finished and collected: the KILL finds no unit (126), which the
+     * old group-then-signal order reported as BQ_CLEANUP_FAILED; the CLI's
+     * relayed exit 0 is the proof. */
+    BqPrepBrokerStage stage = {0};
+    BQ_PREP_CHECK(bq_prep_test_broker_launch(queue, original, 70, installed, workspaces, original_preparation,
+                                             pinned, toolchain_root, driver, broker, workspace_path, &stage));
+    siginfo_t exited = {0};
+    BQ_PREP_CHECK(stage.process.process > 0 &&
+                  waitid(P_PID, (id_t)stage.process.process, &exited, WEXITED | WNOWAIT) == 0 &&
+                  exited.si_code == CLD_EXITED && exited.si_status == 0);
+    BQ_PREP_CHECK(bq_retirement_matched_build_cancel(&stage.build, &stage.process,
+                                                     bq_phase_clock() + 5000000000ull) &&
+                  stage.process.state == BQ_RETIREMENT_BUILD_WAIT_FAILED && !stage.process.process &&
+                  bq_prep_test_kill_requests(launches, 70) == 1);
+    BQ_PREP_CHECK(bq_prep_test_broker_close(&stage));
+
+    /* Cancelled before the unit exists: the first KILL finds none, so it is
+     * retried until it reaches the hanging stage the broker starts later, and
+     * the CLI then exits with the relayed result. */
+    BQ_PREP_CHECK(bq_prep_test_broker_launch(queue, original, 65, installed, workspaces, original_preparation,
+                                             pinned, toolchain_root, driver, broker, workspace_path, &stage));
+    BQ_PREP_CHECK(bq_retirement_matched_build_cancel(&stage.build, &stage.process,
+                                                     bq_phase_clock() + 5000000000ull) &&
+                  stage.process.state == BQ_RETIREMENT_BUILD_WAIT_FAILED && !stage.process.process &&
+                  bq_prep_test_kill_requests(launches, 65) >= 2);
+    long pid = bq_prep_test_driver_pid(workspace_path, 65);
+    BQ_PREP_CHECK(!pid || bq_prep_test_pid_gone(pid));
+    BQ_PREP_CHECK(bq_prep_test_broker_close(&stage));
+
+    /* A KILL that reports success but leaves the stage running: the CLI never
+     * exits, so it is killed at the deadline and absence is not proven. */
+    BQ_PREP_CHECK(bq_prep_test_broker_launch(queue, original, 66, installed, workspaces, original_preparation,
+                                             pinned, toolchain_root, driver, broker, workspace_path, &stage));
+    pid = 0;
+    for (u32 attempt = 0; !pid && attempt < 500; attempt += 1)
+    {
+        struct timespec pause = {0, 10000000};
+        pid = bq_prep_test_driver_pid(workspace_path, 66);
+        if (!pid) nanosleep(&pause, NULL);
+    }
+    u64 before = bq_phase_clock();
+    BQ_PREP_CHECK(pid > 1 && !bq_retirement_matched_build_cancel(&stage.build, &stage.process, before + 700000000ull) &&
+                  bq_phase_clock() - before < 5000000000ull && stage.process.state == BQ_RETIREMENT_BUILD_WAIT_FAILED &&
+                  !stage.process.process && bq_prep_test_kill_requests(launches, 66) == 1);
+    BQ_PREP_CHECK(bq_prep_test_pid_gone(pid));
+    BQ_PREP_CHECK(bq_prep_test_broker_close(&stage));
+}
+
 BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* original, int installed,
     int workspaces, char const* installed_path, char const* workspace_path, char const* profile,
     BqRetirementPreparation const* original_preparation)
@@ -2363,7 +2577,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* or
     pid_t peer = bq_prep_test_phase_peer(&phases, 61, 71, true);
     BqRetirementUnitBuilt built = {0};
     BQ_PREP_CHECK(bq_retirement_unit_build_pinned(success.store, &success.unit, workspaces, installed, root,
-                  profile_pins, driver, toolchain_root, broker, geteuid(), &phases, cancel[0], generous, &built) ==
+                  profile_pins, driver, toolchain_root, broker, workspace_path, geteuid(), &phases, cancel[0], generous, &built) ==
                   BQ_OK && built.owned && phases.sequence == BQ_PHASE_PREPARING);
     BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
     BQ_PREP_CHECK(built.verified.launcher == BQ_RETIREMENT_LAUNCH_BROKER && built.verified.next == 4 &&
@@ -2400,18 +2614,18 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* or
     /* Re-import, then tampered record, wrong toolchain and wrong binary. */
     BqRetirementMatchedBuild observed = {0};
     BQ_PREP_CHECK(bq_retirement_unit_build_import_pinned(success.store, &success.unit, workspaces, installed, root,
-                  profile_pins, driver, toolchain_root, broker, built.binary_record_sha256, built.build_record_sha256,
+                  profile_pins, driver, toolchain_root, broker, workspace_path, built.binary_record_sha256, built.build_record_sha256,
                   &observed) == BQ_OK && !strcmp(observed.stage_receipt_sha256[3],
                   built.verified.stage_receipt_sha256[3]));
     BQ_PREP_CHECK(bq_retirement_unit_build_import_pinned(success.store, &success.unit, workspaces, installed, root,
-                  profile_pins, driver, toolchain_root, NULL, built.binary_record_sha256, built.build_record_sha256,
+                  profile_pins, driver, toolchain_root, NULL, NULL, built.binary_record_sha256, built.build_record_sha256,
                   &observed) == BQ_CORRUPT && !observed.preparation_sha256[0]);
     char record_name[48];
     BQ_PREP_CHECK(bq_record_name(record_name, "matched-builds", success.job.id) &&
                   bq_prep_test_flip_sealed(success.attempt, BQ_RETIREMENT_UNIT_EVIDENCE_DIRECTORY, record_name,
                                            BQ_RETIREMENT_EXPORT_MODE, 0400) &&
                   bq_retirement_unit_build_import_pinned(success.store, &success.unit, workspaces, installed, root,
-                      profile_pins, driver, toolchain_root, broker, built.binary_record_sha256,
+                      profile_pins, driver, toolchain_root, broker, workspace_path, built.binary_record_sha256,
                       built.build_record_sha256, &observed) == BQ_CORRUPT && !observed.preparation_sha256[0] &&
                   bq_prep_test_flip_sealed(success.attempt, BQ_RETIREMENT_UNIT_EVIDENCE_DIRECTORY, record_name,
                                            BQ_RETIREMENT_EXPORT_MODE, 0400));
@@ -2425,28 +2639,32 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* or
                    rename(clang_path, saved) == 0 && bq_prep_test_write(clang_path, "fixture only\n") &&
                    chmod(clang_path, 0555) == 0 && chmod(tool_bin, 0555) == 0;
     BQ_PREP_CHECK(swapped && bq_retirement_unit_build_import_pinned(success.store, &success.unit, workspaces,
-                  installed, root, profile_pins, driver, toolchain_root, broker, built.binary_record_sha256,
+                  installed, root, profile_pins, driver, toolchain_root, broker, workspace_path, built.binary_record_sha256,
                   built.build_record_sha256, &observed) != BQ_OK && !observed.preparation_sha256[0]);
     BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 && unlink(clang_path) == 0 && rename(saved, clang_path) == 0 &&
                   chmod(tool_bin, 0555) == 0);
-    BQ_PREP_CHECK(bq_prep_test_flip_sealed(success.attempt, "trusted-build", "candidate-ide", 0500, 0500) &&
+    char const* frozen = BQ_RETIREMENT_BUILD_WORK_DIRECTORY "/trusted-build";
+    BQ_PREP_CHECK(bq_prep_test_flip_sealed(success.attempt, frozen, "candidate-ide", 0500, 0500) &&
                   bq_retirement_unit_build_import_pinned(success.store, &success.unit, workspaces, installed, root,
-                      profile_pins, driver, toolchain_root, broker, built.binary_record_sha256,
+                      profile_pins, driver, toolchain_root, broker, workspace_path, built.binary_record_sha256,
                       built.build_record_sha256, &observed) != BQ_OK && !observed.preparation_sha256[0] &&
-                  bq_prep_test_flip_sealed(success.attempt, "trusted-build", "candidate-ide", 0500, 0500));
+                  bq_prep_test_flip_sealed(success.attempt, frozen, "candidate-ide", 0500, 0500));
     BQ_PREP_CHECK(bq_retirement_unit_build_import_pinned(success.store, &success.unit, workspaces, installed, root,
-                  profile_pins, driver, toolchain_root, broker, built.binary_record_sha256, built.build_record_sha256,
+                  profile_pins, driver, toolchain_root, broker, workspace_path, built.binary_record_sha256, built.build_record_sha256,
                   &observed) == BQ_OK);
     /* A live result and a second build into the same attempt are refused
      * before any child; PREPARING is already held by this channel. */
     BqRetirementUnitBuilt again = {0};
     BQ_PREP_CHECK(bq_retirement_unit_build_pinned(success.store, &success.unit, workspaces, installed, root,
-                  profile_pins, driver, toolchain_root, broker, geteuid(), &phases, cancel[0], generous, &built) ==
+                  profile_pins, driver, toolchain_root, broker, workspace_path, geteuid(), &phases, cancel[0], generous, &built) ==
                   BQ_BAD_REQUEST && built.owned);
     BQ_PREP_CHECK(bq_retirement_unit_build_pinned(success.store, &success.unit, workspaces, installed, root,
-                  profile_pins, driver, toolchain_root, broker, geteuid(), &phases, cancel[0], generous, &again) ==
+                  profile_pins, driver, toolchain_root, broker, workspace_path, geteuid(), &phases, cancel[0], generous, &again) ==
                   BQ_WORKSPACE_MISMATCH && !again.owned && again.binaries.descriptors[0] == -1);
     BQ_PREP_CHECK(bq_prep_test_read_text(launches, text, sizeof(text)) == (u32)(cursor - text));
+    char kept_binaries[SHA256_HEX_CAPACITY], kept_builds[SHA256_HEX_CAPACITY];
+    memcpy(kept_binaries, built.binary_record_sha256, sizeof(kept_binaries));
+    memcpy(kept_builds, built.build_record_sha256, sizeof(kept_builds));
     BQ_PREP_CHECK(bq_retirement_unit_built_release(&built) && !built.owned && built.binaries.descriptors[0] == -1);
     /* The checked-in blocked profile and a profile without the driver pin
      * fail before the channel is touched. */
@@ -2454,8 +2672,25 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* or
     BQ_PREP_CHECK(bq_retirement_unit_build(success.store, &success.unit, workspaces, installed, root, &untouched,
                   cancel[0], generous, &again) != BQ_OK && !untouched.sequence && !again.owned);
     BQ_PREP_CHECK(bq_retirement_unit_build_pinned(success.store, &success.unit, workspaces, installed, root,
-                  string_from_pointer(fixture.pinned), driver, toolchain_root, broker, geteuid(), &untouched,
+                  string_from_pointer(fixture.pinned), driver, toolchain_root, broker, workspace_path, geteuid(), &untouched,
                   cancel[0], generous, &again) == BQ_RECIPE_MISMATCH && !untouched.sequence && !again.owned);
+    /* A broker sequence binds the broker's own workspace root: the fixed
+     * production root (what bq_retirement_unit_build passes) or none refuses
+     * this test root before the channel, a launch or a re-import. */
+    BQ_PREP_CHECK(bq_retirement_unit_build_pinned(success.store, &success.unit, workspaces, installed, root,
+                  profile_pins, driver, toolchain_root, broker, BQ_RETIREMENT_STAGE_WORKSPACE_ROOT, geteuid(),
+                  &untouched, cancel[0], generous, &again) == BQ_WORKSPACE_MISMATCH && !untouched.sequence);
+    BQ_PREP_CHECK(bq_retirement_unit_build_pinned(success.store, &success.unit, workspaces, installed, root,
+                  profile_pins, driver, toolchain_root, broker, NULL, geteuid(), &untouched, cancel[0], generous,
+                  &again) == BQ_WORKSPACE_MISMATCH && !untouched.sequence && !again.owned);
+    BQ_PREP_CHECK(bq_retirement_unit_build_import_pinned(success.store, &success.unit, workspaces, installed, root,
+                  profile_pins, driver, toolchain_root, broker, BQ_RETIREMENT_STAGE_WORKSPACE_ROOT,
+                  kept_binaries, kept_builds, &observed) == BQ_WORKSPACE_MISMATCH &&
+                  !observed.preparation_sha256[0] &&
+                  bq_retirement_unit_build_import_pinned(success.store, &success.unit, workspaces, installed, root,
+                      profile_pins, driver, toolchain_root, broker, workspace_path, kept_binaries, kept_builds,
+                      &observed) == BQ_OK);
+    BQ_PREP_CHECK(bq_prep_test_read_text(launches, text, sizeof(text)) == (u32)(cursor - text));
     BQ_PREP_CHECK(bq_prep_test_unit_attempt_close(&success));
 
     /* A refused acknowledgement launches nothing and creates no evidence. */
@@ -2464,13 +2699,13 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* or
                                             pinned, toolchain_root, &refused));
     peer = bq_prep_test_phase_peer(&phases, 62, 72, false);
     BQ_PREP_CHECK(bq_retirement_unit_build_pinned(refused.store, &refused.unit, workspaces, installed, root,
-                  profile_pins, driver, toolchain_root, broker, geteuid(), &phases, cancel[0], generous, &built) ==
+                  profile_pins, driver, toolchain_root, broker, workspace_path, geteuid(), &phases, cancel[0], generous, &built) ==
                   BQ_WORKER_MISMATCH && !built.owned && phases.failed);
     BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
     BQ_PREP_CHECK(bq_prep_test_read_text(launches, text, sizeof(text)) == (u32)(cursor - text) &&
                   fstatat(refused.attempt, BQ_RETIREMENT_UNIT_EVIDENCE_DIRECTORY, &info, AT_SYMLINK_NOFOLLOW) != 0 &&
-                  errno == ENOENT && fstatat(refused.attempt, "build-log-0", &info, AT_SYMLINK_NOFOLLOW) != 0 &&
-                  errno == ENOENT);
+                  errno == ENOENT && fstatat(refused.attempt, BQ_RETIREMENT_BUILD_WORK_DIRECTORY, &info,
+                                             AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT);
     BQ_PREP_CHECK(bq_prep_test_unit_attempt_close(&refused));
 
     /* Cancellation (SIGTERM self-pipe, driven here by SIGALRM) and deadline
@@ -2490,7 +2725,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* or
         u64 deadline = trial ? bq_phase_clock() + 800000000ull : generous;
         peer = bq_prep_test_phase_peer(&phases, id, id + 10u, true);
         BqError result = bq_retirement_unit_build_pinned(hanging.store, &hanging.unit, workspaces, installed, root,
-            profile_pins, driver, toolchain_root, broker, geteuid(), &phases, cancel[0], deadline, &built);
+            profile_pins, driver, toolchain_root, broker, workspace_path, geteuid(), &phases, cancel[0], deadline, &built);
         if (!trial)
         {
             BQ_PREP_CHECK(armed && setitimer(ITIMER_REAL, &stopped, NULL) == 0 &&
@@ -2503,7 +2738,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* or
         BQ_PREP_CHECK(result == (trial ? BQ_WORKER_TIMEOUT : BQ_WORKER_CANCEL_SIGNAL) && !built.owned &&
                       built.binaries.descriptors[0] == -1);
         char pid_path[512], pid_text[32];
-        int pid_length = snprintf(pid_path, sizeof(pid_path), "%s/job-%" PRIu64 "-attempt-%" PRIu64 "/matched-build/pid",
+        int pid_length = snprintf(pid_path, sizeof(pid_path), "%s/job-%" PRIu64 "-attempt-%" PRIu64
+                                  "/" BQ_RETIREMENT_STAGE_BASE_PARENT "/matched-build/pid",
                                   workspace_path, (uint64_t)id, (uint64_t)id + 10u);
         long pid = pid_length > 0 && (size_t)pid_length < sizeof(pid_path) &&
                    bq_prep_test_read_text(pid_path, pid_text, sizeof(pid_text)) ? strtol(pid_text, NULL, 10) : 0;
@@ -2518,13 +2754,174 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_build(BqQueue* queue, BqJob const* or
         BQ_PREP_CHECK(length > 0 && used >= (u32)length && !strcmp(text + used - (u32)length, expected));
         char receipt[48];
         BQ_PREP_CHECK(bq_record_name(receipt, "matched-stage-0", id) &&
-                      fstatat(hanging.attempt, "trusted-build", &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT);
+                      fstatat(hanging.attempt, BQ_RETIREMENT_BUILD_WORK_DIRECTORY "/trusted-build", &info,
+                              AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT);
         evidence = openat(hanging.attempt, BQ_RETIREMENT_UNIT_EVIDENCE_DIRECTORY,
                           O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         BQ_PREP_CHECK(evidence >= 0 && fstatat(evidence, receipt, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT);
         if (evidence >= 0) close(evidence);
         BQ_PREP_CHECK(bq_prep_test_unit_attempt_close(&hanging));
     }
+    bq_prep_test_broker_cleanup(queue, original, installed, workspaces, original_preparation, pinned, toolchain_root,
+                                driver, broker, workspace_path, launches);
+    /* A broker stage that settles any other way than exit 0 with complete
+     * capture takes the same KILL and proof before its failure is recorded:
+     * a relayed nonzero exit (67) and a refusal before any unit (71, 126) are
+     * proven and leave a failed receipt, a log overflow (69) is proven and
+     * refused, and an unproven relay (68, 125) is BQ_CLEANUP_FAILED with no
+     * receipt. */
+    u64 const settle_ids[] = {67, 71, 69, 68};
+    BqError const settle_results[] = {BQ_WORKER_FAILED, BQ_WORKER_FAILED, BQ_WORKER_FAILED, BQ_CLEANUP_FAILED};
+    char const* const settle_exits[] = {"\nexit=5\n", "\nexit=126\n", NULL, NULL};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(settle_ids); index += 1)
+    {
+        u64 id = settle_ids[index];
+        BqPrepUnitAttempt settling = {0};
+        BQ_PREP_CHECK(bq_prep_test_unit_attempt(queue, original, id, installed, workspaces, original_preparation,
+                                                pinned, toolchain_root, &settling));
+        peer = bq_prep_test_phase_peer(&phases, id, id + 10u, true);
+        BqError result = bq_retirement_unit_build_pinned(settling.store, &settling.unit, workspaces, installed, root,
+            profile_pins, driver, toolchain_root, broker, workspace_path, geteuid(), &phases, cancel[0], generous,
+            &built);
+        BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
+        BQ_PREP_CHECK(result == settle_results[index] && !built.owned && bq_prep_test_kill_requests(launches, id) == 1);
+        char receipt[48], receipt_text[1024] = {0};
+        u32 receipt_size = 0;
+        evidence = openat(settling.attempt, BQ_RETIREMENT_UNIT_EVIDENCE_DIRECTORY,
+                          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        bool named = bq_record_name(receipt, "matched-stage-0", id) && evidence >= 0;
+        bool recorded = named && bq_record_read_at(evidence, receipt, (u8*)receipt_text, sizeof(receipt_text) - 1u,
+                                                   &receipt_size) == BQ_OK;
+        BQ_PREP_CHECK(named && (settle_exits[index] ? recorded && strstr(receipt_text, settle_exits[index]) :
+                                                      fstatat(evidence, receipt, &info, AT_SYMLINK_NOFOLLOW) != 0));
+        if (evidence >= 0) close(evidence);
+        BQ_PREP_CHECK(bq_prep_test_unit_attempt_close(&settling));
+    }
+    /* #1018 completion: the attempt made by the real bq_materialize, whose mode
+     * is the production 02710 rather than a fixture's private directory. The
+     * real path materializes only the admitted smoke recipe, so a
+     * validate-buster-v1 job with the same two commits lays out the attempt
+     * and the retirement request then takes over its seal and A record. The
+     * fixture broker derives its workspace from its own location, so the
+     * driver and broker are copied beside the new workspace root. */
+    char queue_path[80] = "/tmp/bq-retirement-materialize-queue-XXXXXX";
+    char root_path[80] = "/tmp/bq-retirement-materialized-XXXXXX";
+    bool queue_made = mkdtemp(queue_path) != NULL;
+    bool root_made = mkdtemp(root_path) != NULL;
+    BqQueue materialized = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
+    bool opened = queue_made && bq_open(&materialized, queue_path) == BQ_OK;
+    char recipes[512], recipe_path[640], placed_driver[160], placed_broker[160], placed_launches[160];
+    BqRecipeFiles files = {0};
+    String8 validate = bq_recipe_profile(BQ_RECIPE_VALIDATE_BUSTER);
+    int recipes_length = snprintf(recipes, sizeof(recipes), "%s/recipes", installed_path);
+    bool described = recipes_length > 0 && (size_t)recipes_length < sizeof(recipes) &&
+                     bq_recipe_files(BQ_RECIPE_VALIDATE_BUSTER, &files);
+    int recipe_length = described ? snprintf(recipe_path, sizeof(recipe_path), "%s/%s", recipes, files.profile) : -1;
+    int placed_lengths[3] = {snprintf(placed_driver, sizeof(placed_driver), "%s/fixture-driver", root_path),
+                             snprintf(placed_broker, sizeof(placed_broker), "%s/fixture-broker", root_path),
+                             snprintf(placed_launches, sizeof(placed_launches), "%s/broker-launches", root_path)};
+    bool recipe_installed = recipe_length > 0 && (size_t)recipe_length < sizeof(recipe_path) &&
+                            chmod(recipes, 0700) == 0 &&
+                            bq_prep_test_write_bytes(recipe_path, (char const*)validate.pointer, (u32)validate.length);
+    bool staged = root_made && opened && recipe_installed && chmod(recipes, 0500) == 0 &&
+                  chmod(root_path, 02710) == 0;
+    for (u32 index = 0; index < 3; index += 1)
+        staged = staged && placed_lengths[index] > 0 && (size_t)placed_lengths[index] < sizeof(placed_driver);
+    staged = staged && bq_prep_test_copy_file(driver, placed_driver) && bq_prep_test_copy_file(broker, placed_broker);
+    String8 fields[BQ_FIELD_COUNT] = {S8("fixture"), S8("materialized"), S8("validate-buster-v1"),
+        string_from_pointer(original_preparation->subjects[0].commit),
+        string_from_pointer(original_preparation->subjects[1].commit)};
+    BqRequest smoke = {0};
+    u64 materialized_id = 0, materialized_token = 0;
+    staged = staged && bq_request_make(fields, &smoke) == BQ_OK &&
+             bq_submit(&materialized, &smoke, &materialized_id) == BQ_OK &&
+             bq_materialize(&materialized, string_from_pointer(installed_path), string_from_pointer(root_path),
+                            &materialized_id, &materialized_token) == BQ_OK;
+    BQ_PREP_CHECK(staged);
+    char attempt_name[64];
+    int materialized_root = staged ? open(root_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int materialized_attempt = materialized_root >= 0 &&
+        bq_workspace_name(attempt_name, materialized_id, materialized_token) ?
+        openat(materialized_root, attempt_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat attempt_info = {0};
+    BQ_PREP_CHECK(materialized_attempt >= 0 && fstat(materialized_attempt, &attempt_info) == 0 &&
+                  (attempt_info.st_mode & 07777) == 02710);
+    BqJob retirement_job = *original;
+    retirement_job.id = materialized_id;
+    retirement_job.token = materialized_token;
+    BqRetirementPreparation materialized_preparation = *original_preparation;
+    bool subjects = materialized_attempt >= 0;
+    for (u32 side = 0; subjects && side < 2; side += 1)
+    {
+        int subject = openat(materialized_attempt, side ? "candidate" : "base",
+                             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int source = subject >= 0 ? openat(subject, "source", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        subjects = source >= 0 && bq_retirement_verify_subject(installed, subject, source,
+            bq_field(&retirement_job.request, 3 + side), &materialized_preparation.subjects[side]);
+        if (source >= 0) close(source);
+        if (subject >= 0) close(subject);
+    }
+    BqRetirementStore materialized_queue = bq_retirement_queue_store(&materialized);
+    BqRetirementStore materialized_store = {-1};
+    BqRetirementUnitPrepared materialized_unit = {.policy = {.clang = -1, .inventory = -1}};
+    char materialized_digest[SHA256_HEX_CAPACITY] = {0};
+    subjects = subjects && unlinkat(materialized_attempt, ".identity", 0) == 0 &&
+               bq_workspace_seal(materialized_attempt, &retirement_job, true) &&
+               bq_retirement_preparation_record(materialized_queue, &retirement_job, &materialized_preparation,
+                                                BQ_OK, 2) &&
+               bq_retirement_preparation_ready_pinned(materialized_queue, &retirement_job, installed,
+                   materialized_root, profile_pins, materialized_digest, NULL) == BQ_OK &&
+               bq_retirement_preparation_export(materialized_queue, &retirement_job, materialized_root,
+                                                materialized_digest) == BQ_OK &&
+               bq_retirement_unit_store_open(materialized_root, materialized_id, materialized_token,
+                                             &materialized_store) == BQ_OK &&
+               bq_retirement_unit_prepare_pinned(materialized_store, materialized_root, installed, materialized_id,
+                   materialized_token, profile_pins, toolchain_root, materialized_digest,
+                   &materialized_unit) == BQ_OK;
+    BQ_PREP_CHECK(subjects);
+    BqRetirementUnitBuilt placed = {0};
+    peer = bq_prep_test_phase_peer(&phases, materialized_id, materialized_token, true);
+    BQ_PREP_CHECK(subjects && bq_retirement_unit_build_pinned(materialized_store, &materialized_unit,
+                  materialized_root, installed, string_from_pointer(root_path), profile_pins, placed_driver,
+                  toolchain_root, placed_broker, root_path, geteuid(), &phases, cancel[0], generous, &placed) == BQ_OK &&
+                  placed.owned && placed.binaries.descriptors[0] >= 3 && placed.binaries.descriptors[1] >= 3);
+    BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
+    /* Four typed requests in order; the attempt is still the materializer's
+     * 02710, the helper's work directory is private, and each subject built
+     * in its own service-created root. */
+    char placed_text[4096];
+    bq_prep_test_read_text(placed_launches, placed_text, sizeof(placed_text));
+    cursor = placed_text;
+    for (u32 stage = 0; stage < 4; stage += 1)
+    {
+        int length = snprintf(expected, sizeof(expected), "start-stage %" PRIu64 " %" PRIu64 " %s %s %s\n",
+                              (uint64_t)materialized_id, (uint64_t)materialized_token, names[stage],
+                              original_preparation->subjects[0].commit, original_preparation->subjects[1].commit);
+        char* found = length > 0 && (size_t)length < sizeof(expected) ? strstr(cursor, expected) : NULL;
+        BQ_PREP_CHECK(found == cursor);
+        cursor = found ? found + length : cursor;
+    }
+    BQ_PREP_CHECK(*cursor == 0);
+    struct stat work_info = {0}, base_root = {0}, candidate_root = {0};
+    BQ_PREP_CHECK(materialized_attempt >= 0 && fstat(materialized_attempt, &attempt_info) == 0 &&
+                  (attempt_info.st_mode & 07777) == 02710 &&
+                  fstatat(materialized_attempt, BQ_RETIREMENT_BUILD_WORK_DIRECTORY, &work_info,
+                          AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(work_info.st_mode) &&
+                  work_info.st_uid == geteuid() && (work_info.st_mode & 077) == 0 &&
+                  fstatat(materialized_attempt, "base/build/matched-build", &base_root, AT_SYMLINK_NOFOLLOW) == 0 &&
+                  (base_root.st_mode & 07777) == 02700 &&
+                  fstatat(materialized_attempt, "candidate/matched-build", &candidate_root,
+                          AT_SYMLINK_NOFOLLOW) == 0 && (candidate_root.st_mode & 07777) == 02770);
+    BQ_PREP_CHECK(bq_retirement_unit_built_release(&placed) && !placed.owned);
+    BQ_PREP_CHECK(bq_retirement_unit_release(&materialized_unit));
+    if (materialized_store.directory >= 0) close(materialized_store.directory);
+    if (materialized_attempt >= 0) close(materialized_attempt);
+    if (materialized_root >= 0) close(materialized_root);
+    if (opened) bq_close(&materialized);
+    BQ_PREP_CHECK(!recipe_installed || (chmod(recipes, 0700) == 0 && unlink(recipe_path) == 0 &&
+                                        chmod(recipes, 0500) == 0));
+    if (root_made) bq_prep_test_cleanup(root_path);
+    if (queue_made) bq_prep_test_cleanup(queue_path);
     if (cancel[0] >= 0) close(cancel[0]);
     if (cancel[1] >= 0) close(cancel[1]);
     BQ_PREP_CHECK(bq_prep_test_reference_remove(&fixture));

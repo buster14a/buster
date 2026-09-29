@@ -262,7 +262,7 @@ bool bq_retirement_unit_built_release(BqRetirementUnitBuilt* built)
  * rechecked. The coordinator's later replay reads the same files. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_build_import_pinned(BqRetirementStore store,
     BqRetirementUnitPrepared const* prepared, int workspaces, int installed, String8 workspace_root,
-    String8 profile, char const* driver, char const* toolchain_root, char const* broker,
+    String8 profile, char const* driver, char const* toolchain_root, char const* broker, char const* broker_workspaces,
     char const binary_record_sha256[SHA256_HEX_CAPACITY], char const build_record_sha256[SHA256_HEX_CAPACITY],
     BqRetirementMatchedBuild* verified)
 {
@@ -279,7 +279,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_build_import_pinned(BqRetirementS
     BqRetirementBuildStores stores = {store, {evidence}};
     if (result == BQ_OK)
         result = bq_retirement_matched_build_import_stores(stores, &prepared->job, installed, workspaces,
-            workspace_root, profile, driver, toolchain_root, broker, prepared->preparation_sha256,
+            workspace_root, profile, driver, toolchain_root, broker, broker_workspaces, prepared->preparation_sha256,
             binary_record_sha256, build_record_sha256, verified);
     if (evidence >= 0 && close(evidence) != 0 && result == BQ_OK) result = BQ_IO;
     if (result != BQ_OK && verified) *verified = (BqRetirementMatchedBuild){.generated_root = -1};
@@ -295,8 +295,10 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_unit_cancelled(int cancellation_fd)
 }
 
 /* Launch the next stage and wait for it under the cancellation descriptor
- * and the absolute deadline. A cancelled or expired stage is killed, reaped
- * and proven absent before this returns; a settled one is completed. */
+ * and the absolute deadline. A cancelled or expired stage, and a broker stage
+ * that settled other than cleanly, is stopped and proven absent
+ * (bq_retirement_matched_build_cancel) before anything is recorded; a
+ * settled one is then completed. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_stage(BqRetirementBuildStores stores, BqJob const* job,
     int installed, int workspaces, String8 profile, uid_t candidate_uid, int cancellation_fd, u64 deadline_ns,
     BqRetirementMatchedBuild* build)
@@ -320,12 +322,21 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_stage(BqRetirementBuildStores sto
             result = bq_retirement_unit_cancelled(cancellation_fd) ? BQ_WORKER_CANCEL_SIGNAL :
                      bq_retirement_build_clock_ns() >= deadline_ns ? BQ_WORKER_TIMEOUT : BQ_OK;
     }
-    if (process.state && !settled)
+    /* A broker stage that settled any other way than exit 0 with complete
+     * capture (a nonzero or unproven CLI status, a log overflow, a capture or
+     * wait failure) may have left its unit running: it takes the same KILL
+     * and proof as a cancelled one before any failure evidence is written. */
+    bool unproven = settled < 0 && process.launcher == BQ_RETIREMENT_LAUNCH_BROKER;
+    if (process.state && (!settled || unproven))
     {
         u64 now = bq_retirement_build_clock_ns();
         u64 cleanup = now && now <= UINT64_MAX - BQ_RETIREMENT_UNIT_CLEANUP_NS ?
                       now + BQ_RETIREMENT_UNIT_CLEANUP_NS : 0;
         if (!bq_retirement_matched_build_cancel(build, &process, cleanup)) result = BQ_CLEANUP_FAILED;
+        else if (settled) unproven = false;
+    }
+    if (process.state && (!settled || unproven))
+    {
         bq_retirement_matched_build_abort(&process);
         if (!bq_retirement_matched_build_release(build) && result == BQ_OK) result = BQ_IO;
         build->failed = true;
@@ -340,8 +351,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_stage(BqRetirementBuildStores sto
 
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_build_pinned(BqRetirementStore store,
     BqRetirementUnitPrepared const* prepared, int workspaces, int installed, String8 workspace_root,
-    String8 profile, char const* driver, char const* toolchain_root, char const* broker, uid_t candidate_uid,
-    BqPhaseChannel* phases, int cancellation_fd, u64 deadline_ns, BqRetirementUnitBuilt* built)
+    String8 profile, char const* driver, char const* toolchain_root, char const* broker, char const* broker_workspaces,
+    uid_t candidate_uid, BqPhaseChannel* phases, int cancellation_fd, u64 deadline_ns, BqRetirementUnitBuilt* built)
 {
     bool fresh = built && !built->owned;
     if (fresh) *built = (BqRetirementUnitBuilt){.verified = {.generated_root = -1}, .binaries = {.descriptors = {-1, -1}}};
@@ -349,6 +360,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_build_pinned(BqRetirementStore st
     BqError result = fresh && prepared && prepared->owned && store.directory >= 0 && workspaces >= 0 &&
                      installed >= 0 && driver && toolchain_root && broker && phases &&
                      bq_workspace_name(attempt_name, prepared->job.id, prepared->job.token) ? BQ_OK : BQ_BAD_REQUEST;
+    /* The broker builds cwd and --build-directory from its own fixed root;
+     * a different caller root would bind other bytes than the broker runs. */
+    if (result == BQ_OK && !(broker_workspaces && string_equal(workspace_root, string_from_pointer(broker_workspaces))))
+        result = BQ_WORKSPACE_MISMATCH;
     /* A profile without the driver pin cannot build; fail before the channel. */
     if (result == BQ_OK && !bq_retirement_profile_sha(profile, S8("build-driver-sha256="), pin))
         result = BQ_RECIPE_MISMATCH;
@@ -366,19 +381,16 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_build_pinned(BqRetirementStore st
     BqRetirementMatchedBuild build = {.generated_root = -1};
     if (result == BQ_OK)
         result = bq_retirement_matched_build_begin_stores(stores, &prepared->job, installed, workspaces,
-            workspace_root, profile, driver, toolchain_root, broker, prepared->preparation_sha256, true, &build);
+            workspace_root, profile, driver, toolchain_root, broker, broker_workspaces, prepared->preparation_sha256,
+            true, &build);
     if (result == BQ_OK && strcmp(build.toolchain.manifest_sha256, prepared->toolchain.manifest_sha256))
         result = BQ_CONFIGURATION_MISMATCH;
+    /* Each generate launch creates its subject's own configured root
+     * (base/build/matched-build, candidate/matched-build), so the candidate
+     * never starts from, or can write, the baseline configuration. */
     for (u32 stage = 0; result == BQ_OK && stage < BQ_RETIREMENT_BUILD_STAGES; stage += 1)
-    {
-        /* The baseline configured root moves aside, service-owned and intact,
-         * so the candidate generate must create a fresh root of its own. */
-        if (stage == 2u && renameat2(attempt, "matched-build", attempt, "matched-build-baseline",
-                                     RENAME_NOREPLACE) != 0) result = BQ_WORKSPACE_MISMATCH;
-        if (result == BQ_OK)
-            result = bq_retirement_unit_stage(stores, &prepared->job, installed, workspaces, profile,
-                                              candidate_uid, cancellation_fd, deadline_ns, &build);
-    }
+        result = bq_retirement_unit_stage(stores, &prepared->job, installed, workspaces, profile,
+                                          candidate_uid, cancellation_fd, deadline_ns, &build);
     if (result == BQ_OK)
         result = bq_retirement_unit_evidence_closed(evidence, workspaces, &prepared->job, false) &&
                  fchmod(evidence, BQ_RETIREMENT_EXPORT_MODE) == 0 && fsync(evidence) == 0 && fsync(attempt) == 0 ?
@@ -386,8 +398,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_build_pinned(BqRetirementStore st
     if (!bq_retirement_matched_build_release(&build) && result == BQ_OK) result = BQ_IO;
     if (result == BQ_OK)
         result = bq_retirement_unit_build_import_pinned(store, prepared, workspaces, installed, workspace_root,
-            profile, driver, toolchain_root, broker, build.binary_record_sha256, build.build_record_sha256,
-            &built->verified);
+            profile, driver, toolchain_root, broker, broker_workspaces, build.binary_record_sha256,
+            build.build_record_sha256, &built->verified);
     if (result == BQ_OK)
         result = bq_retirement_binaries_acquire_stores(stores, &prepared->job, installed, workspaces, profile,
             prepared->preparation_sha256, build.binary_record_sha256, &built->binaries);
@@ -415,7 +427,8 @@ BqError bq_retirement_unit_build(BqRetirementStore store, BqRetirementUnitPrepar
     struct passwd* candidate = getpwnam("buster-bench-candidate");
     BqError result = candidate && candidate->pw_uid != geteuid() ?
         bq_retirement_unit_build_pinned(store, prepared, workspaces, installed, workspace_root, profile,
-            BQ_RETIREMENT_BUILD_DRIVER, BQ_RETIREMENT_TOOLCHAIN_ROOT, BQ_RETIREMENT_UNIT_BROKER, candidate->pw_uid,
-            phases, cancellation_fd, deadline_ns, built) : BQ_CONFIGURATION_MISMATCH;
+            BQ_RETIREMENT_BUILD_DRIVER, BQ_RETIREMENT_TOOLCHAIN_ROOT, BQ_RETIREMENT_UNIT_BROKER,
+            BQ_RETIREMENT_STAGE_WORKSPACE_ROOT, candidate->pw_uid, phases, cancellation_fd, deadline_ns, built) :
+        BQ_CONFIGURATION_MISMATCH;
     return result;
 }

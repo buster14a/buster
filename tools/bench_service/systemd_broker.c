@@ -7,6 +7,16 @@
  * executable is forwarded to systemd.  `self-test` exercises construction and
  * rejection without contacting the manager.
  *
+ * Stages: 0 outer, 1..5 the smoke recipe's, 6..9 the #1020 retirement
+ * matched builds (bq_broker_retirement_stage), whose argv, environment and
+ * configured-root paths come from retirement_stage.h, shared with the
+ * matched-build helper and the credential gate. bq_broker_command builds
+ * every launch; bq_broker_retirement_self_test pins their exact vectors.
+ * bq_broker_execute relays one command; an abandoned stage relay stops its
+ * exact unit (bq_broker_unit_stop_commands, bq_broker_unit_stop) and replies
+ * BQ_RETIREMENT_STAGE_UNPROVEN_STATUS unless the unit is proven gone (#1785);
+ * bq_broker_unit_stop_self_test pins that path.
+ *
  * This executable is Linux-only and deliberately has no Buster dependency.
  */
 #ifndef _GNU_SOURCE
@@ -37,12 +47,13 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/xattr.h>
+#include "retirement_stage.h"
 
 #define BQ_BROKER_SOCKET "/run/buster-bench-systemd-broker/control.sock"
 #define BQ_BROKER_QUEUE "/var/lib/buster-bench/queue"
 #define BQ_BROKER_LEASE "/var/lib/buster-bench/lease/host.lock"
 #define BQ_BROKER_LEASE_RECEIPT "/etc/buster-bench/systemd-broker-lease.identity"
-#define BQ_BROKER_WORKSPACES "/var/lib/buster-bench/workspaces"
+#define BQ_BROKER_WORKSPACES BQ_RETIREMENT_STAGE_WORKSPACE_ROOT
 #define BQ_BROKER_CGROUP_SLICE "/buster.slice/buster-bench.slice"
 #define BQ_BROKER_INSTALLED "/opt/buster-bench/installed"
 #define BQ_BROKER_SERVICE "/usr/local/libexec/buster-bench-service"
@@ -58,12 +69,22 @@
 #define BQ_BROKER_DIAG_CHUNK 512u
 #define BQ_BROKER_DIAG_OUTPUT (512u * 1024u)
 #define BQ_BROKER_DIAG_MILLISECONDS 500u
+/* Relayed stage output, and the bound for proving an abandoned unit gone. */
+#define BQ_BROKER_OUTPUT_CAP (16u * 1024u * 1024u)
+#define BQ_BROKER_STOP_MILLISECONDS 15000u
+#define BQ_BROKER_CAPTURE_MILLISECONDS 5000u
 /* A larger NSS group list is refused, never accepted from a truncated buffer. */
 #define BQ_BROKER_ACCOUNT_GROUP_LIMIT 32
 
 enum { BQ_BROKER_START = 1, BQ_BROKER_SIGNAL = 2 };
 enum { BQ_BROKER_OUTER = 0, BQ_BROKER_BASE_GENERATE = 1, BQ_BROKER_BASE_BUILD = 2,
-       BQ_BROKER_CANDIDATE_GENERATE = 3, BQ_BROKER_CANDIDATE_BUILD = 4, BQ_BROKER_THROUGHPUT_STAGE = 5 };
+       BQ_BROKER_CANDIDATE_GENERATE = 3, BQ_BROKER_CANDIDATE_BUILD = 4, BQ_BROKER_THROUGHPUT_STAGE = 5,
+       /* #1020 matched builds: the fixed commands of retirement_stage.h. */
+       BQ_BROKER_RETIREMENT_BASE_GENERATE = BQ_RETIREMENT_STAGE_FIRST_NUMBER,
+       BQ_BROKER_RETIREMENT_BASE_BUILD = BQ_RETIREMENT_STAGE_FIRST_NUMBER + 1,
+       BQ_BROKER_RETIREMENT_CANDIDATE_GENERATE = BQ_RETIREMENT_STAGE_FIRST_NUMBER + 2,
+       BQ_BROKER_RETIREMENT_CANDIDATE_BUILD = BQ_RETIREMENT_STAGE_FIRST_NUMBER + 3,
+       BQ_BROKER_LAST_STAGE = BQ_BROKER_RETIREMENT_CANDIDATE_BUILD };
 enum { BQ_BROKER_TERM = 1, BQ_BROKER_KILL = 2, BQ_BROKER_CONT = 3 };
 
 typedef struct BqBrokerRequest
@@ -87,6 +108,18 @@ typedef struct BqBrokerCommand
     unsigned count;
     bool valid;
 } BqBrokerCommand;
+
+/* The exact stage unit a start may leave behind and the fixed commands that
+ * stop it when its relay is abandoned (#1785). The vectors point into unit,
+ * so the object stays in place. */
+typedef struct BqBrokerUnitStop
+{
+    char unit[128];
+    char const* kill[6];
+    char const* state[7];
+    uint64_t milliseconds;
+    bool enabled;
+} BqBrokerUnitStop;
 
 typedef struct BqBrokerFrame
 {
@@ -120,6 +153,10 @@ typedef struct BqBrokerPaths
     char candidate_build[512];
     char candidate_staging[512];
     char throughput_output[512];
+    /* Retirement configured roots: created fresh by the service before each
+     * generate and each stage's only writable path. */
+    char retirement_base_build[512];
+    char retirement_candidate_build[512];
 } BqBrokerPaths;
 
 typedef struct BqBrokerAccounts
@@ -141,8 +178,30 @@ typedef struct BqBrokerStartGroups
 } BqBrokerStartGroups;
 
 static char const* const bq_broker_stages[] = {
-    "", "base-generate", "base-build", "candidate-generate", "candidate-build", "throughput"
+    "", "base-generate", "base-build", "candidate-generate", "candidate-build", "throughput",
+    BQ_RETIREMENT_STAGE_NAMES
 };
+
+static bool bq_broker_retirement_stage(uint32_t stage)
+{
+    bool retirement = stage >= BQ_BROKER_RETIREMENT_BASE_GENERATE && stage <= BQ_BROKER_RETIREMENT_CANDIDATE_BUILD;
+    return retirement;
+}
+
+/* Stages that run as buster-bench; every other stage runs as the candidate. */
+static bool bq_broker_service_stage(uint32_t stage)
+{
+    bool service = stage <= BQ_BROKER_BASE_BUILD || stage == BQ_BROKER_RETIREMENT_BASE_GENERATE ||
+                   stage == BQ_BROKER_RETIREMENT_BASE_BUILD;
+    return service;
+}
+
+static bool bq_broker_generate_stage(uint32_t stage)
+{
+    bool generate = stage == BQ_BROKER_BASE_GENERATE || stage == BQ_BROKER_CANDIDATE_GENERATE ||
+                    stage == BQ_BROKER_RETIREMENT_BASE_GENERATE || stage == BQ_BROKER_RETIREMENT_CANDIDATE_GENERATE;
+    return generate;
+}
 
 static bool bq_broker_format(char* output, size_t capacity, char const* format, ...)
 {
@@ -183,7 +242,7 @@ static bool bq_broker_request_valid(BqBrokerRequest const* request)
     bool start = request->operation == BQ_BROKER_START;
     bool signal = request->operation == BQ_BROKER_SIGNAL;
     bool ok = request->magic == BQ_BROKER_MAGIC && request->version == 1 && request->reserved == 0 &&
-              (start || signal) && request->stage <= BQ_BROKER_THROUGHPUT_STAGE &&
+              (start || signal) && request->stage <= BQ_BROKER_LAST_STAGE &&
               request->job != 0 && request->attempt != 0;
     if (ok && start)
         ok = request->signal_number == 0 && bq_broker_revision(request->base) &&
@@ -219,6 +278,11 @@ static bool bq_broker_paths(BqBrokerRequest const* request, BqBrokerPaths* paths
     if (ok) ok = bq_broker_format(paths->candidate_staging, sizeof(paths->candidate_staging), "%s/candidate/staging", paths->attempt);
     if (ok) ok = bq_broker_format(paths->throughput_output, sizeof(paths->throughput_output), "%s/throughput-results",
                                   paths->candidate_staging);
+    if (ok) ok = bq_broker_format(paths->retirement_base_build, sizeof(paths->retirement_base_build),
+                                  "%s/" BQ_RETIREMENT_STAGE_BASE_PARENT "/" BQ_RETIREMENT_STAGE_BUILD_LEAF, paths->attempt);
+    if (ok) ok = bq_broker_format(paths->retirement_candidate_build, sizeof(paths->retirement_candidate_build),
+                                  "%s/" BQ_RETIREMENT_STAGE_CANDIDATE_PARENT "/" BQ_RETIREMENT_STAGE_BUILD_LEAF,
+                                  paths->attempt);
     return ok;
 }
 
@@ -274,7 +338,7 @@ static void bq_broker_common_sandbox(BqBrokerCommand* command)
 static void bq_broker_add_gate(BqBrokerCommand* command, BqBrokerRequest const* request,
                                BqBrokerStartGroups const* groups)
 {
-    unsigned role = request->stage <= BQ_BROKER_BASE_BUILD ? 0u : 1u;
+    unsigned role = bq_broker_service_stage(request->stage) ? 0u : 1u;
     char list[384] = {0};
     size_t used = 0;
     bool ok = groups && groups->count[role] > 0 &&
@@ -314,8 +378,20 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroup
         bq_broker_add(command, "--wait");
         if (request->stage != BQ_BROKER_OUTER) bq_broker_add(command, "--pipe");
         bq_broker_add(command, "--service-type=exec");
-        bq_broker_add(command, "--setenv=PATH=/usr/bin:/bin");
-        bq_broker_add(command, "--setenv=LC_ALL=C");
+        if (bq_broker_retirement_stage(request->stage))
+        {
+            /* The same four values the credential gate installs, in place of
+             * anything PID1 would otherwise add. */
+            bq_broker_add(command, "--setenv=PATH=" BQ_RETIREMENT_STAGE_PATH_VALUE);
+            bq_broker_add(command, "--setenv=LC_ALL=" BQ_RETIREMENT_STAGE_LC_ALL_VALUE);
+            bq_broker_add(command, "--setenv=TZ=" BQ_RETIREMENT_STAGE_TZ_VALUE);
+            bq_broker_add(command, "--setenv=HOME=" BQ_RETIREMENT_STAGE_HOME_VALUE);
+        }
+        else
+        {
+            bq_broker_add(command, "--setenv=PATH=/usr/bin:/bin");
+            bq_broker_add(command, "--setenv=LC_ALL=C");
+        }
         bq_broker_add_format(command, "--unit=%s", paths.unit);
         bq_broker_add(command, "--slice=buster-bench.slice");
         bq_broker_add(command, "--property=AllowedCPUs=2");
@@ -329,7 +405,7 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroup
             bq_broker_add_format(command, "--property=BindsTo=%s", paths.parent);
             bq_broker_add_format(command, "--property=After=%s", paths.parent);
             bq_broker_add(command, "--collect");
-            if (request->stage <= BQ_BROKER_BASE_BUILD)
+            if (bq_broker_service_stage(request->stage))
             {
                 bq_broker_add(command, "--uid=buster-bench");
                 bq_broker_add(command, "--gid=buster-bench");
@@ -361,7 +437,24 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroup
         }
         else
         {
-            if (request->stage <= BQ_BROKER_BASE_BUILD)
+            if (request->stage == BQ_BROKER_RETIREMENT_BASE_GENERATE ||
+                request->stage == BQ_BROKER_RETIREMENT_BASE_BUILD)
+            {
+                /* The service-created root, not base/build, so the stage can
+                 * fill but never replace it; the candidate root stays read-only. */
+                bq_broker_add_format(command, "--property=ReadOnlyPaths=%s %s", paths.base_source,
+                                     paths.candidate_source);
+                bq_broker_add_format(command, "--property=ReadWritePaths=%s", paths.retirement_base_build);
+                bq_broker_add_format(command, "--working-directory=%s", paths.base_source);
+            }
+            else if (bq_broker_retirement_stage(request->stage))
+            {
+                bq_broker_add_format(command, "--property=ReadOnlyPaths=%s %s %s", paths.base_source,
+                                     paths.base_build, paths.candidate_source);
+                bq_broker_add_format(command, "--property=ReadWritePaths=%s", paths.retirement_candidate_build);
+                bq_broker_add_format(command, "--working-directory=%s", paths.candidate_source);
+            }
+            else if (request->stage <= BQ_BROKER_BASE_BUILD)
             {
                 bq_broker_add_format(command, "--property=ReadOnlyPaths=%s %s", paths.base_source,
                                      paths.candidate_source);
@@ -424,6 +517,24 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroup
             bq_broker_add(command, "1");
             bq_broker_add(command, "--no-guard");
             bq_broker_add(command, "--service-output");
+        }
+        else if (bq_broker_retirement_stage(request->stage))
+        {
+            /* Exactly bq_retirement_matched_build_stage's argv for this stage. */
+            static char const* const generate_options[] = {BQ_RETIREMENT_STAGE_GENERATE_OPTIONS};
+            static char const* const build_options[] = {BQ_RETIREMENT_STAGE_BUILD_OPTIONS};
+            bool generate = bq_broker_generate_stage(request->stage);
+            bq_broker_add(command, BQ_RETIREMENT_STAGE_DRIVER);
+            bq_broker_add(command, generate ? "generate" : "build");
+            bq_broker_add(command, "--build-directory");
+            bq_broker_add_format(command, "%s", bq_broker_service_stage(request->stage) ?
+                                 paths.retirement_base_build : paths.retirement_candidate_build);
+            bq_broker_add(command, "--config");
+            bq_broker_add(command, BQ_RETIREMENT_STAGE_CONFIG);
+            unsigned count = generate ? sizeof(generate_options) / sizeof(generate_options[0]) :
+                                        sizeof(build_options) / sizeof(build_options[0]);
+            for (unsigned index = 0; index < count; index += 1)
+                bq_broker_add(command, generate ? generate_options[index] : build_options[index]);
         }
         else
         {
@@ -727,6 +838,30 @@ static bool bq_broker_installed_binary(char const* path, bool static_gate)
     return ok;
 }
 
+/* Retirement directories a stage start requires, each exactly service-owned
+ * with the candidate group and reached by an O_NOFOLLOW component walk:
+ * base/build 02700 for every stage, so the candidate cannot reach the
+ * baseline root, then the stage's own ReadWritePaths root, 02700 for the
+ * baseline and 02770 for the candidate. Returns the count, 0 otherwise.
+ * The check precedes PID1's bind mount. In that gap only the service
+ * identity can replace either root: base/build is service-only and the
+ * candidate root's parent candidate/ is the service-owned 02710. */
+static unsigned bq_broker_retirement_roots(BqBrokerRequest const* request, BqBrokerPaths const* paths,
+                                           char const* roots[2], mode_t modes[2])
+{
+    unsigned count = 0;
+    if (bq_broker_retirement_stage(request->stage))
+    {
+        bool service = bq_broker_service_stage(request->stage);
+        roots[0] = paths->base_build;
+        modes[0] = 02700;
+        roots[1] = service ? paths->retirement_base_build : paths->retirement_candidate_build;
+        modes[1] = service ? 02700 : 02770;
+        count = 2;
+    }
+    return count;
+}
+
 static bool bq_broker_state(BqBrokerRequest const* request, uid_t service_uid,
                             gid_t service_gid, gid_t candidate_gid)
 {
@@ -750,6 +885,15 @@ static bool bq_broker_state(BqBrokerRequest const* request, uid_t service_uid,
              bq_broker_installed_binary(BQ_BROKER_GATE, true);
         if (ok && request->stage == BQ_BROKER_CANDIDATE_GENERATE)
             ok = bq_broker_directory(paths.candidate_staging, service_uid, true);
+        /* Retirement: the installed toolchain is root-owned and immutable,
+         * and every bq_broker_retirement_roots directory is exact. PID1
+         * refuses the unit if a ReadWritePaths root is missing. */
+        char const* roots[2] = {0};
+        mode_t modes[2] = {0};
+        unsigned count = bq_broker_retirement_roots(request, &paths, roots, modes);
+        if (ok && count) ok = bq_broker_directory(BQ_RETIREMENT_STAGE_PATH_VALUE, 0, false);
+        for (unsigned index = 0; ok && index < count; index += 1)
+            ok = bq_broker_private_directory(roots[index], service_uid, candidate_gid, modes[index]);
     }
     return ok;
 }
@@ -777,7 +921,7 @@ static bool bq_broker_unit_from_text(char const* unit, BqBrokerRequest* request)
     }
     BqBrokerPaths paths;
     bool found = false;
-    for (unsigned stage = 0; ok && !found && stage <= BQ_BROKER_THROUGHPUT_STAGE; stage += 1)
+    for (unsigned stage = 0; ok && !found && stage <= BQ_BROKER_LAST_STAGE; stage += 1)
     {
         candidate.stage = stage;
         found = bq_broker_paths(&candidate, &paths) && !strcmp(paths.unit, unit);
@@ -834,7 +978,7 @@ static bool bq_broker_gate_exec_identity(char const* text, BqBrokerRequest const
     char const prefix[] = "{ path=" BQ_BROKER_GATE " ; argv[]=";
     size_t prefix_size = sizeof(prefix) - 1;
     bool ok = value && end && (size_t)(end - value) > prefix_size &&
-              !memcmp(value, prefix, prefix_size) && request->stage <= BQ_BROKER_THROUGHPUT_STAGE;
+              !memcmp(value, prefix, prefix_size) && request->stage <= BQ_BROKER_LAST_STAGE;
     char tokens[8][384] = {{0}};
     char const* at = ok ? value + prefix_size : NULL;
     for (unsigned index = 0; ok && index < 8; index += 1)
@@ -850,8 +994,7 @@ static bool bq_broker_gate_exec_identity(char const* text, BqBrokerRequest const
                          request->stage == BQ_BROKER_THROUGHPUT_STAGE ? BQ_BROKER_THROUGHPUT : BQ_BROKER_BUILD;
     char const* verb = request->stage == BQ_BROKER_OUTER ? "worker-unit" :
                        request->stage == BQ_BROKER_THROUGHPUT_STAGE ? "run" :
-                       request->stage == BQ_BROKER_BASE_GENERATE ||
-                       request->stage == BQ_BROKER_CANDIDATE_GENERATE ? "generate" : "build";
+                       bq_broker_generate_stage(request->stage) ? "generate" : "build";
     uint64_t uid = 0, gid = 0;
     ok = ok && bq_broker_format(stage, sizeof(stage), "%u", request->stage) &&
          !strcmp(tokens[0], BQ_BROKER_GATE) && !strcmp(tokens[1], stage) &&
@@ -874,7 +1017,7 @@ static bool bq_broker_gate_exec_identity(char const* text, BqBrokerRequest const
         count += 1;
         current = comma ? comma + 1 : NULL;
     }
-    ok = ok && count == (request->stage <= BQ_BROKER_BASE_BUILD ? 2u : 1u);
+    ok = ok && count == (bq_broker_service_stage(request->stage) ? 2u : 1u);
     if (ok && request->signal_number == BQ_BROKER_CONT)
     {
         BqBrokerCommand expected = {.valid = true};
@@ -890,7 +1033,8 @@ static bool bq_broker_exec_identity(char const* text, BqBrokerRequest const* req
                                     BqBrokerStartGroups const* groups)
 {
     bool ok = bq_broker_gate_exec_identity(text, request, groups);
-    if (!ok && request->signal_number != BQ_BROKER_CONT)
+    /* Retirement units never existed without the gate: no legacy form. */
+    if (!ok && request->signal_number != BQ_BROKER_CONT && !bq_broker_retirement_stage(request->stage))
     {
         char const* previous = request->stage == BQ_BROKER_OUTER ? BQ_BROKER_SERVICE :
                                request->stage == BQ_BROKER_THROUGHPUT_STAGE ?
@@ -1180,25 +1324,13 @@ static void bq_broker_diag_outcome(BqBrokerDiagnostic* diagnostic, int result,
     errno = saved_errno;
 }
 
-static bool bq_broker_show(char const* unit, char output[8192])
+/* Run a fixed argv with a cleared environment, stdout captured (at most
+ * 8191 bytes) and stderr discarded, until the absolute deadline (monotonic
+ * milliseconds). True only for a complete capture and exit status 0. */
+static bool bq_broker_capture(char const* const* arguments, char output[8192], uint64_t deadline)
 {
-    static char const* const properties[] = {"Id", "LoadState", "Slice", "InvocationID", "ControlGroup",
-        "User", "Group", "ExecStart", "PartOf", "BindsTo", "After", "AllowedCPUs", "MemoryMax",
-        "MemorySwapMax", "TasksMax", "RuntimeMaxUSec", "NoNewPrivileges", "ProtectSystem",
-        "PrivateNetwork", "CollectMode"};
-    char options[sizeof(properties) / sizeof(properties[0])][64];
-    char const* arguments[sizeof(properties) / sizeof(properties[0]) + 5] = {BQ_BROKER_CTL, "show", "--no-pager"};
-    bool ok = true;
-    unsigned count = 3;
-    for (unsigned index = 0; ok && index < sizeof(properties) / sizeof(properties[0]); index += 1)
-    {
-        ok = bq_broker_format(options[index], sizeof(options[index]), "--property=%s", properties[index]);
-        if (ok) arguments[count++] = options[index];
-    }
-    arguments[count++] = unit;
-    arguments[count] = NULL;
     int pipefd[2] = {-1, -1};
-    if (ok) ok = pipe2(pipefd, O_CLOEXEC | O_NONBLOCK) == 0;
+    bool ok = pipe2(pipefd, O_CLOEXEC | O_NONBLOCK) == 0;
     pid_t child = ok ? fork() : -1;
     if (child == 0)
     {
@@ -1211,12 +1343,11 @@ static bool bq_broker_show(char const* unit, char output[8192])
         clearenv();
         setenv("PATH", "/usr/bin:/bin", 1);
         setenv("LC_ALL", "C", 1);
-        execv(BQ_BROKER_CTL, (char* const*)arguments);
+        execv(arguments[0], (char* const*)arguments);
         _exit(127);
     }
     if (pipefd[1] >= 0) close(pipefd[1]);
     ok = ok && child > 0;
-    uint64_t deadline = bq_broker_now_milliseconds() + 5000;
     size_t used = 0;
     bool eof = false;
     while (ok && !eof && bq_broker_now_milliseconds() < deadline)
@@ -1259,6 +1390,73 @@ static bool bq_broker_show(char const* unit, char output[8192])
     }
     ok = ok && eof && child > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
     return ok;
+}
+
+static bool bq_broker_show(char const* unit, char output[8192])
+{
+    static char const* const properties[] = {"Id", "LoadState", "Slice", "InvocationID", "ControlGroup",
+        "User", "Group", "ExecStart", "PartOf", "BindsTo", "After", "AllowedCPUs", "MemoryMax",
+        "MemorySwapMax", "TasksMax", "RuntimeMaxUSec", "NoNewPrivileges", "ProtectSystem",
+        "PrivateNetwork", "CollectMode"};
+    char options[sizeof(properties) / sizeof(properties[0])][64];
+    char const* arguments[sizeof(properties) / sizeof(properties[0]) + 5] = {BQ_BROKER_CTL, "show", "--no-pager"};
+    bool ok = true;
+    unsigned count = 3;
+    for (unsigned index = 0; ok && index < sizeof(properties) / sizeof(properties[0]); index += 1)
+    {
+        ok = bq_broker_format(options[index], sizeof(options[index]), "--property=%s", properties[index]);
+        if (ok) arguments[count++] = options[index];
+    }
+    arguments[count++] = unit;
+    arguments[count] = NULL;
+    output[0] = 0;
+    ok = ok && bq_broker_capture(arguments, output, bq_broker_now_milliseconds() + BQ_BROKER_CAPTURE_MILLISECONDS);
+    return ok;
+}
+
+/* A stage start (never the outer unit, whose recursive stop proof the
+ * coordinator owns, nor a signal) can leave its transient unit behind. */
+static bool bq_broker_unit_stop_commands(BqBrokerRequest const* request, BqBrokerUnitStop* stop)
+{
+    BqBrokerPaths paths;
+    memset(stop, 0, sizeof(*stop));
+    stop->enabled = bq_broker_request_valid(request) && request->operation == BQ_BROKER_START &&
+                    request->stage != BQ_BROKER_OUTER && bq_broker_paths(request, &paths) &&
+                    bq_broker_format(stop->unit, sizeof(stop->unit), "%s", paths.unit);
+    if (stop->enabled)
+    {
+        char const* kill[] = {BQ_BROKER_CTL, "kill", "--kill-whom=all", "--signal=KILL", stop->unit, NULL};
+        char const* state[] = {BQ_BROKER_CTL, "show", "--no-pager", "--property=LoadState",
+                               "--property=ActiveState", stop->unit, NULL};
+        memcpy(stop->kill, kill, sizeof(kill));
+        memcpy(stop->state, state, sizeof(state));
+        stop->milliseconds = BQ_BROKER_STOP_MILLISECONDS;
+    }
+    return stop->enabled;
+}
+
+/* SIGKILL every process of the exact unit, then poll until PID1 reports it
+ * unloaded (LoadState=not-found) or stopped (ActiveState inactive or failed:
+ * KillMode=control-group leaves no process) within stop->milliseconds. The
+ * kill's own result is not used: a unit that is already gone or has no
+ * process is expected. True only for that observation. */
+static bool bq_broker_unit_stop(BqBrokerUnitStop const* stop)
+{
+    uint64_t deadline = bq_broker_now_milliseconds() + stop->milliseconds;
+    char output[8192];
+    uint64_t bound = bq_broker_now_milliseconds() + BQ_BROKER_CAPTURE_MILLISECONDS;
+    (void)bq_broker_capture(stop->kill, output, bound < deadline ? bound : deadline);
+    bool gone = false;
+    while (!gone && bq_broker_now_milliseconds() < deadline)
+    {
+        bound = bq_broker_now_milliseconds() + BQ_BROKER_CAPTURE_MILLISECONDS;
+        gone = bq_broker_capture(stop->state, output, bound < deadline ? bound : deadline) &&
+               (bq_broker_field_equals(output, "LoadState", "not-found") ||
+                bq_broker_field_equals(output, "ActiveState", "inactive") ||
+                bq_broker_field_equals(output, "ActiveState", "failed"));
+        if (!gone) poll(NULL, 0, 100);
+    }
+    return gone;
 }
 
 static bool bq_broker_signal_identity(BqBrokerRequest const* request,
@@ -1310,7 +1508,7 @@ static bool bq_broker_signal_identity(BqBrokerRequest const* request,
     }
     else if (ok)
     {
-        char const* identity = request->stage <= BQ_BROKER_BASE_BUILD ? "buster-bench" : "buster-bench-candidate";
+        char const* identity = bq_broker_service_stage(request->stage) ? "buster-bench" : "buster-bench-candidate";
         ok = bq_broker_field_equals(output, "User", identity) &&
              bq_broker_field_equals(output, "Group", identity) &&
              bq_broker_exec_identity(output, request, groups) &&
@@ -1348,8 +1546,12 @@ static bool bq_broker_write_all(int descriptor, unsigned char const* bytes, size
     return ok;
 }
 
+/* Relay one manager command. For a stage start, stop names its unit: a relay
+ * abandoned after the unit may exist (output cap, poll, read, send, wait or
+ * deadline failure) first stops that exact unit and replies 126 only once it
+ * is proven gone, else BQ_RETIREMENT_STAGE_UNPROVEN_STATUS (#1785). */
 static int bq_broker_execute(BqBrokerCommand const* command, int connection, bool signal_operation,
-                             int32_t* framed_status, bool* frame_delivered)
+                             BqBrokerUnitStop const* stop, int32_t* framed_status, bool* frame_delivered)
 {
     int output[2] = {-1, -1}, error_pipe[2] = {-1, -1};
     bool ok = pipe2(output, O_CLOEXEC) == 0;
@@ -1410,7 +1612,7 @@ static int bq_broker_execute(BqBrokerCommand const* command, int connection, boo
                 else if (ok)
                 {
                     total += (uint64_t)count;
-                    ok = total <= 16u * 1024u * 1024u &&
+                    ok = total <= BQ_BROKER_OUTPUT_CAP &&
                          bq_broker_send_frame(connection, index == 0 ? BQ_BROKER_STDOUT : BQ_BROKER_STDERR,
                                               bytes, (uint32_t)count);
                 }
@@ -1433,11 +1635,14 @@ static int bq_broker_execute(BqBrokerCommand const* command, int connection, boo
     }
     int32_t result = ok && reaped && WIFEXITED(status) ? WEXITSTATUS(status) :
                      ok && reaped && WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 126;
+    bool abandoned = !(ok && reaped);
+    if (abandoned && stop && stop->enabled)
+        result = bq_broker_unit_stop(stop) ? 126 : BQ_RETIREMENT_STAGE_UNPROVEN_STATUS;
     bool sent = bq_broker_send_frame(connection, BQ_BROKER_STATUS, &result, sizeof(result));
     if (!sent) result = 126;
     if (framed_status) *framed_status = result;
     if (frame_delivered) *frame_delivered = sent;
-    return result == 126 ? 1 : 0;
+    return result == 126 || abandoned ? 1 : 0;
 }
 
 static bool bq_broker_accounts_valid(BqBrokerAccounts const* accounts)
@@ -1693,9 +1898,11 @@ static int bq_broker_server(void)
     int result = 1;
     int32_t framed_status = 126;
     bool frame_sent = false;
+    BqBrokerUnitStop stop;
+    if (ok) bq_broker_unit_stop_commands(&request, &stop);
     if (ok)
         result = bq_broker_execute(&command, STDIN_FILENO, request.operation == BQ_BROKER_SIGNAL,
-                                   &framed_status, &frame_sent);
+                                   &stop, &framed_status, &frame_sent);
     else
     {
         int32_t status = 126;
@@ -1716,6 +1923,9 @@ static int bq_broker_client(BqBrokerRequest const* request)
         ok = connect(connection, (struct sockaddr*)&address, sizeof(address)) == 0;
     }
     if (ok) ok = send(connection, request, sizeof(*request), MSG_NOSIGNAL) == sizeof(*request);
+    /* Once a stage start is sent, its unit may exist; a lost connection
+     * before the status frame proves nothing about it (#1785). */
+    bool stage_sent = ok && request->operation == BQ_BROKER_START && request->stage != BQ_BROKER_OUTER;
     int result = 126;
     bool finished = false;
     while (ok && !finished)
@@ -1740,14 +1950,14 @@ static int bq_broker_client(BqBrokerRequest const* request)
             ok = false;
     }
     if (connection >= 0) close(connection);
-    if (!ok || !finished) result = 126;
+    if (!ok || !finished) result = stage_sent ? BQ_RETIREMENT_STAGE_UNPROVEN_STATUS : 126;
     return result;
 }
 
 static bool bq_broker_stage(char const* name, uint32_t* stage)
 {
     bool found = false;
-    for (uint32_t index = 1; !found && index <= BQ_BROKER_THROUGHPUT_STAGE; index += 1)
+    for (uint32_t index = 1; !found && index <= BQ_BROKER_LAST_STAGE; index += 1)
     {
         if (!strcmp(name, bq_broker_stages[index]))
         {
@@ -1825,6 +2035,332 @@ static unsigned bq_broker_property_count(BqBrokerCommand const* command, char co
     for (unsigned index = 0; index < command->count; index += 1)
         if (!strncmp(command->argv[index], prefix, length)) count += 1;
     return count;
+}
+
+/* #1020 retirement stages. The expected systemd-run vectors are spelled out
+ * here rather than derived from retirement_stage.h, so a drift in the shared
+ * contract or in the command builder fails this test. Returns its checks. */
+static unsigned bq_broker_retirement_self_test(BqBrokerStartGroups const* groups, bool* passed)
+{
+    static char const* const names[] = {"retirement-base-generate", "retirement-base-build",
+                                        "retirement-candidate-generate", "retirement-candidate-build"};
+    static char const* const sandbox[] = {
+        "--property=KillMode=control-group", "--property=SendSIGKILL=yes", "--property=TimeoutStopSec=10s",
+        "--property=NoNewPrivileges=yes", "--property=PrivateTmp=yes", "--property=PrivateDevices=yes",
+        "--property=ProtectSystem=strict", "--property=RestrictSUIDSGID=yes", "--property=ProtectHome=yes",
+        "--property=ProtectControlGroups=yes", "--property=ProtectKernelTunables=yes",
+        "--property=ProtectKernelModules=yes", "--property=ProtectKernelLogs=yes", "--property=ProtectClock=yes",
+        "--property=ProtectHostname=yes", "--property=ProtectProc=invisible", "--property=LockPersonality=yes",
+        "--property=MemoryDenyWriteExecute=yes", "--property=RemoveIPC=yes", "--property=KeyringMode=private",
+        "--property=RestrictNamespaces=yes", "--property=RestrictRealtime=yes",
+        "--property=CapabilityBoundingSet=", "--property=AmbientCapabilities=",
+        "--property=RestrictAddressFamilies=AF_UNIX", "--property=SystemCallArchitectures=native",
+        "--property=SystemCallFilter=@system-service", "--property=SystemCallErrorNumber=EPERM"};
+    static char const* const generate_options[] = {"--cc", "clang", "--no-include-tests",
+        "--no-developer-targets", "--no-check-optional-warnings", "--no-fuzz", "--no-sanitize",
+        "--no-time-trace", "--no-instrument", "--no-lto"};
+    static char const* const build_options[] = {"-t", "ide", "--", "-j1"};
+#define BQ_ATTEMPT "/var/lib/buster-bench/workspaces/job-1-attempt-2"
+    unsigned checks = 0;
+    bool ok = true;
+#define BQ_RETIREMENT_CHECK(condition) do { checks += 1; if (!(condition)) ok = false; } while (0)
+    BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = 1, .operation = BQ_BROKER_START,
+                               .job = 1, .attempt = 2};
+    memset(request.base, 'a', 40);
+    memset(request.candidate, 'b', 40);
+    BqBrokerCommand command;
+    BqBrokerRequest parsed;
+    for (unsigned index = 0; index < 4; index += 1)
+    {
+        bool service = index < 2, generate = (index & 1u) == 0;
+        char unit[128], stage[8], read_write[600], unit_name[128], show[512];
+        snprintf(unit, sizeof(unit), "--unit=buster-bench-1-2-%s.service", names[index]);
+        snprintf(stage, sizeof(stage), "%u", 6u + index);
+        char const* root = service ? BQ_ATTEMPT "/base/build/matched-build" : BQ_ATTEMPT "/candidate/matched-build";
+        snprintf(read_write, sizeof(read_write), "--property=ReadWritePaths=%s", root);
+        char const* expected[BQ_BROKER_MAX_ARGS + 1];
+        unsigned count = 0;
+        char const* head[] = {"/usr/bin/systemd-run", "--quiet", "--wait", "--pipe", "--service-type=exec",
+            "--setenv=PATH=/opt/buster-bench/installed/toolchain/native-retirement-performance-v1/bin",
+            "--setenv=LC_ALL=C", "--setenv=TZ=UTC", "--setenv=HOME=/nonexistent", unit,
+            "--slice=buster-bench.slice", "--property=AllowedCPUs=2", "--property=MemoryMax=8589934592",
+            "--property=MemorySwapMax=0", "--property=TasksMax=256", "--property=RuntimeMaxSec=3600000000us",
+            "--property=PartOf=buster-bench-1-2.service", "--property=BindsTo=buster-bench-1-2.service",
+            "--property=After=buster-bench-1-2.service", "--collect",
+            service ? "--uid=buster-bench" : "--uid=buster-bench-candidate",
+            service ? "--gid=buster-bench" : "--gid=buster-bench-candidate",
+            service ? "--property=UMask=0077" : "--property=UMask=0007"};
+        for (unsigned item = 0; item < sizeof(head) / sizeof(head[0]); item += 1) expected[count++] = head[item];
+        for (unsigned item = 0; item < sizeof(sandbox) / sizeof(sandbox[0]); item += 1)
+            expected[count++] = sandbox[item];
+        char const* tail[] = {
+            service ? "--property=ReadOnlyPaths=" BQ_ATTEMPT "/base/source " BQ_ATTEMPT "/candidate/source" :
+                      "--property=ReadOnlyPaths=" BQ_ATTEMPT "/base/source " BQ_ATTEMPT "/base/build "
+                      BQ_ATTEMPT "/candidate/source",
+            read_write,
+            service ? "--working-directory=" BQ_ATTEMPT "/base/source" :
+                      "--working-directory=" BQ_ATTEMPT "/candidate/source",
+            "--property=InaccessiblePaths=/var/lib/buster-bench/queue /var/lib/buster-bench/lease/host.lock "
+            "/var/lib/buster-bench/workspaces/results/job-1-attempt-2",
+            "--property=PrivateNetwork=yes", "/usr/local/libexec/buster-bench-credential-gate", stage,
+            service ? "65000" : "65001", service ? "65000" : "65001", service ? "65000,65001" : "65001", "--",
+            "/usr/local/libexec/buster-bench-build", generate ? "generate" : "build", "--build-directory", root,
+            "--config", "Release"};
+        for (unsigned item = 0; item < sizeof(tail) / sizeof(tail[0]); item += 1) expected[count++] = tail[item];
+        unsigned options = generate ? 10u : 4u;
+        for (unsigned item = 0; item < options; item += 1)
+            expected[count++] = generate ? generate_options[item] : build_options[item];
+        request.stage = 6u + index;
+        bool built = bq_broker_command(&request, groups, &command);
+        BQ_RETIREMENT_CHECK(built && command.count == count && command.argv[count] == NULL);
+        for (unsigned item = 0; built && item < count && item < command.count; item += 1)
+            BQ_RETIREMENT_CHECK(!strcmp(command.argv[item], expected[item]));
+        /* One writable path, and never the other subject's root. */
+        BQ_RETIREMENT_CHECK(bq_broker_property_count(&command, "--property=ReadWritePaths=") == 1 &&
+                            !bq_broker_has_argument(&command, "--setenv=PATH=/usr/bin:/bin") &&
+                            !bq_broker_has_argument(&command, service ?
+                                "--property=ReadWritePaths=" BQ_ATTEMPT "/candidate/matched-build" :
+                                "--property=ReadWritePaths=" BQ_ATTEMPT "/base/build/matched-build"));
+        /* The typed CLI selects the stage by name only. */
+        char* cli[] = {"broker", "start-stage", "1", "2", (char*)names[index], request.base, request.candidate};
+        BQ_RETIREMENT_CHECK(bq_broker_cli(7, cli, &parsed) && parsed.stage == 6u + index &&
+                            parsed.operation == BQ_BROKER_START);
+        /* signal accepts exactly this unit, TERM or KILL, never CONT. */
+        snprintf(unit_name, sizeof(unit_name), "buster-bench-1-2-%s.service", names[index]);
+        char* kill_cli[] = {"broker", "signal", unit_name, "KILL"};
+        BQ_RETIREMENT_CHECK(bq_broker_unit_from_text(unit_name, &parsed) && parsed.stage == 6u + index &&
+                            parsed.job == 1 && parsed.attempt == 2);
+        BQ_RETIREMENT_CHECK(bq_broker_cli(4, kill_cli, &parsed) && parsed.signal_number == BQ_BROKER_KILL &&
+                            bq_broker_command(&parsed, groups, &command) && command.count == 5 &&
+                            !strcmp(command.argv[0], BQ_BROKER_CTL) && !strcmp(command.argv[1], "kill") &&
+                            !strcmp(command.argv[2], "--kill-whom=all") &&
+                            !strcmp(command.argv[3], "--signal=KILL") && !strcmp(command.argv[4], unit_name));
+        kill_cli[3] = "TERM";
+        BQ_RETIREMENT_CHECK(bq_broker_cli(4, kill_cli, &parsed) && parsed.signal_number == BQ_BROKER_TERM);
+        kill_cli[3] = "CONT";
+        BQ_RETIREMENT_CHECK(!bq_broker_cli(4, kill_cli, &parsed));
+        /* A readback of this unit's own gated ExecStart authorizes KILL. */
+        snprintf(show, sizeof(show), "ExecStart={ path=" BQ_BROKER_GATE " ; argv[]=" BQ_BROKER_GATE
+                 " %u %s %s %s -- " BQ_BROKER_BUILD " %s fixed ; ignore_errors=no }\n", 6u + index,
+                 service ? "65000" : "65001", service ? "65000" : "65001", service ? "65000,65001" : "65001",
+                 generate ? "generate" : "build");
+        BqBrokerRequest signal_request = {.magic = BQ_BROKER_MAGIC, .version = 1, .operation = BQ_BROKER_SIGNAL,
+                                          .stage = 6u + index, .signal_number = BQ_BROKER_KILL,
+                                          .job = 1, .attempt = 2};
+        BQ_RETIREMENT_CHECK(bq_broker_exec_identity(show, &signal_request, groups));
+        /* Another stage's number, verb, role or a legacy direct form is foreign. */
+        signal_request.stage = 6u + (index ^ 1u);
+        BQ_RETIREMENT_CHECK(!bq_broker_exec_identity(show, &signal_request, groups));
+        signal_request.stage = 6u + (index ^ 2u);
+        BQ_RETIREMENT_CHECK(!bq_broker_exec_identity(show, &signal_request, groups));
+        signal_request.stage = service ? BQ_BROKER_BASE_GENERATE + index : BQ_BROKER_CANDIDATE_GENERATE + index - 2u;
+        BQ_RETIREMENT_CHECK(!bq_broker_exec_identity(show, &signal_request, groups));
+        signal_request.stage = 6u + index;
+        char const* legacy = "ExecStart={ path=" BQ_BROKER_BUILD " ; argv[]=fixed }\n";
+        BQ_RETIREMENT_CHECK(!bq_broker_exec_identity(legacy, &signal_request, groups));
+    }
+    /* Unknown or malformed stage names, request-supplied paths and extra
+     * arguments never reach a command. */
+    static char const* const malformed[] = {"retirement-base", "retirement-base-generat", "retirement-evil-generate",
+        "Retirement-base-generate", "retirement-base-generate ", "retirement-base-generate/..",
+        "retirement-candidate-generate\n", "retirement-base-generate-x", "retirement-", "7", "",
+        BQ_ATTEMPT "/base/build/matched-build", "../retirement-base-generate"};
+    for (unsigned index = 0; index < sizeof(malformed) / sizeof(malformed[0]); index += 1)
+    {
+        char* cli[] = {"broker", "start-stage", "1", "2", (char*)malformed[index], request.base, request.candidate};
+        BQ_RETIREMENT_CHECK(!bq_broker_cli(7, cli, &parsed));
+    }
+    char path_revision[41];
+    memcpy(path_revision, "/var/lib/buster-bench/workspaces/aaaaaaa", 41);
+    char* path_cli[] = {"broker", "start-stage", "1", "2", "retirement-base-generate", path_revision,
+                        request.candidate, BQ_ATTEMPT "/base/build"};
+    BQ_RETIREMENT_CHECK(!bq_broker_cli(7, path_cli, &parsed));
+    path_cli[5] = request.base;
+    BQ_RETIREMENT_CHECK(!bq_broker_cli(8, path_cli, &parsed) && bq_broker_cli(7, path_cli, &parsed));
+    request.stage = BQ_BROKER_RETIREMENT_CANDIDATE_BUILD;
+    request.candidate[0] = '/';
+    BQ_RETIREMENT_CHECK(!bq_broker_command(&request, groups, &command));
+    request.candidate[0] = 'b';
+    request.stage = BQ_BROKER_LAST_STAGE + 1;
+    BQ_RETIREMENT_CHECK(!bq_broker_command(&request, groups, &command));
+    static char const* const foreign[] = {"buster-bench-1-2-retirement-base.service",
+        "buster-bench-1-2-retirement-base-generate", "buster-bench-1-2-retirement-base-generate.service.d",
+        "buster-bench-1-2-retirement-candidate-build.socket", "buster-bench-1-2-retirement-base-generate-x.service",
+        "other-1-2-retirement-base-generate.service", "buster-bench-1-0-retirement-base-build.service",
+        "buster-bench-1-2-retirement-evil-build.service"};
+    for (unsigned index = 0; index < sizeof(foreign) / sizeof(foreign[0]); index += 1)
+    {
+        char* cli[] = {"broker", "signal", (char*)foreign[index], "KILL"};
+        BQ_RETIREMENT_CHECK(!bq_broker_unit_from_text(foreign[index], &parsed) && !bq_broker_cli(4, cli, &parsed));
+    }
+    /* Each retirement start requires base/build and exactly its own root. */
+    for (unsigned index = 0; index < 4; index += 1)
+    {
+        BqBrokerPaths paths;
+        char const* roots[2] = {0};
+        mode_t modes[2] = {0};
+        request.stage = 6u + index;
+        BQ_RETIREMENT_CHECK(bq_broker_paths(&request, &paths) &&
+                            bq_broker_retirement_roots(&request, &paths, roots, modes) == 2 &&
+                            !strcmp(roots[0], BQ_ATTEMPT "/base/build") && modes[0] == 02700 &&
+                            !strcmp(roots[1], index < 2 ? BQ_ATTEMPT "/base/build/matched-build" :
+                                                          BQ_ATTEMPT "/candidate/matched-build") &&
+                            modes[1] == (index < 2 ? 02700 : 02770));
+    }
+    request.stage = BQ_BROKER_BASE_BUILD;
+    BqBrokerPaths smoke_paths;
+    char const* smoke_roots[2] = {0};
+    mode_t smoke_modes[2] = {0};
+    BQ_RETIREMENT_CHECK(bq_broker_paths(&request, &smoke_paths) &&
+                        bq_broker_retirement_roots(&request, &smoke_paths, smoke_roots, smoke_modes) == 0);
+    /* The root check itself: exact owner, group and mode through a no-follow
+     * walk; a symlinked root or parent and a wrong mode are refused. */
+    char temporary[] = "/tmp/buster-broker-root-XXXXXX";
+    char* base = mkdtemp(temporary);
+    char build[96], root[128], alias[96], through[128], leaf[128];
+    bool made = base && bq_broker_format(build, sizeof(build), "%s/build", base) &&
+                bq_broker_format(root, sizeof(root), "%s/matched-build", build) &&
+                bq_broker_format(alias, sizeof(alias), "%s/alias", base) &&
+                bq_broker_format(through, sizeof(through), "%s/matched-build", alias) &&
+                bq_broker_format(leaf, sizeof(leaf), "%s/leaf", build) &&
+                mkdir(build, 0700) == 0 && mkdir(root, 0700) == 0 && chmod(root, 02700) == 0 &&
+                symlink(build, alias) == 0 && symlink(root, leaf) == 0;
+    BQ_RETIREMENT_CHECK(made && bq_broker_private_directory(root, geteuid(), getegid(), 02700) &&
+                        !bq_broker_private_directory(through, geteuid(), getegid(), 02700) &&
+                        !bq_broker_private_directory(leaf, geteuid(), getegid(), 02700) &&
+                        !bq_broker_private_directory(root, geteuid() + 1, getegid(), 02700) &&
+                        chmod(root, 02750) == 0 && !bq_broker_private_directory(root, geteuid(), getegid(), 02700));
+    if (base)
+    {
+        unlink(leaf);
+        unlink(alias);
+        rmdir(root);
+        rmdir(build);
+        rmdir(base);
+    }
+    /* The smoke recipe's stages keep their fixed PATH and build directories. */
+    request.stage = BQ_BROKER_CANDIDATE_GENERATE;
+    BQ_RETIREMENT_CHECK(bq_broker_command(&request, groups, &command) &&
+                        bq_broker_has_argument(&command, "--setenv=PATH=/usr/bin:/bin") &&
+                        !bq_broker_has_argument(&command, "--setenv=TZ=UTC") &&
+                        bq_broker_has_argument(&command, "--property=ReadWritePaths=" BQ_ATTEMPT "/candidate/staging") &&
+                        bq_broker_has_argument(&command, BQ_ATTEMPT "/candidate/staging"));
+    request.stage = BQ_BROKER_BASE_BUILD;
+    BQ_RETIREMENT_CHECK(bq_broker_command(&request, groups, &command) &&
+                        bq_broker_has_argument(&command, "--property=ReadWritePaths=" BQ_ATTEMPT "/base/build") &&
+                        bq_broker_has_argument(&command, BQ_ATTEMPT "/base/build") &&
+                        !bq_broker_has_argument(&command, BQ_ATTEMPT "/base/build/matched-build"));
+#undef BQ_RETIREMENT_CHECK
+#undef BQ_ATTEMPT
+    if (!ok) *passed = false;
+    return checks;
+}
+
+/* Drain a relay like the CLI: returns the status frame's value when the
+ * relayed output stayed within the cap, else 255. */
+static int bq_broker_drain_relay(int connection)
+{
+    uint64_t total = 0;
+    int result = 255;
+    bool finished = false;
+    while (!finished)
+    {
+        BqBrokerFrame frame;
+        ssize_t received = recv(connection, &frame, sizeof(frame), 0);
+        finished = received < (ssize_t)offsetof(BqBrokerFrame, bytes) || frame.length > sizeof(frame.bytes);
+        if (!finished && frame.kind == BQ_BROKER_STATUS && frame.length == sizeof(int32_t))
+        {
+            int32_t status;
+            memcpy(&status, frame.bytes, sizeof(status));
+            result = total <= BQ_BROKER_OUTPUT_CAP && status >= 0 && status < 255 ? status : 255;
+            finished = true;
+        }
+        else if (!finished) total += frame.length;
+    }
+    return result;
+}
+
+/* #1785: the exact stop vectors, and a stage relay abandoned past the 16 MiB
+ * cap stopping its unit before it replies: 126 once the unit reads back as
+ * gone, BQ_RETIREMENT_STAGE_UNPROVEN_STATUS while it still reads active.
+ * Returns its checks. */
+static unsigned bq_broker_unit_stop_self_test(bool* passed)
+{
+    unsigned checks = 0;
+    bool ok = true;
+#define BQ_STOP_CHECK(condition) do { checks += 1; if (!(condition)) ok = false; } while (0)
+    BqBrokerRequest request = {.magic = BQ_BROKER_MAGIC, .version = 1, .operation = BQ_BROKER_START,
+                               .stage = BQ_BROKER_RETIREMENT_BASE_GENERATE, .job = 1, .attempt = 2};
+    memset(request.base, 'a', 40);
+    memset(request.candidate, 'b', 40);
+    BqBrokerUnitStop stop;
+    char const* unit = "buster-bench-1-2-retirement-base-generate.service";
+    char const* kill_vector[] = {BQ_BROKER_CTL, "kill", "--kill-whom=all", "--signal=KILL", unit, NULL};
+    char const* state_vector[] = {BQ_BROKER_CTL, "show", "--no-pager", "--property=LoadState",
+                                  "--property=ActiveState", unit, NULL};
+    bool vectors = bq_broker_unit_stop_commands(&request, &stop) && stop.milliseconds == BQ_BROKER_STOP_MILLISECONDS;
+    for (unsigned index = 0; vectors && index < 6; index += 1)
+        vectors = kill_vector[index] ? stop.kill[index] && !strcmp(stop.kill[index], kill_vector[index]) :
+                                       stop.kill[index] == NULL;
+    for (unsigned index = 0; vectors && index < 7; index += 1)
+        vectors = state_vector[index] ? stop.state[index] && !strcmp(stop.state[index], state_vector[index]) :
+                                        stop.state[index] == NULL;
+    BQ_STOP_CHECK(vectors);
+    /* Smoke stage units are stopped the same way; the outer unit (the
+     * coordinator's recursive stop proof) and signals never are. */
+    request.stage = BQ_BROKER_BASE_BUILD;
+    BQ_STOP_CHECK(bq_broker_unit_stop_commands(&request, &stop) &&
+                  !strcmp(stop.kill[4], "buster-bench-1-2-base-build.service"));
+    request.stage = BQ_BROKER_OUTER;
+    BQ_STOP_CHECK(!bq_broker_unit_stop_commands(&request, &stop) && !stop.enabled);
+    BqBrokerRequest signal_request = {.magic = BQ_BROKER_MAGIC, .version = 1, .operation = BQ_BROKER_SIGNAL,
+                                      .stage = BQ_BROKER_RETIREMENT_BASE_GENERATE,
+                                      .signal_number = BQ_BROKER_KILL, .job = 1, .attempt = 2};
+    BQ_STOP_CHECK(!bq_broker_unit_stop_commands(&signal_request, &stop) && !stop.enabled);
+    char directory[] = "/tmp/buster-broker-stop-XXXXXX";
+    char* base = mkdtemp(directory);
+    char marker[64];
+    bool marked = base && bq_broker_format(marker, sizeof(marker), "%s/killed", base);
+    BQ_STOP_CHECK(marked);
+    for (unsigned trial = 0; marked && trial < 2; trial += 1)
+    {
+        request.stage = BQ_BROKER_RETIREMENT_BASE_GENERATE;
+        bool built = bq_broker_unit_stop_commands(&request, &stop);
+        /* Stand-ins for systemctl: kill leaves a marker; show reads back the
+         * unit still active, or unloaded and inactive. */
+        stop.kill[0] = "/usr/bin/touch";
+        stop.kill[1] = marker;
+        stop.kill[2] = NULL;
+        stop.state[0] = "/usr/bin/printf";
+        stop.state[1] = trial ? "LoadState=not-found\nActiveState=inactive\n" : "LoadState=loaded\nActiveState=active\n";
+        stop.state[2] = NULL;
+        stop.milliseconds = 300;
+        int pair[2] = {-1, -1};
+        bool paired = built && socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0;
+        pid_t drainer = paired ? fork() : -1;
+        if (drainer == 0)
+        {
+            close(pair[0]);
+            _exit(bq_broker_drain_relay(pair[1]));
+        }
+        if (pair[1] >= 0) close(pair[1]);
+        BqBrokerCommand flood = {.argv = {"/usr/bin/yes"}, .count = 1, .valid = true};
+        int32_t framed = -1;
+        bool delivered = false;
+        int executed = drainer > 0 ? bq_broker_execute(&flood, pair[0], false, &stop, &framed, &delivered) : -1;
+        if (pair[0] >= 0) close(pair[0]);
+        int status = -1;
+        while (drainer > 0 && waitpid(drainer, &status, 0) < 0 && errno == EINTR) {}
+        struct stat info;
+        int32_t expected = trial ? 126 : BQ_RETIREMENT_STAGE_UNPROVEN_STATUS;
+        BQ_STOP_CHECK(executed == 1 && delivered && framed == expected && WIFEXITED(status) &&
+                      WEXITSTATUS(status) == expected && stat(marker, &info) == 0 && unlink(marker) == 0);
+    }
+    if (base) rmdir(base);
+    BQ_STOP_CHECK(BQ_RETIREMENT_STAGE_UNPROVEN_STATUS != 126 && BQ_RETIREMENT_STAGE_UNPROVEN_STATUS != 0);
+#undef BQ_STOP_CHECK
+    if (!ok) *passed = false;
+    return checks;
 }
 
 static int bq_broker_self_test(void)
@@ -2052,8 +2588,10 @@ static int bq_broker_self_test(void)
                                                    "--uid=buster-bench" : "--uid=buster-bench-candidate"));
         }
     }
-    request.stage = BQ_BROKER_THROUGHPUT_STAGE + 1;
+    request.stage = BQ_BROKER_LAST_STAGE + 1;
     BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
+    request.stage = BQ_BROKER_OUTER;
+    checks += bq_broker_retirement_self_test(&start_groups, &ok);
     request.stage = BQ_BROKER_OUTER;
     request.base[0] = '/';
     BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
@@ -2110,7 +2648,7 @@ static int bq_broker_self_test(void)
     if (io_ready)
     {
         BqBrokerCommand test_command = {.argv = {"/usr/bin/printf", "broker-output"}, .count = 2, .valid = true};
-        int executed = bq_broker_execute(&test_command, connection[0], false, NULL, NULL);
+        int executed = bq_broker_execute(&test_command, connection[0], false, NULL, NULL, NULL);
         BqBrokerFrame frame;
         ssize_t received = recv(connection[1], &frame, sizeof(frame), 0);
         BQ_BROKER_CHECK(executed == 0 && received == (ssize_t)(offsetof(BqBrokerFrame, bytes) + 13) &&
@@ -2124,7 +2662,7 @@ static int bq_broker_self_test(void)
         test_command.argv[0] = "/usr/bin/false";
         test_command.argv[1] = NULL;
         test_command.count = 1;
-        BQ_BROKER_CHECK(bq_broker_execute(&test_command, connection[0], true, NULL, NULL) == 0);
+        BQ_BROKER_CHECK(bq_broker_execute(&test_command, connection[0], true, NULL, NULL, NULL) == 0);
         received = recv(connection[1], &frame, sizeof(frame), 0);
         status = -1;
         if (received == (ssize_t)(offsetof(BqBrokerFrame, bytes) + sizeof(status)))
@@ -2133,6 +2671,7 @@ static int bq_broker_self_test(void)
     }
     if (connection[0] >= 0) close(connection[0]);
     if (connection[1] >= 0) close(connection[1]);
+    checks += bq_broker_unit_stop_self_test(&ok);
     char temporary[] = "/tmp/buster-systemd-broker-XXXXXX";
     char* root = mkdtemp(temporary);
     BQ_BROKER_CHECK(root != NULL);
