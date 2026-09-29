@@ -192,6 +192,63 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.plan()["status"], "disabled")
         self.assertEqual(self.api.comments, [])
 
+    def test_writer_refused_candidates_are_blocked_not_fatal(self):
+        # #1933: the real resolve_candidate -> gate.source_candidate path raises
+        # the merge gate's IntegrationError; plan() must record it per PR.
+        import native_retirement_merge_gate as gate
+        self.assertIs(gate.integration, i)
+        split_head, generated_head = "e" * 40, "f" * 40
+        heads = {1791: HEAD, 1796: split_head, 1696: generated_head}
+        ordinary_pr = self.api.pr
+        pulls = [ordinary_pr]
+        for number in (1796, 1696):
+            pr = copy.deepcopy(ordinary_pr)
+            pr["number"], pr["head"]["sha"] = number, heads[number]
+            pulls.append(pr)
+        classifications = {
+            HEAD: i.Classification("ordinary", ("src/buster/lib/value.c",), (), (), ()),
+            split_head: i.Classification(
+                "split-required",
+                ("docs/native-retirement-support-v1.tsv", "tools/native_retirement_contract.py"),
+                (), ("tools/native_retirement_contract.py",), ("docs/native-retirement-support-v1.tsv",)),
+            generated_head: i.Classification(
+                "ordinary", ("tools/native_retirement_dependency_binding.generated.h",),
+                ("tools/native_retirement_dependency_binding.generated.h",), (), ()),
+        }
+        fixture_all = self.api.all
+
+        def all_pages(path, **query):
+            if path == "pulls":
+                return copy.deepcopy(pulls)
+            if path in ("issues/1796/comments", "issues/1696/comments"):
+                return []
+            return fixture_all(path, **query)
+
+        def commit(repo, revision):
+            prefix = "refs/remotes/origin/native-retirement-controller-"
+            if revision.startswith(prefix):
+                return heads[int(revision[len(prefix):])]
+            return BASE if revision == "HEAD" else revision
+
+        self.api.all = all_pages
+        with mock.patch.object(i, "_git"), \
+                mock.patch.object(i, "_commit", side_effect=commit), \
+                mock.patch.object(i, "classify_candidate",
+                                  side_effect=lambda repo, base, head: classifications[head]), \
+                mock.patch.object(gate, "integration_record", return_value=((), {})), \
+                mock.patch.object(gate, "clean_merge_tree", return_value="a" * 40), \
+                mock.patch.object(gate, "bound_sources", return_value=frozenset({"src/buster/lib/value.c"})):
+            result = c.plan(self.api, ROOT, BASE, 100)
+        self.assertEqual(result["status"], "planned")
+        self.assertEqual(result["request"]["number"], 1791)
+        statuses = {entry["number"]: entry for entry in result["observations"]}
+        self.assertEqual(statuses[1791]["status"], "eligible")
+        self.assertEqual(statuses[1796]["status"], "blocked")
+        self.assertIn("split it into a backwards-compatible bootstrap", statuses[1796]["detail"])
+        self.assertEqual(statuses[1696]["status"], "blocked")
+        self.assertIn("generated artifacts were edited manually", statuses[1696]["detail"])
+        self.assertEqual(len(self.api.comments), 1)
+
 
 class WorkflowTests(unittest.TestCase):
     def test_writer_keeps_one_privileged_publisher_and_no_dispatch_authority(self):
