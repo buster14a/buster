@@ -7,23 +7,64 @@
  *
  * Entry point: bq_retirement_row_produce.
  *
+ * Isolation. Every step runs candidate-derived code: the candidate binary
+ * compiling, and the program it generated running. Each step is confined
+ * with Landlock (bq_retirement_row_sandbox) before exec: it may read and
+ * execute the system trees (/usr, /lib*, /bin, /sbin), read /etc and A's two
+ * source roots, execute and read its side's held binary, use /dev/null and
+ * read the random and zero devices, and use its own new step directory
+ * freely, and nothing else. It cannot open the reference oracle's outputs,
+ * the check evidence, the row evidence or another step's directory, cannot
+ * bind or connect TCP sockets (ABI 4) and cannot signal or reach abstract
+ * sockets outside its domain (ABI 6). A kernel without Landlock makes every
+ * step fail closed (BQ_CONFIGURATION_MISMATCH). The steps still run as the
+ * service user; the broker's separate candidate UID is not used here.
+ *
  * Map: bq_retirement_row_spawn forks one step through
  * bq_retirement_build_child's normalized state (retirement_check_runner.c's
  * limits: own process group, default signals, empty mask, umask 0077,
- * close-on-exec from 3, RLIMIT_AS, no core) and places the side's held
- * binary, A's two roots and the step's work directory in the canonical slots
- * the plan's digests assume; bq_retirement_row_step runs it as the check
- * runner runs a check (no other child first, subreaper, the step and job
- * bounds, cancellation, the sweep) with the held binaries fstat'ed and
- * rehashed around it; bq_retirement_row_metrics_inputs reads the compiler's
- * per-input metrics records; bq_retirement_row_artifact reads an artifact and
- * its code section with the independent reader; bq_retirement_row_batch,
- * bq_retirement_row_compile observe a batch group and a per-row compile (with
- * its runtime step) for one side.
+ * close-on-exec from 3, RLIMIT_AS, no core), places the side's held binary,
+ * A's two roots and the step's work directory in the canonical slots the
+ * plan's digests assume and enters the sandbox; bq_retirement_row_step runs
+ * it as the check runner runs a check (no other child first, subreaper, the
+ * step and job bounds, cancellation, the sweep) with the held binaries'
+ * fstat identity unchanged around it (bq_retirement_row_produce rehashes
+ * them once before and once after the whole run);
+ * bq_retirement_row_metrics_parse reads the compiler's metrics records and
+ * bq_retirement_row_metrics_single checks a per-row compile's;
+ * bq_retirement_row_artifact freezes an artifact and reads it with the
+ * service's per-target format, machine and kind check;
+ * bq_retirement_row_cpu_model names the pinned CPU; bq_retirement_row_batch
+ * and bq_retirement_row_compile observe a batch group and a per-row compile
+ * (with its runtime step) for one side.
  */
 #include "retirement_row_plan.h"
+#include <linux/landlock.h>
+#include <sys/syscall.h>
 
-/* One step's outcome. */
+/* Landlock rights by bit, as the kernel UAPI numbers them, so an older
+ * linux/landlock.h still builds: ABI 1 handles bits 0-12, ABI 2 adds REFER,
+ * ABI 3 TRUNCATE, ABI 5 IOCTL_DEV; ABI 4 adds TCP bind/connect and ABI 6 the
+ * signal and abstract-socket scopes. */
+#define BQ_RETIREMENT_ROW_FS_EXECUTE (1ull << 0)
+#define BQ_RETIREMENT_ROW_FS_WRITE_FILE (1ull << 1)
+#define BQ_RETIREMENT_ROW_FS_READ_FILE (1ull << 2)
+#define BQ_RETIREMENT_ROW_FS_READ_DIR (1ull << 3)
+#define BQ_RETIREMENT_ROW_FS_ABI1 ((1ull << 13) - 1u)
+#define BQ_RETIREMENT_ROW_FS_REFER (1ull << 13)
+#define BQ_RETIREMENT_ROW_FS_TRUNCATE (1ull << 14)
+#define BQ_RETIREMENT_ROW_FS_IOCTL_DEV (1ull << 15)
+#define BQ_RETIREMENT_ROW_NET_TCP 3ull
+#define BQ_RETIREMENT_ROW_SCOPES 3ull
+
+typedef struct BqRetirementRowRulesetAttributes
+{
+    u64 handled_access_fs, handled_access_net, scoped;
+} BqRetirementRowRulesetAttributes;
+
+/* One step's outcome. output_sha256 is the step's stdout, or its combined
+ * stdout and stderr for a runtime step, which the oracle captures the same
+ * way. */
 typedef struct BqRetirementRowStepResult
 {
     int exit_code;
@@ -32,10 +73,60 @@ typedef struct BqRetirementRowStepResult
     char output_sha256[SHA256_HEX_CAPACITY], log_sha256[SHA256_HEX_CAPACITY];
 } BqRetirementRowStepResult;
 
+BUSTER_GLOBAL_LOCAL bool bq_retirement_row_rule(int ruleset, int parent, u64 allowed)
+{
+    struct landlock_path_beneath_attr beneath = {.allowed_access = allowed, .parent_fd = parent};
+    bool ok = parent >= 0 && syscall(SYS_landlock_add_rule, ruleset, LANDLOCK_RULE_PATH_BENEATH, &beneath, 0) == 0;
+    return ok;
+}
+
+/* A system path the step may use, when it exists. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_row_system_rule(int ruleset, char const* path, bool directory, u64 allowed)
+{
+    int held = open(path, O_PATH | O_CLOEXEC | (directory ? O_DIRECTORY : 0));
+    bool ok = held < 0 ? errno == ENOENT || errno == ENOTDIR : bq_retirement_row_rule(ruleset, held, allowed);
+    if (held >= 0) close(held);
+    return ok;
+}
+
+/* The Landlock ruleset of one step (close-on-exec), or -1: see the file
+ * header. binary is the side's held binary, sources A's roots and work the
+ * step's own directory. */
+BUSTER_GLOBAL_LOCAL int bq_retirement_row_sandbox(int binary, int const sources[2], int work)
+{
+    long abi = syscall(SYS_landlock_create_ruleset, NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
+    u64 handled = abi >= 1 ? BQ_RETIREMENT_ROW_FS_ABI1 : 0;
+    if (abi >= 2) handled |= BQ_RETIREMENT_ROW_FS_REFER;
+    if (abi >= 3) handled |= BQ_RETIREMENT_ROW_FS_TRUNCATE;
+    if (abi >= 5) handled |= BQ_RETIREMENT_ROW_FS_IOCTL_DEV;
+    BqRetirementRowRulesetAttributes attributes = {handled, abi >= 4 ? BQ_RETIREMENT_ROW_NET_TCP : 0,
+                                                   abi >= 6 ? BQ_RETIREMENT_ROW_SCOPES : 0};
+    size_t size = abi >= 6 ? sizeof(attributes) : abi >= 4 ? 2u * sizeof(u64) : sizeof(u64);
+    int ruleset = abi >= 1 ? (int)syscall(SYS_landlock_create_ruleset, &attributes, size, 0) : -1;
+    u64 read = BQ_RETIREMENT_ROW_FS_READ_FILE | BQ_RETIREMENT_ROW_FS_READ_DIR;
+    u64 null_device = BQ_RETIREMENT_ROW_FS_READ_FILE | BQ_RETIREMENT_ROW_FS_WRITE_FILE |
+                      (handled & BQ_RETIREMENT_ROW_FS_TRUNCATE);
+    static char const* const trees[] = {"/usr", "/lib", "/lib64", "/lib32", "/bin", "/sbin"};
+    static char const* const devices[] = {"/dev/zero", "/dev/urandom", "/dev/random"};
+    bool ok = ruleset >= 0;
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(trees); index += 1)
+        ok = bq_retirement_row_system_rule(ruleset, trees[index], true, read | BQ_RETIREMENT_ROW_FS_EXECUTE);
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(devices); index += 1)
+        ok = bq_retirement_row_system_rule(ruleset, devices[index], false, BQ_RETIREMENT_ROW_FS_READ_FILE);
+    ok = ok && bq_retirement_row_system_rule(ruleset, "/etc", true, read) &&
+         bq_retirement_row_system_rule(ruleset, "/dev/null", false, null_device) &&
+         bq_retirement_row_rule(ruleset, sources[0], read) && bq_retirement_row_rule(ruleset, sources[1], read) &&
+         bq_retirement_row_rule(ruleset, binary, BQ_RETIREMENT_ROW_FS_EXECUTE | BQ_RETIREMENT_ROW_FS_READ_FILE) &&
+         bq_retirement_row_rule(ruleset, work, handled);
+    if (!ok && ruleset >= 0) close(ruleset);
+    return ok ? ruleset : -1;
+}
+
 /* Forks one step (see the map). held is the side's binary, A's base and
- * candidate roots and the work directory, in slot order. */
+ * candidate roots and the work directory, in slot order; ruleset the step's
+ * sandbox. combined puts stdout on the log pipe too. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_row_spawn(BqRetirementRowCommand const* command, int const held[4], u32 side,
-    u64 memory_bytes, BqRetirementCheckChild* child)
+    u64 memory_bytes, int ruleset, bool combined, BqRetirementCheckChild* child)
 {
     int output[2] = {-1, -1}, log[2] = {-1, -1};
     bool ok = pipe2(output, O_CLOEXEC) == 0 && pipe2(log, O_CLOEXEC) == 0 && output[0] >= 3 && output[1] >= 3 &&
@@ -46,19 +137,21 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_row_spawn(BqRetirementRowCommand const* c
         struct rlimit memory = {(rlim_t)memory_bytes, (rlim_t)memory_bytes}, core = {0, 0};
         int const slots[4] = {BQ_RETIREMENT_ROW_SLOT_BINARY + (int)side, BQ_RETIREMENT_ROW_SLOT_SOURCE,
                               BQ_RETIREMENT_ROW_SLOT_SOURCE + 1, BQ_RETIREMENT_ROW_SLOT_WORK};
-        int moved[4] = {-1, -1, -1, -1};
+        int moved[5] = {-1, -1, -1, -1, -1};
         int entry = dup(held[3]);
         bool ready = entry >= 3 && bq_retirement_build_child(log[1], -1, entry, true, 0077) &&
-                     dup2(output[1], STDOUT_FILENO) == STDOUT_FILENO && setrlimit(RLIMIT_CORE, &core) == 0 &&
-                     setrlimit(RLIMIT_AS, &memory) == 0;
-        /* Out of the way first, then into the canonical slots; dup2 clears
-         * close-on-exec on exactly those four. */
-        for (u32 index = 0; ready && index < 4; index += 1)
+                     (combined || dup2(output[1], STDOUT_FILENO) == STDOUT_FILENO) &&
+                     setrlimit(RLIMIT_CORE, &core) == 0 && setrlimit(RLIMIT_AS, &memory) == 0;
+        /* Out of the way first (the ruleset too), then into the canonical
+         * slots; dup2 clears close-on-exec on exactly those four. */
+        for (u32 index = 0; ready && index < 5; index += 1)
         {
-            moved[index] = fcntl(held[index], F_DUPFD_CLOEXEC, 64);
+            moved[index] = fcntl(index < 4 ? held[index] : ruleset, F_DUPFD_CLOEXEC, 64);
             ready = moved[index] >= 64;
         }
         for (u32 index = 0; ready && index < 4; index += 1) ready = dup2(moved[index], slots[index]) == slots[index];
+        ready = ready && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 &&
+                syscall(SYS_landlock_restrict_self, moved[4], 0) == 0;
         if (ready) execve(command->arguments[0], command->arguments, command->environment);
         _exit(127);
     }
@@ -89,10 +182,12 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_row_spawn(BqRetirementRowCommand const* c
     return ok;
 }
 
-/* Runs one step in work with the side's held binary. BQ_OK means the child
- * reached a verdict; result then holds how it ended. */
+/* Runs one step in work with the side's held binary, sandboxed. BQ_OK means
+ * the child reached a verdict; result then holds how it ended. A held binary
+ * that is not the same unchanged file afterwards is BQ_SOURCE_MISMATCH. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_row_step(BqRetirementRowRun const* run, BqRetirementRowTemplate const* template,
-    BqRetirementRowContext const* context, char* storage, int work, char const* capture, BqRetirementRowStepResult* result)
+    BqRetirementRowContext const* context, char* storage, int work, char const* capture, bool combined,
+    BqRetirementRowStepResult* result)
 {
     *result = (BqRetirementRowStepResult){.exit_code = -1};
     BqError status = bq_retirement_check_stop(run->cancellation_fd, run->deadline_ns);
@@ -101,16 +196,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_row_step(BqRetirementRowRun const* run
     if (status == BQ_OK && !(bq_retirement_row_command(template, context, storage, &command) &&
                              bq_retirement_row_command_digest(&command, result->command_sha256)))
         status = BQ_CONFIGURATION_MISMATCH;
-    /* The held binaries: the verified bytes now, and the same unchanged
-     * files after the child. */
     BqRetirementHeldBinaries const* binaries = run->binaries;
     struct stat before[2] = {{0}}, after[2] = {{0}};
-    char digests[2][SHA256_HEX_CAPACITY] = {{0}};
     for (u32 side = 0; status == BQ_OK && side < 2; side += 1)
         if (fstat(binaries->descriptors[side], before + side) != 0) status = BQ_SOURCE_MISMATCH;
-    if (status == BQ_OK && !(bq_retirement_check_binaries(binaries, digests) &&
-                             !memcmp(digests, binaries->verified.binary_sha256, sizeof(digests))))
-        status = BQ_SOURCE_MISMATCH;
+    int ruleset = status == BQ_OK ? bq_retirement_row_sandbox(binaries->descriptors[context->side], run->sources, work) :
+                  -1;
+    if (status == BQ_OK && ruleset < 0) status = BQ_CONFIGURATION_MISMATCH;
     char names[2][96];
     int named[2] = {snprintf(names[0], sizeof(names[0]), "%s.stdout", capture),
                     snprintf(names[1], sizeof(names[1]), "%s.stderr", capture)};
@@ -127,8 +219,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_row_step(BqRetirementRowRun const* run
     int const held[4] = {binaries->descriptors[context->side], run->sources[0], run->sources[1], work};
     u64 started = bq_retirement_build_clock_ns();
     if (status == BQ_OK)
-        status = bq_retirement_row_spawn(&command, held, context->side, (u64)template->memory_mib << 20, &child) ?
-                 BQ_OK : BQ_IO;
+        status = bq_retirement_row_spawn(&command, held, context->side, (u64)template->memory_mib << 20, ruleset,
+                                         combined, &child) ? BQ_OK : BQ_IO;
     bool spawned = status == BQ_OK;
     BqRetirementCheckRun waiter = {.cancellation_fd = run->cancellation_fd, .deadline_ns = run->deadline_ns};
     if (spawned)
@@ -148,16 +240,18 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_row_step(BqRetirementRowRun const* run
         result->timed_out = child.timed_out;
         result->out_of_memory = signalled && WTERMSIG(child.status) == SIGKILL && !child.killed;
         result->failures = child.overflow + child.lingering;
-        sha256_finish_hex(&child.output_hash, result->output_sha256);
         sha256_finish_hex(&child.log_hash, result->log_sha256);
+        if (combined) memcpy(result->output_sha256, result->log_sha256, SHA256_HEX_CAPACITY);
+        else sha256_finish_hex(&child.output_hash, result->output_sha256);
     }
+    /* The same unchanged files (device, inode, size, mode, links, owner,
+     * mtime and ctime), so a modify-and-restore during the step is caught
+     * without rehashing the binaries around every step. */
     for (u32 side = 0; status == BQ_OK && side < 2; side += 1)
         if (!(fstat(binaries->descriptors[side], after + side) == 0 &&
               bq_retirement_oracle_same_file(before + side, after + side)))
             status = BQ_SOURCE_MISMATCH;
-    if (status == BQ_OK && !(bq_retirement_check_binaries(binaries, digests) &&
-                             !memcmp(digests, binaries->verified.binary_sha256, sizeof(digests))))
-        status = BQ_SOURCE_MISMATCH;
+    if (ruleset >= 0) close(ruleset);
     if (output_file >= 0) close(output_file);
     if (log_file >= 0) close(log_file);
     return status;
@@ -184,61 +278,160 @@ BUSTER_GLOBAL_LOCAL u8* bq_retirement_row_read(int work, char const* name, u64 c
     return bytes;
 }
 
-/* One observed artifact: its file digest and, with the independent reader,
- * its code section. readable is false when the reader refuses it. */
-BUSTER_GLOBAL_LOCAL bool bq_retirement_row_artifact(int work, char const* name, char digest[SHA256_HEX_CAPACITY],
-    TpRetirementArtifact* facts)
+/* One observed artifact of a row on target at stage: frozen read-only (an
+ * executable 0500), its file digest recorded whatever it holds, then read
+ * with the service's own check (bq_retirement_artifact_target and
+ * bq_retirement_artifact_read): the format and machine of the target and an
+ * object at the object stage, an executable otherwise. valid is false when
+ * any of that does not hold; facts then stays empty. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_row_artifact(int work, char const* name, u32 target, u32 stage,
+    char digest[SHA256_HEX_CAPACITY], TpRetirementArtifact* facts)
 {
+    *facts = (TpRetirementArtifact){0};
+    bool executable = stage != BQ_RETIREMENT_STAGE_OBJECT;
+    struct stat info = {0};
+    bool present = fstatat(work, name, &info, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(info.st_mode);
+    bool frozen = present && fchmodat(work, name, executable ? 0500 : 0400, 0) == 0;
     u64 size = 0;
-    u8* bytes = bq_retirement_row_read(work, name, BQ_RETIREMENT_ROW_ARTIFACT_BYTES_CAP, &size);
-    bool present = bytes != NULL;
-    if (present) bq_digest(bytes, (u32)size, (char8*)digest);
-    bool readable = present && tp_retirement_artifact(bytes, size, facts);
-    if (!readable) *facts = (TpRetirementArtifact){0};
+    u8* bytes = frozen ? bq_retirement_row_read(work, name, BQ_RETIREMENT_ROW_ARTIFACT_BYTES_CAP, &size) : NULL;
+    bool hashed = bytes != NULL;
+    if (hashed) bq_digest(bytes, (u32)size, (char8*)digest);
     free(bytes);
-    return readable;
+    unsigned format = 0, machine = 0;
+    bool valid = hashed && bq_retirement_artifact_target(target, stage, &format, &machine) &&
+                 bq_retirement_artifact_read((BqRetirementArtifactLocation){work, name}, format, machine, executable,
+                                             facts) &&
+                 !strcmp(facts->file_sha256, digest);
+    if (!valid) *facts = (TpRetirementArtifact){0};
+    return valid;
 }
 
-/* The per-input records of a metrics file, in order: each input's status
- * ("ok" or not), diagnostic digest and fallback-function count. count
- * receives the number of input records; false on any record that does not
- * parse. */
-BUSTER_GLOBAL_LOCAL bool bq_retirement_row_metrics_inputs(u8 const* bytes, u64 size, u32 capacity, u32* count,
-    u8* compiled, char (*diagnostic)[SHA256_HEX_CAPACITY], u64* fallback)
+/* The index of a per-input metrics field, by its name. */
+BUSTER_GLOBAL_LOCAL u32 bq_retirement_row_metrics_field(char const* name)
 {
-    TpRetirementMetricsValue header[TP_METRICS_H_COUNT], input[TP_METRICS_I_COUNT], function[TP_METRICS_F_COUNT];
+    u32 found = TP_METRICS_I_COUNT;
+    for (u32 index = 0; found == TP_METRICS_I_COUNT && index < TP_METRICS_I_COUNT; index += 1)
+        if (!strcmp(tp_retirement_metrics_input_fields[index], name)) found = index;
+    return found;
+}
+
+/* One metrics file's header and input records. status is the input's
+ * status index in bq_retirement_row_statuses, or BQ_RETIREMENT_ROW_STATUSES
+ * for any other. */
+#define BQ_RETIREMENT_ROW_STATUSES 5u
+BUSTER_GLOBAL_LOCAL char const* const bq_retirement_row_statuses[BQ_RETIREMENT_ROW_STATUSES] = {
+    "ok", "rejected", "failed", "not_run", "prebuilt"
+};
+
+typedef struct BqRetirementRowMetrics
+{
+    TpRetirementMetricsValue header[TP_METRICS_H_COUNT];
+    u8* status;
+    char (*diagnostic)[SHA256_HEX_CAPACITY];
+    u64* fallback;
+    u8* fixture_path;
+    u32 count;
+} BqRetirementRowMetrics;
+
+/* Parses a metrics file of at most capacity input records; fixture, when
+ * given, marks which inputs record exactly that path. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_row_metrics_parse(u8 const* bytes, u64 size, u32 capacity, char const* fixture,
+    BqRetirementRowMetrics* metrics)
+{
+    TpRetirementMetricsValue input[TP_METRICS_I_COUNT], function[TP_METRICS_F_COUNT];
+    u32 fallback_field = bq_retirement_row_metrics_field("fallback_functions");
     u64 offset = 0;
     char const* line = NULL;
     size_t length = 0;
-    bool ok = bytes && size && tp_retirement_metrics_next(bytes, size, &offset, &line, &length) &&
+    bool ok = bytes && size && fallback_field < TP_METRICS_I_COUNT &&
+              tp_retirement_metrics_next(bytes, size, &offset, &line, &length) &&
               tp_retirement_metrics_line(line, length, "CC_METRICS", tp_retirement_metrics_header_fields,
-                                         TP_METRICS_H_COUNT, header) &&
-              header[TP_METRICS_H_INPUTS].number <= capacity;
-    u32 inputs = ok ? (u32)header[TP_METRICS_H_INPUTS].number : 0;
+                                         TP_METRICS_H_COUNT, metrics->header) &&
+              metrics->header[TP_METRICS_H_INPUTS].number <= capacity;
+    u32 inputs = ok ? (u32)metrics->header[TP_METRICS_H_INPUTS].number : 0;
     for (u32 index = 0; ok && index < inputs; index += 1)
     {
         ok = tp_retirement_metrics_next(bytes, size, &offset, &line, &length) &&
              tp_retirement_metrics_line(line, length, "CC_METRICS_INPUT", tp_retirement_metrics_input_fields,
                                         TP_METRICS_I_COUNT, input) &&
-             input[TP_METRICS_I_INDEX].number == index;
+             input[TP_METRICS_I_INDEX].number == index &&
+             tp_retirement_metrics_truncation(input, TP_METRICS_I_MESSAGE_BYTES);
         if (ok)
         {
-            compiled[index] = tp_retirement_metrics_text(&input[TP_METRICS_I_STATUS], "ok");
-            memcpy(diagnostic[index], input[TP_METRICS_I_DIAGNOSTIC_DIGEST].text, 64);
-            diagnostic[index][64] = 0;
-            fallback[index] = input[38].number;
+            metrics->status[index] = BQ_RETIREMENT_ROW_STATUSES;
+            for (u32 status = 0; status < BQ_RETIREMENT_ROW_STATUSES; status += 1)
+                if (tp_retirement_metrics_text(&input[TP_METRICS_I_STATUS], bq_retirement_row_statuses[status]))
+                    metrics->status[index] = (u8)status;
+            memcpy(metrics->diagnostic[index], input[TP_METRICS_I_DIAGNOSTIC_DIGEST].text, 64);
+            metrics->diagnostic[index][64] = 0;
+            metrics->fallback[index] = input[fallback_field].number;
+            metrics->fixture_path[index] = fixture && tp_retirement_metrics_input_path(&input[TP_METRICS_I_PATH], fixture);
         }
         u64 functions = ok ? input[TP_METRICS_I_FUNCTION_RECORDS].number : 0;
         for (u64 ordinal = 0; ok && ordinal < functions; ordinal += 1)
             ok = tp_retirement_metrics_next(bytes, size, &offset, &line, &length) &&
                  tp_retirement_metrics_line(line, length, "CC_METRICS_FUNCTION", tp_retirement_metrics_function_fields,
-                                            TP_METRICS_F_COUNT, function);
+                                            TP_METRICS_F_COUNT, function) &&
+                 function[TP_METRICS_F_INPUT].number == index && function[TP_METRICS_F_ORDINAL].number == ordinal;
     }
     ok = ok && offset == size;
-    *count = ok ? inputs : 0;
+    metrics->count = ok ? inputs : 0;
     return ok;
 }
-BUSTER_CT_CHECK(TP_METRICS_I_COUNT > 38);
+
+/* A per-row compile's metrics, checked as the batch path checks a batch's:
+ * the schema, the records and status counts, the process's exit status, the
+ * action of the row's stage, and the row's own fixture as the first input.
+ * accepted is whether every input compiled, or (linking an executable) was
+ * a prebuilt input; diagnostic is the first input's compiler diagnostic
+ * digest and fallback the fallback functions over all inputs. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_row_metrics_single(BqRetirementRowMetrics const* metrics, u32 stage, int exit_code,
+    bool* accepted, char diagnostic[SHA256_HEX_CAPACITY], u64* fallback)
+{
+    TpRetirementMetricsValue const* header = metrics->header;
+    u64 counts[BQ_RETIREMENT_ROW_STATUSES + 1u] = {0};
+    for (u32 index = 0; index < metrics->count; index += 1) counts[metrics->status[index]] += 1;
+    bool ok = metrics->count > 0 && tp_retirement_metrics_text(&header[TP_METRICS_H_SCHEMA], "buster-cc-metrics") &&
+              header[TP_METRICS_H_RECORDS].number == metrics->count && !counts[BQ_RETIREMENT_ROW_STATUSES] &&
+              header[TP_METRICS_H_OK].number == counts[0] && header[TP_METRICS_H_REJECTED].number == counts[1] &&
+              header[TP_METRICS_H_FAILED].number == counts[2] && header[TP_METRICS_H_NOT_RUN].number == counts[3] &&
+              header[TP_METRICS_H_PREBUILT].number == counts[4] && exit_code >= 0 &&
+              header[TP_METRICS_H_EXIT_STATUS].number == (u64)exit_code &&
+              tp_retirement_metrics_text(&header[TP_METRICS_H_ACTION],
+                                         stage == BQ_RETIREMENT_STAGE_OBJECT ? "object" : "link") &&
+              metrics->fixture_path[0];
+    bool all = ok;
+    u64 total = 0;
+    for (u32 index = 0; ok && index < metrics->count; index += 1)
+    {
+        all = all && (metrics->status[index] == 0 || (stage != BQ_RETIREMENT_STAGE_OBJECT && metrics->status[index] == 4));
+        total += metrics->fallback[index];
+    }
+    *accepted = ok && all;
+    *fallback = total;
+    if (ok) memcpy(diagnostic, metrics->diagnostic[0], SHA256_HEX_CAPACITY);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_row_metrics_allocate(BqRetirementRowMetrics* metrics, u32 capacity)
+{
+    *metrics = (BqRetirementRowMetrics){0};
+    metrics->status = calloc(capacity, 1);
+    metrics->diagnostic = calloc(capacity, sizeof(*metrics->diagnostic));
+    metrics->fallback = calloc(capacity, sizeof(*metrics->fallback));
+    metrics->fixture_path = calloc(capacity, 1);
+    bool ok = metrics->status && metrics->diagnostic && metrics->fallback && metrics->fixture_path;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_retirement_row_metrics_free(BqRetirementRowMetrics* metrics)
+{
+    free(metrics->status);
+    free(metrics->diagnostic);
+    free(metrics->fallback);
+    free(metrics->fixture_path);
+    *metrics = (BqRetirementRowMetrics){0};
+}
 
 /* A new private step directory under the attempt's retirement-work/. */
 BUSTER_GLOBAL_LOCAL int bq_retirement_row_directory(int work, char const* name)
@@ -262,7 +455,8 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_row_code(BqRetirementTrustedRow const* ro
 /* One batch group on one side: the response file, the batch step, its
  * metrics authenticated against the frozen contract (the plan's statuses,
  * errors, exit status and bound with the observed diagnostics and objects),
- * then each input's observation and its row's facts. */
+ * then each input's observation and its row's facts. Every object is read as
+ * an x86_64-linux relocatable, the timed native-host target's. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_row_batch(BqRetirementRowRun const* run, u32 index, u32 side, char* storage,
     BqRetirementRowObserved* observed)
 {
@@ -273,11 +467,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_row_batch(BqRetirementRowRun const* ru
     int work = bq_retirement_row_directory(run->work, name);
     BqError status = work >= 3 ? BQ_OK : BQ_WORKSPACE_MISMATCH;
     TpRetirementBatchInput* inputs = calloc(group->input_count, sizeof(*inputs));
-    u8* compiled = calloc(group->input_count, 1);
-    char (*diagnostic)[SHA256_HEX_CAPACITY] = calloc(group->input_count, sizeof(*diagnostic));
-    u64* fallback = calloc(group->input_count, sizeof(*fallback));
     TpRetirementMemberSample* members = calloc(group->input_count, sizeof(*members));
-    if (status == BQ_OK && !(inputs && compiled && diagnostic && fallback && members)) status = BQ_IO;
+    BqRetirementRowMetrics parsed = {0};
+    if (status == BQ_OK && !(inputs && members && bq_retirement_row_metrics_allocate(&parsed, group->input_count)))
+        status = BQ_IO;
     /* The response file the {{inputs}} token names, in the work directory. */
     char placeholder[SHA256_HEX_CAPACITY];
     memset(placeholder, '0', 64);
@@ -297,24 +490,25 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_row_batch(BqRetirementRowRun const* ru
     BqRetirementRowContext context = {.metrics = group->metrics, .inputs = group->list_leaf, .side = side, .label = 1};
     if (status == BQ_OK)
         status = bq_retirement_row_step(run, plan->templates + group->template_index, &context, storage, work, "batch",
-                                        &step);
+                                        false, &step);
     u64 size = 0;
     u8* metrics = status == BQ_OK ? bq_retirement_row_read(work, group->metrics, group->metrics_bytes_max, &size) : NULL;
-    u32 records = 0;
-    if (status == BQ_OK &&
-        !(metrics && bq_retirement_row_metrics_inputs(metrics, size, group->input_count, &records, compiled, diagnostic,
-                                                      fallback) && records == group->input_count))
+    if (status == BQ_OK && !(metrics && bq_retirement_row_metrics_parse(metrics, size, group->input_count, NULL, &parsed) &&
+                             parsed.count == group->input_count))
         status = BQ_RECIPE_MISMATCH;
     /* The observed contract: every input's diagnostic, and its object when
      * the plan pins one. */
     char (*objects)[SHA256_HEX_CAPACITY] = status == BQ_OK ? calloc(group->input_count, sizeof(*objects)) : NULL;
     TpRetirementArtifact* artifacts = status == BQ_OK ? calloc(group->input_count, sizeof(*artifacts)) : NULL;
-    if (status == BQ_OK && !(objects && artifacts)) status = BQ_IO;
+    u8* valid = status == BQ_OK ? calloc(group->input_count, 1) : NULL;
+    if (status == BQ_OK && !(objects && artifacts && valid)) status = BQ_IO;
     for (u32 slot = 0; status == BQ_OK && slot < group->input_count; slot += 1)
     {
         BqRetirementRowPlanInput const* input = plan->inputs + group->first_input + slot;
-        inputs[slot].diagnostic_sha256 = diagnostic[slot];
-        if (input->artifact) bq_retirement_row_artifact(work, input->artifact, objects[slot], artifacts + slot);
+        inputs[slot].diagnostic_sha256 = parsed.diagnostic[slot];
+        if (input->artifact)
+            valid[slot] = bq_retirement_row_artifact(work, input->artifact, BQ_RETIREMENT_UNIT_NATIVE_TARGET,
+                                                     BQ_RETIREMENT_STAGE_OBJECT, objects[slot], artifacts + slot);
         inputs[slot].object_sha256 = objects[slot][0] ? objects[slot] : NULL;
     }
     /* The frozen oracle: statuses, errors, diagnostics, object presence and
@@ -327,33 +521,33 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_row_batch(BqRetirementRowRun const* ru
     {
         u32 at = group->first_input + slot;
         BqRetirementRowPlanInput const* input = plan->inputs + at;
-        memcpy(observed->diagnostic_sha256[at][side], diagnostic[slot], SHA256_HEX_CAPACITY);
+        bool compiled = parsed.status[slot] == 0;
+        memcpy(observed->diagnostic_sha256[at][side], parsed.diagnostic[slot], SHA256_HEX_CAPACITY);
         memcpy(observed->object_sha256[at][side], objects[slot], SHA256_HEX_CAPACITY);
         BqRetirementObservedSide* fact = input->row != TP_RETIREMENT_BATCH_NO_ROW ?
                                          observed->facts[input->row].side + side : NULL;
         if (fact)
         {
             memcpy(fact->compiler_command_sha256, step.command_sha256, SHA256_HEX_CAPACITY);
-            memcpy(fact->diagnostic_sha256, diagnostic[slot], SHA256_HEX_CAPACITY);
+            memcpy(fact->diagnostic_sha256, parsed.diagnostic[slot], SHA256_HEX_CAPACITY);
             memcpy(fact->artifact_sha256, objects[slot], SHA256_HEX_CAPACITY);
-            fact->compiler_exit = compiled[slot] ? 0 : step.exit_code;
+            fact->compiler_exit = compiled ? 0 : step.exit_code;
             fact->runtime_exit = input->member ? -1 : 0;
         }
         if (fact && input->member)
         {
-            fact->semantic_pass = compiled[slot] && artifacts[slot].file_sha256[0];
-            fact->fallback_count = fallback[slot] <= UINT32_MAX ? (u32)fallback[slot] : UINT32_MAX;
+            fact->semantic_pass = compiled && valid[slot];
+            fact->fallback_count = parsed.fallback[slot] <= UINT32_MAX ? (u32)parsed.fallback[slot] : UINT32_MAX;
             bq_retirement_row_code(plan->completed + input->row, artifacts + slot, fact);
         }
     }
+    free(valid);
     free(objects);
     free(artifacts);
     free(metrics);
     free(inputs);
-    free(compiled);
-    free(diagnostic);
-    free(fallback);
     free(members);
+    bq_retirement_row_metrics_free(&parsed);
     if (work >= 0) close(work);
     return status;
 }
@@ -365,6 +559,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_row_compile(BqRetirementRowRun const* 
 {
     BqRetirementRowPlan const* plan = run->plan;
     BqRetirementRowPlanRow const* planned = plan->rows + row;
+    BqRetirementTrustedRow const* trusted = plan->completed + row;
     BqRetirementObservedSide* fact = observed->facts[row].side + side;
     char name[64], output[32], metrics_name[32];
     snprintf(name, sizeof(name), "row-work-%u-%u", row, side);
@@ -376,46 +571,43 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_row_compile(BqRetirementRowRun const* 
                                       .side = side, .label = 1};
     if (status == BQ_OK)
         status = bq_retirement_row_step(run, plan->templates + planned->compile, &context, storage, work, "compile",
-                                        &step);
+                                        false, &step);
     u64 size = 0;
     u8* metrics = status == BQ_OK ? bq_retirement_row_read(work, metrics_name, TP_RETIREMENT_METRICS_ARTIFACT_BYTES,
                                                            &size) : NULL;
-    u8 compiled[TP_RETIREMENT_BATCH_INPUTS] = {0};
-    char (*diagnostic)[SHA256_HEX_CAPACITY] = status == BQ_OK ? calloc(TP_RETIREMENT_BATCH_INPUTS,
-                                                                       sizeof(*diagnostic)) : NULL;
-    u64* fallback = status == BQ_OK ? calloc(TP_RETIREMENT_BATCH_INPUTS, sizeof(*fallback)) : NULL;
-    if (status == BQ_OK && !(diagnostic && fallback)) status = BQ_IO;
-    u32 records = 0;
-    bool reported = status == BQ_OK && metrics &&
-                    bq_retirement_row_metrics_inputs(metrics, size, TP_RETIREMENT_BATCH_INPUTS, &records, compiled,
-                                                     diagnostic, fallback) && records > 0;
+    BqRetirementRowMetrics parsed = {0};
+    if (status == BQ_OK && !bq_retirement_row_metrics_allocate(&parsed, TP_RETIREMENT_BATCH_INPUTS)) status = BQ_IO;
+    bool accepted = false;
     u64 fallbacks = 0;
-    bool all_compiled = reported;
-    for (u32 index = 0; reported && index < records; index += 1)
-    {
-        all_compiled = all_compiled && compiled[index];
-        fallbacks += fallback[index];
-    }
+    char diagnostic[SHA256_HEX_CAPACITY] = {0};
+    bool reported = status == BQ_OK && metrics &&
+                    bq_retirement_row_metrics_parse(metrics, size, TP_RETIREMENT_BATCH_INPUTS, planned->fixture,
+                                                    &parsed) &&
+                    bq_retirement_row_metrics_single(&parsed, trusted->stage, step.exit_code, &accepted, diagnostic,
+                                                     &fallbacks);
     TpRetirementArtifact artifact = {0};
-    bool readable = status == BQ_OK && bq_retirement_row_artifact(work, output, fact->artifact_sha256, &artifact);
+    bool valid = status == BQ_OK && bq_retirement_row_artifact(work, output, trusted->target, trusted->stage,
+                                                               fact->artifact_sha256, &artifact);
     if (status == BQ_OK)
     {
         memcpy(fact->compiler_command_sha256, step.command_sha256, SHA256_HEX_CAPACITY);
-        memcpy(fact->diagnostic_sha256, step.log_sha256, SHA256_HEX_CAPACITY);
+        memcpy(fact->diagnostic_sha256, diagnostic, SHA256_HEX_CAPACITY);
         fact->compiler_exit = step.exit_code;
         fact->timed_out = step.timed_out;
         fact->out_of_memory = step.out_of_memory;
-        fact->semantic_pass = step.exit_code == 0 && !step.failures && all_compiled && readable;
+        /* Compile acceptance, not a per-row #509 semantic verdict. */
+        fact->semantic_pass = step.exit_code == 0 && !step.failures && reported && accepted && valid;
         fact->fallback_count = reported ? (fallbacks <= UINT32_MAX ? (u32)fallbacks : UINT32_MAX) : UINT32_MAX;
         fact->runtime_exit = -1;
-        bq_retirement_row_code(plan->completed + row, &artifact, fact);
+        bq_retirement_row_code(trusted, &artifact, fact);
     }
-    /* The generated program, run from the same work directory. */
+    /* The generated program, run from the same work directory with stdout
+     * and stderr on one writer, as the oracle captured its output. */
     if (status == BQ_OK && planned->runtime != BQ_RETIREMENT_ROW_PLAN_NONE && fact->semantic_pass)
     {
         BqRetirementRowStepResult program = {0};
         status = bq_retirement_row_step(run, plan->templates + planned->runtime, &context, storage, work, "runtime",
-                                        &program);
+                                        true, &program);
         if (status == BQ_OK)
         {
             memcpy(fact->runtime_command_sha256, program.command_sha256, SHA256_HEX_CAPACITY);
@@ -426,10 +618,61 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_row_compile(BqRetirementRowRun const* 
         }
     }
     free(metrics);
-    free(diagnostic);
-    free(fallback);
+    bq_retirement_row_metrics_free(&parsed);
     if (work >= 0) close(work);
     return status;
+}
+
+/* The digest of the named model of one logical CPU from /proc/cpuinfo: its
+ * "model name" line, else (AArch64) its "CPU implementer", "CPU variant",
+ * "CPU part" and "CPU revision" lines, else "unknown". */
+bool bq_retirement_row_cpu_model(u32 cpu, char digest[SHA256_HEX_CAPACITY])
+{
+    char* text = malloc(BQ_RETIREMENT_CHECK_CPUINFO_CAP + 1u);
+    int file = open("/proc/cpuinfo", O_RDONLY | O_CLOEXEC);
+    size_t used = 0;
+    bool ok = text && file >= 0;
+    bool more = ok;
+    while (ok && more && used < BQ_RETIREMENT_CHECK_CPUINFO_CAP)
+    {
+        ssize_t count = read(file, text + used, BQ_RETIREMENT_CHECK_CPUINFO_CAP - used);
+        if (count > 0) used += (size_t)count;
+        else if (count == 0) more = false;
+        else ok = errno == EINTR;
+    }
+    if (file >= 0) close(file);
+    char model[512] = {0}, part[512] = {0};
+    bool mine = false, found = false;
+    if (ok) text[used] = 0;
+    for (char* line = ok ? text : NULL; line && !found && line < text + used;)
+    {
+        char* end = strchr(line, '\n');
+        if (end) *end = 0;
+        char* colon = strchr(line, ':');
+        size_t key = colon ? (size_t)(colon - line) : 0;
+        while (key && (line[key - 1] == ' ' || line[key - 1] == '\t')) key -= 1;
+        char const* value = colon ? colon + 1 : "";
+        while (*value == ' ') value += 1;
+        if (!line[0]) found = mine && (model[0] || part[0]);
+        else if (key == 9 && !strncmp(line, "processor", 9))
+        {
+            char* digits_end = NULL;
+            unsigned long number = strtoul(value, &digits_end, 10);
+            mine = digits_end != value && number == cpu;
+        }
+        else if (mine && key == 10 && !strncmp(line, "model name", 10)) snprintf(model, sizeof(model), "%s", value);
+        else if (mine && key > 4 && !strncmp(line, "CPU ", 4) && strlen(part) + strlen(line) + 2u < sizeof(part))
+        {
+            strcat(part, line);
+            strcat(part, ";");
+        }
+        line = end ? end + 1 : NULL;
+    }
+    found = found || (mine && (model[0] || part[0]));
+    char const* name = found && model[0] ? model : found ? part : "unknown";
+    if (ok) bq_digest(name, (u32)strlen(name), (char8*)digest);
+    free(text);
+    return ok;
 }
 
 BqError bq_retirement_row_produce(BqRetirementRowRun const* run, BqRetirementRowObserved* observed)
@@ -440,6 +683,12 @@ BqError bq_retirement_row_produce(BqRetirementRowRun const* run, BqRetirementRow
                      run->binaries->descriptors[0] >= 3 && run->binaries->descriptors[1] >= 3 && run->sources[0] >= 3 &&
                      run->sources[1] >= 3 && run->work >= 3 && bq_retirement_row_observed_init(plan, observed) ?
                      BQ_OK : BQ_BAD_REQUEST;
+    /* The held binaries are the verified bytes before the first step and
+     * after the last; each step checks their file identity. */
+    char digests[2][SHA256_HEX_CAPACITY] = {{0}};
+    if (result == BQ_OK && !(bq_retirement_check_binaries(run->binaries, digests) &&
+                             !memcmp(digests, run->binaries->verified.binary_sha256, sizeof(digests))))
+        result = BQ_SOURCE_MISMATCH;
     /* The rows run on the plan's CPU alone, and the observation records the
      * CPU model and affinity they actually ran with. */
     cpu_set_t previous, pinned;
@@ -449,8 +698,9 @@ BqError bq_retirement_row_produce(BqRetirementRowRun const* run, BqRetirementRow
     bool saved = result == BQ_OK && sched_getaffinity(0, sizeof(previous), &previous) == 0;
     bool moved = saved && sched_setaffinity(0, sizeof(pinned), &pinned) == 0;
     if (result == BQ_OK && !moved) result = BQ_CONFIGURATION_MISMATCH;
-    if (result == BQ_OK && !bq_retirement_check_provenance(observed->cpu_model_sha256, &observed->cpus,
-                                                           observed->cpu_mask))
+    char unused_model[SHA256_HEX_CAPACITY];
+    if (result == BQ_OK && !(bq_retirement_check_provenance(unused_model, &observed->cpus, observed->cpu_mask) &&
+                             bq_retirement_row_cpu_model(plan->cpu, observed->cpu_model_sha256)))
         result = BQ_IO;
     char* storage = result == BQ_OK ? malloc(BQ_RETIREMENT_ROW_COMMAND_STORAGE) : NULL;
     if (result == BQ_OK && !storage) result = BQ_IO;
@@ -477,6 +727,9 @@ BqError bq_retirement_row_produce(BqRetirementRowRun const* run, BqRetirementRow
         fact->code_eligible = fact->compiler_eligible && plan->completed[row].code_obligation &&
                               fact->side[0].code_bytes > 0;
     }
+    if (result == BQ_OK && !(bq_retirement_check_binaries(run->binaries, digests) &&
+                             !memcmp(digests, run->binaries->verified.binary_sha256, sizeof(digests))))
+        result = BQ_SOURCE_MISMATCH;
     free(storage);
     if (moved && sched_setaffinity(0, sizeof(previous), &previous) != 0 && result == BQ_OK) result = BQ_IO;
     if (result != BQ_OK && fresh && observed->owned) bq_retirement_row_observed_release(observed);

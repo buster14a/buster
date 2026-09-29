@@ -1414,6 +1414,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_gate_pinned(BqRetirementUnitPrepa
                                  !strcmp(observed->receipt_sha256, checks.checks[index].receipt_sha256)))
             result = BQ_RECIPE_MISMATCH;
     }
+    /* The check evidence is closed, digested and sealed before any row step
+     * runs candidate code (which its sandbox also keeps out of it). */
+    char evidence_sha256[SHA256_HEX_CAPACITY] = {0};
+    if (result == BQ_OK && !(bq_retirement_check_evidence_closed(directory, checks.checks, checks.count, false,
+                                                                 evidence_sha256) &&
+                             fchmod(directory, BQ_RETIREMENT_EXPORT_MODE) == 0 && fsync(directory) == 0))
+        result = BQ_SOURCE_MISMATCH;
     /* The per-row half: every row step of the pinned plan with the held
      * binaries, persisted canonically and admitted as persisted. */
     BqRetirementRowObserved produced = {0}, persisted = {0};
@@ -1440,10 +1447,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_gate_pinned(BqRetirementUnitPrepa
         if (again >= 0) close(again);
         if (!same) result = BQ_SOURCE_MISMATCH;
     }
-    /* The ordered run records and logs, and no process left behind. */
-    char evidence_sha256[SHA256_HEX_CAPACITY] = {0};
-    if (result == BQ_OK && !bq_retirement_check_evidence_closed(directory, checks.checks, checks.count, false,
-                                                                evidence_sha256))
+    /* The sealed check evidence is unchanged, and no process is left
+     * behind. */
+    char evidence_again[SHA256_HEX_CAPACITY] = {0};
+    if (result == BQ_OK && !(bq_retirement_check_evidence_closed(directory, checks.checks, checks.count, true,
+                                                                 evidence_again) &&
+                             !strcmp(evidence_again, evidence_sha256)))
         result = BQ_SOURCE_MISMATCH;
     if (result == BQ_OK && !bq_retirement_check_descendants_absent()) result = BQ_CLEANUP_FAILED;
     if (result == BQ_OK)
@@ -1483,9 +1492,8 @@ BqError bq_retirement_unit_gate(BqRetirementUnitPrepared const* prepared, BqReti
     return result;
 }
 
-
-/* Design step 10 with a profile: the gate's authority digest must still be
- * the profile's required-checks pin. */
+/* Design step 10 with a profile: the gate's authority digest and row plan
+ * must still be the profile's required-checks and row-plan pins. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_unit_ready_pinned(BqRetirementUnitPrepared const* prepared,
     BqRetirementUnitBuilt const* built, BqRetirementProjection const* projection, BqRetirementUnitOracle const* oracle,
     BqRetirementUnitGate const* gate, int workspaces, String8 profile, char ready_sha256[SHA256_HEX_CAPACITY])

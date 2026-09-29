@@ -14,7 +14,12 @@
  * mechanics, not any compiler), the canonical row evidence, the join and the
  * correctness gate on the result, and each refusal: a forged or foreign plan,
  * a row missing or added (plan or evidence), a command, CPU, batch-key or
- * control-status mismatch and a modified evidence file.
+ * control-status mismatch and a modified evidence file. The producer cases
+ * also cover the sandbox (a generated program that tries to read the
+ * reference oracle's output and plant a file beside its step is denied and
+ * its row refused), per-target artifact checks (wrong machine, wrong kind),
+ * prebuilt link inputs, a held binary changed before or during a step, and
+ * the second A/A aggregate against lane D's bq_retirement_campaign_bind.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_ROW_PLAN_TESTS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_ROW_PLAN_TESTS_H
@@ -32,9 +37,6 @@
 #define BQ_ROW_TEST_PATH_EXECUTABLE 128u
 #define BQ_ROW_TEST_CONTROL_FAILED 256u
 #define BQ_ROW_TEST_UNKNOWN_TOKEN 512u
-
-/* The campaign's A/A second-label domain is the one the plan derives. */
-BUSTER_CT_CHECK(sizeof(BQ_RETIREMENT_ROW_AA_SECOND_DOMAIN) == sizeof(BQ_RETIREMENT_AA_SECOND_COMMANDS_DOMAIN));
 
 BUSTER_GLOBAL_LOCAL bool bq_row_test_control(BqRetirementTrustedRow const* row, u32 native)
 {
@@ -106,8 +108,13 @@ BUSTER_GLOBAL_LOCAL u32 bq_row_test_plan(char* text, u32 capacity, BqRetirementP
     {
         u32 group_members = split ? (group ? members - 1u : 1u) : members;
         u32 group_controls = group ? 0 : controls;
-        line = snprintf(text + used, capacity - (u32)used, "group=%u 1 none batch.metrics 1048576 %u %u\n", group,
-                        group_controls ? 1u : 0u, group_members + group_controls);
+        /* The reviewed campaign budget's metrics bound for the group's
+         * inputs, as the campaign requires of every object contract. */
+        TpRetirementCampaignBudget budget = bq_campaign_service_budget();
+        uint64_t bound = 0;
+        ok = tp_retirement_budget_metrics_bytes(&budget, group_members + group_controls, &bound);
+        line = ok ? snprintf(text + used, capacity - (u32)used, "group=%u 1 none batch.metrics %" PRIu64 " %u %u\n",
+                             group, (uint64_t)bound, group_controls ? 1u : 0u, group_members + group_controls) : -1;
         ok = line > 0 && (u32)line < capacity - (u32)used;
         if (ok) used += line;
         u32 seen = 0, written = 0;
@@ -157,13 +164,12 @@ BUSTER_GLOBAL_LOCAL bool bq_row_test_cpu(u32* cpu, char model[SHA256_HEX_CAPACIT
 {
     cpu_set_t set;
     CPU_ZERO(&set);
-    u32 cpus = 0;
-    char mask[BQ_RETIREMENT_ROW_CPU_MASK_CAPACITY];
-    bool ok = sched_getaffinity(0, sizeof(set), &set) == 0 && bq_retirement_check_provenance(model, &cpus, mask);
+    bool ok = sched_getaffinity(0, sizeof(set), &set) == 0;
     *cpu = UINT32_MAX;
     for (u32 index = 0; ok && index < CPU_SETSIZE && *cpu == UINT32_MAX; index += 1)
         if (CPU_ISSET(index, &set)) *cpu = index;
-    return ok && *cpu != UINT32_MAX;
+    ok = ok && *cpu != UINT32_MAX && bq_retirement_row_cpu_model(*cpu, model);
+    return ok;
 }
 
 /* An observation of plan as an honest producer would make it, with
@@ -247,9 +253,9 @@ BUSTER_GLOBAL_LOCAL void bq_row_test_passing(BqRetirementRequiredChecks const* c
     }
 }
 
-/* A minimal ELF64 x86-64 relocatable object whose one code section holds
- * code. */
-BUSTER_GLOBAL_LOCAL bool bq_row_test_elf(int directory, char const* name, char const* code)
+/* A minimal ELF64 file for machine (62 x86-64, 183 AArch64) of type (1 a
+ * relocatable object, 2 an executable) whose one code section holds code. */
+BUSTER_GLOBAL_LOCAL bool bq_row_test_elf(int directory, char const* name, char const* code, u32 machine, u32 type)
 {
     u8 bytes[512] = {0};
     u32 length = (u32)strlen(code), table = (64u + length + 7u) & ~7u;
@@ -257,8 +263,8 @@ BUSTER_GLOBAL_LOCAL bool bq_row_test_elf(int directory, char const* name, char c
     if (ok)
     {
         memcpy(bytes, "\177ELF\2\1\1", 7);
-        bytes[16] = 1;
-        bytes[18] = 62;
+        bytes[16] = (u8)type;
+        bytes[18] = (u8)machine;
         bytes[20] = 1;
         for (u32 index = 0; index < 8; index += 1) bytes[40 + index] = (u8)((u64)table >> (index * 8));
         bytes[52] = 64;
@@ -297,16 +303,17 @@ typedef struct BqRowTestInput
 
 /* One compiler metrics file: the header and one record per input, as the
  * batch authentication requires them. */
-BUSTER_GLOBAL_LOCAL u32 bq_row_test_metrics(char* text, u32 capacity, u32 exit_status, BqRowTestInput const* inputs,
-    u32 count)
+BUSTER_GLOBAL_LOCAL u32 bq_row_test_metrics(char* text, u32 capacity, u32 exit_status, char const* action,
+    BqRowTestInput const* inputs, u32 count)
 {
-    u32 statuses[3] = {0};
+    u32 statuses[4] = {0};
     char const* first_error = "driver.none";
     for (u32 index = 0; index < count; index += 1)
     {
-        u32 status = !strcmp(inputs[index].status, "ok") ? 0 : !strcmp(inputs[index].status, "rejected") ? 1 : 2;
+        u32 status = !strcmp(inputs[index].status, "ok") ? 0 : !strcmp(inputs[index].status, "rejected") ? 1 :
+                     !strcmp(inputs[index].status, "failed") ? 2 : 3;
         statuses[status] += 1;
-        if (status && !strcmp(first_error, "driver.none")) first_error = inputs[index].error;
+        if (status && status < 3 && !strcmp(first_error, "driver.none")) first_error = inputs[index].error;
     }
     int used = snprintf(text, capacity, "CC_METRICS");
     for (u32 field = 0; used > 0 && (u32)used < capacity && field < TP_METRICS_H_COUNT; field += 1)
@@ -314,11 +321,12 @@ BUSTER_GLOBAL_LOCAL u32 bq_row_test_metrics(char* text, u32 capacity, u32 exit_s
         char value[80];
         u64 numbers[TP_METRICS_H_COUNT] = {[TP_METRICS_H_VERSION] = 1, [TP_METRICS_H_INPUTS] = count,
             [TP_METRICS_H_RECORDS] = count, [TP_METRICS_H_OK] = statuses[0], [TP_METRICS_H_REJECTED] = statuses[1],
-            [TP_METRICS_H_FAILED] = statuses[2], [TP_METRICS_H_EXIT_STATUS] = exit_status,
+            [TP_METRICS_H_FAILED] = statuses[2], [TP_METRICS_H_PREBUILT] = statuses[3],
+            [TP_METRICS_H_EXIT_STATUS] = exit_status,
             [TP_METRICS_H_COMPILE_JOBS] = 1, [TP_METRICS_H_WORKERS] = 1, [TP_METRICS_H_KEEP_GOING] = 1,
             [TP_METRICS_H_WALL_NS] = 1000u * count + 1u, [TP_METRICS_H_PEAK_RSS] = 65536};
         char const* words[TP_METRICS_H_COUNT] = {[TP_METRICS_H_SCHEMA] = "buster-cc-metrics",
-            [TP_METRICS_H_ERROR] = first_error, [TP_METRICS_H_ACTION] = "object",
+            [TP_METRICS_H_ERROR] = first_error, [TP_METRICS_H_ACTION] = action,
             [TP_METRICS_H_TARGET] = BQ_RETIREMENT_ROW_BATCH_TARGET, [TP_METRICS_H_ALLOCATOR] = "none",
             [TP_METRICS_H_INTERVALS] = "serial"};
         if (words[field]) snprintf(value, sizeof(value), "%s", words[field]);
@@ -358,14 +366,16 @@ BUSTER_GLOBAL_LOCAL u32 bq_row_test_metrics(char* text, u32 capacity, u32 exit_s
 }
 
 /* A stand-in compiler: compile copies <fixture>.out and <fixture>.metrics
- * out of A's candidate root; batch copies each listed fixture's .o to its
- * basename.o, then batch.metrics, and exits with batch.exit. */
+ * out of A's candidate root (after a second's sleep when slow exists
+ * there); batch copies each listed fixture's .o to its basename.o, then
+ * batch.metrics, and exits with batch.exit. */
 BUSTER_GLOBAL_LOCAL bool bq_row_test_compiler(char const* path, u32 side)
 {
     char text[1024];
     int length = snprintf(text, sizeof(text), "#!/bin/sh\n# stand-in compiler %u\nsrc=$2\n"
-        "if [ \"$1\" = compile ]; then\n  cat \"$src/$3.out\" > \"$4\" && chmod 0700 \"$4\" && "
-        "cat \"$src/$3.metrics\" > \"$5\" && exit 0\n  exit 1\nfi\n"
+        "if [ \"$1\" = compile ]; then\n  if [ -f \"$src/slow\" ]; then sleep 1; fi\n"
+        "  cat \"$src/$3.out\" > \"$4\" && chmod 0700 \"$4\" && cat \"$src/$3.metrics\" > \"$5\" && exit 0\n"
+        "  exit 1\nfi\n"
         "if [ \"$1\" = batch ]; then\n  while IFS= read -r line; do\n    f=${line#\\\"}; f=${f%%\\\"}; b=${f##*/}\n"
         "    if [ -f \"$src/$f.o\" ]; then cat \"$src/$f.o\" > \"$b.o\"; fi\n  done < \"${3#@}\"\n"
         "  cat \"$src/batch.metrics\" > \"$4\" && exit \"$(cat \"$src/batch.exit\")\"\n  exit 1\nfi\nexit 2\n", side);
@@ -377,6 +387,45 @@ BUSTER_GLOBAL_LOCAL bool bq_row_test_compiler(char const* path, u32 side)
     return ok;
 }
 
+/* Compiles a C program from source into path with the host compiler. */
+BUSTER_GLOBAL_LOCAL bool bq_row_test_program(char const* path, char const* source)
+{
+    char* const argv[] = {"/usr/bin/cc", "-x", "c", "-o", (char*)path, "-", NULL};
+    int input[2] = {-1, -1};
+    bool ok = pipe(input) == 0;
+    pid_t child = ok ? fork() : -1;
+    if (child == 0)
+    {
+        dup2(input[0], STDIN_FILENO);
+        close(input[0]);
+        close(input[1]);
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    if (input[0] >= 0) close(input[0]);
+    size_t length = strlen(source);
+    ok = ok && child > 0 && write(input[1], source, length) == (ssize_t)length;
+    if (input[1] >= 0) close(input[1]);
+    int status = 0;
+    pid_t waited = -1;
+    do { if (child > 0) waited = waitpid(child, &status, 0); }
+    while (waited < 0 && errno == EINTR);
+    ok = ok && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    return ok;
+}
+
+/* The native runtime row's honest program: half of its output on stdout,
+ * half on stderr, as one writer captures them. */
+BUSTER_GLOBAL_LOCAL char const bq_row_test_honest[] =
+    "#include <stdio.h>\nint main(void) { fputs(\"fixture-\", stdout); fflush(stdout); "
+    "fputs(\"runtime\\n\", stderr); return 0; }\n";
+/* A program that tries to read the reference oracle's output beside its
+ * step directory and to plant a file there, printing what it got. */
+BUSTER_GLOBAL_LOCAL char const bq_row_test_attack[] =
+    "#include <stdio.h>\nint main(void) { FILE* planted = fopen(\"../planted\", \"w\"); if (planted) fclose(planted); "
+    "FILE* oracle = fopen(\"../reference-oracle/out\", \"r\"); int c = 0; if (!oracle) { fputs(\"denied\\n\", stdout); "
+    "return 0; } while ((c = fgetc(oracle)) != EOF) putchar(c); fclose(oracle); return 0; }\n";
+
 typedef struct BqRowTestFixture
 {
     BqCheckTestFixture* checks;
@@ -386,13 +435,25 @@ typedef struct BqRowTestFixture
     u32 cpu;
 } BqRowTestFixture;
 
+/* bq_row_test_sources variants. */
+#define BQ_ROW_TEST_SOURCES_REJECTED 1u
+#define BQ_ROW_TEST_SOURCES_PREBUILT 2u
+#define BQ_ROW_TEST_SOURCES_ATTACK 4u
+#define BQ_ROW_TEST_SOURCES_WRONG_MACHINE 8u
+#define BQ_ROW_TEST_SOURCES_WRONG_KIND 16u
+
 /* The candidate root's prepared outputs for the stand-in compilers: the
- * members' objects, per-row objects (row 4, the native runtime row, gets a
- * real executable printing BQ_ROW_TEST_RUNTIME_OUTPUT), single-input metrics
- * and the batch's metrics and exit status. */
-BUSTER_GLOBAL_LOCAL bool bq_row_test_sources(BqRowTestFixture* fixture, char const* candidate, bool control_ok)
+ * members' x86-64 objects, per-row artifacts of each row's target and kind
+ * (row 4, the native runtime row, gets a real executable), single-input
+ * metrics with the stage's action, and the batch's metrics and exit status.
+ * REJECTED records row 2's input as rejected; PREBUILT adds a prebuilt input
+ * to row 4's link; ATTACK builds row 4 from bq_row_test_attack; WRONG_MACHINE
+ * gives row 2 (an AArch64 row) an x86-64 object and WRONG_KIND row 5 (a
+ * self-host executable) a relocatable object. */
+BUSTER_GLOBAL_LOCAL bool bq_row_test_sources(BqRowTestFixture* fixture, char const* candidate, u32 variant)
 {
     BqRetirementProjection const* projection = &fixture->checks->projection;
+    u32 native = projection->prepared.native_target;
     int root = fixture->checks->sources[1];
     bool ok = mkdirat(root, "tests", 0700) == 0 || errno == EEXIST;
     int tests = ok ? openat(root, "tests", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
@@ -410,69 +471,60 @@ BUSTER_GLOBAL_LOCAL bool bq_row_test_sources(BqRowTestFixture* fixture, char con
         for (u32 index = 0; ok && index < projection->prepared.rows; index += 1)
         {
             BqRetirementTrustedRow const* row = projection->rows + index;
-            bool member = bq_retirement_row_timed_object(row, projection->prepared.native_target);
-            bool control = bq_row_test_control(row, projection->prepared.native_target);
+            bool member = bq_retirement_row_timed_object(row, native);
+            bool control = bq_row_test_control(row, native);
             if (!(pass ? control : member)) continue;
             snprintf(fixtures[batch_count], sizeof(fixtures[batch_count]), "tests/row-%u.c", index);
-            batch[batch_count] = (BqRowTestInput){fixtures[batch_count], (member || control_ok) ? "ok" : "rejected",
-                (member || control_ok) ? "driver.none" : "driver.rejected", member ? empty : diagnosed, member};
-            exit_status = exit_status || (!member && !control_ok);
+            batch[batch_count] = (BqRowTestInput){fixtures[batch_count], member ? "ok" : "rejected",
+                member ? "driver.none" : "driver.rejected", member ? empty : diagnosed, member};
+            exit_status = exit_status || !member;
             if (member)
             {
                 char name[32], code[32];
                 snprintf(name, sizeof(name), "row-%u.c.o", index);
                 snprintf(code, sizeof(code), "member-%u-code", index);
-                ok = bq_row_test_elf(tests, name, code);
+                ok = bq_row_test_elf(tests, name, code, 62, 1);
             }
             batch_count += 1;
         }
-    u32 length = ok ? bq_row_test_metrics(metrics, 1u << 20, exit_status, batch, batch_count) : 0;
+    u32 length = ok ? bq_row_test_metrics(metrics, 1u << 20, exit_status, "object", batch, batch_count) : 0;
     char exit_text[8];
     int exit_length = snprintf(exit_text, sizeof(exit_text), "%u\n", exit_status);
     ok = ok && length && bq_row_test_write_at(root, "batch.metrics", metrics, length) &&
          bq_row_test_write_at(root, "batch.exit", exit_text, (u32)exit_length);
-    /* Per-row compiles: every other compiler-eligible row. */
+    /* Per-row compiles: every other compiler-eligible row, with an artifact
+     * of the row's own target and kind. */
     for (u32 index = 0; ok && index < projection->prepared.rows; index += 1)
     {
         BqRetirementTrustedRow const* row = projection->rows + index;
-        if (!row->compiler_eligible || bq_retirement_row_timed_object(row, projection->prepared.native_target))
-            continue;
-        char name[32], metrics_name[40], code[32], fixture_name[32];
+        if (!row->compiler_eligible || bq_retirement_row_timed_object(row, native)) continue;
+        char name[32], metrics_name[40], code[32], fixture_name[32], output[256];
         snprintf(name, sizeof(name), "row-%u.c.out", index);
         snprintf(metrics_name, sizeof(metrics_name), "row-%u.c.metrics", index);
         snprintf(code, sizeof(code), "single-%u-code", index);
         snprintf(fixture_name, sizeof(fixture_name), "tests/row-%u.c", index);
-        if (bq_retirement_row_native_runtime(row, projection->prepared.native_target))
+        snprintf(output, sizeof(output), "%s/tests/%s", candidate, name);
+        bool object = row->stage == BQ_RETIREMENT_STAGE_OBJECT;
+        if (bq_retirement_row_native_runtime(row, native))
         {
-            char output[256];
-            snprintf(output, sizeof(output), "%s/tests/%s", candidate, name);
-            char* const argv[] = {"/usr/bin/cc", "-x", "c", "-o", output, "-", NULL};
-            /* The program's source on cc's stdin, through a pipe. */
-            int source[2] = {-1, -1};
-            ok = pipe(source) == 0;
-            pid_t child = ok ? fork() : -1;
-            if (child == 0)
-            {
-                dup2(source[0], STDIN_FILENO);
-                close(source[0]);
-                close(source[1]);
-                execv(argv[0], argv);
-                _exit(127);
-            }
-            static char const program[] = "#include <stdio.h>\nint main(void) { fputs(\"" "fixture-runtime\\n"
-                                          "\", stdout); return 0; }\n";
-            if (source[0] >= 0) close(source[0]);
-            ok = ok && child > 0 && write(source[1], program, sizeof(program) - 1u) == (ssize_t)(sizeof(program) - 1u);
-            if (source[1] >= 0) close(source[1]);
-            int status = 0;
-            pid_t waited = -1;
-            do { if (child > 0) waited = waitpid(child, &status, 0); }
-            while (waited < 0 && errno == EINTR);
-            ok = ok && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+            unlinkat(tests, name, 0);
+            ok = bq_row_test_program(output, (variant & BQ_ROW_TEST_SOURCES_ATTACK) ? bq_row_test_attack :
+                                                                                 bq_row_test_honest);
         }
-        else ok = bq_row_test_elf(tests, name, code);
-        BqRowTestInput single = {fixture_name, "ok", "driver.none", empty, true};
-        length = ok ? bq_row_test_metrics(metrics, 1u << 20, 0, &single, 1) : 0;
+        else
+        {
+            bool machine = (variant & BQ_ROW_TEST_SOURCES_WRONG_MACHINE) && index == 2;
+            bool kind = (variant & BQ_ROW_TEST_SOURCES_WRONG_KIND) && index == 5;
+            ok = bq_row_test_elf(tests, name, code, (row->target <= 6) != machine ? 183u : 62u,
+                                 object || kind ? 1u : 2u);
+        }
+        bool rejected = (variant & BQ_ROW_TEST_SOURCES_REJECTED) && index == 2;
+        BqRowTestInput single[2] = {{fixture_name, rejected ? "rejected" : "ok",
+                                     rejected ? "driver.rejected" : "driver.none", empty, !rejected},
+                                    {"lib/prebuilt.o", "prebuilt", "driver.none", empty, false}};
+        u32 inputs = (variant & BQ_ROW_TEST_SOURCES_PREBUILT) && index == 4 ? 2u : 1u;
+        length = ok ? bq_row_test_metrics(metrics, 1u << 20, 0, object ? "object" : "link", single,
+                                          inputs) : 0;
         ok = ok && length && bq_row_test_write_at(tests, metrics_name, metrics, length);
     }
     free(metrics);
@@ -744,28 +796,83 @@ BUSTER_GLOBAL_LOCAL void bq_row_test_join(BqRowTestFixture* fixture)
     BQ_PREP_CHECK(bq_row_test_pin(fixture, projection, 0));
 }
 
-/* The producer with the stand-in compilers on the plan's CPU. */
+/* Prepares the candidate root (sources variant), pins and imports the plan
+ * variant and runs the producer into a new work directory, whose descriptor
+ * work receives. */
+BUSTER_GLOBAL_LOCAL BqError bq_row_test_run(BqRowTestFixture* fixture, u32 plan_flags, u32 sources,
+    BqRetirementRowPlan* plan, BqRetirementRowObserved* observed, int* work)
+{
+    BqCheckTestFixture* checks = fixture->checks;
+    char candidate[160];
+    snprintf(candidate, sizeof(candidate), "%s/source-candidate-1", checks->workspaces);
+    bq_retirement_row_plan_release(plan);
+    *work = -1;
+    bool ready = bq_row_test_sources(fixture, candidate, sources) && bq_row_test_pin(fixture, &checks->projection,
+                                                                                    plan_flags) &&
+                 bq_row_test_import(fixture, &checks->projection, plan) == BQ_OK &&
+                 bq_check_test_directory(checks, "row-work", work);
+    /* The reference oracle's output beside every step directory, as
+     * retirement-work/reference-oracle/ sits beside the unit's steps. */
+    if (ready && (sources & BQ_ROW_TEST_SOURCES_ATTACK))
+    {
+        int oracle = mkdirat(*work, "reference-oracle", 0700) == 0 ?
+                     openat(*work, "reference-oracle", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        ready = oracle >= 0 && bq_row_test_write_at(oracle, "out", BQ_ROW_TEST_RUNTIME_OUTPUT,
+                                                     (u32)strlen(BQ_ROW_TEST_RUNTIME_OUTPUT));
+        if (oracle >= 0) close(oracle);
+    }
+    BqRetirementRowRun run = {plan, &fixture->compilers, {checks->sources[0], checks->sources[1]}, *work,
+                              checks->cancel[0], bq_retirement_build_clock_ns() + 120ull * 1000000000ull};
+    BqError result = ready ? bq_retirement_row_produce(&run, observed) : BQ_IO;
+    return result;
+}
+
+/* Changes the held compiler at path after delay_ms and restores its bytes,
+ * from a process that is not this process's child. */
+BUSTER_GLOBAL_LOCAL bool bq_row_test_tamper_later(char const* path, u32 delay_ms)
+{
+    pid_t middle = fork();
+    if (middle == 0)
+    {
+        pid_t helper = fork();
+        if (helper == 0)
+        {
+            struct timespec pause = {delay_ms / 1000u, (long)(delay_ms % 1000u) * 1000000L};
+            nanosleep(&pause, NULL);
+            struct stat info = {0};
+            int file = stat(path, &info) == 0 && chmod(path, 0700) == 0 ? open(path, O_WRONLY | O_APPEND) : -1;
+            bool changed = file >= 0 && write(file, "#", 1) == 1 && ftruncate(file, info.st_size) == 0;
+            if (file >= 0) close(file);
+            _exit(changed && chmod(path, 0500) == 0 ? 0 : 1);
+        }
+        _exit(helper > 0 ? 0 : 1);
+    }
+    int status = 0;
+    pid_t waited = -1;
+    do { if (middle > 0) waited = waitpid(middle, &status, 0); }
+    while (waited < 0 && errno == EINTR);
+    bool ok = waited == middle && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    return ok;
+}
+
+/* The producer with the stand-in compilers on the plan's CPU, each step in
+ * its sandbox. */
 BUSTER_GLOBAL_LOCAL void bq_row_test_producer(BqRowTestFixture* fixture)
 {
     BqCheckTestFixture* checks = fixture->checks;
     BqRetirementProjection* projection = &checks->projection;
-    char candidate[160];
-    snprintf(candidate, sizeof(candidate), "%s/source-candidate-1", checks->workspaces);
-    /* Row 4's oracle is the stand-in program's output (the population seal
-     * does not cover oracle digests). */
+    /* Row 4's oracle is the stand-in program's combined stdout and stderr
+     * (the population seal does not cover oracle digests). */
     bq_digest(BQ_ROW_TEST_RUNTIME_OUTPUT, (u32)strlen(BQ_ROW_TEST_RUNTIME_OUTPUT),
               (char8*)checks->rows[4].independent_oracle_sha256);
     BqRetirementRowPlan plan = {0};
     BqRetirementRowObserved observed = {0};
     int work = -1;
-    BQ_PREP_CHECK(bq_row_test_compilers(fixture) && bq_row_test_sources(fixture, candidate, false) &&
-                  bq_row_test_pin(fixture, projection, 0) && bq_row_test_import(fixture, projection, &plan) == BQ_OK &&
-                  bq_check_test_directory(checks, "row-work", &work));
-    BqRetirementRowRun run = {&plan, &fixture->compilers, {checks->sources[0], checks->sources[1]}, work,
-                              checks->cancel[0], bq_retirement_build_clock_ns() + 120ull * 1000000000ull};
-    BqError produced = plan.owned ? bq_retirement_row_produce(&run, &observed) : BQ_BAD_REQUEST;
+    BQ_PREP_CHECK(bq_row_test_compilers(fixture));
+    BqError produced = bq_row_test_run(fixture, 0, 0, &plan, &observed, &work);
     if (produced != BQ_OK) fprintf(stderr, "RETIREMENT_PREP row producer returned %d\n", (int)produced);
-    BQ_PREP_CHECK(produced == BQ_OK && observed.owned && observed.cpus == 1 && bq_check_test_no_children());
+    BQ_PREP_CHECK(produced == BQ_OK && observed.owned && observed.cpus == 1 && bq_check_test_no_children() &&
+                  !strcmp(observed.cpu_model_sha256, fixture->cpu_model));
     for (u32 row = 0; observed.owned && row < observed.row_count; row += 1)
     {
         BqRetirementRowFact const* fact = observed.facts + row;
@@ -776,30 +883,68 @@ BUSTER_GLOBAL_LOCAL void bq_row_test_producer(BqRowTestFixture* fixture)
                       !strcmp(fact->side[0].compiler_command_sha256, plan.completed[row].compiler_command_sha256[0]) &&
                       !strcmp(fact->side[1].compiler_command_sha256, plan.completed[row].compiler_command_sha256[1]))));
     }
+    char empty[SHA256_HEX_CAPACITY];
+    bq_digest("", 0, (char8*)empty);
     BQ_PREP_CHECK(observed.owned && observed.facts[3].side[0].compiler_exit == 1 &&
                   !observed.facts[3].side[0].artifact_sha256[0] &&
                   !strcmp(observed.facts[4].side[1].runtime_output_sha256, checks->rows[4].independent_oracle_sha256) &&
                   observed.facts[4].side[1].runtime_exit == 0 &&
+                  !strcmp(observed.facts[2].side[0].diagnostic_sha256, empty) &&
                   !strcmp(observed.object_sha256[0][0], observed.facts[0].side[0].artifact_sha256));
-    /* The observation joins and the correctness gate admits it; its
-     * canonical bytes round trip. */
+    /* The observation joins and the correctness gate admits it. */
     BQ_PREP_CHECK(bq_row_test_admit(fixture, &plan, &observed) == BQ_OK);
     bq_retirement_row_observed_release(&observed);
     /* The same steps again into the same work directory are refused. */
+    BqRetirementRowRun run = {&plan, &fixture->compilers, {checks->sources[0], checks->sources[1]}, work,
+                              checks->cancel[0], bq_retirement_build_clock_ns() + 120ull * 1000000000ull};
     BQ_PREP_CHECK(bq_retirement_row_produce(&run, &observed) == BQ_WORKSPACE_MISMATCH && !observed.owned);
     if (work >= 0) close(work);
+
+    /* (H1) The generated program tries to read the reference oracle's
+     * output beside its step directory and to plant a file there. Its sandbox
+     * denies both, so it prints "denied", and the gate refuses the row. */
+    BqError attacked = bq_row_test_run(fixture, 0, BQ_ROW_TEST_SOURCES_ATTACK, &plan, &observed, &work);
+    char denied[SHA256_HEX_CAPACITY];
+    bq_digest("denied\n", 7, (char8*)denied);
+    struct stat info = {0};
+    BQ_PREP_CHECK(attacked == BQ_OK && observed.owned &&
+                  !strcmp(observed.facts[4].side[0].runtime_output_sha256, denied) &&
+                  fstatat(work, "planted", &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT &&
+                  bq_row_test_admit(fixture, &plan, &observed) == BQ_RECIPE_MISMATCH);
+    bq_retirement_row_observed_release(&observed);
+    if (work >= 0) close(work);
+
+    /* (H2) An artifact of another machine (row 2 is an AArch64 row) or of
+     * another kind (row 5 builds an executable) is recorded but not
+     * accepted, and the gate refuses it. */
+    static u32 const wrong[] = {BQ_ROW_TEST_SOURCES_WRONG_MACHINE, BQ_ROW_TEST_SOURCES_WRONG_KIND,
+                                BQ_ROW_TEST_SOURCES_REJECTED};
+    static u32 const wrong_row[] = {2, 5, 2};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(wrong); index += 1)
+    {
+        BqError result = bq_row_test_run(fixture, 0, wrong[index], &plan, &observed, &work);
+        BqRetirementObservedSide const* side = observed.owned ? observed.facts[wrong_row[index]].side : NULL;
+        BQ_PREP_CHECK(result == BQ_OK && side && side->semantic_pass == 0 && side->artifact_sha256[0] &&
+                      bq_row_test_admit(fixture, &plan, &observed) == BQ_RECIPE_MISMATCH);
+        bq_retirement_row_observed_release(&observed);
+        if (work >= 0) close(work);
+    }
+    /* (M5) A link that also records a prebuilt input is accepted. */
+    BQ_PREP_CHECK(bq_row_test_run(fixture, 0, BQ_ROW_TEST_SOURCES_PREBUILT, &plan, &observed, &work) == BQ_OK &&
+                  observed.facts[4].side[0].semantic_pass == 1 &&
+                  bq_row_test_admit(fixture, &plan, &observed) == BQ_OK);
+    bq_retirement_row_observed_release(&observed);
+    if (work >= 0) close(work);
+
     /* A control whose status is not the pinned one fails the batch's
      * metrics authentication. */
-    bq_retirement_row_plan_release(&plan);
-    BQ_PREP_CHECK(bq_row_test_pin(fixture, projection, BQ_ROW_TEST_CONTROL_FAILED) &&
-                  bq_row_test_import(fixture, projection, &plan) == BQ_OK &&
-                  bq_check_test_directory(checks, "row-work", &work));
-    run = (BqRetirementRowRun){&plan, &fixture->compilers, {checks->sources[0], checks->sources[1]}, work,
-                               checks->cancel[0], bq_retirement_build_clock_ns() + 120ull * 1000000000ull};
-    BQ_PREP_CHECK(bq_retirement_row_produce(&run, &observed) == BQ_RECIPE_MISMATCH && !observed.owned &&
-                  bq_check_test_no_children());
+    BQ_PREP_CHECK(bq_row_test_run(fixture, BQ_ROW_TEST_CONTROL_FAILED, 0, &plan, &observed, &work) ==
+                  BQ_RECIPE_MISMATCH && !observed.owned && bq_check_test_no_children());
     if (work >= 0) close(work);
     /* A CPU the unit may not run on. */
+    char candidate[160];
+    snprintf(candidate, sizeof(candidate), "%s/source-candidate-1", checks->workspaces);
+    BQ_PREP_CHECK(bq_row_test_sources(fixture, candidate, 0));
     bq_retirement_row_plan_release(&plan);
     BQ_PREP_CHECK(bq_row_test_pin(fixture, projection, 0) && bq_row_test_import(fixture, projection, &plan) == BQ_OK &&
                   bq_check_test_directory(checks, "row-work", &work));
@@ -807,18 +952,196 @@ BUSTER_GLOBAL_LOCAL void bq_row_test_producer(BqRowTestFixture* fixture)
     run = (BqRetirementRowRun){&plan, &fixture->compilers, {checks->sources[0], checks->sources[1]}, work,
                                checks->cancel[0], bq_retirement_build_clock_ns() + 120ull * 1000000000ull};
     BQ_PREP_CHECK(bq_retirement_row_produce(&run, &observed) == BQ_CONFIGURATION_MISMATCH && !observed.owned);
-    /* A held compiler changed between the import and the run. */
     plan.cpu = fixture->cpu;
+    if (work >= 0) close(work);
+    /* (M6) A held compiler whose bytes changed before the run fails the
+     * run's rehash; one changed and restored during a step (bytes equal
+     * again) fails that step's file identity. */
     char path[160];
     snprintf(path, sizeof(path), "%s/row-compiler-1", checks->workspaces);
-    struct stat info = {0};
     int appender = stat(path, &info) == 0 && chmod(path, 0700) == 0 ? open(path, O_WRONLY | O_APPEND | O_CLOEXEC) : -1;
-    BQ_PREP_CHECK(appender >= 0 && write(appender, "\n", 1) == 1 && close(appender) == 0);
+    BQ_PREP_CHECK(appender >= 0 && write(appender, "\n", 1) == 1 && close(appender) == 0 &&
+                  bq_check_test_directory(checks, "row-work", &work));
+    run.work = work;
     BQ_PREP_CHECK(bq_retirement_row_produce(&run, &observed) == BQ_SOURCE_MISMATCH && !observed.owned);
     BQ_PREP_CHECK(truncate(path, info.st_size) == 0 && chmod(path, 0500) == 0);
     if (work >= 0) close(work);
+    BQ_PREP_CHECK(bq_row_test_write_at(checks->sources[1], "slow", "", 0) &&
+                  bq_check_test_directory(checks, "row-work", &work));
+    run.work = work;
+    BQ_PREP_CHECK(bq_row_test_tamper_later(path, 500));
+    BQ_PREP_CHECK(bq_retirement_row_produce(&run, &observed) == BQ_SOURCE_MISMATCH && !observed.owned);
+    struct timespec settle = {1, 0};
+    nanosleep(&settle, NULL);
+    struct stat after = {0};
+    BQ_PREP_CHECK(unlinkat(checks->sources[1], "slow", 0) == 0 && stat(path, &after) == 0 &&
+                  after.st_size == info.st_size && (after.st_mode & 07777) == 0500);
+    if (work >= 0) close(work);
     bq_retirement_row_plan_release(&plan);
     BQ_PREP_CHECK(bq_row_test_pin(fixture, projection, 0) && bq_check_test_no_children());
+}
+
+
+/* One A/A or A/B stage of the campaign for the six fixture rows: timed rows
+ * 0 and 1 (the object group), 4 (a link singleton with native runtime) and
+ * 5 (a self-host singleton). */
+typedef struct BqRowTestStage
+{
+    TpRetirementExecution execution;
+    TpRetirementTranscript transcript;
+    TpRetirementSamples samples;
+    TpRetirementMetricsShards metrics;
+    TpRetirementSampleRow rows[4];
+    TpRetirementSampleGroup groups[3];
+    unsigned workspace[10], members[4];
+    FILE* streams[3];
+} BqRowTestStage;
+
+BUSTER_GLOBAL_LOCAL bool bq_row_test_stage_open(BqRowTestStage* stage, char const* tag)
+{
+    static unsigned const ids[] = {0, 1, 4, 5}, metrics[] = {0, 0, TP_RETIREMENT_SAMPLE_RUNTIME, 0};
+    static unsigned const kinds[] = {TP_RETIREMENT_GROUP_OBJECT, TP_RETIREMENT_GROUP_SINGLETON,
+                                     TP_RETIREMENT_GROUP_SINGLETON};
+    static unsigned const offsets[] = {0, 2, 3, 4}, members[] = {0, 1, 2, 3}, runtime[] = {4};
+    *stage = (BqRowTestStage){0};
+    for (u32 index = 0; index < 3; index += 1) stage->streams[index] = tmpfile();
+    TpRetirementLayout layout = {4, 3, ids, metrics, kinds, offsets, members};
+    bool ok = stage->streams[0] && stage->streams[1] && stage->streams[2] &&
+              tp_retirement_execution_init(&stage->execution, 1, 3, runtime, 1, BQ_CHECK_TEST_ROWS, 60, stage->workspace,
+                                           10) &&
+              tp_retirement_transcript_init(&stage->transcript, &stage->execution, "job-91", 5, "boot-fixture", 0, 1000) &&
+              tp_retirement_transcript_begin_shard(&stage->transcript, stage->streams[0]) &&
+              tp_retirement_samples_init(&stage->samples, &stage->transcript, stage->streams[1], &layout, stage->rows,
+                                         stage->groups, stage->members) &&
+              tp_retirement_metrics_shards_init(&stage->metrics, tag, stage->streams[2]) &&
+              tp_retirement_samples_attach_metrics(&stage->samples, &stage->metrics);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_row_test_stage_close(BqRowTestStage* stage)
+{
+    for (u32 index = 0; index < 3; index += 1)
+        if (stage->streams[index]) fclose(stage->streams[index]);
+}
+
+/* Lane D's campaign binding (bq_retirement_campaign_bind) over the gate the
+ * row plan and an honest observation issue, with measured commands resolved
+ * from the plan's templates in the canonical layout: the second A/A label
+ * aggregate the plan derives must be the one the binding computes. */
+BUSTER_GLOBAL_LOCAL int bq_row_test_bind(BqRowTestFixture* fixture, BqRetirementRowPlan* plan,
+    char const aa_second[SHA256_HEX_CAPACITY])
+{
+    BqCheckTestFixture* checks = fixture->checks;
+    BqRetirementRowObserved observed = {0};
+    BqRetirementRowJoined joined = {0};
+    BqRetirementRequiredChecks required = {.hosted = -1};
+    BqRetirementCheckResult results[BQ_CHECK_TEST_CHECKS] = {0};
+    BqRetirementUnitGate gate = {0};
+    BqRowTestStage* stages = calloc(2, sizeof(*stages));
+    enum { UNITS = 4, COMMANDS = UNITS * TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT };
+    TpRetirementMeasuredCommand commands[2][COMMANDS];
+    char digests[2][COMMANDS][SHA256_HEX_CAPACITY], outputs[2][COMMANDS][SHA256_HEX_CAPACITY];
+    char* storage = calloc(2u * COMMANDS, BQ_RETIREMENT_ROW_COMMAND_STORAGE);
+    BqRetirementRowCommand resolved[2][COMMANDS];
+    memcpy(plan->aa_second_commands_sha256, aa_second, SHA256_HEX_CAPACITY);
+    bool ok = stages && storage && bq_row_test_observe(plan, &observed) &&
+              bq_retirement_row_evidence_join(plan, &checks->projection, &observed, &joined) == BQ_OK &&
+              bq_check_test_import(checks, &checks->job, &checks->projection, &required) == BQ_OK;
+    if (ok) bq_row_test_passing(&required, results);
+    ok = ok && bq_retirement_unit_gate_admit(&checks->projection, &required, results, &joined.evidence, &gate) == BQ_OK &&
+         bq_row_test_stage_open(&stages[0], "aa") && bq_row_test_stage_open(&stages[1], "ab");
+    /* Slots: the object group, the row 4 and row 5 singletons, then row 4's
+     * runtime; per stage [slot * 2 + variant]. The A/A second label resolves
+     * {{label}} as 2. */
+    static u32 const slot_rows[UNITS] = {0, 4, 5, 4};
+    for (u32 stage = 0; ok && stage < 2; stage += 1)
+        for (u32 slot = 0; ok && slot < UNITS; slot += 1)
+            for (u32 variant = 0; ok && variant < 2; variant += 1)
+            {
+                u32 index = slot * 2u + variant, row = slot_rows[slot], side = stage ? variant : 0;
+                bool runtime = slot == 3, batch = slot == 0;
+                BqRetirementRowPlanRow const* planned = plan->rows + row;
+                BqRetirementRowPlanGroup const* group = batch ? plan->groups : NULL;
+                char output_leaf[32], metrics_leaf[32];
+                bq_retirement_row_leaves(row, output_leaf, metrics_leaf);
+                BqRetirementRowContext context = {.fixture = planned->fixture, .output = output_leaf,
+                    .metrics = batch ? group->metrics : metrics_leaf, .inputs = batch ? group->list_leaf : NULL,
+                    .side = side, .label = !stage && variant ? 2u : 1u};
+                BqRetirementRowTemplate const* template = plan->templates + (batch ? group->template_index :
+                                                                            runtime ? planned->runtime : planned->compile);
+                ok = bq_retirement_row_command(template, &context,
+                                               storage + (size_t)(stage * COMMANDS + index) * BQ_RETIREMENT_ROW_COMMAND_STORAGE,
+                                               &resolved[stage][index]);
+                BqRetirementObservedSide const* facts = observed.facts[row].side + side;
+                char const* objects[1] = {facts->artifact_sha256};
+                ok = ok && (runtime ? (memcpy(outputs[stage][index], checks->rows[4].independent_oracle_sha256,
+                                              SHA256_HEX_CAPACITY), true) :
+                            batch ? tp_retirement_batch_contract_output(&joined.evidence.groups[0].contract[side],
+                                                                        outputs[stage][index]) :
+                            tp_retirement_batch_output_digest(objects, 1, outputs[stage][index]));
+                commands[stage][index] = (TpRetirementMeasuredCommand){.unit = runtime ? row : slot,
+                    .kind = runtime, .variant = variant, .argument_count = resolved[stage][index].argument_count,
+                    .environment_count = resolved[stage][index].environment_count,
+                    .timeout_seconds = template->timeout_seconds, .arguments = resolved[stage][index].arguments,
+                    .environment = resolved[stage][index].environment, .directory = BQ_RETIREMENT_ROW_WORK_PATH,
+                    .artifact = batch || runtime ? NULL : "row-artifact.o",
+                    .batch = batch ? &joined.evidence.groups[0].contract[side] : NULL,
+                    .command_sha256 = digests[stage][index], .output_sha256 = outputs[stage][index],
+                    .exit_status = batch ? (int)plan->groups[0].exit_status : 0};
+                ok = ok && tp_retirement_command_hash(&commands[stage][index], digests[stage][index]);
+            }
+    TpRetirementCampaignBudget budget = bq_campaign_service_budget();
+    char budget_sha256[SHA256_HEX_CAPACITY] = {0};
+    unsigned stages_of[3] = {TP_RETIREMENT_BUDGET_STAGE_OBJECT, TP_RETIREMENT_BUDGET_STAGE_LINK,
+                             TP_RETIREMENT_BUDGET_STAGE_SELF_HOST};
+    TpRetirementCampaignReview review = {&budget, stages_of, NULL, NULL, NULL, 3, 0};
+    TpRetirementPlan statistics = {.version = TP_RETIREMENT_STATISTICS_VERSION, .seed = 1, .pairs_per_round = 60,
+        .resamples = TP_RETIREMENT_MIN_RESAMPLES, .bootstrap_members_per_scope = 1, .cell_members_per_scope = 1,
+        .frozen_before_samples = 1};
+    TpRetirementExecutable executables[2] = {0};
+    TpRetirementCampaign campaign = {0};
+    BqRetirementCampaignBinding binding = {0};
+    TpRetirementCampaignCommand workspace[2 * COMMANDS];
+    unsigned identity[UNITS];
+    ok = ok && tp_retirement_budget_digest(&budget, budget_sha256) &&
+         tp_retirement_executable_init(&executables[0], checks->held.descriptors[0],
+                                       checks->projection.prepared.binary_sha256[0]) &&
+         tp_retirement_executable_init(&executables[1], checks->held.descriptors[1],
+                                       checks->projection.prepared.binary_sha256[1]);
+    int bound = ok ? bq_retirement_campaign_bind(&binding, &gate.correctness, &campaign, &statistics,
+        &stages[0].samples, &stages[1].samples, &executables[0], &executables[1], commands[0], commands[1], workspace,
+        2 * COMMANDS, identity, UNITS, &review, budget_sha256, gate.correctness.sealed_sha256,
+        gate.correctness.checks_sha256) : -1;
+    if (stages)
+    {
+        bq_row_test_stage_close(&stages[0]);
+        bq_row_test_stage_close(&stages[1]);
+    }
+    free(stages);
+    free(storage);
+    bq_retirement_unit_gate_release(&gate);
+    bq_retirement_row_joined_release(&joined);
+    bq_retirement_row_observed_release(&observed);
+    bq_retirement_required_checks_release(&required);
+    return bound;
+}
+
+/* The plan's second A/A label aggregate is lane D's: the campaign binds with
+ * it, and with one changed digit (another aggregate) it refuses. */
+BUSTER_GLOBAL_LOCAL void bq_row_test_campaign(BqRowTestFixture* fixture)
+{
+    BqRetirementRowPlan plan = {0};
+    BQ_PREP_CHECK(bq_row_test_pin(fixture, &fixture->checks->projection, 0) &&
+                  bq_row_test_import(fixture, &fixture->checks->projection, &plan) == BQ_OK);
+    char derived[SHA256_HEX_CAPACITY], changed[SHA256_HEX_CAPACITY];
+    memcpy(derived, plan.aa_second_commands_sha256, SHA256_HEX_CAPACITY);
+    memcpy(changed, derived, SHA256_HEX_CAPACITY);
+    changed[0] = changed[0] == '0' ? '1' : '0';
+    int bound = plan.owned ? bq_row_test_bind(fixture, &plan, derived) : -1;
+    if (bound != 1) fprintf(stderr, "RETIREMENT_PREP row plan campaign bind returned %d\n", bound);
+    BQ_PREP_CHECK(bound == 1);
+    BQ_PREP_CHECK(plan.owned && bq_row_test_bind(fixture, &plan, changed) == 0);
+    bq_retirement_row_plan_release(&plan);
 }
 
 BUSTER_GLOBAL_LOCAL void bq_row_test_runner(void)
@@ -843,6 +1166,7 @@ BUSTER_GLOBAL_LOCAL void bq_row_test_runner(void)
         bq_row_test_importer(fixture);
         bq_row_test_join(fixture);
         bq_row_test_producer(fixture);
+        bq_row_test_campaign(fixture);
     }
     for (u32 side = 0; fixture && side < 2; side += 1)
         if (fixture->compilers.descriptors[side] >= 0) close(fixture->compilers.descriptors[side]);

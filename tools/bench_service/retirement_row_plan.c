@@ -27,10 +27,6 @@
 #include <stdarg.h>
 
 #define BQ_RETIREMENT_ROW_SLOT_BYTES (BQ_RETIREMENT_CHECK_FIELD_CAP + 1024u)
-/* retirement_campaign_binding.h's BQ_RETIREMENT_AA_SECOND_COMMANDS_DOMAIN
- * (lane D), which this translation unit does not include; the tests check
- * both are the same. */
-#define BQ_RETIREMENT_ROW_AA_SECOND_DOMAIN "bq-retirement-aa-second-commands-v3"
 
 typedef enum BqRetirementRowToken
 {
@@ -424,7 +420,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_row_plan_decode(BqRetirementCheckCursor* 
     bq_retirement_check_digest_line(cursor, "census=", prepared->census_sha256);
     bq_retirement_check_digest_line(cursor, "population=", projection->population_sha256);
     u32 native = bq_retirement_check_count(cursor, "native-target=", 1, 12);
-    cursor->ok = cursor->ok && native == prepared->native_target;
+    cursor->ok = cursor->ok && native == prepared->native_target && native == BQ_RETIREMENT_UNIT_NATIVE_TARGET;
     plan->native_target = native;
     char* cpu = bq_retirement_check_line(cursor, "cpu=");
     char* cpu_fields[2] = {0};
@@ -562,7 +558,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_row_plan_derive(BqRetirementRowPlan* plan
     }
     Sha256 aggregate;
     sha256_init(&aggregate);
-    static char const aa_domain[] = BQ_RETIREMENT_ROW_AA_SECOND_DOMAIN;
+    static char const aa_domain[] = BQ_RETIREMENT_AA_SECOND_COMMANDS_DOMAIN;
     sha256_add(&aggregate, aa_domain, sizeof(aa_domain) - 1);
     for (u32 index = 0; ok && index < plan->row_count; index += 1)
     {

@@ -757,25 +757,67 @@ From the plan the importer derives, for the attempt:
 ### The row producer
 
 `bq_retirement_row_produce` (in `retirement_row_producer.c`) runs the plan
-on the plan's CPU alone (`sched_setaffinity`, restored afterwards) and
-records the CPU model and affinity it observed. Every step runs as a check
-does: no other child first, `bq_retirement_build_child`'s normalized child
-with the step's `RLIMIT_AS` and bounds, the job deadline and cancellation,
-the subreaper sweep, and the held binaries `fstat`'ed and rehashed around
-it. For each side it runs:
+on the plan's CPU alone (`sched_setaffinity`, restored afterwards). It
+records the affinity and the model of that CPU as `/proc/cpuinfo` names it
+(`model name`; on AArch64 the `CPU implementer`, `variant`, `part` and
+`revision` lines; else `unknown`). It rehashes both held binaries once before
+the first step and once after the last. Every step runs as a check does: no
+other child first, `bq_retirement_build_child`'s normalized child with the
+step's `RLIMIT_AS` and bounds, the job deadline and cancellation, and the
+subreaper sweep. Each binary's `fstat` identity (device, inode, size, mode,
+links, owner, mtime and ctime) must be unchanged around every step, so a
+modify-and-restore during a step fails it with `BQ_SOURCE_MISMATCH`.
+
+**Isolation.** Each step runs candidate-derived code: the candidate binary
+compiling, and the program it generated running. Before exec the step
+enters a Landlock sandbox (`bq_retirement_row_sandbox`). It may:
+
+- read and execute `/usr`, `/lib*`, `/bin` and `/sbin`, and read `/etc`;
+- read A's two source roots;
+- execute and read its side's held binary;
+- use `/dev/null` and read the zero and random devices;
+- use its own new step directory freely.
+
+Everything else is denied: the reference oracle's outputs, the check and row
+evidence, and every other step's directory. With Landlock ABI 4 it also
+cannot bind or connect TCP sockets, and with ABI 6 it cannot signal, or reach
+abstract sockets, outside its domain. A kernel without Landlock fails every
+step with `BQ_CONFIGURATION_MISMATCH`. The steps still run as the service
+user: the broker's separate candidate UID is not used here (see remaining
+work below).
+
+For each side it runs:
 
 - each batch group once, in a new `retirement-work/group-work-<g>-<side>`
   with the response file written there. The compiler's metrics records must
   authenticate (`tp_retirement_metrics_check`) against the contract made of
   the plan's pinned statuses, errors, exit status and bound with the
   observed diagnostics and objects, or the producer returns
-  `BQ_RECIPE_MISMATCH`. Members' and controls' facts come from their inputs;
-  code facts come from each object with the independent artifact reader;
-- each per-row compile in a new `retirement-work/row-work-<row>-<side>`: exit
-  status, the artifact and its code section, the diagnostic stream and the
-  metrics records (all inputs compiled, fallback count). A row with a runtime
-  template then runs its artifact there, whose stdout digest is the runtime
-  output the gate compares with the independent oracle.
+  `BQ_RECIPE_MISMATCH`. Members' and controls' facts come from their inputs.
+  Every object is frozen `0400` and read with the service's own artifact
+  check (`bq_retirement_artifact_target`, `bq_retirement_artifact_read`) as an
+  x86_64-linux relocatable, which also yields its code section;
+- each per-row compile in a new `retirement-work/row-work-<row>-<side>`. The
+  artifact is frozen (`0500` for an executable) and read with the same check
+  for the row's own target and stage: the target's format and machine, a
+  relocatable at the object stage and an executable otherwise. The metrics
+  are checked as a batch's are: schema, record and status counts, the
+  process's exit status, the stage's action (`object`, or `link` for link and
+  self-host) and the row's fixture as the first input. The diagnostic is
+  that input's compiler diagnostic digest (never a digest of stderr), and
+  the fallback count is summed over all inputs. Link and self-host templates
+  must pass the metrics flag (`{{metrics}}` is required in every compile
+  template); without a record the fallback count is `UINT32_MAX` and the gate
+  refuses. A row with a runtime template then runs its artifact there, with
+  stdout and stderr on one writer, as the oracle captured its output; that
+  digest is the runtime output the gate compares with the independent
+  oracle.
+
+`semantic_pass` is compile acceptance, not a per-row #509 semantic proof,
+which the required checks' receipts carry. It holds when the compile exited
+0 with no capture failure, every metrics input compiled (or, linking an
+executable, was a `prebuilt` input), and the artifact passed the per-target
+check.
 
 The observation is `BqRetirementRowObserved`, with a canonical form,
 `BQ-RETIREMENT-ROW-EVIDENCE-V1`. `bq_retirement_row_observed_parse` accepts
@@ -799,7 +841,9 @@ gate with `BQ_RECIPE_MISMATCH`; its receipt stays in the unsealed directory.
 It then runs the row producer, writes the canonical row evidence as
 `retirement-rows/row-evidence` (`O_EXCL`, `0400`, fsynced), parses those bytes
 back and joins them with the plan, so the gate admits exactly what it
-persisted. After the rows it rescans both roots with `bq_retirement_scan` (a
+persisted. Before the first row step it closes, digests and seals
+`retirement-checks/` (`0500`), and after the rows it requires the sealed
+evidence to be unchanged. After the rows it rescans both roots with `bq_retirement_scan` (a
 change is `BQ_SOURCE_MISMATCH`), requires the check evidence to close
 exactly, computes the ordered digest of every check's run record and log,
 and requires again that no descendant is left (`BQ_CLEANUP_FAILED`).
@@ -857,13 +901,14 @@ or control-status mismatch, and changed row evidence.
 **Remaining work.** The blocked profile pins neither authority, so the
 public entry refuses before either directory exists or any child starts.
 Integration must install and pin a reviewed row plan for the real corpus;
-the fixture plan and stand-in compilers prove mechanics only. The producer
-takes each row's semantic verdict from its compile (exit status, every
-metrics input compiled, an artifact the independent reader accepts) and
-leaves the per-row #509 semantic proof to the required checks; link and
-self-host templates must still emit compiler metrics records for their
-fallback counts. A per-step cgroup v2 leaf is still missing, as for the
-checks.
+the fixture plan and stand-in compilers prove mechanics only. The row steps
+are isolated with Landlock but still run as the service user. Running them
+as the broker's separate candidate UID, in a unit that cannot read the
+service's workspace at all, needs lane C's broker support for per-row stages
+and is not done. The required checks (`retirement_check_runner.c`) are not
+sandboxed: they are pinned commands whose output must equal a pinned digest,
+but they also run the candidate binary. A per-step cgroup v2 leaf is still
+missing, as for the checks.
 
 ## Ready record and coordinator replay (#1020)
 
@@ -1037,13 +1082,22 @@ receipt:
 - the reference receipt's observed build command.
 
 Only the record digest from the authenticated channel anchors those values.
-The check receipts, the row plan and the correctness seal, by contrast, are
-re-derived from the pinned authorities and the persisted evidence, so
-another job's or token's receipt, a swapped binary, a missing check, a
-changed row-evidence byte or a changed `row-plan=` or `correctness=` value
-fails the replay. The fixture shows the remaining limit: a record whose row
-descriptor, command digest, observation chain, oracle attempt and gate seal
-are all changed together still replays.
+The check receipts and the row plan, by contrast, are re-derived from the
+pinned authorities, and the correctness seal is recomputed from the
+persisted row evidence. So another job's or token's receipt, a swapped
+binary, a missing check, a row-evidence byte that the gate rejects, and a
+changed `row-plan=` or `correctness=` value each fail the replay.
+
+The row observations themselves (artifacts, codes, diagnostics, runtime
+outputs, CPU provenance) are not re-observed. Like the descriptor numbers,
+they are anchored only by the authenticated record digest and the unit's
+honesty. The fixture shows both limits:
+
+- A record whose row descriptor, command digest, observation chain, oracle
+  attempt and gate seal are all changed together still replays.
+- Row evidence rewritten consistently still replays: one compile's artifact
+  digest changed, the correctness gate rerun over it, and the gate seal and
+  record recomputed under a new record digest.
 
 ## Capacity derivation
 

@@ -13,8 +13,9 @@
  *
  * bq_retirement_row_produce runs the plan in the unit with the held matched
  * binaries inside the bounded runner (retirement_check_runner.c's child
- * normalization, subreaper sweep and deadlines, plus pre/post fstat of the
- * held binaries) and observes the row facts: exit status, artifacts and
+ * normalization, subreaper sweep and deadlines, a per-step Landlock sandbox
+ * and per-step fstat identity of the held binaries, rehashed once before and
+ * once after the run) and observes the row facts: exit status, artifacts and
  * their code sections (the independent artifact reader), the compiler's
  * per-input metrics records (status, error, diagnostic digest, fallback
  * count), runtime output and the CPU provenance. BqRetirementRowObserved is
@@ -221,5 +222,8 @@ typedef struct BqRetirementRowRun
  * BQ_CONFIGURATION_MISMATCH; cancellation, the deadline and a descendant
  * that survives the sweep map as for the check runner. */
 BUSTER_F_DECL BqError bq_retirement_row_produce(BqRetirementRowRun const* run, BqRetirementRowObserved* observed);
+/* The digest of logical CPU cpu's model as /proc/cpuinfo names it (see
+ * retirement_row_producer.c); the observation records it for the pinned CPU. */
+BUSTER_F_DECL bool bq_retirement_row_cpu_model(u32 cpu, char digest[SHA256_HEX_CAPACITY]);
 
 #endif

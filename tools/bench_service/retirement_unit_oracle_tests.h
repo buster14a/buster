@@ -863,6 +863,11 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
     forged.seal_sha256[0] = forged.seal_sha256[0] == '0' ? '1' : '0';
     BQ_PREP_CHECK(bq_retirement_unit_ready_pinned(unit, &success->built, projection, oracle, &forged, workspaces,
                   profile, refused) == BQ_RECIPE_MISMATCH);
+    /* The seal binds the persisted row evidence's digest. */
+    forged = gate;
+    forged.row_evidence_sha256[0] = forged.row_evidence_sha256[0] == '0' ? '1' : '0';
+    BQ_PREP_CHECK(bq_retirement_unit_ready_pinned(unit, &success->built, projection, oracle, &forged, workspaces,
+                  profile, refused) == BQ_RECIPE_MISMATCH);
     gate.correctness.batch_authority = 0;
     BQ_PREP_CHECK(bq_retirement_unit_ready_pinned(unit, &success->built, projection, oracle, &gate, workspaces, profile,
                       refused) == BQ_BAD_REQUEST);
@@ -1091,6 +1096,63 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
     BQ_PREP_CHECK(bq_prep_test_ready_install(attempt, digest, original, length) &&
                   bq_prep_test_replay(fixture, success, digest) == BQ_OK);
 
+    /* A consistent row-evidence forgery: one per-row compile's artifact
+     * digest changed in the persisted evidence, the correctness gate rerun
+     * over it, and the gate seal and the record recomputed with the unit's
+     * own functions under a new record digest. The replay accepts it: it
+     * re-derives the row plan and recomputes the correctness seal, but the
+     * row observations themselves are anchored only by the authenticated
+     * record digest. */
+    BqRetirementRowObserved forged_rows = {0};
+    BqRetirementRowJoined forged_joined = {0};
+    BqRetirementRequiredChecks forged_checks = {.hosted = -1};
+    BqRetirementUnitGate forged_gate = {0};
+    BqRetirementCheckResult* passing = calloc(BQ_CHECK_TEST_CHECKS, sizeof(*passing));
+    char* forged_text = NULL;
+    u32 forged_rows_length = 0, forged_row = UINT32_MAX;
+    for (u32 row = 0; forged_row == UINT32_MAX && row < row_plan.row_count; row += 1)
+        if (row_plan.rows[row].compile < BQ_RETIREMENT_ROW_PLAN_BATCH) forged_row = row;
+    bool forged_ok = passing && forged_row != UINT32_MAX &&
+                     bq_retirement_row_observed_parse((u8 const*)rows_saved, rows_size, &row_plan, &forged_rows) ==
+                     BQ_OK;
+    if (forged_ok)
+    {
+        char* first = forged_rows.facts[forged_row].side[0].artifact_sha256;
+        first[0] = first[0] == '0' ? '1' : '0';
+    }
+    forged_ok = forged_ok && bq_retirement_row_observed_format(&forged_rows, &forged_text, &forged_rows_length) &&
+                bq_prep_test_reference_replace(rows_directory, BQ_RETIREMENT_ROW_EVIDENCE_NAME, forged_text,
+                                               forged_rows_length, 0400) &&
+                bq_retirement_row_evidence_join(&row_plan, projection, &forged_rows, &forged_joined) == BQ_OK &&
+                bq_retirement_required_checks_import_profile(installed, profile, &unit->job, &unit->preparation,
+                                                             projection, &forged_checks) == BQ_OK;
+    if (forged_ok) bq_row_test_passing(&forged_checks, passing);
+    forged_ok = forged_ok && bq_retirement_unit_gate_admit(projection, &forged_checks, passing,
+                                                           &forged_joined.evidence, &forged_gate) == BQ_OK;
+    if (forged_ok)
+    {
+        memcpy(forged_gate.evidence_sha256, gate.evidence_sha256, SHA256_HEX_CAPACITY);
+        bq_digest(forged_text, forged_rows_length, (char8*)forged_gate.row_evidence_sha256);
+    }
+    BqRetirementUnitReadyFacts row_facts = bq_retirement_unit_facts(unit, &success->built, projection, oracle,
+                                                                    &forged_gate);
+    u32 row_forged_length = 0;
+    BQ_PREP_CHECK(forged_ok && strcmp(forged_gate.correctness.sealed_sha256, gate.correctness.sealed_sha256) &&
+                  bq_retirement_unit_gate_seal(&row_facts, row_facts.gate_sha256) &&
+                  bq_retirement_unit_ready_format(&row_facts, bytes, sizeof(bytes), &row_forged_length) &&
+                  bq_prep_test_ready_install(attempt, digest, bytes, row_forged_length) &&
+                  bq_prep_test_replay(fixture, success, digest) == BQ_OK);
+    BQ_PREP_CHECK(bq_prep_test_reference_replace(rows_directory, BQ_RETIREMENT_ROW_EVIDENCE_NAME, rows_saved, rows_size,
+                                                 0400) &&
+                  bq_prep_test_ready_install(attempt, digest, original, length) &&
+                  bq_prep_test_replay(fixture, success, digest) == BQ_OK);
+    bq_retirement_unit_gate_release(&forged_gate);
+    bq_retirement_row_joined_release(&forged_joined);
+    bq_retirement_row_observed_release(&forged_rows);
+    bq_retirement_required_checks_release(&forged_checks);
+    free(forged_text);
+    free(passing);
+
     /* A crash between the temporary and the link leaves only the temporary
      * in an unsealed directory; one after the link, two links. Both fail,
      * and the unit refuses to write into the leftover directory. */
@@ -1172,8 +1234,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
                                                      0400) &&
                       bq_prep_test_replay(fixture, success, digest) == BQ_OK);
     }
-    /* The persisted row evidence: an unsealed directory, a changed digit
-     * (the recomputed correctness seal no longer matches the gate seal), a
+    /* The persisted row evidence: an unsealed directory, a changed digit of
+     * row 0's command (the rerun correctness gate refuses the row), a
      * missing row line (it no longer parses) and a missing file. */
     BQ_PREP_CHECK(rows_directory >= 0 && fchmod(rows_directory, 0700) == 0 &&
                   bq_prep_test_replay(fixture, success, digest) == BQ_SOURCE_MISMATCH &&
