@@ -4341,10 +4341,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_f128(Un
             scratch_end(temporary);
         }
     }
+    // The canonical emitter selected by `none` has no MIR fallback to reject,
+    // so it runs the same byte oracles without the strict-fallback flag.
+    String8 image_modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality"),
+                             S8("-fregister-allocator=none")};
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
     {
-        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(image_modes); mode += 1)
         {
+            String8 strict = mode == BUSTER_ARRAY_LENGTH(image_modes) - 1 ? S8("-fverify-codegen") : S8("-fno-machine-fallback");
             for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
             {
                 for (u32 position = 0; position < BUSTER_ARRAY_LENGTH(positions); position += 1)
@@ -4353,12 +4358,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_f128(Un
                     {
                         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                         String8 output = buster_test_temporary_path(temporary.arena, S8("buster-a64-f128"), S8(".o"));
-                        String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend], positions[position],
-                                             S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, fixtures[fixture]};
+                        String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], image_modes[mode], frontends[frontend], positions[position],
+                                             strict, S8("-fverify-codegen"), S8("-o"), output, fixtures[fixture]};
                         CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
                             compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
                         String8 description = string_format(temporary.arena, S8("f128 {S8} {S8} {S8} {S8} {S8}: {S8}"),
-                            targets[target], modes[mode], frontends[frontend], positions[position], fixtures[fixture], compiled.diagnostic);
+                            targets[target], image_modes[mode], frontends[frontend], positions[position], fixtures[fixture], compiled.diagnostic);
                         BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
                         BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == (fixture ? 4u : 3u) &&
                             compiled.codegen_statistics.fallback_function_count == 0, description);
@@ -4382,8 +4387,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_f128(Un
                             for (u32 direction = 0; direction < 2; direction += 1)
                             {
                                 String8 mixed_object = buster_test_temporary_path(temporary.arena, S8("buster-f128-mixed"), S8(".o"));
-                                String8 mixed[] = {S8("-c"), S8("-g0"), modes[mode], frontends[frontend], positions[position],
-                                    S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-DBUSTER_F128_FENV=1"),
+                                String8 mixed[] = {S8("-c"), S8("-g0"), image_modes[mode], frontends[frontend], positions[position],
+                                    strict, S8("-fverify-codegen"), S8("-DBUSTER_F128_FENV=1"),
                                     direction ? S8("-DBUSTER_F128_CLIENT=1") : S8("-DBUSTER_F128_LIBRARY=1"),
                                     fixtures[fixture], S8("-o"), mixed_object};
                                 CompilerDriverResult mixed_result = compiler_driver_execute_invocation(temporary.arena,
