@@ -4087,12 +4087,12 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_test_operation_row(UnitTestArguments* a
 // prefix from a crash identifies reached cases but cannot pass the batch.
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_native_frame_batch_stream(Arena* arena, String8 text, SliceString8 ids, u32* started, u32* completed)
 {
-    bool valid = ids.length > 0 && ids.length <= COMPILER_DRIVER_TEST_NATIVE_FRAME_BATCH_CAPACITY;
+    bool valid = ids.pointer && ids.length > 0 && ids.length <= COMPILER_DRIVER_TEST_NATIVE_FRAME_BATCH_CAPACITY;
     *started = 0;
     *completed = 0;
     for (u64 index = 0; valid && index < ids.length; index += 1)
     {
-        valid = ids.pointer[index].length != 0;
+        valid = ids.pointer[index].pointer && ids.pointer[index].length != 0;
         for (u64 prior = 0; valid && prior < index; prior += 1)
         {
             valid = !string_equal(ids.pointer[index], ids.pointer[prior]);
@@ -4156,7 +4156,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_batch_contr
 #if defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC && !BUSTER_ANDROID && !BUSTER_IOS
     String8 executable = buster_test_temporary_path(arguments->arena, S8("buster-frame-batch-control"), S8(".exe"));
     String8 command_tail[] = {S8("-O0"), S8("-fno-inline"), S8("-fno-lto"),
-        S8("tests/host_native_frame_batch.c"), S8("tests/host_native_frame_batch_control.c"),
+        S8("tools/driver-test/host_native_frame_batch.c"), S8("tools/driver-test/host_native_frame_batch_control.c"),
 #if !BUSTER_WINDOWS
         S8("-lm"),
 #endif
@@ -4168,10 +4168,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_batch_contr
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(command_tail); index += 1) { command[command_count++] = command_tail[index]; }
     ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = command, .length = command_count},
         (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true, .new_process_group = true});
-    bool linked = spawn.handle && os_process_wait_deadline(arguments->arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+    ProcessWaitResult control_link = {0};
+    if (spawn.handle)
+    {
+        control_link = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+        BUSTER_CHECK(!control_link.process_tree_cleanup_failed && !control_link.process_group_reservation_retained && !control_link.process_group_ownership_lost);
+    }
+    bool linked = spawn.handle && control_link.result == PROCESS_RESULT_SUCCESS;
     if (BUSTER_REQUIRE(arguments, linked))
     {
-        String8 faults[] = {S8("pass"), S8("fail"), S8("crash"), S8("timeout"), S8("partial"), S8("malformed"), S8("leak")};
+        String8 faults[] = {S8("pass"), S8("fail"), S8("crash"), S8("timeout"), S8("partial"), S8("malformed"), S8("leak"),
+#if BUSTER_LINUX || BUSTER_MACOS
+            S8("cancel"),
+#endif
+        };
         String8 ids[] = {S8("case-0"), S8("case-1"), S8("case-2"), S8("case-4"), S8("case-5"), S8("case-7"), S8("case-8"), S8("case-9")};
         String8 run[] = {executable, ids[0], ids[1], ids[2], ids[3], ids[4], ids[5], ids[6], ids[7]};
         for (u32 fault = 0; fault < BUSTER_ARRAY_LENGTH(faults); fault += 1)
@@ -4186,24 +4196,35 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_batch_contr
                 (SliceString8)BUSTER_ARRAY_TO_SLICE(keys), (SliceString8)BUSTER_ARRAY_TO_SLICE(values), options);
             if (BUSTER_REQUIRE(arguments, child.handle != 0))
             {
+                ProcessControlAtomic cancellation_signal = 0;
+                ProcessControlAtomic cancellation_escalated = 0;
+                ProcessGroupControlState control = {.cancellation_signal = &cancellation_signal, .cancellation_escalated = &cancellation_escalated};
+                if (fault == 7)
+                {
+                    process_control_atomic_store(&cancellation_signal, 1);
+                    child.process_group_control = &control;
+                }
                 ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, child, fault == 3 ? 100000 : 30000000);
+                // No subsequent spawn may follow uncertain group ownership.
+                BUSTER_CHECK(!waited.process_tree_cleanup_failed && !waited.process_group_reservation_retained && !waited.process_group_ownership_lost);
                 u32 started;
                 u32 completed;
                 bool manifest = compiler_driver_test_native_frame_batch_stream(arguments->arena,
                     (String8){(char8*)waited.streams[STANDARD_STREAM_OUTPUT].pointer, waited.streams[STANDARD_STREAM_OUTPUT].length},
                     (SliceString8)BUSTER_ARRAY_TO_SLICE(ids), &started, &completed);
-                bool passed = waited.result == PROCESS_RESULT_SUCCESS && manifest;
+                bool passed = waited.result == PROCESS_RESULT_SUCCESS && manifest && !process_control_atomic_load(&cancellation_signal);
                 BUSTER_TEST_RAW(arguments, passed == (fault == 0), faults[fault]);
                 BUSTER_TEST(arguments, fault != 0 || completed == 255);
                 BUSTER_TEST(arguments, fault != 3 || waited.timed_out);
                 BUSTER_TEST(arguments, !waited.process_tree_cleanup_failed && !waited.process_group_reservation_retained && !waited.process_group_ownership_lost);
                 BUSTER_TEST(arguments, fault != 6 || completed == 1);
+                BUSTER_TEST(arguments, fault != 7 || (waited.result != PROCESS_RESULT_SUCCESS && !waited.timed_out && completed == 0));
             }
         }
         // Two copies of the same entry payload must remain a real link error;
         // the harness never permits duplicate symbol acceptance by linker flag.
-        String8 collision_tail[] = {S8("tests/host_native_frame_batch.c"),
-            S8("tests/host_native_frame_batch_control.c"), S8("tests/host_native_frame_batch_control.c"),
+        String8 collision_tail[] = {S8("tools/driver-test/host_native_frame_batch.c"),
+            S8("tools/driver-test/host_native_frame_batch_control.c"), S8("tools/driver-test/host_native_frame_batch_control.c"),
 #if !BUSTER_WINDOWS
             S8("-lm"),
 #endif
@@ -4216,8 +4237,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_batch_contr
         ProcessSpawnResult collision_spawn = os_process_spawn((SliceString8){.pointer = collision, .length = collision_count},
             (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
                 .new_process_group = true, .capture = (u64)1 << STANDARD_STREAM_ERROR});
-        BUSTER_TEST(arguments, collision_spawn.handle &&
-            os_process_wait_deadline(arguments->arena, collision_spawn, 30000000).result != PROCESS_RESULT_SUCCESS);
+        ProcessWaitResult collision_wait = {0};
+        if (collision_spawn.handle)
+        {
+            collision_wait = os_process_wait_deadline(arguments->arena, collision_spawn, 30000000);
+            BUSTER_CHECK(!collision_wait.process_tree_cleanup_failed && !collision_wait.process_group_reservation_retained && !collision_wait.process_group_ownership_lost);
+        }
+        BUSTER_TEST(arguments, collision_spawn.handle && !collision_wait.timed_out &&
+            collision_wait.result != PROCESS_RESULT_SUCCESS && collision_wait.streams[STANDARD_STREAM_ERROR].length != 0);
     }
 #endif
     return result;
@@ -4301,11 +4328,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
             if (configured_clang && S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
             String8 tail[] = {S8("-O0"), S8("-fno-inline"), S8("-fno-lto"), S8("-c"),
                 single ? S8("-DBUSTER_NATIVE_FRAME_BATCH_SINGLE=1") : S8("-UBUSTER_NATIVE_FRAME_BATCH_SINGLE"),
-                S8("tests/host_native_frame_batch.c"), S8("-o"), single ? single_adapter : batch_adapter};
+                S8("tools/driver-test/host_native_frame_batch.c"), S8("-o"), single ? single_adapter : batch_adapter};
             for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(tail); index += 1) { command[count++] = tail[index]; }
             ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = command, .length = count},
                 (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true, .new_process_group = true});
-            adapters_compiled = spawn.handle && os_process_wait_deadline(arguments->arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+            adapters_compiled = false;
+            if (spawn.handle)
+            {
+                ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+                BUSTER_CHECK(!waited.process_tree_cleanup_failed && !waited.process_group_reservation_retained && !waited.process_group_ownership_lost);
+                adapters_compiled = waited.result == PROCESS_RESULT_SUCCESS;
+            }
             BUSTER_TEST(arguments, adapters_compiled);
         }
         if (timing) { compiler_driver_test_operation_end(&batch_prepare_time, prepare_start); }
@@ -4327,6 +4360,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
         if (configured_clang && S8(BUSTER_HOST_C_COMPILER_ARG1).length) { host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
         host_command[host_count++] = S8("-O0");
         host_command[host_count++] = S8("-fno-inline");
+        if (batch_enabled) { host_command[host_count++] = S8("-fno-lto"); }
         if (batch_enabled && observer != 2)
         {
             host_command[host_count++] = string_format(arguments->arena, S8("-Dmain=native_frame_case_{u32}"), observer == 3 ? 9u : observer + 4);
@@ -4452,7 +4486,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                             bool executable_cpu = cpu == 0 || (fixture >= 7 &&
                                 (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
                                           : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE)));
-                            bool runtime_eligible = host_observer_available && native_target && executable_cpu && fixture != 3 &&
+                            bool runtime_required = host_observer_available && native_target && executable_cpu && fixture != 3;
+                            bool runtime_eligible = runtime_required &&
                                 compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object &&
                                 compiled.codegen_statistics.function_count == function_counts[fixture] &&
                                 compiled.codegen_statistics.fallback_function_count == 0 && (observer == UINT32_MAX || host_compiled[observer]);
@@ -4460,10 +4495,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                             {
                                 arguments->show(arguments, S8("NATIVE_FRAME_VECTOR_COMPILE_V1 target={S8} allocator={u32} frontend={u32} pic={u32} cpu={u32} fixture={u32} error={u32} classification={S8}\n"),
                                     targets[target], mode, frontend, pic, cpu, fixture, (u32)compiled.error,
-                                    runtime_eligible ? S8("runtime") : S8("compile-only"));
+                                    runtime_required ? S8("runtime") : S8("compile-only"));
                             }
                             if (batch_cell) { batch_compiled[batch_index] = runtime_eligible; }
-                            if (runtime_eligible) { native_frame_case_count += 1; }
+                            if (runtime_required) { native_frame_case_count += 1; }
                             bool execute_batch = batch_cell && fixture == 9;
                             if (execute_batch)
                             {
@@ -4473,6 +4508,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                     runtime_eligible = runtime_eligible && batch_compiled[index];
                                 }
                                 BUSTER_TEST_RAW(arguments, runtime_eligible, S8("native frame batch preparation; missing cases remain unexecuted"));
+                                if (!runtime_eligible && (program_flag_get(PROGRAM_FLAG_VERBOSE) || timing))
+                                {
+                                    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(batch_fixtures); index += 1)
+                                    {
+                                        arguments->show(arguments, S8("NATIVE_FRAME_VECTOR_CASE_V1 id={S8}.allocator-{u32}.frontend-{u32}.pic-{u32}.cpu-{u32}.fixture-{u32} classification=runtime batch_size={u32} status=unexecuted\n"),
+                                            targets[target], mode, frontend, pic, cpu, batch_fixtures[index], (u32)BUSTER_ARRAY_LENGTH(batch_fixtures));
+                                    }
+                                }
+                            }
+                            if (runtime_required && !runtime_eligible && !batch_cell && (program_flag_get(PROGRAM_FLAG_VERBOSE) || timing))
+                            {
+                                arguments->show(arguments, S8("NATIVE_FRAME_VECTOR_CASE_V1 id={S8}.allocator-{u32}.frontend-{u32}.pic-{u32}.cpu-{u32}.fixture-{u32} classification=runtime batch_size=1 status=unexecuted\n"),
+                                    targets[target], mode, frontend, pic, cpu, fixture);
                             }
                             if (runtime_eligible && (!batch_cell || execute_batch))
                             {
@@ -4562,6 +4610,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                         link_command[link_count++] = host_objects[1];
                                         link_command[link_count++] = host_objects[3];
                                         link_command[link_count++] = batch_adapter;
+                                        link_command[link_count++] = S8("-fno-lto");
                                     }
                                     else if (observer != UINT32_MAX)
                                     {
@@ -4583,6 +4632,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                         TimeDataType link_wait_start = timing ? timestamp_take() : (TimeDataType){0};
                                         ProcessWaitResult waited = execute_batch ? os_process_wait_deadline(temporary.arena, linked, 30000000)
                                             : os_process_wait_sync(temporary.arena, linked);
+                                        if (execute_batch)
+                                        {
+                                            BUSTER_CHECK(!waited.process_tree_cleanup_failed && !waited.process_group_reservation_retained && !waited.process_group_ownership_lost);
+                                        }
                                         link_ok = waited.result == PROCESS_RESULT_SUCCESS && !waited.process_tree_cleanup_failed &&
                                             !waited.process_group_reservation_retained && !waited.process_group_ownership_lost;
                                         if (timing) { compiler_driver_test_operation_end(&host_link_wait_time, link_wait_start); }
@@ -4609,7 +4662,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                         }
                                     }
                                 }
-                                for (u32 index = 0; index < object_count; index += 1) { BUSTER_TEST_RAW(arguments, link_ok, ids[index]); }
+                                for (u32 index = 0; index < object_count; index += 1)
+                                {
+                                    BUSTER_TEST_RAW(arguments, link_ok, ids[index]);
+                                    if (!link_ok && (program_flag_get(PROGRAM_FLAG_VERBOSE) || timing))
+                                    {
+                                        arguments->show(arguments, S8("NATIVE_FRAME_VECTOR_CASE_V1 id={S8} classification=runtime batch_size={u32} status=unexecuted\n"),
+                                            ids[index], object_count);
+                                    }
+                                }
                                 if (link_ok)
                                 {
                                     String8 run_arguments[9] = {executable};
@@ -4643,6 +4704,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                         run_ok = waited.result == PROCESS_RESULT_SUCCESS;
                                         if (execute_batch)
                                         {
+                                            BUSTER_CHECK(!waited.process_tree_cleanup_failed && !waited.process_group_reservation_retained && !waited.process_group_ownership_lost);
                                             TimeDataType parse_start = timing ? timestamp_take() : (TimeDataType){0};
                                             String8 output = {(char8*)waited.streams[STANDARD_STREAM_OUTPUT].pointer, waited.streams[STANDARD_STREAM_OUTPUT].length};
                                             bool manifest_ok = compiler_driver_test_native_frame_batch_stream(temporary.arena, output,

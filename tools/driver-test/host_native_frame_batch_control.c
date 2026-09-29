@@ -14,7 +14,7 @@ int native_frame_case_0(void)
     {
         if (strcmp(fault, "fail") == 0) { result = 7; }
         else if (strcmp(fault, "crash") == 0) { raise(SIGILL); result = 1; }
-        else if (strcmp(fault, "timeout") == 0)
+        else if (strcmp(fault, "timeout") == 0 || strcmp(fault, "cancel") == 0)
         {
             volatile unsigned count = 0;
             for (;;) { count += 1; }

@@ -50,7 +50,10 @@ the arrays in the fixture. Additional `batch_prepare` and `batch_parse` rows
 reuse `DRIVER_OPERATION_TIMING_V1`; the body includes retained storage and
 complete preparation/link/run/parse work. Regression fixtures check passing
 and failing payloads, symbol collisions, state leakage, crashes, deadlines,
-partial and malformed output, and duplicate/missing result records.
+partial and malformed output, and duplicate/missing result records. POSIX
+cancellation kills a deliberately nonterminating child and verifies reaping.
+Uncertain process-group ownership stops the runner before another child can
+be admitted; missing compilation or a failed link emits unexecuted case rows.
 
 The branch-only hosted census records image, CPU, source/tree, binary and
 compiler identities. Its three alternating uninstrumented isolated module
