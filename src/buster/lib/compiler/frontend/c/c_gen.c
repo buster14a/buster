@@ -7754,6 +7754,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
             runtime = S8("__truncdfhf2");
             runtime_parameter = builder->f64_type;
         }
+        else if (source_value->kind == IR_TYPE_FLOAT && source_value->bit_width == 80 && c_ir_target_supports_f80(builder->target))
+        {
+            // x87 rounds once, directly to binary16, through the libgcc and
+            // compiler-rt entry Clang selects; the f80 operand keeps its
+            // ordinary memory position in the call.
+            runtime = S8("__truncxfhf2");
+            runtime_parameter = source_type;
+        }
         else if (source_type.value != builder->f32_type.value)
         {
             bool source_bfloat16 = source_value->kind == IR_TYPE_FLOAT && source_value->bit_width == 16 &&
@@ -15447,8 +15455,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_runtime_call(CIntegerIrBuilder* bu
     IrValueId result = IR_VALUE_ID_INVALID;
     IrSymbolId symbol = IR_SYMBOL_ID_INVALID;
     IrTypeId function_type = IR_TYPE_ID_INVALID;
+    // The x87 entry is newer and returns its half in XMM0 like Clang's Darwin
+    // lowering expects, so only the binary32/binary64 entries take the bridge.
     bool darwin_x64_integer_half_abi = builder->target.cpu_arch == CPU_ARCH_X86_64 &&
-                                       (builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS);
+                                       (builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS) &&
+                                       !string_equal(link_name, S8("__truncxfhf2"));
     IrTypeId runtime_return_type = return_type;
     IrTypeId runtime_parameter_type = parameter_type;
     IrValueId runtime_argument = argument;
