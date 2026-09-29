@@ -38,7 +38,10 @@ REQUIRED_WORKFLOW_PATHS = {
 # The event-driven admission reconciler (#1807) publishes this check through the
 # Checks API, outside any workflow-run check suite. It is bound instead by an
 # exact-head external ID; see check_marker in tools/merge_queue_admission.py.
-RECONCILED_CHECK_MARKERS = {"Main integration admission": "buster-merge-queue-admission-v1:"}
+RECONCILED_CHECK_MARKERS = {
+    "Main integration admission": "buster-merge-queue-admission-v1:",
+    "Native retirement merge admission": "buster-native-retirement-admission-v1:",
+}
 ACTIVE_RUN_STATUSES = frozenset(("queued", "pending", "waiting", "requested", "in_progress"))
 
 
