@@ -25,7 +25,8 @@ Do not rerun to select a favorable result.
 
 Target is exactly 128x96; tiles are 16x16, 48 in total. At most 64 ordered,
 unique command IDs in 0..63. Geometry and effective clips are integer, half-open,
-axis-aligned rectangles intersected with the target. Inputs are constant
+axis-aligned rectangles intersected with the target; geometry/clip coordinates
+are bounded to [-256, 256]. Empty rectangles issue no samples. Inputs are constant
 straight RGBA8 colors and optional nearest-neighbor 8x8 R8 coverage textures
 with explicit immutable ID/generation pairs. Clear is a known opaque constant.
 
@@ -33,6 +34,11 @@ For each covered sample let `a = (As * coverage + 127) / 255`.
 For each RGB component, `out = (Cs*a + destination*(255-a) + 127) / 255`,
 using unsigned integer division. Stored alpha is replaced by `a`.
 An untextured draw has coverage 255. Every draw rounds independently.
+For textured draws, map pixel centers using the original unclipped rectangle:
+`tx = floor(8 * (2 * (x - x0) + 1) / (2 * (x1 - x0)))`, with `ty` analogous,
+then clamp each index to [0, 7]. Clipping never renormalizes that mapping.
+All integer products fit the declared coordinate budget. A clipped rectangle
+[-4,4) covers x=0..3 with texels 4..7, not a restarted texel 0.
 This follows the observed RGB/alpha blend algebra, but does not reproduce
 Buster's floating-point rounding, linear/repeat texture sampling, sRGB handling,
 four-color interpolation, rounded corners or SDF softness.
