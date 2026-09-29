@@ -87,6 +87,12 @@ non-cancelling concurrency group. Protect the
 Dispatch it with an open non-draft PR number. The default `auto` class and
 `configured` authorization mode resolve the immutable request from trusted main.
 Optional SHA and class overrides remain strict assertions.
+Resolution refuses a candidate before authorization or any branch update when
+it is non-empty and changes no admitted repository source, trusted
+implementation, or policy/schema path. It shares the merge gate's
+`classification_is_bound` predicate over the current-main source snapshot,
+because admission would reject such an integration head. Catch-ups (empty
+candidates) and bound candidates remain eligible.
 
 For a previously attested head, preparation first verifies its original trusted
 publication and recovers the original source candidate. It requires the recorded

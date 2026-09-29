@@ -109,25 +109,7 @@ def parse_trailers(message: str) -> dict[str, str]:
 
 
 def bound_sources(repo: Path, base: str) -> frozenset[str]:
-    result = integration._git(
-        repo, "show", base + ":docs/native-retirement-repository-sources-v1.json"
-    )
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        raise AdmissionError("trusted base has malformed repository-source snapshot") from error
-    records = data.get("records")
-    if not isinstance(records, list):
-        raise AdmissionError("trusted base repository-source snapshot has no records")
-    sources: set[str] = set()
-    for record in records:
-        source = record.get("source") if isinstance(record, dict) else None
-        if not isinstance(source, str):
-            raise AdmissionError("trusted base repository-source snapshot has a malformed record")
-        sources.add(integration._canonical_path(source))
-    if not sources:
-        raise AdmissionError("trusted base repository-source snapshot is unexpectedly empty")
-    return frozenset(sources)
+    return integration.bound_sources(repo, base)
 
 
 def changed_paths(repo: Path, base: str, head: str) -> tuple[str, ...]:
@@ -136,9 +118,8 @@ def changed_paths(repo: Path, base: str, head: str) -> tuple[str, ...]:
 
 def classification_is_bound(classification, changed: tuple[str, ...],
                             sources: frozenset[str]) -> bool:
-    """True when the candidate changes admitted sources or trusted state."""
-    source_change = any(path in sources for path in changed)
-    return source_change or classification.kind in ("bootstrap", "policy")
+    # The writer refuses the same non-bound candidates before publication (#1828).
+    return integration.classification_is_bound(classification, changed, sources)
 
 
 def classification_requires_writer(classification) -> bool:
