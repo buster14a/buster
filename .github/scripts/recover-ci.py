@@ -6,6 +6,7 @@ the live required checks for one merge group, plus Buster CI jobs before its
 aggregate finishes. Only the trusted default-branch workflow mutates runs.
 """
 
+import html
 import json
 import os
 from pathlib import Path
@@ -273,6 +274,29 @@ def watch(api, event, sleep_fn=time.sleep, max_probes=WATCH_PROBES):
     raise TimeoutError("Merge-group fail-fast watcher exceeded its bounded polling window.")
 
 
+def lifecycle_summary(title, message, event, repository, handler_sha, handler_id,
+                      handler_attempt):
+    source = event["workflow_run"]
+
+    def code(value):
+        return "<code>" + html.escape(str(value)) + "</code>"
+
+    source_url = ("https://github.com/" + repository + "/actions/runs/" +
+                  str(source["id"]) + "/attempts/" + str(source["run_attempt"]))
+    handler_url = ("https://github.com/" + repository + "/actions/runs/" +
+                   str(handler_id) + "/attempts/" + str(handler_attempt))
+    return ("## " + title + "\n\n" +
+            "Upstream: [Buster CI run " + str(source["id"]) + " attempt " +
+            str(source["run_attempt"]) + "](" + source_url + "), " +
+            code(event["action"]) + " notification for " +
+            code(source["event"]) + " on " + code(source["head_branch"]) +
+            " at " + code(source["head_sha"]) + ".\n\n" +
+            "Trusted handler: [run " + str(handler_id) + " attempt " +
+            str(handler_attempt) + "](" + handler_url + ") on default-branch " +
+            code(handler_sha) + ".\n\n" +
+            "Decision: " + html.escape(message) + "\n")
+
+
 def main():
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     api = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GH_TOKEN"])
@@ -282,18 +306,21 @@ def main():
     try:
         if mode == "watch":
             message = watch(api, event)
-            title = "Merge-group CI fail-fast"
+            title = "Buster CI merge-group watcher"
         elif mode == "recover":
             message = recover(api, event)
-            title = "Cancelled CI recovery"
+            title = "Buster CI recovery decision"
         else:
             raise ValueError("Expected recover or watch mode")
     except SkipRecovery as skipped:
         message = "No action: " + str(skipped)
-        title = "CI lifecycle controller"
+        title = "Buster CI lifecycle no action"
     print(message)
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
-        summary.write("## " + title + "\n\n" + message + "\n")
+        summary.write(lifecycle_summary(
+            title, message, event, os.environ["GITHUB_REPOSITORY"],
+            os.environ["GITHUB_SHA"], os.environ["GITHUB_RUN_ID"],
+            os.environ["GITHUB_RUN_ATTEMPT"]))
 
 
 if __name__ == "__main__":

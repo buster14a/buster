@@ -1166,10 +1166,35 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_process_spawn_probe(String8 mode)
         if (valid)
         {
 #if BUSTER_WINDOWS
+            HANDLE probe = (HANDLE)(uintptr_t)parsed.value;
             DWORD flags = 0;
             SetLastError(ERROR_SUCCESS);
-            BOOL present = GetHandleInformation((HANDLE)(uintptr_t)parsed.value, &flags);
-            success = !present && GetLastError() == ERROR_INVALID_HANDLE;
+            BOOL present = GetHandleInformation(probe, &flags);
+            if (!present)
+            {
+                success = GetLastError() == ERROR_INVALID_HANDLE;
+            }
+            else
+            {
+                // Handle values are per process: this process (for example its
+                // sanitizer runtime) may own an unrelated handle with the same
+                // value. Fail only when it names the parent's event object.
+                String8 name = os_get_environment_variable(S8("BUSTER_OS_SPAWN_PROBE_NAME"));
+                typedef BOOL(WINAPI * CompareObjectHandlesProc)(HANDLE, HANDLE);
+                HMODULE kernelbase = GetModuleHandleW(L"kernelbase.dll");
+                CompareObjectHandlesProc compare_object_handles =
+                    kernelbase ? (CompareObjectHandlesProc)(void (*)(void))GetProcAddress(kernelbase, "CompareObjectHandles") : 0;
+                if (name.length && compare_object_handles)
+                {
+                    String16 name16 = string16_from_string8(program_state->arena, name, true);
+                    HANDLE named = OpenEventW(SYNCHRONIZE, FALSE, (LPCWSTR)name16.pointer);
+                    if (named)
+                    {
+                        success = !compare_object_handles(probe, named);
+                        CloseHandle(named);
+                    }
+                }
+            }
 #else
             errno = 0;
             success = fcntl((int)parsed.value, F_GETFD) < 0 && errno == EBADF;
