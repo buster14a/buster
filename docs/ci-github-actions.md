@@ -470,3 +470,31 @@ pinned `.github/zig.json` digest; it adds only the validated namespace.
 ## Native runner phase observations
 
 Every native matrix lane retains calibrated, process-local phase evidence through its existing artifact. Provider preamble and Actions API clocks are joined only during audit; missing or contradictory identity is retained but cannot enter a performance comparison. See [Native runner observations](native-runner-observations.md).
+
+## Intel-macOS runner interruption observations (#1749)
+
+The Intel-macOS workflow-tool, Zig installation, desktop combination, native
+mode/differential, and iOS simulator steps start a step-owned resource sampler.
+It emits a `CI_RESOURCE_SAMPLE` JSON line immediately and every 30 seconds to
+the live step log and to `resources-<phase>.jsonl` in the existing job artifact.
+The step shell stops and waits for the sampler on exit; the sampler does not
+change the payload result or start another build/test worker.
+
+Each record identifies the phase, UTC time and elapsed time; it reports host
+load, a descendant-only process count, CPU percentage, RSS, and the three
+largest process names (no arguments or environment). It also reports macOS
+memory-pressure free percentage, swap used, cumulative pageouts, and free disk
+space under `RUNNER_TEMP`. A failed, unsupported, timed-out, or unparseable probe
+records an explicit status or `unknown`, never zero. The CPU percentage is a
+snapshot of processes still visible to `ps`; RSS is their current sum, not
+peak memory or the runner's total footprint. `sampling_ms` measures each
+observation's overhead. These fields are diagnostic only and cannot complete a
+missing required job or replace the exact phase evidence.
+
+Sampling starts after checkout, within the named step. It does not cover time
+before that step or between steps. A runner that stops communicating may lose
+both its artifact and the live log; the last available sample, if any, bounds
+what was observed and cannot prove the cause of a later outage. The separate
+`CI complete` interruption record in PR #1754 uses controller-visible job
+metadata and annotations even when the runner cannot finish cleanup. Keep
+failed-run elapsed time separate from successful-run performance in #709.
