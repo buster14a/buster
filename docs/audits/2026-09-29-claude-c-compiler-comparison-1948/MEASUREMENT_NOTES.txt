@@ -1,0 +1,142 @@
+Compiler comparison measurement notes, 2026-09-29 UTC
+
+Pins: Buster e642c1e32e40568c168d36b0f281c76e4c939139;
+CCC 6f1b99acb2f4ec2414592136c2009fe7713deec3.
+Stock cJSON tag1.7.19 c859b25da02955fef659d658b8f324b5cde87be3.
+Host: hosted EPYC9V74 VM, Linux x86-64. This is NOT a Zen5/9700X result.
+Affinity is recorded in raw_results.json. The host is shared: unrelated
+background build load was observed, and affinity cannot exclude host or
+neighbor load. Root compiler builds and related agent probes finished
+before the measured suite. No confidence/fleet/general-corpus claim follows.
+
+Compiler builds were performed by the parent owner. Buster is clang20
+Release -O3 -march=native, unity, tests-off; CCC is Rust1.90 cargo release.
+Binary SHA256 and size, source SHA256 and bytes, full /proc/cpuinfo, exact
+command prefixes and per-sample commands are recorded. Buster's own compiler
+binary includes build debug information; its disk size is not a clean
+shipping-footprint comparison with Cargo release or dynamic Clang driver.
+
+Compilation: 7 alternating/rotating round samples, one untimed warmup.
+End-to-object commands use -O2 -std=gnu17 -fno-pic -c. Buster additionally
+requires 'cc' subcommand and '-g0' because it defaults to debug ON; CCC omits
+all debug flags because its parser interprets '-g0' as debug ON. QUALITY is
+explicit after -O2. Identical -O2 spelling does not imply equivalent passes.
+Buster default-target profile reports cpu=znver4 vector_bits=512; CCC and
+Clang default x86-64 behavior. The measured Buster stock and synthetic source
+profiles show zero native/split SIMD operations; this cannot be marketed as
+a controlled Zen5/vector-width comparison. Clang reduction uses SSE2.
+
+Timing: monotonic perf_counter around compiler subprocess from fresh Python
+wrapper, excluding wrapper interpreter startup, including compiler process
+spawn/startup and object writing. Initial Python wrapper resource RSS had
+approximately 10MiB pre-exec memory floor on tiny CCC processes. RSS was
+therefore corrected with 3 extra compile samples in a small C fork/exec/wait4
+timer (ru_maxrss KiB). Those separate RSS samples and original floor-affected
+values are retained in raw_results.json; accepted compile WALL times and
+runtime times were not replaced. Current harness uses the C helper for new
+reproductions. This small wrapper-method change can alter spawn overhead
+slightly. cJSON and all synthetic cells compiled under all 4 variants.
+
+Runtime: the same compiler-generated objects linked through clang20 -no-pie,
+common libc; cJSON additionally common libm. Thus speed results concern
+generated code, not bundled linkers. Arrays fit in small caches, so these do
+not measure cache-miss behavior, SIMD512 throughput, multi-threading or I/O.
+8 header-free synthetic kernels use unsigned defined wraparound arithmetic
+and FP powers of two, avoiding signed overflow and FP reassociation alarms.
+Seed and repetition input come from argv. Checksum is printed and consumed.
+All 72 seed/repetition/kernel cases per BusterFAST/BusterQUALITY/CCC matched
+Clang20 stdout. Stock cJSON parse/print/free driver matched Clang for reps
+1/3/19. Every timed run and full warmup also matched the oracle. This proves
+only these checked cases, not general compiler or cJSON-suite correctness.
+
+Runtime repetitions are common across compilers per kernel, calibrated on
+Clang20 to approximately 35-65ms. 5 rotating/alternating samples follow
+warmup. Runtime wall includes process startup and array initialization.
+Raw min/max ranges are retained. FP FAST/CCC ranges do not overlap in this
+capture (FAST minimum184.317ms; CCC maximum180.431ms), while QUALITY/CCC
+ranges do overlap despite FAST/QUALITY identical linked .text. The ~8.9%
+median gap therefore deserves stronger host control before generalization.
+
+Main numerical findings (native defaults, median samples):
+- Buster compilation wins cJSON2.30x, macro1024functions3.71x,
+  scalar512functions2.57x, scalar4096functions6.32x.
+- CCC compilation wins scalar4functions7.29x (noisy Buster14-27ms range),
+  scalar32functions2.44x, runtimeTU1.63x, small cJSONdriver3.34x.
+- Buster RSS wins only scalar4096: 91480 vs155876KiB (41.3% lower).
+  CCC RSS wins 7 other TUs. Full raw medians are in summary.json.
+- CCC .text is smaller in all8 TUs: reductions 27.8%-81.6%.
+- CCC runtime median faster in all9 cells: reduction2.508x, division1.525x,
+  LICM2.483x, GVN2.231x, helper-inlining1.907x, branch3.651x,
+  indexed-memory1.784x, FP1.089x, stock cJSON1.185x.
+- Equal-weight geometric mean across these9 hand-picked cells: CCC1.911x
+  (47.7% lower time). This is a synthetic-suite aggregate, not user-weighted
+  production performance. Prefer individual cells and real cJSON result.
+
+FAST/QUALITY object equivalence:
+All7 synthetic object files are whole-file byte-identical between FAST and
+QUALITY, including runtime.c. Linked runtime executables .text also match.
+Any synthetic FAST/QUALITY sample-time difference has no generated-code
+explanation and must be treated as noise. cJSON .text differs: FAST54777B,
+QUALITY54032B, reduction1.36%. Its runtime medians119.76ms vs124.36ms have
+overlapping ranges, so no robust QUALITY speed advantage is demonstrated.
+
+Disassembly-supported optimization opportunities:
+1. helper inlining: Buster inlining kernel retains two call relocations to
+   helper per inner iteration (runtime_buster_fast.disasm.txt offsets e75,
+   ec8), while CCC inlining kernel has no calls. CCC also hoists helper
+   invariants. Measured whole-kernel gap1.907x, not attributable solely to
+   calls because allocation/instruction selection differ too.
+2. LICM: CCC computes x*y at2e8, x+y at2f0, and seed&15 at303 before loops.
+   Buster repeats invariant multiply at8b3, addition at8e0, mask at92c in
+   inner loop. Whole-kernel gap2.483x. Add safe loop-invariant hoisting with
+   dominance, trap/side-effect/alias legality; test unsigned/floating cases
+   separately to preserve language semantics.
+3. if conversion: CCC branches kernel uses cmovne at8e3; Buster uses a
+   conditional jump at10cc and stack-mediated branch merges. Clang uses
+   conditional branches too. CCC3.651x faster than Buster and1.598x faster
+   than Clang here. Add costed diamond-to-select lowering for safe small
+   arms; do not infer that unconditional branchless code always wins.
+4. constant division: Buster uses two div rcx per element at649/68a, including
+   /37. CCC retains variable divide at17b but lowers /37 to unsigned magic
+   multiplication and >>5 around1a1-1e9 (not especially compact!). Gap1.525x.
+   Add unsigned and signed exact division/remainder-by-constant algorithms,
+   with high-product lowering and boundary/differential tests.
+5. GVN/CSE: CCC GVN kernel has a single x*y computation at4cf and reuses
+   x*y+seed. Buster repeats multiplications and stack traffic. Whole-kernel
+   gap2.231x. Add value numbering before allocation, with memorySSA/alias
+   reasoning only where needed, plus dirty-function scheduling/budgets.
+6. register/value placement and addressing: Buster spills/reloads even f0:
+   166-byte body vs CCC73-byte body; scalar_4 total.text694vs295B. Constant
+   shifts use CL in Buster vs immediate encodings in CCC, *3 uses imul plus
+   constant register in Buster vs lea in CCC. Reduction accumulator and
+   counters use stack homes in Buster; CCC keeps key values in registers
+   though still has needless moves/spills. Improve live-range persistence,
+   copy coalescing, immediate operand selection, fold scaled addressing and
+   removable jump/mov chains before introducing a broad vectorizer.
+   Scalar frontend SSA was active: profile says fallback_locals=0.
+   All profile runs report codegen fallback_functions=0; gaps are actual
+   current native FAST behavior, not fallback path measurement.
+7. startup/small-TU compilation: Buster15-21ms vs CCC2.8-6.2ms on tiny scalar
+   inputs. Profile CLI/OS/arena/target initialization and fixed per-module
+   work, add lazy setup or persistent compile batch service as evidence
+   warrants. Do not assert a specific root cause without startup profiling.
+
+Untimed profiles outside measurement:
+- Buster -v -fcodegen-fallback-census outputs runtime, scalar4, and cJSON
+  statistics under outputs/profile-*-buster.txt; no whole-phase timer exposed
+  by -v. Runtime490IR instructions/423values/6892codebytes; scalar4 52IR
+  instructions/48values/694codebytes and24reloads/28spills. cJSON113functions,
+  8672IRinstructions/54777codebytes. No fallback functions on any.
+- CCC_TIME_PHASES=1 stock cJSON: preprocess16ms, lex3ms, parse7ms, sema4ms,
+  lowering8ms, mem2reg2ms, optimizer12ms, codegen13ms; reported pre-assembly
+  compile64ms. This is one untimed approximate observation, not stage medians
+  or directly equal to our end-to-object86.5ms median (assembly is additional).
+
+Reproduce: sibling directories buster/ and ccc/ at pinned commits with
+binaries buster/build/Release/ide and ccc/target/release/ccc; clang20 on PATH
+at /usr/bin/clang-20; run python3 comparison/benchmark.py --run after builds
+finish, with other heavy workloads stopped. Generated workload sources,
+tiny C timer, actual raw JSON, summary, profiles/disassembly and cJSON MIT
+license are retained. No compiler unit tests or heavy builds ran during the
+accepted timed capture. Main harness generates only scalar/macro workloads;
+stock cJSON and runtime sources remain supplied inputs.

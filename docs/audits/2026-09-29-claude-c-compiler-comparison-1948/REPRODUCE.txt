@@ -1,0 +1,95 @@
+Buster vs Claude's C Compiler - evidence and reproduction
+29 September 2026
+
+Pinned repositories:
+  Buster: buster14a/buster e642c1e32e40568c168d36b0f281c76e4c939139
+  CCC: anthropics/claudes-c-compiler 6f1b99acb2f4ec2414592136c2009fe7713deec3
+  cJSON 1.7.19: c859b25da02955fef659d658b8f324b5cde87be3
+
+Extract this archive into a new directory. It contains comparison/.
+Clone the two compiler repositories into sibling directories buster/ and ccc/.
+The repository clones and compiler binaries are deliberately omitted.
+
+Dependencies used: Linux x86-64, Clang 20.1.2 (/usr/bin/clang-20), CMake,
+Ninja, Rust/Cargo 1.90.0, GNU ld/objdump/objcopy/size/readelf, system C runtime
+development files, Python 3. The report generator additionally needs reportlab
+and a Liberation Sans or DejaVu Sans font installation. No Rust crates beyond
+the compiler's own package are required. The cJSON C/H source is unmodified;
+its MIT license accompanies the sources.
+
+Commands from the directory containing comparison/:
+
+  git clone https://github.com/buster14a/buster.git buster
+  git -C buster checkout --detach e642c1e32e40568c168d36b0f281c76e4c939139
+  git clone https://github.com/anthropics/claudes-c-compiler.git ccc
+  git -C ccc checkout --detach 6f1b99acb2f4ec2414592136c2009fe7713deec3
+
+Build Buster from its root with the hosted Clang bootstrap exception used here
+(this does not establish trusted TCC/bootstrap or native-retirement admission):
+
+  cd buster
+  /usr/bin/clang-20 -Isrc -Wall -Werror -Wno-unused-function \
+    -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
+    build.c -o /tmp/buster-comparison-driver
+  /tmp/buster-comparison-driver generate --config Release \
+    --cc /usr/bin/clang-20 --no-include-tests --no-developer-targets \
+    --no-sanitize --no-fuzz --no-lto --linker DEFAULT
+  /tmp/buster-comparison-driver build --config Release -t ide
+  cd ../ccc
+  cargo +1.90.0 build --release --bin ccc --offline
+  cd ..
+
+IMPORTANT: generate deletes its selected Buster build tree; use a new clone,
+and place the build driver outside that tree, as shown above.
+
+Archive historical evidence under a separate path before rerunning; benchmark.py
+updates raw_results.json in its working comparison/ directory. Finish all builds
+and other probes before capture. Prefer an exclusive idle 9700X for Zen5 results.
+
+  python3 comparison/benchmark.py --run
+
+The current reproduction harness uses the corrected C fork/exec/wait4 observer
+for wall/RSS. Historical recorded wall values used the Python wrapper clock;
+three C RSS re-observations corrected the inherited memory floor, without
+replacing original wall/runtime samples. Both methods include compiler process
+creation but their spawn costs can differ slightly. Read MEASUREMENT_NOTES.txt
+and methods in raw_results.json before comparing fresh runs.
+
+Untimed feature probes (do not overlap timing):
+
+  python3 comparison/probes/run_probes.py
+
+Report regeneration from the included frozen summary:
+
+  python3 comparison/make_report.py
+
+The native default artifact targets are not CPU-model normalized. Recorded
+Buster profile says znver4/vector_bits512; CCC and Clang default x86-64.
+Compiler host builds also differ: Buster -O3/-march=native, CCC stock Cargo
+release. These are configured-implementation observations, not isolated
+language, instruction-set, or architecture-model causal effects.
+
+Measurements are exploratory shared EPYC9V74 VM results. They are not Zen5,
+correctness certification, a global corpus ranking, or retirement admission.
+Source capabilities/historical project claims are distinct from executed checks.
+All selected synthetic/cJSON runtime checks passed; full compiler unit/CI suites
+and broad external project suites were not run during this comparison.
+
+Files:
+  raw_results.json: every accepted observation, argv, hashes, output and checks
+  summary.json: medians, ranges, size and RSS summaries, artifact equivalence
+  MEASUREMENT_NOTES.txt: method limits, fixes, disassembly attribution
+  sources/: deterministic workloads, cJSON source/header/license and driver
+  benchmark.py / measure_child.c/.py: orchestration and observers
+  outputs/*.txt: disassembly, untimed profiles, and other inspection evidence
+  probes/: sources, commands, sections/relocations and codegen evidence
+  source-audits/: read-only implementation research at pinned revisions
+  make_report.py: report generator
+
+Frozen raw_results.json SHA256:
+  5ae9e6a51ebc228ca26ddc5973eef64e36eb1e2acc252afbb4639bc105cc6f2c
+
+Percent time reduction uses 1 - winner_time / loser_time.
+Speedup factor uses loser_time / winner_time.
+Code size reduction uses 1 - smaller_text / larger_text.
+Do not interpret proposed changes as measured speedups.

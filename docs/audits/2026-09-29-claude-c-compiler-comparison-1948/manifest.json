@@ -1,0 +1,92 @@
+{
+  "report_issue": "https://github.com/buster14a/buster/issues/1948",
+  "measurement_date": "2026-09-29",
+  "evidence_class": "Pinned source inspection, reproduced probes and exploratory shared-VM measurements; no general conformance or Zen5 admission",
+  "buster_source": "e642c1e32e40568c168d36b0f281c76e4c939139",
+  "buster_tree": "6042cb7556b3627898be0d55fb7f5ad4d0d63373",
+  "ccc_source": "6f1b99acb2f4ec2414592136c2009fe7713deec3",
+  "cjson_source": "c859b25da02955fef659d658b8f324b5cde87be3",
+  "raw_results_sha256": "5ae9e6a51ebc228ca26ddc5973eef64e36eb1e2acc252afbb4639bc105cc6f2c",
+  "files": {
+    "README.md": {
+      "bytes": 38857,
+      "sha256": "d9947f5ec5afaa5952bd8524aef040208ac964aa85026339d48dd7224d368648"
+    },
+    "summary.json": {
+      "bytes": 21182,
+      "sha256": "8b2c2c241eb69ca25b241769fe912bd7542b3590e14f544b4a8f3ef455de6e89"
+    },
+    "MEASUREMENT_NOTES.txt": {
+      "bytes": 9389,
+      "sha256": "4a177f5cb4d7905ed320033d9cf70749a8d34ed01b7146b0d7f033d4be071c44"
+    },
+    "REPRODUCE.txt": {
+      "bytes": 4713,
+      "sha256": "14e2656bc91bf445de650df9da1ae422fb9e41444ec0553db11516020bd9df4d"
+    },
+    "Buster_vs_Claude_C_Compiler.pdf": {
+      "bytes": 92054,
+      "sha256": "e49b896b3195a90f8774cd1088a769622605432db295ff5205dc33c7d6dccf47"
+    },
+    "Buster_vs_Claude_C_Compiler_evidence.zip": {
+      "bytes": 200869,
+      "sha256": "fc19896940628c8af7705f95fdd57317b0ef268d1c7518b4664761fad0bb33d3"
+    }
+  },
+  "evidence_archive_entries": [
+    "comparison/benchmark.py",
+    "comparison/measure_child.c",
+    "comparison/measure_child.py",
+    "comparison/raw_results.json",
+    "comparison/summary.json",
+    "comparison/MEASUREMENT_NOTES.txt",
+    "comparison/REPRODUCE.txt",
+    "comparison/make_report.py",
+    "comparison/sources/cJSON.c",
+    "comparison/sources/cJSON.h",
+    "comparison/sources/cJSON_LICENSE.txt",
+    "comparison/sources/cjson_driver.c",
+    "comparison/sources/macro_1024.c",
+    "comparison/sources/runtime.c",
+    "comparison/sources/scalar_32.c",
+    "comparison/sources/scalar_4.c",
+    "comparison/sources/scalar_4096.c",
+    "comparison/sources/scalar_512.c",
+    "comparison/outputs/child_usage.json",
+    "comparison/outputs/profile-cjson-buster.txt",
+    "comparison/outputs/profile-cjson-ccc.txt",
+    "comparison/outputs/profile-runtime-buster.txt",
+    "comparison/outputs/profile-scalar4-buster.txt",
+    "comparison/outputs/rss-c-tiny.json",
+    "comparison/outputs/rss_refresh.json",
+    "comparison/outputs/runtime_buster_fast.disasm.txt",
+    "comparison/outputs/runtime_ccc.disasm.txt",
+    "comparison/outputs/runtime_clang20.disasm.txt",
+    "comparison/probes/atomic.c",
+    "comparison/probes/avx512.c",
+    "comparison/probes/buster_atomic.disasm.txt",
+    "comparison/probes/buster_errorattr.disasm.txt",
+    "comparison/probes/buster_native_vector.disasm.txt",
+    "comparison/probes/ccc_atomic.disasm.txt",
+    "comparison/probes/ccc_avx512.disasm.txt",
+    "comparison/probes/ccc_errorattr.disasm.txt",
+    "comparison/probes/ccc_native_vector.disasm.txt",
+    "comparison/probes/clang20_atomic.disasm.txt",
+    "comparison/probes/clang20_avx512.disasm.txt",
+    "comparison/probes/clang20_native_vector.disasm.txt",
+    "comparison/probes/cpu.c",
+    "comparison/probes/debug.c",
+    "comparison/probes/errorattr.c",
+    "comparison/probes/extra_probes.py",
+    "comparison/probes/fortify.c",
+    "comparison/probes/native_vector.c",
+    "comparison/probes/no_header.c",
+    "comparison/probes/probe-summary.txt",
+    "comparison/probes/results.json",
+    "comparison/probes/run_probes.py",
+    "comparison/probes/stdio.c",
+    "comparison/source-audits/buster-analysis.txt",
+    "comparison/source-audits/ccc-analysis.txt",
+    "comparison/source-audits/validation-evidence.txt"
+  ]
+}
