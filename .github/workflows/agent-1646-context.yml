@@ -17,6 +17,13 @@ jobs:
         with:
           ref: codex/1646-static-assert-message
 
+      - name: Install compiler test prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes tcc
+
       - name: Format and inspect the patch
         shell: bash
         run: |
@@ -72,9 +79,9 @@ jobs:
             printf 'test_all_outcome=%s\n' '${{ steps.test_all.outcome }}'
             printf 'self_host_outcome=%s\n' '${{ steps.self_host.outcome }}'
             printf '\n===== test_all tail =====\n'
-            tail -n 300 /tmp/issue-1646-test-all.log 2>/dev/null || true
+            tail -n 400 /tmp/issue-1646-test-all.log 2>/dev/null || true
             printf '\n===== self_host tail =====\n'
-            tail -n 300 /tmp/issue-1646-self-host.log 2>/dev/null || true
+            tail -n 400 /tmp/issue-1646-self-host.log 2>/dev/null || true
           } > .agent/test-1646.log
           git restore src/buster/lib/compiler/frontend/c/c_internal.h \
                       src/buster/lib/compiler/frontend/c/c_parse.c \
