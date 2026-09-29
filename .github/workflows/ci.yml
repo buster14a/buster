@@ -140,7 +140,11 @@ jobs:
       # Every non-dispatch event and the default manual run stay uninstrumented.
       BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.cmake_profile && '1' || '0' }}
     if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name != 'merge_group' || needs.lint.result == 'success') }}
-    name: ${{ matrix.name }} ${{ matrix.shard }}
+    # The first attempt of a draft pull-request run defers scarce macOS
+    # runners: the lane reports itself as a named Linux no-op. Merge groups,
+    # main, tags, ready pull requests and "Re-run all jobs" run it in full.
+    # See docs/ci-runner-queue.md#draft-pull-request-deferral.
+    name: ${{ matrix.name }} ${{ matrix.shard }}${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && ' (deferred for draft PR)' || '' }}
     timeout-minutes: 300
     strategy:
       fail-fast: ${{ github.event_name == 'merge_group' }}
@@ -196,10 +200,30 @@ jobs:
             vs_arch: arm64
             vs_component: Microsoft.VisualStudio.Component.VC.Tools.ARM64
             clang_arch: aarch64
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && 'ubuntu-26.04' || matrix.runner }}
     steps:
+      # A macOS lane on a non-macOS runner is deferred; skipping checkout skips
+      # every later step. The step fails unless deferral was authorized, and
+      # CI complete accepts the no-op only for a first-attempt draft run.
+      - name: Defer macOS runner lane for draft pull request
+        if: ${{ startsWith(matrix.runner, 'macos-') && runner.os != 'macOS' }}
+        shell: bash
+        env:
+          DEFERRAL_AUTHORIZED: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' }}
+          DEFERRED_LANE: ${{ matrix.name }} ${{ matrix.shard }}
+          DEFERRED_RUNNER: ${{ matrix.runner }}
+        run: |
+          set -euo pipefail
+          if [[ "$DEFERRAL_AUTHORIZED" != true ]]; then
+            echo "::error::$DEFERRED_LANE must run on $DEFERRED_RUNNER; only a first-attempt draft pull-request run may defer it."
+            exit 1
+          fi
+          echo "::notice title=macOS lane deferred::$DEFERRED_LANE did not run because this pull request is a draft. It runs on the first push after the pull request is ready, on Re-run all jobs, and always in the merge queue."
+          printf '## %s deferred\n\nThis draft pull-request run did not request a %s runner. The merge queue always runs this lane.\n' "$DEFERRED_LANE" "$DEFERRED_RUNNER" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout
         id: checkout
+        if: ${{ !startsWith(matrix.runner, 'macos-') || runner.os == 'macOS' }}
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
@@ -625,8 +649,9 @@ jobs:
     env:
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
+    # Draft pull-request deferral of macOS runners; see the desktop job.
+    name: ${{ matrix.name }}${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && ' (deferred for draft PR)' || '' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && 'ubuntu-26.04' || matrix.runner }}
     timeout-minutes: 300
     strategy:
       fail-fast: false
@@ -669,8 +694,25 @@ jobs:
             vs_component: Microsoft.VisualStudio.Component.VC.Tools.ARM64
             clang_arch: aarch64
     steps:
+      - name: Defer macOS runner lane for draft pull request
+        if: ${{ startsWith(matrix.runner, 'macos-') && runner.os != 'macOS' }}
+        shell: bash
+        env:
+          DEFERRAL_AUTHORIZED: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' }}
+          DEFERRED_LANE: ${{ matrix.name }}
+          DEFERRED_RUNNER: ${{ matrix.runner }}
+        run: |
+          set -euo pipefail
+          if [[ "$DEFERRAL_AUTHORIZED" != true ]]; then
+            echo "::error::$DEFERRED_LANE must run on $DEFERRED_RUNNER; only a first-attempt draft pull-request run may defer it."
+            exit 1
+          fi
+          echo "::notice title=macOS lane deferred::$DEFERRED_LANE did not run because this pull request is a draft. It runs on the first push after the pull request is ready, on Re-run all jobs, and always in the merge queue."
+          printf '## %s deferred\n\nThis draft pull-request run did not request a %s runner. The merge queue always runs this lane.\n' "$DEFERRED_LANE" "$DEFERRED_RUNNER" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout
         id: checkout
+        if: ${{ !startsWith(matrix.runner, 'macos-') || runner.os == 'macOS' }}
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
@@ -951,7 +993,8 @@ jobs:
 
   mobile:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    name: ${{ matrix.name }}
+    # Draft pull-request deferral of macOS runners; see the desktop job.
+    name: ${{ matrix.name }}${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && ' (deferred for draft PR)' || '' }}
     timeout-minutes: 300
     strategy:
       fail-fast: ${{ github.event_name == 'merge_group' }}
@@ -969,16 +1012,33 @@ jobs:
             runner: macos-26
             os: ios
             arch: aarch64
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && 'ubuntu-26.04' || matrix.runner }}
     steps:
+      - name: Defer macOS runner lane for draft pull request
+        if: ${{ startsWith(matrix.runner, 'macos-') && runner.os != 'macOS' }}
+        shell: bash
+        env:
+          DEFERRAL_AUTHORIZED: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' }}
+          DEFERRED_LANE: ${{ matrix.name }}
+          DEFERRED_RUNNER: ${{ matrix.runner }}
+        run: |
+          set -euo pipefail
+          if [[ "$DEFERRAL_AUTHORIZED" != true ]]; then
+            echo "::error::$DEFERRED_LANE must run on $DEFERRED_RUNNER; only a first-attempt draft pull-request run may defer it."
+            exit 1
+          fi
+          echo "::notice title=macOS lane deferred::$DEFERRED_LANE did not run because this pull request is a draft. It runs on the first push after the pull request is ready, on Re-run all jobs, and always in the merge queue."
+          printf '## %s deferred\n\nThis draft pull-request run did not request a %s runner. The merge queue always runs this lane.\n' "$DEFERRED_LANE" "$DEFERRED_RUNNER" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout
         id: checkout
+        if: ${{ !startsWith(matrix.runner, 'macos-') || runner.os == 'macOS' }}
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
 
       - name: Install coreutils
-        if: ${{ matrix.os == 'ios' }}
+        if: ${{ matrix.os == 'ios' && steps.checkout.outcome == 'success' }}
         shell: bash
         run: brew install --quiet coreutils
 
@@ -1074,7 +1134,7 @@ jobs:
 
       - name: Test (iOS simulator)
         id: ios
-        if: ${{ matrix.os == 'ios' }}
+        if: ${{ matrix.os == 'ios' && steps.checkout.outcome == 'success' }}
         shell: bash
         env:
           BUSTER_IOS_ARCH: ${{ matrix.arch == 'aarch64' && 'arm64' || 'x86_64' }}
