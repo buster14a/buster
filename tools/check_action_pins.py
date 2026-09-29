@@ -21,7 +21,10 @@ APPROVED = {
 }
 # GitHub binds this literal reusable workflow to the caller's own commit.
 # Local composite actions are allowed only by exact path and are scanned below.
-APPROVED_LOCAL_WORKFLOWS = {"./.github/workflows/throughput-real-source.yml"}
+APPROVED_LOCAL_WORKFLOWS = {
+    "./.github/workflows/throughput-real-source.yml",
+    "./.github/workflows/compiler-throughput.yml",
+}
 APPROVED_LOCAL_ACTIONS = {"./.github/actions/native-artifact-upload"}
 ACTION = re.compile(r"\s*(?:-\s+)?uses:\s*(.*?)\s*$")
 BLOCK = re.compile(r"\s*(?:-\s+)?[A-Za-z_][A-Za-z0-9_-]*:\s*[|>][-+]?\s*$")
