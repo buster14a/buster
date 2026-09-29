@@ -18164,10 +18164,91 @@ BUSTER_C_SHARED void c_parse_index_scope_children(CParseResult* result, Arena* a
     result->scope_children = children;
 }
 
+// The deepest scope under root for every token of [start, start + count),
+// exactly as c_parse_scope_for_token's descent answers it. At each level the
+// descent takes the last child starting at or before the token and enters it
+// only before that child's end, so a child owns [its start, min(its end, the
+// next sibling's start)) within its parent's share: an empty, shorter or
+// overlapped sibling hands the rest back to the parent, and a child reaching
+// past its parent is clipped to it. Its own children subdivide that share
+// the same way, and each scope is visited once.
+BUSTER_C_INTERNAL void c_parse_body_scopes_build(CParseResult* result, Arena* scratch, CScopeId root, u32 start, u32 count, u32* scopes)
+{
+    for (u32 offset = 0; offset < count; offset += 1)
+    {
+        scopes[offset] = root.value;
+    }
+    u32 capacity = 64;
+    u32* pending = arena_allocate(scratch, u32, capacity * 3);
+    u32 pending_count = 1;
+    pending[0] = root.value;
+    pending[1] = start;
+    pending[2] = start + count;
+    while (pending_count)
+    {
+        pending_count -= 1;
+        u32 parent = pending[pending_count * 3];
+        u32 low = pending[pending_count * 3 + 1];
+        u32 high = pending[pending_count * 3 + 2];
+        u32 limit = result->scope_children_offsets[parent + 1];
+        for (u32 entry = result->scope_children_offsets[parent]; entry < limit; entry += 1)
+        {
+            u32 child = result->scope_children[entry];
+            u32 next_start = entry + 1 < limit ? result->scopes[result->scope_children[entry + 1]].token_start : UINT32_MAX;
+            u32 share_start = BUSTER_MAX(result->scopes[child].token_start, low);
+            u32 share_end = BUSTER_MIN(BUSTER_MIN(result->scopes[child].token_end, next_start), high);
+            if (share_start < share_end)
+            {
+                for (u32 token = share_start; token < share_end; token += 1)
+                {
+                    scopes[token - start] = child;
+                }
+                if (pending_count == capacity)
+                {
+                    u32* grown = arena_allocate(scratch, u32, capacity * 6);
+                    memcpy(grown, pending, sizeof(*pending) * capacity * 3);
+                    pending = grown;
+                    capacity *= 2;
+                }
+                pending[pending_count * 3] = child;
+                pending[pending_count * 3 + 1] = share_start;
+                pending[pending_count * 3 + 2] = share_end;
+                pending_count += 1;
+            }
+        }
+    }
+}
+
+#if BUSTER_INCLUDE_TESTS
+u32 c_test_parse_body_scope_mismatches(CParseResult* result, Arena* arena, CScopeId root, u32 start, u32 count)
+{
+    u32 mismatches = UINT32_MAX;
+    if (result->scope_children_offsets && root.value < result->scope_count)
+    {
+        u64 mark = arena->position;
+        u32* scopes = arena_allocate(arena, u32, count ? count : 1);
+        c_parse_body_scopes_build(result, arena, root, start, count, scopes);
+        mismatches = 0;
+        for (u32 offset = 0; offset < count; offset += 1)
+        {
+            mismatches += scopes[offset] != c_parse_scope_for_token(result, root, start + offset).value;
+        }
+        arena_set_position(arena, mark);
+    }
+    return mismatches;
+}
+#endif
+
 BUSTER_C_SHARED CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index)
 {
     CScopeId best = root;
-    if (result && root.value < result->scope_count && result->scope_children_offsets)
+    CTokenPositionIndex const* position_index = result ? result->position_index : 0;
+    if (position_index && position_index->body_scopes && root.value == position_index->body_scope_root.value &&
+        token_index - position_index->body_scope_start < position_index->body_scope_count)
+    {
+        best.value = position_index->body_scopes[token_index - position_index->body_scope_start];
+    }
+    else if (result && root.value < result->scope_count && result->scope_children_offsets)
     {
         // Siblings do not overlap. Find the last child starting at or before
         // the token, then descend only if its half-open interval contains it.
@@ -24443,6 +24524,21 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         memset(machine->expression_queries, 0, sizeof(*machine->expression_queries) * declaration->body_token_count);
         u8* skipped = arena_allocate(machine->scratch_arena, u8, declaration->body_token_count);
         memset(skipped, 0, declaration->body_token_count);
+        // Every family asks c_parse_scope_for_token about this body's tokens
+        // under the declaration's own scope, so the descent is answered once
+        // per token up front and each of those queries becomes one load.
+        CTokenPositionIndex* body_scope_index =
+            result->position_index && result->scope_children_offsets && declaration->scope.value < result->scope_count ? result->position_index : 0;
+        if (body_scope_index)
+        {
+            u32* body_scopes = arena_allocate(machine->scratch_arena, u32, declaration->body_token_count);
+            c_parse_body_scopes_build(result, machine->scratch_arena, declaration->scope, declaration->body_start, declaration->body_token_count,
+                                      body_scopes);
+            body_scope_index->body_scopes = body_scopes;
+            body_scope_index->body_scope_start = declaration->body_start;
+            body_scope_index->body_scope_count = declaration->body_token_count;
+            body_scope_index->body_scope_root = declaration->scope;
+        }
         if (!c_parse_body_delimiters_valid(machine, result, preprocess, declaration))
             c_parse_lowering_constraint_consider(&diagnostic, S8("function body has mismatched delimiters"), declaration->body_start,
                 declaration->syntax_declaration ? declaration->syntax_declaration->function_name_token : declaration->body_start);
@@ -24470,6 +24566,10 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         machine->expression_queries = 0;
         machine->expression_query_result = 0;
         machine->expression_query_tokens = 0;
+        if (body_scope_index)
+        {
+            body_scope_index->body_scopes = 0;
+        }
         arena_set_position(machine->scratch_arena, validation_mark);
         if (diagnostic.message.length)
         {
