@@ -494,5 +494,281 @@ class RetirementEligibilityTests(unittest.TestCase):
             binding._bounded_code_bytes(0, "baseline", positive=True)
 
 
+def disposition_row(index, source, stage, eligible):
+    """A canonical performance row for ``source`` with the derived eligibility."""
+    identity = {field: source[field] for field in binding.ROW_IDENTITY_FIELDS
+                if field != "artifact_stage"}
+    identity["artifact_stage"] = stage
+    runtime = eligible and binding._native_runtime_required(
+        {"identity": identity}, binding.NATIVE_TIMED_TARGET)
+    return {"row": index, "identity": identity,
+            "metrics": {"compiler_wall_time": eligible, "compiler_peak_memory": eligible,
+                        "generated_code_bytes": eligible, "generated_runtime": runtime},
+            "eligibility": {
+                "compiler_wall_time": eligible, "compiler_peak_rss": eligible,
+                "generated_code_bytes": eligible, "generated_runtime": runtime,
+                "runtime_oracle": ("independent-native-executable-oracle" if runtime
+                                   else "not-applicable"),
+                "code_section": ("deterministic-code-section" if eligible
+                                 else "not-applicable")}}
+
+
+def disposition_inputs(census_rows):
+    expected_object = {tuple(row[field] for field in binding.ROW_IDENTITY_FIELDS
+                             if field != "artifact_stage"): row for row in census_rows}
+    by_row = {index: "admitted-supported" for index in range(len(census_rows))}
+    reasons = {index: "supported-object-zero-fallback" for index in range(len(census_rows))}
+    return expected_object, by_row, reasons
+
+
+class SupplementDispositionTests(unittest.TestCase):
+    """Option 3 of the census disposition (decision recorded in #36)."""
+
+    def setUp(self):
+        from native_retirement_contract_test import ContractTests, read_table
+        self.fixture = ContractTests()
+        self.fixture.setUp()
+        self.resolved = self.fixture.make_failed_direct_reference_supplements()
+        self.report = census.validate_shards(self.fixture.shards, self.fixture.root / "report.json",
+                                             True, reference_supplements=True)
+        _fields, self.rows = read_table(self.fixture.shards[0] / "rows.tsv")
+        self.skips = set(self.report["applicability_skip_rows"])
+
+    def tearDown(self):
+        self.fixture.tearDown()
+
+    def rule(self, report):
+        return binding._supplement_resolved_rows(report, self.rows, self.skips)
+
+    def rehash_supplement(self, shard, mutation):
+        """Rewrite one shard's supplement manifest and rebind its report digest."""
+        path = self.fixture.shards[shard] / "reference-supplement/manifest.json"
+        manifest = json.loads(path.read_text())
+        mutation(manifest)
+        path.write_text(json.dumps(manifest))
+        report = copy.deepcopy(self.report)
+        report["reference_supplement_sha256"][shard] = hashlib.sha256(path.read_bytes()).hexdigest()
+        return report
+
+    def test_supplement_set_is_accepted_and_those_rows_are_compiler_ineligible(self):
+        self.assertEqual(self.resolved, [0, 4])
+        self.assertEqual(self.rule(self.report), self.resolved)
+        by_row = {row: name for name, ids in self.report["applicability_rows_by_class"].items()
+                  for row in ids}
+        evidence = binding._check_validator_projection_evidence(
+            self.fixture.root, self.report, self.rows, by_row, self.skips)
+        binding._replay_validator_report(self.fixture.root, self.report, evidence)
+        proofs = binding._check_reference_supplements(self.fixture.root, self.report, self.rows,
+                                                      self.resolved)
+        self.assertEqual(set(proofs), {0, 4})
+        for shard, row in enumerate(self.resolved):
+            self.assertEqual(proofs[row]["reason"], binding.SUPPLEMENT_INELIGIBLE_REASON)
+            self.assertEqual(proofs[row]["decision"], binding.SUPPLEMENT_DISPOSITION_DECISION)
+            self.assertEqual(proofs[row]["supplement_manifest_sha256"],
+                             self.report["reference_supplement_sha256"][shard])
+        expected_object, _classes, _reasons = disposition_inputs(self.rows)
+        parsed = [disposition_row(index, row, "object", index not in self.resolved)
+                  for index, row in enumerate(self.rows)]
+        parsed.append(disposition_row(len(parsed), self.rows[1], "link", True))
+        eligible, applicability, objects = binding._derive_compiler_eligibility(
+            parsed, expected_object, self.skips, proofs, by_row, evidence["reasons"])
+        self.assertEqual(set(range(len(parsed))) - eligible, {0, 4})
+        self.assertEqual(objects, len(self.rows) - 2)
+        for row in self.resolved:
+            self.assertFalse(applicability[row]["compiler_eligible"])
+            self.assertEqual(applicability[row]["compiler_ineligible_reason"],
+                             binding.SUPPLEMENT_INELIGIBLE_REASON)
+            self.assertEqual(applicability[row]["supplement"], proofs[row])
+            self.assertEqual(applicability[row]["reason"],
+                             "direct-reference-unresolved-clang-control-passed")
+        # Correctness and MIR rows are unchanged: the group's MIR rows stay eligible.
+        self.assertTrue({1, 2, 3, 5, 6, 7} <= eligible)
+        timed = {row["row"] for row in binding._timed_rows(parsed)}
+        self.assertFalse({0, 4} & timed)
+        self.assertEqual(len(timed), 16 - 2 + 1)
+        self.assertEqual({row["row"] for row in parsed if row["metrics"]["generated_code_bytes"]},
+                         eligible)
+
+        # The rows are never silently dropped: an artifact that keeps them
+        # eligible, or a stage row carrying their identity, is rejected.
+        kept = copy.deepcopy(parsed)
+        kept[0] = disposition_row(0, self.rows[0], "object", True)
+        with self.assertRaisesRegex(ValueError, "supplement provenance"):
+            binding._derive_compiler_eligibility(kept, expected_object, self.skips, proofs,
+                                                 by_row, evidence["reasons"])
+        stage = parsed + [disposition_row(len(parsed), self.rows[4], "link", False)]
+        with self.assertRaisesRegex(ValueError, "stage row carries a supplement-resolved"):
+            binding._derive_compiler_eligibility(stage, expected_object, self.skips, proofs,
+                                                 by_row, evidence["reasons"])
+
+    def test_every_defect_outside_the_supplement_set_stays_fatal(self):
+        cases = (
+            ("telemetry_defect_rows", lambda rows: rows + [8], "not exactly the supplement"),
+            ("artifact_defect_rows", lambda rows: rows[:-1], "not exactly the supplement"),
+            ("execution_defect_rows", lambda rows: sorted(rows + [1]), "not exactly the supplement"),
+            ("telemetry_defect_rows", lambda rows: sorted(rows + [5]), "not exactly the supplement"),
+            ("execution_defect_rows", lambda rows: [], "not exactly the supplement"),
+            ("fallback_defect_rows", lambda rows: [0], "contains fallback_defect_rows"),
+            ("candidate_failure_rows", lambda rows: [1], "contains candidate_failure_rows"),
+            ("reference_failure_rows", lambda rows: [0], "contains reference_failure_rows"),
+            ("unexpected_failure_rows", lambda rows: [1], "contains unexpected_failure_rows"),
+        )
+        for field, change, message in cases:
+            report = copy.deepcopy(self.report)
+            report[field] = change(report[field])
+            with self.subTest(field=field, value=report[field]), \
+                    self.assertRaisesRegex(ValueError, message):
+                self.rule(report)
+
+    def test_supplement_inventory_and_digest_must_match(self):
+        unsupplemented = copy.deepcopy(self.report)
+        unsupplemented["reference_supplement_sha256"] = []
+        with self.assertRaisesRegex(ValueError, "without an independent reference supplement"):
+            self.rule(unsupplemented)
+        short = copy.deepcopy(self.report)
+        short["reference_supplement_sha256"] = short["reference_supplement_sha256"][:1]
+        with self.assertRaisesRegex(ValueError, "do not cover every census shard"):
+            self.rule(short)
+        partial = copy.deepcopy(self.report)
+        partial["direct_reference_failure_rows"] = [0, 1, 2, 4, 5, 6, 7]
+        with self.assertRaisesRegex(ValueError, "do not cover the group's executed rows"):
+            self.rule(partial)
+
+        mismatched = copy.deepcopy(self.report)
+        mismatched["reference_supplement_sha256"][0] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "manifest digest differs"):
+            binding._check_reference_supplements(self.fixture.root, mismatched, self.rows,
+                                                 self.resolved)
+        with self.assertRaisesRegex(ValueError, "inventory differs"):
+            binding._check_reference_supplements(self.fixture.root, self.report, self.rows, [0])
+
+        def forge_object(manifest):
+            manifest["results"][0]["object_sha256"] = "1" * 64
+        with self.assertRaisesRegex(ValueError, "object differs"):
+            binding._check_reference_supplements(self.fixture.root,
+                                                 self.rehash_supplement(0, forge_object),
+                                                 self.rows, self.resolved)
+
+    def test_right_set_with_a_failed_supplement_is_rejected(self):
+        def fail_control(manifest):
+            manifest["results"][0]["status"] = 1
+        claimed = self.rehash_supplement(1, fail_control)
+        with self.assertRaisesRegex(ValueError, "did not pass"):
+            binding._check_reference_supplements(self.fixture.root, claimed, self.rows,
+                                                 self.resolved)
+        # The honest census of that supplement retains the unresolved reference.
+        report = census.validate_shards(self.fixture.shards, self.fixture.root / "failed.json",
+                                        True, reference_supplements=True)
+        self.assertEqual(report["reference_failure_rows"], [4, 5, 6, 7])
+        with self.assertRaisesRegex(ValueError, "contains reference_failure_rows"):
+            self.rule(report)
+        by_row = {row: name for name, ids in claimed["applicability_rows_by_class"].items()
+                  for row in ids}
+        evidence = binding._check_validator_projection_evidence(
+            self.fixture.root, report, self.rows, by_row, self.skips)
+        with self.assertRaisesRegex(ValueError, "replay differs"):
+            binding._replay_validator_report(self.fixture.root, claimed, evidence)
+
+
+class SupplementDispositionShapeTests(unittest.TestCase):
+    """The real census shape: 276 rows, 69 per shard, 24 on the timed host."""
+
+    HOST_FIXTURES = ("tests/basic_c_asm_goto_identity.c", "tests/basic_c_compiler_barrier_fallback.c",
+                     "tests/basic_c_wide_vector_abi.c", "tests/differential/native_aggregate_host.c",
+                     "tests/differential/win64_vector.c", "tests/differential/win64_wide.c")
+    F128_FIXTURE = "tests/host_aarch64_float_to_f128.c"
+
+    def test_real_shape_population_delta(self):
+        root = Path(__file__).resolve().parents[1]
+        with (root / binding.SUPPORT_DECLARATION_PATH).open() as stream:
+            subjects = [row["path"] for row in csv.DictReader(stream, delimiter="\t")
+                        if row["role"] == "subject"]
+        for fixture in self.HOST_FIXTURES + (self.F128_FIXTURE,):
+            self.assertIn(fixture, subjects)
+        targets = list(census.TARGETS)
+        foreign = [target for target in targets if target != binding.NATIVE_TIMED_TARGET]
+        aarch64 = [target for target in targets if target.startswith("aarch64-")]
+        # 69 (fixture, target) pairs, each four groups (one per shard):
+        # 58 retained-reference (6 on the host), 6 admitted-supported, 5
+        # platform-inapplicable.
+        pairs = {(fixture, binding.NATIVE_TIMED_TARGET): "retained-reference"
+                 for fixture in self.HOST_FIXTURES}
+        pairs.update({(self.F128_FIXTURE, target): "admitted-supported" for target in aarch64})
+        others = [fixture for fixture in subjects
+                  if fixture not in self.HOST_FIXTURES and fixture != self.F128_FIXTURE]
+        for index in range(57):
+            pairs[(others[index], foreign[index % len(foreign)])] = (
+                "platform-inapplicable" if index < 5 else "retained-reference")
+        self.assertEqual(len(pairs), 69)
+        census_rows = []
+        for fixture in subjects:
+            recipe = census.expected_fixture_recipe(fixture)[0]
+            for target in targets:
+                abi, link, execution = census.TARGETS[target]
+                cpu = census.expected_cpu(fixture, target, "baseline")
+                for frontend in ("local-backed-canonical", "direct-ssa"):
+                    for pic in ("0", "1"):
+                        for allocator in census.ALLOCATORS:
+                            index = len(census_rows)
+                            census_rows.append({
+                                "row": str(index), "group": str(index // 4), "fixture": fixture,
+                                "target": target, "target_abi": abi, "cpu": cpu,
+                                "cpu_features": cpu, "allocator": allocator,
+                                "frontend_lowering": frontend, "PIC": pic,
+                                "fixture_recipe": recipe,
+                                "compile_obligation": "supported-object-zero-fallback",
+                                "link_obligation": link, "execution_obligation": execution,
+                                "diagnostic_obligation": "none",
+                                "argv_evidence": f"groups/{index // 4}/{allocator}.argv"})
+        self.assertEqual(len(census_rows), census.FULL_ROW_COUNT)
+        direct = sorted(int(row["row"]) for row in census_rows
+                        if (row["fixture"], row["target"]) in pairs)
+        resolved = [row for row in direct if row % 4 == 0]
+        report = {"direct_reference_failure_rows": direct, "shards": 4,
+                  "reference_supplement_sha256": ["a" * 64, "b" * 64, "c" * 64, "d" * 64],
+                  **{field: resolved for field in binding.SUPPLEMENT_DEFECT_FIELDS},
+                  **{field: [] for field in binding.ALWAYS_FATAL_DEFECT_FIELDS}}
+        self.assertEqual(binding._supplement_resolved_rows(report, census_rows, set()), resolved)
+        self.assertEqual(len(resolved), 276)
+        self.assertEqual([sum(int(census_rows[row]["group"]) % 4 == shard for row in resolved)
+                          for shard in range(4)], [69] * 4)
+        classes = [pairs[(census_rows[row]["fixture"], census_rows[row]["target"])]
+                   for row in resolved]
+        self.assertEqual({name: classes.count(name) for name in set(classes)},
+                         {"retained-reference": 232, "admitted-supported": 24,
+                          "platform-inapplicable": 20})
+        self.assertEqual({census_rows[row]["target"] for row in resolved}, set(targets))
+
+        proofs = {row: {"reason": binding.SUPPLEMENT_INELIGIBLE_REASON} for row in resolved}
+        expected_object, by_row, reasons = disposition_inputs(census_rows)
+        before = [disposition_row(index, row, "object", True)
+                  for index, row in enumerate(census_rows)]
+        after = [disposition_row(index, row, "object", index not in proofs)
+                 for index, row in enumerate(census_rows)]
+        eligible, _applicability, _objects = binding._derive_compiler_eligibility(
+            after, expected_object, set(), proofs, by_row, reasons)
+        self.assertEqual(len(eligible), census.FULL_ROW_COUNT - 276)
+        timed_before = {row["row"] for row in binding._timed_rows(before)}
+        timed_after = {row["row"] for row in binding._timed_rows(after)}
+        code_before = {row["row"] for row in before if row["metrics"]["generated_code_bytes"]}
+        code_after = {row["row"] for row in after if row["metrics"]["generated_code_bytes"]}
+        removed_timed = timed_before - timed_after
+        removed_code = code_before - code_after
+        self.assertEqual(len(removed_timed), 24)
+        self.assertEqual(len(removed_code), 276)
+        self.assertEqual(len(removed_code - removed_timed), 252)
+        self.assertTrue(all(census_rows[row]["allocator"] == "none" for row in removed_code))
+        # The six real host fixtures use compiler-default: no timed batch group
+        # vanishes. (Untimed group counts depend on which foreign fixtures are
+        # affected, which this synthetic shape does not reproduce.)
+        self.assertEqual(len(binding._batch_groups(before)), len(binding._batch_groups(after)))
+        print(json.dumps({"proof": "supplement-disposition-real-shape",
+                          "resolved_rows": len(resolved), "timed_rows_removed": len(removed_timed),
+                          "untimed_code_byte_rows_removed": len(removed_code - removed_timed),
+                          "code_byte_rows_removed": len(removed_code),
+                          "timed_rows_before": len(timed_before), "timed_rows_after": len(timed_after),
+                          "batch_groups": len(binding._batch_groups(after))}, sort_keys=True))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -28,7 +28,11 @@ import native_retirement_contract_test as contract_test
 import native_retirement_performance_binding as binding
 
 
-EXPECTED_PROBE_OUTPUT = "VALIDATOR_ELIGIBILITY rows=192 eligible=160 skipped=32"
+EXPECTED_PROBE_OUTPUT = "VALIDATOR_ELIGIBILITY rows=192 eligible=160 skipped=32 supplement=0"
+# Option 3 (#36): the supplement fixture's two failed direct references
+# (census rows 0 and 4, native-host allocator-none rows) are compiler-ineligible.
+EXPECTED_SUPPLEMENT_PROBE_OUTPUT = "VALIDATOR_ELIGIBILITY rows=192 eligible=158 skipped=32 supplement=2"
+SUPPLEMENT_RESOLVED_ROWS = [0, 4]
 # (A1) Only compiler-eligible rows on the pinned native-host target
 # (binding.NATIVE_TIMED_TARGET, x86_64-unknown-linux-gnu) are timed or carry
 # generated runtime, so the unavailable ledger record names another target
@@ -113,7 +117,7 @@ def check_row_configuration_reference():
         raise RuntimeError(f"row_configuration_digest accepted malformed identity {malformed!r}")
 
 
-def run_validator(shards, output):
+def run_validator(shards, output, supplements=False):
     command = [
         sys.executable,
         str(TOOLS / "native_retirement_contract.py"),
@@ -122,6 +126,8 @@ def run_validator(shards, output):
         "--out", str(output),
         "--require-clean-candidate",
     ]
+    if supplements:
+        command.append("--reference-supplements")
     result = subprocess.run(command, cwd=REPOSITORY, check=False,
                             capture_output=True, text=True)
     require(result.returncode == 0,
@@ -237,19 +243,69 @@ def expected_configurations(report, shard):
             for row in range(len(census_rows))]
 
 
-def expect_probe_success(probe, artifacts, configurations):
+def census_rows_of(shard):
+    _row_fields, census_rows = contract_test.read_table(shard / "rows.tsv")
+    return census_rows
+
+
+def supplement_disposition(report, shard):
+    """The binding's option-3 supplement-resolved set for this report."""
+    return binding._supplement_resolved_rows(report, census_rows_of(shard),
+                                             set(report["applicability_skip_rows"]))
+
+
+def expected_ineligible(report, artifacts, shard):
+    """Python reference for the C probe's VALIDATOR_INELIGIBLE lines.
+
+    A skipped row's proof hashes its applicability-skips.tsv line and a
+    supplement-resolved row's proof hashes its applicability.tsv line, each
+    under its own domain and the pinned report digest; the reason strings are
+    the binding's.
+    """
+    report_sha = sha256(artifacts["report"].read_bytes()).encode("ascii")
+
+    def lines_by_row(path):
+        lines = path.read_bytes().split(b"\n")
+        require(lines[-1] == b"", f"{path.name} does not end with a newline")
+        return {int(line.split(b"\t", 1)[0]): line for line in lines[1:-1]}
+
+    def proof(domain, line):
+        return sha256(domain + b"\0" + report_sha + b"\0" + line)
+
+    skips = lines_by_row(artifacts["skips"])
+    applicability = lines_by_row(artifacts["applicability"])
+    require(sorted(skips) == report["applicability_skip_rows"],
+            "applicability-skips.tsv rows differ from the report skip set")
+    resolved = supplement_disposition(report, shard)
+    lines = []
+    for row in sorted(set(skips) | set(resolved)):
+        if row in skips:
+            reason = binding.NONEXECUTED_INELIGIBLE_REASON
+            digest = proof(b"bq-retirement-validator-skip-v1", skips[row])
+        else:
+            reason = binding.SUPPLEMENT_INELIGIBLE_REASON
+            digest = proof(b"bq-retirement-validator-supplement-v1", applicability[row])
+        lines.append(f"VALIDATOR_INELIGIBLE row={row} reason={reason} proof={digest}")
+    return lines
+
+
+def expect_probe_success(probe, artifacts, configurations, report, shard,
+                         expected_summary=EXPECTED_PROBE_OUTPUT):
     result = probe_result(probe, artifacts)
     require(result.returncode == 0,
             "compiled C eligibility probe rejected the genuine fixture:\n" +
             result.stdout + result.stderr)
     lines = result.stdout.splitlines()
-    require(lines[:1] == [EXPECTED_PROBE_OUTPUT],
+    require(lines[:1] == [expected_summary],
             "compiled C eligibility probe returned an unexpected projection: " +
             result.stdout.strip())
     expected = [f"VALIDATOR_CONFIGURATION row={row} sha256={digest}"
                 for row, digest in enumerate(configurations)]
-    require(lines[1:] == expected,
+    require([line for line in lines if line.startswith("VALIDATOR_CONFIGURATION ")] == expected,
             "C configuration_sha256 projection differs from row_configuration_digest")
+    require([line for line in lines if line.startswith("VALIDATOR_INELIGIBLE ")] ==
+            expected_ineligible(report, artifacts, shard),
+            "C compiler-ineligible rows, reasons or proofs differ from the binding's disposition")
 
 
 def expect_tamper_rejected(probe, artifacts, path, replacement, label):
@@ -392,7 +448,8 @@ def population_record(report, report_path, shard, stage_rows=POPULATION_STAGE_RO
     require(binding.TARGETS.index(POPULATION_NATIVE_TARGET) + 1 == POPULATION_NATIVE_TARGET_ID,
             "population native target id is not its performance TARGETS ordinal")
     _fields, census_rows = contract_test.read_table(shard / "rows.tsv")
-    skips = set(report["applicability_skip_rows"])
+    # Authenticated skips and (option 3) supplement-resolved rows are untimed.
+    skips = set(report["applicability_skip_rows"]) | set(supplement_disposition(report, shard))
 
     def declared(index, census_index, stage):
         census = census_rows[census_index]
@@ -455,6 +512,7 @@ def expected_population(report, shard, data):
         by_identity[key] = index
     configurations = expected_configurations(report, shard)
     skips = set(report["applicability_skip_rows"])
+    resolved = set(supplement_disposition(report, shard))
     lines = []
     for row in parsed:
         key = tuple(row["identity"][field] for field in binding.ROW_IDENTITY_FIELDS
@@ -464,9 +522,11 @@ def expected_population(report, shard, data):
         if row["row"] < len(census_rows):
             require(stage == "object" and census_index == row["row"],
                     "population object rows are not the census rows in order")
-        compile_eligible = census_index not in skips
+        require(census_index not in resolved or stage == "object",
+                "a stage row carries a supplement-resolved identity")
+        compile_eligible = census_index not in skips and census_index not in resolved
         require(row["metrics"]["compiler_wall_time"] is compile_eligible,
-                "population compiler eligibility differs from the skip set")
+                "population compiler eligibility differs from the skip and supplement sets")
         runtime = compile_eligible and binding._native_runtime_required(
             row, POPULATION_NATIVE_TARGET)
         require(row["metrics"]["generated_runtime"] is runtime,
@@ -477,9 +537,22 @@ def expected_population(report, shard, data):
     return lines
 
 
-def check_population(probe, artifacts, report, shard):
+def expect_both_reject_population(probe, population, path, report, shard, record, mutation, label):
+    """A population tamper that the Python reference and the C import both reject."""
+    changed = json.loads(json.dumps(record))
+    mutation(changed)
+    try:
+        expected_population(report, shard, population_bytes(changed))
+    except (RuntimeError, ValueError):
+        pass
+    else:
+        raise RuntimeError(f"Python population reference accepted {label}")
+    expect_tamper_rejected(probe, population, path, lambda _original: population_bytes(changed), label)
+
+
+def check_population(probe, artifacts, report, shard, stage_rows=POPULATION_STAGE_ROWS):
     """C/Python cross-check of the imported performance population."""
-    record = population_record(report, artifacts["report"], shard)
+    record = population_record(report, artifacts["report"], shard, stage_rows)
     path = artifacts["report"].parent / "performance-rows.json"
     path.write_bytes(population_bytes(record))
     path.chmod(0o444)
@@ -544,6 +617,23 @@ def check_population(probe, artifacts, report, shard):
                             (stale_source, "stale rows.tsv source digest"),
                             (duplicate_stage, "duplicated stage row identity")):
         expect_tamper_rejected(probe, population, path, mutated(mutation), label)
+    for resolved in supplement_disposition(report, shard):
+        def keep_timed(changed, resolved=resolved):
+            eligibility = changed["rows"][resolved]["eligibility"]
+            eligibility["compiler_wall_time"] = eligibility["compiler_peak_rss"] = True
+            eligibility["generated_code_bytes"] = True
+            eligibility["code_section"] = "deterministic-code-section"
+
+        def stage_identity(changed, resolved=resolved):
+            # Untimed markers, so only the object-rows-only bound rejects it.
+            identity = dict(changed["rows"][resolved]["identity"], artifact_stage="link")
+            changed["rows"][-3]["identity"] = identity
+            changed["rows"][-3]["eligibility"] = dict(changed["rows"][resolved]["eligibility"])
+
+        expect_both_reject_population(probe, population, path, report, shard, record, keep_timed,
+                                      f"supplement-resolved row {resolved} kept compiler-eligible")
+        expect_both_reject_population(probe, population, path, report, shard, record, stage_identity,
+                                      f"stage row carrying supplement-resolved row {resolved}")
     expect_tamper_rejected(probe, population, path,
                            lambda data: data.replace(b'"row":0}', b'"row": 0}', 1),
                            "non-canonical serialization")
@@ -555,6 +645,129 @@ def check_population(probe, artifacts, report, shard):
             "restored performance population no longer matches")
     write_profile(artifacts["profile"], artifacts)
     return len(expected)
+
+
+# Option 3 stage rows avoid the supplement-resolved census rows 0 and 4, which
+# the decision disposes of as object rows only.
+SUPPLEMENT_STAGE_ROWS = (("link", 1), ("self-host-stage1", 2), ("link", 64),
+                         ("self-host-stage1", 16))
+
+
+def census_artifacts(fixture, report_path):
+    shard = fixture.shards[0]
+    return {
+        "support": shard / "support-contract.tsv",
+        "source_applicability": shard / "applicability-ledger.tsv",
+        "inputs": shard / "inputs.tsv",
+        "rows": shard / "rows.tsv",
+        "manifest": shard / "manifest.txt",
+        "report": report_path,
+        "applicability": fixture.root / "applicability.tsv",
+        "skips": fixture.root / "applicability-skips.tsv",
+        "profile": fixture.root / "eligibility.profile",
+    }
+
+
+def expect_both_reject_report(probe, artifacts, report, shard, mutation, label):
+    """A report tamper that the binding's rule and the C projection both reject."""
+    changed = json.loads(json.dumps(report))
+    mutation(changed)
+    try:
+        binding._supplement_resolved_rows(changed, census_rows_of(shard),
+                                          set(changed["applicability_skip_rows"]))
+    except ValueError:
+        pass
+    else:
+        raise RuntimeError(f"binding supplement rule accepted {label}")
+    expect_tamper_rejected(probe, artifacts, artifacts["report"],
+                           lambda data: mutate_report(data, mutation), label)
+
+
+def check_supplement_disposition(probe):
+    """C/Python agreement on option 3 over genuine supplement evidence.
+
+    The fixture's two direct references fail as the frozen backend's do (a
+    nonzero exit and no object) and their Clang controls pass, so the census
+    keeps rows 0 and 4 in the telemetry, execution and artifact defect lists.
+    Both implementations must derive that set, accept it, make those rows
+    compiler-ineligible with the same reason and proof, and reject every
+    defect outside it. Returns the performance-population row count.
+    """
+    fixture = contract_test.ContractTests(methodName="runTest")
+    fixture.setUp()
+    try:
+        fixture.install_applicability({INAPPLICABLE_RECORD, UNAVAILABLE_RECORD})
+        require(fixture.make_failed_direct_reference_supplements() == SUPPLEMENT_RESOLVED_ROWS,
+                "supplement fixture did not fail the expected direct references")
+        report_path = fixture.root / "validator-report.json"
+        report = run_validator(fixture.shards, report_path, supplements=True)
+        independently_replay_python(fixture.root, report, fixture.shards[0])
+        shard = fixture.shards[0]
+        census_rows = census_rows_of(shard)
+        resolved = supplement_disposition(report, shard)
+        require(resolved == SUPPLEMENT_RESOLVED_ROWS,
+                "binding did not derive the supplement-resolved set")
+        for field in binding.SUPPLEMENT_DEFECT_FIELDS:
+            require(report[field] == resolved, f"census {field} is not the supplement set")
+        proofs = binding._check_reference_supplements(fixture.root, report, census_rows, resolved)
+        require(sorted(proofs) == resolved and
+                all(proof["reason"] == binding.SUPPLEMENT_INELIGIBLE_REASON for proof in proofs.values()),
+                "binding did not authenticate each resolved row's supplement")
+
+        artifacts = census_artifacts(fixture, report_path)
+        write_profile(artifacts["profile"], artifacts)
+        make_read_only(*(path for name, path in artifacts.items() if name != "profile"))
+        configurations = expected_configurations(report, shard)
+        expect_probe_success(probe, artifacts, configurations, report, shard,
+                             EXPECTED_SUPPLEMENT_PROBE_OUTPUT)
+
+        def append(field, row):
+            return lambda changed: changed[field].__setitem__(slice(None), sorted(changed[field] + [row]))
+
+        def drop(field, row):
+            return lambda changed: changed[field].remove(row)
+
+        cases = (
+            (append("telemetry_defect_rows", 8), "defect row outside the supplement set"),
+            (drop("artifact_defect_rows", 4), "supplement-set row missing from a defect list"),
+            (append("execution_defect_rows", 1), "defect on a MIR row"),
+            (append("fallback_defect_rows", 0), "fallback defect on a resolved row"),
+            (append("candidate_failure_rows", 1), "candidate failure"),
+            (lambda changed: changed["reference_failure_rows"].extend([4, 5, 6, 7]),
+             "right set with a failed supplement"),
+            (append("unexpected_failure_rows", 1), "unexpected failure"),
+            (lambda changed: changed["reference_supplement_sha256"].pop(),
+             "supplement digests that do not cover every shard"),
+            (lambda changed: changed["reference_supplement_sha256"].clear(),
+             "direct-reference defects without a supplement"),
+            (drop("direct_reference_failure_rows", 5),
+             "direct-reference set that does not cover its group"),
+        )
+        for mutation, label in cases:
+            expect_both_reject_report(probe, artifacts, report, shard, mutation, label)
+        # A mismatched supplement digest keeps the report's shape, so the C
+        # projection (which holds only the pinned report bytes) cannot see it;
+        # the binding authenticates the supplement bytes themselves.
+        mismatched = json.loads(json.dumps(report))
+        mismatched["reference_supplement_sha256"][0] = "0" * 64
+        try:
+            binding._check_reference_supplements(fixture.root, mismatched, census_rows, resolved)
+        except ValueError:
+            pass
+        else:
+            raise RuntimeError("binding accepted a mismatched supplement digest")
+        expect_tamper_rejected(probe, artifacts, artifacts["report"],
+            lambda data: mutate_report(data, lambda changed:
+                changed["reference_supplement_sha256"].__setitem__(0, "z" * 64)),
+            "malformed supplement digest")
+        expect_probe_success(probe, artifacts, configurations, report, shard,
+                             EXPECTED_SUPPLEMENT_PROBE_OUTPUT)
+        rows = check_population(probe, artifacts, report, shard, SUPPLEMENT_STAGE_ROWS)
+        require(rows == 192 + len(SUPPLEMENT_STAGE_ROWS),
+                "supplement population cross-check did not cover every declared row")
+        return rows
+    finally:
+        fixture.tearDown()
 
 
 def execute(probe):
@@ -598,7 +811,7 @@ def execute(probe):
         configurations = expected_configurations(report, shard)
         require(len(configurations) == 192 and len(set(configurations)) == 192,
                 "fixture configuration digests are not distinct per row")
-        expect_probe_success(probe, artifacts, configurations)
+        expect_probe_success(probe, artifacts, configurations, report, shard)
         expect_tamper_rejected(
             probe, artifacts, artifacts["report"],
             lambda data: replace_once(data, b'"clean_candidate": true',
@@ -709,12 +922,13 @@ def execute(probe):
             "residual digest")
         expect_missing_profile_pin_rejected(
             probe, artifacts, "validator-source-applicability-sha256")
-        expect_probe_success(probe, artifacts, configurations)
+        expect_probe_success(probe, artifacts, configurations, report, shard)
         population_rows = check_population(probe, artifacts, report, shard)
         require(population_rows == 192 + len(POPULATION_STAGE_ROWS),
                 "population cross-check did not cover every declared row")
     finally:
         fixture.tearDown()
+    check_supplement_disposition(probe)
 
 
 # Installed names of the unit's census directory (retirement_unit.h
@@ -796,6 +1010,7 @@ def main():
     print("schema-2 validator eligibility fixture passed "
           "(192 rows, 160 eligible, 32 skipped, 192 C/Python configuration digests, "
           f"{192 + len(POPULATION_STAGE_ROWS)} C/Python performance-population rows; "
+          "option-3 supplement disposition: 2 resolved rows, 158 eligible, C/Python agreement; "
           "positive and tamper probes)")
 
 

@@ -1,7 +1,10 @@
 /* Service-side A -> B entry for #881.
  * The _pinned and _built_pinned functions remain lower-level fixture seams for
  * matched-build import and held binaries. The raw #508 identity and staged
- * source-ledger eligibility projection validate the pinned census files.
+ * source-ledger eligibility projection validate the pinned census files;
+ * bq_retirement_validator_applicability_projection also applies the option-3
+ * census supplement disposition (#36): supplement-resolved allocator-none rows
+ * are compiler-ineligible and the three raw defect lists must equal them.
  * bq_retirement_validator_row_configuration_sha256 derives each census row's
  * #1020 configuration_sha256 from the pinned rows.tsv bytes and
  * bq_retirement_validator_rows_join requires B's rows to carry it.
@@ -63,6 +66,12 @@ struct BqRetirementValidatorEligibility
     char profile[64];
     u8* compiler_eligible;
     u8* classification;
+    /* Option 3 (#36): 1 for each supplement-resolved allocator-none row,
+     * which is compiler-ineligible. skip_proof_sha256 then holds its
+     * supplement proof (domain bq-retirement-validator-supplement-v1) rather
+     * than a skip proof (bq-retirement-validator-skip-v1). */
+    u8* supplement_resolved;
+    u32 supplement_count;
     char (*skip_proof_sha256)[SHA256_HEX_CAPACITY];
     /* #1020 per-row configuration_sha256, derived from the pinned rows.tsv
      * bytes whose rows_identity_sha256 the report binds. */
@@ -83,6 +92,7 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_validator_eligibility_release(BqRetiremen
     {
         free(projection->compiler_eligible);
         free(projection->classification);
+        free(projection->supplement_resolved);
         free(projection->skip_proof_sha256);
         free(projection->configuration_sha256);
         free(projection->identity_sha256);
@@ -1771,15 +1781,21 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String
 {
     static String8 const app_header = S8_INITIALIZER("row\tgroup\tfixture\ttarget\tcpu\tfrontend\tallocator\tPIC\tapplicability\tadmission\tdisposition\treason\townership\tcandidate_failure\treference_failure\tacceptance_failure");
     static String8 const skips_header = S8_INITIALIZER("row\tgroup\tfixture\ttarget\tallocator\tapplicability\treason");
+    /* Option 3 (#36, as _supplement_resolved_rows in the binding): these
+     * lists stay empty, while the telemetry, execution and artifact defect
+     * lists must each equal exactly the supplement-resolved set. */
     static String8 const failure_arrays[] = {
         S8_INITIALIZER("candidate_failure_rows"),
         S8_INITIALIZER("reference_failure_rows"), S8_INITIALIZER("fallback_defect_rows"),
+        S8_INITIALIZER("unexpected_failure_rows")
+    };
+    static String8 const supplement_defect_arrays[] = {
         S8_INITIALIZER("telemetry_defect_rows"), S8_INITIALIZER("execution_defect_rows"),
-        S8_INITIALIZER("artifact_defect_rows"), S8_INITIALIZER("unexpected_failure_rows")
+        S8_INITIALIZER("artifact_defect_rows")
     };
     bool ok = report.pointer && report_sha256.length == 64 && applicability.pointer && skips_text.pointer &&
               raw_rows && subjects && subject_count > 0 && ledger && ledger_count <= BQ_RETIREMENT_VALIDATOR_LEDGER_RECORD_CAP &&
-              row_count > 0 && projection;
+              row_count > 0 && projection && projection->supplement_resolved;
     u8* observed_skips = ok ? calloc(row_count, 1) : NULL;
     u8* candidate_failures = ok ? calloc(row_count, 1) : NULL;
     u8* reference_failures = ok ? calloc(row_count, 1) : NULL;
@@ -1797,6 +1813,20 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String
                     supported_gap_rows, &supported_gap_count) &&
                  bq_retirement_validator_json_row_set(report, S8("direct_reference_failure_rows"),
                     row_count, direct_reference_failures, &direct_failure_count);
+    /* The supplement-resolved set: the allocator-none rows of the retained
+     * direct-reference failures. The applicability loop below requires every
+     * such group's executed MIR rows, and no other row, in the same list. */
+    u32 supplement_count = 0;
+    u64 report_shards = 0;
+    for (u32 index = 0; ok && index < row_count; index += 1)
+    {
+        bool resolved = direct_reference_failures[index] != 0 &&
+                        index % BQ_RETIREMENT_CENSUS_ALLOCATOR_COUNT == 0;
+        ok = !resolved || string_equal(raw_rows[index].fields[7], S8("none"));
+        projection->supplement_resolved[index] = resolved;
+        supplement_count += resolved;
+    }
+    if (ok) ok = bq_retirement_validator_json_uint(report, S8("shards"), &report_shards) && report_shards > 0;
     u32 report_counts[5] = {0}, admission_counts[5] = {0}, app_counts[5] = {0};
     if (ok) ok = bq_retirement_validator_class_counts(report, S8("applicability_counts"), report_counts) &&
                  bq_retirement_validator_class_counts(report, S8("admission_counts"), admission_counts);
@@ -1813,8 +1843,10 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String
                      SHA256_HEX_CAPACITY) &&
              bq_retirement_validator_json_sha256_array(report, S8("reference_supplement_sha256"), 4);
     else if (ok && string_equal(census_profile, S8("self-test")))
-        ok = supported_gap_count == 0 && direct_failure_count == 0 &&
-             bq_retirement_validator_json_sha256_array(report, S8("reference_supplement_sha256"), 0);
+        ok = supported_gap_count == 0 && (direct_failure_count == 0) == (supplement_count == 0) &&
+             report_shards <= UINT32_MAX &&
+             bq_retirement_validator_json_sha256_array(report, S8("reference_supplement_sha256"),
+                                                       supplement_count ? (u32)report_shards : 0);
     else if (ok) ok = false;
     String8 residual_evidence = {0}, residual_tsv = {0};
     bool residual_truncated = true, require_clean_acceptance = false, clean_acceptance = false;
@@ -1835,6 +1867,9 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String
         ok = require_clean_acceptance && clean_acceptance;
     for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(failure_arrays); index += 1)
         ok = bq_retirement_validator_json_empty_array(report, failure_arrays[index]);
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(supplement_defect_arrays); index += 1)
+        ok = bq_retirement_validator_json_rows_match_flags(report, supplement_defect_arrays[index], row_count,
+                                                           projection->supplement_resolved);
     u64 offset = 0;
     String8 line = {0};
     if (ok) ok = bq_next_line(applicability, &offset, &line) && string_equal(line, app_header);
@@ -1880,6 +1915,21 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String
              string_equal(source[2], string_from_pointer(subjects[subject_index].path)) &&
              string_equal(source[12], string_from_pointer(subjects[subject_index].compile_obligation)) &&
              observed_skips[raw_index] == authenticated_skip;
+        if (ok && projection->supplement_resolved[raw_index])
+        {
+            /* The replayable reason for a supplement-resolved row: its
+             * report-bound applicability line (with the validator's rewritten
+             * clang-control reason) under the pinned report digest. */
+            Sha256 hash;
+            sha256_init(&hash);
+            static char const domain[] = "bq-retirement-validator-supplement-v1";
+            sha256_add(&hash, domain, sizeof(domain) - 1);
+            sha256_add(&hash, "\0", 1);
+            sha256_add(&hash, report_sha256.pointer, report_sha256.length);
+            sha256_add(&hash, "\0", 1);
+            sha256_add(&hash, line.pointer, line.length);
+            sha256_finish_hex(&hash, (char8*)projection->skip_proof_sha256[raw_index]);
+        }
         if (ok)
         {
             app_counts[classification - 1] += 1;
@@ -1956,17 +2006,22 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String
                 skipped += 1;
             }
         }
-        else projection->compiler_eligible[index] = 1;
+        else projection->compiler_eligible[index] = projection->supplement_resolved[index] ? 0 : 1;
     }
     ok = ok && skipped == report_skip_count && skips_offset == skips_text.length;
     if (!ok && projection)
     {
         free(projection->compiler_eligible);
         free(projection->classification);
+        free(projection->supplement_resolved);
         free(projection->skip_proof_sha256);
         memset(projection, 0, sizeof(*projection));
     }
-    else if (ok) projection->row_count = row_count;
+    else if (ok)
+    {
+        projection->row_count = row_count;
+        projection->supplement_count = supplement_count;
+    }
     free(observed_skips);
     free(candidate_failures);
     free(reference_failures);
@@ -2182,9 +2237,10 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_eligibility_projection(int supp
         {
             projection->compiler_eligible = calloc(row_count, 1);
             projection->classification = calloc(row_count, 1);
+            projection->supplement_resolved = calloc(row_count, 1);
             projection->skip_proof_sha256 = calloc(row_count, sizeof(*projection->skip_proof_sha256));
             ok = projection->compiler_eligible && projection->classification &&
-                 projection->skip_proof_sha256 &&
+                 projection->supplement_resolved && projection->skip_proof_sha256 &&
                  bq_retirement_validator_applicability_projection(report_text,
                     string_from_pointer(report_sha), manifest_profile, applicability_text, skips_text,
                     raw_rows, subjects, subject_count, ledger, ledger_count, row_count, projection);
@@ -2497,8 +2553,10 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_population_row(BqRetirementPopulationCurs
  * - every later row is a declared link or self-host-stage1 row whose census
  *   row is the unique census row carrying the same identity (the
  *   declaration's own binding, never a heuristic), and both stages appear;
- * - compiler eligibility, classification and skip proof come from the
- *   census row's schema-2 projection and must equal the declared
+ * - compiler eligibility, classification and skip proof (or, for an
+ *   option-3 supplement-resolved object row, its supplement proof) come from
+ *   the census row's schema-2 projection; no stage row may carry a
+ *   supplement-resolved identity; eligibility must equal the declared
  *   compiler_wall_time/compiler_peak_rss; generated_runtime must equal
  *   compiler eligibility and _native_runtime_required (execution_obligation
  *   semantic-gate-509, a link or self-host-stage1 stage and the native
@@ -2523,7 +2581,8 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_performance_rows_derive(String8 text, Str
     u32 object_rows = eligibility ? eligibility->row_count : 0;
     bool ok = rows_output && count_output && eligibility && object_rows && eligibility->identity_sha256 &&
               eligibility->subject_sha256 && eligibility->classification && eligibility->compiler_eligible &&
-              eligibility->skip_proof_sha256 && eligibility->configuration_sha256 &&
+              eligibility->supplement_resolved && eligibility->skip_proof_sha256 &&
+              eligibility->configuration_sha256 &&
               eligibility->subject_count == object_rows / BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT &&
               native_target >= 1 && native_target <= 12 && text.length <= BQ_RETIREMENT_POPULATION_BYTES_CAP;
     for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(pin_keys); index += 1)
@@ -2616,7 +2675,10 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_performance_rows_derive(String8 text, Str
             bool code_marker = metrics[2] ? string_equal(code_section, S8("deterministic-code-section")) :
                                string_equal(code_section, S8("not-applicable")) ||
                                (compile && string_equal(code_section, S8("deterministic-zero-baseline-code-section")));
+            /* Option 3 disposes of census object rows only: a stage row may
+             * not carry a supplement-resolved identity. */
             ok_row = ok_row && row->classification >= 1 && row->classification <= 5 &&
+                     (stage == BQ_RETIREMENT_STAGE_OBJECT || !eligibility->supplement_resolved[census]) &&
                      metrics[0] == compile && metrics[1] == compile && metrics[3] == runtime &&
                      (compile || !metrics[2]) && code_marker &&
                      string_equal(runtime_oracle, runtime ? S8("independent-native-executable-oracle") :

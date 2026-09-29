@@ -573,6 +573,18 @@ retains `direct_reference_failure_rows` and every supplement digest. Both clean
 acceptance gates remain required. Missing, failed or altered supplements fail
 acceptance.
 
+The failed allocator-`none` rows therefore stay in `telemetry_defect_rows`,
+`execution_defect_rows` and `artifact_defect_rows` (a failed direct compile is
+an execution defect, its zero-byte object an artifact defect, and the artifact
+defect is folded into the telemetry defect). The census does not clear them.
+The performance binding's disposition of those rows (option 3, decided in
+[#36](https://github.com/buster14a/buster/issues/36#issuecomment-5895408613))
+is defined in the
+[performance contract](native-retirement-performance-contract.md): exactly the
+supplement-resolved allocator-`none` rows become compiler-ineligible for
+performance, those three lists are accepted only when each equals that set,
+and every other defect list must stay empty.
+
 Clang's UEFI controls use the corresponding freestanding C ABI: x64 MSVC/LLP64
 and ARM64 AAPCS64/LP64, with short wchar. The ARM64 control is an ELF object; it
 is not claimed to validate a PE loader. `basic_c_asm_goto_range.c` deliberately

@@ -17,6 +17,12 @@ v3 execution plan; per-input metrics artifacts supply per-fixture samples;
 the batch process metric pair is gated over object batch groups through a
 ``group-round-pair`` result population; and code bytes are measured once per
 (variant, row) on every target through a per-row code record set.
+
+The census supplement disposition (option 3, decision recorded in #36) is
+implemented by ``_supplement_resolved_rows`` (the support-check rule),
+``_check_reference_supplements`` (per-row supplement authentication) and
+``_derive_compiler_eligibility`` (supplement-resolved allocator-none rows are
+compiler-ineligible with an explicit reason).
 """
 
 import argparse
@@ -62,6 +68,17 @@ except ImportError:
     sys.modules[_result_input_spec.name] = RESULT_INPUT
     _result_input_spec.loader.exec_module(RESULT_INPUT)
 RESULT_INPUT_HARD_CAPS = RESULT_INPUT.HARD_CAPS
+
+try:
+    import native_retirement_reference as REFERENCE_SUPPLEMENT
+except ImportError:
+    _reference_spec = importlib.util.spec_from_file_location(
+        "native_retirement_reference",
+        Path(__file__).resolve().with_name("native_retirement_reference.py"))
+    if _reference_spec is None or _reference_spec.loader is None:
+        raise RuntimeError("native_retirement_reference.py is required by the supplement disposition")
+    REFERENCE_SUPPLEMENT = importlib.util.module_from_spec(_reference_spec)
+    _reference_spec.loader.exec_module(REFERENCE_SUPPLEMENT)
 
 
 SCHEMA = "buster-native-retirement-performance-binding-v1"
@@ -134,6 +151,28 @@ BATCH_GROUP_KEY_FIELDS = ("allocator", "frontend_lowering", "PIC", "fixture_reci
                           "cpu", "cpu_features")
 OBJECT_BATCH_GROUP = "object-batch"
 SINGLETON_STAGE_GROUP = "singleton-stage"
+# Census supplement disposition (option 3, maintainer decision recorded at
+# SUPPLEMENT_DISPOSITION_DECISION).  The census keeps the raw telemetry,
+# execution and artifact defect flags of every allocator-none row whose frozen
+# direct compile failed and whose independent Clang control passed.  Exactly
+# those object rows become compiler-ineligible (no timing, no code-byte ratio)
+# with SUPPLEMENT_INELIGIBLE_REASON, and the support check accepts those three
+# defect lists only when each equals that set.  Every other defect stays fatal.
+SUPPLEMENT_DISPOSITION_DECISION = (
+    "https://github.com/buster14a/buster/issues/36#issuecomment-5895408613")
+SUPPLEMENT_INELIGIBLE_REASON = "direct-reference-supplement-resolved"
+NONEXECUTED_INELIGIBLE_REASON = "authenticated-non-executed"
+SUPPLEMENT_DEFECT_FIELDS = ("telemetry_defect_rows", "execution_defect_rows",
+                            "artifact_defect_rows")
+ALWAYS_FATAL_DEFECT_FIELDS = ("candidate_failure_rows", "reference_failure_rows",
+                              "fallback_defect_rows", "unexpected_failure_rows")
+SUPPLEMENT_MANIFEST_FIELDS = ("schema", "directory", "compiler_sha256", "version_sha256",
+                              "environment", "census_manifest_sha256",
+                              "rows_identity_sha256", "input_ledger_sha256", "results")
+SUPPLEMENT_RECORD_FIELDS = ("row", "group", "status", "object_bytes", "object_sha256",
+                            "stdout_sha256", "stderr_sha256", "oracle")
+SUPPLEMENT_MANIFEST_BYTE_CAP = 16 * 1024 * 1024
+SUPPLEMENT_OBJECT_BYTE_CAP = 64 * 1024 * 1024
 SUPPORT_FILE_ROLES = [
     "support_declaration", "performance_declaration", "manifest", "inputs",
     "rows", "dependencies", "environment", "performance_rows", "validator_report",
@@ -1885,6 +1924,177 @@ def _replay_validator_report(root, validator_report, projection_evidence):
                 _fail(f"#508 schema-2 validator replay differs in {field}")
 
 
+def _supplement_resolved_rows(report, census_rows, skip_rows):
+    """Option 3 support rule: the exact supplement-resolved direct-reference set.
+
+    ``direct_reference_failure_rows`` is the census's pre-supplement record:
+    the allocator-``none`` row of every group whose frozen direct compile
+    failed, plus that group's executed MIR rows.  The supplement-resolved set
+    is its allocator-``none`` rows.  The telemetry, execution and artifact
+    defect lists are accepted only when each equals that set exactly; the
+    candidate, final reference, fallback and unexpected lists must stay empty,
+    so a defect outside the set, on a MIR row, or of another kind is fatal.
+    ``census_rows`` must already be in the validated allocator order.
+    """
+    row_count = len(census_rows)
+    for field in ALWAYS_FATAL_DEFECT_FIELDS:
+        if report[field]:
+            _fail(f"schema-2 validator report contains {field}")
+    direct = _row_ids(report["direct_reference_failure_rows"],
+                      "validator_report.direct_reference_failure_rows", row_count)
+    supplements = _list(report["reference_supplement_sha256"],
+                        "validator_report.reference_supplement_sha256")
+    for index, digest in enumerate(supplements):
+        _sha(digest, f"validator_report.reference_supplement_sha256[{index}]")
+    width = len(ALLOCATORS)
+    resolved = [row for row in direct if census_rows[row]["allocator"] == "none"]
+    resolved_set = set(resolved)
+    direct_set = set(direct)
+    for row in direct:
+        if row - row % width not in resolved_set:
+            _fail("direct-reference failure row has no failed allocator-none reference")
+    for row in resolved:
+        if row % width or row in skip_rows:
+            _fail("supplement-resolved reference row is not an executed allocator-none row")
+        for member in range(row + 1, row + width):
+            if (member in direct_set) is (member in skip_rows):
+                _fail("direct-reference failure rows do not cover the group's executed rows")
+    if resolved and not supplements:
+        _fail("direct-reference defects are retained without an independent reference supplement")
+    if supplements and len(supplements) != report["shards"]:
+        _fail("reference supplement digests do not cover every census shard")
+    for field in SUPPLEMENT_DEFECT_FIELDS:
+        rows = _row_ids(report[field], f"validator_report.{field}", row_count)
+        if rows != resolved:
+            _fail(f"schema-2 validator report {field} is not exactly the "
+                  "supplement-resolved direct-reference set")
+    return resolved
+
+
+def _check_reference_supplements(root, report, census_rows, resolved):
+    """Authenticate each supplement-resolved row's own supplement record.
+
+    Every shard's ``reference-supplement/manifest.json`` must hash to its
+    report digest and bind the report's row and input identities.  Its records
+    must name exactly the supplement-resolved rows of that shard, and each
+    record must be a passing control whose retained object has the recorded
+    size, digest and target header.  The returned per-row proof is the
+    replayable reason that removes the row from timing and the code-byte ratio.
+    """
+    supplements = report["reference_supplement_sha256"]
+    directories = _list(report["directories"], "validator_report.directories")
+    proofs = {}
+    if supplements and len(directories) != len(supplements):
+        _fail("reference supplement digests do not match the census shard directories")
+    for index, digest in enumerate(supplements):
+        shard = _report_evidence_path(root, directories[index],
+                                      f"validator_report.directories[{index}]", directory=True)
+        name = f"validator_report.reference_supplement[{index}]"
+        manifest_path = _report_evidence_path(
+            root, str(shard / "reference-supplement" / "manifest.json"), f"{name}.manifest")
+        if manifest_path.stat().st_size > SUPPLEMENT_MANIFEST_BYTE_CAP:
+            _fail(f"{name}.manifest exceeds its byte cap")
+        data = manifest_path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != digest:
+            _fail("reference supplement manifest digest differs from the validator report")
+        try:
+            manifest = json.loads(data.decode("utf-8"), object_pairs_hook=_json_object)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            _fail(f"{name}.manifest is not valid UTF-8 JSON: {error}")
+        manifest = _keys(manifest, SUPPLEMENT_MANIFEST_FIELDS, f"{name}.manifest")
+        if manifest["schema"] != 1 \
+                or manifest["rows_identity_sha256"] != report["rows_identity_sha256"] \
+                or manifest["input_ledger_sha256"] != report["input_ledger_sha256"]:
+            _fail("reference supplement manifest does not bind the census identities")
+        for position, record in enumerate(_list(manifest["results"], f"{name}.results")):
+            record = _keys(record, SUPPLEMENT_RECORD_FIELDS, f"{name}.results[{position}]")
+            if type(record["row"]) is not str or not record["row"].isdigit():
+                _fail(f"{name}.results[{position}].row is not a census row")
+            row = int(record["row"])
+            if row not in resolved or row in proofs:
+                _fail("reference supplement inventory differs from the supplement-resolved "
+                      "direct-reference set")
+            source = census_rows[row]
+            if record["group"] != source["group"] \
+                    or int(source["group"]) % len(supplements) != index:
+                _fail("reference supplement record is not bound to its census group and shard")
+            if type(record["status"]) is not int or record["status"] != 0:
+                _fail("reference supplement control for a resolved row did not pass")
+            _positive_int(record["object_bytes"], f"{name}.results[{position}].object_bytes")
+            _sha(record["object_sha256"], f"{name}.results[{position}].object_sha256")
+            artifact = _report_evidence_path(
+                root, str(shard / "reference-supplement" / f"{source['group']}.o"),
+                f"{name}.results[{position}].object")
+            if artifact.stat().st_size > SUPPLEMENT_OBJECT_BYTE_CAP:
+                _fail(f"{name}.results[{position}].object exceeds its byte cap")
+            object_data = artifact.read_bytes()
+            if len(object_data) != record["object_bytes"] \
+                    or hashlib.sha256(object_data).hexdigest() != record["object_sha256"] \
+                    or not REFERENCE_SUPPLEMENT.object_valid(object_data, source["target"]):
+                _fail("reference supplement object differs from its record or target header")
+            proofs[row] = {
+                "reason": SUPPLEMENT_INELIGIBLE_REASON,
+                "decision": SUPPLEMENT_DISPOSITION_DECISION,
+                "supplement_manifest_sha256": digest,
+                "supplement_object_sha256": record["object_sha256"],
+            }
+    if set(proofs) != set(resolved):
+        _fail("reference supplement inventory differs from the supplement-resolved "
+              "direct-reference set")
+    return proofs
+
+
+def _derive_compiler_eligibility(parsed, expected_object, skip_rows, supplement_proofs,
+                                 applicability_by_row, reasons):
+    """Derive (and join) every canonical row's compiler eligibility.
+
+    A row is compiler-ineligible exactly when its census row is an
+    authenticated non-executed skip or (option 3) a supplement-resolved
+    direct-reference row; the reason and its proof stay on the row, and the
+    identity join to the census remains exhaustive.  A supplement-resolved
+    census identity may only be an object row: the decision disposes of the
+    census object rows and nothing else.
+    """
+    compiler_eligible_rows = set()
+    performance_applicability = {}
+    eligible_object_rows = 0
+    for row in parsed:
+        identity = tuple(row["identity"][field] for field in ROW_IDENTITY_FIELDS
+                         if field != "artifact_stage")
+        source = expected_object.get(identity)
+        if source is None:
+            _fail("canonical performance row has no schema-2 census identity")
+        census_row = int(source["row"])
+        supplement = supplement_proofs.get(census_row)
+        if supplement is not None and row["identity"]["artifact_stage"] != "object":
+            _fail("a stage row carries a supplement-resolved direct-reference identity")
+        reason = (NONEXECUTED_INELIGIBLE_REASON if census_row in skip_rows
+                  else SUPPLEMENT_INELIGIBLE_REASON if supplement is not None else None)
+        compiler_eligible = reason is None
+        if row["metrics"]["compiler_wall_time"] is not compiler_eligible \
+                or row["metrics"]["compiler_peak_memory"] is not compiler_eligible:
+            _fail("canonical compiler eligibility differs from authenticated skip and "
+                  "supplement provenance")
+        if not compiler_eligible:
+            if any(row["metrics"][metric] for metric in ROW_METRICS) \
+                    or row["eligibility"]["runtime_oracle"] != "not-applicable" \
+                    or row["eligibility"]["code_section"] != "not-applicable":
+                _fail("authenticated non-executed row contains measurement eligibility")
+        else:
+            compiler_eligible_rows.add(row["row"])
+            if row["identity"]["artifact_stage"] == "object":
+                eligible_object_rows += 1
+        performance_applicability[row["row"]] = {
+            "census_row": census_row,
+            "classification": applicability_by_row[census_row],
+            "reason": reasons[census_row],
+            "compiler_eligible": compiler_eligible,
+            "compiler_ineligible_reason": reason,
+            "supplement": supplement,
+        }
+    return compiler_eligible_rows, performance_applicability, eligible_object_rows
+
+
 def _check_census_cpu_axes(census_rows, axes):
     # These rows are authenticated by the mandatory census replay. Preserve
     # their exact CPU profiles, including target-scoped fixture overrides.
@@ -2193,12 +2403,11 @@ def _check_support_output(root, binding, row_data, native_target=None):
     if not validator_report["require_clean_candidate"] \
             or not validator_report["clean_candidate"]:
         _fail("schema-2 validator report does not enforce a clean candidate")
-    for field in ("candidate_failure_rows", "reference_failure_rows",
-                  "fallback_defect_rows", "telemetry_defect_rows",
-                  "execution_defect_rows", "artifact_defect_rows",
-                  "unexpected_failure_rows"):
-        if validator_report[field]:
-            _fail(f"schema-2 validator report contains {field}")
+    # Option 3 (SUPPLEMENT_DISPOSITION_DECISION): the three raw defect lists
+    # may be non-empty only as exactly the supplement-resolved set; every
+    # other defect list must be empty.
+    supplement_rows = _supplement_resolved_rows(validator_report, census_rows,
+                                                applicability_skip_rows)
     unavailable_rows = validator_report["applicability_rows_by_class"]["unavailable"]
     if validator_report["acceptance_failure_rows"] != unavailable_rows:
         _fail("schema-2 acceptance failures are not exactly authenticated unavailable rows")
@@ -2206,35 +2415,12 @@ def _check_support_output(root, binding, row_data, native_target=None):
             not validator_report["acceptance_failure_rows"]):
         _fail("schema-2 clean_acceptance disagrees with retained failure evidence")
     _replay_validator_report(root, validator_report, projection_evidence)
-    compiler_eligible_rows = set()
-    performance_applicability = {}
-    eligible_object_rows = 0
-    for row in parsed:
-        identity = tuple(row["identity"][field] for field in ROW_IDENTITY_FIELDS
-                         if field != "artifact_stage")
-        source = expected_object.get(identity)
-        if source is None:
-            _fail("canonical performance row has no schema-2 census identity")
-        census_row = int(source["row"])
-        compiler_eligible = census_row not in applicability_skip_rows
-        if row["metrics"]["compiler_wall_time"] is not compiler_eligible \
-                or row["metrics"]["compiler_peak_memory"] is not compiler_eligible:
-            _fail("canonical compiler eligibility differs from authenticated skip provenance")
-        if not compiler_eligible:
-            if any(row["metrics"][metric] for metric in ROW_METRICS) \
-                    or row["eligibility"]["runtime_oracle"] != "not-applicable" \
-                    or row["eligibility"]["code_section"] != "not-applicable":
-                _fail("authenticated non-executed row contains measurement eligibility")
-        else:
-            compiler_eligible_rows.add(row["row"])
-            if row["identity"]["artifact_stage"] == "object":
-                eligible_object_rows += 1
-        performance_applicability[row["row"]] = {
-            "census_row": census_row,
-            "classification": applicability_by_row[census_row],
-            "reason": projection_evidence["reasons"][census_row],
-            "compiler_eligible": compiler_eligible,
-        }
+    supplement_proofs = _check_reference_supplements(root, validator_report, census_rows,
+                                                     supplement_rows)
+    compiler_eligible_rows, performance_applicability, eligible_object_rows = \
+        _derive_compiler_eligibility(parsed, expected_object, applicability_skip_rows,
+                                     supplement_proofs, applicability_by_row,
+                                     projection_evidence["reasons"])
     _check_batch_recipe_flags(parsed, inputs_by_path)
 
     # Keep the byte-level identities available to the workflow validator.  A
@@ -2255,6 +2441,7 @@ def _check_support_output(root, binding, row_data, native_target=None):
             "projection_artifacts": projection_evidence["artifacts"],
             "applicability_sha256": validator_report["applicability_sha256"],
             "applicability_skip_rows": sorted(applicability_skip_rows),
+            "supplement_resolved_rows": supplement_rows,
             "group_count": declaration_groups}
 
 

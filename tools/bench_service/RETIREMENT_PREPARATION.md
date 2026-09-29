@@ -437,7 +437,11 @@ The import requires the following:
   identity is the same serialization with its own `artifact_stage`, and no
   identity may repeat, as in the binding.
 - **Values from the census row.** Classification, compiler eligibility and
-  skip proof come from the census row's schema-2 projection. The source
+  skip proof come from the census row's schema-2 projection. An option-3
+  supplement-resolved allocator-`none` row is compiler-ineligible, and its
+  skip proof is its supplement proof
+  ([census import](retirement_census_import.md)). A stage row may not carry
+  such an identity. The source
   digest is the subject's support-declaration digest, and
   `configuration_sha256` is the census row's #1020 digest.
 - **Eligibility markers.** `compiler_wall_time` and `compiler_peak_rss`

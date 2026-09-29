@@ -35,7 +35,12 @@ set; it does not replay baseline shard results or independent supplements. It
 also fails closed on candidate and final reference failure rows, checks that
 acceptance failures match unresolved `unavailable` rows, checks
 `clean_acceptance`, requires both acceptance flags for full-census, and rejects
-nonempty defect arrays. A report with retained
+a nonempty fallback defect or unexpected failure array. Under option 3
+([#36](https://github.com/buster14a/buster/issues/36#issuecomment-5895408613),
+[import rules](retirement_census_import.md)), the telemetry, execution and
+artifact defect arrays must each equal the supplement-resolved allocator-`none`
+set exactly, and those rows are compiler-ineligible with a supplement proof.
+A report with retained
 direct-reference failures and four supplement digests remains only a staged
 projection; independent supplemental proof and the separate #508 binding are
 required before admission.
