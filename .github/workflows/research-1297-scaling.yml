@@ -6,54 +6,38 @@ on:
     paths: [.github/workflows/research-1297-scaling.yml]
 permissions:
   contents: read
+  actions: read
 jobs:
-  census:
+  postflight:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 35
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
-      - name: Run disposable scaling census
+      - name: Reuse exact successful census binaries and inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: scaling1297-36643345512
+          run-id: 36643345512
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/prior
+      - name: Time with native clock and collect real-source counts
         shell: bash
         run: |
           set -euo pipefail
-          python3 -u tools/research/scaling_probe_1297.py --out "$RUNNER_TEMP/scaling1297" | tee "$RUNNER_TEMP/scaling1297-console.log"
-      - name: Summarize source metadata
-        if: ${{ always() }}
-        shell: bash
-        run: |
+          test "$(git hash-object src/buster/lib/compiler/frontend/c/c_gen.c)" = 60dfd0e1c6174088326976954e618f6435e9f92a
+          python3 -u tools/research/scaling_postflight_1297.py --prior "$RUNNER_TEMP/prior/scaling1297" --out "$RUNNER_TEMP/scaling1297-post" | tee "$RUNNER_TEMP/scaling1297-post-console.log"
           git status --short
-          git hash-object src/buster/lib/compiler/frontend/c/c_gen.c
-          git ls-tree --name-only HEAD
-          git ls-files '*LICENSE*' '*LICENCE*' '*license*' '*License*' | head -50
-          python3 - <<'PY'
-          from pathlib import Path
-          for name, needles in {
-              'src/buster/lib/compiler/frontend/c/c.h': ['struct CEntity', 'struct CDeclaration', 'struct CScope'],
-              'src/buster/lib/compiler/frontend/c/c_parse.c': ['c_parse_add_entity', 'declaration_token_plus_one ='],
-              'src/buster/lib/compiler/frontend/c/c_gen.c': ['c_ir_find_local_by_entity', 'c_ir_lower_body_initialize'],
-          }.items():
-              p = Path(name)
-              if not p.exists():
-                  continue
-              lines = p.read_text().splitlines()
-              for needle in needles:
-                  hits = [i for i,line in enumerate(lines) if needle in line]
-                  print('SOURCE_HITS', name, needle, [i+1 for i in hits])
-                  for i in hits[:1]:
-                      for j in range(max(0,i-2),min(len(lines),i+75)):
-                          print(f'{name}:{j+1}: {lines[j]}')
-          PY
-      - name: Retain all results including failures
+      - name: Retain postflight observations including failures
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: scaling1297-${{ github.run_id }}
+          name: scaling1297-post-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/scaling1297
-            ${{ runner.temp }}/scaling1297-console.log
+            ${{ runner.temp }}/scaling1297-post
+            ${{ runner.temp }}/scaling1297-post-console.log
           if-no-files-found: error
           retention-days: 30
