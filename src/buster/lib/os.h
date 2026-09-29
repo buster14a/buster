@@ -117,6 +117,11 @@ struct ThreadCreateOptions
 {
     ThreadCallback* callback;
     void* argument;
+    // Leaves the thread out of os_is_only_live_thread(). Only for a thread
+    // that never touches a global built on first use (the test runner's
+    // fixture watchdog), so serial initializers stay checkable while it runs.
+    bool untracked;
+    u8 reserved[7];
 };
 
 typedef
@@ -411,8 +416,9 @@ BUSTER_F_DECL OsFileDescriptor* os_get_stdout(void);
 BUSTER_F_DECL OsFileDescriptor* os_get_standard_stream(StandardStream stream);
 BUSTER_F_DECL OsThreadHandle* os_thread_create(ThreadCreateOptions options);
 BUSTER_F_DECL bool os_thread_join(OsThreadHandle* handle);
-// True while every thread this process started through os_thread_create has
-// been joined, so the caller is the only one that can be touching a global.
+// True while every thread this process started through os_thread_create,
+// other than untracked ones, has been joined, so the caller is the only one
+// that can be touching a global.
 BUSTER_F_DECL bool os_is_only_live_thread(void);
 BUSTER_F_DECL OsMutexHandle* os_mutex_create(void);
 BUSTER_F_DECL void os_mutex_lock(OsMutexHandle* handle);
