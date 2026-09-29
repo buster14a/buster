@@ -1,0 +1,31 @@
+name: Instruction delivery research (branch only)
+on:
+  push:
+    branches: [codex/1438-ifetch-census]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Archive immutable research input (no build or timing)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          BASE=8f67df736f13d4edc055110a7a6d619a00a22eaf
+          git cat-file -e "$BASE^{commit}"
+          git archive --format=tar "$BASE" | gzip -n > evidence/source.tar.gz
+          git rev-parse "$BASE" "$BASE^{tree}" > evidence/source-identity.txt
+          sha256sum evidence/source.tar.gz > evidence/source.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ifetch-source-8f67df73
+          path: evidence
+          retention-days: 30
+          if-no-files-found: error
