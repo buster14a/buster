@@ -18116,6 +18116,71 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(destructor_temporary);
     }
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    // A variable defined inside `.init_array` and `.fini_array` (issue 1728).
+    // The entry-stub writers call the entries themselves and take the arrays
+    // off the image, so a read through the variable has to find the bytes
+    // relocated into writable data.  A host compiler places the variables,
+    // so the symbols reach the linker from a foreign ELF object.  `main`
+    // computes the verdict and the `.fini_array` entry reports it, so the
+    // status also proves that entry ran; a status nothing overwrote is 1.
+    {
+        String8 array_source = S8(
+            "extern void _exit(int status);\n"
+            "static int sequence;\n"
+            "static int verdict = 1;\n"
+            "static void early(void) { sequence = sequence * 10 + 2; }\n"
+            "static void late(void) { _exit(verdict); }\n"
+            "__attribute__((constructor(101))) static void first(void) { sequence = sequence * 10 + 1; }\n"
+            "__attribute__((section(\".init_array\"), used)) void (*early_entry)(void) = early;\n"
+            "__attribute__((section(\".fini_array\"), used)) void (*late_entry)(void) = late;\n"
+            "int main(void)\n"
+            "{\n"
+            "    verdict = sequence != 12 ? 2 : early_entry != early ? 3 : late_entry != late ? 4 : 0;\n"
+            "    return 1;\n"
+            "}\n");
+        String8 hosts[] = {executable_resolve_in_path(arguments->arena, S8("gcc")), executable_resolve_in_path(arguments->arena, S8("clang"))};
+        for (u32 host = 0; host < BUSTER_ARRAY_LENGTH(hosts); host += 1)
+        {
+            if (hosts[host].length)
+            {
+                TemporalArena array_temporary = scratch_begin(&arguments->arena, 1);
+                String8 array_object_path = buster_test_temporary_path(array_temporary.arena, S8("buster-c-initializer-array-symbol"), S8(".o"));
+                String8 array_image_path = buster_test_temporary_path(array_temporary.arena, S8("buster-c-initializer-array-symbol"), S8(""));
+                String8 array_source_path = buster_test_temporary_path(array_temporary.arena, S8("buster-c-initializer-array-symbol"), S8(".c"));
+                String8 host_command[] = {hosts[host], S8("-O0"), S8("-fPIC"), S8("-c"), S8("-o"), array_object_path, array_source_path};
+                bool host_ok = file_write(array_source_path, BUSTER_SLICE_TO_BYTE_SLICE(array_source));
+                if (host_ok)
+                {
+                    ProcessSpawnResult host_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_command), (SliceString8){0}, (SliceString8){0},
+                                                                     (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                    host_ok = host_spawn.handle && os_process_wait_sync(array_temporary.arena, host_spawn).result == PROCESS_RESULT_SUCCESS;
+                }
+                BUSTER_TEST(arguments, host_ok);
+                if (host_ok)
+                {
+                    String8 array_link_command_line[] = {S8("-o"), array_image_path, array_object_path};
+                    CompilerDriverResult array_build = compiler_driver_execute_invocation(array_temporary.arena,
+                        compiler_driver_parse_arguments(array_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(array_link_command_line)));
+                    BUSTER_TEST(arguments, array_build.error == COMPILER_DRIVER_ERROR_NONE);
+                    if (array_build.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 array_arguments[] = {array_image_path};
+                        ProcessSpawnResult array_spawn =
+                            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(array_arguments), (SliceString8){0}, (SliceString8){0},
+                                             (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, array_spawn.handle != 0);
+                        if (array_spawn.handle)
+                        {
+                            BUSTER_TEST(arguments, os_process_wait_sync(array_temporary.arena, array_spawn).result == PROCESS_RESULT_SUCCESS);
+                        }
+                    }
+                }
+                scratch_end(array_temporary);
+            }
+        }
+    }
+#endif
     // The order across two translation units, which is the half one file
     // cannot show (issue 789).  GNU runs every prioritized constructor before
     // every unprioritized one over the whole program, and the two fixtures

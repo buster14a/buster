@@ -3210,6 +3210,71 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_copy_symbol_table(UnitTestArgum
     return result;
 }
 
+// A symbol defined inside `.init_array` or `.fini_array` names storage the
+// program can read, even though the entry stub calls the entries itself: the
+// bytes stay in the image at the symbol's address, with their relocations
+// applied (issue 1728).
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_initializer_array_symbol(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u8 text[] = {0x31, 0xc0, 0xc3};
+    u8 data[] = {0x91, 0x37, 0xc4};
+    u8 init_array[OBJECT_INITIALIZER_ENTRY_SIZE] = {0};
+    u8 fini_array[OBJECT_INITIALIZER_ENTRY_SIZE] = {0};
+    ObjectSymbol symbols[] = {
+        {.name = S8("main"), .size = sizeof(text), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("early_entry"), .size = OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_INIT_ARRAY, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        {.name = S8("late_entry"), .size = OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_FINI_ARRAY, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        {.name = S8("local_data"), .size = sizeof(data), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA},
+    };
+    ObjectRelocation relocations[] = {
+        {.section = OBJECT_SECTION_INIT_ARRAY, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        {.section = OBJECT_SECTION_FINI_ARRAY, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64, .addend = 1},
+    };
+    ObjectFile object = link_test_object_make(arguments->arena, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        (ByteSlice)BUSTER_ARRAY_TO_SLICE(text), symbols, BUSTER_ARRAY_LENGTH(symbols), relocations, BUSTER_ARRAY_LENGTH(relocations));
+    object.sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data);
+    object.sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(init_array);
+    object.sections[OBJECT_SECTION_FINI_ARRAY].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(fini_array);
+    NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &object, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+    if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE))
+    {
+        u32 data_section = 0;
+        u64 data_header = 0;
+        LinkTestElfSymbol main_symbol = {0};
+        LinkTestElfSymbol local_data_symbol = {0};
+        LinkTestElfSymbol entry_symbols[2] = {0};
+        BUSTER_TEST(arguments, link_test_elf_section_find(linked.executable, S8(".data"), &data_section, &data_header));
+        BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("main"), &main_symbol));
+        BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("local_data"), &local_data_symbol));
+        BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("early_entry"), &entry_symbols[0]));
+        BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("late_entry"), &entry_symbols[1]));
+        if (BUSTER_REQUIRE(arguments, data_header != 0))
+        {
+            u64 data_address = link_read_u64(linked.executable.pointer, data_header + 16);
+            u64 data_offset = link_read_u64(linked.executable.pointer, data_header + 24);
+            u64 data_size = link_read_u64(linked.executable.pointer, data_header + 32);
+            BUSTER_TEST(arguments, local_data_symbol.value == data_address && data_offset <= linked.executable.length &&
+                                       data_size <= linked.executable.length - data_offset &&
+                                       memcmp(linked.executable.pointer + data_offset, data, sizeof(data)) == 0);
+            for (u32 slot = 0; slot < 2; slot += 1)
+            {
+                LinkTestElfSymbol entry = entry_symbols[slot];
+                bool inside = entry.section == data_section && entry.size == OBJECT_INITIALIZER_ENTRY_SIZE && entry.value >= data_address &&
+                              entry.value % OBJECT_INITIALIZER_ENTRY_SIZE == 0 && entry.value - data_address >= sizeof(data) &&
+                              entry.value - data_address <= data_size && data_size - (entry.value - data_address) >= OBJECT_INITIALIZER_ENTRY_SIZE;
+                BUSTER_TEST(arguments, inside);
+                if (inside)
+                {
+                    BUSTER_TEST(arguments, link_read_u64(linked.executable.pointer, data_offset + entry.value - data_address) == main_symbol.value + slot);
+                }
+            }
+            BUSTER_TEST(arguments, entry_symbols[0].value != entry_symbols[1].value);
+        }
+    }
+    return result;
+}
+
 // Every ELF executable form carries the same non-loaded static-symbol
 // contract.  Exercise both instruction sets, static and hosted layouts, and
 // Linux and Android policy over interleaved local/global symbols, aliases,
@@ -4086,6 +4151,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult symbol_table = link_test_elf_symbol_table(arguments);
     result.succeeded_test_count += symbol_table.succeeded_test_count;
     result.test_count += symbol_table.test_count;
+    UnitTestResult initializer_array_symbol = link_test_elf_initializer_array_symbol(arguments);
+    result.succeeded_test_count += initializer_array_symbol.succeeded_test_count;
+    result.test_count += initializer_array_symbol.test_count;
     UnitTestResult merged_symbol_table = link_test_elf_merged_symbol_table(arguments);
     result.succeeded_test_count += merged_symbol_table.succeeded_test_count;
     result.test_count += merged_symbol_table.test_count;
