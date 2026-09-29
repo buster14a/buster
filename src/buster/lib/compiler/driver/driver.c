@@ -899,7 +899,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     String8 architecture_option = {0};
     bool options_ended = false;
     bool action_seen = false;
-    String8 position_independent_executable_option = {0};
+    // Whether the code model in force came from -fPIE/-fpie, which is what
+    // -fno-pie cancels; -fno-pie after -fPIC leaves -fPIC's model alone.
+    bool position_independent_executable_model = false;
+    // The -shared or -pie spelling that asked for a position-independent
+    // image, kept for the diagnostic on a target with no writer for one.
+    String8 position_independent_image_option = {0};
     bool common_storage_requested = false;
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
@@ -1584,23 +1589,42 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         // an offset from the thread pointer, and it decides how every other
         // reference to an interposable symbol is spelled: through the GOT for
         // an address and the PLT for a direct call. -fno-pic asks for the
-        // rip-relative forms back. PIE-specific reference selection is not
-        // implemented for x86-64 ELF, so -fPIE/-fpie are rejected there
-        // instead of being silently ignored; other targets keep their prior
-        // accepted no-op behavior.
-        if (string_equal(argument, S8("-fPIC")) || string_equal(argument, S8("-fpic")))
+        // rip-relative forms back. -fPIE/-fpie select the same model: an
+        // executable could bind its own definitions directly, but code that
+        // may be linked into a shared object is also correct in a PIE, and
+        // the position-independent image writer relaxes the GOT loads of
+        // definitions it binds. The last of the four positive spellings wins,
+        // as it does for GCC, and -fno-pie cancels only a PIE model.
+        if (string_equal(argument, S8("-fPIC")) || string_equal(argument, S8("-fpic")) || string_equal(argument, S8("-fPIE")) ||
+            string_equal(argument, S8("-fpie")))
         {
             invocation.position_independent = true;
+            position_independent_executable_model = string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie"));
             continue;
         }
-        if (string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie")))
-        {
-            position_independent_executable_option = argument;
-            continue;
-        }
-        if (string_equal(argument, S8("-fno-pic")))
+        if (string_equal(argument, S8("-fno-pic")) || (string_equal(argument, S8("-fno-pie")) && position_independent_executable_model))
         {
             invocation.position_independent = false;
+            position_independent_executable_model = false;
+            continue;
+        }
+        // The image a link produces. -shared outranks -pie wherever the two
+        // meet, as it does for GCC; -no-pie returns to the fixed-address
+        // executable only from -pie.
+        if (string_equal(argument, S8("-shared")))
+        {
+            invocation.image_kind = NATIVE_IMAGE_SHARED;
+            position_independent_image_option = argument;
+            continue;
+        }
+        if (string_equal(argument, S8("-pie")) || string_equal(argument, S8("-no-pie")))
+        {
+            bool pie = string_equal(argument, S8("-pie"));
+            if (invocation.image_kind != NATIVE_IMAGE_SHARED)
+            {
+                invocation.image_kind = pie ? NATIVE_IMAGE_PIE : NATIVE_IMAGE_EXECUTABLE;
+                position_independent_image_option = pie ? argument : (String8){0};
+            }
             continue;
         }
         // clang's spelling of the flag configure scripts pass the linker as
@@ -1656,10 +1680,23 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     {
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), S8("-fcommon"));
     }
-    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && position_independent_executable_option.length && !invocation.has_gpu_target &&
-        invocation.target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(invocation.target) == OBJECT_FORMAT_ELF64)
+    // Only the x86-64 Linux writer places a position-independent image. The
+    // request is a link option, so a compile-only invocation carrying it in
+    // shared flags is not refused for it, as GCC ignores it there.
+    bool position_independent_image_target =
+        !invocation.has_gpu_target && invocation.target.os == OPERATING_SYSTEM_LINUX && invocation.target.cpu_arch == CPU_ARCH_X86_64;
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.image_kind != NATIVE_IMAGE_EXECUTABLE &&
+        invocation.action == COMPILER_DRIVER_ACTION_LINK && !position_independent_image_target)
     {
-        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), position_independent_executable_option);
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), position_independent_image_option);
+    }
+    // Code linked into a position-independent image in this invocation is
+    // compiled for one: the fixed-address model's absolute and copy-relocated
+    // references are what such an image cannot hold.
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.image_kind != NATIVE_IMAGE_EXECUTABLE &&
+        invocation.action == COMPILER_DRIVER_ACTION_LINK)
+    {
+        invocation.position_independent = true;
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.emit_llvm_bitcode &&
         (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
@@ -2191,6 +2228,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
         bool versioned = version_symbol_size / sizeof(u16) >= symbol_count;
         library->exported_data_symbols = collect_data ? arena_allocate(arena, NativeDynamicDataSymbol, symbol_count) : 0;
         library->versioned_symbols = arena_allocate(arena, NativeDynamicVersionedSymbol, symbol_count);
+        library->referenced_symbols = arena_allocate(arena, String8, symbol_count);
         for (u64 symbol_index = 0; symbol_index < symbol_count; symbol_index += 1)
         {
             u64 symbol = symbol_offset + symbol_index * DRIVER_ELF_SYMBOL_SIZE;
@@ -2205,9 +2243,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             }
             u8 info = bytes.pointer[symbol + 4];
             u8 binding = (u8)(info >> 4);
-            // Defined global or weak entries only: an undefined or local one
-            // names nothing this executable could bind to.
-            if ((binding != 1 && binding != 2) || !section || !name || name >= string_size)
+            // Global or weak entries only: a local one names nothing this
+            // executable could bind to or define for the library.
+            if ((binding != 1 && binding != 2) || !name || name >= string_size)
             {
                 continue;
             }
@@ -2221,6 +2259,13 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
                 continue;
             }
             String8 spelling = {.pointer = (char8*)bytes.pointer + string_offset + name, .length = length};
+            // An undefined entry is a name the library expects some other
+            // module -- possibly this executable -- to define.
+            if (!section)
+            {
+                library->referenced_symbols[library->referenced_symbol_count++] = spelling;
+                continue;
+            }
             u16 version = 0;
             if (versioned)
             {
@@ -2314,6 +2359,8 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
             library->exported_data_symbol_count = 0;
             library->versioned_symbols = 0;
             library->versioned_symbol_count = 0;
+            library->referenced_symbols = 0;
+            library->referenced_symbol_count = 0;
             file_map_unmap(file);
         }
     }
@@ -3048,6 +3095,17 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
     return true;
 }
 
+// A failed native link names its reason and symbol. A relocation refused in
+// a position-independent image is almost always an object compiled for a
+// fixed address, so the diagnostic says what the image needs instead.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena, CompilerDriverInvocation invocation, NativeExecutableLinkResult link)
+{
+    String8 hint = invocation.image_kind != NATIVE_IMAGE_EXECUTABLE && link.error == LINK_ERROR_RELOCATION
+                       ? S8(" (a position-independent image needs objects compiled with -fPIC)")
+                       : S8("");
+    return string_format(arena, S8("native C link failed with {S8}: {S8}{S8}"), link_error_name(link.error), link.symbol, hint);
+}
+
 // What a finished object becomes: textual assembly for -S, a written object
 // file for -c, or a linked executable. It is shared by the C pipeline above
 // and by the assembly front door below, which reach the same three outputs
@@ -3162,14 +3220,14 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
                                                     .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
                                                     .runtime_exports_known = dynamic_libraries.runtime.exports_known,
                                                     .debug_info = invocation.debug_info,
+                                                    .image_kind = (u8)invocation.image_kind,
                                                 });
     compiler_driver_dynamic_libraries_release(&dynamic_libraries);
     WORK_LEDGER_RECORD(OUTPUT_LINK_IMAGE_BYTES, result->native_link.executable.length);
     if (result->native_link.error != LINK_ERROR_NONE)
     {
         result->error = COMPILER_DRIVER_ERROR_LINK;
-        result->diagnostic =
-            string_format(arena, S8("native C link failed with {S8}: {S8}"), link_error_name(result->native_link.error), result->native_link.symbol);
+        result->diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result->native_link);
     }
 }
 
@@ -4759,14 +4817,14 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                                     .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
                                                     .runtime_exports_known = dynamic_libraries.runtime.exports_known,
                                                     .debug_info = invocation.debug_info,
+                                                    .image_kind = (u8)invocation.image_kind,
                                                 });
     compiler_driver_dynamic_libraries_release(&dynamic_libraries);
     WORK_LEDGER_RECORD(OUTPUT_LINK_IMAGE_BYTES, result.native_link.executable.length);
     if (result.native_link.error != LINK_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic =
-            string_format(arena, S8("native C link failed with {S8}: {S8}"), link_error_name(result.native_link.error), result.native_link.symbol);
+        result.diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result.native_link);
     }
 finish:
     if (archive_state.arena) arena_destroy(archive_state.arena, 1);
