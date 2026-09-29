@@ -23734,6 +23734,105 @@ BUSTER_GLOBAL_LOCAL String8 matrix_coverage_resolve_executable(Arena* arena, Str
     }
     return result;
 }
+
+#define MATRIX_COVERAGE_PROCESS_QUERY_CAPTURE_LIMIT 4096
+
+typedef enum MatrixCoverageProcessQueryFailure
+{
+    MATRIX_COVERAGE_PROCESS_QUERY_SUCCESS,
+    MATRIX_COVERAGE_PROCESS_QUERY_SPAWN_FAILURE,
+    MATRIX_COVERAGE_PROCESS_QUERY_TIMEOUT,
+    MATRIX_COVERAGE_PROCESS_QUERY_WAIT_FAILURE,
+    MATRIX_COVERAGE_PROCESS_QUERY_NONZERO_EXIT,
+} MatrixCoverageProcessQueryFailure;
+
+typedef struct MatrixCoverageProcessQueryResult MatrixCoverageProcessQueryResult;
+struct MatrixCoverageProcessQueryResult
+{
+    MatrixCoverageProcessQueryFailure failure;
+    ProcessSpawnFailure spawn_failure;
+    OsError spawn_error;
+    ProcessResult wait_result;
+    u32 platform_status;
+    u64 elapsed_microseconds;
+    u64 observed_output_bytes;
+    u64 observed_error_bytes;
+    u64 captured_output_bytes;
+    u64 captured_error_bytes;
+    u64 dropped_output_bytes;
+    u64 dropped_error_bytes;
+    String8 output;
+    String8 error;
+    String8 preferred;
+    bool timed_out;
+    bool termination_requested;
+    bool forcibly_terminated;
+    bool output_truncated;
+    bool capture_failed;
+    bool process_tree_cleanup_failed;
+};
+
+BUSTER_GLOBAL_LOCAL MatrixCoverageProcessQueryResult matrix_coverage_process_query_detailed(
+    Arena* arena, SliceString8 arguments, bool prefer_standard_error, u64 timeout_microseconds)
+{
+    ProcessSpawnOptions options = {
+        .capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
+        .use_process_environment = 1,
+        .new_process_group = timeout_microseconds != 0,
+        .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_TRUNCATE,
+    };
+    options.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = MATRIX_COVERAGE_PROCESS_QUERY_CAPTURE_LIMIT;
+    options.capture_limits.per_stream[STANDARD_STREAM_ERROR] = MATRIX_COVERAGE_PROCESS_QUERY_CAPTURE_LIMIT;
+    options.capture_limits.total = 2 * MATRIX_COVERAGE_PROCESS_QUERY_CAPTURE_LIMIT;
+    u64 started = os_now_microseconds();
+    ProcessSpawnResult spawn = os_process_spawn(arguments, (SliceString8){0}, (SliceString8){0}, options);
+    MatrixCoverageProcessQueryResult result = {
+        .failure = MATRIX_COVERAGE_PROCESS_QUERY_SPAWN_FAILURE,
+        .spawn_failure = spawn.failure,
+        .spawn_error = spawn.error,
+    };
+    if (spawn.handle)
+    {
+        ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, timeout_microseconds);
+        result.wait_result = wait.result;
+        result.platform_status = wait.platform_status;
+        result.output = (String8){.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer,
+                                  .length = wait.streams[STANDARD_STREAM_OUTPUT].length};
+        result.error = (String8){.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer,
+                                 .length = wait.streams[STANDARD_STREAM_ERROR].length};
+        result.preferred = prefer_standard_error && result.error.length ? result.error :
+            (result.output.length ? result.output : result.error);
+        result.observed_output_bytes = wait.observed_bytes[STANDARD_STREAM_OUTPUT];
+        result.observed_error_bytes = wait.observed_bytes[STANDARD_STREAM_ERROR];
+        result.captured_output_bytes = wait.captured_bytes[STANDARD_STREAM_OUTPUT];
+        result.captured_error_bytes = wait.captured_bytes[STANDARD_STREAM_ERROR];
+        result.dropped_output_bytes = wait.dropped_bytes[STANDARD_STREAM_OUTPUT];
+        result.dropped_error_bytes = wait.dropped_bytes[STANDARD_STREAM_ERROR];
+        result.timed_out = wait.timed_out;
+        result.termination_requested = wait.termination_requested;
+        result.forcibly_terminated = wait.forcibly_terminated;
+        result.output_truncated = wait.output_truncated;
+        result.capture_failed = wait.capture_failed;
+        result.process_tree_cleanup_failed = wait.process_tree_cleanup_failed;
+        if (wait.timed_out) { result.failure = MATRIX_COVERAGE_PROCESS_QUERY_TIMEOUT; }
+else if (wait.capture_failed || wait.process_tree_cleanup_failed)
+{
+    result.failure = MATRIX_COVERAGE_PROCESS_QUERY_WAIT_FAILURE;
+}
+else if (wait.result == PROCESS_RESULT_SUCCESS)
+{
+    result.failure = MATRIX_COVERAGE_PROCESS_QUERY_SUCCESS;
+}
+else if (wait.platform_status)
+{
+    result.failure = MATRIX_COVERAGE_PROCESS_QUERY_NONZERO_EXIT;
+}
+else { result.failure = MATRIX_COVERAGE_PROCESS_QUERY_WAIT_FAILURE; }
+    }
+    result.elapsed_microseconds = os_now_microseconds() - started;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool matrix_coverage_process_query(Arena* arena, SliceString8 arguments, bool prefer_standard_error, String8* output)
 {
     ProcessSpawnResult spawn = os_process_spawn(arguments, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR), .use_process_environment = 1});
