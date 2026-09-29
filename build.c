@@ -36566,6 +36566,15 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
     if (service) os_argument_builder_append(&builder, S8("-DBQ_SERVICE_INSTALLED=1"));
     os_argument_builder_append(&builder, (service ? (self_test ? S8("tools/bench_service/tests.c") : S8("tools/bench_service/main.c")) : (self_test ? S8("tools/throughput/tests.c") : S8("tools/throughput/throughput.c"))));
     os_argument_builder_append(&builder, S8("tools/throughput/shared.c"));
+#if BUSTER_LINUX
+    /* #881-E: the durable result store and the result composer are separate
+     * translation units linked into the service (and its tests). */
+    if (service)
+    {
+        os_argument_builder_append(&builder, S8("tools/bench_service/retirement_result.c"));
+        os_argument_builder_append(&builder, S8("tools/bench_service/retirement_compose.c"));
+    }
+#endif
     if (sanitize)
     {
         os_argument_builder_append(&builder, S8("-g"));
@@ -40276,10 +40285,11 @@ BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
                              S8("tools/bench_service/retirement_correctness_tests.c"),
                              S8("tools/bench_service/retirement_result_tests.c"),
                              S8("tools/bench_service/retirement_validator_eligibility.c"),
-                             S8("tools/bench_service/retirement_reference_producer_tests.c")};
+                             S8("tools/bench_service/retirement_reference_producer_tests.c"),
+                             S8("tools/bench_service/retirement_compose_tests.c")};
         String8 names[] = {S8("retirement-prepare-tests"), S8("retirement-correctness-tests"),
                            S8("retirement-store-tests"), S8("retirement-validator-eligibility"),
-                           S8("retirement-reference-producer-tests")};
+                           S8("retirement-reference-producer-tests"), S8("retirement-compose-tests")};
         for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
         {
             String8 executable = string_format(arena, S8("build/bench-service-tools/{S8}{S8}"),
@@ -40298,15 +40308,13 @@ BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
             os_argument_builder_append(&builder, S8("-funsigned-char"));
             os_argument_builder_append(&builder, S8("-Isrc"));
             os_argument_builder_append(&builder, S8("-DBUSTER_SINGLE_THREADED=1"));
-            if (index == 2) os_argument_builder_append(&builder, S8("-DBUSTER_RETIREMENT_STORE_TEST"));
+            if (index == 2 || index == 5) os_argument_builder_append(&builder, S8("-DBUSTER_RETIREMENT_STORE_TEST"));
             os_argument_builder_append(&builder, sources[index]);
-            if (index == 0 || index == 3)
+            if (index == 0 || index == 3 || index == 5)
                 os_argument_builder_append(&builder, S8("tools/throughput/shared.c"));
-            if (index == 2)
-            {
-                os_argument_builder_append(&builder, S8("tools/bench_service/retirement_result.c"));
-                os_argument_builder_append(&builder, S8("src/buster/lib/hash.c"));
-            }
+            if (index == 5) os_argument_builder_append(&builder, S8("tools/bench_service/retirement_compose.c"));
+            if (index == 2 || index == 5) os_argument_builder_append(&builder, S8("tools/bench_service/retirement_result.c"));
+            if (index == 2) os_argument_builder_append(&builder, S8("src/buster/lib/hash.c"));
             if (sanitize)
             {
                 os_argument_builder_append(&builder, S8("-g"));
@@ -40334,6 +40342,20 @@ BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
             *run = (ProcessRun){.arguments = os_argument_builder_flush(&builder),
                                 .working_directory = S8("."),
                                 .spawn_options = {.use_process_environment = 1, .search_path = index == 3}};
+            if (index == 5)
+            {
+                /* The composed sealed result through the #511 validator. */
+                ProcessRun* validate = run_add(arena, step_add(arena));
+                builder = os_argument_builder_start(arena);
+                os_argument_builder_append(&builder, S8("python3"));
+                os_argument_builder_append(&builder, S8("-W"));
+                os_argument_builder_append(&builder, S8("error"));
+                os_argument_builder_append(&builder, S8("tools/bench_service/retirement_compose_test.py"));
+                os_argument_builder_append(&builder, executable);
+                *validate = (ProcessRun){.arguments = os_argument_builder_flush(&builder),
+                                         .working_directory = S8("."),
+                                         .spawn_options = {.use_process_environment = 1, .search_path = 1}};
+            }
         }
         ProcessRun* replay = run_add(arena, step_add(arena));
         OsArgumentBuilder builder = os_argument_builder_start(arena);
