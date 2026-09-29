@@ -702,12 +702,32 @@ the service-opened private output directory before launch. Afterwards the
 producer opens each object relative to that descriptor without following
 links and hashes it; each must equal its frozen artifact byte for byte, in
 every warmup and sample batch, or the attempt is invalid for nondeterminism.
-The batch output digest is the SHA-256 of the canonical JSON list of per-input
-object digests (null for an input without an object). A singleton link or
-self-host group writes its one artifact, whose digest list has one entry.
+Each member input also names its census row; members appear in ascending row
+order and must equal the group's layout rows, and a control names no row
+(`TP_RETIREMENT_BATCH_NO_ROW`) or a row outside the timed projection.
+
+Batch output digest schema (version 1, used by the frozen command's
+`output_sha256` and the transcript's `output_sha256` for a compiler batch): the
+lowercase hex SHA-256 of the UTF-8 bytes of a JSON array with one entry per
+frozen batch input, in contract order. The entry is that input's object digest
+as a 64-character lowercase hex string, or JSON `null` when the input is a
+control that writes no object. The array is written without whitespace
+(`json.dumps(list, separators=(",", ":"))`), so a member/control pair encodes as
+`["<64 hex>",null]`. A singleton link or self-host group writes its one
+artifact, so its array has exactly one string entry. Any other encoding,
+ordering or entry count is a different digest and fails the oracle.
 Runtime output is read from the actual child's log descriptor. All paths hash a
 regular, single-link file, bounded to 1 GiB, with identity/size/metadata checks
 around the read.
+
+The A1 compiler campaign is fail-closed until a separate reviewed change
+(tracked as review item M4) supplies three missing pieces: a reviewed worker
+budget replacing the fixed one-hour budget, which cannot hold the full
+invocation count; packing per-input metrics files into bounded shards, since a
+full campaign writes one file per object batch invocation (244 per group at 60
+pairs) and exceeds the 4,096-entry evidence store; and frozen batch contracts
+in the correctness gate. Until then the service refuses object groups and no
+campaign is admitted or run.
 
 `retirement_metrics.h` reads the compiler's own per-input metrics text
 (`docs/agents/driver.md`, #1823) without trusting the compiler: a tagged

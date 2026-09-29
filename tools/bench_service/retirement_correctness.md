@@ -291,6 +291,12 @@ cannot be joined to an object batch group here and the binding fails closed
 (`BQ_RECIPE_MISMATCH` from the queue-aware entry). Freezing object batch
 contracts in the gate is a separate producer step.
 
+The campaign stays fail-closed until that separate change (review item M4)
+lands. It must add frozen batch contracts to the gate, replace the fixed
+one-hour worker budget with a reviewed campaign budget, and pack per-input
+metrics files into bounded shards so that a full campaign fits the 4,096-entry
+evidence store. This branch admits and runs no campaign.
+
 `bq_retirement_campaign_run` rejects bindings without held service descriptors
 and rechecks the held record, gate join and transcript identity before launch.
 It checks the gate seal on each call and rehashes all gate facts before the
