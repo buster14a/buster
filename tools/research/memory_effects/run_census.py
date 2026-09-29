@@ -8,7 +8,8 @@ root = pathlib.Path.cwd()
 out = root / "memory-evidence"
 out.mkdir(exist_ok=True)
 driver = root / "src/buster/lib/compiler/driver/driver.c"
-source = driver.read_text()
+original_source = driver.read_text()
+source = original_source
 include = '#include <buster/lib/compiler/driver/driver.h>\n'
 assert source.count(include) == 1
 source = source.replace(include, include + '#include "../../../../../tools/research/memory_effects/memory_census.h"\n')
@@ -19,6 +20,7 @@ driver.write_text(source)
 subprocess.run(['clang', '-Isrc', '-Wall', '-Werror', '-Wno-unused-function', '-Wno-unused-variable', 'build.c', '-o', '/tmp/buster-memory-build'], check=True)
 subprocess.run(['/tmp/buster-memory-build', 'generate', '--cc', 'clang', '--linker', 'DEFAULT', '--no-include-tests'], check=True)
 subprocess.run(['/tmp/buster-memory-build', 'build', '--config', 'Release', '-t', 'ide'], check=True)
+driver.write_text(original_source)
 inputs = [
     'tools/research/memory_effects/memory_cases.c',
     'tests/basic_c_operations.c',
