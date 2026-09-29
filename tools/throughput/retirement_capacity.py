@@ -5,10 +5,21 @@ This is arithmetic only. Amendment A1 times the native-host batch groups: one
 fresh compiler process per (configuration, recipe) object group compiles every
 fixture of the group, and each link or self-host stage row is a singleton
 group. The checked-in support declaration and the fixture recipe table fix the
-group shapes; the blocked service profile has no authenticated #508 rows or
-validator-derived eligibility, so group sizes are a source-derived envelope
-(every supported subject timed, every registered control appended), never an
-admitted campaign size or a host-rate claim.
+object group shapes; the blocked service profile has no authenticated #508 rows
+or validator-derived eligibility, so object group sizes are a source-derived
+envelope (every supported subject timed, every registered control appended),
+never an admitted campaign size or a host-rate claim.
+
+Stage singletons (native link and self-host rows, timed) and untimed
+singletons (cross-target link and self-host rows) are counted, never assumed:
+from canonical #508 performance rows when ``--performance-rows`` supplies them
+(the validator's own ``_batch_groups``/``_untimed_groups`` partition), and
+otherwise from the declaration-derived minimum the validator enforces (one
+native link and one native self-host row, no cross-target stage row). The
+report also states the declaration's upper envelope for stage rows (both
+stages on every declared object identity) and how many further runtime-eligible
+stage singletons the store could hold, so the minimum is never mistaken for an
+upper bound.
 
 The model mirrors tools/throughput/retirement_campaign.h:
 ``(G + U) * 2 * (warmups + rounds * pairs)`` invocations per stage, the
@@ -17,7 +28,9 @@ metrics artifacts packed into metrics shards (at most ``2 * ceil(bytes / cap)``
 shards per writer under greedy rotation), and the untimed cross-target
 code-artifact batches (two variants times production and reproduction).
 The per-input metrics bound and the time bounds are reviewed pins set at
-integration time; the report shows which values fit the store.
+integration time; the report shows which values fit the store and states the
+largest per-input metrics bound that fits at the 254-pair maximum as an
+explicit assumption the reviewed budget must satisfy, never a measurement.
 """
 
 import argparse
@@ -205,11 +218,18 @@ def source_limits(root):
         "store_file_bytes": source_product(store, "TP_RETIREMENT_STORE_FILE_BYTES"),
         "store_total_bytes": source_product(store, "TP_RETIREMENT_STORE_TOTAL_BYTES"),
     }
-    derivation = re.search(r'#define TP_RETIREMENT_BUDGET_DERIVATION \\\n\s*"([^"]*)"\s*\\\n\s*"([^"]*)"',
+    derivation = re.search(r'#define TP_RETIREMENT_BUDGET_DERIVATION((?:\s*\\\n\s*"[^"]*")+)',
                            budget.read_text(encoding="utf-8"))
     if not derivation:
         raise ValueError("could not read the reviewed-budget derivation from retirement_budget.h")
-    source["budget_derivation"] = derivation.group(1) + derivation.group(2)
+    source["budget_derivation"] = "".join(re.findall(r'"([^"]*)"', derivation.group(1)))
+    stage_names = re.search(r'tp_retirement_budget_stage_names\[[A-Z_]+\] = \{\s*([^}]*)\}',
+                            budget.read_text(encoding="utf-8"))
+    if not stage_names:
+        raise ValueError("could not read the reviewed-budget stage names from retirement_budget.h")
+    source["budget_stages"] = re.findall(r'"([^"]*)"', stage_names.group(1))
+    if source["budget_stages"] != ["object", "link", "self-host-stage1"]:
+        raise ValueError("the reviewed budget's stage keys differ from the validator's stages")
     if source["campaign_stages"] != 2 or source["minimum_pairs"] % 2:
         raise ValueError("unexpected fixed campaign structure in source")
     if source["sample_partition_records"] % source["sample_records_per_shard"]:
@@ -337,35 +357,107 @@ def maximum_fitting_per_input(groups, runtime_rows, pairs, untimed, source, head
     return best
 
 
+def budget_key(group):
+    """The reviewed budget's key for one group: (kind, stage)."""
+    return (group["kind"], group.get("stage", "object" if group["kind"] == "object" else None))
+
+
 def budget_counts(groups, runtime_rows, pairs, untimed, source):
-    """The counts the reviewed-budget derivation multiplies, and the contract's
-    illustrative per-batch estimate (not a reviewed bound)."""
+    """The counts the reviewed-budget derivation multiplies, keyed as the
+    budget keys its bounds (group kind and stage; untimed groups separately),
+    and the contract's illustrative object-batch estimate (not a reviewed
+    bound; stage singletons have no contract estimate and are excluded)."""
     per_unit = 2 * (source["warmups"] + source["rounds"] * pairs)
     per_group = source["campaign_stages"] * per_unit
+    for group in list(groups) + list(untimed):
+        kind, stage = budget_key(group)
+        if (kind, stage) != ("object", "object") and (kind != "singleton" or stage not in
+                                                      source["budget_stages"][1:]):
+            raise ValueError("a group has no reviewed-budget key (kind and stage)")
+
+    def by_key(items, repeats):
+        counts = {}
+        for group in items:
+            key = "/".join(budget_key(group))
+            counts[key] = counts.get(key, 0) + repeats
+        return dict(sorted(counts.items()))
+
     large = sum(1 for group in groups if group["kind"] == "object" and group["inputs"] > 4)
-    small = len(groups) - large
+    small = sum(1 for group in groups if group["kind"] == "object") - large
     illustrative_ns = per_group * (large * CONTRACT_ESTIMATE_LARGE_BATCH_NS
                                    + small * CONTRACT_ESTIMATE_SMALL_BATCH_NS)
     return {
         "derivation": source["budget_derivation"],
         "compiler_batches_both_stages": per_group * len(groups),
+        "compiler_batches_by_kind_and_stage": by_key(groups, per_group),
         "runtime_processes_both_stages": per_group * runtime_rows,
         "untimed_batches": source["untimed_batches_per_group"] * len(untimed),
-        "illustrative_compiler_hours_at_contract_estimates": round(illustrative_ns / 3.6e12, 2),
+        "untimed_batches_by_kind_and_stage": by_key(untimed, source["untimed_batches_per_group"]),
+        "singletons_costed_as_one_input_batches": False,
+        "untimed_bounds_are_the_slowest_untimed_target": True,
+        "illustrative_object_batch_hours_at_contract_estimates": round(illustrative_ns / 3.6e12, 2),
         "illustrative_rates_are_a_reviewed_bound": False,
     }
 
 
-def a1_groups(root, binding, contract):
+def maximum_fitting_stage_singletons(groups, runtime_rows, pairs, untimed, per_input, source):
+    """How many further runtime-eligible timed stage singletons still fit."""
+    model = campaign_model(groups, runtime_rows, pairs, untimed, per_input, source)
+    if not model["fits"]:
+        return None
+    low, high = 0, 1
+    extra = {"kind": "singleton", "stage": "link", "inputs": 1, "members": 1}
+
+    def fits(count):
+        return campaign_model(list(groups) + [extra] * count, runtime_rows + count, pairs, untimed,
+                              per_input, source)["fits"]
+    while fits(high):
+        low, high = high, high * 2
+    while high - low > 1:
+        middle = (low + high) // 2
+        low, high = (middle, high) if fits(middle) else (low, middle)
+    return low
+
+
+def stage_rows_from_performance_rows(binding, data):
+    """Count stage singletons from canonical #508 performance rows with the
+    validator's own partition: timed singletons by stage, the runtime-eligible
+    timed rows, and untimed singletons by stage (code-observed cross-target
+    link and self-host rows)."""
+    parsed, _axes, _family = binding._performance_rows(data, "performance_rows")
+    timed = [group for group in binding._batch_groups(parsed)
+             if group["kind"] == binding.SINGLETON_STAGE_GROUP]
+    untimed = [group for group in binding._untimed_groups(parsed)
+               if group["kind"] == binding.SINGLETON_STAGE_GROUP]
+    runtime = sum(1 for row in binding._timed_rows(parsed) if row["metrics"]["generated_runtime"])
+    return ([group["identity"]["artifact_stage"] for group in timed], runtime,
+            [group["identity"]["artifact_stage"] for group in untimed], "census")
+
+
+def stage_rows_from_declaration(binding):
+    """The declaration-derived minimum the validator enforces: a complete
+    stage population has at least one native link and one native self-host
+    row (SUPPORT_MIN_STAGE_ROW_COUNT - SUPPORT_OBJECT_ROW_COUNT stage rows) and
+    needs no cross-target stage row. Runtime eligibility is conditional, so
+    the worst case (every timed stage row runtime-eligible) is used."""
+    minimum = binding.SUPPORT_MIN_STAGE_ROW_COUNT - binding.SUPPORT_OBJECT_ROW_COUNT
+    stages = [stage for stage in binding.STAGES if stage != "object"]
+    if minimum != len(stages):
+        raise ValueError("the validator's minimum stage population is not one row per stage")
+    return stages, minimum, [], "declaration-minimum"
+
+
+def a1_groups(root, binding, contract, stage_rows=None):
     """Source-derived envelope of the A1 batch groups.
 
     Per native-host configuration, each fixture recipe of the supported
     subjects is one object group whose members are those subjects; every
     compiler-default group also carries the registered non-object controls and
     rejection fixtures as appended controls (the worst case for inputs and
-    metrics bytes). Link and self-host stage rows are singleton groups. The
-    untimed groups repeat the object shapes on every cross-target, without
-    controls.
+    metrics bytes). Link and self-host stage rows are singleton groups counted
+    by ``stage_rows`` (census or declaration minimum). The untimed object
+    groups repeat the object shapes on every cross-target, without controls;
+    the untimed singletons are the counted cross-target stage rows.
     """
     support = read_tsv(root / binding.SUPPORT_DECLARATION_PATH)
     supported = [row["path"] for row in support
@@ -384,15 +476,30 @@ def a1_groups(root, binding, contract):
         per_configuration.append({"kind": "object", "recipe": recipe, "members": len(members),
                                   "inputs": len(members) + len(controls),
                                   "fixtures": members + controls})
-    timed = [dict(group) for _ in range(configurations) for group in per_configuration]
-    stage_rows = len(binding.STAGES) - 1
-    timed.extend({"kind": "singleton", "recipe": "stage", "members": 1, "inputs": 1, "fixtures": []}
-                 for _ in range(stage_rows))
+    timed = [dict(group, stage="object") for _ in range(configurations) for group in per_configuration]
+    timed_stages, runtime, untimed_stages, stage_source = stage_rows or stage_rows_from_declaration(binding)
+    timed.extend({"kind": "singleton", "stage": stage, "recipe": "stage", "members": 1, "inputs": 1,
+                  "fixtures": []} for stage in timed_stages)
     untimed_targets = len(binding.TARGETS) - 1
-    untimed = [{"kind": "object", "recipe": group["recipe"], "members": group["members"],
+    untimed = [{"kind": "object", "stage": "object", "recipe": group["recipe"], "members": group["members"],
                 "inputs": group["members"], "fixtures": group["fixtures"][:group["members"]]}
                for _ in range(untimed_targets * configurations) for group in per_configuration]
-    return timed, untimed, configurations, per_configuration, stage_rows
+    untimed.extend({"kind": "singleton", "stage": stage, "recipe": "stage", "members": 1, "inputs": 1,
+                    "fixtures": []} for stage in untimed_stages)
+    stages = {"source": stage_source, "runtime_rows": runtime,
+              "timed_singletons_by_stage": {stage: timed_stages.count(stage) for stage in binding.STAGES[1:]},
+              "untimed_singletons_by_stage": {stage: untimed_stages.count(stage)
+                                              for stage in binding.STAGES[1:]},
+              "declared_object_identities": binding.SUPPORT_OBJECT_ROW_COUNT,
+              "native_supported_object_identities": configurations * sum(
+                  group["members"] for group in per_configuration)}
+    # Every stage row shares its identity with a declared object row, so both
+    # stages on every declared identity bound the stage rows from above.
+    stages["stage_rows_upper_envelope"] = {
+        "timed": stages["native_supported_object_identities"] * (len(binding.STAGES) - 1),
+        "untimed": (binding.SUPPORT_OBJECT_ROW_COUNT - stages["native_supported_object_identities"])
+        * (len(binding.STAGES) - 1)}
+    return timed, untimed, configurations, per_configuration, stages
 
 
 def input_list_bytes(fixtures):
@@ -400,12 +507,18 @@ def input_list_bytes(fixtures):
     return sum(3 + len(item) + item.count('"') + item.count("\\") for item in fixtures)
 
 
-def build_report(root, require_committed=True):
+def build_report(root, require_committed=True, performance_rows=None):
     root = root.resolve()
     input_digests = verify_committed_inputs(root, REPORT_INPUTS) if require_committed else {}
     sys.path.insert(0, str(root / "tools"))
     import native_retirement_contract as contract
     import native_retirement_performance_binding as binding
+    stage_rows = None
+    rows_sha256 = None
+    if performance_rows is not None:
+        data = Path(performance_rows).read_bytes()
+        rows_sha256 = hashlib.sha256(data).hexdigest()
+        stage_rows = stage_rows_from_performance_rows(binding, data)
 
     support_bytes = (root / binding.SUPPORT_DECLARATION_PATH).read_bytes()
     support_sha = hashlib.sha256(support_bytes).hexdigest()
@@ -416,7 +529,8 @@ def build_report(root, require_committed=True):
     if profile.get("support-declaration-sha256") != support_sha:
         raise ValueError("support declaration digest differs from the blocked profile pin")
     source = source_limits(root)
-    timed, untimed, configurations, per_configuration, stage_rows = a1_groups(root, binding, contract)
+    timed, untimed, configurations, per_configuration, stages = a1_groups(root, binding, contract, stage_rows)
+    runtime_rows = stages["runtime_rows"]
     largest_list = max(input_list_bytes(group["fixtures"]) for group in per_configuration)
     largest_inputs = max(group["inputs"] for group in per_configuration)
     if largest_inputs > source["batch_inputs"] or largest_list > source["input_list_bytes"] \
@@ -425,11 +539,16 @@ def build_report(root, require_committed=True):
     scenarios = {}
     for pairs in (source["minimum_pairs"], source["maximum_pairs"]):
         for per_input in (4096, 8192, 16384):
-            for runtime in (0, stage_rows):
+            for runtime in sorted({0, runtime_rows}):
                 model = campaign_model(timed, runtime, pairs, untimed, per_input, source)
                 scenarios[f"pairs-{pairs}/per-input-{per_input}/runtime-{runtime}"] = model
-    maxima = {f"pairs-{pairs}": maximum_fitting_per_input(timed, stage_rows, pairs, untimed, source)
+    maxima = {f"pairs-{pairs}": maximum_fitting_per_input(timed, runtime_rows, pairs, untimed, source)
               for pairs in (source["minimum_pairs"], source["maximum_pairs"])}
+    maximum_pairs = source["maximum_pairs"]
+    assumption = maxima[f"pairs-{maximum_pairs}"]
+    headroom = {f"per-input-{per_input}": maximum_fitting_stage_singletons(
+                    timed, runtime_rows, maximum_pairs, untimed, per_input, source)
+                for per_input in (4096, 8192)}
     report = {
         "schema": "buster-native-retirement-capacity-model-v2",
         "source": {
@@ -439,6 +558,7 @@ def build_report(root, require_committed=True):
             "report_input_sha256": input_digests,
             "support_declaration": binding.SUPPORT_DECLARATION_PATH,
             "support_declaration_sha256": support_sha,
+            "performance_rows_sha256": rows_sha256,
             "profile": str(profile_path.relative_to(root)),
             "profile_status": profile.get("status"),
             "campaign_budget_pinned": "campaign-budget-sha256" in profile,
@@ -449,9 +569,11 @@ def build_report(root, require_committed=True):
                 {"recipe": group["recipe"], "members": group["members"], "inputs": group["inputs"]}
                 for group in per_configuration],
             "timed_object_groups": sum(group["kind"] == "object" for group in timed),
-            "stage_singleton_groups": stage_rows,
+            "stage_singleton_groups": sum(group["kind"] == "singleton" for group in timed),
+            "stage_rows": stages,
             "timed_rows_envelope": sum(group["members"] for group in timed),
             "untimed_groups": len(untimed),
+            "untimed_singleton_groups": sum(group["kind"] == "singleton" for group in untimed),
             "largest_batch_inputs": largest_inputs,
             "largest_input_list_bytes": largest_list,
             "batch_argv_is_constant_in_inputs": True,
@@ -460,8 +582,17 @@ def build_report(root, require_committed=True):
         "policy_limits": source,
         "scenarios": scenarios,
         "maximum_fitting_per_input_metrics_bound": maxima,
+        "measured_bound_assumption": {
+            "pairs_per_round": maximum_pairs,
+            "maximum_per_input_metrics_bytes": assumption,
+            "statement": (f"the reviewed per-input metrics bound must be at most {assumption} bytes per "
+                          f"input at {maximum_pairs} pairs for this population; this is an assumption "
+                          "about measured metrics sizes that integration must confirm, not a measurement"),
+            "measured_here": False,
+        },
+        "additional_runtime_stage_singletons_fitting_at_maximum_pairs": headroom,
         "reviewed_budget": {
-            **budget_counts(timed, stage_rows, source["maximum_pairs"], untimed, source),
+            **budget_counts(timed, runtime_rows, source["maximum_pairs"], untimed, source),
             "pinned": "campaign-budget-sha256" in profile,
             "one_hour_worker_budget_applies": False,
         },
@@ -482,6 +613,8 @@ def render_text(report):
         f"profile={report['source']['profile_status']} "
         f"campaign_budget_pinned={str(report['source']['campaign_budget_pinned']).lower()}",
         f"groups object={population['timed_object_groups']} singleton={population['stage_singleton_groups']} "
+        f"stage_source={population['stage_rows']['source']} "
+        f"untimed_singletons={population['untimed_singleton_groups']} "
         f"configurations={population['native_host_configurations']} "
         f"timed_rows_envelope={population['timed_rows_envelope']} untimed_groups={population['untimed_groups']} "
         f"largest_batch_inputs={population['largest_batch_inputs']} "
@@ -501,10 +634,11 @@ def render_text(report):
     budget = report["reviewed_budget"]
     lines.extend([
         "max_fitting_per_input_metrics_bound " + " ".join(f"{key}={value}" for key, value in maxima.items()),
+        "ASSUMPTION " + report["measured_bound_assumption"]["statement"],
         f"reviewed_budget pinned={str(budget['pinned']).lower()} "
         f"compiler_batches={budget['compiler_batches_both_stages']} "
         f"runtime_processes={budget['runtime_processes_both_stages']} untimed_batches={budget['untimed_batches']} "
-        f"illustrative_compiler_hours={budget['illustrative_compiler_hours_at_contract_estimates']}",
+        f"illustrative_object_batch_hours={budget['illustrative_object_batch_hours_at_contract_estimates']}",
         "CONCLUSION modeled-only; payload bytes use the source-proven maximal line widths and the reviewed "
         "per-input metrics bound, and exclude the caller's external entries/bytes; the recipe stays blocked.",
     ])
@@ -516,9 +650,11 @@ def main():
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2],
                         help="immutable checkout root (default: this repository)")
     parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument("--performance-rows", type=Path, default=None,
+                        help="canonical #508 performance rows: count stage singletons from the census")
     args = parser.parse_args()
     try:
-        report = build_report(args.repo)
+        report = build_report(args.repo, performance_rows=args.performance_rows)
     except (OSError, ValueError, OverflowError, KeyError) as error:
         parser.error(str(error))
     if args.format == "json":

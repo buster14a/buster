@@ -7,7 +7,10 @@ derivation against the C collector's own capacity figures
 4,096-entry and 128 GiB store caps once per-batch metrics artifacts are
 packed into shards. No performance or admission claim follows.
 """
+import copy
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools/throughput"))
 sys.path.insert(0, str(ROOT / "tools"))
 import retirement_capacity as capacity  # noqa: E402
+import native_retirement_performance_binding as binding  # noqa: E402
+import native_retirement_performance_binding_test as binding_tests  # noqa: E402
 
 
 def c_fixture_groups(per_configuration=(416, 4, 1, 1, 1), members=None):
@@ -23,10 +28,29 @@ def c_fixture_groups(per_configuration=(416, 4, 1, 1, 1), members=None):
     members = members or (406, 2, 1, 1, 1)
     groups = [{"kind": "object", "inputs": inputs, "members": count}
               for _ in range(16) for inputs, count in zip(per_configuration, members)]
-    groups.extend({"kind": "singleton", "inputs": 1, "members": 1} for _ in range(2))
+    groups.extend({"kind": "singleton", "stage": stage, "inputs": 1, "members": 1}
+                  for stage in ("link", "self-host-stage1"))
     untimed = [{"kind": "object", "inputs": inputs, "members": inputs}
                for _ in range(11 * 16) for inputs in per_configuration]
     return groups, untimed
+
+
+def canonical_rows(specs):
+    """Canonical #508 performance rows: (target, stage, runtime, code) per row."""
+    template = binding_tests.BindingTests._series_join_fixture()[0][0]["identity"]
+    rows = []
+    for index, (target, stage, runtime, code) in enumerate(specs):
+        identity = dict(copy.deepcopy(template), fixture=f"tests/capacity-{index}.c", target=target,
+                        artifact_stage=stage)
+        rows.append({"row": index, "identity": identity, "eligibility": {
+            "compiler_wall_time": True, "compiler_peak_rss": True, "generated_code_bytes": code,
+            "generated_runtime": runtime,
+            "runtime_oracle": "independent-native-executable-oracle" if runtime else "not-applicable",
+            "code_section": "deterministic-code-section" if code else "not-applicable"}})
+    value = {"schema": binding.ROW_SCHEMA, "version": binding.ROW_VERSION,
+             "row_identity_fields": binding.ROW_IDENTITY_FIELDS,
+             "sources": {role: "a" * 64 for role in binding.ROW_SOURCE_ROLES}, "rows": rows}
+    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
 
 
 class CapacityModelTests(unittest.TestCase):
@@ -51,7 +75,13 @@ class CapacityModelTests(unittest.TestCase):
         self.assertEqual(source["untimed_batches_per_group"], 4)
         self.assertEqual(source["transcript_record_bytes_max"], 1018)
         self.assertEqual(source["untimed_record_bytes_max"], 747)
-        self.assertIn("sum_u(4*batch(n_u))", source["budget_derivation"])
+        # (M1) The derivation keys every bound by group kind and stage and
+        # names the separate slowest-target untimed tables.
+        self.assertIn("timed(kind_g,stage_g,n_g)", source["budget_derivation"])
+        self.assertIn("never a one-input batch", source["budget_derivation"])
+        self.assertIn("slowest untimed target", source["budget_derivation"])
+        self.assertEqual(source["budget_derivation"], binding.CAMPAIGN_BUDGET_DERIVATION)
+        self.assertEqual(source["budget_stages"], binding.STAGES)
 
     def test_invocations_follow_the_a1_formula(self):
         # (G + U) * 2 * (warmups + rounds * pairs) per stage.
@@ -121,11 +151,67 @@ class CapacityModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             capacity.metrics_artifact_bound(self.source["batch_inputs"] + 1, 1, 4096, self.source)
 
+    def test_budget_counts_key_singletons_by_stage(self):
+        # (M1) Stage singletons are counted under their own stage keys, never
+        # as one-input object batches; untimed groups are counted apart.
+        groups, untimed = c_fixture_groups()
+        untimed = untimed + [{"kind": "singleton", "stage": "link", "inputs": 1, "members": 1}] * 11
+        counts = capacity.budget_counts(groups, 2, 254, untimed, self.source)
+        per_group = 2 * 2 * (2 + 2 * 254)
+        self.assertEqual(counts["compiler_batches_by_kind_and_stage"],
+                         {"object/object": 80 * per_group, "singleton/link": per_group,
+                          "singleton/self-host-stage1": per_group})
+        self.assertEqual(counts["untimed_batches_by_kind_and_stage"],
+                         {"object/object": 880 * 4, "singleton/link": 11 * 4})
+        self.assertFalse(counts["singletons_costed_as_one_input_batches"])
+        self.assertTrue(counts["untimed_bounds_are_the_slowest_untimed_target"])
+        for bad in ({"kind": "singleton", "inputs": 1, "members": 1},
+                    {"kind": "singleton", "stage": "object", "inputs": 1, "members": 1},
+                    {"kind": "object", "stage": "link", "inputs": 1, "members": 1}):
+            with self.subTest(group=bad), self.assertRaises(ValueError):
+                capacity.budget_counts(groups + [bad], 2, 254, untimed, self.source)
+
+    def test_stage_singletons_are_counted_from_the_census(self):
+        # (L8) With canonical #508 rows, the validator's own partition counts
+        # the timed stage singletons, runtime rows and untimed singletons.
+        native, cross = binding.NATIVE_TIMED_TARGET, "aarch64-unknown-linux-gnu"
+        data = canonical_rows([(native, "object", False, False), (native, "link", True, False),
+                               (native, "self-host-stage1", True, False), (native, "link", False, False),
+                               (cross, "link", False, True), (cross, "self-host-stage1", False, True),
+                               (cross, "link", False, False), (cross, "object", False, True)])
+        timed, runtime, untimed, source = capacity.stage_rows_from_performance_rows(binding, data)
+        self.assertEqual((sorted(timed), runtime, sorted(untimed), source),
+                         (["link", "link", "self-host-stage1"], 2, ["link", "self-host-stage1"], "census"))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rows.json"
+            path.write_bytes(data)
+            report = capacity.build_report(ROOT, require_committed=False, performance_rows=path)
+        population = report["population"]
+        self.assertEqual(population["stage_rows"]["source"], "census")
+        self.assertEqual(population["stage_singleton_groups"], 3)
+        self.assertEqual(population["untimed_singleton_groups"], 2)
+        self.assertEqual(population["stage_rows"]["timed_singletons_by_stage"],
+                         {"link": 2, "self-host-stage1": 1})
+        self.assertEqual(report["reviewed_budget"]["untimed_batches_by_kind_and_stage"],
+                         {"object/object": 880 * 4, "singleton/link": 4, "singleton/self-host-stage1": 4})
+        self.assertIsNotNone(report["source"]["performance_rows_sha256"])
+
     def test_report_derives_the_groups_from_the_support_declaration(self):
         population = self.report["population"]
         self.assertEqual(population["native_host_configurations"], 16)
         self.assertEqual(population["timed_object_groups"], 80)
-        self.assertEqual(population["stage_singleton_groups"], 2)
+        # (L8) Without a census the stage singletons are the validator's
+        # declaration minimum (one native link, one native self-host row), and
+        # the declaration's upper envelope is reported beside them.
+        self.assertEqual(population["stage_singleton_groups"],
+                         binding.SUPPORT_MIN_STAGE_ROW_COUNT - binding.SUPPORT_OBJECT_ROW_COUNT)
+        stages = population["stage_rows"]
+        self.assertEqual(stages["source"], "declaration-minimum")
+        self.assertEqual(stages["timed_singletons_by_stage"], {"link": 1, "self-host-stage1": 1})
+        self.assertEqual(stages["untimed_singletons_by_stage"], {"link": 0, "self-host-stage1": 0})
+        self.assertEqual(population["untimed_singleton_groups"], 0)
+        self.assertEqual(stages["stage_rows_upper_envelope"],
+                         {"timed": 2 * 405 * 16, "untimed": 2 * (binding.SUPPORT_OBJECT_ROW_COUNT - 405 * 16)})
         self.assertEqual([group["recipe"] for group in population["recipe_groups_per_configuration"]],
                          ["compiler-default", "c23", "c23-dialect-assertions", "x86-avx512", "x86-cx16"])
         self.assertEqual(sum(group["members"] for group in population["recipe_groups_per_configuration"]),
@@ -149,6 +235,17 @@ class CapacityModelTests(unittest.TestCase):
         self.assertTrue(scenarios["pairs-60/per-input-16384/runtime-2"]["fits"])
         maxima = self.report["maximum_fitting_per_input_metrics_bound"]
         self.assertGreaterEqual(maxima["pairs-254"], 8192)
+        # (L8) The per-input bound at the maximum is reported as an explicit
+        # assumption, never a measurement.
+        assumption = self.report["measured_bound_assumption"]
+        self.assertEqual((assumption["pairs_per_round"], assumption["maximum_per_input_metrics_bytes"]),
+                         (254, 9472))
+        self.assertIn("9472 bytes per input at 254 pairs", assumption["statement"])
+        self.assertFalse(assumption["measured_here"])
+        self.assertIn("ASSUMPTION", capacity.render_text(self.report))
+        headroom = self.report["additional_runtime_stage_singletons_fitting_at_maximum_pairs"]
+        self.assertGreater(headroom["per-input-4096"], headroom["per-input-8192"])
+        self.assertGreater(headroom["per-input-8192"], 0)
 
     def test_report_keeps_the_recipe_blocked_and_the_budget_unpinned(self):
         self.assertEqual(self.report["source"]["profile_status"], "blocked")

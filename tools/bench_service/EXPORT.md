@@ -275,8 +275,10 @@ this point.
 `tools/throughput/retirement_capacity.py` derives, from the support
 declaration and the fixture recipe table, 80 object groups (16 configurations
 of a compiler-default group of up to 416 inputs, a 4-input c23 group and three
-single-fixture groups) plus 2 stage singletons, 6,482 timed rows at most and 880
-untimed cross-target groups. Per-batch metrics artifacts are byte ranges of
+single-fixture groups), 880 untimed cross-target object groups, and stage
+singletons counted from canonical #508 rows when supplied, otherwise at the
+validator's declaration minimum of 2 (one native link, one native self-host;
+6,482 timed rows at most). Per-batch metrics artifacts are byte ranges of
 64 MiB metrics shards (at most `2 * ceil(bytes / 64 MiB)` shards per writer),
 so they no longer need one store entry each. Worst-case payload, excluding the
 caller's external entries and bytes, with a reviewed 4 KiB header per artifact:
@@ -289,8 +291,13 @@ caller's external entries and bytes, with a reviewed 4 KiB header per artifact:
 | 254 | 8 KiB | 85,680 | 81,600 | 3,523 | 118,495,217,760 | fits |
 | 254 | 16 KiB | 85,680 | 81,600 | 6,963 | 233,935,571,040 | rejected before timing |
 
-Both stage singletons are counted as runtime rows. The same campaign with one
-store entry per metrics artifact would need 166,779 entries at 254 pairs. The
+Both stage singletons are counted as runtime rows. The declaration bounds the
+stage rows only from above (both stages on every declared object identity), so
+the report also gives how many further runtime-eligible stage singletons fit
+at 254 pairs (17,079 at 4 KiB, 4,220 at 8 KiB), and states the largest
+fitting per-input bound (9,472 bytes at 254 pairs) as an assumption the
+measured metrics sizes must satisfy. The same campaign with one store entry
+per metrics artifact would need 166,779 entries at 254 pairs. The
 per-input metrics bound and every time bound are reviewed pins of the campaign
 budget; nothing here admits the recipe.
 

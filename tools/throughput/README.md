@@ -738,7 +738,9 @@ replacement in the service directory, which must be the batch's cwd (objects
 are `cwd/basename.o`). Before launch and again after the child exits, the
 measurement requires exactly one `@<leaf>` argument, no fixture path on the
 argv, and a read-only, service-owned file whose bytes equal the canonical
-list. The validator recomputes the canonical list from the frozen member order
+list; after the child it also requires the device, inode and change time
+recorded before launch, so a child that renames the list away and back or
+rewrites it with identical bytes fails the batch. The validator recomputes the canonical list from the frozen member order
 and controls, tokenizes it with the driver's grammar, and requires the plan's
 `input_list_sha256` to be its digest.
 
@@ -757,30 +759,46 @@ then exceed one shard's capacity, so a writer of `T` bytes has at most
 `2 * ceil(T / 64 MiB)` shards, which is the store preflight's entry bound. A
 stage with object groups attaches its writer to its collector before freeze,
 and a batch whose reviewed bound exceeds the remaining room needs a spare
-stream before it may launch. The validator streams each artifact's range from
-its shard, requires artifacts to tile each shard contiguously in record order
-(a shard starts at offset 0, is never revisited, and holds no trailing bytes;
-timed and untimed batches never share one), and seals the shards, not one
-entry per batch.
+stream before it may launch. The untimed writer's tag is always `untimed`
+(`TP_RETIREMENT_UNTIMED_METRICS_TAG`), and freeze requires the two timed
+writers' tags to differ from it and from each other. The validator streams
+each artifact's range from its shard and hashes the shard from those same
+bytes (no second read), requires artifacts to tile each shard contiguously in
+record order (a shard starts at offset 0, is never revisited, and holds no
+trailing bytes; timed and untimed batches never share one), requires one tag
+per writer with shard indexes equal to their position and at most 2,048
+shards per writer (`TP_RETIREMENT_METRICS_SHARDS`), and seals the shards, not
+one entry per batch.
 
 (M4) Amendment A1 replaces the fixed one-hour worker budget with a reviewed
 budget bound into the admitted service recipe. `retirement_budget.h` holds the
-record: the reviewed whole-job ceiling, the authenticated fixed-phase bounds, a
-measured upper bound per batch process by group size (ascending input-count
-classes with nondecreasing bounds), a measured bound per runtime process, and
-the reviewed metrics bound (a header plus a per-input bound). Its canonical
-text names the derivation formula, and its SHA-256 is the recipe profile's
-`campaign-budget-sha256=` pin; a strict decoder admits only the canonical
-bytes. `tp_retirement_budget_preflight` derives
-`fixed + stages * (settling + export) + sum over groups of stages * 2 * (W + R * P) * batch(inputs)
-+ U * stages * 2 * (W + R * P) * runtime + sum over untimed groups of 4 * batch(inputs)` and rejects,
-before timing, a job the reviewed ceiling cannot hold, a group larger than every
-class, a missing bound or overflow. `tp_retirement_campaign_freeze` takes the
-budget and its pin, requires the digest to equal the pin and every object
-contract to carry the budget's metrics bound for its input count, sizes the
-metrics shards from those bounds, and runs the budget preflight; the numeric
-bounds are integration-time pins, and the blocked profile has no pin, so the
-queue-aware bind fails closed.
+record (schema v2): the reviewed whole-job ceiling, the authenticated
+fixed-phase bounds, compiler-process bounds keyed by group kind and artifact
+stage, a measured bound per runtime process, and the reviewed metrics bound (a
+header plus a per-input bound). The timed table holds object batch classes
+(ascending input counts with nondecreasing bounds) and one bound per
+singleton stage (`link`, `self-host-stage1`; the table has room for later
+stages, whose slots stay zero until a named stage, and so a new schema and
+pin, is added). A link or self-host singleton costs its stage's bound, never a
+one-input batch. The untimed table has the same shape and is measured as the
+maximum over every untimed target (the slowest target); untimed batches never
+use the native timed bounds. Its canonical text names the derivation formula,
+and its SHA-256 is the recipe profile's `campaign-budget-sha256=` pin; a strict
+decoder admits only the canonical bytes. `tp_retirement_budget_preflight`
+derives
+`fixed + stages * (settling + export) + sum over groups of stages * 2 * (W + R * P) * timed(kind, stage, inputs)
++ U * stages * 2 * (W + R * P) * runtime + sum over untimed groups of 4 * untimed(kind, stage, inputs)` and
+rejects, before timing, a job the reviewed ceiling cannot hold, a group larger
+than every class, a kind/stage pair without a bound, a missing bound or
+overflow. `tp_retirement_campaign_freeze` takes the budget, each timed group's
+stage and the recipe pin as a separate argument, requires the budget's digest
+to equal that pin and every object contract to carry the budget's metrics
+bound for its input count, sizes the metrics shards from those bounds, and
+runs the budget preflight; the numeric bounds are integration-time pins, and
+the blocked profile has no pin, so the queue-aware bind fails closed. The
+validator binds the same record into the execution plan (`campaign_budget`:
+record and digest) and requires every object group's `metrics_bytes_max` to
+equal header + inputs * per-input from it.
 
 (A1) Untimed code-artifact batches: `retirement_untimed.h` runs, per untimed
 group and variant, at most one production batch and exactly one reproduction
@@ -803,12 +821,22 @@ invocations per stage, both result populations, the metrics shards of both
 stages and the untimed batches with their shards and record file. From the
 support declaration, the 16 native-host configurations give 80 object groups
 (compiler-default of up to 416 inputs with every registered control appended,
-c23 of 4, and three single-fixture recipes) plus 2 stage singletons, and 880
-untimed cross-target groups. With a reviewed per-input metrics bound of 4 KiB
+c23 of 4, and three single-fixture recipes) and 880 untimed cross-target
+object groups. Stage singletons are counted, not assumed: from canonical #508
+performance rows with `--performance-rows` (the validator's own partition),
+and otherwise at the validator's declaration minimum (one native link and one
+native self-host singleton, no cross-target stage row), beside the
+declaration's upper envelope (both stages on every declared object identity:
+12,960 timed and 144,864 untimed stage rows) and the number of further
+runtime-eligible stage singletons that still fit at 254 pairs. With a reviewed
+per-input metrics bound of 4 KiB
 the whole campaign at the 254-pair maximum needs at most 1,803 store entries
 and 60.8 GB (of 4,093 and 128 GiB); 8 KiB needs 3,523 entries and 118.5 GB;
 the largest bound that fits at 254 pairs is 9,472 bytes per input (37,888 at
-60 pairs). Without sharding the same campaign would need 166,779 entries.
+60 pairs), which the report states as an explicit assumption the measured
+metrics sizes must satisfy. Without sharding the same campaign would need
+166,779 entries. `retirement_capacity_test.py` runs in the Compiler throughput
+workflow beside `retirement_execution_test.py`.
 These are envelopes, not an admitted size or a host rate:
 
 ```sh
