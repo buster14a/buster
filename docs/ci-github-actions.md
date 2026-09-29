@@ -63,8 +63,11 @@ lanes additionally run the configuration-differential suite, reusing their
 fresh Release compiler; the two Windows lanes report the mode gate
 independently. Mobile retains its three independent suite-level shards; lint,
 UEFI and the independent analyzer remain required. **Require `CI complete`**,
-which checks all groups and the exact 25-job inventory, including all twelve
-desktop partitions and all six native jobs. The old six names alone do not
+which checks all groups and the exact 25-job inventory for full executions.
+On a qualifying same-commit main push, ten native/mobile/UEFI jobs are instead
+proven by the exact queue run while desktop, lint and analyzer run on main;
+see [queue-to-main reuse](ci-main-reuse.md) for its admission and fallback.
+The old six names alone do not
 prove coverage. See [combination sharding](ci-combination-shards.md) for native
 ownership, fail-closed completion, reproduction and mandatory performance
 qualification; [Windows CI coverage](windows-ci-coverage.md) records the
@@ -87,7 +90,8 @@ compile/link/bundle-only; Apple Silicon retains simulator execution.
 
 The main workflow covers pull requests (including forks), main pushes, tags,
 merge groups and manual runs. Feature pushes use their PR run without a duplicate matrix. `fail-fast` is off
-in all three matrices. Native and mobile lanes have no desktop prerequisite;
+for native lanes and on ordinary desktop/mobile runs; merge-group desktop and
+mobile matrices use fail-fast. Native and mobile lanes have no desktop prerequisite;
 combination failure cannot hide their results or turn green. Within each Unix
 native lane, the differential step still runs after mode failure unless
 cancelled; Windows requires its independent mode result.
@@ -118,7 +122,7 @@ Both workflows have the same event policy:
 | Event | Checkout/tested revision | Scheduling |
 | --- | --- | --- |
 | Pull request opened, synchronized or reopened, including forks | GitHub's `refs/pull/<number>/merge` revision (`GITHUB_SHA`), not merely the head SHA | One run of each workflow per event; a new revision supersedes that PR's older run |
-| Push to `main` | Pushed commit | Every run retained, including pending runs |
+| Push to `main` | Pushed commit | Every run retained; only exact, recent successful queue evidence may skip the ten equivalent jobs |
 | Tag push | Commit selected by the tag event | Every run retained |
 | Merge group | GitHub's generated merge-group revision | Coalesced only within that workflow and merge-group ref |
 | Explicit workflow dispatch | Revision selected for that workflow dispatch | Independent run-ID group; no automatic coalescing |
@@ -132,9 +136,9 @@ a job retains the original event SHA; a newer PR head requires its own run.
 Branch protection should require **both `CI complete` and
 `Linux x86-64 bootstrap evidence`** when the stronger audit is mandatory.
 `CI complete` aggregates its lint, desktop, native, mobile, UEFI and analyzer
-jobs; it is not a proxy for the separate bootstrap result. No same-name skipped
-check is introduced to stand in for a missing run, and this documentation does
-not change repository rules.
+obligations; it is not a proxy for the separate bootstrap result. For a reused
+main run, its receipt links the actual queue job executions and the skipped
+main jobs remain visibly skipped. This documentation does not change rules.
 
 Each workflow uses its own name and event in the concurrency key. Only PR and
 merge-group runs permit cancellation. Main, tag and manual runs include their
