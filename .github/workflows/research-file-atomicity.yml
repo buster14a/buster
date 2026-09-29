@@ -1,0 +1,102 @@
+name: Research file failure atomicity
+
+on:
+  push:
+    branches: [codex/83-failure-atomicity-20260930]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-file-atomicity-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Record source identity and platform implementations
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          {
+            git rev-parse HEAD HEAD^{tree}
+            git log -3 --format='%H %s'
+            git diff --exit-code 8f67df736f13d4edc055110a7a6d619a00a22eaf -- src/buster/lib tools/throughput/shared.c
+            git ls-tree HEAD src/buster/lib/file.c src/buster/lib/file.h src/buster/lib/os.c src/buster/lib/os_internal.h src/buster/lib/arena.c
+            uname -a
+            clang --version
+            gcc --version
+            printf 'RUN=%s ATTEMPT=%s RUNNER=%s ARCH=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_OS" "$RUNNER_ARCH"
+          } | tee evidence/identity.log
+          cp tools/research/file_publish_probe.c evidence/
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          names = ('os_file_close_checked', 'os_file_replacement_target_stats', 'os_file_staging_create', 'os_file_replace', 'os_file_delete_checked', 'scratch_begin', 'scratch_end', 'thread_context_allocate', 'thread_context_release')
+          with Path('evidence/source-excerpts.txt').open('w') as out:
+              for file in ('src/buster/lib/os.c', 'src/buster/lib/arena.c'):
+                  lines = Path(file).read_text().splitlines()
+                  for i, line in enumerate(lines):
+                      if any(re.match(r'^[A-Za-z_][^;]*\b' + name + r'\(', line) for name in names) and i + 1 < len(lines) and lines[i + 1] == '{':
+                          end = next(j for j in range(i + 2, len(lines)) if lines[j] == '}')
+                          print(f'{file}:{i + 1}-{end + 1}: {line}')
+                          out.write(f'\n{file}:{i + 1}-{end + 1}\n' + '\n'.join(lines[i:end + 1]) + '\n')
+          PY
+      - name: Cheapest control then full bounded failure population
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ulimit -c 0
+          common=(-Isrc -DBUSTER_SINGLE_THREADED=1 -DBUSTER_INCLUDE_TESTS=1 -std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char)
+          clang "${common[@]}" tools/research/file_publish_probe.c -Wl,--wrap=close -lm -pthread -o evidence/probe-clang
+          evidence/probe-clang close-only 2>&1 | tee evidence/close-first.log
+          evidence/probe-clang 2>&1 | tee evidence/clang.log
+          gcc "${common[@]}" tools/research/file_publish_probe.c -Wl,--wrap=close -lm -pthread -o evidence/probe-gcc
+          evidence/probe-gcc 2>&1 | tee evidence/gcc.log
+      - name: Independent oracle negative control
+        if: ${{ !cancelled() && success() }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          clang -Isrc -DBUSTER_SINGLE_THREADED=1 -DBUSTER_INCLUDE_TESTS=1 -DPROBE_DROP_CLOSE_ERROR=1 -std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/research/file_publish_probe.c -Wl,--wrap=close -lm -pthread -o evidence/probe-mutant
+          set +e
+          evidence/probe-mutant close-only > evidence/mutant.log 2>&1
+          status=$?
+          set -e
+          cat evidence/mutant.log
+          printf 'MUTANT_EXIT=%s\n' "$status" | tee -a evidence/mutant.log
+          test "$status" = 1
+          grep -E 'RESULT trials=2 assertions=[0-9]+ failures=[1-9][0-9]* mutant=1' evidence/mutant.log
+      - name: Sanitized bounded population
+        if: ${{ !cancelled() && success() }}
+        shell: bash
+        env:
+          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euxo pipefail
+          clang -Isrc -DBUSTER_SINGLE_THREADED=1 -DBUSTER_INCLUDE_TESTS=1 -std=c11 -O1 -g -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char -fsanitize=address,undefined -fno-omit-frame-pointer tools/research/file_publish_probe.c -Wl,--wrap=close -lm -pthread -o evidence/probe-sanitized
+          evidence/probe-sanitized skip-oom 2>&1 | tee evidence/sanitized.log
+      - name: Final immutable evidence hashes
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          find evidence -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > evidence/SHA256SUMS
+          cat evidence/SHA256SUMS
+          git diff --exit-code -- src/buster/lib
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: file-atomicity-${{ github.sha }}
+          path: evidence
+          retention-days: 30
+          if-no-files-found: error
