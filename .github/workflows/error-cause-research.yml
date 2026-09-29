@@ -1,0 +1,117 @@
+name: Error-cause recovery research (branch only)
+on:
+  push:
+    branches: [research/390-error-cause-boundary-8f67df7]
+permissions:
+  contents: read
+jobs:
+  source:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 8f67df736f13d4edc055110a7a6d619a00a22eaf
+          persist-credentials: false
+      - name: Preserve pinned source for structured probe design
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/recovery-source"
+          OUT="$RUNNER_TEMP/recovery-source"
+          git rev-parse HEAD 'HEAD^{tree}' | tee "$OUT/identity.txt"
+          git archive HEAD src/buster/lib/compiler/frontend/c src/buster/lib/compiler/driver src/buster/tests/compiler/frontend/c src/buster/tests/compiler/driver src/buster/apps/ide/ide.c src/buster/lib/entry_point.c src/buster/lib/thread.h src/buster/tests/test.c > "$OUT/source.tar"
+          find . -maxdepth 1 -type f -iname '*licen*' -exec cp '{}' "$OUT/" \;
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          out=Path(os.environ['RUNNER_TEMP'])/'recovery-source'
+          p=Path('src/buster/lib/compiler/frontend/c/c_parse.c')
+          lines=p.read_text().splitlines()
+          anchors=('recover_translation_unit', 'rollback_declaration_state', 'begin_declaration_state', 'set_diagnostic(', 'c_parse_fail(', 'c_analyze_semantics_core(', 'recover_statement', 'recover_declaration')
+          chosen=set()
+          for i,line in enumerate(lines):
+              if any(a in line for a in anchors): chosen.update(range(max(0,i-5),min(len(lines),i+95)))
+          text='\n'.join(f'{i+1}: {lines[i]}' for i in sorted(chosen))
+          (out/'recovery-excerpts.txt').write_text(text)
+          print(text[:45000])
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ always() }}
+        with:
+          name: error-cause-source-${{ github.run_id }}
+          path: ${{ runner.temp }}/recovery-source
+          if-no-files-found: error
+          retention-days: 14
+  screen:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 8f67df736f13d4edc055110a7a6d619a00a22eaf
+          persist-credentials: false
+      - name: Build unchanged baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/error-cause-screen" .cache/recovery-probe
+          exec > >(tee "$RUNNER_TEMP/error-cause-screen/build.log") 2>&1
+          git rev-parse HEAD 'HEAD^{tree}'
+          printf 'workflow=%s run=%s attempt=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o .cache/recovery-probe/build
+          .cache/recovery-probe/build generate --ci --linker DEFAULT --build-directory build-probe -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF
+          .cache/recovery-probe/build build --config Release --build-directory build-probe -t ide
+          sha256sum build-probe/Release/ide
+          git diff --exit-code
+      - name: Controlled edits (CLI screen; not structured cascade census)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PROBE_IDE="$PWD/build-probe/Release/ide"
+          python3 - <<'PY'
+          import os,json,subprocess,hashlib
+          from pathlib import Path
+          out=Path(os.environ['RUNNER_TEMP'])/'error-cause-screen'
+          families={
+            'global_semi': ('typedef int Count;\nCount total = 3;\nint use(Count x) { return x + total; }\nint later(void) { return 7; }\n', '3;', '3'),
+            'local_init': ('int calc(void) {\n  int x = 3;\n  return x + 1;\n}\nint later(void) { return 7; }\n', '= 3;', '= ;'),
+            'local_semi': ('int calc(void) {\n  int x = 3;\n  return x + 1;\n}\nint later(void) { return 7; }\n', '3;', '3'),
+            'call_paren': ('int add(int a, int b) { return a + b; }\nint calc(void) { return add(1, 2); }\nint later(void) { return 7; }\n', 'add(1, 2)', 'add(1, 2'),
+            'unknown_name': ('int calc(int value) { return value + 1; }\nint later(void) { return 7; }\n', 'return value', 'return vlaue'),
+            'enum_init': ('int external(void);\nenum { BAD = 3 };\nint use(void) { return BAD; }\nint later(void) { return 7; }\n', 'BAD = 3', 'BAD = external()'),
+            'typedef_decl': ('typedef int Index;\nIndex value = 3;\nint use(Index x) { return x + value; }\nint later(void) { return 7; }\n', 'int Index;', 'int Index'),
+            'aggregate_init': ('struct Pair { int a; int b; };\nstruct Pair pair = { 1, 2 };\nint use(void) { return pair.a; }\nint later(void) { return 7; }\n', '1, 2', '1 2'),
+          }
+          rows=[]
+          for family,(good,old,new) in families.items():
+            assert good.count(old)==1,(family,old)
+            bad=good.replace(old,new,1)
+            variants={'valid':good,'single':bad,'independent':bad.replace('return 7;', 'return later_unknown;')+'int separate(void) { return separate_unknown; }\n'}
+            for variant,text in variants.items():
+              name=family+'-'+variant
+              src=out/(name+'.c');src.write_text(text)
+              for mode in ('syntax','object'):
+                obj=out/(name+'.'+mode+'.o')
+                argv=[os.environ['PROBE_IDE'],'cc','-nostdinc','-std=c17','-march=baseline']
+                argv+=['-fsyntax-only'] if mode=='syntax' else ['-c','-g0','-o',str(obj)]
+                argv.append(str(src))
+                try:
+                  p=subprocess.run(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20)
+                  row={'case':name,'mode':mode,'argv':argv,'status':p.returncode,'stdout':p.stdout.decode('utf-8','replace'),'stderr':p.stderr.decode('utf-8','replace'),'source_sha256':hashlib.sha256(text.encode()).hexdigest(),'object_exists':obj.exists()}
+                except subprocess.TimeoutExpired as e:
+                  row={'case':name,'mode':mode,'argv':argv,'timeout':True}
+                rows.append(row);print(json.dumps(row),flush=True)
+          (out/'cli-screen.json').write_text(json.dumps(rows,indent=2))
+          PY
+      - name: Preserve evidence including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: error-cause-screen-${{ github.run_id }}
+          path: ${{ runner.temp }}/error-cause-screen
+          if-no-files-found: error
+          retention-days: 14
