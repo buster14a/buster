@@ -669,6 +669,39 @@ def _object_groups(groups):
     return [group for group in groups if group["kind"] == OBJECT_BATCH_GROUP]
 
 
+def _untimed_groups(rows):
+    """Derive the untimed code-artifact batch partition.
+
+    Code rows outside the timed projection are compiled outside timing in
+    batches of the timed form: one target, configuration and frozen argv per
+    object batch (multi-input ``-c``), ascending row order, and one singleton
+    per non-object stage row.  Ordinals follow each group's smallest row.
+    """
+    groups = []
+    object_groups = {}
+    for row in sorted(rows, key=lambda item: item["row"]):
+        if _timed(row) or not _code_observed(row):
+            continue
+        identity = row["identity"]
+        key = tuple(identity[field] for field in BATCH_GROUP_KEY_FIELDS)
+        if identity["artifact_stage"] == "object":
+            group = object_groups.get((identity["target"], key))
+            if group is None:
+                group = {"kind": OBJECT_BATCH_GROUP, "key": key, "rows": []}
+                object_groups[(identity["target"], key)] = group
+                groups.append(group)
+        else:
+            group = {"kind": SINGLETON_STAGE_GROUP, "key": key, "rows": []}
+            groups.append(group)
+        group["rows"].append(row["row"])
+        group["identity"] = {"target": identity["target"],
+                             "artifact_stage": identity["artifact_stage"],
+                             **{field: identity[field] for field in BATCH_GROUP_KEY_FIELDS}}
+    for ordinal, group in enumerate(groups):
+        group["group"] = ordinal
+    return groups
+
+
 def _family_cells(rows):
     """Map each #619 variable metric to its ordered exact cells.
 
@@ -2459,104 +2492,107 @@ def _execution_context(binding, raw_measurements_sha256):
     }
 
 
-INPUT_COMPILED = "compiled"
+def _check_group_contracts(values, groups, row_by_id, name="execution_plan.groups",
+                           untimed=False):
+    """Join v3 batch group contracts to an independently derived partition.
 
-
-def _check_group_contracts(values, groups, row_by_id):
-    """Join v3 batch group contracts to the independently derived partition.
-
-    Each object group freezes its ordered timed members, any status-checked
+    Each object group freezes its ordered members, any status-checked
     controls, and per variant the batch command digest and expected exit
     status.  A control is never a timed cell; when it names a canonical row,
     that row must be outside the timed projection and compiled with the same
     frozen argv.  Object paths are ``cwd/basename.o``, so basenames collide.
+    Untimed code-artifact groups (``untimed=True``) carry no controls.
     """
-    contracts = _list(values, "execution_plan.groups")
+    contracts = _list(values, name)
     if len(contracts) != len(groups):
-        _fail("execution plan batch groups differ from the derived A1 partition")
+        _fail(f"{name} differ from the derived A1 partition")
     by_group = {}
     control_rows = set()
     for contract, group in zip(contracts, groups):
-        contract = _keys(contract, ("group", "kind", "configuration", "recipe", "members",
-                                    "controls", "baseline", "candidate"),
-                         "execution_plan.group")
+        contract = _keys(contract, ("group", "kind", "target", "configuration", "recipe",
+                                    "members", "controls", "baseline", "candidate"),
+                         f"{name}[]")
         if type(contract["group"]) is not int or contract["group"] != group["group"] \
                 or contract["kind"] != group["kind"]:
-            _fail("execution plan batch group is not the derived A1 partition")
+            _fail(f"{name} batch group is not the derived A1 partition")
         identity = group["identity"]
-        if contract["configuration"] != {field: identity[field] for field in
-                                         ("allocator", "frontend_lowering", "PIC")} \
+        if contract["target"] != identity["target"] \
+                or contract["configuration"] != {field: identity[field] for field in
+                                                 ("allocator", "frontend_lowering", "PIC")} \
                 or contract["recipe"] != {field: identity[field] for field in
                                           ("fixture_recipe", "cpu", "cpu_features")}:
-            _fail("execution plan batch group configuration or recipe differs from its rows")
-        members = _list(contract["members"], "execution_plan.group.members")
+            _fail(f"{name} batch group configuration or recipe differs from its rows")
+        members = _list(contract["members"], f"{name}[].members")
         if [member.get("row") if type(member) is dict else None
                 for member in members] != group["rows"]:
-            _fail("execution plan batch group members differ from the derived partition")
+            _fail(f"{name} batch group members differ from the derived partition")
         object_group = group["kind"] == OBJECT_BATCH_GROUP
         stems = []
         for member in members:
-            member = _keys(member, ("row", "diagnostic_sha256"), "execution_plan.group.member")
+            member = _keys(member, ("row", "diagnostic_sha256"), f"{name}[].member")
             if object_group:
-                _sha(member["diagnostic_sha256"], "execution_plan.group.member.diagnostic_sha256")
+                _sha(member["diagnostic_sha256"], f"{name}[].member.diagnostic_sha256")
             elif member["diagnostic_sha256"] is not None:
                 _fail("a singleton stage group has no per-input diagnostic record")
             stems.append(PurePosixPath(row_by_id[member["row"]]["identity"]["fixture"]).stem)
-        controls = _list(contract["controls"], "execution_plan.group.controls")
+        controls = _list(contract["controls"], f"{name}[].controls")
         if controls and not object_group:
             _fail("a singleton stage group cannot carry batch controls")
-        contributions = []
+        if controls and untimed:
+            _fail("an untimed code-artifact batch carries no controls")
+        failures = []
         for control in controls:
-            control = _keys(control, ("fixture", "row", "status", "exit_contribution",
+            control = _keys(control, ("fixture", "row", "status", "error",
                                       "diagnostic_sha256", "object_sha256"),
-                            "execution_plan.group.control")
-            _relative_path(control["fixture"], "execution_plan.group.control.fixture")
-            _token(control["status"], "execution_plan.group.control.status")
-            contribution = control["exit_contribution"]
-            if type(contribution) is not int or not 0 <= contribution <= 255:
-                _fail("execution plan batch control exit contribution is not an exit status")
-            _sha(control["diagnostic_sha256"], "execution_plan.group.control.diagnostic_sha256")
+                            f"{name}[].control")
+            _relative_path(control["fixture"], f"{name}[].control.fixture")
+            if control["status"] not in FROZEN_INPUT_STATUSES \
+                    or type(control["error"]) is not str \
+                    or not CC_ERROR_RE.fullmatch(control["error"]):
+                _fail(f"{name} batch control status or error is not a frozen compiler outcome")
+            _sha(control["diagnostic_sha256"], f"{name}[].control.diagnostic_sha256")
             if control["object_sha256"] is not None:
-                _sha(control["object_sha256"], "execution_plan.group.control.object_sha256")
-            compiled = control["status"] == INPUT_COMPILED
+                _sha(control["object_sha256"], f"{name}[].control.object_sha256")
+            compiled = control["status"] == "ok"
             if compiled != (control["object_sha256"] is not None) \
-                    or compiled != (contribution == 0):
-                _fail("execution plan batch control status, exit contribution and object disagree")
+                    or compiled != (control["error"] == CC_ERROR_NONE):
+                _fail(f"{name} batch control status, error and object disagree")
             if control["row"] is not None:
                 row = row_by_id.get(control["row"]) if type(control["row"]) is int else None
                 if row is None or _timed(row) or control["row"] in control_rows \
                         or row["identity"]["fixture"] != control["fixture"] \
-                        or row["identity"]["target"] != NATIVE_TIMED_TARGET \
+                        or row["identity"]["target"] != identity["target"] \
                         or tuple(row["identity"][field] for field in BATCH_GROUP_KEY_FIELDS) \
                         != group["key"]:
-                    _fail("execution plan batch control row is timed, duplicated, or compiled "
+                    _fail(f"{name} batch control row is timed, duplicated, or compiled "
                           "with a different frozen argv")
                 control_rows.add(control["row"])
             stems.append(PurePosixPath(control["fixture"]).stem)
-            contributions.append(contribution)
+            failures.append(not compiled)
         if len(set(stems)) != len(stems):
-            _fail("execution plan batch group inputs collide on their object basename")
+            _fail(f"{name} batch group inputs collide on their object basename")
         for variant in ("baseline", "candidate"):
             side = _keys(contract[variant], ("command_sha256", "exit_status"),
-                         f"execution_plan.group.{variant}")
-            _sha(side["command_sha256"], f"execution_plan.group.{variant}.command_sha256")
+                         f"{name}[].{variant}")
+            _sha(side["command_sha256"], f"{name}[].{variant}.command_sha256")
             status = side["exit_status"]
             if type(status) is not int or not 0 <= status <= 255:
-                _fail("execution plan batch exit status is not an exit status")
-            if (status != 0) != any(contributions):
-                _fail("execution plan batch exit status contradicts its frozen input statuses")
+                _fail(f"{name} batch exit status is not an exit status")
+            if (status != 0) != any(failures):
+                _fail(f"{name} batch exit status contradicts its frozen input statuses")
         by_group[contract["group"]] = contract
     return by_group
 
 
 def _check_execution_plan(root, descriptor, binding, parsed, sampling,
                           admitted_cpu, native_target):
-    """Validate the frozen v3 plan; return it with group and row contract maps."""
+    """Validate the frozen v3 plan; return it with its group, row and untimed maps."""
     _artifact(descriptor, "execution_plan")
     plan = _read_json_evidence(root, descriptor, "execution_plan")
     plan = _keys(plan, ("schema", "version", "schedule", "seed", "rounds",
                         "pairs_per_round", "warmups_per_variant", "cpu", "native_target",
-                        "performance_rows_sha256", "rows", "groups"), "execution_plan")
+                        "performance_rows_sha256", "rows", "groups", "untimed_groups"),
+                 "execution_plan")
     if plan["schema"] != EXECUTION_PLAN_SCHEMA or type(plan["version"]) is not int \
             or plan["version"] != 1 or plan["schedule"] != EXECUTION_SCHEDULE:
         _fail("execution plan schema/version/schedule is not supported")
@@ -2593,6 +2629,9 @@ def _check_execution_plan(root, descriptor, binding, parsed, sampling,
     groups = _batch_groups(rows)
     group_of_row = {row: group["group"] for group in groups for row in group["rows"]}
     group_contracts = _check_group_contracts(plan["groups"], groups, row_by_id)
+    untimed_contracts = _check_group_contracts(plan["untimed_groups"], _untimed_groups(rows),
+                                               row_by_id, "execution_plan.untimed_groups",
+                                               untimed=True)
     row_contracts = {}
     for contract, row in zip(contracts, rows):
         _keys(contract, ("row", "identity_sha256", "oracle_sha256", "group", "baseline",
@@ -2703,7 +2742,7 @@ def _check_execution_plan(root, descriptor, binding, parsed, sampling,
                 elif side[key] is not None:
                     _fail("ineligible runtime evidence must be explicitly absent")
         row_contracts[row["row"]] = contract
-    return plan, group_contracts, row_contracts
+    return plan, group_contracts, row_contracts, untimed_contracts
 
 
 def _stream_canonical_jsonl(root, descriptor, records, line_cap, byte_cap, name):
@@ -2741,79 +2780,231 @@ def _stream_canonical_jsonl(root, descriptor, records, line_cap, byte_cap, name)
         _fail(f"consumed {name} differs from its authenticated digest")
 
 
-METRICS_RECORD_FIELDS = ("input", "fixture", "row", "status", "exit_contribution",
-                         "diagnostic_sha256", "started_ns", "finished_ns", "phase_ns",
-                         "arena_high_water_bytes", "object_sha256", "code_sections",
-                         "code_functions")
+def _read_jsonl_evidence(root, descriptor, name):
+    """Read an already-validated ``{path,bytes,sha256,records}`` JSONL set."""
+    descriptor = _keys(descriptor, ("path", "bytes", "sha256", "records"), name)
+    _positive_int(descriptor["records"], f"{name}.records")
+    artifact = {key: descriptor[key] for key in ("path", "bytes", "sha256")}
+    return list(_stream_canonical_jsonl(root, artifact, descriptor["records"],
+                                        CODE_RECORD_LINE_CAP,
+                                        descriptor["records"] * CODE_RECORD_LINE_CAP, name))
 
 
-def _check_batch_metrics(root, descriptor, contract, row_contracts, row_by_id, variant,
-                         started_ns, finished_ns, name):
-    """Authenticate one batch's per-input metrics artifact without trusting it.
+# The per-input metrics artifact is the compiler's own `-fmetrics-out` text
+# (docs/agents/driver.md, "Per-input records and continue-on-failure"): one
+# `CC_METRICS` header, then per input one `CC_METRICS_INPUT` line followed by
+# its `CC_METRICS_FUNCTION` lines.  Every line is `TAG key=value ...` with the
+# keys in a fixed order; numbers are decimal and strings lowercase hex (`-`
+# when empty).  This pins the revision that adds per-input start/end offsets
+# from the process origin, the diagnostic record count and digest, the
+# `intervals` header field and the `*_truncated` flags.  A later schema is a
+# reviewed validator change, never a reader that skips unknown keys.
+CC_METRICS_VERSION = 1
+CC_METRICS_SCHEMA = "buster-cc-metrics"
+CC_METRICS_HEADER_FIELDS = (
+    "version", "schema", "inputs", "records", "ok", "rejected", "failed", "not_run",
+    "prebuilt", "error", "exit_status", "action", "target", "allocator", "compile_jobs",
+    "compilation_workers", "intervals", "keep_going", "function_sizes", "wall_ns",
+    "peak_rss_bytes",
+)
+CC_METRICS_PHASE_FIELDS = ("read_ns", "preprocess_ns", "parse_ns", "analysis_ns", "ir_ns",
+                           "codegen_ns", "object_ns", "emit_ns")
+CC_METRICS_INPUT_FIELDS = (
+    "version", "index", "status", "error", "errors", "warnings", "measured", "start_ns",
+    "end_ns", "total_ns", *CC_METRICS_PHASE_FIELDS, "arena_peak_bytes",
+    "arena_retained_bytes", "source_bytes", "preprocessed_tokens", "object_file_bytes",
+    "text_bytes", "rodata_bytes", "data_bytes", "bss_bytes", "tdata_bytes", "tbss_bytes",
+    "initializer_bytes", "unwind_bytes", "debug_bytes", "codegen_functions", "instructions",
+    "values", "code_bytes", "stack_frame_bytes", "max_stack_frame_bytes",
+    "fallback_functions", "fallback_records", "function_records", "function_records_omitted",
+    "diagnostic_records", "diagnostic_digest", "diagnostic_line", "diagnostic_column",
+    "path_hex", "diagnostic_code_hex", "diagnostic_path_hex", "message_bytes",
+    "message_truncated", "message_hex",
+)
+CC_METRICS_FUNCTION_FIELDS = ("version", "input", "ordinal", "code_bytes", "name_bytes",
+                              "name_truncated", "name_hex")
+CC_METRICS_WORD_FIELDS = {"schema", "error", "action", "target", "allocator", "intervals",
+                          "status"}
+CC_METRICS_DIGEST_FIELDS = {"diagnostic_digest"}
+CC_METRICS_WORD_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
+CC_METRICS_NUMBER_RE = re.compile(r"^(0|[1-9][0-9]{0,19})$")
+CC_METRICS_HEX_RE = re.compile(r"^(-|(?:[0-9a-f]{2})+)$")
+CC_INPUT_STATUSES = ("ok", "rejected", "failed", "not_run", "prebuilt")
+CC_ERROR_NONE = "driver.none"
+CC_ERROR_RE = re.compile(r"^driver\.[a-z0-9-]{1,63}$")
+# (A1) Frozen oracle statuses a batch input may have.  `not_run` would mean a
+# batch-stopping failure (no continue-on-failure) and `prebuilt` a link input.
+FROZEN_INPUT_STATUSES = ("ok", "rejected", "failed")
+TARGET_METRICS_NAMES = {
+    "aarch64-apple-ios": "aarch64-ios", "aarch64-apple-macos": "aarch64-macos",
+    "aarch64-linux-android": "aarch64-android", "aarch64-pc-windows-msvc": "aarch64-windows",
+    "aarch64-unknown-linux-gnu": "aarch64-linux", "aarch64-unknown-uefi": "aarch64-uefi",
+    "x86_64-apple-ios": "x86_64-ios", "x86_64-apple-macos": "x86_64-macos",
+    "x86_64-linux-android": "x86_64-android", "x86_64-pc-windows-msvc": "x86_64-windows",
+    "x86_64-unknown-linux-gnu": "x86_64-linux", "x86_64-unknown-uefi": "x86_64-uefi",
+}
 
-    Returns each timed member's ``(interval_ns, arena_high_water_bytes)`` and
-    the batch output digest.  Inputs must be exactly the frozen members then
-    controls; statuses, exit contributions and diagnostics must equal the
-    frozen oracle; intervals must be ordered, non-overlapping and inside the
-    process interval; phase sums may not exceed their interval; and every
-    emitted object must equal its frozen artifact.
+
+def _cc_metrics_line(line, tag, fields, name):
+    """Parse one tagged record with exactly ``fields`` in order."""
+    try:
+        text = line.decode("ascii")
+    except UnicodeDecodeError:
+        _fail(f"{name} is not ASCII")
+    words = text[:-1].split(" ")
+    if words[0] != tag or len(words) != len(fields) + 1:
+        _fail(f"{name} is not a {tag} record with the pinned field order")
+    values = {}
+    for field, word in zip(fields, words[1:]):
+        key, separator, value = word.partition("=")
+        if key != field or not separator or not value:
+            _fail(f"{name} field {field!r} is missing, reordered, or unknown")
+        if field in CC_METRICS_WORD_FIELDS:
+            if not CC_METRICS_WORD_RE.fullmatch(value):
+                _fail(f"{name}.{field} is not a metrics word")
+            values[field] = value
+        elif field in CC_METRICS_DIGEST_FIELDS:
+            _sha(value, f"{name}.{field}")
+            values[field] = value
+        elif field.endswith("_hex"):
+            if not CC_METRICS_HEX_RE.fullmatch(value):
+                _fail(f"{name}.{field} is not lowercase hex")
+            values[field] = b"" if value == "-" else bytes.fromhex(value)
+        else:
+            if not CC_METRICS_NUMBER_RE.fullmatch(value) or int(value) > (1 << 64) - 1:
+                _fail(f"{name}.{field} is not a canonical unsigned decimal")
+            values[field] = int(value)
+    if values["version"] != CC_METRICS_VERSION:
+        _fail(f"{name} is not metrics version {CC_METRICS_VERSION}")
+    return values
+
+
+def _read_cc_metrics(root, descriptor, inputs, name):
+    """Strictly parse one bounded compiler metrics artifact.
+
+    Returns the header and exactly ``inputs`` input records in order.  Each
+    input is followed by exactly its ``function_records`` function lines.
+    The consumed bytes are the hashed bytes.
     """
     descriptor = _artifact(descriptor, name)
+    if descriptor["bytes"] > METRICS_ARTIFACT_BYTE_CAP:
+        _fail(f"{name} exceeds its bounded size")
+    _check_evidence(root, descriptor, name)
+    path = Path(root).resolve().joinpath(*PurePosixPath(descriptor["path"]).parts)
+    digest = hashlib.sha256()
+    size = 0
+    records = []
+    header = None
+    with path.open("rb") as stream:
+        def next_line():
+            nonlocal size
+            line = stream.readline(METRICS_RECORD_BYTE_CAP + 1)
+            if not line.endswith(b"\n") or len(line) > METRICS_RECORD_BYTE_CAP:
+                _fail(f"{name} record is missing, truncated, or oversized")
+            size += len(line)
+            digest.update(line)
+            return line
+
+        header = _cc_metrics_line(next_line(), "CC_METRICS", CC_METRICS_HEADER_FIELDS,
+                                  f"{name} header")
+        for index in range(inputs):
+            record = _cc_metrics_line(next_line(), "CC_METRICS_INPUT",
+                                      CC_METRICS_INPUT_FIELDS, f"{name} input {index}")
+            if record["index"] != index:
+                _fail(f"{name} inputs do not follow the frozen batch input order")
+            if record["function_records"] and not header["function_sizes"]:
+                _fail(f"{name} lists functions that the header did not request")
+            for ordinal in range(record["function_records"]):
+                function = _cc_metrics_line(next_line(), "CC_METRICS_FUNCTION",
+                                            CC_METRICS_FUNCTION_FIELDS,
+                                            f"{name} input {index} function {ordinal}")
+                if function["input"] != index or function["ordinal"] != ordinal:
+                    _fail(f"{name} function records do not follow their input")
+            records.append(record)
+        if stream.read(1):
+            _fail(f"{name} contains undeclared extra records")
+    if size != descriptor["bytes"] or digest.hexdigest() != descriptor["sha256"]:
+        _fail(f"consumed {name} differs from its authenticated digest")
+    return header, records
+
+
+def _frozen_batch_inputs(contract, row_contracts, row_by_id, variant, object_field):
+    """Frozen per-input expectations for one batch: members, then controls.
+
+    ``object_field`` selects the frozen object digest for members
+    (``artifact_sha256`` for timed and production batches,
+    ``reproduction_sha256`` for untimed reproduction batches).
+    """
     inputs = [{"fixture": row_by_id[member["row"]]["identity"]["fixture"],
-               "row": member["row"], "status": INPUT_COMPILED, "exit_contribution": 0,
+               "status": "ok", "error": CC_ERROR_NONE,
                "diagnostic_sha256": member["diagnostic_sha256"],
-               "object_sha256": row_contracts[member["row"]][variant]["artifact_sha256"],
-               "member": True} for member in contract["members"]]
-    inputs.extend({**control, "member": False} for control in contract["controls"])
+               "object_sha256": row_contracts[member["row"]][variant][object_field],
+               "row": member["row"], "member": True} for member in contract["members"]]
+    inputs.extend({**control, "member": False} for control in contract.get("controls", []))
+    return inputs
+
+
+def _check_batch_metrics(root, descriptor, contract, frozen_inputs, exit_status, target,
+                         elapsed_ns, name):
+    """Authenticate one batch's compiler metrics artifact without trusting it.
+
+    Returns each timed member's ``(interval_ns, arena_peak_bytes)``.  The
+    header must describe one serial, continue-on-failure object compile of
+    exactly the frozen inputs with the frozen exit status, configuration and
+    target; inputs must carry their frozen statuses, errors and diagnostic
+    digests, with ordered non-overlapping intervals inside the compiler's own
+    window (itself inside the supervisor's process interval when known) and
+    phase sums within each interval.  Object bytes are bound separately, by
+    the invocation's output digest over the frozen per-input object digests.
+    """
+    header, records = _read_cc_metrics(root, descriptor, len(frozen_inputs), name)
+    statuses = [record["status"] for record in records]
+    for status in statuses:
+        if status not in CC_INPUT_STATUSES:
+            _fail(f"{name} input status is unknown")
+    first_error = next((record["error"] for record in records if record["status"] != "ok"),
+                       CC_ERROR_NONE)
+    configuration = contract["configuration"]
+    if (header["schema"] != CC_METRICS_SCHEMA
+            or header["inputs"] != len(frozen_inputs) or header["records"] != len(frozen_inputs)
+            or any(header[status] != statuses.count(status) for status in CC_INPUT_STATUSES)
+            or header["not_run"] or header["prebuilt"]
+            or header["error"] != first_error or header["exit_status"] != exit_status
+            or header["action"] != "object"
+            or header["target"] != TARGET_METRICS_NAMES[target]
+            or header["allocator"] != configuration["allocator"]
+            or header["compile_jobs"] != 1 or header["compilation_workers"] != 1
+            or header["intervals"] != "serial" or header["keep_going"] != 1
+            or not header["wall_ns"]
+            or (elapsed_ns is not None and header["wall_ns"] > elapsed_ns)):
+        _fail(f"{name} header is not one serial continue-on-failure batch of the frozen inputs")
     members = {}
-    objects = []
-    previous_end = started_ns
-    for index, record in enumerate(_stream_canonical_jsonl(
-            root, descriptor, len(inputs), METRICS_RECORD_BYTE_CAP,
-            METRICS_ARTIFACT_BYTE_CAP, name)):
-        expected = inputs[index]
-        record = _keys(record, METRICS_RECORD_FIELDS, f"{name} record")
-        if type(record["input"]) is not int or record["input"] != index \
-                or record["fixture"] != expected["fixture"] \
-                or type(record["row"]) is not type(expected["row"]) \
-                or record["row"] != expected["row"]:
-            _fail("per-input metrics do not follow the frozen batch input order")
-        if record["status"] != expected["status"] \
-                or type(record["exit_contribution"]) is not int \
-                or record["exit_contribution"] != expected["exit_contribution"] \
-                or record["diagnostic_sha256"] != expected["diagnostic_sha256"]:
-            _fail("per-input status, exit contribution or diagnostics differ from the frozen oracle")
-        if record["object_sha256"] != expected["object_sha256"]:
-            _fail("per-input object is not byte-identical to its frozen artifact (nondeterminism)")
-        _positive_int(record["started_ns"], f"{name}.started_ns")
-        _positive_int(record["finished_ns"], f"{name}.finished_ns")
-        if record["started_ns"] < previous_end \
-                or record["finished_ns"] <= record["started_ns"] \
-                or record["finished_ns"] > finished_ns:
+    previous_end = 0
+    for expected, record in zip(frozen_inputs, records):
+        path = record["path_hex"].decode("utf-8", errors="strict") \
+            if record["path_hex"].isascii() else None
+        if path is None or not (path == expected["fixture"]
+                                or path.endswith("/" + expected["fixture"])):
+            _fail(f"{name} inputs do not follow the frozen batch input order")
+        if record["status"] != expected["status"] or record["error"] != expected["error"] \
+                or record["diagnostic_digest"] != expected["diagnostic_sha256"] \
+                or record["measured"] != 1:
+            _fail("per-input status, error or diagnostics differ from the frozen oracle")
+        if (record["object_file_bytes"] > 0) != (expected["object_sha256"] is not None):
+            _fail("per-input object output contradicts its frozen oracle")
+        if record["start_ns"] < previous_end or record["end_ns"] <= record["start_ns"] \
+                or record["end_ns"] > header["wall_ns"]:
             _fail("per-input intervals overlap, are unordered, or leave the batch process interval")
-        previous_end = record["finished_ns"]
-        interval_ns = record["finished_ns"] - record["started_ns"]
-        phases = _object(record["phase_ns"], f"{name}.phase_ns")
-        for phase, elapsed in phases.items():
-            _token(phase, f"{name}.phase_ns key")
-            _nonnegative_int(elapsed, f"{name}.phase_ns.{phase}")
-        if sum(phases.values()) > interval_ns:
+        previous_end = record["end_ns"]
+        interval_ns = record["end_ns"] - record["start_ns"]
+        if record["total_ns"] != interval_ns:
+            _fail(f"{name} total_ns is not its per-input interval")
+        if sum(record[field] for field in CC_METRICS_PHASE_FIELDS) > interval_ns:
             _fail("per-input phase timings exceed their per-input interval")
         if expected["member"]:
-            _positive_int(record["arena_high_water_bytes"], f"{name}.arena_high_water_bytes")
-        else:
-            _nonnegative_int(record["arena_high_water_bytes"], f"{name}.arena_high_water_bytes")
-        for field in ("code_sections", "code_functions"):
-            for entry in _list(record[field], f"{name}.{field}"):
-                entry = _keys(entry, ("name", "bytes"), f"{name}.{field}[]")
-                _single_line_string(entry["name"], f"{name}.{field}[].name")
-                _bounded_code_bytes(entry["bytes"], f"{name}.{field}[].bytes")
-        objects.append(record["object_sha256"])
-        if expected["member"]:
-            members[expected["row"]] = (interval_ns, record["arena_high_water_bytes"])
-    if finished_ns - started_ns < sum(interval for interval, _arena in members.values()):
-        _fail("batch process metric is inconsistent with its per-input intervals")
-    return members, _batch_output_digest(objects)
+            _positive_int(record["arena_peak_bytes"], f"{name}.arena_peak_bytes")
+            members[expected["row"]] = (interval_ns, record["arena_peak_bytes"])
+    return members
 
 
 def _execution_trace_records(root, shards, expected_count):
@@ -2933,7 +3124,7 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
         _positive_int(receipt[key], f"execution receipt.{key}")
     if receipt["completed_at_ns"] <= receipt["bound_at_ns"]:
         _fail("execution receipt completion must follow pre-sample binding")
-    plan, group_contracts, row_contracts = _check_execution_plan(
+    plan, group_contracts, row_contracts, untimed_contracts = _check_execution_plan(
         root, plan_descriptor, binding, parsed, sampling, admitted_cpu, native_target)
     row_by_id = {row["row"]: row for row in parsed}
     group_by_id = {group["group"]: group for group in _batch_groups(parsed)}
@@ -3006,15 +3197,26 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
                     if metrics_artifact["path"] in metrics_paths:
                         _fail("batch invocation reuses another batch's per-input metrics artifact")
                     metrics_paths.add(metrics_artifact["path"])
-                    members, expected_output = _check_batch_metrics(
-                        root, metrics_artifact, group_contracts[group["group"]],
-                        row_contracts, row_by_id, variant, value["started_ns"],
-                        value["finished_ns"], f"per-input metrics {value['sequence']}")
+                    contract = group_contracts[group["group"]]
+                    frozen_inputs = _frozen_batch_inputs(contract, row_contracts, row_by_id,
+                                                         variant, "artifact_sha256")
+                    members = _check_batch_metrics(
+                        root, metrics_artifact, contract, frozen_inputs, expected_exit,
+                        group["identity"]["target"], value["finished_ns"] - value["started_ns"],
+                        f"per-input metrics {value['sequence']}")
+                    expected_output = _batch_output_digest(
+                        [item["object_sha256"] for item in frozen_inputs])
                 else:
                     if value["metrics_artifact"] is not None:
                         _fail("singleton stage invocation cannot carry a per-input metrics artifact")
                     expected_output = _batch_output_digest(
                         [row_contracts[group["rows"][0]][variant]["artifact_sha256"]])
+                # Every warmup and sample batch must reproduce each frozen
+                # object byte for byte; the producer hashes the written
+                # objects in input order into this digest.
+                if value["output_sha256"] != expected_output:
+                    _fail("batch objects are not byte-identical to their frozen artifacts "
+                          "(nondeterminism)")
             else:
                 side = row_contracts[value["row"]][variant]
                 expected_binary = side["artifact_sha256"]
@@ -3071,7 +3273,7 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
         _fail("execution transcript is missing required warmups or timed invocations")
     return {"receipt_sha256": trusted_receipt_sha256, "invocations": count,
             "job_id": receipt["job_id"], "attempt": receipt["attempt"],
-            "row_contracts": row_contracts}
+            "row_contracts": row_contracts, "untimed_contracts": untimed_contracts}
 
 
 def _finite_positive_sample(sample):
@@ -3217,6 +3419,95 @@ def _check_code_records(root, descriptor, parsed, row_contracts):
             sides[variant] = side["code_section_bytes"]
         facts[row["row"]] = (sides["baseline"], sides["candidate"])
     return facts
+
+
+UNTIMED_BATCH_PURPOSES = ("production", "reproduction")
+UNTIMED_BATCH_FIELDS = ("command_sha256", "exit_status", "group", "metrics_artifact",
+                        "output_sha256", "purpose", "variant")
+
+
+def _untimed_batch_records(root, descriptor, groups):
+    """Stream the sealed untimed code-artifact batch records (or none)."""
+    if not groups:
+        if descriptor is not None:
+            _fail("untimed batch records exist without untimed code-artifact groups")
+        return []
+    if type(descriptor) is not dict:
+        _fail("sealed result lacks its untimed code-artifact batch records")
+    descriptor = _keys(descriptor, ("path", "bytes", "sha256", "records"),
+                       "sealed_result_bundle.untimed_batches")
+    artifact = _artifact({key: descriptor[key] for key in ("path", "bytes", "sha256")},
+                         "sealed_result_bundle.untimed_batches")
+    limit = len(groups) * 2 * len(UNTIMED_BATCH_PURPOSES)
+    if type(descriptor["records"]) is not int or not 0 < descriptor["records"] <= limit:
+        _fail("untimed batch record count is outside its derived bound")
+    return list(_stream_canonical_jsonl(root, artifact, descriptor["records"],
+                                        CODE_RECORD_LINE_CAP, limit * CODE_RECORD_LINE_CAP,
+                                        "untimed batch records"))
+
+
+def _check_untimed_batches(root, descriptor, parsed, row_contracts, untimed_contracts):
+    """Authenticate the untimed code-artifact batches outside timing.
+
+    (A1) Each untimed group and variant has exactly one reproduction batch
+    and at most one production batch (a production artifact may come from
+    the correctness run instead).  Each batch uses the frozen command and
+    exit status; its compiler metrics carry every member's frozen status and
+    diagnostic digest; and its objects equal the frozen artifacts
+    (production) or reproduction digests (reproduction).  These batches are
+    not timed invocations and never enter the ``(G + U)`` transcript.
+    """
+    groups = _untimed_groups(parsed)
+    row_by_id = {row["row"]: row for row in parsed}
+    records = _untimed_batch_records(root, descriptor, groups)
+    seen = set()
+    last = None
+    paths = set()
+    for index, record in enumerate(records):
+        record = _keys(record, UNTIMED_BATCH_FIELDS, "untimed batch record")
+        if type(record["group"]) is not int or not 0 <= record["group"] < len(groups) \
+                or record["variant"] not in ("baseline", "candidate") \
+                or record["purpose"] not in UNTIMED_BATCH_PURPOSES:
+            _fail("untimed batch record names an unknown group, variant or purpose")
+        key = (record["group"], ("baseline", "candidate").index(record["variant"]),
+               UNTIMED_BATCH_PURPOSES.index(record["purpose"]))
+        if last is not None and key <= last:
+            _fail("untimed batch records are not unique and ordered")
+        last = key
+        seen.add(key)
+        group = groups[record["group"]]
+        contract = untimed_contracts[group["group"]]
+        side = contract[record["variant"]]
+        if record["command_sha256"] != side["command_sha256"] \
+                or type(record["exit_status"]) is not int \
+                or record["exit_status"] != side["exit_status"]:
+            _fail("untimed batch command or exit status differs from its frozen contract")
+        object_field = ("artifact_sha256" if record["purpose"] == "production"
+                        else "reproduction_sha256")
+        frozen_inputs = _frozen_batch_inputs(contract, row_contracts, row_by_id,
+                                             record["variant"], object_field)
+        if group["kind"] == OBJECT_BATCH_GROUP:
+            metrics_artifact = record["metrics_artifact"]
+            if type(metrics_artifact) is not dict:
+                _fail("untimed batch lacks its per-input metrics artifact")
+            _artifact(metrics_artifact, "untimed batch record.metrics_artifact")
+            if metrics_artifact["path"] in paths:
+                _fail("untimed batch reuses another batch's per-input metrics artifact")
+            paths.add(metrics_artifact["path"])
+            _check_batch_metrics(root, metrics_artifact, contract, frozen_inputs,
+                                 record["exit_status"], group["identity"]["target"], None,
+                                 f"untimed batch metrics {index}")
+        elif record["metrics_artifact"] is not None:
+            _fail("untimed singleton stage batch cannot carry a per-input metrics artifact")
+        if record["output_sha256"] != _batch_output_digest(
+                [item["object_sha256"] for item in frozen_inputs]):
+            _fail("untimed batch objects differ from their frozen artifacts or reproduction "
+                  "digests (nondeterminism)")
+    for group in groups:
+        for variant in range(2):
+            if (group["group"], variant, 1) not in seen:
+                _fail("an untimed code-artifact group lacks its reproduction batch")
+    return records
 
 
 def _family_member_indexes(family):
@@ -3617,6 +3908,13 @@ def _sealed_closure_files(root, binding, support_output, records, phases,
     finally:
         invocations.close()
     add("workflow.code_records", result_bundle["code_records"])
+    if result_bundle["untimed_batches"] is not None:
+        add("workflow.untimed_batches", result_bundle["untimed_batches"])
+        untimed = _read_jsonl_evidence(root, result_bundle["untimed_batches"],
+                                       "untimed batch records")
+        for index, record in enumerate(untimed):
+            if record.get("metrics_artifact") is not None:
+                add(f"untimed.metrics.{index}", record["metrics_artifact"])
     manifests = list(result_bundle["result_manifests"]) \
         + list(result_bundle["batch_result_manifests"])
     for index, item in enumerate(manifests):
@@ -3929,7 +4227,7 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
         "family_sha256", "result_manifests", "batch_result_manifests",
         "raw_measurements_sha256", "member_invocations_sha256", "member_count",
         "scopes_per_member", "adapter_input", "code_records", "code_bytes_summary",
-        "execution_receipt"), "sealed_result_bundle")
+        "execution_receipt", "untimed_batches"), "sealed_result_bundle")
     if result_bundle["schema"] != RESULT_BUNDLE_SCHEMA or result_bundle["version"] != 1:
         _fail("sealed result bundle schema/version is not approved")
     if result_bundle["source_rows_sha256"] != support_output["rows_sha256"] \
@@ -4046,6 +4344,8 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
     # the transcript above proved every timed batch reproduced its artifacts.
     code_facts = _check_code_records(root, result_bundle["code_records"], parsed,
                                      execution["row_contracts"])
+    _check_untimed_batches(root, result_bundle["untimed_batches"], parsed,
+                           execution["row_contracts"], execution["untimed_contracts"])
     code_summary = _code_bytes_summary(parsed, code_facts)
     if result_bundle["code_bytes_summary"] != code_summary:
         _fail("sealed result bundle code-byte summary differs from the code records")
@@ -4101,7 +4401,8 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
         "family_sha256", "member_invocations_sha256", "member_count",
         "adapter_command", "adapter_build_command", "adapter_toolchain_sha256",
         "adapter_source_sha256",
-        "code_bytes_summary_sha256", "publication_id", "published_bundle_sha256",
+        "code_bytes_summary_sha256", "untimed_batches_sha256", "publication_id",
+        "published_bundle_sha256",
         "downloaded_bundle_sha256", "downloaded_bundle", "adapter_result",
         "publication_receipt"),
         "independent_replay_bundle")
@@ -4138,6 +4439,10 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
          "independent_replay_bundle.code_bytes_summary_sha256")
     if replay_bundle["code_bytes_summary_sha256"] != _canonical_json_digest(code_summary):
         _fail("independent replay code-byte summary is not the sealed summary")
+    untimed_descriptor = result_bundle["untimed_batches"]
+    if replay_bundle["untimed_batches_sha256"] != (
+            untimed_descriptor["sha256"] if untimed_descriptor is not None else None):
+        _fail("independent replay does not bind the sealed untimed batch records")
     _token(replay_bundle["publication_id"],
            "independent_replay_bundle.publication_id")
     _sha(replay_bundle["published_bundle_sha256"],

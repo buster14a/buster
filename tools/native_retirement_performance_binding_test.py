@@ -588,7 +588,7 @@ class BindingTests(unittest.TestCase):
             "member_count": len(family["members"]),
             "scopes_per_member": len(binding.STATISTICAL_SCOPES),
             "adapter_input": adapter_input,
-            "code_records": {**input_shard, "records": 1},
+            "code_records": {**input_shard, "records": 1}, "untimed_batches": None,
             "code_bytes_summary": {
                 "rows": 0, "aggregate_ratio": 1.0,
                 "per_cell_max_ratio": 1.0, "aggregate_pass": True,
@@ -647,7 +647,7 @@ class BindingTests(unittest.TestCase):
             "adapter_build_command": "cc -std=c11 -O2 -Wall -Wextra -Werror",
             "adapter_toolchain_sha256": "b" * 64,
             "adapter_source_sha256": statistics["sha256"],
-            "code_bytes_summary_sha256": "0" * 64,
+            "code_bytes_summary_sha256": "0" * 64, "untimed_batches_sha256": None,
             "publication_id": "published-retirement-bundle-v1",
             "published_bundle_sha256": downloaded_bundle["sha256"],
             "downloaded_bundle_sha256": downloaded_bundle["sha256"],
@@ -1474,12 +1474,16 @@ class BindingTests(unittest.TestCase):
                 execution_root, execution_receipt, events)
             code_records = InvocationEvidenceTests.code_records(
                 execution_root, execution_plan, parsed)
+            untimed_batches = InvocationEvidenceTests.untimed_batches(
+                execution_root, execution_plan, parsed, ("production", "reproduction"))
+            self.assertEqual(untimed_batches["records"], 4)
             for path in sorted((execution_root / "execution").rglob("*")):
                 if path.is_file():
                     contents[path.relative_to(execution_root).as_posix()] = path.read_bytes()
             self.assertEqual(code_records["records"], 3)
             result_bundle_value["execution_receipt"] = execution_descriptor
             result_bundle_value["code_records"] = code_records
+            result_bundle_value["untimed_batches"] = untimed_batches
             code_summary = binding._code_bytes_summary(
                 parsed, {row["row"]: (1, 1) for row in parsed})
             result_bundle_value["code_bytes_summary"] = code_summary
@@ -1499,6 +1503,9 @@ class BindingTests(unittest.TestCase):
                 adapter_result_descriptor)
         self.assertEqual(sum(item["name"].startswith("execution.metrics.")
                              for item in seal_files), 2 * (2 + 2 * 60))
+        self.assertEqual(sum(item["name"].startswith("untimed.metrics.")
+                             for item in seal_files), 4)
+        self.assertIn("workflow.untimed_batches", {item["name"] for item in seal_files})
         seal_value = {
             "schema": "buster-native-retirement-result-seal-v1", "version": 1,
             "files": seal_files,
@@ -1569,6 +1576,7 @@ class BindingTests(unittest.TestCase):
             "adapter_toolchain_sha256": toolchain_digest,
             "adapter_source_sha256": source_closure_digest,
             "code_bytes_summary_sha256": binding._canonical_json_digest(code_summary),
+            "untimed_batches_sha256": untimed_batches["sha256"],
             "publication_id": publication_id,
             "published_bundle_sha256": downloaded_descriptor["sha256"],
             "downloaded_bundle_sha256": downloaded_descriptor["sha256"],

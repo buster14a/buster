@@ -268,13 +268,35 @@ class InvocationEvidenceTests(unittest.TestCase):
     @classmethod
     def rejection_control(cls, fixture="tests/rejection-control.c"):
         """A frozen, status-checked (never timed) rejection control input."""
-        return {"fixture": fixture, "row": None, "status": "rejected", "exit_contribution": 1,
+        return {"fixture": fixture, "row": None, "status": "rejected",
+                "error": "driver.analysis",
                 "diagnostic_sha256": cls.digest(f"diagnostic/{fixture}"),
                 "object_sha256": None}
 
     @classmethod
+    def group_contract(cls, group, controls, command_prefix):
+        object_group = group["kind"] == binding.OBJECT_BATCH_GROUP
+        exit_status = 1 if any(item["status"] != "ok" for item in controls) else 0
+        sides = {}
+        for side in ("baseline", "candidate"):
+            command = (cls.digest(f"{command_prefix}/{group['group']}/{side}") if object_group
+                       else cls.digest(f"compile/{group['rows'][0]}/{side}"))
+            sides[side] = {"command_sha256": command, "exit_status": exit_status}
+        return {
+            "group": group["group"], "kind": group["kind"],
+            "target": group["identity"]["target"],
+            "configuration": {field: group["identity"][field]
+                              for field in ("allocator", "frontend_lowering", "PIC")},
+            "recipe": {field: group["identity"][field]
+                       for field in ("fixture_recipe", "cpu", "cpu_features")},
+            "members": [{"row": row,
+                         "diagnostic_sha256": cls.EMPTY_SHA256 if object_group else None}
+                        for row in group["rows"]],
+            "controls": controls, **sides}
+
+    @classmethod
     def execution_plan(cls, root, record, parsed, controls=None):
-        """Build a v3 plan: row contracts plus derived batch group contracts."""
+        """Build a v3 plan: row contracts plus derived timed and untimed groups."""
         sampling = record["rules"]["sampling"]
         oracle_path = record["workflow"]["records"]["oracle"]["path"]
         oracle_by_row = {item["row"]: item for item in
@@ -282,26 +304,12 @@ class InvocationEvidenceTests(unittest.TestCase):
         controls = controls or {}
         groups = binding._batch_groups(parsed)
         group_of_row = {row: group["group"] for group in groups for row in group["rows"]}
-        group_contracts = []
-        for group in groups:
-            object_group = group["kind"] == binding.OBJECT_BATCH_GROUP
-            group_controls = copy.deepcopy(controls.get(group["group"], []))
-            exit_status = 1 if any(item["exit_contribution"] for item in group_controls) else 0
-            sides = {}
-            for side in ("baseline", "candidate"):
-                command = (cls.digest(f"batch/{group['group']}/{side}") if object_group
-                           else cls.digest(f"compile/{group['rows'][0]}/{side}"))
-                sides[side] = {"command_sha256": command, "exit_status": exit_status}
-            group_contracts.append({
-                "group": group["group"], "kind": group["kind"],
-                "configuration": {field: group["identity"][field]
-                                  for field in ("allocator", "frontend_lowering", "PIC")},
-                "recipe": {field: group["identity"][field]
-                           for field in ("fixture_recipe", "cpu", "cpu_features")},
-                "members": [{"row": row,
-                             "diagnostic_sha256": cls.EMPTY_SHA256 if object_group else None}
-                            for row in group["rows"]],
-                "controls": group_controls, **sides})
+        group_contracts = [
+            cls.group_contract(group, copy.deepcopy(controls.get(group["group"], []))
+                               if group["kind"] == binding.OBJECT_BATCH_GROUP else [], "batch")
+            for group in groups]
+        untimed_contracts = [cls.group_contract(group, [], "untimed")
+                             for group in binding._untimed_groups(parsed)]
         contracts = []
         for row in parsed:
             oracle = oracle_by_row[row["row"]]
@@ -336,48 +344,94 @@ class InvocationEvidenceTests(unittest.TestCase):
                 "native_target": binding.NATIVE_TIMED_TARGET,
                 "performance_rows_sha256": binding._support_file(
                     record["support"], "performance_rows")["sha256"],
-                "rows": contracts, "groups": group_contracts}
+                "rows": contracts, "groups": group_contracts,
+                "untimed_groups": untimed_contracts}
         for key in ("seed", "rounds", "pairs_per_round", "warmups_per_variant"):
             plan[key] = sampling[key]
         return plan
 
-    @classmethod
-    def metrics_records(cls, contract, fixtures, plan_rows, variant, started_ns, intervals,
-                        arenas):
-        """Per-input metrics records for one batch, members then controls."""
-        records = []
-        cursor = started_ns + 1
-        inputs = [(member["row"], member["diagnostic_sha256"], "compiled", 0,
-                   plan_rows[member["row"]][variant]["artifact_sha256"], True)
+    @staticmethod
+    def cc_metrics(contract, fixtures, wall_ns, intervals, arenas, rss, exit_status):
+        """Compiler ``-fmetrics-out`` records for one batch (members, then controls).
+
+        Returned as editable ``{"header", "inputs", "functions"}`` so a test
+        can corrupt one field before ``cc_metrics_bytes`` serializes it.
+        """
+        inputs = [(member["row"], member["diagnostic_sha256"], "ok", "driver.none", True)
                   for member in contract["members"]]
         inputs.extend((control["row"], control["diagnostic_sha256"], control["status"],
-                       control["exit_contribution"], control["object_sha256"], False)
-                      for control in contract["controls"])
-        for index, (row, diagnostic, status, contribution, obj, member) in enumerate(inputs):
+                       control["error"], False) for control in contract["controls"])
+        records, functions = [], {}
+        cursor = 1
+        for index, (row, diagnostic, status, error, member) in enumerate(inputs):
             interval = intervals[row] if member else 10
-            records.append({
-                "input": index, "fixture": fixtures[index], "row": row, "status": status,
-                "exit_contribution": contribution, "diagnostic_sha256": diagnostic,
-                "started_ns": cursor, "finished_ns": cursor + interval,
-                "phase_ns": {"backend": interval // 2, "frontend": interval // 4},
-                "arena_high_water_bytes": arenas[row] if member else 0,
-                "object_sha256": obj,
-                "code_sections": [{"bytes": 100, "name": ".text"}] if member else [],
-                "code_functions": [{"bytes": 100, "name": "main"}] if member else [],
+            ok = status == "ok"
+            record = {field: 0 for field in binding.CC_METRICS_INPUT_FIELDS}
+            record.update({
+                "version": 1, "index": index, "status": status, "error": error,
+                "errors": 0 if ok else 1, "measured": 1, "start_ns": cursor,
+                "end_ns": cursor + interval, "total_ns": interval,
+                "parse_ns": interval // 4, "codegen_ns": interval // 2,
+                "arena_peak_bytes": arenas[row] if member else 4096,
+                "source_bytes": 100, "object_file_bytes": 1000 if ok else 0,
+                "text_bytes": 100 if ok else 0, "code_bytes": 100 if ok else 0,
+                "function_records": 1 if ok else 0,
+                "diagnostic_records": 0 if ok else 1, "diagnostic_digest": diagnostic,
+                "path_hex": fixtures[index].encode(), "diagnostic_code_hex": b"" if ok else error.encode(),
+                "diagnostic_path_hex": b"" if ok else fixtures[index].encode(),
+                "message_bytes": 0 if ok else 5, "message_hex": b"" if ok else b"error",
             })
+            records.append(record)
+            if ok:
+                functions[index] = [{"version": 1, "input": index, "ordinal": 0,
+                                     "code_bytes": 100, "name_bytes": 4, "name_truncated": 0,
+                                     "name_hex": b"main"}]
             cursor += interval
-        return records
+        statuses = [record["status"] for record in records]
+        header = {
+            "version": 1, "schema": "buster-cc-metrics", "inputs": len(records),
+            "records": len(records),
+            **{status: statuses.count(status) for status in binding.CC_INPUT_STATUSES},
+            "error": next((record["error"] for record in records if record["status"] != "ok"),
+                          "driver.none"),
+            "exit_status": exit_status, "action": "object",
+            "target": binding.TARGET_METRICS_NAMES[contract["target"]],
+            "allocator": contract["configuration"]["allocator"], "compile_jobs": 1,
+            "compilation_workers": 1, "intervals": "serial", "keep_going": 1,
+            "function_sizes": 1, "wall_ns": wall_ns, "peak_rss_bytes": rss,
+        }
+        assert cursor <= wall_ns, "fixture intervals must fit inside the compiler window"
+        return {"header": header, "inputs": records, "functions": functions}
+
+    @staticmethod
+    def cc_metrics_bytes(metrics):
+        def value(item):
+            if isinstance(item, bytes):
+                return item.hex() if item else "-"
+            return str(item)
+
+        def line(tag, fields, record):
+            return tag + "".join(f" {field}={value(record[field])}" for field in fields) + "\n"
+
+        text = [line("CC_METRICS", binding.CC_METRICS_HEADER_FIELDS, metrics["header"])]
+        for index, record in enumerate(metrics["inputs"]):
+            text.append(line("CC_METRICS_INPUT", binding.CC_METRICS_INPUT_FIELDS, record))
+            for function in metrics["functions"].get(index, []):
+                text.append(line("CC_METRICS_FUNCTION", binding.CC_METRICS_FUNCTION_FIELDS,
+                                 function))
+        return "".join(text).encode()
 
     @classmethod
     def attach_execution(cls, root, record, parsed, samples, batch_samples=None,
-                         controls=None, mutate_metrics=None):
+                         controls=None, mutate_metrics=None, mutate_objects=None):
         """Attach a complete test-only v3 plan and batch transcript to a fixture.
 
         ``samples`` maps (row, round, pair) to metric -> {baseline, candidate};
         ``batch_samples`` maps (group, round, pair) the same way for the batch
         process pair.  Warmups reuse coordinate (unit, 0, 0).  Frozen oracle
         outputs are test values, never deployment evidence.
-        ``mutate_metrics(sequence, records)`` may corrupt one metrics artifact.
+        ``mutate_metrics(sequence, metrics)`` may corrupt one metrics artifact
+        and ``mutate_objects(sequence, digests)`` one batch's written objects.
         """
         sampling = record["rules"]["sampling"]
         plan = cls.execution_plan(root, record, parsed, controls)
@@ -416,16 +470,21 @@ class InvocationEvidenceTests(unittest.TestCase):
                         arenas[row] = samples[row_key]["compiler_peak_memory"][variant]
                     fixtures = ([row_by_id[row]["identity"]["fixture"] for row in group["rows"]]
                                 + [item["fixture"] for item in contract["controls"]])
-                    metrics = cls.metrics_records(contract, fixtures, plan_rows, variant,
-                                                  started, intervals, arenas)
-                    output = binding._batch_output_digest(
-                        [item["object_sha256"] for item in metrics])
+                    metrics = cls.cc_metrics(contract, fixtures,
+                                             int(round(seconds * 1_000_000_000)) - 1,
+                                             intervals, arenas, rss,
+                                             contract[variant]["exit_status"])
+                    objects = ([plan_rows[row][variant]["artifact_sha256"]
+                                for row in group["rows"]]
+                               + [item["object_sha256"] for item in contract["controls"]])
                     if mutate_metrics is not None:
                         mutate_metrics(event["sequence"], metrics)
-                    data = b"".join((json.dumps(item, sort_keys=True, separators=(",", ":"))
-                                     + "\n").encode() for item in metrics)
+                    if mutate_objects is not None:
+                        mutate_objects(event["sequence"], objects)
+                    output = binding._batch_output_digest(objects)
                     metrics_artifact = cls.put(
-                        root, f"execution/metrics/batch-{event['sequence']:06d}.jsonl", data)
+                        root, f"execution/metrics/batch-{event['sequence']:06d}.txt",
+                        cls.cc_metrics_bytes(metrics))
                 else:
                     row = group["rows"][0]
                     key = (row, event["round"], event["pair"]) if sample else (row, 0, 0)
@@ -468,6 +527,47 @@ class InvocationEvidenceTests(unittest.TestCase):
                    "completed_at_ns": last_end + 1, "invocations": len(events), "shards": []}
         descriptor = cls.write_transcript(root, receipt, events)
         return plan_descriptor, receipt, descriptor, events, raw_digest
+
+    @classmethod
+    def untimed_batches(cls, root, plan_descriptor, parsed, purposes=("reproduction",),
+                        mutate=None, path="execution/untimed-batches.jsonl"):
+        """Write the untimed code-artifact batch records and their metrics."""
+        plan = json.loads((root / plan_descriptor["path"]).read_text())
+        rows = {item["row"]: item for item in plan["rows"]}
+        row_by_id = {row["row"]: row for row in parsed}
+        lines = []
+        for contract in plan["untimed_groups"]:
+            object_group = contract["kind"] == binding.OBJECT_BATCH_GROUP
+            members = [member["row"] for member in contract["members"]]
+            for variant in ("baseline", "candidate"):
+                for purpose in purposes:
+                    field = "artifact_sha256" if purpose == "production" else "reproduction_sha256"
+                    objects = [rows[row][variant][field] for row in members]
+                    metrics_artifact = None
+                    if object_group:
+                        metrics = cls.cc_metrics(
+                            contract, [row_by_id[row]["identity"]["fixture"] for row in members],
+                            5_000_000, {row: 1000 for row in members},
+                            {row: 8192 for row in members}, 65536,
+                            contract[variant]["exit_status"])
+                        value = {"metrics": metrics, "objects": objects}
+                        if mutate is not None:
+                            mutate(contract["group"], variant, purpose, value)
+                        metrics_artifact = cls.put(
+                            root, f"execution/untimed/{contract['group']}-{variant}-{purpose}.txt",
+                            cls.cc_metrics_bytes(value["metrics"]))
+                        objects = value["objects"]
+                    lines.append({"command_sha256": contract[variant]["command_sha256"],
+                                  "exit_status": contract[variant]["exit_status"],
+                                  "group": contract["group"],
+                                  "metrics_artifact": metrics_artifact,
+                                  "output_sha256": binding._batch_output_digest(objects),
+                                  "purpose": purpose, "variant": variant})
+        if not lines:
+            return None
+        data = b"".join((json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                        for item in lines)
+        return {**cls.put(root, path, data), "records": len(lines)}
 
     @classmethod
     def write_transcript(cls, root, receipt, events):
@@ -884,7 +984,7 @@ class InvocationEvidenceTests(unittest.TestCase):
                   "member_invocations_sha256": binding._family_invocation_digest(self.family),
                   "member_count": len(self.family["members"]), "scopes_per_member": 3,
                   "adapter_input": adapter, "execution_receipt": self.descriptor,
-                  "code_records": code_records,
+                  "code_records": code_records, "untimed_batches": None,
                   "code_bytes_summary": binding._code_bytes_summary(
                       self.rows, {0: (100, 100), 1: (100, 100)})}
         result_descriptor = self.put(self.root, "results/bundle.json", result)
@@ -1021,12 +1121,12 @@ class InvocationEvidenceTests(unittest.TestCase):
         return [event["sequence"] for event in self.events
                 if event["kind"] == "compiler" and event["group"] == 1]
 
-    def assert_metrics_rejected(self, mutate, message, sequences=None):
+    def assert_metrics_rejected(self, mutate, message, sequences=None, hook="mutate_metrics"):
         for target in sequences or (self.batch_sequences()[0], self.batch_sequences()[-1]):
-            def corrupt(sequence, records, target=target):
+            def corrupt(sequence, value, target=target):
                 if sequence == target:
-                    mutate(records)
-            self.attach(mutate_metrics=corrupt)
+                    mutate(value)
+            self.attach(**{hook: corrupt})
             with self.subTest(sequence=target, message=message), \
                     self.assertRaisesRegex(ValueError, message):
                 self.check()
@@ -1052,53 +1152,78 @@ class InvocationEvidenceTests(unittest.TestCase):
             self.check()
 
     def test_batch_objects_must_reproduce_their_frozen_artifacts(self):
-        # Determinism: every warmup and sample batch must emit each fixture's
-        # object byte-identical to its frozen artifact.
-        def mismatch(records):
-            records[0]["object_sha256"] = "f" * 64
-        self.assert_metrics_rejected(mismatch, "nondeterminism")
+        # Determinism: every warmup and sample batch must write each fixture's
+        # object byte-identical to its frozen artifact; the producer hashes the
+        # written objects in input order into the invocation's output digest.
+        def mismatch(objects):
+            objects[0] = "f" * 64
+        self.assert_metrics_rejected(mismatch, "nondeterminism", hook="mutate_objects")
+
+        def extra_object(objects):
+            objects[1] = "f" * 64
+        self.assert_metrics_rejected(extra_object, "nondeterminism", hook="mutate_objects")
 
     def test_per_input_intervals_are_ordered_and_inside_the_batch(self):
-        def overlap(records):
-            records[1]["started_ns"] = records[0]["finished_ns"] - 1
-            records[1]["finished_ns"] = records[1]["started_ns"] + 10
+        def overlap(metrics):
+            first, second = metrics["inputs"][:2]
+            second["start_ns"] = first["end_ns"] - 1
+            second["end_ns"] = second["start_ns"] + 10
+            second["total_ns"] = 10
 
-        def early(records):
-            records[0]["started_ns"] -= 2
+        def late(metrics):
+            record = metrics["inputs"][-1]
+            record["end_ns"] = metrics["header"]["wall_ns"] + 1
+            record["total_ns"] = record["end_ns"] - record["start_ns"]
 
-        def late(records):
-            records[-1]["finished_ns"] += 10 ** 9
+        def empty(metrics):
+            record = metrics["inputs"][0]
+            record["end_ns"] = record["start_ns"]
+            record["total_ns"] = 0
 
-        def empty(records):
-            records[0]["finished_ns"] = records[0]["started_ns"]
+        def outside_process(metrics):
+            metrics["header"]["wall_ns"] += 10 ** 9
+        for mutate, message in ((overlap, "per-input intervals"), (late, "per-input intervals"),
+                                (empty, "per-input intervals"),
+                                (outside_process, "header is not one serial")):
+            self.assert_metrics_rejected(mutate, message)
 
-        for mutate in (overlap, early, late, empty):
-            self.assert_metrics_rejected(mutate, "per-input intervals")
-
-        def phases(records):
-            interval = records[0]["finished_ns"] - records[0]["started_ns"]
-            records[0]["phase_ns"] = {"backend": interval, "frontend": 1}
+        def phases(metrics):
+            record = metrics["inputs"][0]
+            record["codegen_ns"] = record["total_ns"]
         self.assert_metrics_rejected(phases, "phase timings exceed")
 
+        def total(metrics):
+            metrics["inputs"][0]["total_ns"] += 1
+        self.assert_metrics_rejected(total, "total_ns is not its per-input interval")
+
     def test_control_status_and_diagnostics_match_the_frozen_oracle(self):
-        for field, value in (("status", "compiled"), ("exit_contribution", 0),
-                             ("diagnostic_sha256", "e" * 64)):
-            def change(records, field=field, value=value):
-                records[1][field] = value
-            self.assert_metrics_rejected(change, "status, exit contribution or diagnostics")
+        for field, value in (("status", "failed"), ("error", "driver.parse"),
+                             ("diagnostic_digest", "e" * 64)):
+            def change(metrics, field=field, value=value):
+                metrics["inputs"][1][field] = value
+            self.assert_metrics_rejected(change, "status, error or diagnostics|header is not")
 
-        def member_diagnostic(records):
-            records[0]["diagnostic_sha256"] = "e" * 64
-        self.assert_metrics_rejected(member_diagnostic, "status, exit contribution or diagnostics")
+        def member_diagnostic(metrics):
+            metrics["inputs"][0]["diagnostic_digest"] = "e" * 64
+        self.assert_metrics_rejected(member_diagnostic, "status, error or diagnostics")
 
-        def reorder(records):
-            records.reverse()
+        def unmeasured(metrics):
+            metrics["inputs"][0]["measured"] = 0
+        self.assert_metrics_rejected(unmeasured, "status, error or diagnostics")
+
+        def reorder(metrics):
+            metrics["inputs"][0]["path_hex"], metrics["inputs"][1]["path_hex"] = \
+                metrics["inputs"][1]["path_hex"], metrics["inputs"][0]["path_hex"]
         self.assert_metrics_rejected(reorder, "frozen batch input order")
 
+        def object_written(metrics):
+            metrics["inputs"][1]["object_file_bytes"] = 10
+        self.assert_metrics_rejected(object_written, "object output contradicts")
+
         def inconsistent_control(plan):
-            plan["groups"][1]["controls"][0]["status"] = "compiled"
+            plan["groups"][1]["controls"][0]["status"] = "ok"
         self.rewrite_plan(inconsistent_control)
-        with self.assertRaisesRegex(ValueError, "status, exit contribution and object disagree"):
+        with self.assertRaisesRegex(ValueError, "status, error and object disagree"):
             self.check()
         self.attach()
 
@@ -1109,30 +1234,80 @@ class InvocationEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exit status contradicts"):
             self.check()
 
-    def test_metrics_artifacts_are_bounded_and_exactly_the_frozen_inputs(self):
-        _plan, groups, rows = binding._check_execution_plan(
+    def test_metrics_header_is_one_serial_continue_on_failure_object_batch(self):
+        for field, value in (("compile_jobs", 2), ("compilation_workers", 2),
+                             ("intervals", "concurrent"), ("keep_going", 0),
+                             ("action", "link"), ("target", "aarch64-linux"),
+                             ("allocator", "quality"), ("exit_status", 0),
+                             ("error", "driver.none"), ("inputs", 3), ("records", 3),
+                             ("rejected", 0), ("not_run", 1), ("schema", "other-metrics")):
+            def change(metrics, field=field, value=value):
+                metrics["header"][field] = value
+            self.assert_metrics_rejected(change, "header is not one serial",
+                                         sequences=(self.batch_sequences()[-1],))
+
+    def test_metrics_artifacts_are_strict_bounded_and_exactly_the_frozen_inputs(self):
+        _plan, groups, rows, _untimed = binding._check_execution_plan(
             self.root, self.plan, self.record, self.rows, self.rules["sampling"], 3,
             binding.NATIVE_TIMED_TARGET)
         event = self.events[self.batch_index()]
+        frozen = binding._frozen_batch_inputs(groups[1], rows, {row["row"]: row for row in self.rows},
+                                              event["variant"], "artifact_sha256")
         oversized = dict(event["metrics_artifact"], bytes=binding.METRICS_ARTIFACT_BYTE_CAP + 1)
         with mock.patch.object(binding, "_check_evidence") as read:
             with self.assertRaisesRegex(ValueError, "exceeds its bounded size"):
-                binding._check_batch_metrics(
-                    self.root, oversized, groups[1], rows, {row["row"]: row for row in self.rows},
-                    event["variant"], event["started_ns"], event["finished_ns"], "metrics")
+                binding._check_batch_metrics(self.root, oversized, groups[1], frozen, 1,
+                                             binding.NATIVE_TIMED_TARGET, None, "metrics")
             read.assert_not_called()
 
-        def huge_record(records):
-            records[0]["code_functions"] = [{"bytes": 1, "name": "f" * binding.METRICS_RECORD_BYTE_CAP}]
+        def huge_record(metrics):
+            metrics["inputs"][1]["message_hex"] = b"e" * binding.METRICS_RECORD_BYTE_CAP
         self.assert_metrics_rejected(huge_record, "missing, truncated, or oversized")
 
-        def extra(records):
-            records.append(dict(records[-1], input=len(records)))
+        def extra(metrics):
+            metrics["inputs"].append(dict(metrics["inputs"][-1], index=len(metrics["inputs"])))
         self.assert_metrics_rejected(extra, "undeclared extra records")
 
-        def missing(records):
-            records.pop()
+        def missing(metrics):
+            metrics["inputs"].pop()
         self.assert_metrics_rejected(missing, "missing, truncated, or oversized")
+
+        def version(metrics):
+            metrics["header"]["version"] = 2
+        self.assert_metrics_rejected(version, "not metrics version 1")
+
+        def leading_zero(metrics):
+            metrics["inputs"][0]["errors"] = "00"
+        self.assert_metrics_rejected(leading_zero, "canonical unsigned decimal")
+
+        def upper_hex(metrics):
+            metrics["inputs"][0]["path_hex"] = "ABCD"
+        self.assert_metrics_rejected(upper_hex, "lowercase hex")
+
+        def stray_function(metrics):
+            metrics["functions"][0][0]["input"] = 1
+        self.assert_metrics_rejected(stray_function, "function records do not follow")
+
+        def unrequested_functions(metrics):
+            metrics["header"]["function_sizes"] = 0
+        self.assert_metrics_rejected(unrequested_functions, "did not request")
+
+    def test_metrics_artifact_parser_rejects_reordered_or_unknown_keys(self):
+        event = self.events[self.batch_index()]
+        path = self.root / event["metrics_artifact"]["path"]
+        data = path.read_bytes()
+        lines = data.splitlines(keepends=True)
+        swapped = lines[1].replace(b" errors=", b" warnings_tmp=").replace(
+            b" warnings=", b" errors=").replace(b" warnings_tmp=", b" warnings=")
+        for index, replacement in ((1, swapped),
+                                   (1, lines[1].replace(b"\n", b" extra=1\n")),
+                                   (0, lines[0].replace(b"CC_METRICS ", b"CC_METRICS  ", 1)),
+                                   (1, lines[1].replace(b"CC_METRICS_INPUT", b"CC_METRICS_ROW"))):
+            changed = b"".join(lines[:index] + [replacement] + lines[index + 1:])
+            descriptor = self.put(self.root, "execution/metrics/tampered.txt", changed)
+            with self.subTest(index=index), self.assertRaisesRegex(
+                    ValueError, "pinned field order|missing, reordered, or unknown"):
+                binding._read_cc_metrics(self.root, descriptor, 2, "tampered metrics")
 
     def test_batch_process_metrics_and_artifacts_are_required(self):
         for index in (self.batch_index("warmup"), self.batch_index()):
@@ -1207,7 +1382,7 @@ class InvocationEvidenceTests(unittest.TestCase):
     def test_code_records_cover_every_code_row_with_its_reproduction(self):
         self.add_untimed_rows()
         self.attach()
-        _plan, _groups, rows = binding._check_execution_plan(
+        _plan, _groups, rows, _untimed = binding._check_execution_plan(
             self.root, self.plan, self.record, self.rows, self.rules["sampling"], 3,
             binding.NATIVE_TIMED_TARGET)
         good = self.code_records(self.root, self.plan, self.rows)
@@ -1232,6 +1407,94 @@ class InvocationEvidenceTests(unittest.TestCase):
             binding._check_code_records(self.root, {**omitted, "records": 3}, self.rows, rows)
         with self.assertRaisesRegex(ValueError, "every code-eligible row"):
             binding._check_code_records(self.root, {**omitted, "records": 2}, self.rows, rows)
+
+    def untimed_contracts(self):
+        _plan, _groups, rows, untimed = binding._check_execution_plan(
+            self.root, self.plan, self.record, self.rows, self.rules["sampling"], 3,
+            binding.NATIVE_TIMED_TARGET)
+        return rows, untimed
+
+    def test_untimed_code_artifact_batches_are_sealed_and_checked(self):
+        # (A1) Untimed code rows need their frozen oracle status/diagnostics and
+        # a byte-identical reproduction, from batches outside the timed count.
+        self.add_untimed_rows()
+        self.attach()
+        self.assertEqual([group["rows"] for group in binding._untimed_groups(self.rows)], [[3]])
+        rows, untimed = self.untimed_contracts()
+        self.assertEqual(self.check()["invocations"], (2 + 1) * 2 * (2 + 2 * 60))
+        for purposes in (("reproduction",), ("production", "reproduction")):
+            descriptor = self.untimed_batches(self.root, self.plan, self.rows, purposes)
+            records = binding._check_untimed_batches(self.root, descriptor, self.rows, rows,
+                                                     untimed)
+            self.assertEqual([(record["variant"], record["purpose"]) for record in records],
+                             [(variant, purpose) for variant in ("baseline", "candidate")
+                              for purpose in purposes])
+        with self.assertRaisesRegex(ValueError, "lacks its untimed code-artifact batch records"):
+            binding._check_untimed_batches(self.root, None, self.rows, rows, untimed)
+        with self.assertRaisesRegex(ValueError, "lacks its reproduction batch"):
+            binding._check_untimed_batches(
+                self.root, self.untimed_batches(self.root, self.plan, self.rows, ("production",)),
+                self.rows, rows, untimed)
+
+        def status(group, variant, purpose, value):
+            value["metrics"]["inputs"][0]["diagnostic_digest"] = "e" * 64
+
+        def rejected(group, variant, purpose, value):
+            value["metrics"]["inputs"][0].update(status="rejected", error="driver.parse")
+
+        def object_mismatch(group, variant, purpose, value):
+            value["objects"][0] = "f" * 64
+
+        def interval(group, variant, purpose, value):
+            record = value["metrics"]["inputs"][0]
+            record["end_ns"] = value["metrics"]["header"]["wall_ns"] + 1
+            record["total_ns"] = record["end_ns"] - record["start_ns"]
+        for mutate, message in ((status, "status, error or diagnostics"),
+                                (rejected, "status, error or diagnostics|header is not"),
+                                (object_mismatch, "nondeterminism"),
+                                (interval, "per-input intervals")):
+            for purpose in ("production", "reproduction"):
+                def selected(group, variant, which, value, mutate=mutate, purpose=purpose):
+                    if variant == "candidate" and which == purpose:
+                        mutate(group, variant, which, value)
+                descriptor = self.untimed_batches(self.root, self.plan, self.rows,
+                                                  ("production", "reproduction"), selected)
+                with self.subTest(message=message, purpose=purpose), \
+                        self.assertRaisesRegex(ValueError, message):
+                    binding._check_untimed_batches(self.root, descriptor, self.rows, rows, untimed)
+        good = self.untimed_batches(self.root, self.plan, self.rows, ("reproduction",))
+        lines = [json.loads(line) for line in (self.root / good["path"]).read_bytes().splitlines()]
+        for change, message in (
+                (lambda value: value[0].update(command_sha256="e" * 64), "frozen contract"),
+                (lambda value: value[0].update(exit_status=1), "frozen contract"),
+                (lambda value: value[0].update(metrics_artifact=None), "lacks its per-input"),
+                (lambda value: value.reverse(), "unique and ordered"),
+                (lambda value: value[1].update(variant="baseline"), "unique and ordered"),
+                (lambda value: value[0].update(group=1), "unknown group"),
+                (lambda value: value[0].update(purpose="timed"), "unknown group, variant or purpose")):
+            candidate = copy.deepcopy(lines)
+            change(candidate)
+            data = b"".join((json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                            for item in candidate)
+            descriptor = {**self.put(self.root, "execution/untimed-bad.jsonl", data),
+                          "records": len(candidate)}
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                binding._check_untimed_batches(self.root, descriptor, self.rows, rows, untimed)
+
+    def test_untimed_group_contracts_are_the_derived_partition(self):
+        self.add_untimed_rows()
+        for change, message in (
+                (lambda plan: plan["untimed_groups"].pop(), "derived A1 partition"),
+                (lambda plan: plan["untimed_groups"][0].update(target=binding.NATIVE_TIMED_TARGET),
+                 "configuration or recipe"),
+                (lambda plan: plan["untimed_groups"][0]["controls"].append(self.rejection_control()),
+                 "no controls"),
+                (lambda plan: plan["untimed_groups"][0]["members"][0].update(
+                    diagnostic_sha256=None), "diagnostic_sha256")):
+            self.attach()
+            self.rewrite_plan(change)
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                self.check()
 
     def test_rehashed_wrong_context_or_plan_rejects(self):
         for field in ("context_sha256", "execution_plan_sha256"):
