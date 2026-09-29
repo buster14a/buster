@@ -194,6 +194,7 @@ BUSTER_C_EXTERN CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
                                                    u32* invalid_specifier);
 BUSTER_C_EXTERN bool c_parse_type_name_start_word_token(CPreprocessResult preprocess, CToken token);
 BUSTER_C_EXTERN u32 c_symbol_intern(CSymbolTable* table, String8 name);
+BUSTER_C_EXTERN u32 c_symbol_find(const CSymbolTable* table, String8 name);
 BUSTER_C_EXTERN bool c_type_parse_buffer_size_add(u64* size, u64 count, u64 element_size, u64 alignment);
 BUSTER_C_EXTERN void c_parse_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                 CDeclaration* declaration, CTypeId inherited_base);
@@ -283,6 +284,7 @@ BUSTER_C_EXTERN void c_parse_index_scope_children(CParseResult* result, Arena* a
 BUSTER_C_EXTERN void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                     String8 name, u32 token_index);
+BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_at_token(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 token_index);
 BUSTER_C_EXTERN bool c_parse_result_reserve_types(CParseResult* result, u32 additional);
 BUSTER_C_EXTERN CTypeId c_parse_aggregate_unique(CParseResult* result, CTypeKind kind, String8 tag, bool* decided);
 #if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
@@ -577,16 +579,29 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_attribute_native_binding
 // Index 0 is the empty spelling that C_SYMBOL_WELL_KNOWN_NONE never matches.
 BUSTER_C_EXTERN String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_COUNT];
 
+// Can a token without an interned id still be spelled like an identifier?
+// Only identifiers and unclassified hand-built rows can: a punctuator,
+// number, literal, newline or pragma marker never spells a word that starts
+// with a letter or underscore and holds no quote, which is every
+// well-known spelling. Callers ask about arbitrary tokens, so this is what
+// keeps punctuation from paying a spelling compare.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_may_spell_word(CToken token)
+{
+    return token.kind == C_TOKEN_IDENTIFIER || token.kind == C_TOKEN_INVALID;
+}
+
 // Is this identifier token spelled `well_known`?  Interned tokens — every
-// token the preprocessor produced — settle on the integer compare. Symbol 0
-// marks a token that never passed the intern pass (pasted, synthesized, or
-// test-built) and falls back to the spelling, so a missed path costs speed
-// and never correctness. Both sides read the one spelling table, so the id
-// and the fallback spelling cannot drift apart.
+// identifier the preprocessor produced, pasted ones included — settle on the
+// integer compare. Symbol 0 marks a non-identifier or a token that never
+// passed the intern pass (synthesized or test-built); only the latter falls
+// back to the spelling, so a missed path costs speed and never correctness.
+// Both sides read the one spelling table, so the id and the fallback
+// spelling cannot drift apart.
 BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_is_well_known(char8 const* spelling_base, CToken token, CSymbolWellKnown well_known)
 {
     return token.symbol ? token.symbol == (u32)well_known
-                        : string_equal(c_token_spelling(spelling_base, token), c_symbol_well_known_spellings[well_known]);
+                        : c_token_may_spell_word(token) &&
+                              string_equal(c_token_spelling(spelling_base, token), c_symbol_well_known_spellings[well_known]);
 }
 
 // Is this identifier token spelled as any member of `set`, a union of
@@ -605,7 +620,7 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_in_well_known_set(
     {
         String8 spelling = c_token_spelling(spelling_base, token);
         result = false;
-        for (u64 remaining = set; remaining && !result; remaining &= remaining - 1)
+        for (u64 remaining = c_token_may_spell_word(token) ? set : 0; remaining && !result; remaining &= remaining - 1)
         {
             result = string_equal(spelling, c_symbol_well_known_spellings[trailing_zeroes_u64(remaining)]);
         }
