@@ -3061,9 +3061,16 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
 
     // ELF page relocations retain explicit RELA addends; REL ADRP carries
     // an unscaled signed literal, while ADD carries an unsigned low twelve.
-    u32 elf_page_words[] = {UINT32_C(0xb0000008), UINT32_C(0xf0ffffe8), UINT32_C(0x913ffd08), UINT32_C(0x11000517)};
-    u32 elf_page_canonical[] = {UINT32_C(0x90000008), UINT32_C(0x90000008), UINT32_C(0x91000108), UINT32_C(0x11000117)};
-    s64 elf_page_implicit[] = {1, -1, 4095, 1};
+    // The GOT pair follows: its ADRP reads like the direct one, and its
+    // 64-bit LDR carries a REL addend scaled by eight.
+    u32 elf_page_words[] = {UINT32_C(0xb0000008), UINT32_C(0xf0ffffe8), UINT32_C(0x913ffd08), UINT32_C(0x11000517),
+                            UINT32_C(0xb0000008), UINT32_C(0xf9400528)};
+    u32 elf_page_canonical[] = {UINT32_C(0x90000008), UINT32_C(0x90000008), UINT32_C(0x91000108), UINT32_C(0x11000117),
+                                UINT32_C(0x90000008), UINT32_C(0xf9400128)};
+    s64 elf_page_implicit[] = {1, -1, 4095, 1, 1, 8};
+    ObjectRelocationKind elf_page_kinds[] = {OBJECT_RELOCATION_AARCH64_ELF_PAGE21, OBJECT_RELOCATION_AARCH64_ELF_PAGE21,
+                                             OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12, OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12,
+                                             OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21, OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12};
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(elf_page_words); case_index += 1)
     {
         ObjectSection page_sections[BUSTER_ARRAY_LENGTH(sections)];
@@ -3072,7 +3079,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         page_sections[OBJECT_SECTION_TEXT].data = (ByteSlice){.pointer = (u8*)page_text, .length = sizeof(page_text)};
         page_sections[OBJECT_SECTION_TEXT].virtual_size = sizeof(page_text);
         ObjectRelocation page_relocation = {.section = OBJECT_SECTION_TEXT, .symbol = 1, .addend = -17,
-            .kind = case_index < 2 ? OBJECT_RELOCATION_AARCH64_ELF_PAGE21 : OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12};
+            .kind = elf_page_kinds[case_index]};
         ObjectFile page_object = object;
         page_object.sections = page_sections;
         page_object.relocations = &page_relocation;
@@ -3140,7 +3147,10 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             }
             if (offsets_valid)
             {
-                u32 invalid_words[] = {UINT32_C(0xd503201f), UINT32_C(0x10000008), UINT32_C(0x91400400), UINT32_C(0xf9400000)};
+                // A GOT load of XZR or of a W register is refused as well.
+                bool got_load = elf_page_kinds[case_index] == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12;
+                u32 invalid_words[] = {UINT32_C(0xd503201f), UINT32_C(0x10000008), UINT32_C(0x91400400),
+                                       got_load ? UINT32_C(0xf940011f) : UINT32_C(0xf9400000), got_load ? UINT32_C(0xb9400108) : UINT32_C(0xd503201f)};
                 for (u32 bad = 0; bad < BUSTER_ARRAY_LENGTH(invalid_words); bad += 1)
                 {
                     object_test_write_u32(artifact.bytes, target_data, invalid_words[bad]);
@@ -3176,6 +3186,24 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                                                           0, UINT64_MAX, 1, &page_patched));
     BUSTER_TEST(arguments, !object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12, UINT32_C(0x91000108),
                                                           0, 0, -1, &page_patched));
+    // The GOT pair relaxes to ADRP/ADD of the symbol; a symbol at zero, an
+    // absent weak one, becomes MOVZ #0 and ADD #0.
+    BUSTER_TEST(arguments, object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21, UINT32_C(0x90000008),
+                                                         0x2004, 0x2fff, 1, &page_patched) && page_patched == UINT32_C(0xb0000008));
+    BUSTER_TEST(arguments, object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21, UINT32_C(0x90000008),
+                                                         UINT64_C(0x100001000), 0, 0, &page_patched) && page_patched == UINT32_C(0xd2800008));
+    BUSTER_TEST(arguments, object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12, UINT32_C(0xf9400128),
+                                                         0x2008, 0x2abc, 0, &page_patched) && page_patched == UINT32_C(0x912af128));
+    BUSTER_TEST(arguments, object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12, UINT32_C(0xf9400128),
+                                                         0x2008, 0, 0, &page_patched) && page_patched == UINT32_C(0x91000128));
+    BUSTER_TEST(arguments, !object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21, UINT32_C(0xd503201f),
+                                                          0x2004, 0, 0, &page_patched));
+    BUSTER_TEST(arguments, !object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12, UINT32_C(0xf940013f),
+                                                          0x2008, 0x2abc, 0, &page_patched));
+    BUSTER_TEST(arguments, !object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12, UINT32_C(0xb9400128),
+                                                          0x2008, 0x2abc, 0, &page_patched));
+    BUSTER_TEST(arguments, !object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12, UINT32_C(0x91000128),
+                                                          0x2008, 0x2abc, 0, &page_patched));
 
     u32 aarch64_branch_opcodes[] = {UINT32_C(0x14000000), UINT32_C(0x94000000)};
     ObjectRelocationKind aarch64_branch_kinds[] = {OBJECT_RELOCATION_AARCH64_JUMP26, OBJECT_RELOCATION_AARCH64_CALL26};

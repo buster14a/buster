@@ -441,6 +441,8 @@ runner labels define separate cohorts. Reports include queue delay, elapsed
 time, execution span and summed runner seconds, including mobile/lint/aggregate
 jobs. Never attribute differences to this PR without matching source/cache state
 and multiple completed observations. No speedup is claimed before that evidence.
+Runner assignment latency and macOS capacity across all workflows are measured
+with `queue-collect`/`queue-summarize`; see [ci-runner-queue.md](ci-runner-queue.md).
 
 ## Independent Clang analyzer gate
 
