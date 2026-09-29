@@ -5,8 +5,10 @@ The native self-test writes the fixtures. These tests authenticate those exact
 bytes, independently derive the schedule and process identities, and join every
 sample through the production replay reader. No performance result is claimed.
 (A1) Compiler invocations are batch processes of frozen batch groups; object
-batches carry per-input metrics artifacts; row and batch samples are separate
-#615 populations; code bytes are a once-per-row record set.
+batches carry per-input metrics artifacts as byte ranges of metrics shards and
+name their inputs through a digest-bound `@file` response file; row and batch
+samples are separate #615 populations; code bytes are a once-per-row record
+set; untimed code-artifact batches have their own sealed records and shards.
 Run after `bench_throughput self-test`, with its output directory as argument.
 """
 import copy
@@ -49,8 +51,10 @@ def _native_rows(row_ids=(0, 6, 10), object_rows=(6,)):
     return rows
 
 
-def _metrics_path(instance):
-    return f"retirement-metrics-{instance[:32]}.txt"
+def _slice(root, artifact):
+    with (root / artifact["path"]).open("rb") as stream:
+        stream.seek(artifact["offset"])
+        return stream.read(artifact["bytes"])
 
 
 def _boundary_object_groups(rows):
@@ -178,8 +182,20 @@ class NativeExecutionTests(unittest.TestCase):
         control = {"fixture": "tests/control.c", "row": None, "status": "rejected",
                    "error": "driver.analysis", "diagnostic_sha256": "b" * 64, "object_sha256": None}
         contract = {"members": [{"row": row, "diagnostic_sha256": EMPTY_SHA256} for row in (0, 1)],
-                    "controls": [control],
+                    "controls": [control], "metrics_bytes_max": 1 << 20,
                     "configuration": {"allocator": "none", "frontend_lowering": "direct-ssa", "PIC": "0"}}
+        # The batch argv names its inputs only through the response file,
+        # whose leaf is the SHA-256 of the canonical list of the frozen order.
+        argv = json.loads(command)["argv"]
+        listing = binding._input_list_bytes(["tests/alpha.c", "tests/beta.c", "tests/control.c"], "list")
+        leaf = f"retirement-inputs-{hashlib.sha256(listing).hexdigest()}.rsp"
+        self.assertEqual([item for item in argv if item.startswith("@")], ["@" + leaf])
+        self.assertFalse({"tests/alpha.c", "tests/beta.c", "tests/control.c"} & set(argv))
+        self.assertLessEqual(len(argv), 256)
+        self.assertEqual((self.root / "retirement-measured" / leaf).read_bytes(), listing)
+        self.assertEqual(binding._response_file_arguments(listing, "list"),
+                         [b"tests/alpha.c", b"tests/beta.c", b"tests/control.c"])
+        shards = binding._MetricsShards(self.root)
         row_contracts = {row: {variant: {"artifact_sha256": artifact_digest}
                                for variant in ("baseline", "candidate")} for row in (0, 1)}
         row_by_id = {row["row"]: row for row in rows}
@@ -195,15 +211,18 @@ class NativeExecutionTests(unittest.TestCase):
             self.assertEqual(event["output_sha256"],
                              binding._batch_output_digest([artifact_digest, artifact_digest, None]))
             descriptor = event["metrics_artifact"]
-            self.assertEqual(descriptor["path"], _metrics_path(event["process_instance_sha256"]))
-            self.assertNotIn(descriptor["path"], paths)
-            paths.add(descriptor["path"])
+            self.assertEqual(descriptor["path"], "retirement-metrics-mb-0000.txt")
+            self.assertNotIn(descriptor["sha256"], paths)
+            paths.add(descriptor["sha256"])
+            shards.add(descriptor, "real batch metrics")
             members = binding._check_batch_metrics(
                 self.root, descriptor, contract, frozen, 1, binding.NATIVE_TIMED_TARGET,
                 event["finished_ns"] - event["started_ns"], "real batch metrics")
             self.assertEqual(set(members), {0, 1})
             if event["phase"] == "sample":
                 members_by_coordinate[event["round"], event["pair"], event["variant"]] = (members, event)
+        # All 244 artifacts tile one shard exactly, in record order.
+        self.assertEqual([item["path"] for item in shards.finish()], ["retirement-metrics-mb-0000.txt"])
         row_lines = (self.root / "retirement-measured-batch-rows.jsonl").read_bytes().splitlines()
         batch_lines = (self.root / "retirement-measured-batch-batches.jsonl").read_bytes().splitlines()
         self.assertEqual((len(row_lines), len(batch_lines)), (240, 120))
@@ -256,17 +275,21 @@ class NativeExecutionTests(unittest.TestCase):
         expected = list(binding._execution_schedule(rows, sampling))
         self.assertEqual([group["rows"] for group in binding._batch_groups(rows)], [[0], [6], [10]])
         self.assertEqual(len(events), len(expected))
+        offset = 0
         for event, identity in zip(events, expected):
             self.assertEqual({key: event[key] for key in identity}, identity)
             self.assertEqual(event["process_instance_sha256"], binding._process_instance_digest(
                 "job-1", 2, "boot-123", event["pid"], event["process_start_token"]))
             if event["kind"] == "compiler" and event["group"] == 1:
                 descriptor = event["metrics_artifact"]
-                data = (self.root / descriptor["path"]).read_bytes()
-                self.assertEqual(descriptor, {"bytes": len(data), "path": _metrics_path(
-                    event["process_instance_sha256"]), "sha256": hashlib.sha256(data).hexdigest()})
+                data = _slice(self.root, descriptor)
+                self.assertEqual(descriptor, {"bytes": len(data), "offset": offset,
+                                              "path": "retirement-metrics-rec-0000.txt",
+                                              "sha256": hashlib.sha256(data).hexdigest()})
+                offset += len(data)
             else:
                 self.assertIsNone(event["metrics_artifact"])
+        self.assertEqual((self.root / "retirement-metrics-rec-0000.txt").stat().st_size, offset)
 
     def test_maximum_serialized_records_fit_the_shard_byte_cap(self):
         transcript_line = (self.root / "retirement-execution-max.jsonl").read_bytes()
@@ -276,7 +299,7 @@ class NativeExecutionTests(unittest.TestCase):
         transcript = list(binding._execution_trace_records(self.root, [transcript_shard], 1))
         self.assertEqual(len(transcript), 1)
         event = transcript[0]
-        self.assertEqual(len(transcript_line), 1018)
+        self.assertEqual(len(transcript_line), 1017)
         self.assertEqual(event["sequence"], 101999999)
         self.assertEqual((event["kind"], event["group"], event["row"]), ("compiler", 99999, None))
         self.assertEqual((event["round"], event["pair"], event["variant"]), (1, 253, "candidate"))
@@ -295,8 +318,9 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(event["process_instance_sha256"], binding._process_instance_digest(
             "a" * 128, 2**64 - 1, "b" * 128, 2**64 - 1, str(2**64 - 1)))
         self.assertEqual(event["metrics_artifact"], {
-            "bytes": binding.METRICS_ARTIFACT_BYTE_CAP,
-            "path": _metrics_path(event["process_instance_sha256"]), "sha256": "e" * 64})
+            "bytes": 33554432, "offset": 33554432,
+            "path": "retirement-metrics-abcdefgh-2047.txt", "sha256": "e" * 64})
+        self.assertEqual(binding._metrics_artifact(event["metrics_artifact"], "max"), event["metrics_artifact"])
         self.assertNotIn(b'"job_id"', transcript_line)
         self.assertNotIn(b'"boot_id"', transcript_line)
 
@@ -305,7 +329,7 @@ class NativeExecutionTests(unittest.TestCase):
             "bytes": len(warmup_line), "sha256": hashlib.sha256(warmup_line).hexdigest(),
             "records": 1}
         warmup = list(binding._execution_trace_records(self.root, [warmup_shard], 1))[0]
-        self.assertEqual(len(warmup_line), 1019)
+        self.assertEqual(len(warmup_line), 1018)
         self.assertEqual((warmup["sequence"], warmup["group"], warmup["phase"], warmup["warmup"]),
                          (399999, 99999, "warmup", 1))
         self.assertIsNone(warmup["round"])
@@ -372,10 +396,10 @@ class NativeExecutionTests(unittest.TestCase):
         # shard at most 131072; the native cap for either is 64 MiB.
         # Object-batch warmups are one byte longer than the sampled record:
         # three null schedule fields outweigh their shorter sequence number.
-        transcript_upper = 1019 * 65536
+        transcript_upper = 1018 * 65536
         sample_upper = 330 * 131072
         batch_upper = 266 * 131072
-        self.assertEqual((transcript_upper, sample_upper, batch_upper), (66781184, 43253760, 34865152))
+        self.assertEqual((transcript_upper, sample_upper, batch_upper), (66715648, 43253760, 34865152))
         self.assertLessEqual(transcript_upper, 67108864)
         self.assertLessEqual(sample_upper, 67108864)
         self.assertLessEqual(batch_upper, 67108864)
@@ -537,6 +561,7 @@ class NativeExecutionTests(unittest.TestCase):
                              "records": {"admission": artifact, "oracle": put("oracle.json", {"records": oracles})}},
             }
             groups = binding._batch_groups(rows)
+            row_by_row = {row["row"]: row for row in rows}
             contracts = []
             for row, oracle in zip(rows, oracles):
                 runtime = row["metrics"]["generated_runtime"]
@@ -561,6 +586,10 @@ class NativeExecutionTests(unittest.TestCase):
                     "members": [{"row": row, "diagnostic_sha256": EMPTY_SHA256 if object_group else None}
                                 for row in group["rows"]],
                     "controls": [],
+                    "input_list_sha256": hashlib.sha256(binding._input_list_bytes(
+                        [f"tests/native-execution-{rows.index(row_by_row[item])}.c"
+                         for item in group["rows"]], "list")).hexdigest() if object_group else None,
+                    "metrics_bytes_max": binding.METRICS_ARTIFACT_BYTE_CAP if object_group else None,
                     "baseline": {"command_sha256": "b" * 64, "exit_status": 0},
                     "candidate": {"command_sha256": "b" * 64, "exit_status": 0}})
             plan = put("plan.json", {"schema": binding.EXECUTION_PLAN_SCHEMA, "version": 1,
@@ -574,8 +603,9 @@ class NativeExecutionTests(unittest.TestCase):
             for event in events:
                 if event["metrics_artifact"] is not None:
                     metrics_paths.append(event["metrics_artifact"]["path"])
-                    shutil.copyfile(self.root / metrics_paths[-1], root / metrics_paths[-1])
-            self.assertEqual(len(metrics_paths), 244)
+            self.assertEqual((len(metrics_paths), set(metrics_paths)),
+                             (244, {"retirement-metrics-rec-0000.txt"}))
+            shutil.copyfile(self.root / metrics_paths[0], root / metrics_paths[0])
             raw = hashlib.sha256(self.sample_data + self.batch_data).hexdigest()
             receipt = put("receipt.json", {"schema": binding.EXECUTION_RECEIPT_SCHEMA, "version": 1,
                 "context_sha256": binding._canonical_json_digest(binding._execution_context(record, raw)),
@@ -627,8 +657,53 @@ class NativeExecutionTests(unittest.TestCase):
                 target = root / metrics_paths[0]
                 data = target.read_bytes()
                 target.write_bytes(data.replace(b" keep_going=1 ", b" keep_going=0 "))
-                with self.assertRaisesRegex(ValueError, "per-input metrics 4 digest does not match evidence"):
+                with self.assertRaisesRegex(ValueError, "per-input metrics 4 differs from its authenticated"):
                     check()
+
+    @unittest.skipUnless(sys.platform == "linux", "descriptor-bound execution requires Linux")
+    def test_real_untimed_code_artifact_batches(self):
+        """Untimed production and reproduction batches: sealed records and shards."""
+        data = (self.root / "retirement-untimed-batches.jsonl").read_bytes()
+        descriptor = {"path": "retirement-untimed-batches.jsonl", "bytes": len(data),
+                      "sha256": hashlib.sha256(data).hexdigest(), "records": 4}
+        records = binding._read_jsonl_evidence(self.root, descriptor, "untimed batch records")
+        artifact_digest = hashlib.sha256((self.root / "retirement-artifact-1-1.bin").read_bytes()).hexdigest()
+        control = {"fixture": "tests/control.c", "row": None, "status": "rejected",
+                   "error": "driver.analysis", "diagnostic_sha256": "b" * 64, "object_sha256": None}
+        contract = {"members": [{"row": row, "diagnostic_sha256": EMPTY_SHA256} for row in (0, 1)],
+                    "controls": [control], "metrics_bytes_max": 4096 + 3 * 16384,
+                    "configuration": {"allocator": "none", "frontend_lowering": "direct-ssa", "PIC": "0"}}
+        rows = _native_rows(row_ids=(0, 1), object_rows=(0, 1))
+        for index, row in enumerate(rows):
+            row["identity"]["fixture"] = ("tests/alpha.c", "tests/beta.c")[index]
+        row_contracts = {row: {variant: {"artifact_sha256": artifact_digest, "reproduction_sha256": artifact_digest}
+                               for variant in ("baseline", "candidate")} for row in (0, 1)}
+        shards = binding._MetricsShards(self.root)
+        self.assertEqual([(record["variant"], record["purpose"]) for record in records],
+                         [(variant, purpose) for variant in ("baseline", "candidate")
+                          for purpose in binding.UNTIMED_BATCH_PURPOSES])
+        instances = set()
+        previous = 0
+        for record in records:
+            self.assertEqual(set(record), set(binding.UNTIMED_BATCH_FIELDS))
+            self.assertEqual((record["group"], record["exit_status"]), (0, 1))
+            self.assertEqual(record["process_instance_sha256"], binding._process_instance_digest(
+                "job-1", 2, "boot-123", record["pid"], record["process_start_token"]))
+            self.assertNotIn(record["process_instance_sha256"], instances)
+            instances.add(record["process_instance_sha256"])
+            self.assertGreater(record["started_ns"], previous)
+            previous = record["finished_ns"]
+            field = "artifact_sha256" if record["purpose"] == "production" else "reproduction_sha256"
+            frozen = binding._frozen_batch_inputs(contract, row_contracts, {row["row"]: row for row in rows},
+                                                  record["variant"], field)
+            self.assertEqual(record["output_sha256"],
+                             binding._batch_output_digest([artifact_digest, artifact_digest, None]))
+            shards.add(record["metrics_artifact"], "untimed metrics")
+            members = binding._check_batch_metrics(
+                self.root, record["metrics_artifact"], contract, frozen, 1, binding.NATIVE_TIMED_TARGET,
+                record["finished_ns"] - record["started_ns"], "untimed batch metrics")
+            self.assertEqual(set(members), {0, 1})
+        self.assertEqual([item["path"] for item in shards.finish()], ["retirement-metrics-untimed-0000.txt"])
 
 
 if __name__ == "__main__":

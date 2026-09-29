@@ -232,6 +232,19 @@ CODE_RECORD_LINE_CAP = 8192
 # artifact is at most 64 MiB.
 METRICS_RECORD_BYTE_CAP = 1024 * 1024
 METRICS_ARTIFACT_BYTE_CAP = 64 * 1024 * 1024
+# (A1, M4) Per-batch metrics artifacts are byte ranges of metrics shards: one
+# shard is one evidence-store entry (at most the store's 64 MiB file cap), so a
+# full campaign's per-batch artifacts fit the 4,096-entry store.  A shard leaf
+# names its writer tag and index; artifacts tile each shard contiguously in
+# record order.
+METRICS_SHARD_BYTE_CAP = 64 * 1024 * 1024
+METRICS_SHARD_CAP = 4096
+METRICS_SHARD_RE = re.compile(r"^retirement-metrics-[a-z]{1,8}-[0-9]{4}\.txt$")
+# (A1, recorded Q10 default) Each batch passes its inputs as one digest-bound
+# `@file` response file (docs/agents/driver.md "Response files"): the driver
+# reads at most 4 MiB and 65,536 expanded arguments from response files.
+INPUT_LIST_BYTE_CAP = 4 * 1024 * 1024
+INPUT_LIST_ARGUMENT_CAP = 65536
 SEALED_RESULT_SCHEMA = "buster-native-retirement-sealed-result-v1"
 RESULT_BUNDLE_SCHEMA = "buster-native-retirement-result-bundle-v2"
 REPLAY_BUNDLE_SCHEMA = "buster-native-retirement-independent-replay-bundle-v1"
@@ -2508,6 +2521,75 @@ def _execution_context(binding, raw_measurements_sha256):
     }
 
 
+def _response_file_arguments(data, name):
+    """Tokenize response-file bytes with the driver's grammar (docs/agents/driver.md).
+
+    Whitespace separates arguments; single and double quotes group bytes and
+    are removed; a backslash takes the next byte literally.  An open quote, a
+    trailing backslash, a NUL byte or an argument that begins with ``@`` is
+    refused, as the driver refuses it.
+    """
+    if len(data) > INPUT_LIST_BYTE_CAP or b"\0" in data:
+        _fail(f"{name} exceeds the driver's response-file bound or holds a NUL byte")
+    arguments = []
+    current = bytearray()
+    started = False
+    quote = None
+    index = 0
+    while index < len(data):
+        byte = data[index]
+        if byte == 0x5c:
+            index += 1
+            if index == len(data):
+                _fail(f"{name} ends in a backslash")
+            current.append(data[index])
+            started = True
+        elif quote is not None:
+            if byte == quote:
+                quote = None
+            else:
+                current.append(byte)
+        elif byte in (0x22, 0x27):
+            quote = byte
+            started = True
+        elif byte in b" \t\n\r\v\f":
+            if started:
+                arguments.append(bytes(current))
+            current = bytearray()
+            started = False
+        else:
+            current.append(byte)
+            started = True
+        index += 1
+    if quote is not None:
+        _fail(f"{name} leaves a quote open")
+    if started:
+        arguments.append(bytes(current))
+    if len(arguments) > INPUT_LIST_ARGUMENT_CAP or any(item.startswith(b"@") for item in arguments):
+        _fail(f"{name} exceeds the argument bound or nests a response file")
+    return arguments
+
+
+def _input_list_bytes(fixtures, name):
+    """Canonical response file of a batch's frozen inputs, in order.
+
+    Each input is one line inside double quotes with a backslash before every
+    ``"`` and ``\\``.  An input that begins with ``@`` (nesting) or ``-`` (an
+    option) is refused.  The encoding must tokenize back to exactly the inputs.
+    """
+    lines = []
+    for fixture in fixtures:
+        _relative_path(fixture, f"{name} input")
+        if fixture.startswith(("@", "-")) or not all(0x20 <= ord(c) <= 0x7e for c in fixture):
+            _fail(f"{name} input cannot be a response-file argument")
+        escaped = fixture.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'"{escaped}"\n')
+    data = "".join(lines).encode("ascii")
+    if _response_file_arguments(data, name) != [fixture.encode("ascii") for fixture in fixtures]:
+        _fail(f"{name} does not tokenize to its frozen inputs")
+    return data
+
+
 def _check_group_contracts(values, groups, row_by_id, name="execution_plan.groups",
                            untimed=False):
     """Join v3 batch group contracts to an independently derived partition.
@@ -2518,6 +2600,11 @@ def _check_group_contracts(values, groups, row_by_id, name="execution_plan.group
     that row must be outside the timed projection and compiled with the same
     frozen argv.  Object paths are ``cwd/basename.o``, so basenames collide.
     Untimed code-artifact groups (``untimed=True``) carry no controls.
+
+    (A1, M4) An object group also binds its response-file input list digest
+    (canonical encoding of the frozen inputs, which must tokenize back to
+    exactly that order) and the reviewed per-artifact metrics bound from the
+    pinned campaign budget.  A singleton stage group has neither.
     """
     contracts = _list(values, name)
     if len(contracts) != len(groups):
@@ -2526,7 +2613,8 @@ def _check_group_contracts(values, groups, row_by_id, name="execution_plan.group
     control_rows = set()
     for contract, group in zip(contracts, groups):
         contract = _keys(contract, ("group", "kind", "target", "configuration", "recipe",
-                                    "members", "controls", "baseline", "candidate"),
+                                    "members", "controls", "input_list_sha256",
+                                    "metrics_bytes_max", "baseline", "candidate"),
                          f"{name}[]")
         if type(contract["group"]) is not int or contract["group"] != group["group"] \
                 or contract["kind"] != group["kind"]:
@@ -2587,6 +2675,17 @@ def _check_group_contracts(values, groups, row_by_id, name="execution_plan.group
             failures.append(not compiled)
         if len(set(stems)) != len(stems):
             _fail(f"{name} batch group inputs collide on their object basename")
+        if object_group:
+            fixtures = [row_by_id[member["row"]]["identity"]["fixture"] for member in members]
+            fixtures.extend(control["fixture"] for control in controls)
+            listing = _input_list_bytes(fixtures, f"{name}[].input_list")
+            if contract["input_list_sha256"] != hashlib.sha256(listing).hexdigest():
+                _fail(f"{name} input list digest is not the canonical response file of its frozen inputs")
+            bound = contract["metrics_bytes_max"]
+            if type(bound) is not int or not 0 < bound <= METRICS_ARTIFACT_BYTE_CAP:
+                _fail(f"{name} metrics bound is not a reviewed per-artifact bound")
+        elif contract["input_list_sha256"] is not None or contract["metrics_bytes_max"] is not None:
+            _fail("a singleton stage group has no response file or metrics bound")
         for variant in ("baseline", "candidate"):
             side = _keys(contract[variant], ("command_sha256", "exit_status"),
                          f"{name}[].{variant}")
@@ -2908,27 +3007,101 @@ def _check_cc_text(record, prefix, name):
         _fail(f"{name} {prefix} truncation contradicts its recorded length")
 
 
+def _metrics_artifact(value, name):
+    """A per-batch metrics artifact: ``{bytes, offset, path, sha256}`` of a shard range."""
+    value = _keys(value, ("bytes", "offset", "path", "sha256"), name)
+    if type(value["path"]) is not str or not METRICS_SHARD_RE.fullmatch(value["path"]):
+        _fail(f"{name}.path is not a metrics shard leaf")
+    _positive_int(value["bytes"], f"{name}.bytes")
+    _nonnegative_int(value["offset"], f"{name}.offset")
+    _sha(value["sha256"], f"{name}.sha256")
+    if value["bytes"] > METRICS_ARTIFACT_BYTE_CAP \
+            or value["offset"] > METRICS_SHARD_BYTE_CAP - value["bytes"]:
+        _fail(f"{name} exceeds its bounded size or its shard")
+    return value
+
+
+class _MetricsShards:
+    """Contiguous packing of per-batch metrics artifacts into metrics shards.
+
+    In record order, a shard's first artifact starts at offset 0 and each next
+    artifact at the previous artifact's end; a shard left for another is never
+    revisited; timed and untimed batches never share a shard.  ``finish``
+    requires each shard file to hold exactly its artifacts (no trailing bytes)
+    and returns the sealed ``{path, bytes, sha256}`` shard descriptors.
+    """
+
+    def __init__(self, root, closed=frozenset()):
+        self.root = root
+        self.closed = frozenset(closed)
+        self.order = []
+        self.ends = {}
+        self.current = None
+
+    def fork(self):
+        """A tracker for further artifacts that may not reuse any shard seen here."""
+        return _MetricsShards(self.root, self.closed | frozenset(self.ends))
+
+    def add(self, artifact, name):
+        path = artifact["path"]
+        if path != self.current:
+            if path in self.ends or path in self.closed or artifact["offset"] != 0:
+                _fail(f"{name} is not packed contiguously into a fresh metrics shard")
+            if len(self.order) + len(self.closed) >= METRICS_SHARD_CAP:
+                _fail("metrics shards exceed the evidence-store entry bound")
+            self.order.append(path)
+            self.ends[path] = 0
+            self.current = path
+        elif artifact["offset"] != self.ends[path]:
+            _fail(f"{name} is not packed contiguously in its metrics shard")
+        self.ends[path] = artifact["offset"] + artifact["bytes"]
+
+    def finish(self):
+        descriptors = []
+        root = Path(self.root).resolve()
+        for path in self.order:
+            descriptor = {"path": path, "bytes": self.ends[path], "sha256": "0" * 64}
+            target = root.joinpath(*PurePosixPath(path).parts)
+            if target.is_symlink() or not target.is_file() \
+                    or target.stat().st_size != self.ends[path]:
+                _fail("metrics shard holds bytes outside its authenticated artifacts")
+            digest = hashlib.sha256()
+            with target.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            descriptor["sha256"] = digest.hexdigest()
+            _check_evidence(self.root, descriptor, "metrics shard")
+            descriptors.append(descriptor)
+        return descriptors
+
+
 def _read_cc_metrics(root, descriptor, inputs, name):
-    """Strictly parse one bounded compiler metrics artifact.
+    """Strictly parse one bounded compiler metrics artifact, streamed from its shard.
 
     Returns the header and exactly ``inputs`` input records in order.  Each
     input is followed by exactly its ``function_records`` function lines.
-    The consumed bytes are the hashed bytes.
+    The consumed bytes are exactly the artifact's authenticated shard range,
+    and they are the hashed bytes.
     """
-    descriptor = _artifact(descriptor, name)
-    if descriptor["bytes"] > METRICS_ARTIFACT_BYTE_CAP:
-        _fail(f"{name} exceeds its bounded size")
-    _check_evidence(root, descriptor, name)
+    descriptor = _metrics_artifact(descriptor, name)
     path = Path(root).resolve().joinpath(*PurePosixPath(descriptor["path"]).parts)
+    if path.is_symlink() or not path.is_file():
+        _fail(f"{name} shard is missing or is a symbolic link")
+    if path.stat().st_size < descriptor["offset"] + descriptor["bytes"]:
+        _fail(f"{name} lies outside its metrics shard")
     digest = hashlib.sha256()
     size = 0
     records = []
     header = None
     with path.open("rb") as stream:
+        stream.seek(descriptor["offset"])
+
         def next_line():
             nonlocal size
-            line = stream.readline(METRICS_RECORD_BYTE_CAP + 1)
-            if not line.endswith(b"\n") or len(line) > METRICS_RECORD_BYTE_CAP:
+            remaining = descriptor["bytes"] - size
+            line = stream.readline(min(METRICS_RECORD_BYTE_CAP, remaining) + 1)
+            if not line.endswith(b"\n") or len(line) > METRICS_RECORD_BYTE_CAP \
+                    or len(line) > remaining:
                 _fail(f"{name} record is missing, truncated, or oversized")
             size += len(line)
             digest.update(line)
@@ -2952,9 +3125,9 @@ def _read_cc_metrics(root, descriptor, inputs, name):
                     _fail(f"{name} function records do not follow their input")
                 _check_cc_text(function, "name", f"{name} input {index} function {ordinal}")
             records.append(record)
-        if stream.read(1):
-            _fail(f"{name} contains undeclared extra records")
-    if size != descriptor["bytes"] or digest.hexdigest() != descriptor["sha256"]:
+    if size != descriptor["bytes"]:
+        _fail(f"{name} contains undeclared extra records")
+    if digest.hexdigest() != descriptor["sha256"]:
         _fail(f"consumed {name} differs from its authenticated digest")
     return header, records
 
@@ -2989,6 +3162,8 @@ def _check_batch_metrics(root, descriptor, contract, frozen_inputs, exit_status,
     the invocation's output digest over the frozen per-input object digests.
     """
     header, records = _read_cc_metrics(root, descriptor, len(frozen_inputs), name)
+    if descriptor["bytes"] > contract["metrics_bytes_max"]:
+        _fail(f"{name} exceeds its group's reviewed metrics bound")
     statuses = [record["status"] for record in records]
     for status in statuses:
         if status not in CC_INPUT_STATUSES:
@@ -3127,7 +3302,10 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
     object group's per-input metrics artifact supplies each timed member's
     wall and peak-memory sample and proves every object byte-identical to its
     frozen artifact; the process's own wall/RSS are the batch metric pair.  A
-    singleton stage group's process metrics are that row's samples.
+    singleton stage group's process metrics are that row's samples.  (M4)
+    Each artifact is a ``{bytes, offset, path, sha256}`` range of a metrics
+    shard, streamed from that range; artifacts tile their shards in record
+    order and each shard holds nothing else.
     """
     if trusted_receipt_sha256 is None:
         _fail("independently obtained trusted execution receipt digest is required")
@@ -3168,7 +3346,7 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
     last_end = receipt["bound_at_ns"]
     count = 0
     process_instances = set()
-    metrics_paths = set()
+    metrics_shards = _MetricsShards(root)
     metrics_digests = set()
     observations = _execution_trace_records(root, shards, expected_count)
     try:
@@ -3226,10 +3404,9 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
                     metrics_artifact = value["metrics_artifact"]
                     if type(metrics_artifact) is not dict:
                         _fail("batch invocation lacks its per-input metrics artifact")
-                    _artifact(metrics_artifact, "execution invocation.metrics_artifact")
-                    if metrics_artifact["path"] in metrics_paths:
-                        _fail("batch invocation reuses another batch's per-input metrics artifact")
-                    metrics_paths.add(metrics_artifact["path"])
+                    _metrics_artifact(metrics_artifact, "execution invocation.metrics_artifact")
+                    metrics_shards.add(metrics_artifact,
+                                       "batch invocation's per-input metrics artifact")
                     if metrics_artifact["sha256"] in metrics_digests:
                         _fail("batch invocation reuses another batch's per-input metrics content")
                     metrics_digests.add(metrics_artifact["sha256"])
@@ -3307,12 +3484,14 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
         observations.close()
     if count != expected_count or next(expected_order, None) is not None:
         _fail("execution transcript is missing required warmups or timed invocations")
+    # Every metrics shard holds exactly its authenticated artifacts.
+    metrics_shards.finish()
     return {"receipt_sha256": trusted_receipt_sha256, "invocations": count,
             "job_id": receipt["job_id"], "attempt": receipt["attempt"],
             "boot_id": receipt["boot_id"], "bound_at_ns": receipt["bound_at_ns"],
             "completed_at_ns": receipt["completed_at_ns"],
             "process_instances": frozenset(process_instances),
-            "metrics_paths": frozenset(metrics_paths),
+            "metrics_shards": metrics_shards,
             "metrics_digests": frozenset(metrics_digests),
             "row_contracts": row_contracts, "untimed_contracts": untimed_contracts}
 
@@ -3514,7 +3693,9 @@ def _check_untimed_batches(root, descriptor, parsed, row_contracts, untimed_cont
     seen = set()
     last = None
     instances = set(execution["process_instances"])
-    paths = set(execution["metrics_paths"])
+    # Untimed batches start their own shards: none continues a timed shard.
+    shards = execution["metrics_shards"].fork()
+    artifacts = []
     digests = set(execution["metrics_digests"])
     production_instances = {}
     intervals = []
@@ -3569,10 +3750,8 @@ def _check_untimed_batches(root, descriptor, parsed, row_contracts, untimed_cont
             metrics_artifact = record["metrics_artifact"]
             if type(metrics_artifact) is not dict:
                 _fail("untimed batch lacks its per-input metrics artifact")
-            _artifact(metrics_artifact, "untimed batch record.metrics_artifact")
-            if metrics_artifact["path"] in paths:
-                _fail("untimed batch reuses another batch's per-input metrics artifact")
-            paths.add(metrics_artifact["path"])
+            _metrics_artifact(metrics_artifact, "untimed batch record.metrics_artifact")
+            artifacts.append(metrics_artifact)
             if metrics_artifact["sha256"] in digests:
                 _fail("untimed batch reuses another batch's per-input metrics content")
             digests.add(metrics_artifact["sha256"])
@@ -3594,6 +3773,9 @@ def _check_untimed_batches(root, descriptor, parsed, row_contracts, untimed_cont
         for variant in range(2):
             if (group["group"], variant, 1) not in seen:
                 _fail("an untimed code-artifact group lacks its reproduction batch")
+    for artifact in artifacts:
+        shards.add(artifact, "untimed batch's per-input metrics artifact")
+    shards.finish()
     return records
 
 
@@ -3983,25 +4165,35 @@ def _sealed_closure_files(root, binding, support_output, records, phases,
         root, result_bundle["execution_receipt"], "execution_receipt")
     for index, shard in enumerate(execution_receipt["shards"]):
         add(f"execution.shard.{index}", shard)
-    # (A1) Every batch's per-input metrics artifact and the code record set
-    # are sealed evidence; replay must be able to re-authenticate both.
+    # (A1, M4) Every metrics shard holding a batch's per-input metrics
+    # artifact and the code record set are sealed evidence; replay must be
+    # able to re-authenticate each artifact's shard range and both files.
+    metrics_shards = _MetricsShards(root)
     invocations = _execution_trace_records(root, execution_receipt["shards"],
                                            execution_receipt["invocations"])
     try:
         for invocation in invocations:
             if invocation.get("metrics_artifact") is not None:
-                add(f"execution.metrics.{invocation['sequence']}",
-                    invocation["metrics_artifact"])
+                metrics_shards.add(_metrics_artifact(invocation["metrics_artifact"],
+                                                     "execution metrics artifact"),
+                                   "execution metrics artifact")
     finally:
         invocations.close()
+    for index, shard in enumerate(metrics_shards.finish()):
+        add(f"execution.metrics_shard.{index}", shard)
     add("workflow.code_records", result_bundle["code_records"])
     if result_bundle["untimed_batches"] is not None:
         add("workflow.untimed_batches", result_bundle["untimed_batches"])
         untimed = _read_jsonl_evidence(root, result_bundle["untimed_batches"],
                                        "untimed batch records")
-        for index, record in enumerate(untimed):
+        untimed_shards = _MetricsShards(root)
+        for record in untimed:
             if record.get("metrics_artifact") is not None:
-                add(f"untimed.metrics.{index}", record["metrics_artifact"])
+                untimed_shards.add(_metrics_artifact(record["metrics_artifact"],
+                                                     "untimed metrics artifact"),
+                                   "untimed metrics artifact")
+        for index, shard in enumerate(untimed_shards.finish()):
+            add(f"untimed.metrics_shard.{index}", shard)
     manifests = list(result_bundle["result_manifests"]) \
         + list(result_bundle["batch_result_manifests"])
     for index, item in enumerate(manifests):

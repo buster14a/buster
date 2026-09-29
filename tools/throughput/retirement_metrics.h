@@ -12,11 +12,20 @@
  * at 35b6b64): start/end offsets from the origin shared with `wall_ns`, the
  * diagnostic record count and digest, the `intervals` header field, and texts
  * cut at 1,024 bytes with their full length and a `*_truncated` flag.
+ * (A1, M4) A frozen batch contract also carries its reviewed metrics bound, and
+ * its inputs reach the compiler through one digest-bound `@file` response file
+ * (tp_retirement_batch_input_list); the contract digest covers both.
+ *
+ * Map: TpRetirementBatchContract, tp_retirement_batch_input_list(_digest,
+ * _leaf), tp_retirement_batch_contract_valid, tp_retirement_metrics_check,
+ * tp_retirement_batch_output_digest, tp_retirement_batch_contract_digest.
  */
 #ifndef BUSTER_THROUGHPUT_RETIREMENT_METRICS_H
 #define BUSTER_THROUGHPUT_RETIREMENT_METRICS_H
 #include <buster/lib/hash.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define TP_RETIREMENT_METRICS_VERSION 1u
@@ -53,6 +62,9 @@ typedef struct TpRetirementBatchInput
     unsigned member, row;
 } TpRetirementBatchInput;
 
+/* metrics_bytes_max is the group's reviewed metrics-artifact bound from the
+ * pinned campaign budget (retirement_budget.h); a larger artifact rejects the
+ * batch, so the store preflight's byte sum is a true upper bound. */
 typedef struct TpRetirementBatchContract
 {
     char const* target;
@@ -60,7 +72,26 @@ typedef struct TpRetirementBatchContract
     char const* metrics;
     TpRetirementBatchInput const* inputs;
     unsigned input_count, exit_status;
+    uint64_t metrics_bytes_max;
 } TpRetirementBatchContract;
+
+/* (A1, recorded Q10 default) A batch passes its ordered inputs as one
+ * digest-bound `@file` response file (docs/agents/driver.md, "Response
+ * files"), so the argv stays inside the 256-argument / 64 KiB command caps.
+ * The canonical list writes each input on its own line inside double quotes
+ * with a backslash before every `"` and `\`; the driver's tokenizer returns
+ * exactly the frozen input order. The file is named by its own SHA-256, so the
+ * batch command digest (which covers `@<leaf>`) binds the list bytes. The
+ * driver bounds all response files of one invocation to 4 MiB and 65,536
+ * expanded arguments; an input beginning with `@` would be refused as nesting
+ * and one beginning with `-` would be read as an option, so both reject. */
+#define TP_RETIREMENT_INPUT_LIST_BYTES UINT64_C(4194304)
+#define TP_RETIREMENT_INPUT_LIST_ARGUMENTS 65536u
+#define TP_RETIREMENT_INPUT_LIST_PREFIX "retirement-inputs-"
+#define TP_RETIREMENT_INPUT_LIST_SUFFIX ".rsp"
+/* prefix + 64 hex + suffix + NUL */
+#define TP_RETIREMENT_INPUT_LIST_LEAF_CAP 87u
+BUSTER_CT_CHECK(TP_RETIREMENT_BATCH_INPUTS <= TP_RETIREMENT_INPUT_LIST_ARGUMENTS);
 
 typedef struct TpRetirementMetricsValue
 {
@@ -287,8 +318,70 @@ static inline int tp_retirement_metrics_leaf(char const* name)
 static inline int tp_retirement_metrics_fixture(char const* fixture)
 {
     size_t length = fixture ? strlen(fixture) : 0;
-    int ok = length && length <= 512 && fixture[0] != '/' &&
+    int ok = length && length <= 512 && fixture[0] != '/' && fixture[0] != '@' && fixture[0] != '-' &&
         tp_retirement_metrics_clean_path(fixture, length);
+    return ok;
+}
+
+/* Canonical response-file bytes for the frozen inputs, in contract order.
+ * With bytes == NULL only the size is computed. Returns the size, or 0 when an
+ * input is not a valid list entry or the list exceeds the driver's bounds. */
+static inline uint64_t tp_retirement_batch_input_list(TpRetirementBatchContract const* contract,
+    char* bytes, uint64_t capacity)
+{
+    uint64_t size = 0;
+    int ok = contract && contract->inputs && contract->input_count &&
+        contract->input_count <= TP_RETIREMENT_BATCH_INPUTS;
+    for (unsigned i = 0; ok && i < contract->input_count; ++i)
+    {
+        char const* fixture = contract->inputs[i].fixture;
+        ok = tp_retirement_metrics_fixture(fixture);
+        uint64_t line = 3;
+        for (size_t c = 0; ok && fixture[c]; ++c) line += 1 + (fixture[c] == '"' || fixture[c] == '\\');
+        ok = ok && size + line <= TP_RETIREMENT_INPUT_LIST_BYTES && (!bytes || size + line <= capacity);
+        if (ok && bytes)
+        {
+            bytes[size++] = '"';
+            for (size_t c = 0; fixture[c]; ++c)
+            {
+                if (fixture[c] == '"' || fixture[c] == '\\') bytes[size++] = '\\';
+                bytes[size++] = fixture[c];
+            }
+            bytes[size++] = '"';
+            bytes[size++] = '\n';
+        }
+        else if (ok) size += line;
+    }
+    return ok ? size : 0;
+}
+
+static inline int tp_retirement_batch_input_list_digest(TpRetirementBatchContract const* contract, char digest[65])
+{
+    uint64_t size = tp_retirement_batch_input_list(contract, NULL, 0);
+    char* bytes = size ? (char*)malloc((size_t)size) : NULL;
+    int ok = digest && bytes && tp_retirement_batch_input_list(contract, bytes, size) == size;
+    if (digest) digest[0] = 0;
+    if (ok)
+    {
+        Sha256 hash;
+        sha256_init(&hash);
+        sha256_add(&hash, bytes, (u64)size);
+        sha256_finish_hex(&hash, digest);
+    }
+    free(bytes);
+    return ok;
+}
+
+/* `retirement-inputs-<sha256>.rsp`, relative to the batch's cwd. */
+static inline int tp_retirement_batch_input_list_leaf(TpRetirementBatchContract const* contract,
+    char leaf[TP_RETIREMENT_INPUT_LIST_LEAF_CAP])
+{
+    char digest[65];
+    int ok = leaf && tp_retirement_batch_input_list_digest(contract, digest);
+    int length = ok ? snprintf(leaf, TP_RETIREMENT_INPUT_LIST_LEAF_CAP, "%s%s%s", TP_RETIREMENT_INPUT_LIST_PREFIX,
+                               digest, TP_RETIREMENT_INPUT_LIST_SUFFIX) : -1;
+    ok = ok && length == (int)TP_RETIREMENT_INPUT_LIST_LEAF_CAP - 1;
+    if (!ok && leaf) leaf[0] = 0;
     return ok;
 }
 
@@ -302,7 +395,8 @@ static inline int tp_retirement_batch_contract_valid(TpRetirementBatchContract c
     int ok = contract && count && count <= TP_RETIREMENT_BATCH_INPUTS && contract->inputs &&
         tp_retirement_metrics_word(contract->target, contract->target ? strlen(contract->target) : 0) &&
         tp_retirement_metrics_word(contract->allocator, contract->allocator ? strlen(contract->allocator) : 0) &&
-        tp_retirement_metrics_leaf(contract->metrics) && contract->exit_status <= 255;
+        tp_retirement_metrics_leaf(contract->metrics) && contract->exit_status <= 255 &&
+        contract->metrics_bytes_max && contract->metrics_bytes_max <= TP_RETIREMENT_METRICS_ARTIFACT_BYTES;
     for (unsigned i = 0; ok && i < count; ++i)
     {
         TpRetirementBatchInput const* input = &contract->inputs[i];
@@ -330,7 +424,8 @@ static inline int tp_retirement_batch_contract_valid(TpRetirementBatchContract c
         if (ok && input->member) ++members;
         if (ok && !compiled) ++failures;
     }
-    ok = ok && members && (contract->exit_status != 0) == (failures != 0);
+    ok = ok && members && (contract->exit_status != 0) == (failures != 0) &&
+        tp_retirement_batch_input_list(contract, NULL, 0);
     return ok;
 }
 
@@ -368,7 +463,7 @@ static inline int tp_retirement_metrics_check(unsigned char const* bytes, uint64
     char const* first_error = NULL;
     unsigned first_error_length = 0;
     int ok = bytes && size && size <= TP_RETIREMENT_METRICS_ARTIFACT_BYTES &&
-        tp_retirement_batch_contract_valid(contract) && members &&
+        tp_retirement_batch_contract_valid(contract) && size <= contract->metrics_bytes_max && members &&
         tp_retirement_metrics_next(bytes, size, &offset, &line, &length) &&
         tp_retirement_metrics_line(line, length, "CC_METRICS", tp_retirement_metrics_header_fields,
             TP_METRICS_H_COUNT, header);
@@ -504,23 +599,27 @@ static inline void tp_retirement_batch_contract_text(Sha256* hash, char const* t
     if (text) sha256_add(hash, text, length);
 }
 
-/* Identity of every frozen contract field, for freeze/run comparison. */
+/* Identity of every frozen contract field, for freeze/run comparison. v2
+ * adds the reviewed metrics bound and the response-file input-list digest. */
 static inline int tp_retirement_batch_contract_digest(TpRetirementBatchContract const* contract, char digest[65])
 {
-    int ok = tp_retirement_batch_contract_valid(contract);
+    char list[65];
+    int ok = tp_retirement_batch_contract_valid(contract) && tp_retirement_batch_input_list_digest(contract, list);
     if (digest) digest[0] = 0;
     if (ok)
     {
         Sha256 hash;
         sha256_init(&hash);
-        static char const domain[] = "tp-retirement-batch-contract-v1";
+        static char const domain[] = "tp-retirement-batch-contract-v2";
         sha256_add(&hash, domain, sizeof(domain) - 1);
         tp_retirement_batch_contract_text(&hash, contract->target);
         tp_retirement_batch_contract_text(&hash, contract->allocator);
         tp_retirement_batch_contract_text(&hash, contract->metrics);
-        unsigned char numbers[8] = {(unsigned char)contract->input_count,
+        tp_retirement_batch_contract_text(&hash, list);
+        unsigned char numbers[16] = {(unsigned char)contract->input_count,
             (unsigned char)(contract->input_count >> 8), (unsigned char)(contract->input_count >> 16),
             (unsigned char)(contract->input_count >> 24), (unsigned char)contract->exit_status, 0, 0, 0};
+        for (unsigned i = 0; i < 8; ++i) numbers[8 + i] = (unsigned char)(contract->metrics_bytes_max >> (i * 8));
         sha256_add(&hash, numbers, sizeof(numbers));
         for (unsigned i = 0; i < contract->input_count; ++i)
         {

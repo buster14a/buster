@@ -123,7 +123,9 @@ static int test_sample_observe(TpSampleTest* test, int bypass, unsigned mode)
         if (object && mode == TEST_SAMPLE_MEMBER_MEMORY) members[0].peak_memory_bytes = 0;
         if (object && mode == TEST_SAMPLE_MEMBER_ROW) members[0].row = members[count - 1].row + 1;
         int metrics = object != (mode == TEST_SAMPLE_WRONG_METRICS && !invocation.kind);
-        TpRetirementOutput output = {hash, hash, hash, metrics ? hash : NULL, metrics ? 1000 : 0, 0};
+        TpRetirementMetricsArtifact artifact = {"retirement-metrics-aa-0000.txt", 0, 1000, {0}};
+        memcpy(artifact.sha256, hash, 65);
+        TpRetirementOutput output = {hash, hash, hash, metrics ? &artifact : NULL, 0};
         ok = bypass ? tp_retirement_transcript_append(&test->transcript, &observed, &process, &output) :
             tp_retirement_samples_append(&test->samples, &observed, &process, &output,
                 object ? members : NULL, count);

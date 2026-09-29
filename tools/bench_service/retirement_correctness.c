@@ -1,6 +1,7 @@
 /* #1020 pre-timing correctness join. begin authenticates the shape of the
  * imported complete population; check and row poison on the first failure;
- * finish seals every source/check/row/output fact; ready checks the seal again.
+ * batches freezes the (A1) object batch-group contracts; finish seals every
+ * source/check/row/output/batch fact; ready checks the seal again.
  * The service must obtain the input and receipt digests from trusted sources
  * and execute/replay their content before calling these private entry points.
  */
@@ -148,6 +149,19 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_correctness_seal(BqRetirementCorrectness 
         for (uint32_t side = 0; side < 2; side += 1)
             bq_retirement_correctness_side_hash(&hash, &fact->side[side]);
     }
+    /* (A1) The frozen batch groups: each side's complete contract digest
+     * (members, controls, objects, leaves, input list, metrics bound) and
+     * batch command. A contract that no longer validates seals as empty. */
+    bq_retirement_correctness_number(&hash, gate->batches_frozen);
+    bq_retirement_correctness_number(&hash, gate->batch_group_count);
+    for (uint32_t g = 0; gate->batch_groups && g < gate->batch_group_count; g += 1)
+        for (uint32_t side = 0; side < 2; side += 1)
+        {
+            char contract[65] = {0};
+            tp_retirement_batch_contract_digest(&gate->batch_groups[g].contract[side], contract);
+            bq_retirement_correctness_text(&hash, contract);
+            bq_retirement_correctness_text(&hash, gate->batch_groups[g].command_sha256[side]);
+        }
     bq_retirement_correctness_text(&hash, gate->checks_sha256);
     sha256_finish_hex(&hash, digest);
 }
@@ -362,6 +376,97 @@ bool bq_retirement_correctness_row(BqRetirementCorrectness* gate, BqRetirementRo
         }
     }
     if (gate && !ok) gate->failed = 1;
+    return ok;
+}
+
+/* A timed object row: compiler eligible on the native target at the object stage. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_correctness_timed_object(BqRetirementCorrectness const* gate, uint32_t row)
+{
+    BqRetirementTrustedRow const* trusted = row < gate->prepared.rows ? &gate->trusted_rows[row] : NULL;
+    bool timed = trusted && trusted->compiler_eligible && trusted->target == gate->prepared.native_target &&
+        trusted->stage == BQ_RETIREMENT_STAGE_OBJECT;
+    return timed;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_correctness_text_equal(char const* left, char const* right)
+{
+    bool equal = (!left && !right) || (left && right && !strcmp(left, right));
+    return equal;
+}
+
+bool bq_retirement_correctness_batches(BqRetirementCorrectness* gate,
+    BqRetirementBatchGroup const* groups, uint32_t count, uint8_t* assigned_workspace, uint32_t workspace_slots)
+{
+    bool ok = gate && !gate->failed && !gate->finished && !gate->batches_frozen &&
+        gate->checks_done == gate->check_count && gate->rows_done == gate->prepared.rows &&
+        (!count || groups) && count <= gate->prepared.rows && assigned_workspace &&
+        workspace_slots >= gate->prepared.rows;
+    uint32_t previous_first = 0, timed_objects = 0, members_total = 0;
+    if (ok) memset(assigned_workspace, 0, gate->prepared.rows);
+    for (uint32_t g = 0; ok && g < count; g += 1)
+    {
+        BqRetirementBatchGroup const* group = &groups[g];
+        TpRetirementBatchContract const* base = &group->contract[0];
+        TpRetirementBatchContract const* other = &group->contract[1];
+        /* The native target's metrics name (the validator's TARGET_METRICS_NAMES). */
+        ok = tp_retirement_batch_contract_valid(base) && tp_retirement_batch_contract_valid(other) &&
+            base->input_count == other->input_count && base->exit_status == other->exit_status &&
+            base->metrics_bytes_max == other->metrics_bytes_max && !strcmp(base->target, "x86_64-linux") &&
+            !strcmp(other->target, base->target) && !strcmp(other->allocator, base->allocator) &&
+            !strcmp(other->metrics, base->metrics) &&
+            bq_retirement_correctness_digest(group->command_sha256[0]) &&
+            bq_retirement_correctness_digest(group->command_sha256[1]);
+        uint32_t members = 0;
+        for (uint32_t i = 0; ok && i < base->input_count; i += 1)
+        {
+            TpRetirementBatchInput const* left = &base->inputs[i];
+            TpRetirementBatchInput const* right = &other->inputs[i];
+            ok = left->member == right->member && left->row == right->row &&
+                !strcmp(left->fixture, right->fixture) && !strcmp(left->status, right->status) &&
+                !strcmp(left->error, right->error) && !strcmp(left->diagnostic_sha256, right->diagnostic_sha256) &&
+                bq_retirement_correctness_text_equal(left->artifact, right->artifact);
+            if (ok && left->member)
+            {
+                uint32_t row = left->row;
+                ok = bq_retirement_correctness_timed_object(gate, row) && !assigned_workspace[row] &&
+                    (members || !g || row > previous_first);
+                for (uint32_t side = 0; ok && side < 2; side += 1)
+                {
+                    TpRetirementBatchInput const* input = side ? right : left;
+                    ok = bq_retirement_correctness_equal(gate->trusted_rows[row].compiler_command_sha256[side],
+                             group->command_sha256[side]) &&
+                         bq_retirement_correctness_equal(gate->facts[row].side[side].compiler_command_sha256,
+                             group->command_sha256[side]) &&
+                         !strcmp(gate->facts[row].side[side].artifact_sha256, input->object_sha256);
+                }
+                if (ok)
+                {
+                    if (!members) previous_first = row;
+                    assigned_workspace[row] = 1;
+                    members += 1;
+                }
+            }
+            else if (ok)
+                ok = left->row == TP_RETIREMENT_BATCH_NO_ROW ||
+                    (left->row < gate->prepared.rows && !(gate->trusted_rows[left->row].compiler_eligible &&
+                        gate->trusted_rows[left->row].target == gate->prepared.native_target));
+        }
+        members_total += members;
+    }
+    for (uint32_t row = 0; ok && row < gate->prepared.rows; row += 1)
+        if (bq_retirement_correctness_timed_object(gate, row))
+        {
+            ok = assigned_workspace[row] == 1;
+            timed_objects += 1;
+        }
+    ok = ok && timed_objects == members_total;
+    if (ok)
+    {
+        gate->batch_groups = groups;
+        gate->batch_group_count = count;
+        gate->batches_frozen = 1;
+    }
+    else if (gate) gate->failed = 1;
     return ok;
 }
 

@@ -1,14 +1,17 @@
 /* Real child executions with deterministic fixture output, never performance
  * acceptance. The fixture checks cwd, explicit environment, stdin and descriptor
  * isolation. The ordinary native and sanitized harnesses both run this path.
- * The batch child compiles every listed input serially, writes one object per
- * compiled input and a per-input metrics file with its own monotonic offsets. */
+ * The batch child reads its inputs from the `@file` response file, requires
+ * them to be exactly the frozen list, compiles every input serially, and
+ * writes one object per compiled input and a per-input metrics file with its
+ * own monotonic offsets. */
 #ifndef BUSTER_THROUGHPUT_RETIREMENT_MEASUREMENT_TEST_H
 #define BUSTER_THROUGHPUT_RETIREMENT_MEASUREMENT_TEST_H
-#include "retirement_measurement.h"
+#include "retirement_untimed.h"
 
 #ifdef __linux__
 #define TEST_BATCH_INPUTS 8u
+#define TEST_BATCH_METRICS_BYTES UINT64_C(1048576)
 static char const test_batch_empty_digest[] = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 static char const test_batch_control_digest[] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -40,7 +43,7 @@ static int test_batch_contract(TestBatchFixture* fixture, char const* metrics, c
         failures += !member;
     }
     if (ok) fixture->contract = (TpRetirementBatchContract){"x86_64-linux", "none", metrics, fixture->inputs, count,
-                                                            failures ? 1u : 0u};
+                                                            failures ? 1u : 0u, TEST_BATCH_METRICS_BYTES};
     return ok;
 }
 
@@ -51,13 +54,53 @@ static uint64_t test_batch_clock(uint64_t origin, uint64_t after)
     return now;
 }
 
+/* The driver's response-file grammar (docs/agents/driver.md) for the
+ * canonical subset the producer writes: whitespace-separated arguments with
+ * double quotes and backslash escapes. Each argument must be the next frozen
+ * fixture. */
+static int test_batch_response_file(char const* leaf, TestBatchFixture const* fixture)
+{
+    FILE* file = leaf && leaf[0] == '@' ? fopen(leaf + 1, "rb") : NULL;
+    char argument[1024];
+    unsigned count = 0, index = 0;
+    int c = 0, ok = file != NULL, quoted = 0, open = 0;
+    while (ok && (c = fgetc(file)) != EOF)
+    {
+        if (c == '\\')
+        {
+            c = fgetc(file);
+            ok = c != EOF && count < sizeof(argument) - 1;
+            if (ok) argument[count++] = (char)c, open = 1;
+        }
+        else if (c == '"') quoted = !quoted, open = 1;
+        else if (!quoted && (c == ' ' || c == '\n' || c == '\t'))
+        {
+            if (open)
+            {
+                argument[count] = 0;
+                ok = index < fixture->contract.input_count && !strcmp(argument, fixture->inputs[index++].fixture);
+            }
+            count = 0;
+            open = 0;
+        }
+        else
+        {
+            ok = count < sizeof(argument) - 1;
+            if (ok) argument[count++] = (char)c, open = 1;
+        }
+    }
+    ok = ok && !quoted && !open && index == fixture->contract.input_count;
+    if (file) fclose(file);
+    return ok;
+}
+
 static int test_retirement_batch_child(int argc, char** argv)
 {
     int result = 2;
     char byte;
     char const* marker = getenv("TP_RETIREMENT_TEST");
     int leak = atoi(argv[5]);
-    int ok = argc >= 7 && marker && !strcmp(marker, "explicit") && !getenv("TP_RETIREMENT_AMBIENT") &&
+    int ok = argc >= 8 && marker && !strcmp(marker, "explicit") && !getenv("TP_RETIREMENT_AMBIENT") &&
         read(STDIN_FILENO, &byte, 1) == 0 && fcntl(leak, F_GETFD) < 0 && errno == EBADF &&
         access("cwd-marker", F_OK) == 0;
     uint64_t origin = tp_process_monotonic_ns(), previous = 0;
@@ -66,7 +109,8 @@ static int test_retirement_batch_child(int argc, char** argv)
     unsigned artifact_bytes = test_artifact_fixture(artifact, 1, 1);
     TestBatchFixture fixture;
     TestMetricsInput timings[TEST_BATCH_INPUTS];
-    ok = ok && test_batch_contract(&fixture, argv[3], argv + 6, (unsigned)(argc - 6), test_batch_empty_digest);
+    ok = ok && test_batch_contract(&fixture, argv[3], argv + 7, (unsigned)(argc - 7), test_batch_empty_digest) &&
+        test_batch_response_file(argv[6], &fixture);
     for (unsigned i = 0; ok && i < fixture.contract.input_count; ++i)
     {
         uint64_t start = test_batch_clock(origin, previous);
@@ -103,7 +147,7 @@ static int test_retirement_batch_child(int argc, char** argv)
 static int test_retirement_measurement_child(int argc, char** argv)
 {
     int result = 2;
-    if (argc >= 7 && !strcmp(argv[2], "batch")) result = test_retirement_batch_child(argc, argv);
+    if (argc >= 8 && !strcmp(argv[2], "batch")) result = test_retirement_batch_child(argc, argv);
     else if (argc == 6)
     {
         char byte;
@@ -184,16 +228,172 @@ static void test_retirement_measurement_copy(FILE* source, char const* root, cha
     }
 }
 
-/* Publish a completed batch's metrics bytes at the transcript's path, as the
- * service does, then retire the scratch outputs. */
-static void test_retirement_measurement_publish(int cwd, char const* root, TestBatchFixture const* fixture,
-    TpRetirementMeasurementResult const* result)
+/* The metrics bytes already sit in the stage's metrics shard at the
+ * transcript's (shard, offset, length); retire the scratch outputs. */
+static void test_retirement_measurement_publish(int cwd, TestBatchFixture const* fixture)
 {
-    char source[TP_PATH_CAP], target[TP_PATH_CAP], directory[TP_PATH_CAP];
-    CHECK(tp_path(directory, root, "retirement-measured") && tp_path(source, directory, fixture->contract.metrics) &&
-          tp_path(target, root, result->metrics_path) && rename(source, target) == 0);
+    CHECK(unlinkat(cwd, fixture->contract.metrics, 0) == 0);
     for (unsigned i = 0; i < fixture->contract.input_count; ++i)
         if (fixture->inputs[i].artifact) CHECK(unlinkat(cwd, fixture->inputs[i].artifact, 0) == 0);
+}
+
+/* A reviewed test budget: every bound nonzero, classes by group size. */
+static TpRetirementCampaignBudget test_retirement_budget(void)
+{
+    TpRetirementCampaignBudget budget = {.reviewed_ns = UINT64_C(36000000000000),
+        .reservation_ns = 1000000000, .materialization_ns = 2000000000, .baseline_build_ns = 3000000000,
+        .candidate_build_ns = 3000000000, .correctness_ns = 4000000000, .settling_per_stage_ns = 500000000,
+        .aa_qualification_ns = 600000000, .aa_receipt_sealing_ns = 700000000,
+        .sample_export_per_stage_ns = 800000000, .final_statistics_ns = 900000000,
+        .final_sealing_ns = 1000000000, .cleanup_ns = 20000000000, .runtime_process_ns = 50000000,
+        .metrics_header_bytes = 4096, .metrics_input_bytes = 16384, .classes = 3,
+        .batch = {{1, 40000000}, {4, 60000000}, {TP_RETIREMENT_BATCH_INPUTS, 2000000000}}};
+    return budget;
+}
+
+/* Untimed code-artifact batches of one object group: a production and a
+ * reproduction batch per variant, outside the timed window, with records and
+ * the `untimed` metrics shard saved for the Python replay. */
+static void test_retirement_untimed_fixture(char const* root, int cwd, int other,
+    TpRetirementExecutable const* executable, int binary, char** environment,
+    TpRetirementMeasuredCommand const* timed_command, TestBatchFixture const* timed_batch)
+{
+    TpRetirementCampaignBudget budget = test_retirement_budget();
+    TestBatchFixture batch = *timed_batch;
+    batch.contract.inputs = batch.inputs;
+    CHECK(tp_retirement_budget_metrics_bytes(&budget, 3, &batch.contract.metrics_bytes_max) &&
+          batch.contract.metrics_bytes_max == 4096 + 3 * 16384);
+    char output_digest[65];
+    CHECK(tp_retirement_batch_contract_output(&batch.contract, output_digest));
+    char path[TP_PATH_CAP];
+    CHECK(tp_path(path, root, "retirement-untimed-batches.jsonl"));
+    FILE* records = fopen(path, "wb+");
+    CHECK(tp_path(path, root, "retirement-metrics-untimed-0000.txt"));
+    FILE* metrics_stream = fopen(path, "wb+");
+    TpRetirementMetricsShards metrics;
+    unsigned char reproduced[2];
+    TpRetirementUntimed untimed;
+    CHECK(records && metrics_stream && tp_retirement_metrics_shards_init(&metrics, "untimed", metrics_stream) &&
+          tp_retirement_untimed_init(&untimed, records, &metrics, &budget, 1, reproduced, "job-1", 2, "boot-123",
+              tp_first_allowed_cpu(), 1, UINT64_MAX - 1, 0));
+    TpRetirementUntimedBatch run = {*timed_command, 0, 0, TP_RETIREMENT_UNTIMED_PRODUCTION, TP_RETIREMENT_GROUP_OBJECT};
+    run.command.batch = &batch.contract;
+    run.command.unit = 0;
+    TpRetirementMeasurementResult result;
+    for (unsigned step = 0; step < 4; ++step)
+    {
+        run.variant = step / 2;
+        run.purpose = step % 2;
+        run.command.variant = run.variant;
+        int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        TpProcessInputs inputs = {binary, cwd, log, environment};
+        uint64_t records_before = untimed.records;
+        CHECK(log >= 3 && tp_retirement_untimed_run(&untimed, &run, executable, &inputs, cwd, &result) &&
+              result.status == TP_RETIREMENT_MEASUREMENT_COMPLETE && !strcmp(result.output_sha256, output_digest) &&
+              !strcmp(result.metrics.path, "retirement-metrics-untimed-0000.txt") &&
+              untimed.records == records_before + 1);
+        if (log >= 0) CHECK(close(log) == 0);
+        CHECK(unlinkat(cwd, "child.log", 0) == 0 && unlinkat(cwd, "batch.metrics", 0) == 0 &&
+              unlinkat(cwd, "alpha.o", 0) == 0 && unlinkat(cwd, "beta.o", 0) == 0);
+    }
+    TpRetirementShard record_descriptor;
+    TpRetirementShardFile metrics_descriptor;
+    CHECK(tp_retirement_untimed_finish(&untimed, &record_descriptor) && record_descriptor.records == 4 &&
+          tp_retirement_metrics_shards_finish(&metrics, &metrics_descriptor) &&
+          metrics_descriptor.contents.records == 4);
+    char digest[65];
+    uint64_t size = 0, lines = 0;
+    CHECK(tp_path(path, root, "retirement-untimed-batches.jsonl") && records && fflush(records) == 0 &&
+          tp_hash_file(path, digest, &size, &lines) && size == record_descriptor.bytes && lines == 4 &&
+          !strcmp(digest, record_descriptor.sha256));
+    if (records) CHECK(fclose(records) == 0);
+    if (metrics_stream) CHECK(fclose(metrics_stream) == 0);
+
+    /* Failure controls: records out of order, a missing reproduction, a
+     * contract without the reviewed bound, a batch inside the timed window,
+     * and a batch before the reservation. None is retried. */
+    for (unsigned failure = 0; failure < 7; ++failure)
+    {
+        FILE* stream = tmpfile();
+        FILE* shard = tmpfile();
+        TpRetirementMetricsShards scratch;
+        uint64_t now = tp_process_monotonic_ns();
+        /* 3: inside a running window; 4: after the pre-sample binding of an
+         * unfinished collection; 6 (accepted): after a completed window. */
+        uint64_t bound_at = failure == 3 || failure == 6 ? now - 2 : failure == 4 ? 2 : UINT64_MAX - 1;
+        uint64_t completed_at = failure == 3 ? UINT64_MAX - 1 : failure == 6 ? now - 1 : 0;
+        uint64_t reserved_at = failure == 5 ? UINT64_MAX - 2 : 1;
+        CHECK(stream && shard && tp_retirement_metrics_shards_init(&scratch, "untimed", shard) &&
+              tp_retirement_untimed_init(&untimed, stream, &scratch, &budget, 1, reproduced, "job-1", 2,
+                  "boot-123", tp_first_allowed_cpu(), reserved_at, bound_at, completed_at));
+        run.variant = run.command.variant = 0;
+        run.purpose = failure == 0 ? TP_RETIREMENT_UNTIMED_REPRODUCTION : TP_RETIREMENT_UNTIMED_PRODUCTION;
+        TestBatchFixture unbounded = batch;
+        unbounded.contract.inputs = unbounded.inputs;
+        unbounded.contract.metrics_bytes_max = TEST_BATCH_METRICS_BYTES;
+        run.command.batch = failure == 2 ? &unbounded.contract : &batch.contract;
+        int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        TpProcessInputs inputs = {binary, cwd, log, environment};
+        int ok = log >= 3 && tp_retirement_untimed_run(&untimed, &run, executable, &inputs, cwd, &result);
+        if (failure == 0)
+        {
+            /* A reproduction may follow nothing; its production then cannot. */
+            CHECK(ok);
+            CHECK(unlinkat(cwd, "batch.metrics", 0) == 0 && unlinkat(cwd, "alpha.o", 0) == 0 &&
+                  unlinkat(cwd, "beta.o", 0) == 0 && close(log) == 0 && unlinkat(cwd, "child.log", 0) == 0);
+            log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+            inputs.log = log;
+            run.purpose = TP_RETIREMENT_UNTIMED_PRODUCTION;
+            CHECK(!tp_retirement_untimed_run(&untimed, &run, executable, &inputs, cwd, &result) &&
+                  result.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID);
+        }
+        else if (failure == 1)
+        {
+            /* One production batch alone leaves both reproductions missing. */
+            TpRetirementShard descriptor;
+            CHECK(ok && !tp_retirement_untimed_finish(&untimed, &descriptor) && !descriptor.records);
+        }
+        else if (failure == 2) CHECK(!ok && result.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID);
+        else if (failure == 6) CHECK(ok && !untimed.failed && untimed.records == 1);
+        else CHECK(!ok && result.status == TP_RETIREMENT_MEASUREMENT_COLLECTION_FAILED && untimed.failed &&
+                   scratch.failed);
+        if (failure != 1 && failure != 6) CHECK(untimed.failed);
+        struct stat retained;
+        for (unsigned leaf = 0; leaf < 3; ++leaf)
+        {
+            char const* name = leaf == 0 ? "alpha.o" : leaf == 1 ? "beta.o" : "batch.metrics";
+            if (fstatat(cwd, name, &retained, AT_SYMLINK_NOFOLLOW) == 0) CHECK(unlinkat(cwd, name, 0) == 0);
+        }
+        if (log >= 0) CHECK(close(log) == 0);
+        CHECK(unlinkat(cwd, "child.log", 0) == 0);
+        if (stream) CHECK(fclose(stream) == 0);
+        if (shard) CHECK(fclose(shard) == 0);
+    }
+    BUSTER_UNUSED(other);
+
+    /* The widest record: 20-digit timestamps, PID and start token, exit
+     * status 255, group 99999, `reproduction`/`candidate` and a metrics
+     * artifact with 8-digit offset and length at the longest shard leaf. */
+    char line[TP_RETIREMENT_UNTIMED_LINE_CAP], hash[65];
+    memset(hash, 'e', 64); hash[64] = 0;
+    TpRetirementMetricsArtifact widest = {"retirement-metrics-abcdefgh-2047.txt", UINT64_C(33554432),
+        UINT64_C(33554432), {0}};
+    memcpy(widest.sha256, hash, sizeof(hash));
+    TpRetirementUntimedBatch max_batch = {{.exit_status = 255}, TP_RETIREMENT_MAX_CELLS - 1, 1,
+        TP_RETIREMENT_UNTIMED_REPRODUCTION, TP_RETIREMENT_GROUP_OBJECT};
+    TpProcessObservation max_observed = {.pid = UINT64_MAX, .start_token = UINT64_MAX,
+        .started_ns = UINT64_MAX - 1, .finished_ns = UINT64_MAX, .valid = 1};
+    char max_job[129], max_boot[129];
+    memset(max_job, 'a', 128); max_job[128] = 0;
+    memset(max_boot, 'b', 128); max_boot[128] = 0;
+    size_t count = tp_retirement_untimed_record(line, sizeof(line), &max_batch, &max_observed, hash, hash, hash,
+        &widest, max_job, UINT64_MAX, max_boot);
+    CHECK(count == TP_RETIREMENT_UNTIMED_RECORD_BYTES_MAX && line[count - 1] == '\n');
+    CHECK(!tp_retirement_untimed_record(line, count, &max_batch, &max_observed, hash, hash, hash, &widest,
+        max_job, UINT64_MAX, max_boot) && !line[0]);
+    max_batch.group_kind = TP_RETIREMENT_GROUP_SINGLETON;
+    CHECK(!tp_retirement_untimed_record(line, sizeof(line), &max_batch, &max_observed, hash, hash, hash, &widest,
+        max_job, UINT64_MAX, max_boot)); /* A singleton has no metrics and exits zero. */
 }
 
 static void test_retirement_measurement(char const* executable_path, char const* root)
@@ -348,7 +548,7 @@ static void test_retirement_measurement(char const* executable_path, char const*
         ok = tp_retirement_measurement_run(&test.samples, &command, &executable, &inputs, cwd, &result);
         CHECK(ok);
         CHECK(result.status == TP_RETIREMENT_MEASUREMENT_COMPLETE &&
-              result.output_bytes == (invocation.kind ? 13 : artifact_bytes) && !result.metrics_path[0] &&
+              result.output_bytes == (invocation.kind ? 13 : artifact_bytes) && !result.metrics.path[0] &&
               !strcmp(result.output_sha256, invocation.kind ? expected_output : batch_output));
         if (log >= 0) CHECK(close(log) == 0);
         if (ok)
@@ -494,18 +694,24 @@ static void test_retirement_measurement(char const* executable_path, char const*
 
     /* A complete collection of one object group: two members and a frozen
      * rejection control in one serial continue-on-failure batch per
-     * invocation. Every batch reproduces both objects byte for byte and a
-     * metrics file the strict reader accepts; its members' intervals and
-     * arena bytes become their samples. The metrics bytes are published at
-     * the transcript's process-instance path for the Python replay. */
+     * invocation. The inputs reach the child only through the digest-bound
+     * `@file` response file. Every batch reproduces both objects byte for
+     * byte and a metrics file the strict reader accepts; its members'
+     * intervals and arena bytes become their samples, and its metrics bytes
+     * are appended to the stage's `mb` metrics shard for the Python replay. */
+    char list_leaf[TP_RETIREMENT_INPUT_LIST_LEAF_CAP], list_argument[TP_RETIREMENT_INPUT_LIST_LEAF_CAP + 1];
     char* batch_arguments[] = {executable_copy, "retirement-child", "batch", "batch.metrics", "ok", leak_text,
-        "+alpha", "+beta", "-control", NULL};
+        list_argument, "+alpha", "+beta", "-control", NULL, NULL};
     TestBatchFixture batch;
-    CHECK(test_batch_contract(&batch, "batch.metrics", batch_arguments + 6, 3, expected_artifact) &&
+    CHECK(test_batch_contract(&batch, "batch.metrics", batch_arguments + 7, 3, expected_artifact) &&
           tp_retirement_batch_contract_valid(&batch.contract) && batch.contract.exit_status == 1);
+    CHECK(tp_retirement_batch_input_list_write(cwd, &batch.contract, list_leaf));
+    snprintf(list_argument, sizeof(list_argument), "@%s", list_leaf);
+    char rejected_leaf[TP_RETIREMENT_INPUT_LIST_LEAF_CAP];
+    CHECK(!tp_retirement_batch_input_list_write(cwd, &batch.contract, rejected_leaf) && !rejected_leaf[0]);
     char batch_digest[65], batch_command_digest[65];
     CHECK(tp_retirement_batch_contract_output(&batch.contract, batch_digest));
-    TpRetirementMeasuredCommand batch_command = {.arguments = batch_arguments, .argument_count = 9,
+    TpRetirementMeasuredCommand batch_command = {.arguments = batch_arguments, .argument_count = 10,
         .environment = environment, .environment_count = 2, .directory = directory, .batch = &batch.contract,
         .timeout_seconds = 2, .command_sha256 = batch_command_digest, .output_sha256 = batch_digest,
         .exit_status = 1};
@@ -536,29 +742,61 @@ static void test_retirement_measurement(char const* executable_path, char const*
         CHECK(!tp_retirement_batch_rows_match(&layout, &group, &rows_fixture.contract));
     }
     TpRetirementLayout batch_layout = {2, 1, batch_ids, batch_metrics, batch_kinds, batch_offsets, batch_members};
-    for (unsigned scenario = 0; scenario < 10; ++scenario)
+    char other_directory[TP_PATH_CAP];
+    CHECK(tp_path(other_directory, root, "retirement-measured-other") && tp_mkdirs(other_directory) &&
+          chmod(other_directory, 0700) == 0);
+    int other = open(other_directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    CHECK(other >= 3);
+    for (unsigned scenario = 0; scenario < 18; ++scenario)
     {
         memset(&test, 0, sizeof(test));
         test.stream = tmpfile();
         test.spool = tmpfile();
-        CHECK(test.stream && test.spool &&
+        FILE* metrics_stream = NULL;
+        if (!scenario)
+        {
+            CHECK(tp_path(path, root, "retirement-metrics-mb-0000.txt"));
+            metrics_stream = fopen(path, "wb+");
+        }
+        else metrics_stream = tmpfile();
+        TpRetirementMetricsShards metrics_shards;
+        CHECK(test.stream && test.spool && metrics_stream &&
               tp_retirement_execution_init(&test.execution, 1, 1, NULL, 0, 2, 60, test.workspace, 3) &&
               tp_retirement_transcript_init(&test.transcript, &test.execution, "job-1", 2, "boot-123",
                   tp_first_allowed_cpu(), 1000) &&
               tp_retirement_transcript_begin_shard(&test.transcript, test.stream) &&
               tp_retirement_samples_init(&test.samples, &test.transcript, test.spool, &batch_layout, test.rows,
-                  test.groups, test.members));
+                  test.groups, test.members) &&
+              tp_retirement_metrics_shards_init(&metrics_shards, "mb", metrics_stream));
+        if (scenario != 13) CHECK(tp_retirement_samples_attach_metrics(&test.samples, &metrics_shards));
+        /* No spare stream and too little room for the reviewed bound. */
+        if (scenario == 16) metrics_shards.bytes = TP_RETIREMENT_METRICS_SHARD_BYTES - TEST_BATCH_METRICS_BYTES + 1;
         batch_arguments[4] = scenario == 1 ? "nondeterministic" : scenario == 2 ? "status" :
             scenario == 3 ? "badmetrics" : scenario == 4 ? "overlap" : scenario == 5 ? "exit0" :
             scenario == 6 ? "nometrics" : "ok";
+        batch_arguments[10] = scenario == 10 ? "tests/alpha.c" : scenario == 12 ? "@other.rsp" : NULL;
+        batch_command.argument_count = scenario == 10 || scenario == 12 ? 11 : 10;
         TestBatchFixture changed = batch;
         changed.contract.inputs = changed.inputs;
         if (scenario == 7) changed.inputs[1].member = 0, changed.inputs[1].status = "ok";
         if (scenario == 9) changed.inputs[1].row = 5; /* A valid contract naming another row. */
-        batch_command.batch = scenario == 7 || scenario == 9 ? &changed.contract : &batch.contract;
+        if (scenario == 14) changed.contract.metrics_bytes_max = 128; /* Below the batch's actual metrics. */
+        batch_command.batch = scenario == 7 || scenario == 9 || scenario == 14 ? &changed.contract : &batch.contract;
         CHECK(tp_retirement_command_hash(&batch_command, batch_command_digest));
         if (scenario == 8) CHECK(test_text(directory, "beta.o", "stale\n"));
         if (scenario == 9) CHECK(tp_retirement_batch_contract_valid(&changed.contract));
+        char saved_leaf[TP_PATH_CAP + 16];
+        snprintf(saved_leaf, sizeof(saved_leaf), "%s.saved", list_leaf);
+        if (scenario == 11)
+        {
+            /* The same leaf with other bytes: the name no longer is the digest. */
+            CHECK(renameat(cwd, list_leaf, cwd, saved_leaf) == 0);
+            static char const reordered[] = "\"tests/beta.c\"\n\"tests/alpha.c\"\n\"tests/control.c\"\n";
+            int forged = openat(cwd, list_leaf, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400);
+            CHECK(forged >= 3 && write(forged, reordered, sizeof(reordered) - 1) == (ssize_t)(sizeof(reordered) - 1) &&
+                  close(forged) == 0);
+        }
+        if (scenario == 17) CHECK(fchmodat(cwd, list_leaf, 0600, 0) == 0);
         unsigned runs = scenario ? 1 : 244;
         int run_ok = 1;
         for (unsigned i = 0; run_ok && i < runs; ++i)
@@ -569,27 +807,31 @@ static void test_retirement_measurement(char const* executable_path, char const*
             int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
             TpProcessInputs inputs = {binary, cwd, log, environment};
             TpRetirementMeasurementResult result;
+            uint64_t offset = metrics_shards.bytes;
             run_ok = log >= 3 && tp_retirement_measurement_run(&test.samples, &batch_command, &executable, &inputs,
-                                                               cwd, &result);
+                                                               scenario == 15 ? other : cwd, &result);
             if (!scenario)
             {
                 CHECK(run_ok && result.status == TP_RETIREMENT_MEASUREMENT_COMPLETE &&
                       result.process.exit_code == 1 && !strcmp(result.output_sha256, batch_digest) &&
-                      result.output_bytes == 2 * artifact_bytes && result.metrics_bytes &&
-                      tp_retirement_digest(result.metrics_sha256) &&
-                      !strncmp(result.metrics_path, "retirement-metrics-", 19));
-                if (run_ok) test_retirement_measurement_publish(cwd, root, &batch, &result);
+                      result.output_bytes == 2 * artifact_bytes && result.metrics.bytes &&
+                      result.metrics.offset == offset && tp_retirement_digest(result.metrics.sha256) &&
+                      !strcmp(result.metrics.path, "retirement-metrics-mb-0000.txt") &&
+                      metrics_shards.bytes == offset + result.metrics.bytes);
+                if (run_ok) test_retirement_measurement_publish(cwd, &batch);
             }
             else
             {
+                unsigned output_failure = scenario < 5 || scenario == 6 || scenario == 14;
                 unsigned expected_status = scenario == 5 ? TP_RETIREMENT_MEASUREMENT_PROCESS_FAILED :
-                    scenario >= 7 ? TP_RETIREMENT_MEASUREMENT_PLAN_INVALID : TP_RETIREMENT_MEASUREMENT_OUTPUT_INVALID;
+                    output_failure ? TP_RETIREMENT_MEASUREMENT_OUTPUT_INVALID : TP_RETIREMENT_MEASUREMENT_PLAN_INVALID;
                 CHECK(!run_ok && result.status == expected_status && test.samples.failed &&
-                      !test.execution.sequence);
+                      !test.execution.sequence && (scenario == 13 || metrics_shards.failed));
                 struct stat retained;
-                if (scenario < 7)
+                if (output_failure || scenario == 5)
                     CHECK(fstatat(cwd, "alpha.o", &retained, AT_SYMLINK_NOFOLLOW) == 0 &&
                           fstatat(cwd, "beta.o", &retained, AT_SYMLINK_NOFOLLOW) == 0);
+                else CHECK(scenario == 8 || fstatat(cwd, "alpha.o", &retained, AT_SYMLINK_NOFOLLOW) != 0);
                 for (unsigned leaf = 0; leaf < 3; ++leaf)
                 {
                     char const* name = leaf == 0 ? "alpha.o" : leaf == 1 ? "beta.o" : "batch.metrics";
@@ -599,9 +841,14 @@ static void test_retirement_measurement(char const* executable_path, char const*
             if (log >= 0) CHECK(close(log) == 0);
             CHECK(unlinkat(cwd, "child.log", 0) == 0);
         }
+        if (scenario == 11) CHECK(unlinkat(cwd, list_leaf, 0) == 0 && renameat(cwd, saved_leaf, cwd, list_leaf) == 0);
+        if (scenario == 17) CHECK(fchmodat(cwd, list_leaf, 0400, 0) == 0);
         if (!scenario)
         {
+            TpRetirementShardFile metrics_shard;
             CHECK(run_ok && tp_retirement_execution_complete(&test.execution));
+            CHECK(tp_retirement_metrics_shards_finish(&metrics_shards, &metrics_shard) &&
+                  metrics_shard.contents.records == 244 && metrics_shard.contents.bytes == metrics_shards.total_bytes);
             CHECK(tp_retirement_transcript_end_shard(&test.transcript, &transcript_shard) &&
                   tp_retirement_transcript_finish(&test.transcript, tp_process_monotonic_ns()) &&
                   tp_retirement_samples_begin_export(&test.samples));
@@ -619,9 +866,17 @@ static void test_retirement_measurement(char const* executable_path, char const*
                   batch_shards[0].records == 240 && batch_shards[1].records == 120);
             test_retirement_measurement_copy(test.stream, root, "retirement-measured-batch-execution.jsonl");
         }
+        if (metrics_stream) CHECK(fclose(metrics_stream) == 0);
         test_sample_close(&test);
     }
     batch_arguments[4] = "ok";
+    batch_arguments[10] = NULL;
+    batch_command.argument_count = 10;
+    batch_command.batch = &batch.contract;
+    CHECK(tp_retirement_command_hash(&batch_command, batch_command_digest));
+    test_retirement_untimed_fixture(root, cwd, other, &executable, binary, environment, &batch_command, &batch);
+    if (other >= 0) CHECK(close(other) == 0);
+    /* The response file stays beside the command for the Python replay. */
     CHECK(unsetenv("TP_RETIREMENT_AMBIENT") == 0);
     if (binary >= 0) CHECK(close(binary) == 0);
     if (cwd >= 0) CHECK(close(cwd) == 0);

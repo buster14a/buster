@@ -1,6 +1,9 @@
 /* Private queue-owned #1022 -> #1022-D handoff. This entry derives both
  * durable record identities from the active job, reimports A and frozen B
  * outputs, then binds the held descriptors to the fixed campaign transcript.
+ * (M4) The reviewed campaign budget must match the compiled recipe profile's
+ * `campaign-budget-sha256=` pin; the blocked profile carries none, so this
+ * entry fails closed with BQ_RECIPE_MISMATCH until integration pins it.
  * It is an internal service seam; no worker or recipe calls it yet. */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_CAMPAIGN_SERVICE_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_CAMPAIGN_SERVICE_H
@@ -47,7 +50,7 @@ static BqError bq_retirement_campaign_service_bind_pinned(BqQueue* queue,
     TpRetirementMeasuredCommand const* aa_commands,
     TpRetirementMeasuredCommand const* ab_commands,
     TpRetirementCampaignCommand* command_workspace, size_t command_count,
-    unsigned* identity_workspace, size_t identity_count,
+    unsigned* identity_workspace, size_t identity_count, TpRetirementCampaignReview const* review,
     char const* plan_sha256, char const* context_sha256,
     BqRetirementHeldBinaries* held, BqRetirementCampaignBinding* binding)
 {
@@ -93,9 +96,14 @@ static BqError bq_retirement_campaign_service_bind_pinned(BqQueue* queue,
             profile, preparation_sha256, binary_record_sha256, held);
     if (result == BQ_OK && !bq_retirement_campaign_service_active(queue, job_id, attempt_token))
         result = BQ_INVALID_TRANSITION;
+    char budget_pin[SHA256_HEX_CAPACITY] = {0};
+    if (result == BQ_OK && (!review || !review->budget_sha256 ||
+        !bq_retirement_profile_sha(profile, S8("campaign-budget-sha256="), budget_pin) ||
+        strcmp(budget_pin, review->budget_sha256)))
+        result = BQ_RECIPE_MISMATCH;
     if (result == BQ_OK && !bq_retirement_campaign_bind_held(binding, gate, campaign, plan,
         aa, ab, held, job->id, job->token, aa_commands, ab_commands, command_workspace,
-        command_count, identity_workspace, identity_count, plan_sha256, context_sha256))
+        command_count, identity_workspace, identity_count, review, plan_sha256, context_sha256))
         result = BQ_RECIPE_MISMATCH;
     if (result != BQ_OK)
     {
@@ -115,7 +123,7 @@ static inline BqError bq_retirement_campaign_service_bind(BqQueue* queue,
     TpRetirementMeasuredCommand const* aa_commands,
     TpRetirementMeasuredCommand const* ab_commands,
     TpRetirementCampaignCommand* command_workspace, size_t command_count,
-    unsigned* identity_workspace, size_t identity_count,
+    unsigned* identity_workspace, size_t identity_count, TpRetirementCampaignReview const* review,
     char const* plan_sha256, char const* context_sha256,
     BqRetirementHeldBinaries* held, BqRetirementCampaignBinding* binding)
 {
@@ -123,7 +131,7 @@ static inline BqError bq_retirement_campaign_service_bind(BqQueue* queue,
     String8 profile = job ? bq_recipe_profile(bq_request_recipe(&job->request)) : (String8){0};
     BqError result = bq_retirement_campaign_service_bind_pinned(queue, job_id, attempt_token,
         installed, workspaces, profile, gate, campaign, plan, aa, ab, aa_commands, ab_commands,
-        command_workspace, command_count, identity_workspace, identity_count, plan_sha256,
+        command_workspace, command_count, identity_workspace, identity_count, review, plan_sha256,
         context_sha256, held, binding);
     return result;
 }

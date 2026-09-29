@@ -1862,18 +1862,29 @@ static void test_retirement_execution(void)
     CHECK(!tp_retirement_process_instance(digest, "job-1", 0, "boot-123", 4321, "987654"));
     CHECK(!tp_retirement_process_instance(digest, "job-1", 2, "boot-123", 0, "987654"));
     CHECK(!tp_retirement_process_instance(digest, "job-1", 2, "boot-123", 4321, ""));
+    /* Metrics shards are named by writer tag and index, never by a process. */
     char metrics_path[TP_RETIREMENT_METRICS_PATH_CAP];
-    CHECK(tp_retirement_process_instance(digest, "job-1", 2, "boot-123", 4321, "987654") &&
-          tp_retirement_metrics_path(metrics_path, digest) &&
-          !strcmp(metrics_path, "retirement-metrics-feff1be0001f01e4348977e86b09ee13.txt"));
-    CHECK(!tp_retirement_metrics_path(metrics_path, "feff") && !metrics_path[0]);
+    CHECK(tp_retirement_metrics_shard_path(metrics_path, "ab", 7) &&
+          !strcmp(metrics_path, "retirement-metrics-ab-0007.txt") && tp_retirement_metrics_shard_leaf(metrics_path));
+    CHECK(tp_retirement_metrics_shard_path(metrics_path, "abcdefgh", TP_RETIREMENT_METRICS_SHARDS - 1) &&
+          strlen(metrics_path) == 36 && tp_retirement_metrics_shard_leaf(metrics_path));
+    CHECK(!tp_retirement_metrics_shard_path(metrics_path, "abcdefghi", 0) && !metrics_path[0]);
+    CHECK(!tp_retirement_metrics_shard_path(metrics_path, "AB", 0) && !metrics_path[0]);
+    CHECK(!tp_retirement_metrics_shard_path(metrics_path, "", 0) && !metrics_path[0]);
+    CHECK(!tp_retirement_metrics_shard_path(metrics_path, "ab", TP_RETIREMENT_METRICS_SHARDS) && !metrics_path[0]);
+    CHECK(!tp_retirement_metrics_shard_leaf("retirement-metrics-ab-2048.txt") &&
+          !tp_retirement_metrics_shard_leaf("retirement-metrics--0000.txt") &&
+          !tp_retirement_metrics_shard_leaf("retirement-metrics-ab-000.txt") &&
+          !tp_retirement_metrics_shard_leaf("retirement-metrics-a1-0000.txt") &&
+          !tp_retirement_metrics_shard_leaf("retirement-metrics-ab-0000.bin") &&
+          !tp_retirement_metrics_shard_leaf("retirement-metrics-feff1be0001f01e4348977e86b09ee13.txt"));
 }
 
 /* Persist a synthetic transcript for the independent Python replay reader.
  * This fixture deliberately uses decimal/exponent boundaries, not host timing.
  * Rows 0 and 10 are singleton link groups with native runtime; row 6 is a
- * one-member object group whose every batch writes a per-input metrics
- * artifact at its process-instance path. */
+ * one-member object group whose every batch appends its per-input metrics
+ * artifact to the `rec` metrics shard. */
 static void test_retirement_records(char const* root)
 {
     static uint64_t const intervals[] = {1, 9, 10, 99, 100, 999, 1000, 9999, 10000,
@@ -1909,10 +1920,18 @@ static void test_retirement_records(char const* root)
     CHECK(tp_retirement_batch_output_digest(objects, 1, compiler_output));
     TpRetirementBatchInput batch_input = {"tests/native-execution-1.c", "ok", "driver.none",
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", output, "native-execution-1.o", 1, 6};
-    TpRetirementBatchContract contract = {"x86_64-linux", "none", "batch.metrics", &batch_input, 1, 0};
+    TpRetirementBatchContract contract = {"x86_64-linux", "none", "batch.metrics", &batch_input, 1, 0,
+        TP_RETIREMENT_METRICS_ARTIFACT_BYTES};
     size_t metrics_capacity = 1u << 14;
     char* metrics = (char*)malloc(metrics_capacity);
     CHECK(metrics != NULL);
+    TpRetirementMetricsShards metrics_shards;
+    TpRetirementMetricsArtifact artifact;
+    TpRetirementShardFile metrics_shard;
+    CHECK(tp_path(path, root, "retirement-metrics-rec-0000.txt"));
+    FILE* metrics_file = fopen(path, "wb+");
+    CHECK(metrics_file && tp_retirement_metrics_shards_init(&metrics_shards, "rec", metrics_file));
+    CHECK(tp_path(path, root, "retirement-execution.jsonl"));
     TpProcessObservation observed = {.pid = 4321, .start_token = 987654, .valid = 1, .finished_ns = 1000};
     TpProcess process = {.peak_rss_bytes = 4096};
     unsigned batches = 0;
@@ -1924,7 +1943,7 @@ static void test_retirement_records(char const* root)
         observed.pid = 4321 + invocation.sequence;
         process.wall_seconds = (double)interval / 1000000000.0;
         TpRetirementOutput identities = {invocation.kind ? output : executable, command,
-            invocation.kind ? output : compiler_output, NULL, 0, 0};
+            invocation.kind ? output : compiler_output, NULL, 0};
         /* A distinct arena value per batch keeps every metrics artifact unique. */
         TpRetirementMemberSample member = {interval, 65536 + invocation.sequence, 6};
         char metrics_digest[65];
@@ -1942,15 +1961,11 @@ static void test_retirement_records(char const* root)
             sha256_init(&hash);
             sha256_add(&hash, metrics, (u64)size);
             sha256_finish_hex(&hash, metrics_digest);
-            char instance[65], token[32], leaf[TP_RETIREMENT_METRICS_PATH_CAP], metrics_path[TP_PATH_CAP];
-            snprintf(token, sizeof(token), "%" PRIu64, observed.start_token);
-            CHECK(tp_retirement_process_instance(instance, "job-1", 2, "boot-123", observed.pid, token) &&
-                  tp_retirement_metrics_path(leaf, instance) && tp_path(metrics_path, root, leaf));
-            FILE* metrics_file = fopen(metrics_path, "wb");
-            CHECK(metrics_file && fwrite(metrics, 1, size, metrics_file) == size);
-            if (metrics_file) CHECK(fclose(metrics_file) == 0);
-            identities.metrics_sha256 = metrics_digest;
-            identities.metrics_bytes = size;
+            uint64_t offset = metrics_shards.bytes;
+            CHECK(tp_retirement_metrics_shards_append(&metrics_shards, (unsigned char const*)metrics, size, &artifact) &&
+                  artifact.offset == offset && artifact.bytes == size && !strcmp(artifact.sha256, metrics_digest) &&
+                  !strcmp(artifact.path, "retirement-metrics-rec-0000.txt"));
+            identities.metrics = &artifact;
             ++batches;
         }
         size_t count = tp_retirement_execution_record(line, sizeof(line), &invocation, &observed,
@@ -1960,6 +1975,10 @@ static void test_retirement_records(char const* root)
                                            batch ? &member : NULL, batch ? 1 : 0));
     }
     CHECK(tp_retirement_execution_complete(&state) && batches == 244);
+    CHECK(tp_retirement_metrics_shards_finish(&metrics_shards, &metrics_shard) &&
+          metrics_shard.contents.records == 244 && metrics_shard.contents.bytes == metrics_shards.total_bytes &&
+          !strcmp(metrics_shard.path, "retirement-metrics-rec-0000.txt"));
+    if (metrics_file) CHECK(fclose(metrics_file) == 0);
     TpRetirementShard shard;
     CHECK(tp_retirement_transcript_end_shard(&transcript, &shard));
     CHECK(tp_retirement_transcript_finish(&transcript, observed.finished_ns + 1));
@@ -2014,14 +2033,15 @@ static void test_retirement_records(char const* root)
      * bounded by the schedule/token/digest domains: sequence 0..134217727,
      * group or row 0..99999, pair 0..253, round 0..1, uint64 timestamps/PID/
      * start token/attempt, INT_MAX CPU, exit status 255, exact-integer RSS up
-     * to 2^53-1, a 64 MiB metrics artifact at its fixed-width derived path and
-     * at most 15 characters for the one-day seconds format. Job/boot tokens
+     * to 2^53-1, a metrics artifact with 8-digit offset and length (their sum
+     * is at most the 64 MiB shard) at the longest 36-byte shard leaf, and at
+     * most 15 characters for the one-day seconds format. Job/boot tokens
      * are at most 128 safe ASCII characters and only their fixed-width
      * process digest is emitted. A compiler-only 100000-group schedule can
      * reach sequence 101999999 with RSS and a metrics artifact. That sampled
-     * object batch is 1018 bytes. The final compiler warmup has only six
+     * object batch is 1017 bytes. The final compiler warmup has only six
      * sequence digits, but its three null schedule fields make it one byte
-     * longer (1019 bytes). Across all legal even pair counts, the largest
+     * longer (1018 bytes). Across all legal even pair counts, the largest
      * complete schedule under the 2048*65536 transcript cap has 134217720
      * invocations, so sequence 134217719 belongs to a runtime record whose
      * compiler fields are null. */
@@ -2039,20 +2059,32 @@ static void test_retirement_records(char const* root)
         .started_ns = UINT64_MAX - max_elapsed, .finished_ns = UINT64_MAX, .valid = 1};
     TpProcess max_process = {.wall_seconds = (double)max_elapsed / 1000000000.0,
         .peak_rss_bytes = 9007199254740991.0, .exit_code = 255};
-    TpRetirementOutput max_identities = {max_hash, max_hash, max_hash, max_hash,
-        TP_RETIREMENT_METRICS_ARTIFACT_BYTES, 255};
+    TpRetirementMetricsArtifact max_artifact = {"retirement-metrics-abcdefgh-2047.txt", UINT64_C(33554432),
+        UINT64_C(33554432), {0}};
+    memcpy(max_artifact.sha256, max_hash, sizeof(max_hash));
+    TpRetirementOutput max_identities = {max_hash, max_hash, max_hash, &max_artifact, 255};
     size_t max_count = tp_retirement_execution_record(line, sizeof(line), &max_invocation,
         &max_observed, &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX);
-    CHECK(max_count == 1018 && line[max_count - 1] == '\n');
+    CHECK(max_count == 1017 && line[max_count - 1] == '\n');
     CHECK(tp_retirement_execution_record(line, max_count, &max_invocation, &max_observed,
         &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
-    max_count = tp_retirement_execution_record(line, 1019, &max_invocation, &max_observed,
+    max_count = tp_retirement_execution_record(line, 1018, &max_invocation, &max_observed,
         &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX);
-    CHECK(max_count == 1018 && line[max_count - 1] == '\n');
-    max_identities.metrics_bytes = TP_RETIREMENT_METRICS_ARTIFACT_BYTES + 1;
+    CHECK(max_count == 1017 && line[max_count - 1] == '\n');
+    /* An artifact beyond its cap or its shard, or a malformed leaf, rejects. */
+    max_artifact.bytes = TP_RETIREMENT_METRICS_ARTIFACT_BYTES + 1;
+    max_artifact.offset = 0;
     CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
         &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
-    max_identities.metrics_bytes = TP_RETIREMENT_METRICS_ARTIFACT_BYTES;
+    max_artifact.bytes = UINT64_C(33554432);
+    max_artifact.offset = UINT64_C(33554433);
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_artifact.offset = UINT64_C(33554432);
+    max_artifact.path[19] = 'A';
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_artifact.path[19] = 'a';
     max_process.peak_rss_bytes = 9007199254740992.0;
     CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
         &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
@@ -2075,7 +2107,7 @@ static void test_retirement_records(char const* root)
     max_boot[127] = 'b';
     max_count = tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
         &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX);
-    CHECK(max_count == 1018 && tp_path(path, root, "retirement-execution-max.jsonl"));
+    CHECK(max_count == 1017 && tp_path(path, root, "retirement-execution-max.jsonl"));
     file = fopen(path, "wb");
     CHECK(file && fwrite(line, 1, max_count, file) == max_count);
     if (file) CHECK(fclose(file) == 0);
@@ -2112,11 +2144,10 @@ static void test_retirement_records(char const* root)
     /* A runtime process never carries a metrics artifact. */
     CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
         &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
-    max_identities.metrics_sha256 = NULL;
-    max_identities.metrics_bytes = 0;
+    max_identities.metrics = NULL;
     max_count = tp_retirement_execution_record(line, sizeof(line), &max_invocation,
         &max_observed, &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX);
-    CHECK(max_count > 0 && max_count < 1018 && line[max_count - 1] == '\n');
+    CHECK(max_count > 0 && max_count < 1017 && line[max_count - 1] == '\n');
     CHECK(tp_path(path, root, "retirement-execution-max-runtime.jsonl"));
     file = fopen(path, "wb");
     CHECK(file && fwrite(line, 1, max_count, file) == max_count);
@@ -2126,13 +2157,13 @@ static void test_retirement_records(char const* root)
     unsigned identity_runtime[] = {0, 2}, identity_workspace[11];
     CHECK(tp_retirement_execution_init(&state, 1, 3, identity_runtime, 2, 3, 60, identity_workspace, 11));
     CHECK(tp_retirement_execution_peek(&state, &invocation) == TP_RETIREMENT_NEXT_READY);
-    char metrics_hash[65];
-    memset(metrics_hash, 'd', 64); metrics_hash[64] = 0;
-    TpRetirementOutput identities = {executable, command, compiler_output, metrics_hash, 4096, 1};
+    TpRetirementMetricsArtifact record_artifact = {"retirement-metrics-aa-0000.txt", 0, 4096, {0}};
+    memset(record_artifact.sha256, 'd', 64);
+    TpRetirementOutput identities = {executable, command, compiler_output, &record_artifact, 1};
     process = (TpProcess){.wall_seconds = process.wall_seconds, .peak_rss_bytes = 4096, .exit_code = 1};
 #define TEST_RETIREMENT_RECORD() tp_retirement_execution_record(line, sizeof(line), &invocation, &observed, &process, &identities, "job-1", 2, "boot-123", 2)
     CHECK(TEST_RETIREMENT_RECORD() > 0 && strstr(line, "\"exit_code\":1,") &&
-          strstr(line, "\"metrics_artifact\":{\"bytes\":4096,\"path\":\"retirement-metrics-") &&
+          strstr(line, "\"metrics_artifact\":{\"bytes\":4096,\"offset\":0,\"path\":\"retirement-metrics-aa-0000.txt\"") &&
           strstr(line, "\"group\":0,") && strstr(line, "\"row\":null,"));
     observed.valid = 0; CHECK(TEST_RETIREMENT_RECORD() == 0); observed.valid = 1;
     observed.start_token = 0; CHECK(TEST_RETIREMENT_RECORD() == 0); observed.start_token = 987654;
@@ -2150,11 +2181,10 @@ static void test_retirement_records(char const* root)
     process.peak_rss_bytes = 0; CHECK(TEST_RETIREMENT_RECORD() == 0);
     process.peak_rss_bytes = 1.5; CHECK(TEST_RETIREMENT_RECORD() == 0);
     process.peak_rss_bytes = 4096;
-    identities.metrics_bytes = 0; CHECK(TEST_RETIREMENT_RECORD() == 0);
-    identities.metrics_bytes = 4096;
-    metrics_hash[0] = 'D'; CHECK(TEST_RETIREMENT_RECORD() == 0); metrics_hash[0] = 'd';
-    identities.metrics_sha256 = NULL; CHECK(TEST_RETIREMENT_RECORD() == 0);
-    identities.metrics_sha256 = metrics_hash;
+    record_artifact.bytes = 0; CHECK(TEST_RETIREMENT_RECORD() == 0);
+    record_artifact.bytes = 4096;
+    record_artifact.sha256[0] = 'D'; CHECK(TEST_RETIREMENT_RECORD() == 0); record_artifact.sha256[0] = 'd';
+    record_artifact.path[19] = 'A'; CHECK(TEST_RETIREMENT_RECORD() == 0); record_artifact.path[19] = 'a';
     command[0] = 'A'; CHECK(TEST_RETIREMENT_RECORD() == 0); command[0] = 'b';
     invocation.warmup = 2; CHECK(TEST_RETIREMENT_RECORD() == 0); invocation.warmup = 0;
     invocation.row = 0; CHECK(TEST_RETIREMENT_RECORD() == 0); invocation.row = TP_RETIREMENT_NONE;
@@ -2162,8 +2192,7 @@ static void test_retirement_records(char const* root)
         &process, &identities, "job-1", 2, "boot-123", 2) == 0 && line[0] == 0);
     CHECK(tp_retirement_execution_record(line, sizeof(line), &invocation, &observed,
         &process, &identities, "job-1", 2, "boot-123", -1) == 0);
-    identities.metrics_bytes = 0;
-    identities.metrics_sha256 = NULL;
+    identities.metrics = NULL;
     identities.exit_status = process.exit_code = 0;
     CHECK(TEST_RETIREMENT_RECORD() > 0 && strstr(line, "\"metrics_artifact\":null,"));
     invocation.kind = 1;
@@ -2174,11 +2203,9 @@ static void test_retirement_records(char const* root)
     identities.exit_status = process.exit_code = 1;
     CHECK(TEST_RETIREMENT_RECORD() == 0); /* Runtime always exits zero. */
     identities.exit_status = process.exit_code = 0;
-    identities.metrics_sha256 = metrics_hash;
-    identities.metrics_bytes = 4096;
+    identities.metrics = &record_artifact;
     CHECK(TEST_RETIREMENT_RECORD() == 0);
-    identities.metrics_sha256 = NULL;
-    identities.metrics_bytes = 0;
+    identities.metrics = NULL;
     CHECK(TEST_RETIREMENT_RECORD() > 0); /* Runtime RSS is explicitly null. */
 #undef TEST_RETIREMENT_RECORD
     char seconds[32];
@@ -2212,7 +2239,7 @@ static void test_retirement_records(char const* root)
         observed = (TpProcessObservation){.valid = 1, .pid = 4321, .start_token = 987654,
             .started_ns = 1001, .finished_ns = 1001001};
         process = (TpProcess){.wall_seconds = .001, .peak_rss_bytes = 4096};
-        identities = (TpRetirementOutput){executable, command, compiler_output, NULL, 0, 0};
+        identities = (TpRetirementOutput){executable, command, compiler_output, NULL, 0};
         if (failure == 0) CHECK(!tp_retirement_transcript_finish(&transcript, 2000000));
         if (failure == 1) observed.started_ns = 1000;
         if (failure == 2) process.signal_number = 9;
@@ -2258,7 +2285,7 @@ static void test_retirement_shards(char const* root)
     CHECK(tp_retirement_transcript_init(&transcript, &execution, "job-1", 2, "boot-123", 2, 1000));
     char digest[65];
     memset(digest, 'a', 64); digest[64] = 0;
-    TpRetirementOutput output = {digest, digest, digest, NULL, 0, 0};
+    TpRetirementOutput output = {digest, digest, digest, NULL, 0};
     TpProcess process = {.wall_seconds = 1.0, .peak_rss_bytes = 4096};
     TpProcessObservation observed = {.valid = 1, .start_token = 1234, .finished_ns = 1000};
     TpRetirementShardFile shards[2] = {0};

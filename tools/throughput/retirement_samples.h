@@ -7,6 +7,7 @@
  * bytes) and to its group's batch record (the process wall time and peak RSS).
  * A singleton link/self-host group's process is that row's sample. Code bytes
  * never enter the pairs: the code record set carries them once per row.
+ * attach_metrics couples a stage with object groups to its metrics shard writer.
  * Per-unit in-memory hashes detect spool mutation during export without
  * retaining the experiment in RAM. manifest writes each population's canonical
  * full-cap partitions. The service owns exclusive streams, durable publication,
@@ -81,6 +82,7 @@ typedef struct TpRetirementSampleGroup
 typedef struct TpRetirementSamples
 {
     TpRetirementTranscript* transcript;
+    TpRetirementMetricsShards* metrics;
     TpRetirementSampleRow* rows;
     TpRetirementSampleGroup* groups;
     unsigned* members;
@@ -134,6 +136,7 @@ static void tp_retirement_samples_poison(TpRetirementSamples* samples)
         samples->failed = 1;
         samples->finished = 0;
         samples->raw_sha256[0] = samples->descriptors_sha256[0][0] = samples->descriptors_sha256[1][0] = 0;
+        if (samples->metrics) samples->metrics->failed = 1;
         if (samples->transcript)
         {
             samples->transcript->failed = 1;
@@ -332,6 +335,18 @@ static uint64_t tp_retirement_samples_ordinal(TpRetirementSamples const* samples
  * layout's row for that member; singleton and runtime invocations supply
  * none. A spool or transcript write failure invalidates the same attempt. No
  * API imports partial samples, skips warmups, retries a cell or resumes. */
+/* Attach the stage's metrics shard writer before the first invocation. Every
+ * object batch's accepted metrics artifact is appended to it; a stage with no
+ * object groups needs none. */
+static int tp_retirement_samples_attach_metrics(TpRetirementSamples* samples, TpRetirementMetricsShards* metrics)
+{
+    int ok = samples && !samples->failed && !samples->collected && !samples->metrics && samples->object_count &&
+        metrics && !metrics->failed && !metrics->finished && !metrics->artifacts && metrics->stream;
+    if (ok) samples->metrics = metrics;
+    else tp_retirement_samples_poison(samples);
+    return ok;
+}
+
 static int tp_retirement_samples_append(TpRetirementSamples* samples,
     TpProcessObservation const* observed, TpProcess const* process, TpRetirementOutput const* output,
     TpRetirementMemberSample const* members, unsigned member_count)
@@ -356,7 +371,7 @@ static int tp_retirement_samples_append(TpRetirementSamples* samples,
         if (ok && group->kind == TP_RETIREMENT_GROUP_OBJECT)
         {
             uint64_t total = 0;
-            ok = output->metrics_sha256 && members && member_count == group->count;
+            ok = output->metrics && members && member_count == group->count;
             for (unsigned i = 0; ok && i < member_count; ++i)
             {
                 ok = members[i].interval_ns && members[i].interval_ns <= wall - total &&
@@ -365,7 +380,7 @@ static int tp_retirement_samples_append(TpRetirementSamples* samples,
                 if (ok) total += members[i].interval_ns;
             }
         }
-        else if (ok) ok = !output->metrics_sha256 && !members && !member_count;
+        else if (ok) ok = !output->metrics && !members && !member_count;
     }
     else if (ok)
         ok = row < samples->row_count && (samples->rows[row].metrics & TP_RETIREMENT_SAMPLE_RUNTIME) &&

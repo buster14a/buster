@@ -2,10 +2,14 @@
  * executable_init hashes a frozen trusted binary outside timing; run binds the
  * actual argv/environment, executes that descriptor, then reads the actual
  * outputs before advancing the paired-sample collector. A compiler invocation
- * is one batch process of one frozen group: an object batch must write every
- * frozen object byte-identical to its frozen artifact and a per-input metrics
- * file that the strict reader accepts against the frozen oracle; a singleton
- * link/self-host group writes its one artifact. Code sections are parsed once,
+ * is one batch process of one frozen group: an object batch names its inputs
+ * only through its digest-bound response file, must write every frozen object
+ * byte-identical to its frozen artifact and a per-input metrics file that the
+ * strict reader accepts against the frozen oracle within the reviewed bound,
+ * and its metrics bytes are appended to the stage's metrics shard writer; a
+ * singleton link/self-host group writes its one artifact. tp_retirement_launch
+ * is the shared boundary of timed (measurement_run) and untimed
+ * (retirement_untimed.h) batches. Code sections are parsed once,
  * outside timing (tp_retirement_code_observe), never per invocation.
  * The service owns immutable source/cwd trees, private output descriptors,
  * independent correctness/oracles, sandboxing, lease and durable publication.
@@ -52,16 +56,16 @@ typedef enum TpRetirementMeasurementStatus
     TP_RETIREMENT_MEASUREMENT_COMPLETE
 } TpRetirementMeasurementStatus;
 
-/* metrics_path is where the caller must publish the metrics bytes (the
- * transcript names it); it is empty for every other invocation. */
+/* metrics is an object batch's artifact inside its metrics shard (the
+ * transcript names it); it is zeroed for every other invocation. */
 typedef struct TpRetirementMeasurementResult
 {
     TpRetirementMeasurementStatus status;
     TpProcessObservation observed;
     TpProcess process;
-    uint64_t output_bytes, metrics_bytes;
-    char output_sha256[65], metrics_sha256[65];
-    char metrics_path[TP_RETIREMENT_METRICS_PATH_CAP];
+    uint64_t output_bytes;
+    char output_sha256[65];
+    TpRetirementMetricsArtifact metrics;
 } TpRetirementMeasurementResult;
 
 static int tp_retirement_file_same(struct stat const* a, struct stat const* b)
@@ -207,27 +211,24 @@ static inline int tp_retirement_code_observe(int artifact, int reproduction, TpR
     return ok;
 }
 
-/* Read, hash and strictly check one batch's per-input metrics file. */
-static int tp_retirement_metrics_file(int descriptor, TpRetirementBatchContract const* contract,
-    uint64_t elapsed_ns, TpRetirementMemberSample* members, unsigned member_capacity,
-    char digest[65], uint64_t* size)
+/* Read and strictly check one batch's per-input metrics file, bounded by the
+ * group's reviewed metrics bound; the caller owns the returned bytes. */
+static unsigned char* tp_retirement_metrics_file(int descriptor, TpRetirementBatchContract const* contract,
+    uint64_t elapsed_ns, TpRetirementMemberSample* members, unsigned member_capacity, uint64_t* size)
 {
     uint64_t bytes = 0;
-    unsigned char* data = tp_retirement_file_read(descriptor, TP_RETIREMENT_METRICS_ARTIFACT_BYTES, &bytes);
-    int ok = data && digest && size &&
+    uint64_t limit = contract && contract->metrics_bytes_max < TP_RETIREMENT_METRICS_ARTIFACT_BYTES ?
+        contract->metrics_bytes_max : TP_RETIREMENT_METRICS_ARTIFACT_BYTES;
+    unsigned char* data = contract ? tp_retirement_file_read(descriptor, limit, &bytes) : NULL;
+    int ok = data && size &&
         tp_retirement_metrics_check(data, bytes, contract, elapsed_ns, members, member_capacity);
-    if (digest) digest[0] = 0;
-    if (size) *size = 0;
-    if (ok)
+    if (size) *size = ok ? bytes : 0;
+    if (!ok)
     {
-        Sha256 hash;
-        sha256_init(&hash);
-        sha256_add(&hash, data, (u64)bytes);
-        sha256_finish_hex(&hash, digest);
-        *size = bytes;
+        free(data);
+        data = NULL;
     }
-    free(data);
-    return ok;
+    return data;
 }
 
 static int tp_retirement_command_hash(TpRetirementMeasuredCommand const* command, char digest[65])
@@ -279,33 +280,99 @@ static int tp_retirement_output_hash(int directory, char const* leaf, char diges
     return ok;
 }
 
-/* output_directory is a service-opened private directory. Compiler outputs
- * must not exist before launch; no stale output can satisfy the oracle. Runtime
- * output is the fresh log descriptor, which must be empty and positioned at 0.
- * Nothing is removed on either outcome: the caller retains failure evidence
- * and retires successful scratch output before the next invocation. Every
- * warmup and sample batch must reproduce each frozen object byte for byte;
- * the first mismatch is nondeterminism and invalidates the attempt. */
-static int tp_retirement_measurement_run(TpRetirementSamples* samples,
-    TpRetirementMeasuredCommand const* command, TpRetirementExecutable const* executable,
-    TpProcessInputs const* inputs, int output_directory, TpRetirementMeasurementResult* result)
+/* Write a batch's canonical response file into the service directory that is
+ * also the batch's cwd, read-only and without replacement, before timing. */
+static inline int tp_retirement_batch_input_list_write(int directory, TpRetirementBatchContract const* contract,
+    char leaf[TP_RETIREMENT_INPUT_LIST_LEAF_CAP])
+{
+    uint64_t size = contract && tp_retirement_batch_contract_valid(contract) ?
+        tp_retirement_batch_input_list(contract, NULL, 0) : 0;
+    char* bytes = size ? (char*)malloc((size_t)size) : NULL;
+    int ok = bytes && leaf && directory >= 3 && tp_retirement_batch_input_list(contract, bytes, size) == size &&
+        tp_retirement_batch_input_list_leaf(contract, leaf);
+    int file = ok ? openat(directory, leaf, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0400) : -1;
+    uint64_t written = 0;
+    ok = ok && file >= 0;
+    while (ok && written < size)
+    {
+        ssize_t count = write(file, bytes + written, (size_t)(size - written));
+        if (count < 0 && errno == EINTR) continue;
+        ok = count > 0;
+        if (ok) written += (uint64_t)count;
+    }
+    ok = ok && fsync(file) == 0;
+    if (file >= 0 && close(file) != 0) ok = 0;
+    free(bytes);
+    if (!ok && leaf) leaf[0] = 0;
+    return ok;
+}
+
+/* The batch argv names its inputs only through one `@<leaf>` argument, whose
+ * leaf is the list's own SHA-256, and the file in the cwd is exactly the
+ * canonical list: read-only, single-link, owned by the service. */
+static int tp_retirement_batch_input_list_check(TpRetirementMeasuredCommand const* command, int directory)
+{
+    TpRetirementBatchContract const* batch = command ? command->batch : NULL;
+    char leaf[TP_RETIREMENT_INPUT_LIST_LEAF_CAP];
+    uint64_t size = batch ? tp_retirement_batch_input_list(batch, NULL, 0) : 0;
+    char* expected = size ? (char*)malloc((size_t)size) : NULL;
+    int ok = expected && tp_retirement_batch_input_list(batch, expected, size) == size &&
+        tp_retirement_batch_input_list_leaf(batch, leaf) && command->arguments;
+    unsigned lists = 0;
+    for (unsigned i = 1; ok && i < command->argument_count; ++i)
+    {
+        char const* argument = command->arguments[i];
+        ok = argument != NULL;
+        if (ok && argument[0] == '@') ok = !strcmp(argument + 1, leaf) && !lists++;
+        for (unsigned input = 0; ok && input < batch->input_count; ++input)
+            ok = strcmp(argument, batch->inputs[input].fixture) != 0;
+    }
+    ok = ok && lists == 1;
+    int file = ok ? openat(directory, leaf, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC) : -1;
+    struct stat info;
+    ok = ok && file >= 3 && fstat(file, &info) == 0 && S_ISREG(info.st_mode) && !(info.st_mode & 0222) &&
+        info.st_uid == geteuid() && (uint64_t)info.st_size == size;
+    uint64_t actual_size = 0;
+    unsigned char* actual = ok ? tp_retirement_file_read(file, TP_RETIREMENT_INPUT_LIST_BYTES, &actual_size) : NULL;
+    ok = ok && actual && actual_size == size && !memcmp(actual, expected, (size_t)size);
+    if (file >= 0 && close(file) != 0) ok = 0;
+    free(actual);
+    free(expected);
+    return ok;
+}
+
+/* The shared launch boundary for timed and untimed compiler batches and
+ * runtime processes. It advances no collector: pre-launch checks, the fresh
+ * pinned child, then actual output verification. An object batch's accepted
+ * metrics bytes are appended to its metrics shard writer; members receive
+ * each member's per-input sample. group_kind is the compiler group's kind. */
+typedef struct TpRetirementLaunch
+{
+    TpRetirementMeasuredCommand const* command;
+    TpRetirementExecutable const* executable;
+    TpProcessInputs const* inputs;
+    TpRetirementMetricsShards* metrics;
+    int output_directory, cpu;
+    unsigned group_kind;
+} TpRetirementLaunch;
+
+static int tp_retirement_launch(TpRetirementLaunch const* launch, TpRetirementMemberSample* members,
+    unsigned member_capacity, TpRetirementMeasurementResult* result, char command_digest[65])
 {
     TpRetirementMeasurementResult outcome = {.status = TP_RETIREMENT_MEASUREMENT_PLAN_INVALID,
         .process = {.exit_code = -1}};
-    TpRetirementInvocation invocation;
-    TpRetirementExecution* execution = samples && samples->transcript ? samples->transcript->execution : NULL;
-    struct stat binary, cwd, named_cwd, log, output_root;
-    char command_digest[65], output_digest[65] = {0}, frozen_output[65];
-    int ok = result && samples && !samples->failed && !samples->exporting && command && executable &&
-        executable->valid && inputs && inputs->executable == executable->descriptor &&
-        inputs->environment == command->environment && command->timeout_seconds &&
-        command->timeout_seconds <= 86400 && execution &&
-        tp_retirement_execution_peek(execution, &invocation) == TP_RETIREMENT_NEXT_READY;
-    TpRetirementSampleGroup const* group = ok && !invocation.kind && invocation.group < samples->group_count ?
-        &samples->groups[invocation.group] : NULL;
+    TpRetirementMeasuredCommand const* command = launch ? launch->command : NULL;
+    TpRetirementExecutable const* executable = launch ? launch->executable : NULL;
+    TpProcessInputs const* inputs = launch ? launch->inputs : NULL;
     TpRetirementBatchContract const* batch = command ? command->batch : NULL;
-    if (ok) ok = command->unit == (invocation.kind ? invocation.row : invocation.group) &&
-        command->kind == invocation.kind && command->variant == invocation.variant &&
+    TpRetirementMetricsShards* metrics = launch ? launch->metrics : NULL;
+    int output_directory = launch ? launch->output_directory : -1;
+    struct stat binary, cwd, named_cwd, log, output_root;
+    char output_digest[65] = {0}, frozen_output[65];
+    int object = 0;
+    int ok = result && command && executable && command_digest && executable->valid && inputs &&
+        inputs->executable == executable->descriptor && inputs->environment == command->environment &&
+        command->timeout_seconds && command->timeout_seconds <= 86400 && launch->cpu >= 0 &&
         tp_retirement_digest(command->command_sha256) &&
         tp_retirement_digest(command->output_sha256) && tp_retirement_command_hash(command, command_digest) &&
         !strcmp(command_digest, command->command_sha256) &&
@@ -315,52 +382,57 @@ static int tp_retirement_measurement_run(TpRetirementSamples* samples,
         cwd.st_dev == named_cwd.st_dev && cwd.st_ino == named_cwd.st_ino &&
         fstat(inputs->log, &log) == 0 && S_ISREG(log.st_mode) && log.st_nlink == 1 && !log.st_size &&
         lseek(inputs->log, 0, SEEK_CUR) == 0 && (fcntl(inputs->log, F_GETFL) & O_ACCMODE) == O_RDWR;
-    if (ok && !invocation.kind)
+    if (ok && !command->kind)
     {
-        ok = group && output_directory >= 3 && fstat(output_directory, &output_root) == 0 &&
+        ok = output_directory >= 3 && fstat(output_directory, &output_root) == 0 &&
             S_ISDIR(output_root.st_mode) && output_root.st_uid == geteuid() && !(output_root.st_mode & 0022);
-        if (ok && group->kind == TP_RETIREMENT_GROUP_OBJECT)
+        object = launch->group_kind == TP_RETIREMENT_GROUP_OBJECT;
+        if (ok && object)
         {
+            /* Objects are cwd/basename.o and `@<leaf>` resolves against the
+             * cwd, so the service directory must be the cwd. A rotation needs
+             * a spare shard stream before the child starts. */
             ok = !command->artifact && tp_retirement_batch_contract_valid(batch) &&
                 batch->exit_status == (unsigned)command->exit_status &&
                 tp_retirement_batch_contract_output(batch, frozen_output) &&
                 !strcmp(frozen_output, command->output_sha256) &&
-                tp_retirement_output_absent(output_directory, batch->metrics);
+                output_root.st_dev == cwd.st_dev && output_root.st_ino == cwd.st_ino &&
+                tp_retirement_output_absent(output_directory, batch->metrics) &&
+                tp_retirement_batch_input_list_check(command, output_directory) &&
+                metrics && !metrics->failed && !metrics->finished && !metrics->completed_ready && metrics->stream &&
+                (metrics->spare || batch->metrics_bytes_max <= TP_RETIREMENT_METRICS_SHARD_BYTES - metrics->bytes);
             for (unsigned i = 0; ok && i < batch->input_count; ++i)
                 ok = !batch->inputs[i].artifact || tp_retirement_output_absent(output_directory, batch->inputs[i].artifact);
-            ok = ok && tp_retirement_batch_rows_match(samples, group, batch);
         }
         else if (ok)
-            ok = !batch && !command->exit_status && tp_retirement_artifact_leaf(command->artifact) &&
+            ok = launch->group_kind == TP_RETIREMENT_GROUP_SINGLETON && !batch && !command->exit_status &&
+                tp_retirement_artifact_leaf(command->artifact) &&
                 tp_retirement_output_absent(output_directory, command->artifact);
     }
-    if (ok && invocation.kind) ok = !command->artifact && !batch && !command->exit_status;
+    else if (ok) ok = command->kind == 1 && !command->artifact && !batch && !command->exit_status;
     TpProcessObservation observed = {0};
     TpProcess process = {0};
     if (ok)
     {
         outcome.status = TP_RETIREMENT_MEASUREMENT_PROCESS_FAILED;
         process = tp_process_observe_inputs(command->arguments, NULL, NULL,
-            command->timeout_seconds, samples->transcript->cpu, 0, &observed, inputs);
+            command->timeout_seconds, launch->cpu, 0, &observed, inputs);
         outcome.process = process;
         outcome.observed = observed;
         ok = observed.valid && !process.launch_error && process.exit_code == command->exit_status &&
             !process.signal_number && !process.timed_out;
     }
-    TpRetirementMemberSample members[TP_RETIREMENT_BATCH_INPUTS];
-    unsigned member_count = 0;
-    char metrics_digest[65] = {0};
-    uint64_t metrics_bytes = 0, bytes = 0;
+    uint64_t bytes = 0;
     if (ok)
     {
         outcome.status = TP_RETIREMENT_MEASUREMENT_OUTPUT_INVALID;
-        if (invocation.kind)
+        if (command->kind)
         {
             int output = fcntl(inputs->log, F_DUPFD_CLOEXEC, 3);
             ok = output >= 0 && tp_retirement_file_hash(output, output_digest, &bytes);
             if (output >= 0 && close(output) != 0) ok = 0;
         }
-        else if (group->kind == TP_RETIREMENT_GROUP_SINGLETON)
+        else if (!object)
         {
             char artifact[65];
             char const* objects[1] = {artifact};
@@ -383,37 +455,70 @@ static int tp_retirement_measurement_run(TpRetirementSamples* samples,
             }
             ok = ok && tp_retirement_batch_output_digest(objects, batch->input_count, output_digest);
             free(digests);
-            int metrics = ok ? openat(output_directory, batch->metrics,
+            /* The child must leave the response file unchanged. */
+            ok = ok && tp_retirement_batch_input_list_check(command, output_directory);
+            int file = ok ? openat(output_directory, batch->metrics,
                 O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC) : -1;
-            ok = ok && metrics >= 0 && tp_retirement_metrics_file(metrics, batch,
-                observed.finished_ns - observed.started_ns, members, group->count, metrics_digest, &metrics_bytes);
-            if (metrics >= 0 && close(metrics) != 0) ok = 0;
-            member_count = group->count;
+            uint64_t metrics_bytes = 0;
+            unsigned char* data = file >= 0 ? tp_retirement_metrics_file(file, batch,
+                observed.finished_ns - observed.started_ns, members, member_capacity, &metrics_bytes) : NULL;
+            if (file >= 0 && close(file) != 0) ok = 0;
+            ok = ok && data && tp_retirement_metrics_shards_append(metrics, data, metrics_bytes, &outcome.metrics);
+            free(data);
         }
     }
     if (ok)
     {
         outcome.output_bytes = bytes;
         memcpy(outcome.output_sha256, output_digest, sizeof(output_digest));
-        ok = (invocation.kind || bytes) && !strcmp(output_digest, command->output_sha256) &&
+        ok = (command->kind || bytes) && !strcmp(output_digest, command->output_sha256) &&
             fstat(executable->descriptor, &binary) == 0 && tp_retirement_file_same(&binary, &executable->identity);
     }
-    if (ok && metrics_bytes)
-    {
-        char instance[65], start[32];
-        snprintf(start, sizeof(start), "%" PRIu64, observed.start_token);
-        ok = tp_retirement_process_instance(instance, samples->transcript->job, samples->transcript->attempt,
-                samples->transcript->boot, observed.pid, start) &&
-            tp_retirement_metrics_path(outcome.metrics_path, instance);
-        outcome.metrics_bytes = metrics_bytes;
-        memcpy(outcome.metrics_sha256, metrics_digest, sizeof(metrics_digest));
-    }
+    /* A launched object batch that fails verification may already hold shard
+     * bytes; its writer is poisoned with the attempt. */
+    if (!ok && metrics && object && outcome.status == TP_RETIREMENT_MEASUREMENT_OUTPUT_INVALID) metrics->failed = 1;
+    if (ok) outcome.status = TP_RETIREMENT_MEASUREMENT_COMPLETE;
+    if (result) *result = outcome;
+    return ok;
+}
+
+/* output_directory is a service-opened private directory. Compiler outputs
+ * must not exist before launch; no stale output can satisfy the oracle. Runtime
+ * output is the fresh log descriptor, which must be empty and positioned at 0.
+ * Nothing is removed on either outcome: the caller retains failure evidence
+ * and retires successful scratch output before the next invocation. Every
+ * warmup and sample batch must reproduce each frozen object byte for byte;
+ * the first mismatch is nondeterminism and invalidates the attempt. An object
+ * batch's metrics bytes land in the samples' attached metrics shard writer. */
+static int tp_retirement_measurement_run(TpRetirementSamples* samples,
+    TpRetirementMeasuredCommand const* command, TpRetirementExecutable const* executable,
+    TpProcessInputs const* inputs, int output_directory, TpRetirementMeasurementResult* result)
+{
+    TpRetirementMeasurementResult outcome = {.status = TP_RETIREMENT_MEASUREMENT_PLAN_INVALID,
+        .process = {.exit_code = -1}};
+    TpRetirementInvocation invocation;
+    TpRetirementExecution* execution = samples && samples->transcript ? samples->transcript->execution : NULL;
+    char command_digest[65];
+    int ok = result && samples && !samples->failed && !samples->exporting && command && execution &&
+        tp_retirement_execution_peek(execution, &invocation) == TP_RETIREMENT_NEXT_READY;
+    TpRetirementSampleGroup const* group = ok && !invocation.kind && invocation.group < samples->group_count ?
+        &samples->groups[invocation.group] : NULL;
+    if (ok) ok = command->unit == (invocation.kind ? invocation.row : invocation.group) &&
+        command->kind == invocation.kind && command->variant == invocation.variant &&
+        (invocation.kind || (group && (group->kind != TP_RETIREMENT_GROUP_OBJECT ||
+            tp_retirement_batch_rows_match(samples, group, command->batch))));
+    TpRetirementMemberSample members[TP_RETIREMENT_BATCH_INPUTS];
+    unsigned member_count = ok && group && group->kind == TP_RETIREMENT_GROUP_OBJECT ? group->count : 0;
+    TpRetirementLaunch launch = {command, executable, inputs, samples ? samples->metrics : NULL, output_directory,
+        samples && samples->transcript ? samples->transcript->cpu : -1,
+        group ? group->kind : TP_RETIREMENT_GROUP_SINGLETON};
+    if (ok) ok = tp_retirement_launch(&launch, members, member_count, &outcome, command_digest);
     if (ok)
     {
         outcome.status = TP_RETIREMENT_MEASUREMENT_COLLECTION_FAILED;
-        TpRetirementOutput measured = {executable->sha256, command_digest, output_digest,
-            metrics_bytes ? metrics_digest : NULL, metrics_bytes, command->exit_status};
-        ok = tp_retirement_samples_append(samples, &observed, &process, &measured,
+        TpRetirementOutput measured = {executable->sha256, command_digest, outcome.output_sha256,
+            member_count ? &outcome.metrics : NULL, command->exit_status};
+        ok = tp_retirement_samples_append(samples, &outcome.observed, &outcome.process, &measured,
             member_count ? members : NULL, member_count);
     }
     if (!ok) tp_retirement_samples_poison(samples);

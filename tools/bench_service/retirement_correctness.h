@@ -1,14 +1,17 @@
 /* Private pre-timing gate for #1020. The service imports #1018's verified
  * preparation and #508/#509's authenticated census/check/oracle declarations.
- * begin/check/row/finish preserve the complete population; ready verifies
- * structural binding only. The service must independently authenticate each
- * producer and gate the actual measurement launch. This is not a published
- * evidence schema.
+ * begin/check/row/batches/finish preserve the complete population; ready
+ * verifies structural binding only. (A1) batches freezes the plan-v3 object
+ * batch-group contracts of the native-host timed projection, after every row
+ * fact and before finish, so lane D can bind timed object rows through them.
+ * The service must independently authenticate each producer and gate the
+ * actual measurement launch. This is not a published evidence schema.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_CORRECTNESS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_CORRECTNESS_H
 #include <buster/lib/hash.h>
 #include <stdint.h>
+#include "../throughput/retirement_metrics.h"
 
 #define BQ_RETIREMENT_CORRECTNESS_ROWS_CAP 100000u
 #define BQ_RETIREMENT_CORRECTNESS_CHECKS_CAP 256u
@@ -91,6 +94,22 @@ typedef struct BqRetirementRowFact
     BqRetirementObservedSide side[2];
 } BqRetirementRowFact;
 
+/* (A1) One frozen plan-v3 object batch group of the native-host timed
+ * projection, as the trusted importer derives it from the frozen rows (never
+ * chosen by the producer). contract[side] is the complete batch contract of
+ * the A/B baseline (0) and candidate (1) binaries: ordered inputs (timed
+ * members in ascending row order, then status-checked controls), statuses,
+ * diagnostics, each side's frozen object digests, output leaves, the
+ * response-file input list and the reviewed metrics bound. command_sha256 is
+ * that side's batch command digest, which every member row's compiler command
+ * must equal. The second A/A label's command is bound through the sealed
+ * aa_second_commands_sha256 aggregate instead. */
+typedef struct BqRetirementBatchGroup
+{
+    TpRetirementBatchContract contract[2];
+    char command_sha256[2][65];
+} BqRetirementBatchGroup;
+
 typedef struct BqRetirementCorrectness
 {
     BqRetirementPrepared prepared;
@@ -98,8 +117,10 @@ typedef struct BqRetirementCorrectness
     BqRetirementRequiredCheck const* required_checks;
     BqRetirementCheckResult* check_facts;
     BqRetirementRowFact* facts;
+    BqRetirementBatchGroup const* batch_groups;
     uint32_t check_count, checks_done, rows_done, eligible_rows;
     uint32_t required_kinds, seen_kinds, failed, finished;
+    uint32_t batch_group_count, batches_frozen;
     Sha256 checks_hash;
     char checks_sha256[65], sealed_sha256[65];
 } BqRetirementCorrectness;
@@ -114,6 +135,15 @@ BUSTER_F_DECL bool bq_retirement_correctness_check(BqRetirementCorrectness* gate
     BqRetirementCheckResult const* observed);
 BUSTER_F_DECL bool bq_retirement_correctness_row(BqRetirementCorrectness* gate,
     BqRetirementRowFact const* observed);
+/* Freeze the object batch groups once, after every row and before finish.
+ * The groups must partition the timed object rows exactly (each member a
+ * compiler-eligible native-target object row, groups ordered by their smallest
+ * member), agree across both sides except for object digests, bind each
+ * member's compiler command and observed artifact, and name controls only
+ * outside the timed projection. assigned_workspace holds at least `rows`
+ * bytes. The caller keeps the groups and their contracts immutable. */
+BUSTER_F_DECL bool bq_retirement_correctness_batches(BqRetirementCorrectness* gate,
+    BqRetirementBatchGroup const* groups, uint32_t count, uint8_t* assigned_workspace, uint32_t workspace_slots);
 BUSTER_F_DECL bool bq_retirement_correctness_finish(BqRetirementCorrectness* gate);
 BUSTER_F_DECL bool bq_retirement_correctness_ready(BqRetirementCorrectness const* gate);
 #endif

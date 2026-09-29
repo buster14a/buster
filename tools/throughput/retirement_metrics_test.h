@@ -168,7 +168,8 @@ static void test_retirement_metrics(char const* root)
         {"tests/alpha.c", "ok", "driver.none", empty, object, "alpha.o", 1, 3},
         {"tests/beta.c", "ok", "driver.none", empty, object, "beta.o", 1, 7},
         {"tests/control.c", "rejected", "driver.analysis", rejected, NULL, NULL, 0, TP_RETIREMENT_BATCH_NO_ROW}};
-    TpRetirementBatchContract contract = {"x86_64-linux", "none", "batch.metrics", inputs, 3, 1};
+    TpRetirementBatchContract contract = {"x86_64-linux", "none", "batch.metrics", inputs, 3, 1,
+        TP_RETIREMENT_METRICS_ARTIFACT_BYTES};
     CHECK(tp_retirement_batch_contract_valid(&contract));
     TestMetricsInput timings[3];
     test_metrics_timings(timings, 3, 4000);
@@ -269,6 +270,50 @@ static void test_retirement_metrics(char const* root)
     changed[2] = inputs[2];
     changed[1].row = 8;
     CHECK(tp_retirement_batch_contract_digest(&bad, digest) && strcmp(digest, contract_digest));
+    changed[1] = inputs[1];
+    /* The reviewed metrics bound is part of the contract: an artifact above
+     * it rejects, and a missing or oversized bound is inconsistent. */
+    size = test_metrics_render(text, capacity, &contract, 4000, timings, TEST_METRICS_VALID);
+    bad = contract;
+    bad.metrics_bytes_max = size - 1;
+    CHECK(tp_retirement_batch_contract_valid(&bad) &&
+          tp_retirement_batch_contract_digest(&bad, digest) && strcmp(digest, contract_digest));
+    CHECK(size && !tp_retirement_metrics_check((unsigned char const*)text, size, &bad, 5000, members, 2));
+    bad.metrics_bytes_max = size;
+    CHECK(tp_retirement_metrics_check((unsigned char const*)text, size, &bad, 5000, members, 2));
+    bad.metrics_bytes_max = 0;
+    CHECK(!tp_retirement_batch_contract_valid(&bad));
+    bad.metrics_bytes_max = TP_RETIREMENT_METRICS_ARTIFACT_BYTES + 1;
+    CHECK(!tp_retirement_batch_contract_valid(&bad));
+
+    /* The response file: one quoted line per input in frozen order, with `"`
+     * and `\` escaped; its leaf is named by its own SHA-256. */
+    char list[256], leaf[TP_RETIREMENT_INPUT_LIST_LEAF_CAP];
+    char const* const canonical = "\"tests/alpha.c\"\n\"tests/beta.c\"\n\"tests/control.c\"\n";
+    uint64_t list_size = tp_retirement_batch_input_list(&contract, list, sizeof(list));
+    CHECK(list_size == strlen(canonical) && !memcmp(list, canonical, (size_t)list_size) &&
+          tp_retirement_batch_input_list(&contract, NULL, 0) == list_size);
+    sha256_init(&hash);
+    sha256_add(&hash, canonical, (u64)list_size);
+    sha256_finish_hex(&hash, expected);
+    CHECK(tp_retirement_batch_input_list_digest(&contract, digest) && !strcmp(digest, expected));
+    CHECK(tp_retirement_batch_input_list_leaf(&contract, leaf) && !strncmp(leaf, "retirement-inputs-", 18) &&
+          !strncmp(leaf + 18, expected, 64) && !strcmp(leaf + 82, ".rsp"));
+    CHECK(!tp_retirement_batch_input_list(&contract, list, list_size - 1));
+    memcpy(changed, inputs, sizeof(changed));
+    bad = contract;
+    bad.inputs = changed;
+    changed[0].fixture = "tests/a \"quoted\" \\name.c";
+    list_size = tp_retirement_batch_input_list(&bad, list, sizeof(list));
+    CHECK(list_size && !memcmp(list, "\"tests/a \\\"quoted\\\" \\\\name.c\"\n", 30) &&
+          tp_retirement_batch_contract_valid(&bad) && tp_retirement_batch_contract_digest(&bad, digest) &&
+          strcmp(digest, contract_digest));
+    /* A leading `@` is response-file nesting and a leading `-` an option. */
+    changed[0].fixture = "@tests/alpha.c";
+    CHECK(!tp_retirement_batch_input_list(&bad, NULL, 0) && !tp_retirement_batch_contract_valid(&bad));
+    changed[0].fixture = "-tests/alpha.c";
+    CHECK(!tp_retirement_batch_input_list(&bad, NULL, 0) && !tp_retirement_batch_contract_valid(&bad) &&
+          !tp_retirement_batch_input_list_leaf(&bad, leaf) && !leaf[0]);
     free(text);
 }
 #endif

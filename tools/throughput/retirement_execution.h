@@ -6,6 +6,9 @@
  * state. peek/commit makes a failed or unwritten invocation non-resumable.
  * tp_retirement_transcript_append couples checked bytes and cursor advancement;
  * tp_retirement_transcript_finish checks complete collection and flushed output.
+ * (M4) TpRetirementMetricsShards packs per-batch metrics artifacts into
+ * greedy 64 MiB metrics shards; each transcript record names its artifact's
+ * shard, offset, length and SHA-256.
  * These are collection primitives, not service admission or a verdict. The
  * supervisor must own the plan, process launcher, output and receipt authority.
  */
@@ -25,8 +28,16 @@
 #define TP_RETIREMENT_EXECUTION_LINE_CAP 8192u
 /* An identity field that does not apply to an invocation kind (JSON null). */
 #define TP_RETIREMENT_NONE 0xffffffffu
-/* `retirement-metrics-` + 32 hex digits of the process instance + `.txt`. */
+/* A metrics shard leaf: `retirement-metrics-<tag>-<NNNN>.txt`, where the tag
+ * is 1-8 lowercase letters naming its writer (for example `aa`, `ab` or
+ * `untimed`) and NNNN is the shard index. At most 36 bytes plus NUL. */
 #define TP_RETIREMENT_METRICS_PATH_CAP 56u
+#define TP_RETIREMENT_METRICS_TAG_BYTES 8u
+/* One metrics shard is one store entry: at most the store's 64 MiB file cap
+ * (TP_RETIREMENT_STORE_FILE_BYTES), and so at most one artifact at the cap. */
+#define TP_RETIREMENT_METRICS_SHARD_BYTES UINT64_C(67108864)
+#define TP_RETIREMENT_METRICS_SHARDS 2048u
+BUSTER_CT_CHECK(TP_RETIREMENT_METRICS_ARTIFACT_BYTES <= TP_RETIREMENT_METRICS_SHARD_BYTES);
 
 /* A compiler invocation is one batch process of group `group`; a runtime
  * invocation is one process of timed row `row`. The other field is NONE.
@@ -284,17 +295,55 @@ static int tp_retirement_digest(char const* text)
     return ok;
 }
 
-/* A batch's per-input metrics artifact is published at a path derived from
- * its supervisor-bound process instance, so no two invocations (A/A or A/B)
- * can name the same evidence file. The caller publishes the metrics bytes
- * there without replacement. */
-static int tp_retirement_metrics_path(char output[TP_RETIREMENT_METRICS_PATH_CAP], char const* instance)
+/* A metrics shard leaf names its writer tag and shard index; the validator
+ * applies the same pattern. */
+static int tp_retirement_metrics_shard_path(char output[TP_RETIREMENT_METRICS_PATH_CAP], char const* tag,
+    unsigned index)
 {
-    int ok = output && tp_retirement_digest(instance);
-    int length = ok ? snprintf(output, TP_RETIREMENT_METRICS_PATH_CAP, "retirement-metrics-%.32s.txt",
-                               instance) : -1;
-    ok = ok && length > 0 && (unsigned)length < TP_RETIREMENT_METRICS_PATH_CAP;
+    size_t length = 0;
+    while (tag && length <= TP_RETIREMENT_METRICS_TAG_BYTES && tag[length]) ++length;
+    int ok = output && length && length <= TP_RETIREMENT_METRICS_TAG_BYTES && index < TP_RETIREMENT_METRICS_SHARDS;
+    for (size_t i = 0; ok && i < length; ++i) ok = tag[i] >= 'a' && tag[i] <= 'z';
+    int written = ok ? snprintf(output, TP_RETIREMENT_METRICS_PATH_CAP, "retirement-metrics-%s-%04u.txt", tag,
+                                index) : -1;
+    ok = ok && written > 0 && (unsigned)written < TP_RETIREMENT_METRICS_PATH_CAP;
     if (!ok && output) output[0] = 0;
+    return ok;
+}
+
+static int tp_retirement_metrics_shard_leaf(char const* path)
+{
+    size_t length = 0;
+    while (path && length < TP_RETIREMENT_METRICS_PATH_CAP && path[length]) ++length;
+    int ok = length > 28 && length < TP_RETIREMENT_METRICS_PATH_CAP && !memcmp(path, "retirement-metrics-", 19) &&
+        !strcmp(path + length - 4, ".txt") && path[length - 9] == '-';
+    size_t tag = ok ? length - 9 - 19 : 0;
+    ok = ok && tag >= 1 && tag <= TP_RETIREMENT_METRICS_TAG_BYTES;
+    for (size_t i = 0; ok && i < tag; ++i) ok = path[19 + i] >= 'a' && path[19 + i] <= 'z';
+    unsigned index = 0;
+    for (size_t i = length - 8; ok && i < length - 4; ++i)
+    {
+        ok = path[i] >= '0' && path[i] <= '9';
+        index = index * 10 + (unsigned)(path[i] - '0');
+    }
+    return ok && index < TP_RETIREMENT_METRICS_SHARDS;
+}
+
+/* One batch's per-input metrics artifact: a byte range of a metrics shard.
+ * Each artifact stays individually addressable and authenticated by its own
+ * shard, offset, length and SHA-256; the validator streams exactly that range. */
+typedef struct TpRetirementMetricsArtifact
+{
+    char path[TP_RETIREMENT_METRICS_PATH_CAP];
+    uint64_t offset, bytes;
+    char sha256[65];
+} TpRetirementMetricsArtifact;
+
+static int tp_retirement_metrics_artifact_valid(TpRetirementMetricsArtifact const* artifact)
+{
+    int ok = artifact && tp_retirement_metrics_shard_leaf(artifact->path) && tp_retirement_digest(artifact->sha256) &&
+        artifact->bytes && artifact->bytes <= TP_RETIREMENT_METRICS_ARTIFACT_BYTES &&
+        artifact->offset <= TP_RETIREMENT_METRICS_SHARD_BYTES - artifact->bytes;
     return ok;
 }
 
@@ -308,8 +357,7 @@ typedef struct TpRetirementOutput
     char const* executable_sha256;
     char const* command_sha256;
     char const* output_sha256;
-    char const* metrics_sha256;
-    uint64_t metrics_bytes;
+    TpRetirementMetricsArtifact const* metrics;
     int exit_status;
 } TpRetirementOutput;
 
@@ -342,9 +390,7 @@ static size_t tp_retirement_execution_record(char* bytes, size_t capacity,
             invocation->warmup == -1 && invocation->position >= 0 && invocation->position < 2 :
             invocation->round == -1 && invocation->pair == -1 && invocation->position == -1 &&
             invocation->warmup >= 0 && (unsigned)invocation->warmup < TP_RETIREMENT_WARMUPS;
-        ok = ok && (output->metrics_sha256 ? !invocation->kind && tp_retirement_digest(output->metrics_sha256) &&
-            output->metrics_bytes && output->metrics_bytes <= TP_RETIREMENT_METRICS_ARTIFACT_BYTES :
-            !output->metrics_bytes);
+        ok = ok && (!output->metrics || (!invocation->kind && tp_retirement_metrics_artifact_valid(output->metrics)));
         ok = ok && (invocation->kind || (isfinite(process->peak_rss_bytes) &&
             process->peak_rss_bytes > 0 && process->peak_rss_bytes <= 9007199254740991.0 &&
             floor(process->peak_rss_bytes) == process->peak_rss_bytes));
@@ -357,13 +403,13 @@ static size_t tp_retirement_execution_record(char* bytes, size_t capacity,
             tp_retirement_seconds(seconds, elapsed) &&
             fabs(process->wall_seconds * 1000000000.0 - (double)elapsed) <= 1.0;
     }
-    char metrics[TP_RETIREMENT_METRICS_PATH_CAP + 128] = "null";
-    if (ok && output->metrics_sha256)
+    char metrics[TP_RETIREMENT_METRICS_PATH_CAP + 160] = "null";
+    if (ok && output->metrics)
     {
-        char path[TP_RETIREMENT_METRICS_PATH_CAP];
-        int length = tp_retirement_metrics_path(path, instance) ?
-            snprintf(metrics, sizeof(metrics), "{\"bytes\":%" PRIu64 ",\"path\":\"%s\",\"sha256\":\"%s\"}",
-                     output->metrics_bytes, path, output->metrics_sha256) : -1;
+        TpRetirementMetricsArtifact const* artifact = output->metrics;
+        int length = snprintf(metrics, sizeof(metrics),
+            "{\"bytes\":%" PRIu64 ",\"offset\":%" PRIu64 ",\"path\":\"%s\",\"sha256\":\"%s\"}",
+            artifact->bytes, artifact->offset, artifact->path, artifact->sha256);
         ok = length > 0 && (size_t)length < sizeof(metrics);
     }
     if (ok)
@@ -405,10 +451,11 @@ static size_t tp_retirement_execution_record(char* bytes, size_t capacity,
 
 /* Largest line tp_retirement_execution_record can emit for any legal
  * schedule/token/digest domain, including LF. tests.c pins the maximal
- * object-batch warmup (1019 bytes) and sampled record (1018 bytes); the proof
+ * object-batch warmup (1018 bytes) and sampled record (1017 bytes), each with
+ * an 8-digit metrics offset and length at the longest shard leaf; the proof
  * assumes at most nine sequence digits, which the total record cap below
  * preserves. Append rejects a wider line rather than trusting the proof. */
-#define TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX 1019u
+#define TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX 1018u
 #define TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS 65536u
 #define TP_RETIREMENT_TRANSCRIPT_SHARDS 2048u
 #define TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES UINT64_C(67108864)
@@ -563,6 +610,144 @@ static int tp_retirement_transcript_finish(TpRetirementTranscript* transcript, u
         if (ok) transcript->completed_at_ns = completed_at_ns;
         if (!ok) transcript->failed = 1;
     }
+    return ok;
+}
+
+/* Per-batch metrics artifacts packed into sharded store entries (the
+ * transcript/sample shard pattern). A writer owns one tag (`aa`, `ab`,
+ * `untimed`, ...) and appends each accepted artifact at the current shard's
+ * end, returning its shard, offset, length and SHA-256. Rotation is greedy and
+ * internal: an artifact that does not fit the current shard's remaining bytes
+ * starts the next shard on the service-supplied spare stream, so any two
+ * consecutive shards together exceed TP_RETIREMENT_METRICS_SHARD_BYTES and a
+ * writer of T bytes has at most 2 * ceil(T / cap) shards (the store preflight's
+ * entry bound). The completed shard's descriptor must be taken, and a new spare
+ * supplied, before the next rotation. The caller owns every stream, fsync,
+ * no-replace publication and final revalidation; nothing is closed here. */
+typedef struct TpRetirementMetricsShards
+{
+    FILE* stream;
+    FILE* spare;
+    Sha256 hash;
+    uint64_t bytes, artifacts, shard_artifacts, total_bytes;
+    unsigned index;
+    int failed, finished, completed_ready;
+    TpRetirementShardFile completed;
+    char completed_path[TP_RETIREMENT_METRICS_PATH_CAP];
+    char path[TP_RETIREMENT_METRICS_PATH_CAP];
+    char tag[TP_RETIREMENT_METRICS_TAG_BYTES + 1];
+} TpRetirementMetricsShards;
+
+static int tp_retirement_metrics_stream_empty(FILE* stream)
+{
+    int ok = stream && fseek(stream, 0, SEEK_END) == 0 && ftell(stream) == 0;
+    return ok;
+}
+
+static inline int tp_retirement_metrics_shards_init(TpRetirementMetricsShards* shards, char const* tag, FILE* stream)
+{
+    char path[TP_RETIREMENT_METRICS_PATH_CAP];
+    int ok = shards && tp_retirement_metrics_shard_path(path, tag, 0) && tp_retirement_metrics_stream_empty(stream);
+    if (shards)
+    {
+        *shards = (TpRetirementMetricsShards){.failed = !ok};
+        if (ok)
+        {
+            shards->stream = stream;
+            memcpy(shards->path, path, sizeof(path));
+            memcpy(shards->tag, tag, strlen(tag) + 1);
+            sha256_init(&shards->hash);
+        }
+    }
+    return ok;
+}
+
+/* The next shard's stream; it must be empty and distinct from the current one. */
+static inline int tp_retirement_metrics_shards_spare(TpRetirementMetricsShards* shards, FILE* stream)
+{
+    int ok = shards && !shards->failed && !shards->finished && !shards->spare && shards->stream &&
+        stream != shards->stream && tp_retirement_metrics_stream_empty(stream);
+    if (ok) shards->spare = stream;
+    else if (shards) shards->failed = 1;
+    return ok;
+}
+
+static int tp_retirement_metrics_shards_close(TpRetirementMetricsShards* shards)
+{
+    int ok = shards->shard_artifacts && fflush(shards->stream) == 0 && !ferror(shards->stream);
+    if (ok)
+    {
+        memcpy(shards->completed_path, shards->path, sizeof(shards->path));
+        shards->completed = (TpRetirementShardFile){shards->completed_path,
+            {shards->bytes, shards->shard_artifacts, {0}}};
+        sha256_finish_hex(&shards->hash, shards->completed.contents.sha256);
+        shards->completed_ready = 1;
+    }
+    return ok;
+}
+
+static inline int tp_retirement_metrics_shards_append(TpRetirementMetricsShards* shards, unsigned char const* data,
+    uint64_t size, TpRetirementMetricsArtifact* artifact)
+{
+    int ok = shards && !shards->failed && !shards->finished && !shards->completed_ready && shards->stream &&
+        data && artifact && size && size <= TP_RETIREMENT_METRICS_ARTIFACT_BYTES;
+    if (ok && size > TP_RETIREMENT_METRICS_SHARD_BYTES - shards->bytes)
+    {
+        ok = shards->spare && shards->index + 1 < TP_RETIREMENT_METRICS_SHARDS &&
+            tp_retirement_metrics_shards_close(shards) &&
+            tp_retirement_metrics_shard_path(shards->path, shards->tag, shards->index + 1);
+        if (ok)
+        {
+            ++shards->index;
+            shards->stream = shards->spare;
+            shards->spare = NULL;
+            shards->bytes = shards->shard_artifacts = 0;
+            sha256_init(&shards->hash);
+        }
+    }
+    if (artifact) *artifact = (TpRetirementMetricsArtifact){0};
+    if (ok) ok = fwrite(data, 1, (size_t)size, shards->stream) == (size_t)size && !ferror(shards->stream);
+    if (ok)
+    {
+        Sha256 hash;
+        sha256_init(&hash);
+        sha256_add(&hash, data, (u64)size);
+        sha256_finish_hex(&hash, artifact->sha256);
+        sha256_add(&shards->hash, data, (u64)size);
+        memcpy(artifact->path, shards->path, sizeof(shards->path));
+        artifact->offset = shards->bytes;
+        artifact->bytes = size;
+        shards->bytes += size;
+        shards->total_bytes += size;
+        ++shards->shard_artifacts;
+        ++shards->artifacts;
+    }
+    if (!ok && shards) shards->failed = 1;
+    return ok;
+}
+
+/* Take the descriptor of the shard a rotation completed (its path, bytes,
+ * artifact count as `records`, and SHA-256). */
+static inline int tp_retirement_metrics_shards_take(TpRetirementMetricsShards* shards, TpRetirementShardFile* completed)
+{
+    int ok = shards && !shards->failed && shards->completed_ready && completed;
+    if (completed) *completed = (TpRetirementShardFile){0};
+    if (ok)
+    {
+        *completed = shards->completed;
+        shards->completed_ready = 0;
+    }
+    return ok;
+}
+
+/* Close the final shard after the last artifact; any rotated shard must have
+ * been taken first. */
+static inline int tp_retirement_metrics_shards_finish(TpRetirementMetricsShards* shards, TpRetirementShardFile* last)
+{
+    int ok = shards && !shards->failed && !shards->finished && !shards->completed_ready && last &&
+        tp_retirement_metrics_shards_close(shards) && tp_retirement_metrics_shards_take(shards, last);
+    if (ok) shards->finished = 1;
+    else if (shards) shards->failed = 1;
     return ok;
 }
 

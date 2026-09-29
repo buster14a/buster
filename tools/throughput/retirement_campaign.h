@@ -5,24 +5,35 @@
  * accepts those identities in the existing #619 cursor order. The state
  * machine retains an interrupted attempt as invalid. capacity and
  * store_preflight size both stages (G batch groups, U runtime rows, both
- * result populations and one metrics artifact per object batch) against the
- * #1023 store entry and byte ceilings before any timing. It does not confer
- * receipt authority, evaluate #426, or admit a service recipe.
+ * result populations, and the per-batch metrics artifacts packed into metrics
+ * shards) plus the untimed code-artifact batches against the #1023 store
+ * entry and byte ceilings before any timing. freeze also requires the reviewed
+ * campaign budget (retirement_budget.h) to match its recipe pin and to hold the
+ * derived counts. It does not confer receipt authority, evaluate #426, or
+ * admit a service recipe.
+ *
+ * Map: TpRetirementCampaignShape, tp_retirement_campaign_metrics_shards,
+ * tp_retirement_campaign_capacity, tp_retirement_campaign_store_preflight,
+ * TpRetirementCampaignReview, tp_retirement_campaign_freeze,
+ * tp_retirement_campaign_run, tp_retirement_campaign_rotate,
+ * tp_retirement_campaign_finish_stage, tp_retirement_campaign_outcome.
  */
 #ifndef BUSTER_THROUGHPUT_RETIREMENT_CAMPAIGN_H
 #define BUSTER_THROUGHPUT_RETIREMENT_CAMPAIGN_H
-#include "retirement_measurement.h"
+#include "retirement_untimed.h"
 
 #ifdef __linux__
 #include "retirement_store.h"
 #define TP_RETIREMENT_CAMPAIGN_STAGES 2u
 /* Per stage: one command per (group, variant) and per (runtime row, variant). */
 #define TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT 2u
-#define TP_RETIREMENT_CAMPAIGN_WHOLE_JOB_BUDGET_NS UINT64_C(3600000000000)
 /* tp_retirement_store_plan currently requires at least three external entries. */
 #define TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES 3u
 /* The store's receipt validator admits exactly the producer's shard size. */
 BUSTER_CT_CHECK(TP_RETIREMENT_STORE_RECEIPT_SHARD_RECORDS == TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS);
+/* A metrics shard is one store file. */
+BUSTER_CT_CHECK(TP_RETIREMENT_METRICS_SHARD_BYTES <= TP_RETIREMENT_STORE_FILE_BYTES);
+BUSTER_CT_CHECK(TP_RETIREMENT_BUDGET_STAGES == TP_RETIREMENT_CAMPAIGN_STAGES);
 
 typedef enum TpRetirementCampaignPhase
 {
@@ -48,31 +59,44 @@ typedef struct TpRetirementCampaignOutcome
 } TpRetirementCampaignOutcome;
 
 /* The frozen campaign dimensions: G batch groups of which object_groups are
- * multi-input object batches, `rows` timed rows, U runtime-eligible rows,
- * the pair count, and a reviewed upper bound on one metrics artifact's bytes
- * (at most the validator's 64 MiB cap; zero without object groups). */
+ * multi-input object batches, `rows` timed rows, U runtime-eligible rows, the
+ * pair count, and the untimed code-artifact groups (untimed_object_groups of
+ * them object batches). metrics_bytes is the sum of the object groups'
+ * reviewed per-artifact metrics bounds (each group writes one artifact per
+ * batch), untimed_metrics_bytes the same sum over untimed object groups, and
+ * metrics_artifact_max the largest single bound (at most the 64 MiB cap). All
+ * three are zero without object groups of their kind. */
 typedef struct TpRetirementCampaignShape
 {
     unsigned groups, object_groups, rows, runtime_rows, pairs;
-    uint64_t metrics_artifact_bytes;
+    unsigned untimed_groups, untimed_object_groups;
+    uint64_t metrics_bytes, untimed_metrics_bytes, metrics_artifact_max;
 } TpRetirementCampaignShape;
 
 /* Byte bounds use the source-proven maximal line widths
- * (TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX, TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX
- * and TP_RETIREMENT_BATCH_RECORD_BYTES_MAX), which the writers enforce, and the
- * shape's metrics-artifact bound. Payload files are both kinds of shard plus
- * every metrics artifact. */
+ * (TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX, TP_RETIREMENT_SAMPLE_RECORD_BYTES_MAX,
+ * TP_RETIREMENT_BATCH_RECORD_BYTES_MAX and TP_RETIREMENT_UNTIMED_RECORD_BYTES_MAX),
+ * which the writers enforce, and the reviewed metrics bounds, which the
+ * measurement enforces per artifact. Metrics artifacts are not store entries:
+ * they are byte ranges of metrics shards, whose count is bounded by the greedy
+ * packing rule (tp_retirement_campaign_metrics_shards). Payload files are the
+ * transcript, numeric and metrics shards of both stages plus the untimed
+ * metrics shards and the untimed batch record file. */
 typedef struct TpRetirementCampaignCapacity
 {
     uint64_t compiler_invocations_per_stage, runtime_invocations_per_stage;
     uint64_t invocations_per_stage, samples_per_stage, row_samples_per_stage, batch_samples_per_stage;
     uint64_t spool_bytes_per_stage, metrics_artifacts_per_stage, metrics_bytes_per_stage_upper_bound;
+    uint64_t metrics_shards_per_stage_upper_bound;
     uint64_t transcript_bytes_per_stage_upper_bound, sample_bytes_per_stage_upper_bound;
     uint64_t transcript_shards_per_stage, sample_shards_per_stage, sample_partitions_per_stage;
+    uint64_t untimed_batches_upper_bound, untimed_record_bytes_upper_bound, untimed_record_files;
+    uint64_t untimed_metrics_artifacts_upper_bound, untimed_metrics_bytes_upper_bound;
+    uint64_t untimed_metrics_shards_upper_bound;
     uint64_t total_compiler_invocations, total_runtime_invocations;
     uint64_t total_invocations, total_samples, total_spool_bytes;
     uint64_t total_transcript_bytes_upper_bound, total_sample_bytes_upper_bound;
-    uint64_t total_metrics_artifacts, total_metrics_bytes_upper_bound;
+    uint64_t total_metrics_artifacts, total_metrics_bytes_upper_bound, total_metrics_shards_upper_bound;
     uint64_t total_transcript_shards, total_sample_shards, total_sample_partitions;
     uint64_t total_shard_files, total_payload_files, total_payload_bytes_upper_bound;
 } TpRetirementCampaignCapacity;
@@ -85,36 +109,28 @@ typedef struct TpRetirementCampaignStorePlan
     uint64_t entries, bytes, remaining_entries, remaining_bytes;
 } TpRetirementCampaignStorePlan;
 
-/* Supplied by the caller only after it independently authenticates each
- * phase ceiling for this exact job, population, host and held binaries. The
- * invocation ceilings include launcher/collector work for one compiler batch
- * (outputs hashed and metrics read) or runtime oracle. */
-typedef struct TpRetirementCampaignDurationBounds
-{
-    uint64_t reservation_ns, materialization_ns;
-    uint64_t baseline_build_ns, candidate_build_ns, correctness_ns;
-    uint64_t settling_per_stage_ns, compiler_invocation_ns, runtime_invocation_ns;
-    uint64_t aa_qualification_ns, aa_receipt_sealing_ns;
-    uint64_t sample_export_per_stage_ns, final_statistics_ns, final_sealing_ns;
-    uint64_t cleanup_ns;
-} TpRetirementCampaignDurationBounds;
-
-typedef struct TpRetirementCampaignPreflight
-{
-    uint64_t fixed_phase_ns, compiler_invocation_total_ns, runtime_invocation_total_ns;
-    uint64_t required_ns, remaining_ns;
-    int fits;
-} TpRetirementCampaignPreflight;
-
 /* The command hash covers argv/cwd/environment; all other oracle fields are
  * copied separately. contract_sha256 identifies an object group's complete
- * frozen batch contract (inputs, statuses, diagnostics, objects, leaves). */
+ * frozen batch contract (inputs, statuses, diagnostics, objects, leaves, the
+ * response-file digest and the reviewed metrics bound). */
 typedef struct TpRetirementCampaignCommand
 {
     char command_sha256[65], output_sha256[65], contract_sha256[65], artifact[128];
     unsigned timeout_seconds;
     int exit_status;
 } TpRetirementCampaignCommand;
+
+/* The reviewed-budget inputs freeze needs besides the frozen commands: the
+ * budget record, its recipe/profile pin, and the untimed code-artifact groups
+ * (input count and group kind for each; a singleton has one input). */
+typedef struct TpRetirementCampaignReview
+{
+    TpRetirementCampaignBudget const* budget;
+    char const* budget_sha256;
+    unsigned const* untimed_inputs;
+    unsigned const* untimed_kinds;
+    unsigned untimed_groups;
+} TpRetirementCampaignReview;
 
 typedef struct TpRetirementCampaign
 {
@@ -126,8 +142,9 @@ typedef struct TpRetirementCampaign
     unsigned* runtime_rows;
     unsigned groups, runtime_count, population_rows;
     TpRetirementCampaignCapacity capacity;
+    TpRetirementBudgetPreflight budget;
     TpRetirementCampaignPhase phase;
-    char plan_sha256[65], context_sha256[65];
+    char plan_sha256[65], context_sha256[65], budget_sha256[65];
     char binary_sha256[TP_RETIREMENT_CAMPAIGN_STAGES][2][65];
     char job[129], boot[129];
     uint64_t attempt, bound_at_ns;
@@ -155,6 +172,17 @@ static uint64_t tp_retirement_campaign_ceil_div(uint64_t value, uint64_t divisor
     return quotient + !!remainder;
 }
 
+/* Upper bound on the shards one metrics writer produces for `artifacts`
+ * artifacts of at most `bytes` bytes in total. Greedy rotation makes any two
+ * consecutive shards together exceed one shard's capacity, so n shards hold
+ * more than floor(n / 2) * cap bytes: n <= 2 * ceil(bytes / cap). A shard also
+ * holds at least one artifact. */
+static uint64_t tp_retirement_campaign_metrics_shards(uint64_t artifacts, uint64_t bytes)
+{
+    uint64_t greedy = 2 * tp_retirement_campaign_ceil_div(bytes, TP_RETIREMENT_METRICS_SHARD_BYTES);
+    return artifacts < greedy ? artifacts : greedy;
+}
+
 /* Checked entry and byte fit against the #1023 store ceilings. */
 static int tp_retirement_campaign_store_fits(uint64_t owned_files, uint64_t owned_bytes,
     uint64_t external_entries, uint64_t external_bytes, uint64_t* entries, uint64_t* bytes)
@@ -168,29 +196,37 @@ static int tp_retirement_campaign_store_fits(uint64_t owned_files, uint64_t owne
     return ok;
 }
 
-/* The shape must come from the authenticated correctness/oracle gate. The
- * report includes both fixed stages and worst-case transcript, numeric-shard
- * and metrics-artifact payload. It rejects a campaign whose payload files
- * leave fewer than the minimum external entries or whose worst-case payload
- * exceeds the store's byte ceiling (one metrics artifact per object batch,
- * warmups included, is usually what fails first). It does not predict host
- * speed or establish that the whole-job deadline can be met;
- * tp_retirement_campaign_store_preflight adds the caller's exact external
- * reservation before timing. */
+/* The shape must come from the authenticated correctness/oracle gate and the
+ * pinned budget. The report includes both fixed stages, worst-case
+ * transcript, numeric-shard and metrics payload, and the untimed batches. It
+ * rejects a campaign whose payload files leave fewer than the minimum external
+ * entries or whose worst-case payload exceeds the store's byte ceiling. It
+ * does not predict host speed; tp_retirement_budget_preflight does that from
+ * the reviewed bounds, and tp_retirement_campaign_store_preflight adds the
+ * caller's exact external reservation before timing. */
 static int tp_retirement_campaign_capacity(TpRetirementCampaignShape const* shape,
     TpRetirementCampaignCapacity* capacity)
 {
     uint64_t per_variant = 0, per_unit = 0, row_samples = 0, batch_samples = 0, samples = 0;
     uint64_t compiler = 0, runtime = 0, invocations = 0, spool = 0, transcript = 0, sample_bytes = 0;
-    uint64_t row_bytes = 0, batch_bytes = 0, metrics = 0, metrics_bytes = 0;
+    uint64_t row_bytes = 0, batch_bytes = 0, metrics = 0, metrics_bytes = 0, metrics_shards = 0;
+    uint64_t untimed_batches = 0, untimed_records = 0, untimed_artifacts = 0, untimed_bytes = 0;
+    uint64_t untimed_shards = 0, untimed_files = 0;
     uint64_t transcript_shards = 0, sample_shards = 0, partitions = 0;
     TpRetirementCampaignCapacity result = {0};
     unsigned singletons = shape && shape->groups >= shape->object_groups ? shape->groups - shape->object_groups : 0;
     int ok = capacity && shape && shape->groups && shape->groups <= TP_RETIREMENT_MAX_CELLS &&
         shape->object_groups <= shape->groups && shape->rows >= shape->groups &&
         shape->rows <= TP_RETIREMENT_MAX_CELLS && shape->runtime_rows <= singletons &&
-        (shape->object_groups ? shape->metrics_artifact_bytes &&
-            shape->metrics_artifact_bytes <= TP_RETIREMENT_METRICS_ARTIFACT_BYTES : !shape->metrics_artifact_bytes);
+        shape->untimed_groups <= TP_RETIREMENT_MAX_CELLS && shape->untimed_object_groups <= shape->untimed_groups &&
+        (shape->object_groups || shape->untimed_object_groups ?
+            shape->metrics_artifact_max && shape->metrics_artifact_max <= TP_RETIREMENT_METRICS_ARTIFACT_BYTES :
+            !shape->metrics_artifact_max) &&
+        (shape->object_groups ? shape->metrics_bytes >= shape->object_groups &&
+            shape->metrics_bytes / shape->object_groups <= shape->metrics_artifact_max : !shape->metrics_bytes) &&
+        (shape->untimed_object_groups ? shape->untimed_metrics_bytes >= shape->untimed_object_groups &&
+            shape->untimed_metrics_bytes / shape->untimed_object_groups <= shape->metrics_artifact_max :
+            !shape->untimed_metrics_bytes);
     if (ok)
     {
         samples = tp_retirement_samples_union(shape->rows, shape->object_groups, shape->pairs, &row_samples);
@@ -208,7 +244,14 @@ static int tp_retirement_campaign_capacity(TpRetirementCampaignShape const* shap
             tp_retirement_campaign_u64_mul(batch_samples, TP_RETIREMENT_BATCH_RECORD_BYTES_MAX, &batch_bytes) &&
             tp_retirement_campaign_u64_add(row_bytes, batch_bytes, &sample_bytes) &&
             tp_retirement_campaign_u64_mul(shape->object_groups, per_unit, &metrics) &&
-            tp_retirement_campaign_u64_mul(metrics, shape->metrics_artifact_bytes, &metrics_bytes);
+            tp_retirement_campaign_u64_mul(shape->metrics_bytes, per_unit, &metrics_bytes) &&
+            tp_retirement_campaign_u64_mul(shape->untimed_groups, TP_RETIREMENT_BUDGET_UNTIMED_BATCHES,
+                &untimed_batches) &&
+            tp_retirement_campaign_u64_mul(untimed_batches, TP_RETIREMENT_UNTIMED_RECORD_BYTES_MAX, &untimed_records) &&
+            tp_retirement_campaign_u64_mul(shape->untimed_object_groups, TP_RETIREMENT_BUDGET_UNTIMED_BATCHES,
+                &untimed_artifacts) &&
+            tp_retirement_campaign_u64_mul(shape->untimed_metrics_bytes, TP_RETIREMENT_BUDGET_UNTIMED_BATCHES,
+                &untimed_bytes);
     }
     if (ok)
     {
@@ -216,18 +259,27 @@ static int tp_retirement_campaign_capacity(TpRetirementCampaignShape const* shap
         sample_shards = tp_retirement_campaign_ceil_div(row_samples, TP_RETIREMENT_SAMPLE_SHARD_RECORDS) +
             tp_retirement_campaign_ceil_div(batch_samples, TP_RETIREMENT_SAMPLE_SHARD_RECORDS);
         partitions = tp_retirement_samples_partitions(row_samples) + tp_retirement_samples_partitions(batch_samples);
+        metrics_shards = tp_retirement_campaign_metrics_shards(metrics, metrics_bytes);
+        untimed_shards = tp_retirement_campaign_metrics_shards(untimed_artifacts, untimed_bytes);
+        untimed_files = shape->untimed_groups ? 1 : 0;
         result = (TpRetirementCampaignCapacity){
             .compiler_invocations_per_stage = compiler, .runtime_invocations_per_stage = runtime,
             .invocations_per_stage = invocations, .samples_per_stage = samples,
             .row_samples_per_stage = row_samples, .batch_samples_per_stage = batch_samples,
             .spool_bytes_per_stage = spool, .metrics_artifacts_per_stage = metrics,
             .metrics_bytes_per_stage_upper_bound = metrics_bytes,
+            .metrics_shards_per_stage_upper_bound = metrics_shards,
             .transcript_bytes_per_stage_upper_bound = transcript,
             .sample_bytes_per_stage_upper_bound = sample_bytes,
             .transcript_shards_per_stage = transcript_shards, .sample_shards_per_stage = sample_shards,
-            .sample_partitions_per_stage = partitions};
+            .sample_partitions_per_stage = partitions,
+            .untimed_batches_upper_bound = untimed_batches, .untimed_record_bytes_upper_bound = untimed_records,
+            .untimed_record_files = untimed_files, .untimed_metrics_artifacts_upper_bound = untimed_artifacts,
+            .untimed_metrics_bytes_upper_bound = untimed_bytes,
+            .untimed_metrics_shards_upper_bound = untimed_shards};
         ok = invocations <= (uint64_t)TP_RETIREMENT_TRANSCRIPT_SHARDS * TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS &&
             transcript_shards <= TP_RETIREMENT_TRANSCRIPT_SHARDS && sample_shards <= TP_RETIREMENT_TRANSCRIPT_SHARDS &&
+            metrics_shards <= TP_RETIREMENT_METRICS_SHARDS && untimed_shards <= TP_RETIREMENT_METRICS_SHARDS &&
             tp_retirement_campaign_u64_mul(compiler, TP_RETIREMENT_CAMPAIGN_STAGES, &result.total_compiler_invocations) &&
             tp_retirement_campaign_u64_mul(runtime, TP_RETIREMENT_CAMPAIGN_STAGES, &result.total_runtime_invocations) &&
             tp_retirement_campaign_u64_mul(invocations, TP_RETIREMENT_CAMPAIGN_STAGES, &result.total_invocations) &&
@@ -238,20 +290,31 @@ static int tp_retirement_campaign_capacity(TpRetirementCampaignShape const* shap
             tp_retirement_campaign_u64_mul(sample_bytes, TP_RETIREMENT_CAMPAIGN_STAGES,
                 &result.total_sample_bytes_upper_bound) &&
             tp_retirement_campaign_u64_mul(metrics, TP_RETIREMENT_CAMPAIGN_STAGES, &result.total_metrics_artifacts) &&
+            tp_retirement_campaign_u64_add(result.total_metrics_artifacts, untimed_artifacts,
+                &result.total_metrics_artifacts) &&
             tp_retirement_campaign_u64_mul(metrics_bytes, TP_RETIREMENT_CAMPAIGN_STAGES,
                 &result.total_metrics_bytes_upper_bound) &&
+            tp_retirement_campaign_u64_add(result.total_metrics_bytes_upper_bound, untimed_bytes,
+                &result.total_metrics_bytes_upper_bound) &&
+            tp_retirement_campaign_u64_mul(metrics_shards, TP_RETIREMENT_CAMPAIGN_STAGES,
+                &result.total_metrics_shards_upper_bound) &&
+            tp_retirement_campaign_u64_add(result.total_metrics_shards_upper_bound, untimed_shards,
+                &result.total_metrics_shards_upper_bound) &&
             tp_retirement_campaign_u64_mul(transcript_shards, TP_RETIREMENT_CAMPAIGN_STAGES,
                 &result.total_transcript_shards) &&
             tp_retirement_campaign_u64_mul(sample_shards, TP_RETIREMENT_CAMPAIGN_STAGES, &result.total_sample_shards) &&
             tp_retirement_campaign_u64_mul(partitions, TP_RETIREMENT_CAMPAIGN_STAGES, &result.total_sample_partitions) &&
             tp_retirement_campaign_u64_add(result.total_transcript_shards, result.total_sample_shards,
                 &result.total_shard_files) &&
-            tp_retirement_campaign_u64_add(result.total_shard_files, result.total_metrics_artifacts,
-                &result.total_payload_files) &&
+            tp_retirement_campaign_u64_add(result.total_shard_files, result.total_metrics_shards_upper_bound,
+                &result.total_shard_files) &&
+            tp_retirement_campaign_u64_add(result.total_shard_files, untimed_files, &result.total_payload_files) &&
             tp_retirement_campaign_u64_add(result.total_transcript_bytes_upper_bound,
                 result.total_sample_bytes_upper_bound, &result.total_payload_bytes_upper_bound) &&
             tp_retirement_campaign_u64_add(result.total_payload_bytes_upper_bound,
-                result.total_metrics_bytes_upper_bound, &result.total_payload_bytes_upper_bound);
+                result.total_metrics_bytes_upper_bound, &result.total_payload_bytes_upper_bound) &&
+            tp_retirement_campaign_u64_add(result.total_payload_bytes_upper_bound, untimed_records,
+                &result.total_payload_bytes_upper_bound);
         uint64_t entries = 0, bytes = 0;
         ok = ok && tp_retirement_campaign_store_fits(result.total_payload_files, result.total_payload_bytes_upper_bound,
             TP_RETIREMENT_CAMPAIGN_MIN_EXTERNAL_STORE_ENTRIES, 0, &entries, &bytes);
@@ -279,12 +342,15 @@ static inline int tp_retirement_campaign_store_preflight(TpRetirementCampaignCap
         owned_control_bytes >= TP_RETIREMENT_RECEIPT_BYTES &&
         tp_retirement_campaign_u64_add(capacity->total_transcript_shards,
             capacity->total_sample_shards, &shards) &&
+        tp_retirement_campaign_u64_add(shards, capacity->total_metrics_shards_upper_bound, &shards) &&
         shards && shards == capacity->total_shard_files &&
-        tp_retirement_campaign_u64_add(shards, capacity->total_metrics_artifacts, &payload_files) &&
+        capacity->untimed_record_files <= 1 &&
+        tp_retirement_campaign_u64_add(shards, capacity->untimed_record_files, &payload_files) &&
         payload_files == capacity->total_payload_files &&
         tp_retirement_campaign_u64_add(capacity->total_transcript_bytes_upper_bound,
             capacity->total_sample_bytes_upper_bound, &payload) &&
         tp_retirement_campaign_u64_add(payload, capacity->total_metrics_bytes_upper_bound, &payload) &&
+        tp_retirement_campaign_u64_add(payload, capacity->untimed_record_bytes_upper_bound, &payload) &&
         payload && payload == capacity->total_payload_bytes_upper_bound &&
         tp_retirement_campaign_u64_add(payload_files, owned_control_files, &files) &&
         tp_retirement_campaign_u64_add(payload, owned_control_bytes, &owned) &&
@@ -305,66 +371,6 @@ static inline int tp_retirement_campaign_store_preflight(TpRetirementCampaignCap
             plan->remaining_bytes = TP_RETIREMENT_STORE_TOTAL_BYTES - bytes;
         }
     }
-    return ok;
-}
-
-/* Failure-first whole-job preflight. This arithmetic helper has no production
- * caller: the integrator must first authenticate nonzero worst-case bounds
- * from the trusted service for this job. Missing bounds, overflow, an
- * inconsistent capacity record or a sum above the fixed one-hour job budget
- * rejects before timing; fixture bounds are not authority. */
-static inline int tp_retirement_campaign_preflight(TpRetirementCampaignCapacity const* capacity,
-    TpRetirementCampaignDurationBounds const* bounds, TpRetirementCampaignPreflight* preflight)
-{
-    uint64_t expected_invocations = 0, settling_ns = 0, export_ns = 0;
-    uint64_t compiler_ns = 0, runtime_ns = 0, fixed_ns = 0, required_ns = 0;
-    int ok = capacity && bounds && preflight && capacity->total_invocations &&
-        capacity->total_compiler_invocations && capacity->total_samples &&
-        bounds->reservation_ns && bounds->materialization_ns && bounds->baseline_build_ns &&
-        bounds->candidate_build_ns && bounds->correctness_ns && bounds->settling_per_stage_ns &&
-        bounds->compiler_invocation_ns && bounds->aa_qualification_ns &&
-        bounds->aa_receipt_sealing_ns && bounds->sample_export_per_stage_ns &&
-        bounds->final_statistics_ns && bounds->final_sealing_ns && bounds->cleanup_ns &&
-        (!capacity->total_runtime_invocations || bounds->runtime_invocation_ns) &&
-        (capacity->total_runtime_invocations || !bounds->runtime_invocation_ns) &&
-        tp_retirement_campaign_u64_add(capacity->total_compiler_invocations,
-            capacity->total_runtime_invocations, &expected_invocations) &&
-        expected_invocations == capacity->total_invocations &&
-        tp_retirement_campaign_u64_mul(bounds->settling_per_stage_ns,
-            TP_RETIREMENT_CAMPAIGN_STAGES, &settling_ns) &&
-        tp_retirement_campaign_u64_mul(bounds->sample_export_per_stage_ns,
-            TP_RETIREMENT_CAMPAIGN_STAGES, &export_ns) &&
-        tp_retirement_campaign_u64_mul(capacity->total_compiler_invocations,
-            bounds->compiler_invocation_ns, &compiler_ns) &&
-        tp_retirement_campaign_u64_mul(capacity->total_runtime_invocations,
-            bounds->runtime_invocation_ns, &runtime_ns);
-    if (ok)
-    {
-        uint64_t fixed_parts[] = {
-            bounds->reservation_ns, bounds->materialization_ns,
-            bounds->baseline_build_ns, bounds->candidate_build_ns,
-            bounds->correctness_ns, settling_ns, bounds->aa_qualification_ns,
-            bounds->aa_receipt_sealing_ns, export_ns, bounds->final_statistics_ns,
-            bounds->final_sealing_ns, bounds->cleanup_ns
-        };
-        for (unsigned i = 0; ok && i < BUSTER_ARRAY_LENGTH(fixed_parts); ++i)
-            ok = tp_retirement_campaign_u64_add(fixed_ns, fixed_parts[i], &fixed_ns);
-        ok = ok && tp_retirement_campaign_u64_add(fixed_ns, compiler_ns, &required_ns) &&
-            tp_retirement_campaign_u64_add(required_ns, runtime_ns, &required_ns);
-    }
-    if (preflight) *preflight = (TpRetirementCampaignPreflight){0};
-    if (ok && preflight)
-    {
-        preflight->fixed_phase_ns = fixed_ns;
-        preflight->compiler_invocation_total_ns = compiler_ns;
-        preflight->runtime_invocation_total_ns = runtime_ns;
-        preflight->required_ns = required_ns;
-        preflight->fits = required_ns <= TP_RETIREMENT_CAMPAIGN_WHOLE_JOB_BUDGET_NS;
-        if (preflight->fits)
-            preflight->remaining_ns = TP_RETIREMENT_CAMPAIGN_WHOLE_JOB_BUDGET_NS - required_ns;
-        ok = preflight->fits;
-    }
-    else ok = 0;
     return ok;
 }
 
@@ -422,6 +428,72 @@ static unsigned tp_retirement_campaign_group_shape(TpRetirementSampleGroup const
     return (group->count << 1) | group->kind;
 }
 
+/* Derive the store shape and the budget counts from the frozen commands and
+ * the reviewed record: each timed group's input count (an object group's
+ * contract inputs, members plus controls; a singleton's one), the reviewed
+ * metrics bound every object contract must carry, and the untimed groups.
+ * Capacity and the budget preflight must both hold. */
+static int tp_retirement_campaign_review(TpRetirementCampaignReview const* review,
+    TpRetirementMeasuredCommand const* aa_commands, TpRetirementMeasuredCommand const* ab_commands,
+    unsigned groups, unsigned const* group_shapes, unsigned rows, unsigned runtime, unsigned pairs,
+    TpRetirementCampaignCapacity* capacity, TpRetirementBudgetPreflight* budget)
+{
+    unsigned* inputs = groups ? (unsigned*)malloc((size_t)groups * sizeof(*inputs)) : NULL;
+    unsigned objects = 0, untimed_objects = 0;
+    uint64_t metrics = 0, untimed_metrics = 0, largest = 0;
+    int ok = review && review->budget && inputs && aa_commands && ab_commands && group_shapes &&
+        review->untimed_groups <= TP_RETIREMENT_MAX_CELLS &&
+        (!review->untimed_groups || (review->untimed_inputs && review->untimed_kinds));
+    for (unsigned group = 0; ok && group < groups; ++group)
+    {
+        unsigned object = (group_shapes[group] & 1) == TP_RETIREMENT_GROUP_OBJECT;
+        TpRetirementBatchContract const* first = aa_commands[(size_t)group * TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT].batch;
+        uint64_t bound = 0;
+        inputs[group] = object ? (first ? first->input_count : 0) : 1;
+        ok = inputs[group] && (!object || tp_retirement_budget_metrics_bytes(review->budget, inputs[group], &bound));
+        for (unsigned stage = 0; ok && object && stage < TP_RETIREMENT_CAMPAIGN_STAGES; ++stage)
+            for (unsigned variant = 0; ok && variant < 2; ++variant)
+            {
+                TpRetirementBatchContract const* batch = ((stage ? ab_commands : aa_commands) +
+                    (size_t)group * TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT + variant)->batch;
+                ok = batch && batch->input_count == inputs[group] && batch->metrics_bytes_max == bound;
+            }
+        if (ok && object)
+        {
+            ++objects;
+            ok = tp_retirement_campaign_u64_add(metrics, bound, &metrics);
+            if (bound > largest) largest = bound;
+        }
+    }
+    for (unsigned group = 0; ok && group < review->untimed_groups; ++group)
+    {
+        unsigned count = review->untimed_inputs[group], kind = review->untimed_kinds[group];
+        uint64_t bound = 0;
+        ok = count && (kind == TP_RETIREMENT_GROUP_OBJECT ?
+            tp_retirement_budget_metrics_bytes(review->budget, count, &bound) :
+            kind == TP_RETIREMENT_GROUP_SINGLETON && count == 1);
+        if (ok && kind == TP_RETIREMENT_GROUP_OBJECT)
+        {
+            ++untimed_objects;
+            ok = tp_retirement_campaign_u64_add(untimed_metrics, bound, &untimed_metrics);
+            if (bound > largest) largest = bound;
+        }
+    }
+    TpRetirementCampaignShape shape = {groups, objects, rows, runtime, pairs,
+        review ? review->untimed_groups : 0, untimed_objects, metrics, untimed_metrics, largest};
+    TpRetirementBudgetCounts counts = {inputs, review ? review->untimed_inputs : NULL, groups, runtime, pairs,
+        review ? review->untimed_groups : 0};
+    ok = ok && tp_retirement_campaign_capacity(&shape, capacity) &&
+        tp_retirement_budget_preflight(review->budget, &counts, budget);
+    if (!ok)
+    {
+        if (capacity) *capacity = (TpRetirementCampaignCapacity){0};
+        if (budget) *budget = (TpRetirementBudgetPreflight){0};
+    }
+    free(inputs);
+    return ok;
+}
+
 /* Called only after the service independently authenticates its immutable
  * inputs. The adapter checks consistency and snapshots all command, batch
  * contract and oracle identities; a digest or this structure alone never
@@ -435,15 +507,15 @@ static int tp_retirement_campaign_freeze(TpRetirementCampaign* campaign, TpRetir
     TpRetirementExecutable const* ab_candidate, TpRetirementMeasuredCommand const* aa_commands,
     TpRetirementMeasuredCommand const* ab_commands, TpRetirementCampaignCommand* command_workspace,
     size_t command_count, unsigned* identity_workspace, size_t identity_count,
-    unsigned population_rows, uint64_t metrics_artifact_bytes,
+    unsigned population_rows, TpRetirementCampaignReview const* review,
     char const* plan_sha256, char const* context_sha256)
 {
     TpRetirementExecution* a = aa && aa->transcript ? aa->transcript->execution : NULL;
     TpRetirementExecution* b = ab && ab->transcript ? ab->transcript->execution : NULL;
     unsigned groups = a ? a->groups : 0, runtime = a ? a->runtime_count : 0;
-    TpRetirementCampaignShape shape = {groups, aa ? aa->object_count : 0, aa ? aa->row_count : 0, runtime,
-        a ? a->pairs : 0, metrics_artifact_bytes};
-    TpRetirementCampaignCapacity capacity;
+    TpRetirementCampaignCapacity capacity = {0};
+    TpRetirementBudgetPreflight budget = {0};
+    char budget_sha256[65] = {0};
     int ok = campaign && campaign->phase == TP_RETIREMENT_CAMPAIGN_UNAVAILABLE && plan && a && b && groups &&
         groups <= TP_RETIREMENT_MAX_CELLS && a->population_rows == population_rows &&
         b->population_rows == population_rows &&
@@ -480,9 +552,12 @@ static int tp_retirement_campaign_freeze(TpRetirementCampaign* campaign, TpRetir
         aa->transcript->bound_at_ns == ab->transcript->bound_at_ns &&
         !strcmp(aa->transcript->job, ab->transcript->job) &&
         !strcmp(aa->transcript->boot, ab->transcript->boot) &&
-        tp_retirement_campaign_capacity(&shape, &capacity) &&
-        a->expected == capacity.invocations_per_stage &&
-        aa->expected == capacity.samples_per_stage && ab->expected == capacity.samples_per_stage;
+        (!aa->object_count || (aa->metrics && ab->metrics && aa->metrics != ab->metrics &&
+            strcmp(aa->metrics->tag, ab->metrics->tag) && aa->metrics->stream != ab->metrics->stream &&
+            !aa->metrics->artifacts && !ab->metrics->artifacts)) &&
+        review && review->budget && tp_retirement_digest(review->budget_sha256) &&
+        tp_retirement_budget_digest(review->budget, budget_sha256) &&
+        !strcmp(budget_sha256, review->budget_sha256);
     /* Both stages must carry the same frozen layout. */
     for (unsigned row = 0; ok && row < aa->row_count; ++row)
         ok = aa->rows[row].id == ab->rows[row].id && aa->rows[row].metrics == ab->rows[row].metrics &&
@@ -511,6 +586,13 @@ static int tp_retirement_campaign_freeze(TpRetirementCampaign* campaign, TpRetir
                 ok = tp_retirement_campaign_command_copy(command_workspace + index, source,
                     kind ? identity_workspace[slot] : slot, kind, variant, kind ? 0 : identity_workspace[slot]);
             }
+    /* (M4) Every object contract carries the budget's reviewed metrics bound
+     * for its input count; the bounds size the metrics shards, and the batch
+     * sizes and counts must fit the reviewed budget before any timing. */
+    if (ok) ok = tp_retirement_campaign_review(review, aa_commands, ab_commands, groups, identity_workspace,
+        aa->row_count, runtime, a->pairs, &capacity, &budget);
+    ok = ok && a->expected == capacity.invocations_per_stage &&
+        aa->expected == capacity.samples_per_stage && ab->expected == capacity.samples_per_stage;
     if (campaign && campaign->phase == TP_RETIREMENT_CAMPAIGN_UNAVAILABLE)
     {
         *campaign = (TpRetirementCampaign){.phase = TP_RETIREMENT_CAMPAIGN_INVALID};
@@ -528,6 +610,8 @@ static int tp_retirement_campaign_freeze(TpRetirementCampaign* campaign, TpRetir
             campaign->runtime_count = runtime;
             campaign->population_rows = population_rows;
             campaign->capacity = capacity;
+            campaign->budget = budget;
+            memcpy(campaign->budget_sha256, budget_sha256, 65);
             campaign->phase = TP_RETIREMENT_CAMPAIGN_AA;
             memcpy(campaign->plan_sha256, plan_sha256, 65);
             memcpy(campaign->context_sha256, context_sha256, 65);
@@ -576,6 +660,10 @@ static int tp_retirement_campaign_stage_ready(TpRetirementCampaign const* campai
         tp_retirement_digest(samples->raw_sha256) &&
         tp_retirement_digest(samples->descriptors_sha256[0]) &&
         (!samples->object_count || tp_retirement_digest(samples->descriptors_sha256[1])) &&
+        (!samples->object_count || (samples->metrics && samples->metrics->finished && !samples->metrics->failed &&
+            samples->metrics->artifacts == campaign->capacity.metrics_artifacts_per_stage &&
+            samples->metrics->total_bytes <= campaign->capacity.metrics_bytes_per_stage_upper_bound &&
+            samples->metrics->index < campaign->capacity.metrics_shards_per_stage_upper_bound)) &&
         transcript->attempt == campaign->attempt &&
         !strcmp(transcript->job, campaign->job) &&
         !strcmp(transcript->boot, campaign->boot);
@@ -684,7 +772,8 @@ static inline int tp_retirement_campaign_rotate(TpRetirementCampaign* campaign, 
 
 /* A/A remains waiting for the separate approved #426 decision. A/B is enabled
  * only after the service independently validates its admission receipt against
- * this frozen job, plan and context; that authority is supplied by #1021. */
+ * this frozen job, plan and context; that authority is supplied by #1021. A
+ * stage with object groups must first finish its metrics shard writer. */
 static int tp_retirement_campaign_finish_stage(TpRetirementCampaign* campaign,
     uint64_t completed_at_ns, TpRetirementShard* final_shard)
 {
@@ -695,6 +784,7 @@ static int tp_retirement_campaign_finish_stage(TpRetirementCampaign* campaign,
         campaign->phase == TP_RETIREMENT_CAMPAIGN_AB) && transcript &&
         tp_retirement_execution_complete(transcript->execution) &&
         samples->collected == campaign->capacity.invocations_per_stage &&
+        (!samples->object_count || (samples->metrics && samples->metrics->finished && !samples->metrics->failed)) &&
         tp_retirement_transcript_end_shard(transcript, final_shard) &&
         tp_retirement_transcript_finish(transcript, completed_at_ns) &&
         tp_retirement_samples_begin_export(samples);

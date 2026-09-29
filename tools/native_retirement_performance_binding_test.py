@@ -1486,6 +1486,9 @@ class BindingTests(unittest.TestCase):
             for path in sorted((execution_root / "execution").rglob("*")):
                 if path.is_file():
                     contents[path.relative_to(execution_root).as_posix()] = path.read_bytes()
+            # (M4) Per-batch metrics artifacts live in metrics shards.
+            for path in sorted(execution_root.glob("retirement-metrics-*.txt")):
+                contents[path.name] = path.read_bytes()
             self.assertEqual(code_records["records"], 3)
             result_bundle_value["execution_receipt"] = execution_descriptor
             result_bundle_value["code_records"] = code_records
@@ -1507,10 +1510,15 @@ class BindingTests(unittest.TestCase):
                 record["workflow"]["phases"], plan_value,
                 result_bundle_descriptor, result_bundle_value,
                 adapter_result_descriptor)
-        self.assertEqual(sum(item["name"].startswith("execution.metrics.")
-                             for item in seal_files), 2 * (2 + 2 * 60))
-        self.assertEqual(sum(item["name"].startswith("untimed.metrics.")
-                             for item in seal_files), 4)
+        # (M4) The closure seals metrics shards, not one entry per batch: the
+        # 244 object batches fill three 100-artifact shards and the four
+        # untimed batches two 3-artifact shards.
+        self.assertEqual(sum(item["name"].startswith("execution.metrics_shard.")
+                             for item in seal_files), 3)
+        self.assertEqual(sum(item["name"].startswith("untimed.metrics_shard.")
+                             for item in seal_files), 2)
+        self.assertFalse(any(item["name"].startswith(("execution.metrics.", "untimed.metrics."))
+                             for item in seal_files))
         self.assertIn("workflow.untimed_batches", {item["name"] for item in seal_files})
         seal_value = {
             "schema": "buster-native-retirement-result-seal-v1", "version": 1,

@@ -272,6 +272,43 @@ class InvocationEvidenceTests(unittest.TestCase):
         return {"path": path, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
     EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+    # The reviewed per-artifact metrics bound these fixtures freeze.
+    METRICS_BYTES_MAX = 1 << 20
+
+    class MetricsShards:
+        """Pack per-batch metrics artifacts into ``retirement-metrics-<tag>-NNNN.txt``
+        shards, ``per_shard`` artifacts each, as the producer's shard writer does."""
+
+        def __init__(self, root, tag, per_shard=100):
+            self.root, self.tag, self.per_shard = root, tag, per_shard
+            self.index, self.count, self.size = -1, per_shard, 0
+            for stale in root.glob(f"retirement-metrics-{tag}-*.txt"):
+                stale.unlink()
+
+        def append(self, data):
+            if self.count == self.per_shard:
+                self.index, self.count, self.size = self.index + 1, 0, 0
+            path = f"retirement-metrics-{self.tag}-{self.index:04d}.txt"
+            with (self.root / path).open("ab") as stream:
+                stream.write(data)
+            artifact = {"bytes": len(data), "offset": self.size, "path": path,
+                        "sha256": hashlib.sha256(data).hexdigest()}
+            self.size += len(data)
+            self.count += 1
+            return artifact
+
+    @staticmethod
+    def metrics_slice(root, artifact):
+        with (root / artifact["path"]).open("rb") as stream:
+            stream.seek(artifact["offset"])
+            return stream.read(artifact["bytes"])
+
+    @staticmethod
+    def put_metrics(root, path, data):
+        """A one-artifact metrics shard at ``path``."""
+        (root / path).write_bytes(data)
+        return {"bytes": len(data), "offset": 0, "path": path,
+                "sha256": hashlib.sha256(data).hexdigest()}
 
     @staticmethod
     def digest(text):
@@ -286,8 +323,12 @@ class InvocationEvidenceTests(unittest.TestCase):
                 "object_sha256": None}
 
     @classmethod
-    def group_contract(cls, group, controls, command_prefix):
+    def group_contract(cls, group, controls, command_prefix, fixtures=None):
         object_group = group["kind"] == binding.OBJECT_BATCH_GROUP
+        listing = None
+        if object_group:
+            names = list(fixtures or []) + [item["fixture"] for item in controls]
+            listing = hashlib.sha256(binding._input_list_bytes(names, "fixture")).hexdigest()
         exit_status = 1 if any(item["status"] != "ok" for item in controls) else 0
         sides = {}
         for side in ("baseline", "candidate"):
@@ -304,7 +345,8 @@ class InvocationEvidenceTests(unittest.TestCase):
             "members": [{"row": row,
                          "diagnostic_sha256": cls.EMPTY_SHA256 if object_group else None}
                         for row in group["rows"]],
-            "controls": controls, **sides}
+            "controls": controls, "input_list_sha256": listing,
+            "metrics_bytes_max": cls.METRICS_BYTES_MAX if object_group else None, **sides}
 
     @classmethod
     def execution_plan(cls, root, record, parsed, controls=None):
@@ -316,11 +358,14 @@ class InvocationEvidenceTests(unittest.TestCase):
         controls = controls or {}
         groups = binding._batch_groups(parsed)
         group_of_row = {row: group["group"] for group in groups for row in group["rows"]}
+        fixture_of = {row["row"]: row["identity"]["fixture"] for row in parsed}
         group_contracts = [
             cls.group_contract(group, copy.deepcopy(controls.get(group["group"], []))
-                               if group["kind"] == binding.OBJECT_BATCH_GROUP else [], "batch")
+                               if group["kind"] == binding.OBJECT_BATCH_GROUP else [], "batch",
+                               [fixture_of[row] for row in group["rows"]])
             for group in groups]
-        untimed_contracts = [cls.group_contract(group, [], "untimed")
+        untimed_contracts = [cls.group_contract(group, [], "untimed",
+                                                [fixture_of[row] for row in group["rows"]])
                              for group in binding._untimed_groups(parsed)]
         contracts = []
         for row in parsed:
@@ -453,6 +498,7 @@ class InvocationEvidenceTests(unittest.TestCase):
         row_by_id = {row["row"]: row for row in parsed}
         groups = {group["group"]: group for group in binding._batch_groups(parsed)}
         events = []
+        shards = cls.MetricsShards(root, "ab")
         last_end = 100
         job_id = "synthetic-job"
         attempt = 1
@@ -496,9 +542,7 @@ class InvocationEvidenceTests(unittest.TestCase):
                     if mutate_objects is not None:
                         mutate_objects(event["sequence"], objects)
                     output = binding._batch_output_digest(objects)
-                    metrics_artifact = cls.put(
-                        root, f"execution/metrics/batch-{event['sequence']:06d}.txt",
-                        cls.cc_metrics_bytes(metrics))
+                    metrics_artifact = shards.append(cls.cc_metrics_bytes(metrics))
                 else:
                     row = group["rows"][0]
                     key = (row, event["round"], event["pair"]) if sample else (row, 0, 0)
@@ -554,6 +598,7 @@ class InvocationEvidenceTests(unittest.TestCase):
         rows = {item["row"]: item for item in plan["rows"]}
         row_by_id = {row["row"]: row for row in parsed}
         lines = []
+        shards = cls.MetricsShards(root, "untimed", per_shard=3)
         for contract in plan["untimed_groups"]:
             object_group = contract["kind"] == binding.OBJECT_BATCH_GROUP
             members = [member["row"] for member in contract["members"]]
@@ -574,9 +619,7 @@ class InvocationEvidenceTests(unittest.TestCase):
                         value = {"metrics": metrics, "objects": objects}
                         if mutate is not None:
                             mutate(contract["group"], variant, purpose, value)
-                        metrics_artifact = cls.put(
-                            root, f"execution/untimed/{contract['group']}-{variant}-{purpose}.txt",
-                            cls.cc_metrics_bytes(value["metrics"]))
+                        metrics_artifact = shards.append(cls.cc_metrics_bytes(value["metrics"]))
                         objects = value["objects"]
                     pid = 900000 + index
                     token = f"untimed-process-{index}"
@@ -1295,11 +1338,28 @@ class InvocationEvidenceTests(unittest.TestCase):
         frozen = binding._frozen_batch_inputs(groups[1], rows, {row["row"]: row for row in self.rows},
                                               event["variant"], "artifact_sha256")
         oversized = dict(event["metrics_artifact"], bytes=binding.METRICS_ARTIFACT_BYTE_CAP + 1)
-        with mock.patch.object(binding, "_check_evidence") as read:
-            with self.assertRaisesRegex(ValueError, "exceeds its bounded size"):
-                binding._check_batch_metrics(self.root, oversized, groups[1], frozen, 1,
-                                             binding.NATIVE_TIMED_TARGET, None, "metrics")
-            read.assert_not_called()
+        outside = dict(event["metrics_artifact"], offset=binding.METRICS_SHARD_BYTE_CAP)
+        for descriptor in (oversized, outside):
+            with mock.patch.object(binding.Path, "open") as read:
+                with self.assertRaisesRegex(ValueError, "exceeds its bounded size"):
+                    binding._check_batch_metrics(self.root, descriptor, groups[1], frozen, 1,
+                                                 binding.NATIVE_TIMED_TARGET, None, "metrics")
+                read.assert_not_called()
+        # The group's reviewed bound is checked against every artifact.
+        bounded = dict(groups[1], metrics_bytes_max=event["metrics_artifact"]["bytes"] - 1)
+        with self.assertRaisesRegex(ValueError, "reviewed metrics bound"):
+            binding._check_batch_metrics(self.root, event["metrics_artifact"], bounded, frozen, 1,
+                                         binding.NATIVE_TIMED_TARGET, None, "metrics")
+        # A range past the shard's end, or with bytes beyond it, is not the artifact.
+        past = dict(event["metrics_artifact"], offset=event["metrics_artifact"]["offset"] + 10 ** 6)
+        with self.assertRaisesRegex(ValueError, "outside its metrics shard"):
+            binding._check_batch_metrics(self.root, past, groups[1], frozen, 1,
+                                         binding.NATIVE_TIMED_TARGET, None, "metrics")
+        for field, value in (("path", "execution/metrics/batch.txt"),
+                             ("path", "retirement-metrics-AB-0000.txt"), ("offset", -1)):
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                binding._metrics_artifact(dict(event["metrics_artifact"], **{field: value}),
+                                          "metrics")
 
         def huge_record(metrics):
             metrics["inputs"][1]["message_hex"] = b"e" * binding.METRICS_RECORD_BYTE_CAP
@@ -1365,8 +1425,7 @@ class InvocationEvidenceTests(unittest.TestCase):
 
     def test_metrics_artifact_parser_rejects_reordered_or_unknown_keys(self):
         event = self.events[self.batch_index()]
-        path = self.root / event["metrics_artifact"]["path"]
-        data = path.read_bytes()
+        data = self.metrics_slice(self.root, event["metrics_artifact"])
         lines = data.splitlines(keepends=True)
         swapped = lines[1].replace(b" errors=", b" warnings_tmp=").replace(
             b" warnings=", b" errors=").replace(b" warnings_tmp=", b" warnings=")
@@ -1375,7 +1434,7 @@ class InvocationEvidenceTests(unittest.TestCase):
                                    (0, lines[0].replace(b"CC_METRICS ", b"CC_METRICS  ", 1)),
                                    (1, lines[1].replace(b"CC_METRICS_INPUT", b"CC_METRICS_ROW"))):
             changed = b"".join(lines[:index] + [replacement] + lines[index + 1:])
-            descriptor = self.put(self.root, "execution/metrics/tampered.txt", changed)
+            descriptor = self.put_metrics(self.root, "retirement-metrics-tamper-0000.txt", changed)
             with self.subTest(index=index), self.assertRaisesRegex(
                     ValueError, "pinned field order|missing, reordered, or unknown"):
                 binding._read_cc_metrics(self.root, descriptor, 2, "tampered metrics")
@@ -1394,7 +1453,7 @@ class InvocationEvidenceTests(unittest.TestCase):
         events = copy.deepcopy(self.events)
         batch = events[self.batch_index()]
         batch["metrics_artifact"] = events[self.batch_index("warmup")]["metrics_artifact"]
-        with self.assertRaisesRegex(ValueError, "reuses another batch"):
+        with self.assertRaisesRegex(ValueError, "packed contiguously"):
             self.check(self.write_transcript(self.root, self.receipt, events))
         events = copy.deepcopy(self.events)
         events[0]["metrics_artifact"] = batch["metrics_artifact"]
@@ -1430,6 +1489,90 @@ class InvocationEvidenceTests(unittest.TestCase):
             self.rewrite_plan(change)
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                 self.check()
+
+    def test_batch_response_file_and_metrics_bound_are_frozen(self):
+        # (A1 Q10, M4) Each object group binds the digest of its canonical
+        # `@file` input list over the frozen member order plus controls, and
+        # the reviewed metrics bound; a singleton group has neither.
+        listing = binding._input_list_bytes(["tests/invocation-1.c", "tests/rejection-control.c"],
+                                            "list")
+        self.assertEqual(listing, b'"tests/invocation-1.c"\n"tests/rejection-control.c"\n')
+        plan = json.loads((self.root / self.plan["path"]).read_text())
+        self.assertEqual(plan["groups"][1]["input_list_sha256"], hashlib.sha256(listing).hexdigest())
+        self.assertIsNone(plan["groups"][0]["input_list_sha256"])
+        # Quotes and backslashes round-trip through the driver's grammar.
+        quoted = binding._input_list_bytes(['tests/a "b" c.c'], "list")
+        self.assertEqual(binding._response_file_arguments(quoted, "list"), [b'tests/a "b" c.c'])
+        self.assertEqual(binding._response_file_arguments(b"a 'b c'\td\\ e \"\"", "list"),
+                         [b"a", b"b c", b"d e", b""])
+        for data, message in ((b'"open', "quote open"), (b"a\\", "backslash"), (b"a\0b", "NUL"),
+                              (b"@nested", "nests"), (b'"@quoted"', "nests")):
+            with self.subTest(data=data), self.assertRaisesRegex(ValueError, message):
+                binding._response_file_arguments(data, "list")
+        for fixture in ("@tests/a.c", "-tests/a.c", "tests/../a.c", "tests/a\tb.c"):
+            with self.subTest(fixture=fixture), self.assertRaises(ValueError):
+                binding._input_list_bytes([fixture], "list")
+        changes = (
+            (lambda plan: plan["groups"][1].update(input_list_sha256="e" * 64),
+             "canonical response file"),
+            (lambda plan: plan["groups"][1]["controls"][0].update(
+                fixture="tests/other-control.c"), "canonical response file"),
+            (lambda plan: plan["groups"][1].update(metrics_bytes_max=0), "reviewed per-artifact bound"),
+            (lambda plan: plan["groups"][1].update(
+                metrics_bytes_max=binding.METRICS_ARTIFACT_BYTE_CAP + 1), "reviewed per-artifact bound"),
+            (lambda plan: plan["groups"][0].update(metrics_bytes_max=1), "no response file"),
+            (lambda plan: plan["groups"][0].update(input_list_sha256="e" * 64), "no response file"),
+            (lambda plan: plan["groups"][1].pop("input_list_sha256"), "missing fields"),
+        )
+        for change, message in changes:
+            self.attach()
+            self.rewrite_plan(change)
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                self.check()
+
+    def test_metrics_artifacts_tile_their_shards_in_record_order(self):
+        # (M4) Per-batch artifacts are individually addressed shard ranges:
+        # each shard starts at offset 0, each artifact follows the previous
+        # one, and a shard left behind is never revisited.
+        self.attach()
+        batches = [index for index, event in enumerate(self.events)
+                   if event["metrics_artifact"] is not None]
+        paths = {self.events[index]["metrics_artifact"]["path"] for index in batches}
+        self.assertEqual(len(paths), 3)  # 244 batches at 100 artifacts per shard.
+        self.assertEqual(self.check()["metrics_shards"].order, sorted(paths))
+        first, second = self.events[batches[0]], self.events[batches[1]]
+        for change, message in (
+                (lambda events: events[batches[1]]["metrics_artifact"].update(
+                    offset=second["metrics_artifact"]["offset"] + 1), "packed contiguously"),
+                (lambda events: events[batches[0]]["metrics_artifact"].update(offset=1),
+                 "fresh metrics shard"),
+                (lambda events: events[batches[150]].update(
+                    metrics_artifact=dict(first["metrics_artifact"])), "packed contiguously"),
+                (lambda events: events[batches[1]]["metrics_artifact"].update(
+                    sha256="e" * 64), "authenticated digest"),
+                (lambda events: events[batches[1]]["metrics_artifact"].update(
+                    bytes=second["metrics_artifact"]["bytes"] - 1),
+                 "missing, truncated, or oversized|extra records")):
+            events = copy.deepcopy(self.events)
+            change(events)
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                self.check(self.write_transcript(self.root, self.receipt, events))
+        # A sealed shard must hold exactly its artifacts: trailing bytes reject.
+        tracker = binding._MetricsShards(self.root)
+        for index in batches:
+            tracker.add(self.events[index]["metrics_artifact"], "artifact")
+        shards = tracker.finish()
+        self.assertEqual([item["path"] for item in shards], sorted(paths))
+        self.assertEqual(sum(item["bytes"] for item in shards),
+                         sum(self.events[index]["metrics_artifact"]["bytes"] for index in batches))
+        with (self.root / shards[-1]["path"]).open("ab") as stream:
+            stream.write(b"hidden\n")
+        with self.assertRaisesRegex(ValueError, "outside its authenticated artifacts"):
+            tracker.finish()
+        # The untimed batches may not continue or reuse a timed shard.
+        forked = tracker.fork()
+        with self.assertRaisesRegex(ValueError, "fresh metrics shard"):
+            forked.add(first["metrics_artifact"], "artifact")
 
     def test_untimed_code_rows_bind_a_reproduction_digest(self):
         self.add_untimed_rows()
@@ -1568,8 +1711,8 @@ class InvocationEvidenceTests(unittest.TestCase):
         self.assertEqual(len(self.check_untimed(good, rows, untimed, execution)), 4)
         lines = [json.loads(line) for line in (self.root / good["path"]).read_bytes().splitlines()]
         timed = next(event for event in self.events if event["metrics_artifact"] is not None)
-        copied = self.put(self.root, "execution/untimed/copied.txt",
-                          (self.root / lines[0]["metrics_artifact"]["path"]).read_bytes())
+        copied = self.put_metrics(self.root, "retirement-metrics-copy-0000.txt",
+                                  self.metrics_slice(self.root, lines[0]["metrics_artifact"]))
 
         def rebind(record, pid, token):
             record.update(pid=pid, process_start_token=token,
@@ -1597,7 +1740,7 @@ class InvocationEvidenceTests(unittest.TestCase):
              "header is not one serial"),
             (lambda value: value[1].update(metrics_artifact=copied), "per-input metrics content"),
             (lambda value: value[0].update(metrics_artifact=dict(timed["metrics_artifact"])),
-             "reuses another batch's per-input metrics artifact"),
+             "per-input metrics content"),
             (lambda value: value[0].pop("process_start_token"), "missing fields"),
         )
         for change, message in cases:
@@ -1615,8 +1758,8 @@ class InvocationEvidenceTests(unittest.TestCase):
                    if event["metrics_artifact"] is not None]
         events = copy.deepcopy(self.events)
         first, later = events[batches[0]], events[batches[-1]]
-        duplicate = self.put(self.root, "execution/metrics/duplicate.txt",
-                             (self.root / first["metrics_artifact"]["path"]).read_bytes())
+        duplicate = self.put_metrics(self.root, "retirement-metrics-dup-0000.txt",
+                                     self.metrics_slice(self.root, first["metrics_artifact"]))
         later["metrics_artifact"] = duplicate
         with self.assertRaisesRegex(ValueError, "per-input metrics content"):
             self.check(self.write_transcript(self.root, self.receipt, events))
