@@ -242,6 +242,28 @@ METRICS_ARTIFACT_BYTE_CAP = 64 * 1024 * 1024
 METRICS_SHARD_BYTE_CAP = 64 * 1024 * 1024
 METRICS_SHARD_CAP = 2048
 METRICS_SHARD_RE = re.compile(r"^retirement-metrics-([a-z]{1,8})-([0-9]{4})\.txt$")
+# (#1880) The #619 statistics adapter input (``sealed_result_bundle.adapter_input``)
+# is a text manifest over ordered series shards, because the single series
+# stream exceeds the store's 64 MiB per-file cap at A1 scale.  The series
+# stream is unchanged: its header line, then per family member a member line,
+# its ratio lines and ``end``.  Its canonical split is greedy over whole LF
+# lines: every shard is at most ADAPTER_SERIES_SHARD_BYTES, and a shard ends
+# only where the next line would not fit, so the header line opens shard 0
+# and the shards' concatenation is exactly the series.  The manifest binds the
+# order, each shard's offset, bytes and SHA-256 and the whole series' bytes
+# and SHA-256; shard paths are leaves in the manifest's directory.  Format:
+#   BQ-RETIREMENT-STATISTICS-SERIES-V1
+#   series bytes=<total> sha256=<hex> shards=<count> shard_bytes=<cap>
+#   shard=<index> offset=<offset> bytes=<bytes> sha256=<hex> path=<leaf>
+# one shard line per shard, in series order (tp_compose_series in
+# tools/bench_service/retirement_compose.c writes it; `bench_throughput
+# retirement-replay` reads it).
+ADAPTER_SERIES_MANIFEST_HEADER = "BQ-RETIREMENT-STATISTICS-SERIES-V1"
+ADAPTER_SERIES_SHARD_BYTES = 64 * 1024 * 1024
+ADAPTER_SERIES_SHARD_CAP = 1024
+ADAPTER_SERIES_MANIFEST_LINE_BYTES = 512
+ADAPTER_SERIES_LINE_BYTES = 4096
+ADAPTER_SERIES_LEAF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # (A1, M4, L7) The execution plan binds the reviewed campaign budget record
 # (tools/throughput/retirement_budget.h canonical text) and its SHA-256, the
 # recipe-profile pin `campaign-budget-sha256=`.  Every object group's
@@ -3939,9 +3961,213 @@ def _family_member_indexes(family):
             {member: ordinal for ordinal, member in enumerate(cell_members)})
 
 
+def adapter_series_shards(data, shard_bytes=None):
+    """The canonical (#1880) split of one #619 series stream into shards.
+
+    Greedy over whole LF-terminated lines: a line joins the current shard
+    unless that would exceed ``shard_bytes`` (default
+    ADAPTER_SERIES_SHARD_BYTES), so every shard but the last is maximal and
+    the split is a pure function of the series bytes.
+    """
+    cap = ADAPTER_SERIES_SHARD_BYTES if shard_bytes is None else shard_bytes
+    if not data or not data.endswith(b"\n"):
+        raise ValueError("a #619 series is a nonempty sequence of LF-terminated lines")
+    shards = []
+    current = bytearray()
+    for body in data[:-1].split(b"\n"):
+        line = body + b"\n"
+        if len(line) > min(cap, ADAPTER_SERIES_LINE_BYTES):
+            raise ValueError("a #619 series line exceeds its bound")
+        if current and len(current) + len(line) > cap:
+            shards.append(bytes(current))
+            current = bytearray()
+        current += line
+    shards.append(bytes(current))
+    return shards
+
+
+def adapter_series_manifest(shards, leaves, shard_bytes=None):
+    """The canonical manifest bytes over ordered ``shards`` named ``leaves``."""
+    cap = ADAPTER_SERIES_SHARD_BYTES if shard_bytes is None else shard_bytes
+    total = hashlib.sha256()
+    if len(shards) != len(leaves):
+        raise ValueError("every series shard needs exactly one leaf")
+    lines = []
+    offset = 0
+    for index, (shard, leaf) in enumerate(zip(shards, leaves)):
+        total.update(shard)
+        lines.append(f"shard={index} offset={offset} bytes={len(shard)} "
+                     f"sha256={hashlib.sha256(shard).hexdigest()} path={leaf}")
+        offset += len(shard)
+    head = [ADAPTER_SERIES_MANIFEST_HEADER,
+            f"series bytes={offset} sha256={total.hexdigest()} shards={len(shards)} shard_bytes={cap}"]
+    return ("\n".join(head + lines) + "\n").encode("ascii")
+
+
+def _adapter_series_manifest(root, artifact, name="sealed_result_bundle.adapter_input"):
+    """Read and check the canonical #619 series manifest (#1880).
+
+    Returns the whole series' bytes and SHA-256 and its ordered shards, each
+    ``{path, bytes, sha256, offset}`` with the path relative to the evidence
+    root.  Shard indexes follow their order from 0, offsets are contiguous
+    from 0 with no gap or overlap, every shard is nonempty and within the
+    approved shard size, leaves are distinct, and the shards cover exactly
+    the declared series bytes.
+    """
+    _artifact(artifact, name)
+    byte_cap = (ADAPTER_SERIES_SHARD_CAP + 2) * ADAPTER_SERIES_MANIFEST_LINE_BYTES
+    if artifact["bytes"] > byte_cap:
+        _fail(f"{name} exceeds the series manifest bound")
+    target = _check_evidence_file(root, artifact, name)
+    try:
+        with target.open("rb") as stream:
+            data = stream.read(byte_cap + 1)
+    except OSError as error:
+        _fail(f"{name} is unreadable: {error}")
+    if len(data) != artifact["bytes"] or hashlib.sha256(data).hexdigest() != artifact["sha256"]:
+        _fail(f"{name} digest does not match evidence")
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError:
+        _fail(f"{name} is not an ASCII series manifest")
+    lines = text.split("\n")
+    if len(lines) < 4 or lines[-1] != "" or lines[0] != ADAPTER_SERIES_MANIFEST_HEADER \
+            or any(len(line) >= ADAPTER_SERIES_MANIFEST_LINE_BYTES for line in lines):
+        _fail(f"{name} is not a canonical series manifest")
+    series = re.fullmatch(r"series bytes=([1-9][0-9]*) sha256=([0-9a-f]{64}) "
+                          r"shards=([1-9][0-9]*) shard_bytes=([1-9][0-9]*)", lines[1])
+    if not series:
+        _fail(f"{name} series line is malformed")
+    total, total_sha256, count, shard_bytes = (int(series.group(1)), series.group(2),
+                                               int(series.group(3)), int(series.group(4)))
+    if shard_bytes != ADAPTER_SERIES_SHARD_BYTES:
+        _fail(f"{name} does not use the approved series shard size")
+    if count > ADAPTER_SERIES_SHARD_CAP or len(lines) != count + 3:
+        _fail(f"{name} shard count differs from its shard lines")
+    directory = PurePosixPath(artifact["path"]).parent
+    manifest_leaf = PurePosixPath(artifact["path"]).name
+    shards = []
+    leaves = set()
+    offset = 0
+    for index, line in enumerate(lines[2:-1]):
+        match = re.fullmatch(r"shard=(0|[1-9][0-9]*) offset=(0|[1-9][0-9]*) bytes=([1-9][0-9]*) "
+                             r"sha256=([0-9a-f]{64}) path=(\S+)", line)
+        if not match:
+            _fail(f"{name} shard {index} line is malformed")
+        shard_index, shard_offset, size = (int(match.group(i)) for i in (1, 2, 3))
+        leaf = match.group(5)
+        if shard_index != index:
+            _fail(f"{name} shards are not in series order")
+        if shard_offset != offset:
+            _fail(f"{name} shard offsets leave a gap or overlap")
+        if size > shard_bytes:
+            _fail(f"{name} shard {index} exceeds the series shard size")
+        if not ADAPTER_SERIES_LEAF_RE.fullmatch(leaf) or leaf == manifest_leaf:
+            _fail(f"{name} shard {index} path is not a series shard leaf")
+        if leaf in leaves:
+            _fail(f"{name} names one shard twice")
+        leaves.add(leaf)
+        shards.append({"path": (directory / leaf).as_posix(), "bytes": size,
+                       "sha256": match.group(4), "offset": shard_offset})
+        offset += size
+    if offset != total:
+        _fail(f"{name} shards do not cover the whole series")
+    return {"bytes": total, "sha256": total_sha256, "shard_bytes": shard_bytes, "shards": shards}
+
+
+class _AdapterSeriesStream:
+    """Stream the #619 series lines across its shards (#1880).
+
+    Every consumed byte is hashed for its shard and for the whole series, so
+    the joined lines are exactly the authenticated shards in manifest order.
+    A line never straddles two shards, and a shard ends only where its
+    successor's first line would not fit (the canonical greedy split).
+    """
+
+    def __init__(self, root, manifest, name):
+        self.root = root
+        self.manifest = manifest
+        self.name = name
+        self.index = -1
+        self.stream = None
+        self.shard_digest = None
+        self.shard_used = 0
+        self.first_line = False
+        self.total = hashlib.sha256()
+        self.total_bytes = 0
+
+    def _open(self):
+        shard = self.manifest["shards"][self.index]
+        target = _check_evidence_file(self.root, shard, f"{self.name} shard {self.index}")
+        try:
+            self.stream = target.open("rb")
+        except OSError as error:
+            _fail(f"{self.name} shard {self.index} is unreadable: {error}")
+        self.shard_digest = hashlib.sha256()
+        self.shard_used = 0
+        self.first_line = True
+
+    def _finish_shard(self):
+        shard = self.manifest["shards"][self.index]
+        self.stream.close()
+        self.stream = None
+        if self.shard_used != shard["bytes"] or self.shard_digest.hexdigest() != shard["sha256"]:
+            _fail(f"{self.name} shard {self.index} is truncated or differs from its manifest")
+
+    def readline(self):
+        """The next series line, or "" once every shard is consumed."""
+        shards = self.manifest["shards"]
+        line = None
+        while line is None:
+            if self.stream is None:
+                if self.index + 1 == len(shards):
+                    line = b""
+                    continue
+                self.index += 1
+                self._open()
+            raw = self.stream.readline(ADAPTER_SERIES_LINE_BYTES + 1)
+            if not raw:
+                self._finish_shard()
+                continue
+            if not raw.endswith(b"\n") or len(raw) > ADAPTER_SERIES_LINE_BYTES:
+                _fail(f"{self.name} shard {self.index} does not end on a line boundary")
+            if self.first_line and self.index \
+                    and shards[self.index - 1]["bytes"] + len(raw) <= self.manifest["shard_bytes"]:
+                _fail(f"{self.name} shard {self.index - 1} is not canonically packed")
+            self.first_line = False
+            self.shard_used += len(raw)
+            if self.shard_used > shards[self.index]["bytes"]:
+                _fail(f"{self.name} shard {self.index} is longer than its manifest")
+            self.shard_digest.update(raw)
+            self.total.update(raw)
+            self.total_bytes += len(raw)
+            line = raw
+        try:
+            return line.decode("utf-8")
+        except UnicodeDecodeError:
+            _fail(f"{self.name} is not UTF-8 text")
+
+    def finish(self):
+        """Require every shard consumed and the whole series authenticated."""
+        if self.readline():
+            _fail("statistics adapter input has trailing unbound members")
+        if self.total_bytes != self.manifest["bytes"] \
+                or self.total.hexdigest() != self.manifest["sha256"]:
+            _fail(f"{self.name} joined shards differ from the manifest's series")
+
+    def close(self):
+        if self.stream is not None:
+            self.stream.close()
+            self.stream = None
+
+
 def _check_adapter_series(root, artifact, family, parsed, rules, sample_db):
-    """Parse every C-adapter series and join ratios back to raw samples."""
-    _check_evidence(root, artifact, "sealed_result_bundle.adapter_input")
+    """Stream every C-adapter series shard and join ratios back to raw samples.
+
+    ``artifact`` is the series manifest (#1880); its shards are joined in
+    manifest order into the one series stream the adapter consumes.
+    """
+    manifest = _adapter_series_manifest(root, artifact)
     bootstrap_index, cell_index = _family_member_indexes(family)
     family_cells = _family_cells(parsed)
     cell_by_member = {f"{metric}/cell/{cell['cell']}": cell
@@ -3950,12 +4176,8 @@ def _check_adapter_series(root, artifact, family, parsed, rules, sample_db):
     rounds = rules["sampling"]["rounds"]
     pairs = rules["sampling"]["pairs_per_round"]
     expected_resamples = rules["sampling"]["resamples"]
-    target = Path(root).resolve() / PurePosixPath(artifact["path"])
-    try:
-        stream = target.open(encoding="utf-8")
-    except OSError as error:
-        _fail(f"sealed_result_bundle.adapter_input is unreadable: {error}")
-    with stream:
+    stream = _AdapterSeriesStream(root, manifest, "sealed_result_bundle.adapter_input")
+    with closing(stream):
         line = stream.readline()
         header = re.fullmatch(
             r"version=(\d+) seed=(\d+) bootstrap_members=(\d+) cell_members=(\d+) "
@@ -4062,8 +4284,7 @@ def _check_adapter_series(root, artifact, family, parsed, rules, sample_db):
                         _fail("statistics adapter ratio differs from raw candidate/baseline observations")
             if stream.readline() != "end\n":
                 _fail("statistics adapter member does not terminate at its declared cells")
-        if stream.readline():
-            _fail("statistics adapter input has trailing unbound members")
+        stream.finish()
     if seen_members != expected_members:
         _fail("statistics adapter input does not cover the dense family exactly once")
 
@@ -4308,6 +4529,11 @@ def _sealed_closure_files(root, binding, support_output, records, phases,
         add(f"census.projection.{index}", artifact)
     add("workflow.result_bundle", result_bundle_descriptor)
     add("workflow.adapter_input", result_bundle["adapter_input"])
+    # (#1880) The adapter input is a manifest; each of its ordered series
+    # shards is sealed evidence the independent replay re-reads.
+    adapter_series = _adapter_series_manifest(root, result_bundle["adapter_input"])
+    for index, shard in enumerate(adapter_series["shards"]):
+        add(f"workflow.adapter_input.shard.{index}", shard)
     add("workflow.adapter_result", adapter_result)
     pre = _read_json_evidence(root, phases["pre_sample_plan"], "pre_sample_plan")
     add("workflow.execution_plan", pre["execution_plan"])

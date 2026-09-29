@@ -21,8 +21,9 @@
  *
  * Map: Driver, driver_parse, driver_plan, driver_import_all, driver_compose,
  * driver_main, stub_adapter, fixture_streams, fixture_start, fixture_clean,
- * test_canonical_json, test_compose_success, test_compose_refusals,
- * test_budget_and_settle, test_handoff.
+ * test_canonical_json, test_compose_success, test_compose_series_shards,
+ * test_compose_refusals, test_production_capacity, test_budget_and_settle,
+ * test_handoff.
  */
 #define _GNU_SOURCE 1
 #include "retirement_compose.h"
@@ -38,6 +39,7 @@
 #include <unistd.h>
 
 extern unsigned tp_retirement_store_test_sync_calls, tp_retirement_store_test_fail_sync;
+extern uint64_t tp_retirement_compose_test_shard_bytes;
 BUSTER_GLOBAL_LOCAL unsigned assertions, failures;
 #define CHECK(value) do { ++assertions; if (!(value)) { ++failures; fprintf(stderr, "COMPOSE_TEST line=%d: %s\n", __LINE__, #value); } } while (0)
 
@@ -268,6 +270,10 @@ BUSTER_GLOBAL_LOCAL int driver_parse(Driver* driver, char const* spec)
                     driver_digest_copy(driver->binding_sha256, words[2]);
         else if (!strcmp(key, "sealed") && count == 2) valid = driver_copy(driver->sealed, sizeof(driver->sealed), words[1]);
         else if (!strcmp(key, "timeout") && count == 2) driver->timeout_ns = strtoull(words[1], NULL, 10);
+        /* A fixture-only series shard size (#1880), so a small family spans
+         * several shards; the validator test patches its size to match. */
+        else if (!strcmp(key, "series-shard-bytes") && count == 2)
+            tp_retirement_compose_test_shard_bytes = strtoull(words[1], NULL, 10);
         else if (!strcmp(key, "identity") && count == 6)
         {
             valid = driver_copy(driver->job, sizeof(driver->job), words[1]) &&
@@ -605,6 +611,7 @@ BUSTER_GLOBAL_LOCAL int driver_main(char const* spec)
         printf("\"retained_files\":%u,\"seal_entries\":%u,", result->retained_files, result->seal_entries);
         driver_artifact("sealed", &result->sealed, 0);
         driver_artifact("series", &result->series, 0);
+        printf("\"series_shards\":%u,", result->series_shards);
         printf("\"untimed_production\":%" PRIu64 ",\"untimed_records\":%" PRIu64, result->untimed_production,
                result->untimed_records);
         if (driver->authority_fd >= 0)
@@ -633,6 +640,34 @@ BUSTER_GLOBAL_LOCAL int driver_canonical(char const* path, char const* raw)
     return valid ? 0 : 1;
 }
 
+/* The next line of the series the manifest at `input` lists (its shards are
+ * leaves beside it, read in order), or NULL at its end. The stub trusts the
+ * manifest; the reviewed adapter and the validator check it. */
+BUSTER_GLOBAL_LOCAL char* stub_series_line(FILE* manifest, FILE** shard, char* line, size_t capacity)
+{
+    char* result = NULL;
+    int done = 0;
+    while (!done)
+    {
+        if (*shard && fgets(line, (int)capacity, *shard))
+        {
+            result = line;
+            done = 1;
+        }
+        else
+        {
+            char entry[DRIVER_LINE], leaf[DRIVER_PATH];
+            if (*shard) fclose(*shard);
+            *shard = NULL;
+            while (!*shard && fgets(entry, sizeof(entry), manifest))
+                if (sscanf(entry, "shard=%*u offset=%*u bytes=%*u sha256=%*s path=%511s", leaf) == 1)
+                    *shard = fopen(leaf, "rb");
+            done = !*shard;
+        }
+    }
+    return result;
+}
+
 /* A stub for the native fixtures only: one structurally valid result per
  * series member, or (per `stub-mode`) a slow run or a wrong family index.
  * The reviewed adapter replaces it in the Python end-to-end test. */
@@ -651,16 +686,17 @@ BUSTER_GLOBAL_LOCAL int stub_adapter(char const* input_path, char const* output_
         nanosleep(&pause, NULL);
     }
     FILE* input = fopen(input_path, "rb");
+    FILE* shard = NULL;
     FILE* output = input ? fopen(output_path, "wb") : NULL;
     int valid = input && output;
     char line[DRIVER_LINE];
     unsigned members = 0, bootstrap = 0, cells = 0, resamples = 0, pairs = 0, seed_version = 0, total = 0;
     unsigned long long seed = 0;
-    valid = valid && fgets(line, sizeof(line), input) &&
+    valid = valid && stub_series_line(input, &shard, line, sizeof(line)) &&
             sscanf(line, "version=%u seed=%llu bootstrap_members=%u cell_members=%u pairs=%u resamples=%u frozen=1 members=%u",
                    &seed_version, &seed, &bootstrap, &cells, &pairs, &resamples, &total) == 7;
     if (valid) fputs("{\"schema\":\"buster-native-retirement-statistics-replay-v1\",\"version\":1,\"members\":[", output);
-    while (valid && fgets(line, sizeof(line), input))
+    while (valid && stub_series_line(input, &shard, line, sizeof(line)))
     {
         char name[TP_RETIREMENT_COMPOSE_MEMBER_BYTES];
         unsigned metric = 0, kind = 0, family = 0, member_cells = 0, member_pairs = 0, member_resamples = 0;
@@ -680,6 +716,7 @@ BUSTER_GLOBAL_LOCAL int stub_adapter(char const* input_path, char const* output_
     }
     if (valid) fputs("]}\n", output);
     if (output && fclose(output) != 0) valid = 0;
+    if (shard) fclose(shard);
     if (input) fclose(input);
     return valid && members == total ? 0 : 2;
 }
@@ -1255,7 +1292,9 @@ BUSTER_GLOBAL_LOCAL void test_compose_success(void)
     TpRetirementComposeResult const* result = &driver->result;
     /* (G + U) * 2 * (warmups + rounds * pairs) = 3 * 2 * 122. */
     CHECK(result->invocations == 732);
-    CHECK(result->seal_entries == 4 + 5 + 1 + 1 + 1 + 1 + 2 + 2);
+    /* A small family's series is one canonical shard (#1880). */
+    CHECK(result->series_shards == 1);
+    CHECK(result->seal_entries == 4 + 5 + 1 + 1 + 1 + 1 + 2 + 2 + result->series_shards);
     CHECK(result->retained_files == 6 && result->untimed_records == 2 && result->untimed_production == 0);
     CHECK(tp_retirement_store_validate(&driver->store));
     CHECK(driver->store.count == driver->store.planned_files);
@@ -1269,8 +1308,14 @@ BUSTER_GLOBAL_LOCAL void test_compose_success(void)
     CHECK(file_contains(driver->arena, driver->store_fd, "retirement-sealed-result.json",
                         "\"name\":\"result_input.shard.batches-0000\""));
     CHECK(file_contains(driver->arena, driver->store_fd, "retirement-rows-manifest.json", "\"identity\":\"samples-0000\""));
-    CHECK(file_contains(driver->arena, driver->store_fd, TP_RETIREMENT_COMPOSE_SERIES_PATH,
+    CHECK(file_contains(driver->arena, driver->store_fd, "retirement-statistics-series-0000.txt",
                         "member=generated_runtime/cell/row=1 metric=2 kind=1"));
+    CHECK(file_contains(driver->arena, driver->store_fd, TP_RETIREMENT_COMPOSE_SERIES_PATH,
+                        "BQ-RETIREMENT-STATISTICS-SERIES-V1\nseries bytes="));
+    CHECK(file_contains(driver->arena, driver->store_fd, TP_RETIREMENT_COMPOSE_SERIES_PATH,
+                        "shard_bytes=67108864\nshard=0 offset=0 bytes="));
+    CHECK(file_contains(driver->arena, driver->store_fd, "retirement-sealed-result.json",
+                        "\"name\":\"workflow.adapter_input.shard.0\",\"path\":\"retirement-statistics-series-0000.txt\""));
     /* Code summary: rows 0..2 with 101/100, 200/200 and 299/300. */
     CHECK(file_contains(driver->arena, driver->store_fd, TP_RETIREMENT_COMPOSE_BUNDLE_PATH,
                         "\"aggregate_pass\":true,\"aggregate_ratio\":1.0,\"per_cell_max_ratio\":1.01,\"per_cell_pass\":true"));
@@ -1308,8 +1353,45 @@ BUSTER_GLOBAL_LOCAL void test_compose_success(void)
      * overwrite the sealed outputs. */
     struct stat info;
     CHECK(fstatat(driver->scratch_fd, TP_RETIREMENT_COMPOSE_SERIES_PATH, &info, 0) != 0);
+    CHECK(fstatat(driver->scratch_fd, "retirement-statistics-series-0000.txt", &info, 0) != 0);
     TpRetirementComposeResult again;
     CHECK(!tp_retirement_compose(&driver->request, &again));
+    fixture_stop(&fixture);
+}
+
+/* (#1880) With a small shard size the same family spans several canonical
+ * shards: the plan reserves the bound, the settle keeps exactly the shards
+ * written, and every shard is sealed and listed in order. */
+BUSTER_GLOBAL_LOCAL void test_compose_series_shards(void)
+{
+    Fixture fixture;
+    tp_retirement_compose_test_shard_bytes = 4096;
+    CHECK(fixture_ready(&fixture));
+    Driver* driver = fixture.driver;
+    CHECK(driver_compose(driver));
+    tp_retirement_compose_test_shard_bytes = 0;
+    TpRetirementComposeResult const* result = &driver->result;
+    CHECK(result->series_shards > 2);
+    CHECK(result->seal_entries == 4 + 5 + 1 + 1 + 1 + 1 + 2 + 2 + result->series_shards);
+    CHECK(tp_retirement_store_validate(&driver->store));
+    CHECK(driver->store.count == driver->store.planned_files);
+    uint64_t total = 0;
+    for (unsigned s = 0; s < result->series_shards; ++s)
+    {
+        char path[TP_RETIREMENT_STORE_PATH_BYTES + 1], line[128];
+        snprintf(path, sizeof(path), "retirement-statistics-series-%04u.txt", s);
+        struct stat info;
+        CHECK(fstatat(driver->store_fd, path, &info, 0) == 0 && info.st_size > 0 && info.st_size <= 4096);
+        snprintf(line, sizeof(line), "shard=%u offset=%" PRIu64 " bytes=%lld ", s, total, (long long)info.st_size);
+        CHECK(file_contains(driver->arena, driver->store_fd, TP_RETIREMENT_COMPOSE_SERIES_PATH, line));
+        snprintf(line, sizeof(line), "\"name\":\"workflow.adapter_input.shard.%u\"", s);
+        CHECK(file_contains(driver->arena, driver->store_fd, "retirement-sealed-result.json", line));
+        total += (uint64_t)info.st_size;
+    }
+    char series[96];
+    snprintf(series, sizeof(series), "series bytes=%" PRIu64 " ", total);
+    CHECK(file_contains(driver->arena, driver->store_fd, TP_RETIREMENT_COMPOSE_SERIES_PATH, series));
+    CHECK(file_contains(driver->arena, driver->store_fd, "retirement-statistics-series-0000.txt", "version=1 seed="));
     fixture_stop(&fixture);
 }
 
@@ -1478,10 +1560,105 @@ BUSTER_GLOBAL_LOCAL int reopen_store(Driver* driver)
     return valid;
 }
 
+/* (#1880) The A1 production family at both pair bounds: 16 native-host
+ * configurations of five object groups (398, 4, 1, 1 and 1 members; the
+ * compiler-default batch carries 416 inputs) and a runtime-eligible native
+ * link and self-host singleton: 6,482 timed rows, 80 object groups and
+ * 13,126 #619 cells, with 880 untimed cross-target object groups. Its series
+ * exceeds one store file; as shards it fits, and the plan reserves both
+ * campaign stages and every composer output within the 4,096-entry and
+ * 128 GiB store (retirement_capacity_test.py mirrors these bounds). */
+BUSTER_GLOBAL_LOCAL void test_production_capacity(void)
+{
+    enum { CONFIGURATIONS = 16, RECIPES = 5, OBJECT_GROUPS = CONFIGURATIONS * RECIPES, ROWS = 6482, UNTIMED = 880 };
+    static unsigned const members[RECIPES] = {398, 4, 1, 1, 1};
+    static unsigned const inputs[RECIPES] = {416, 4, 1, 1, 1};
+    static char const* const allocators[4] = {"a0", "a1", "a2", "a3"};
+    static char const* const frontends[2] = {"direct-ssa", "mir"};
+    static char const* const pic[2] = {"0", "1"};
+    static uint64_t const expected_series[2] = {UINT64_C(406659336), UINT64_C(1710438664)};
+    static unsigned const expected_shards[2] = {7, 26};
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = DRIVER_ARENA_BYTES, .flags = {.no_pool = 1}});
+    TpRetirementComposeRow* rows = arena ? (TpRetirementComposeRow*)tp_retirement_compose_allocate(arena,
+                                        ROWS * sizeof(TpRetirementComposeRow)) : NULL;
+    unsigned* kinds = arena ? (unsigned*)tp_retirement_compose_allocate(arena,
+                                  (OBJECT_GROUPS + 2) * sizeof(unsigned)) : NULL;
+    CHECK(rows && kinds);
+    unsigned count = 0;
+    uint64_t metrics_bytes = 0, untimed_metrics_bytes = 0, untimed_rows = 0;
+    for (unsigned c = 0; rows && kinds && c < CONFIGURATIONS; ++c)
+    {
+        for (unsigned k = 0; k < RECIPES; ++k)
+        {
+            unsigned group = c * RECIPES + k;
+            kinds[group] = TP_RETIREMENT_GROUP_OBJECT;
+            metrics_bytes += 4096 + (uint64_t)inputs[k] * 4096;
+            for (unsigned m = 0; m < members[k]; ++m, ++count)
+                rows[count] = (TpRetirementComposeRow){count, group, 0, {"x86_64-unknown-linux-gnu", "baseline",
+                    allocators[c % 4], frontends[(c / 4) % 2], pic[c / 8], "object"}};
+        }
+    }
+    /* The untimed groups repeat the object shapes on 11 cross targets. */
+    for (unsigned g = 0; g < UNTIMED; ++g)
+    {
+        untimed_metrics_bytes += 4096 + (uint64_t)members[g % RECIPES] * 4096;
+        untimed_rows += members[g % RECIPES];
+    }
+    if (rows && kinds)
+    {
+        rows[count] = (TpRetirementComposeRow){count, OBJECT_GROUPS, 1, {"x86_64-unknown-linux-gnu", "baseline", "a0",
+                                                                         "direct-ssa", "0", "link"}};
+        kinds[OBJECT_GROUPS] = TP_RETIREMENT_GROUP_SINGLETON;
+        ++count;
+        rows[count] = (TpRetirementComposeRow){count, OBJECT_GROUPS + 1, 1, {"x86_64-unknown-linux-gnu", "baseline",
+                                                                             "a0", "direct-ssa", "0",
+                                                                             "self-host-stage1"}};
+        kinds[OBJECT_GROUPS + 1] = TP_RETIREMENT_GROUP_SINGLETON;
+        ++count;
+    }
+    CHECK(count == ROWS && untimed_rows == 11 * 16 * 405);
+    Fixture fixture;
+    CHECK(fixture_start(&fixture, FIXTURE_CLEAN) && driver_open(fixture.driver));
+    Driver* driver = fixture.driver;
+    driver_views(driver);
+    TpRetirementComposeLayout layout = {rows, kinds, ROWS, OBJECT_GROUPS + 2, 78912, UNTIMED};
+    unsigned pair_counts[2] = {TP_RETIREMENT_MIN_PAIRS_PER_ROUND, TP_RETIREMENT_EXECUTION_MAX_PAIRS};
+    for (unsigned p = 0; rows && kinds && count == ROWS && p < 2; ++p)
+    {
+        TpRetirementComposeShape shape = {&layout, pair_counts[p], (unsigned)(ROWS + untimed_rows), driver->prior_count};
+        TpRetirementComposeBounds bounds;
+        CHECK(tp_retirement_compose_bounds(&shape, &bounds));
+        CHECK(bounds.cell_members == 13126 && bounds.bootstrap_members == 60 && bounds.members == 13186);
+        CHECK(bounds.series == expected_series[p] && bounds.series > TP_RETIREMENT_STORE_FILE_BYTES);
+        CHECK(bounds.series_shards == expected_shards[p]);
+        CHECK(bounds.files == 2 + TP_RETIREMENT_COMPOSE_FIXED_OUTPUTS + expected_shards[p]);
+        CHECK(bounds.series_manifest <= TP_RETIREMENT_STORE_FILE_BYTES && bounds.code <= TP_RETIREMENT_STORE_FILE_BYTES &&
+              bounds.replay <= TP_RETIREMENT_STORE_FILE_BYTES && bounds.seal <= TP_RETIREMENT_STORE_FILE_BYTES);
+        TpRetirementCampaignShape campaign = {OBJECT_GROUPS + 2, OBJECT_GROUPS, ROWS, 2, pair_counts[p], UNTIMED,
+                                              UNTIMED, metrics_bytes, untimed_metrics_bytes, 4096 + 416 * 4096};
+        TpRetirementCampaignCapacity capacity;
+        TpRetirementCampaignStorePlan plan = {0};
+        CHECK(tp_retirement_campaign_capacity(&campaign, &capacity));
+        CHECK(reopen_store(driver));
+        CHECK(tp_retirement_compose_plan(&driver->store, &capacity, &shape, &driver->declaration,
+                                         DRIVER_EXTERNAL_ENTRIES, 0, &plan));
+        CHECK(plan.entries <= TP_RETIREMENT_STORE_FILES && plan.bytes <= TP_RETIREMENT_STORE_TOTAL_BYTES);
+        CHECK(driver->store.bounded_files >= capacity.total_metrics_shards_upper_bound + bounds.series_shards - 1);
+        printf("COMPOSE_CAPACITY pairs=%u rows=%u object_groups=%u cells=%u series=%" PRIu64 " series_shards=%u "
+               "composer_files=%u store_entries=%" PRIu64 "/%u store_bytes=%" PRIu64 "/%" PRIu64 "\n",
+               pair_counts[p], (unsigned)ROWS, (unsigned)OBJECT_GROUPS, bounds.cell_members, bounds.series,
+               bounds.series_shards, bounds.files, plan.entries, TP_RETIREMENT_STORE_FILES, plan.bytes,
+               TP_RETIREMENT_STORE_TOTAL_BYTES);
+    }
+    fixture_stop(&fixture);
+    if (arena) arena_destroy(arena, 1);
+}
+
 BUSTER_GLOBAL_LOCAL void test_budget_and_settle(void)
 {
-    /* A family whose single adapter input exceeds the per-file store cap is
-     * refused before any timing. */
+    /* (#1880) A family whose series exceeds the per-file store cap is bounded
+     * as several shards; one needing more than the shard cap is refused
+     * before any timing. */
     enum { LARGE_ROWS = 4000 };
     Arena* arena = arena_create((ArenaCreation){.reserved_size = DRIVER_ARENA_BYTES, .flags = {.no_pool = 1}});
     TpRetirementComposeRow* rows = arena ? (TpRetirementComposeRow*)tp_retirement_compose_allocate(arena,
@@ -1503,7 +1680,13 @@ BUSTER_GLOBAL_LOCAL void test_budget_and_settle(void)
         TpRetirementComposeLayout large = {rows, kinds, LARGE_ROWS, LARGE_ROWS, LARGE_ROWS, 0};
         TpRetirementComposeShape shape = {&large, TP_RETIREMENT_EXECUTION_MAX_PAIRS, 1, 1};
         TpRetirementComposeBounds bounds;
+        CHECK(tp_retirement_compose_bounds(&shape, &bounds));
+        CHECK(bounds.series > TP_RETIREMENT_STORE_FILE_BYTES && bounds.series_shards > 1 &&
+              bounds.series_shards <= TP_RETIREMENT_COMPOSE_SERIES_SHARDS &&
+              bounds.files == bounds.manifest_count + TP_RETIREMENT_COMPOSE_FIXED_OUTPUTS + bounds.series_shards);
+        tp_retirement_compose_test_shard_bytes = 4096;
         CHECK(!tp_retirement_compose_bounds(&shape, &bounds));
+        tp_retirement_compose_test_shard_bytes = 0;
         shape.pairs = FIXTURE_PAIRS;
         TpRetirementComposeLayout small = {rows, kinds, 2, 2, LARGE_ROWS, 0};
         shape.layout = &small;
@@ -1715,7 +1898,9 @@ int main(int argc, char** argv)
         CHECK(fixture_self());
         test_canonical_json();
         test_compose_success();
+        test_compose_series_shards();
         test_compose_refusals();
+        test_production_capacity();
         test_budget_and_settle();
         test_handoff();
         fprintf(stderr, "COMPOSE_TEST assertions=%u failures=%u\n", assertions, failures);

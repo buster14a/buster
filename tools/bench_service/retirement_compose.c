@@ -14,7 +14,9 @@
  *                  tp_compose_aa (A/A metrics-shard tiling),
  *                  tp_compose_samples, tp_compose_partitions, tp_compose_context
  *   outputs        TpComposeWriter, tp_compose_manifests, tp_compose_code,
- *                  tp_compose_series, tp_compose_adapter (tp_compose_adapter_run,
+ *                  TpComposeSeries (tp_compose_series_plan before the settle,
+ *                  tp_compose_series_pass, tp_compose_series: the #1880 series
+ *                  shards and manifest), tp_compose_adapter (tp_compose_adapter_run,
  *                  tp_compose_replay_check), tp_compose_receipt,
  *                  tp_compose_retained, tp_compose_bundle, tp_compose_seal
  *   entry points   tp_retirement_compose_bounds, tp_retirement_compose_plan,
@@ -55,6 +57,13 @@
 /* The series header line and the member terminator ("end\n"). */
 #define TP_COMPOSE_SERIES_HEADER_BYTES 256u
 #define TP_COMPOSE_SERIES_END_BYTES 4u
+/* (#1880) No series line is longer than this (the header and member lines
+ * are the longest), so under greedy packing every shard but the last holds
+ * more than shard_bytes - TP_COMPOSE_SERIES_LINE_BYTES bytes. */
+#define TP_COMPOSE_SERIES_LINE_BYTES 256u
+/* The series manifest: header and series line, then one line per shard. */
+#define TP_COMPOSE_SERIES_MANIFEST_FIXED_BYTES 512u
+#define TP_COMPOSE_SERIES_MANIFEST_LINE_BYTES 256u
 /* One adapter result member: identity, indexes and nine bound numbers. */
 #define TP_COMPOSE_REPLAY_MEMBER_BYTES 1024u
 #define TP_COMPOSE_REPLAY_FIXED_BYTES 256u
@@ -108,6 +117,21 @@
 #define TP_COMPOSE_BATCH_WALL 3u
 #define TP_COMPOSE_BATCH_RSS 4u
 #define TP_COMPOSE_OBSERVATIONS 5u
+
+#ifdef BUSTER_RETIREMENT_STORE_TEST
+/* Fixture-only override of the series shard size, so a small family spans
+ * several shards (the validator and adapter tests patch theirs to match). */
+uint64_t tp_retirement_compose_test_shard_bytes;
+#endif
+
+BUSTER_GLOBAL_LOCAL uint64_t tp_compose_series_shard_bytes(void)
+{
+    uint64_t result = TP_RETIREMENT_COMPOSE_SERIES_SHARD_BYTES;
+#ifdef BUSTER_RETIREMENT_STORE_TEST
+    if (tp_retirement_compose_test_shard_bytes) result = tp_retirement_compose_test_shard_bytes;
+#endif
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL char const* const tp_compose_metric_names[TP_RETIREMENT_COMPOSE_METRICS] = {
     "compiler_wall_time", "compiler_peak_memory", "generated_runtime",
@@ -778,6 +802,14 @@ BUSTER_GLOBAL_LOCAL int tp_compose_bounds_of(TpRetirementComposeShape const* sha
             (uint64_t)family->count * (TP_COMPOSE_MEMBER_LINE_BYTES + TP_COMPOSE_SERIES_END_BYTES);
         valid = lines <= (UINT64_MAX - result.series) / TP_COMPOSE_RATIO_LINE_BYTES;
         if (valid) result.series += lines * TP_COMPOSE_RATIO_LINE_BYTES;
+        /* (#1880) Greedy whole-line packing: n shards hold more than
+         * (n - 1) * (shard_bytes - line_max) bytes. */
+        uint64_t shard_bytes = tp_compose_series_shard_bytes();
+        valid = valid && shard_bytes > TP_COMPOSE_SERIES_LINE_BYTES && shard_bytes <= TP_RETIREMENT_STORE_FILE_BYTES;
+        uint64_t shards = valid ? 1 + (result.series - 1) / (shard_bytes - TP_COMPOSE_SERIES_LINE_BYTES + 1) : 0;
+        valid = valid && shards <= TP_RETIREMENT_COMPOSE_SERIES_SHARDS;
+        result.series_shards = valid ? (unsigned)shards : 0;
+        result.series_manifest = TP_COMPOSE_SERIES_MANIFEST_FIXED_BYTES + shards * TP_COMPOSE_SERIES_MANIFEST_LINE_BYTES;
         result.replay = TP_COMPOSE_REPLAY_FIXED_BYTES + (uint64_t)family->count * TP_COMPOSE_REPLAY_MEMBER_BYTES;
         result.bundle = TP_COMPOSE_BUNDLE_BYTES;
         result.receipt = TP_RETIREMENT_RECEIPT_BYTES;
@@ -785,15 +817,16 @@ BUSTER_GLOBAL_LOCAL int tp_compose_bounds_of(TpRetirementComposeShape const* sha
                           (uint64_t)TP_RETIREMENT_STORE_FILES * TP_COMPOSE_RETAINED_LINE_BYTES;
         result.seal = TP_COMPOSE_SEAL_FIXED_BYTES +
             (uint64_t)(shape->prior_entries + TP_RETIREMENT_STORE_FILES) * TP_COMPOSE_SEAL_ENTRY_BYTES;
-        result.files = result.manifest_count + TP_RETIREMENT_COMPOSE_FIXED_OUTPUTS;
+        result.files = result.manifest_count + TP_RETIREMENT_COMPOSE_FIXED_OUTPUTS + result.series_shards;
     }
-    /* A1's single adapter input file is bound by the store's per-file cap:
-     * a family too large for it is refused here, before any timing. */
+    /* Every output is at most one store file; the adapter input is sharded
+     * (#1880), so only its manifest is one file here. */
     valid = valid && result.manifests <= TP_RETIREMENT_STORE_FILE_BYTES && result.code <= TP_RETIREMENT_STORE_FILE_BYTES &&
-            result.series <= TP_RETIREMENT_STORE_FILE_BYTES && result.replay <= TP_RETIREMENT_STORE_FILE_BYTES &&
+            result.series_manifest <= TP_RETIREMENT_STORE_FILE_BYTES && result.replay <= TP_RETIREMENT_STORE_FILE_BYTES &&
             result.retained <= TP_RETIREMENT_STORE_FILE_BYTES && result.seal <= TP_RETIREMENT_STORE_FILE_BYTES;
     valid = valid && tp_compose_add(&result.total, result.manifests) && tp_compose_add(&result.total, result.code) &&
-            tp_compose_add(&result.total, result.series) && tp_compose_add(&result.total, result.replay) &&
+            tp_compose_add(&result.total, result.series) && tp_compose_add(&result.total, result.series_manifest) &&
+            tp_compose_add(&result.total, result.replay) &&
             tp_compose_add(&result.total, result.bundle) && tp_compose_add(&result.total, result.receipt) &&
             tp_compose_add(&result.total, result.retained) && tp_compose_add(&result.total, result.seal);
     *bounds = valid ? result : (TpRetirementComposeBounds){0};
@@ -821,10 +854,18 @@ BUSTER_GLOBAL_LOCAL int tp_compose_kind(char const* kind)
     return valid;
 }
 
-/* Paths the composer publishes itself (and the producer's receipt). */
+/* Paths the composer publishes itself (and the producer's receipt),
+ * including every series shard name. */
 BUSTER_GLOBAL_LOCAL int tp_compose_reserved_path(char const* path)
 {
-    int reserved = !strcmp(path, TP_RETIREMENT_EXECUTION_RECEIPT_PATH) ||
+    size_t prefix = sizeof(TP_RETIREMENT_COMPOSE_SERIES_SHARD_PREFIX) - 1;
+    size_t suffix = sizeof(TP_RETIREMENT_COMPOSE_SERIES_SHARD_SUFFIX) - 1;
+    int shard = strlen(path) == prefix + TP_COMPOSE_GROUP_DIGITS + suffix &&
+                !memcmp(path, TP_RETIREMENT_COMPOSE_SERIES_SHARD_PREFIX, prefix) &&
+                !memcmp(path + prefix + TP_COMPOSE_GROUP_DIGITS, TP_RETIREMENT_COMPOSE_SERIES_SHARD_SUFFIX, suffix);
+    for (unsigned i = 0; shard && i < TP_COMPOSE_GROUP_DIGITS; ++i)
+        shard = path[prefix + i] >= '0' && path[prefix + i] <= '9';
+    int reserved = shard || !strcmp(path, TP_RETIREMENT_EXECUTION_RECEIPT_PATH) ||
                    !strcmp(path, TP_RETIREMENT_RETAINED_MANIFEST_PATH) || !strcmp(path, TP_RETIREMENT_COMPOSE_CODE_PATH) ||
                    !strcmp(path, TP_RETIREMENT_COMPOSE_SERIES_PATH) || !strcmp(path, TP_RETIREMENT_COMPOSE_REPLAY_PATH) ||
                    !strcmp(path, TP_RETIREMENT_COMPOSE_BUNDLE_PATH);
@@ -863,6 +904,10 @@ BUSTER_GLOBAL_LOCAL int tp_compose_declaration_digest(TpRetirementComposeDeclara
             valid = suffix <= TP_COMPOSE_SUFFIX_BYTES && (!suffix || tp_compose_printable(entry->suffix, suffix)) &&
                     !memchr(entry->suffix, '/', suffix) && prefix + TP_COMPOSE_GROUP_DIGITS + suffix <=
                     TP_RETIREMENT_STORE_PATH_BYTES && entry->files_max && entry->files_max <= TP_RETIREMENT_COMPOSE_GROUP_FILES;
+            /* A group whose members would be series shard names is refused. */
+            char member[TP_RETIREMENT_STORE_PATH_BYTES + 1];
+            valid = valid && snprintf(member, sizeof(member), "%s0000%s", entry->prefix, entry->suffix) > 0 &&
+                    !tp_compose_reserved_path(member);
             length = valid ? snprintf(line, sizeof(line), "group %s %u %u %" PRIu64 " %s =%s\n", entry->kind,
                                       entry->reserved, entry->files_max, entry->bytes_max, entry->prefix, entry->suffix) : 0;
         }
@@ -899,6 +944,8 @@ int tp_retirement_compose_plan(TpRetirementStore* store, TpRetirementCampaignCap
                 tp_compose_declaration_digest(declaration, digest) &&
                 shape->prior_entries == declaration->prior_entries &&
                 tp_compose_add(&control_bytes, bounds.total) && tp_compose_add(&control_files, bounds.files);
+    /* Series shards are an upper bound; at least one is always written. */
+    if (valid) bounded += bounds.series_shards - 1;
     for (unsigned i = 0; valid && i < declaration->retained_count; ++i)
     {
         TpRetirementComposeRetained const* entry = declaration->retained + i;
@@ -1239,6 +1286,14 @@ typedef struct TpComposeState
     TpRetirementComposeArtifact manifests[TP_RETIREMENT_COMPOSE_PARTITIONS];
     TpRetirementComposeArtifact code, series, replay, receipt, bundle, sealed, untimed, retained;
     unsigned seal_entries;
+    /* (#1880) Each ratio line's length, the planned series shard sizes and
+     * the sealed shards; series is their manifest. */
+    unsigned char* ratio_lines[TP_RETIREMENT_COMPOSE_METRICS];
+    uint64_t* series_sizes;
+    TpRetirementComposeArtifact* series_shards;
+    unsigned series_shard_count;
+    uint64_t series_bytes;
+    char series_sha256[65];
 } TpComposeState;
 
 /* The store file at `path` (binary search of the sorted order), or NONE. */
@@ -2199,45 +2254,222 @@ BUSTER_GLOBAL_LOCAL int tp_compose_code(TpComposeState* state)
     return valid;
 }
 
-/* The #619 statistics input the reviewed adapter consumes: every family
- * member in sorted order with its cells' ratios, round-major. The same bytes
- * go to the store and to the adapter's private scratch copy. */
-BUSTER_GLOBAL_LOCAL int tp_compose_series(TpComposeState* state)
+/* (#1880) The #619 statistics input the reviewed adapter consumes: every
+ * family member in sorted order with its cells' ratios, round-major, split
+ * greedily over whole lines into series shards of at most the shard size.
+ * One pass (TpComposeSeries) either plans the canonical shards before the
+ * settle (counting, from each ratio line's precomputed length) or writes
+ * them; the write must reproduce the planned shard sizes exactly. The same
+ * bytes go to the store and to the adapter's private scratch copies. */
+typedef struct TpComposeSeries
+{
+    TpComposeState* state;
+    TpComposeWriter writer;
+    FILE* copy;
+    Sha256 total;
+    uint64_t shard_bytes, used, total_bytes;
+    unsigned shard, writing, open;
+    int valid;
+} TpComposeSeries;
+
+BUSTER_GLOBAL_LOCAL void tp_compose_series_shard_path(char path[TP_RETIREMENT_STORE_PATH_BYTES + 1], unsigned shard)
+{
+    snprintf(path, TP_RETIREMENT_STORE_PATH_BYTES + 1, "%s%04u%s", TP_RETIREMENT_COMPOSE_SERIES_SHARD_PREFIX, shard,
+             TP_RETIREMENT_COMPOSE_SERIES_SHARD_SUFFIX);
+}
+
+/* Close the open shard: planning records its size, writing seals it and
+ * requires the planned size. */
+BUSTER_GLOBAL_LOCAL void tp_compose_series_close(TpComposeSeries* series)
+{
+    TpComposeState* state = series->state;
+    if (series->writing)
+    {
+        TpRetirementComposeArtifact* artifact = state->series_shards + series->shard;
+        int valid = series->valid && series->used == state->series_sizes[series->shard];
+        if (!valid) series->writer.valid = 0;
+        valid = tp_compose_writer_publish(&series->writer, artifact) && valid;
+        if (series->copy && fclose(series->copy) != 0) valid = 0;
+        series->copy = NULL;
+        series->valid = valid;
+    }
+    else state->series_sizes[series->shard] = series->used;
+    series->open = 0;
+    ++series->shard;
+}
+
+/* Append one series line of `length` bytes, opening the next shard where it
+ * would not fit; planning passes no text. */
+BUSTER_GLOBAL_LOCAL void tp_compose_series_line(TpComposeSeries* series, char const* text, size_t length)
+{
+    TpComposeState* state = series->state;
+    series->valid = series->valid && length && length <= TP_COMPOSE_SERIES_LINE_BYTES &&
+                    (!series->writing || (text && text[length - 1] == '\n'));
+    if (series->valid && series->open && series->used + length > series->shard_bytes) tp_compose_series_close(series);
+    if (series->valid && !series->open)
+    {
+        series->valid = series->shard < (series->writing ? state->series_shard_count : state->bounds.series_shards);
+        series->used = 0;
+        series->open = 1;
+        if (series->valid && series->writing)
+        {
+            char path[TP_RETIREMENT_STORE_PATH_BYTES + 1];
+            tp_compose_series_shard_path(path, series->shard);
+            int fd = openat(state->request->scratch_root, path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC,
+                            0600);
+            series->copy = fd >= 0 ? fdopen(fd, "wb") : NULL;
+            if (fd >= 0 && !series->copy) close(fd);
+            tp_compose_writer_begin(&series->writer, state->store, path, state->series_sizes[series->shard],
+                                    series->copy);
+            series->valid = series->writer.valid && series->copy;
+            if (!series->valid) series->open = 0;
+        }
+    }
+    if (series->valid && series->writing)
+    {
+        tp_compose_writer_bytes(&series->writer, text, length);
+        series->valid = series->writer.valid;
+        if (series->valid) sha256_add(&series->total, text, (u64)length);
+    }
+    if (series->valid)
+    {
+        series->used += length;
+        series->total_bytes += length;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void tp_compose_series_format(TpComposeSeries* series, char const* format, ...)
+{
+    char buffer[TP_COMPOSE_SERIES_LINE_BYTES + 1];
+    va_list arguments;
+    va_start(arguments, format);
+    int length = vsnprintf(buffer, sizeof(buffer), format, arguments);
+    va_end(arguments);
+    series->valid = series->valid && length > 0 && (size_t)length < sizeof(buffer);
+    if (series->valid) tp_compose_series_line(series, buffer, (size_t)length);
+}
+
+/* One pass over the series. Planning takes every ratio line's length from
+ * state->ratio_lines; writing formats the line and requires that length. */
+BUSTER_GLOBAL_LOCAL int tp_compose_series_pass(TpComposeState* state, unsigned writing)
 {
     TpRetirementComposeRequest const* request = state->request;
     TpComposeFamily const* family = &state->family;
     TpRetirementPlan const* plan = request->statistics;
     uint64_t per_unit = state->per_unit;
-    int fd = openat(request->scratch_root, TP_RETIREMENT_COMPOSE_SERIES_PATH,
-                    O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0600);
-    FILE* copy = fd >= 0 ? fdopen(fd, "wb") : NULL;
-    if (fd >= 0 && !copy) close(fd);
-    TpComposeWriter writer;
-    tp_compose_writer_begin(&writer, state->store, TP_RETIREMENT_COMPOSE_SERIES_PATH, state->bounds.series, copy);
-    writer.valid = writer.valid && copy;
-    tp_compose_writer_format(&writer, "version=%u seed=%" PRIu64 " bootstrap_members=%u cell_members=%u pairs=%u "
+    TpComposeSeries series = {.state = state, .shard_bytes = tp_compose_series_shard_bytes(), .writing = writing,
+                              .valid = 1};
+    sha256_init(&series.total);
+    tp_compose_series_format(&series, "version=%u seed=%" PRIu64 " bootstrap_members=%u cell_members=%u pairs=%u "
         "resamples=%u frozen=1 members=%u\n", plan->version, plan->seed, family->bootstrap, family->cells_total,
         state->pairs, plan->resamples, family->count);
-    for (unsigned i = 0; writer.valid && i < family->count; ++i)
+    for (unsigned i = 0; series.valid && i < family->count; ++i)
     {
         TpComposeMember const* member = family->members + family->order[i];
-        tp_compose_writer_format(&writer, "member=%s metric=%u kind=%u family=%u cells=%u pairs=%u resamples=%u limit=%s\n",
+        tp_compose_series_format(&series, "member=%s metric=%u kind=%u family=%u cells=%u pairs=%u resamples=%u limit=%s\n",
             member->name, member->metric, member->kind, member->family, member->cells, state->pairs,
             member->kind ? 0u : plan->resamples,
             member->kind ? tp_compose_cell_limits[member->metric] : tp_compose_aggregate_limits[member->metric]);
         unsigned written = 0;
-        for (unsigned cell = 0; writer.valid && cell < family->cells[member->metric]; ++cell)
+        for (unsigned cell = 0; series.valid && cell < family->cells[member->metric]; ++cell)
         {
             int selected = member->kind ? cell == member->unit : member->dimension == TP_COMPOSE_NONE ||
                 !strcmp(tp_compose_cell_value(family, member->metric, cell, member->dimension), member->value);
-            for (uint64_t index = 0; selected && writer.valid && index < per_unit; ++index)
-                tp_compose_writer_format(&writer, "ratio=%.17g\n", state->ratios[member->metric][cell * per_unit + index]);
+            for (uint64_t index = 0; selected && series.valid && index < per_unit; ++index)
+            {
+                uint64_t slot = cell * per_unit + index;
+                unsigned length = state->ratio_lines[member->metric][slot];
+                if (writing)
+                {
+                    char line[TP_COMPOSE_RATIO_LINE_BYTES + 1];
+                    int formatted = snprintf(line, sizeof(line), "ratio=%.17g\n", state->ratios[member->metric][slot]);
+                    series.valid = formatted > 0 && (unsigned)formatted == length;
+                    if (series.valid) tp_compose_series_line(&series, line, length);
+                }
+                else tp_compose_series_line(&series, NULL, length);
+            }
             written += (unsigned)selected;
         }
-        writer.valid = writer.valid && written == member->cells;
-        tp_compose_writer_format(&writer, "end\n");
+        series.valid = series.valid && written == member->cells;
+        tp_compose_series_format(&series, "end\n");
     }
-    int valid = tp_compose_writer_publish(&writer, &state->series);
+    /* The final shard. Planning fixes the exact shard count and bytes, which
+     * writing must reproduce; writing also derives the series digest. */
+    if (series.valid && series.open) tp_compose_series_close(&series);
+    if (series.valid && !writing)
+    {
+        state->series_shard_count = series.shard;
+        state->series_bytes = series.total_bytes;
+    }
+    series.valid = series.valid && series.shard == state->series_shard_count &&
+                   series.total_bytes == state->series_bytes;
+    if (series.valid && writing) sha256_finish_hex(&series.total, (char8*)state->series_sha256);
+    if (series.open && writing)
+    {
+        series.writer.valid = 0;
+        tp_compose_writer_publish(&series.writer, NULL);
+    }
+    if (series.copy) fclose(series.copy);
+    return series.valid;
+}
+
+/* Before the settle: every ratio line's length (formatted once), then the
+ * canonical shard plan. */
+BUSTER_GLOBAL_LOCAL int tp_compose_series_plan(TpComposeState* state)
+{
+    TpComposeFamily const* family = &state->family;
+    state->series_sizes = (uint64_t*)tp_retirement_compose_allocate(state->arena,
+                              (uint64_t)state->bounds.series_shards * sizeof(uint64_t));
+    state->series_shards = (TpRetirementComposeArtifact*)tp_retirement_compose_allocate(state->arena,
+                               (uint64_t)state->bounds.series_shards * sizeof(TpRetirementComposeArtifact));
+    int valid = state->series_sizes && state->series_shards;
+    for (unsigned m = 0; valid && m < TP_RETIREMENT_COMPOSE_METRICS; ++m)
+    {
+        uint64_t count = (uint64_t)family->cells[m] * state->per_unit;
+        state->ratio_lines[m] = (unsigned char*)tp_retirement_compose_allocate(state->arena, count);
+        valid = state->ratio_lines[m] != NULL;
+        for (uint64_t slot = 0; valid && slot < count; ++slot)
+        {
+            char line[TP_COMPOSE_RATIO_LINE_BYTES + 1];
+            int length = snprintf(line, sizeof(line), "ratio=%.17g\n", state->ratios[m][slot]);
+            valid = length > 0 && (unsigned)length <= TP_COMPOSE_RATIO_LINE_BYTES;
+            if (valid) state->ratio_lines[m][slot] = (unsigned char)length;
+        }
+    }
+    valid = valid && tp_compose_series_pass(state, 0);
+    return valid;
+}
+
+/* Write the planned shards, then the manifest the adapter and the validator
+ * read (tp_retirement_compose.h, TP_RETIREMENT_COMPOSE_SERIES_PATH). */
+BUSTER_GLOBAL_LOCAL int tp_compose_series(TpComposeState* state)
+{
+    TpRetirementComposeRequest const* request = state->request;
+    int valid = tp_compose_series_pass(state, 1);
+    int fd = valid ? openat(request->scratch_root, TP_RETIREMENT_COMPOSE_SERIES_PATH,
+                            O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0600) : -1;
+    FILE* copy = fd >= 0 ? fdopen(fd, "wb") : NULL;
+    if (fd >= 0 && !copy) close(fd);
+    TpComposeWriter writer;
+    if (valid)
+    {
+        tp_compose_writer_begin(&writer, state->store, TP_RETIREMENT_COMPOSE_SERIES_PATH, state->bounds.series_manifest,
+                                copy);
+        writer.valid = writer.valid && copy;
+        tp_compose_writer_format(&writer, "%sseries bytes=%" PRIu64 " sha256=%s shards=%u shard_bytes=%" PRIu64 "\n",
+            TP_RETIREMENT_COMPOSE_SERIES_MANIFEST_HEADER, state->series_bytes, state->series_sha256,
+            state->series_shard_count, tp_compose_series_shard_bytes());
+        uint64_t offset = 0;
+        for (unsigned s = 0; s < state->series_shard_count; ++s)
+        {
+            TpRetirementComposeArtifact const* shard = state->series_shards + s;
+            tp_compose_writer_format(&writer, "shard=%u offset=%" PRIu64 " bytes=%" PRIu64 " sha256=%s path=%s\n", s,
+                                     offset, shard->bytes, shard->sha256, shard->path);
+            offset += shard->bytes;
+        }
+        writer.valid = writer.valid && offset == state->series_bytes;
+        valid = tp_compose_writer_publish(&writer, &state->series);
+    }
     if (copy && fclose(copy) != 0) valid = 0;
     return valid;
 }
@@ -2423,7 +2655,8 @@ BUSTER_GLOBAL_LOCAL int tp_compose_adapter_run(TpComposeState* state)
 }
 
 /* Run the reviewed `bench_throughput retirement-replay` adapter on the
- * scratch copy of the series, check its output, then seal it unchanged. */
+ * scratch copies of the series manifest and shards, check its output, then
+ * seal it unchanged. */
 BUSTER_GLOBAL_LOCAL int tp_compose_adapter(TpComposeState* state)
 {
     TpRetirementComposeRequest const* request = state->request;
@@ -2456,6 +2689,12 @@ BUSTER_GLOBAL_LOCAL int tp_compose_adapter(TpComposeState* state)
     {
         unlinkat(request->scratch_root, TP_RETIREMENT_COMPOSE_REPLAY_PATH, 0);
         unlinkat(request->scratch_root, TP_RETIREMENT_COMPOSE_SERIES_PATH, 0);
+        for (unsigned s = 0; s < state->series_shard_count; ++s)
+        {
+            char path[TP_RETIREMENT_STORE_PATH_BYTES + 1];
+            tp_compose_series_shard_path(path, s);
+            unlinkat(request->scratch_root, path, 0);
+        }
     }
     return valid;
 }
@@ -2624,7 +2863,7 @@ BUSTER_GLOBAL_LOCAL int tp_compose_seal(TpComposeState* state)
     TpRetirementComposeRequest const* request = state->request;
     unsigned capacity = request->prior_count + request->transcript_count + request->metrics_count +
                         request->untimed_metrics_count + request->sample_counts[0] + request->sample_counts[1] +
-                        state->partitions + 8;
+                        state->partitions + state->series_shard_count + 8;
     TpComposeEntry* entries = (TpComposeEntry*)tp_retirement_compose_allocate(state->arena,
                                   (uint64_t)capacity * sizeof(TpComposeEntry));
     unsigned* order = (unsigned*)tp_retirement_compose_allocate(state->arena, (uint64_t)capacity * 2 * sizeof(unsigned));
@@ -2644,6 +2883,9 @@ BUSTER_GLOBAL_LOCAL int tp_compose_seal(TpComposeState* state)
                          "workflow.execution_receipt") &&
         tp_compose_entry(entries, &count, capacity, state->code.path, state->code.bytes, state->code.sha256,
                          "workflow.code_records");
+    for (unsigned i = 0; valid && i < state->series_shard_count; ++i)
+        valid = tp_compose_entry(entries, &count, capacity, state->series_shards[i].path, state->series_shards[i].bytes,
+                                 state->series_shards[i].sha256, "workflow.adapter_input.shard.%u", i);
     for (unsigned i = 0; valid && i < request->transcript_count; ++i)
         valid = tp_compose_store_entry_add(state, entries, &count, capacity, request->transcript_paths[i],
                                            "execution.shard.%u", i);
@@ -2875,13 +3117,19 @@ int tp_retirement_compose(TpRetirementComposeRequest const* request, TpRetiremen
         stage = "context";
         valid = tp_compose_context(&state);
     }
-    /* Every input is verified: settle the reservation to the exact final
-     * inventory (only bounded-kind slack may be released), then publish the
-     * composer's outputs. */
+    /* Every input is verified and the series shards are planned: settle the
+     * reservation to the exact final inventory (only bounded-kind slack may
+     * be released), then publish the composer's outputs. */
+    if (valid)
+    {
+        stage = "series-plan";
+        valid = tp_compose_series_plan(&state);
+    }
     if (valid)
     {
         stage = "settle";
-        valid = tp_retirement_store_settle(state.store, state.store->count + state.bounds.files);
+        valid = tp_retirement_store_settle(state.store, state.store->count + state.bounds.files -
+                                                        state.bounds.series_shards + state.series_shard_count);
     }
     if (valid)
     {
@@ -2936,6 +3184,7 @@ int tp_retirement_compose(TpRetirementComposeRequest const* request, TpRetiremen
         result->bundle = state.bundle;
         result->sealed = state.sealed;
         result->series = state.series;
+        result->series_shards = state.series_shard_count;
         result->replay = state.replay;
         result->code = state.code;
         result->retained = state.retained;

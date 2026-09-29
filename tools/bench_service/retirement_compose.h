@@ -4,7 +4,8 @@
  * (transcript shards, row/batch numeric shards, per-batch metrics shards,
  * untimed batch records and their metrics shards) into the #511 binding's
  * sealed result: the #615 result-input manifests, the code-byte record set,
- * the #619 statistics input, the reviewed `bench_throughput
+ * the #619 statistics input (a manifest over ordered series shards, #1880),
+ * the reviewed `bench_throughput
  * retirement-replay` output, the post-sample execution receipt, the result
  * bundle, the retained-file manifest and the `workflow.phases.sealed_result`
  * record. It never measures, never chooses a trust anchor and never issues a
@@ -51,9 +52,22 @@
 #define TP_RETIREMENT_COMPOSE_SERIES_PATH "retirement-statistics-series.txt"
 #define TP_RETIREMENT_COMPOSE_REPLAY_PATH "retirement-statistics-replay.json"
 #define TP_RETIREMENT_COMPOSE_BUNDLE_PATH "retirement-result-bundle.json"
-/* Composer outputs besides the result-input manifests: code records, series,
- * replay output, bundle, execution receipt, retained manifest and the
- * sealed-result record. */
+/* (#1880) The #619 adapter input (`sealed_result_bundle.adapter_input`) is the
+ * series manifest at TP_RETIREMENT_COMPOSE_SERIES_PATH over ordered shards
+ * `retirement-statistics-series-NNNN.txt` beside it. The series stream is
+ * unchanged; its canonical split is greedy over whole lines, each shard at
+ * most one store file (the header line opens shard 0 and a shard ends only
+ * where the next line would not fit). The manifest binds each shard's index,
+ * offset, bytes and SHA-256 and the whole series' bytes and SHA-256; the
+ * binding validator's ADAPTER_SERIES_* documents the format. */
+#define TP_RETIREMENT_COMPOSE_SERIES_SHARD_PREFIX "retirement-statistics-series-"
+#define TP_RETIREMENT_COMPOSE_SERIES_SHARD_SUFFIX ".txt"
+#define TP_RETIREMENT_COMPOSE_SERIES_SHARD_BYTES TP_RETIREMENT_STORE_FILE_BYTES
+#define TP_RETIREMENT_COMPOSE_SERIES_SHARDS 1024u
+#define TP_RETIREMENT_COMPOSE_SERIES_MANIFEST_HEADER "BQ-RETIREMENT-STATISTICS-SERIES-V1\n"
+/* Composer outputs besides the result-input manifests and the series shards:
+ * code records, series manifest, replay output, bundle, execution receipt,
+ * retained manifest and the sealed-result record. */
 #define TP_RETIREMENT_COMPOSE_FIXED_OUTPUTS 7u
 /* Retained declaration: entries, kind length and a group's index width
  * (`<prefix>NNNN<suffix>`, contiguous from 0000). */
@@ -147,17 +161,21 @@ typedef struct TpRetirementComposeShape
     unsigned pairs, code_rows, prior_entries;
 } TpRetirementComposeShape;
 
+/* series bounds the whole series stream and series_shards its shard count
+ * (both upper bounds before timing); series_manifest bounds the manifest.
+ * files counts every composer output, series shards included. */
 typedef struct TpRetirementComposeBounds
 {
-    uint64_t manifests, code, series, replay, bundle, receipt, retained, seal, total;
-    unsigned manifest_count, files, members, bootstrap_members, cell_members;
+    uint64_t manifests, code, series, series_manifest, replay, bundle, receipt, retained, seal, total;
+    unsigned manifest_count, files, members, bootstrap_members, cell_members, series_shards;
 } TpRetirementComposeBounds;
 
 typedef struct TpRetirementComposeRequest
 {
     /* The prior closure and the binding are re-read below its root. */
     TpRetirementStore* store;
-    /* Private scratch directory for the adapter's input copy and output. */
+    /* Private scratch directory for the adapter's input copies (the series
+     * manifest and shards) and its output. */
     int scratch_root;
     /* The reviewed adapter executable and its authenticated digest; it is
      * executed from the descriptor that was hashed. 0 selects
@@ -221,8 +239,9 @@ typedef struct TpRetirementComposeArtifact
 typedef struct TpRetirementComposeResult
 {
     char raw_measurements_sha256[65], context_sha256[65];
+    /* series is the adapter input's manifest; series_shards its shards. */
     TpRetirementComposeArtifact receipt, bundle, sealed, series, replay, code, retained;
-    unsigned members, seal_entries, retained_files;
+    unsigned members, seal_entries, retained_files, series_shards;
     uint64_t invocations, untimed_records, untimed_production;
     /* On refusal: the first failing check (a static diagnostic name). */
     char const* refused;
@@ -230,12 +249,14 @@ typedef struct TpRetirementComposeResult
 
 /* Derive the family and every composer output bound from pre-timing facts.
  * Rejects a family outside the #619 caps and any output above the store's
- * per-file cap; A1's single-file adapter input is included in that check. */
+ * per-file cap; the adapter input is bounded as series shards of at most one
+ * store file each (#1880), plus their manifest. */
 int tp_retirement_compose_bounds(TpRetirementComposeShape const* shape, TpRetirementComposeBounds* bounds);
 /* Before any timing: reserve both campaign stages (capacity), the composer's
- * outputs, the declaration's unreserved retained files and, as external
- * entries, the prior closure; plan the store; mark the upper-bounded kinds
- * (metrics shards and retained groups) as the only slack settle may release;
+ * outputs (every series shard up to its bound), the declaration's unreserved
+ * retained files and, as external entries, the prior closure; plan the
+ * store; mark the upper-bounded kinds (metrics shards, retained groups and
+ * the series shards beyond the first) as the only slack settle may release;
  * and bind the declaration's digest. */
 int tp_retirement_compose_plan(TpRetirementStore* store, TpRetirementCampaignCapacity const* capacity,
     TpRetirementComposeShape const* shape, TpRetirementComposeDeclaration const* declaration,

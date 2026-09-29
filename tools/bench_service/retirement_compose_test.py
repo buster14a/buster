@@ -510,8 +510,18 @@ class ComposeEndToEndTests(unittest.TestCase):
                 "replay_bundle": replay, "publication_receipt": publication}))
 
     def test_composed_sealed_result_validates(self):
+        # The production 64 MiB shard size gives this small family one series
+        # shard; a 4 KiB fixture size (#1880) spans several, with the
+        # validator's approved size patched to match.
+        for shard_bytes in (None, 4096):
+            with self.subTest(shard_bytes=shard_bytes):
+                self._compose_and_validate(shard_bytes)
+
+    def _compose_and_validate(self, shard_bytes):
         tests = binding_tests.BindingTests("test_complete_record_structural_contract_is_accepted")
-        with tests._adapter_checkout() as repository, \
+        size = mock.patch.object(binding, "ADAPTER_SERIES_SHARD_BYTES",
+                                 shard_bytes or binding.ADAPTER_SERIES_SHARD_BYTES)
+        with tests._adapter_checkout() as repository, size, \
                 mock.patch.object(binding, "__file__",
                                   str(repository / "tools" / "native_retirement_performance_binding.py")), \
                 tempfile.TemporaryDirectory(prefix="retirement-compose-e2e-") as directory:
@@ -520,17 +530,29 @@ class ComposeEndToEndTests(unittest.TestCase):
             for path in (evidence, source, authority):
                 path.mkdir(mode=0o700)
             record, spec, support_output, family = self._fixture(evidence, source)
+            if shard_bytes:
+                spec.append(f"series-shard-bytes {shard_bytes}")
             pristine = root / "pristine"
             shutil.copytree(evidence, pristine)
             with tempfile.TemporaryDirectory(prefix="retirement-compose-trusted-adapter-") as adapter:
                 executable, *_ = binding._compile_trusted_retirement_adapter(Path(adapter))
                 spec += [_adapter_line(executable), f"authority {authority}"]
                 composed = _run_compose(spec, root)
-                self._mutations(root, pristine, source, spec)
+                if not shard_bytes:
+                    self._mutations(root, pristine, source, spec)
             self.assertEqual(composed["invocations"], 732)
             self.assertEqual(composed["members"], len(family["members"]))
             self.assertEqual(composed["retained_files"], 3 + len(list(source.glob("retirement-metrics-ab-*.txt"))))
             self.assertEqual((composed["untimed_records"], composed["untimed_production"]), (4, 2))
+            # (#1880) The adapter input is the series manifest over canonical
+            # shards; their concatenation is the one series stream.
+            manifest = binding._adapter_series_manifest(
+                evidence, {key: composed["series"][key] for key in ("path", "bytes", "sha256")})
+            self.assertEqual(len(manifest["shards"]), composed["series_shards"])
+            self.assertEqual(composed["series_shards"] > 1, bool(shard_bytes))
+            parts = [(evidence / shard["path"]).read_bytes() for shard in manifest["shards"]]
+            self.assertEqual(binding.adapter_series_shards(b"".join(parts), shard_bytes), parts)
+            self.assertTrue(parts[0].startswith(b"version=1 seed="))
             # The composed context is the validator's own _execution_context.
             receipt_value = json.loads((evidence / composed["receipt"]["path"]).read_bytes())
             self.assertEqual(receipt_value["context_sha256"], binding._canonical_json_digest(
@@ -555,14 +577,17 @@ class ComposeEndToEndTests(unittest.TestCase):
                     self.assertRaises(ValueError):
                 binding.validate(path, evidence, trusted_execution_receipt_sha256="f" * 64)
             # Composed bytes are content-bound: tamper with the receipt (the
-            # authority's trust root no longer matches) or the series (the
-            # seal no longer matches) and the validator refuses.
-            for name in ("receipt", "series"):
-                target = evidence / composed[name]["path"]
+            # authority's trust root no longer matches), the series manifest
+            # or its last shard (the seal no longer matches) and the
+            # validator refuses.
+            targets = {"receipt": evidence / composed["receipt"]["path"],
+                       "series": evidence / composed["series"]["path"],
+                       "shard": evidence / manifest["shards"][-1]["path"]}
+            for name, target in targets.items():
                 original = target.read_bytes()
                 os.chmod(target, 0o600)
                 target.write_bytes(original.replace(b"}", b"} ", 1) if name == "receipt" else original + b"end\n")
-                with self.assertRaises(ValueError):
+                with self.subTest(tampered=name), self.assertRaises(ValueError):
                     validate()
                 target.write_bytes(original)
             validate()

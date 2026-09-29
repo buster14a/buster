@@ -1635,8 +1635,9 @@ static void test_retirement_statistics(void)
 
 /* One aggregate and one exact cell for each of the five variable metrics, in
  * member order. first_metric is the index written for the first member, so a
- * caller can present a batch member under another metric's index. */
-static int test_retirement_series(char const* path, unsigned first_metric)
+ * caller can present a batch member under another metric's index. The series
+ * text goes to `series` (at most `capacity` bytes); 0 on overflow. */
+static size_t test_retirement_series_text(char* series, size_t capacity, unsigned first_metric)
 {
     static char const* const names[] = {"compiler_batch_peak_rss", "compiler_batch_wall_time",
                                         "compiler_peak_memory", "compiler_wall_time",
@@ -1647,25 +1648,134 @@ static int test_retirement_series(char const* path, unsigned first_metric)
     static char const* const cells[] = {"group=0", "group=0", "row=0", "row=0", "row=0"};
     static char const* const aggregate_limits[] = {"1.02", "1.02", "1.02", "1.02", "1.03"};
     static char const* const cell_limits[] = {"1.05", "1.05", "1.05", "1.05", "1.03"};
-    FILE* file = fopen(path, "wb");
-    int ok = file != NULL &&
-             fputs("version=1 seed=20260913 bootstrap_members=5 cell_members=5 pairs=60 "
-                   "resamples=100000 frozen=1 members=10\n", file) >= 0;
-    for (unsigned index = 0; ok && index < 5; ++index)
+    int length = snprintf(series, capacity, "version=1 seed=20260913 bootstrap_members=5 cell_members=5 pairs=60 "
+                                            "resamples=100000 frozen=1 members=10\n");
+    size_t used = length > 0 ? (size_t)length : capacity;
+    for (unsigned index = 0; used < capacity && index < 5; ++index)
     {
-        for (unsigned kind = 0; ok && kind < 2; ++kind)
+        for (unsigned kind = 0; used < capacity && kind < 2; ++kind)
         {
             unsigned metric = index == 0 && kind == 0 ? first_metric : metrics[index];
-            ok = kind ? fprintf(file, "member=%s/cell/%s metric=%u kind=1 family=%u cells=1 pairs=60 resamples=0 limit=%s\n",
-                                names[index], cells[index], metric, index, cell_limits[index]) > 0 :
-                        fprintf(file, "member=%s/aggregate metric=%u kind=0 family=%u cells=1 pairs=60 resamples=100000 limit=%s\n",
-                                names[index], metric, index, aggregate_limits[index]) > 0;
-            for (unsigned ratio = 0; ok && ratio < 2 * TP_RETIREMENT_MIN_PAIRS_PER_ROUND; ++ratio)
-                ok = fputs("ratio=1\n", file) >= 0;
-            ok = ok && fputs("end\n", file) >= 0;
+            length = kind ? snprintf(series + used, capacity - used,
+                                     "member=%s/cell/%s metric=%u kind=1 family=%u cells=1 pairs=60 resamples=0 limit=%s\n",
+                                     names[index], cells[index], metric, index, cell_limits[index]) :
+                            snprintf(series + used, capacity - used,
+                                     "member=%s/aggregate metric=%u kind=0 family=%u cells=1 pairs=60 resamples=100000 limit=%s\n",
+                                     names[index], metric, index, aggregate_limits[index]);
+            used = length > 0 ? used + (size_t)length : capacity;
+            for (unsigned ratio = 0; used < capacity && ratio < 2 * TP_RETIREMENT_MIN_PAIRS_PER_ROUND; ++ratio)
+            {
+                length = snprintf(series + used, capacity - used, "ratio=1\n");
+                used = length > 0 ? used + (size_t)length : capacity;
+            }
+            length = used < capacity ? snprintf(series + used, capacity - used, "end\n") : -1;
+            used = length > 0 ? used + (size_t)length : capacity;
         }
     }
+    return used < capacity ? used : 0;
+}
+
+/* #1880 manifest defects the adapter must refuse. */
+typedef enum TestSeriesDefect
+{
+    TEST_SERIES_CANONICAL,
+    TEST_SERIES_REORDERED,
+    TEST_SERIES_MISSING,
+    TEST_SERIES_DUPLICATED,
+    TEST_SERIES_TRUNCATED,
+    TEST_SERIES_GAP,
+    TEST_SERIES_EARLY_SPLIT,
+    TEST_SERIES_DEFECTS
+} TestSeriesDefect;
+
+#define TEST_SERIES_BYTES 32768u
+#define TEST_SERIES_SHARDS 16u
+
+/* Split `series` greedily over whole lines into shards of at most
+ * TP_SERIES_SHARD_BYTES_MIN (the adapter's smallest shard size, so the small
+ * fixture spans several shards), write `<manifest>-NNNN.txt` and the
+ * manifest, and apply `defect`. */
+static int test_series_write(char const* manifest, char const* series, size_t length, TestSeriesDefect defect)
+{
+    size_t starts[TEST_SERIES_SHARDS + 1], shard_start = 0, cursor = 0;
+    unsigned count = 0;
+    int ok = length > 0 && series[length - 1] == '\n';
+    while (ok && cursor < length)
+    {
+        char const* newline = memchr(series + cursor, '\n', length - cursor);
+        size_t line = (size_t)(newline - (series + cursor)) + 1;
+        /* The early split closes shard 0 after its first line. */
+        int split = cursor > shard_start && (cursor + line - shard_start > TP_SERIES_SHARD_BYTES_MIN ||
+                                             (defect == TEST_SERIES_EARLY_SPLIT && count == 0));
+        if (split)
+        {
+            ok = count < TEST_SERIES_SHARDS;
+            if (ok) starts[count++] = shard_start;
+            shard_start = cursor;
+        }
+        cursor += line;
+    }
+    ok = ok && count < TEST_SERIES_SHARDS;
+    if (ok)
+    {
+        starts[count++] = shard_start;
+        starts[count] = length;
+    }
+    ok = ok && count >= 3;
+    char leaves[TEST_SERIES_SHARDS][64], digests[TEST_SERIES_SHARDS][65], total[65];
+    char const* leaf = strrchr(manifest, '/');
+    leaf = leaf ? leaf + 1 : manifest;
+    Sha256 hash;
+    sha256_init(&hash);
+    sha256_add(&hash, series, (u64)length);
+    sha256_finish_hex(&hash, total);
+    for (unsigned i = 0; ok && i < count; ++i)
+    {
+        char path[TP_PATH_CAP];
+        size_t bytes = starts[i + 1] - starts[i];
+        ok = snprintf(leaves[i], sizeof(leaves[i]), "%s-%04u.txt", leaf, i) > 0 &&
+             snprintf(path, sizeof(path), "%s-%04u.txt", manifest, i) > 0;
+        /* The truncated shard loses its final byte after the manifest binds it. */
+        size_t written = defect == TEST_SERIES_TRUNCATED && i == 1 ? bytes - 1 : bytes;
+        FILE* file = ok ? fopen(path, "wb") : NULL;
+        ok = file && fwrite(series + starts[i], 1, written, file) == written;
+        if (file && fclose(file) != 0) ok = 0;
+        sha256_init(&hash);
+        sha256_add(&hash, series + starts[i], (u64)bytes);
+        sha256_finish_hex(&hash, digests[i]);
+    }
+    /* The shard order the manifest lists after the defect. */
+    unsigned order[TEST_SERIES_SHARDS + 1], listed = 0;
+    for (unsigned i = 0; ok && i < count; ++i)
+    {
+        if (defect != TEST_SERIES_MISSING || i != 1)
+        {
+            order[listed++] = defect == TEST_SERIES_REORDERED && i < 2 ? 1 - i : i;
+            if (defect == TEST_SERIES_DUPLICATED && i == 1) order[listed++] = i;
+        }
+    }
+    FILE* file = ok ? fopen(manifest, "wb") : NULL;
+    uint64_t offset = 0;
+    ok = file && fprintf(file, "%s", TP_SERIES_MANIFEST_HEADER) > 0 &&
+         fprintf(file, "series bytes=%zu sha256=%s shards=%u shard_bytes=%u\n", length, total, listed,
+                 TP_SERIES_SHARD_BYTES_MIN) > 0;
+    for (unsigned i = 0; ok && i < listed; ++i)
+    {
+        unsigned shard = order[i];
+        if (defect == TEST_SERIES_GAP && i == 1) offset += 1;
+        ok = fprintf(file, "shard=%u offset=%" PRIu64 " bytes=%zu sha256=%s path=%s\n", i, offset,
+                     starts[shard + 1] - starts[shard], digests[shard], leaves[shard]) > 0;
+        offset += starts[shard + 1] - starts[shard];
+    }
     if (file && fclose(file) != 0) ok = 0;
+    return ok;
+}
+
+static int test_retirement_series(char const* path, unsigned first_metric)
+{
+    char series[TEST_SERIES_BYTES];
+    size_t length = test_retirement_series_text(series, sizeof(series), first_metric);
+    int ok = length && test_series_write(path, series, length, TEST_SERIES_CANONICAL);
     return ok;
 }
 
@@ -1703,6 +1813,21 @@ static void test_retirement_replay(char const* root)
     CHECK(test_retirement_series(input, TP_RETIREMENT_BATCH_WALL_TIME));
     CHECK(tp_retirement_replay(&config) == 2);
     CHECK(test_retirement_series(input, TP_RETIREMENT_VARIABLE_METRICS));
+    CHECK(tp_retirement_replay(&config) == 2);
+    /* (#1880) A reordered, missing, duplicated or truncated shard, an offset
+     * gap and a non-canonical split are refused; the canonical shards pass. */
+    char series[TEST_SERIES_BYTES];
+    size_t length = test_retirement_series_text(series, sizeof(series), TP_RETIREMENT_BATCH_PEAK_RSS);
+    CHECK(length > 0);
+    for (unsigned defect = 0; length && defect < TEST_SERIES_DEFECTS; ++defect)
+    {
+        CHECK(test_series_write(input, series, length, (TestSeriesDefect)defect));
+        CHECK(tp_retirement_replay(&config) == (defect == TEST_SERIES_CANONICAL ? 0 : 2));
+    }
+    /* A manifest naming an absent shard file is refused. */
+    char shard[TP_PATH_CAP];
+    CHECK(length && test_series_write(input, series, length, TEST_SERIES_CANONICAL) &&
+          snprintf(shard, sizeof(shard), "%s-0002.txt", input) > 0 && remove(shard) == 0);
     CHECK(tp_retirement_replay(&config) == 2);
 }
 

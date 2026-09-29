@@ -381,7 +381,8 @@ are separate translation units linked into the service. The service order is:
    reserves both campaign stages, the composer outputs, the unreserved
    retained kinds of the caller's `TpRetirementComposeDeclaration` and, as
    external entries, the prior closure. It marks the upper-bounded kinds
-   (every metrics shard and each retained group) as the only slack settle may
+   (every metrics shard, each retained group and the #619 series shards
+   beyond the first) as the only slack settle may
    release (`tp_retirement_store_bound`) and binds the declaration's digest
    into the store (`tp_retirement_store_retain`). A declaration names each
    retained file kind: an exact path (the A/A transcript and sample shards,
@@ -389,8 +390,11 @@ are separate translation units linked into the service. The service order is:
    `<prefix>NNNN<suffix>` group numbered from 0000 with a file cap (the A/A
    metrics shards; failure logs). Lane D keeps only failure logs (successful
    per-launch logs are deleted under its 4096-entry cap), so the log group is
-   bounded, not exact. A family whose single #619 adapter input exceeds the
-   64 MiB store file cap is refused here.
+   bounded, not exact. The #619 adapter input is sharded (#1880; its format
+   is described below), so the series' shard count is bounded here; a family
+   that would need more than `TP_RETIREMENT_COMPOSE_SERIES_SHARDS` shards, or
+   any other output above the 64 MiB store file cap, is refused before
+   timing.
 2. Lane D publishes its A/A stage, A/B transcript shards, row/batch numeric
    shards, per-batch metrics shards, untimed batch records and retained files
    into that store.
@@ -411,9 +415,12 @@ are separate translation units linked into the service. The service order is:
    evidence root is the store root; entry count and bytes are exactly those
    reserved) and derives the post-sample `_execution_context` in C from the
    authenticated post-A/A binding document with the streamed numeric digest.
-   It then settles the reservation (`tp_retirement_store_settle` releases only
-   bounded slack) and publishes the #615 manifests, the code record set, the
-   statistics input, the output of the reviewed `bench_throughput
+   It plans the canonical series shards from the joined ratios
+   (`tp_compose_series_plan`), then settles the reservation
+   (`tp_retirement_store_settle` releases only bounded slack, keeping exactly
+   the shards it will write) and publishes the #615 manifests, the code record
+   set, the statistics input (its shards, then their manifest), the output of
+   the reviewed `bench_throughput
    retirement-replay` adapter (executed from the descriptor whose digest the
    request authenticates, under a wall-clock limit, its JSON checked member by
    member), the post-sample execution receipt, the retained manifest (every
@@ -448,10 +455,58 @@ the unchanged validator end to end, with the receipt trust root read from the
 producer's authority file; it compares the C canonical writer with
 `json.dumps` and the validator's `_execution_context`, and checks that a
 halved sample, a dropped retained file and a changed binding are refused.
+It composes and validates twice: at the production 64 MiB shard size (one
+series shard) and at a fixture-only 4 KiB size (`series-shard-bytes`, with the
+validator's size patched to match) that spans several shards; tampering with
+the manifest or a shard is refused.
 Given the throughput self-test directory it also composes lane D's own
 C-encoded full-invocation fixture (CI runs this after `bench_throughput
 self-test` on Linux). None of this is service admission or performance
 evidence, and the recipe stays blocked.
+
+**The #619 statistics adapter input (#1880).**
+`sealed_result_bundle.adapter_input` names the series manifest
+(`retirement-statistics-series.txt`), not the series itself: at A1 scale the
+single series stream (header line, then per family member a member line, its
+ratio lines and `end`) is about 407 MB at 60 pairs and 1.7 GB at 254 pairs,
+above the 64 MiB per-file cap that neither the store nor the bundle raises.
+The stream, the statistics, the family and the thresholds are unchanged; only
+its storage is sharded, in the way the transcripts and metrics already are.
+
+- **Shards.** `retirement-statistics-series-NNNN.txt`, beside the manifest,
+  from 0000. The canonical split is greedy over whole LF lines: each shard is
+  at most 64 MiB (`TP_RETIREMENT_COMPOSE_SERIES_SHARD_BYTES`, one store file),
+  a shard ends only where the next line would not fit, and no line is split.
+  The header line therefore opens shard 0 (it is not in the manifest), and
+  the shards' concatenation is byte for byte the former single file.
+- **Manifest.** ASCII, one LF-terminated line each:
+
+  ```text
+  BQ-RETIREMENT-STATISTICS-SERIES-V1
+  series bytes=<total> sha256=<hex> shards=<count> shard_bytes=67108864
+  shard=<index> offset=<offset> bytes=<bytes> sha256=<hex> path=<leaf>
+  ```
+
+  one shard line per shard in series order: indexes from 0, offsets
+  contiguous from 0 with no gap or overlap, every shard nonempty and within
+  `shard_bytes`, distinct leaves, and shard bytes summing to the series.
+- **Store.** Each shard and the manifest are store entries with their own
+  path, bytes and SHA-256, and sealed-closure members
+  (`workflow.adapter_input` for the manifest,
+  `workflow.adapter_input.shard.<index>` for each shard). The plan reserves
+  `1 + (series_bound - 1) / (64 MiB - 255)` shards (every shard but the last
+  holds more than 64 MiB less the 256-byte longest line); the A1 family
+  (6,482 timed rows, 80 object groups, 13,126 cells) needs at most 7 at 60
+  pairs and 26 at 254 pairs.
+- **Readers.** The binding validator (`_adapter_series_manifest`,
+  `_AdapterSeriesStream`, `_check_adapter_series`) requires the approved
+  64 MiB shard size, streams every shard in order, rehashes each shard and
+  the joined series from the bytes it parses, and refuses a reordered,
+  missing, duplicated or truncated shard, an offset gap, a line split across
+  shards or a non-maximal (non-canonical) split. `bench_throughput
+  retirement-replay --input` takes the manifest and applies the same checks
+  (it accepts any shard size from 4 KiB to 64 MiB, so its own tests can span
+  several small shards; the validator alone pins 64 MiB).
 
 Linux supervisor deadline coverage lives in `worker_deadline_tests.c`. Timed
 commands use explicit `exec` so the test retains an owned direct child rather
