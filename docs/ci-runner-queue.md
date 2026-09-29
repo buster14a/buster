@@ -93,18 +93,21 @@ simultaneously (`max_entries_to_build: 20`); 16 ended cancelled, 1 failed and
 window: 12 merge-group (median 2175 s created-to-updated), 10 pull-request and
 3 push.
 
-## Candidate corrections (not applied)
+## Candidate corrections
 
-The completion criteria require comparable before/after windows, so no queue
-setting or workflow trigger changes with this baseline. Each candidate needs a
-reviewed rollout and a second window measured with the commands above.
+Each candidate needs a reviewed rollout and a second window measured with the
+commands above; lower queue depth alone is not a throughput improvement.
 
-1. **Bound speculative merge-group builds to macOS capacity.** Lower
-   `max_entries_to_build` to about `50 / 8`, i.e. 6. Deeper entries cannot hold
-   macOS runners, compete with pull requests, and are the first cancelled when
-   an earlier entry fails. Change the live ruleset,
-   `.github/main-merge-queue.ruleset.json`, `QUEUE` and its tests together;
-   compare completed merges per hour and end-to-end latency, not queue depth.
+1. **Bound speculative merge-group builds to macOS capacity.** The ceiling runs
+   about `50 / 8`, i.e. 6, CI runs; deeper entries cannot hold macOS runners,
+   compete with pull requests, and are the first cancelled when an earlier
+   entry fails. The maintainer asked for 2 as a conservative start; the source
+   policy now requires 4 (32 of 50 macOS runners, leaving about two CI runs of
+   headroom for pull requests and `main`). The live ruleset changes only after
+   that policy lands (see [merge-queue-admission.md](merge-queue-admission.md)).
+   Compare completed merges per hour, end-to-end latency, macOS wait and runner
+   minutes, not queue depth; move to 2 if macOS starvation persists after
+   dispatched work drains.
 2. **Avoid revalidating merge-group heads on `main` pushes** (about 8% of macOS
    minutes here). Push runs may prime `main`-scoped caches and feed other
    workflows; verify those consumers before proposing any change, and never
