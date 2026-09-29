@@ -10352,16 +10352,20 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         // C11 6.7.2.1p13: only an untagged `struct { ... }` or `union { ... }`
         // written here is an anonymous member. A tag (`struct S;`) or a
         // typedef name for an untagged aggregate declares nothing, as in GCC
-        // and Clang without -fms-extensions. Windows targets speak the
-        // Microsoft dialect (c_source.c predefines _MSC_EXTENSIONS for them),
-        // where any complete struct or union named here is an anonymous
-        // member too, as in cl and clang *-pc-windows-msvc.
+        // and Clang without -fms-extensions. The Microsoft dialect, which
+        // Windows targets get alongside `_MSC_EXTENSIONS`, also makes any
+        // complete struct or union named here an anonymous member.
         CType const* base = frame->base_type.value < result->type_count ? &result->types[frame->base_type.value] : 0;
         if (frame->declarator_start == frame->end && base && (base->kind == C_TYPE_STRUCT || base->kind == C_TYPE_UNION))
         {
-            bool defined_here = base->definition_start > frame->start && base->definition_start < frame->end;
-            bool microsoft = preprocess.target.os == OPERATING_SYSTEM_WINDOWS;
-            if (defined_here ? microsoft || !base->tag.length : microsoft && base->is_complete)
+            bool defined_in_place = base->definition_start > frame->start && base->definition_start < frame->end;
+            CType const* unqualified = base;
+            if (!unqualified->is_complete && unqualified->has_unqualified_type && unqualified->unqualified_type.value < result->type_count)
+            {
+                unqualified = &result->types[unqualified->unqualified_type.value];
+            }
+            bool microsoft_anonymous = preprocess.target.os == OPERATING_SYSTEM_WINDOWS && (defined_in_place || unqualified->is_complete);
+            if ((defined_in_place && !base->tag.length) || microsoft_anonymous)
             {
                 BUSTER_VALIDATE(result->member_count < result->member_capacity);
                 result->members[result->member_count++] = (CMember){

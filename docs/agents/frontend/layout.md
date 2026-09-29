@@ -54,9 +54,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   (`c_source.c` predefines `_MSC_EXTENSIONS`), where any complete struct or union
   named there is an anonymous member that adds storage and promotes its fields,
   as in cl and Clang `*-pc-windows-msvc`. `c_type_parse_aggregate_segment_step`
-  decides it from the target; the Clang corpus pins both answers on every
-  target, and `c_test_tagged_member_declares_nothing` names its targets and
-  checks that each rejects the other dialect's sizes.
+  decides it from the target. `c_test_tagged_member_declares_nothing` (x86-64
+  Linux) and `c_test_tagged_member_microsoft_anonymous` (x86-64 and AArch64
+  Windows) name their targets, and the Clang corpus pins both answers byte for
+  byte on every native target.
 - **`__attribute__((packed))` and `__attribute__((aligned(N)))`** decide object
   representation, so ignoring them is an ABI divergence rather than a missing
   optimization: a Buster-only program agrees with itself whatever it agrees on,

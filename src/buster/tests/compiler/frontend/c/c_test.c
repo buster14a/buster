@@ -4419,7 +4419,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_attribute_noreturn(UnitTestArgumen
 // A noreturn call whose value a return, initializer, or switch consumes
 // leaves its block open for the consumer's own rows (issue #1503): the
 // return continuation used to find the block already closed and the body
-// was rejected as unsupported.  A statement-level call still traps.
+// was rejected as unsupported.  `__builtin_unreachable()` behaves the same
+// (issue #1748).  A statement-level call still traps.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_value_operands(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4439,6 +4440,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_value_operands(UnitTestA
         C_TEST_NORETURN_VALUE_SOURCE("int y = die_value(); return y;"),
         C_TEST_NORETURN_VALUE_SOURCE("switch (die_value()) { case 1: return 2; } return 0;"),
         C_TEST_NORETURN_VALUE_SOURCE("return x ? 1 : die_value();"),
+        C_TEST_NORETURN_VALUE_SOURCE("return (__builtin_unreachable(), x);"),
+        C_TEST_NORETURN_VALUE_SOURCE("int y = (__builtin_unreachable(), x + 1); return y;"),
+        C_TEST_NORETURN_VALUE_SOURCE("return x ? 1 : (__builtin_unreachable(), 0);"),
     };
 #undef C_TEST_NORETURN_VALUE_SOURCE
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
@@ -4494,7 +4498,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_value_operands(UnitTestA
 // A noreturn call inside a larger expression statement -- a cast, an
 // argument, a compound literal, an assignment or a comma operand -- leaves its
 // block open for the rest of the statement, which then ends the block in the
-// trap (issue #1736). The statement's rows used to follow the UNREACHABLE.
+// trap (issues #1736 and #1748, the latter for `__builtin_unreachable()`).
+// The statement's rows used to follow the UNREACHABLE.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_expression_statements(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4516,6 +4521,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_expression_statements(Un
         C_TEST_NORETURN_STATEMENT_SOURCE("(void)exit(3);"),
         C_TEST_NORETURN_STATEMENT_SOURCE("x = g();"),
         C_TEST_NORETURN_STATEMENT_SOURCE("sink(g());"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("sink((__builtin_unreachable(), x));"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("x = (__builtin_unreachable(), 0);"),
+        C_TEST_NORETURN_STATEMENT_SOURCE("__builtin_unreachable();"),
     };
 #undef C_TEST_NORETURN_STATEMENT_SOURCE
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
@@ -4727,69 +4735,76 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ambiguous_promoted_parse(UnitTestArgum
 // A member declaration naming only a tag, or a typedef for an untagged
 // aggregate, declares nothing; only an untagged definition written in place
 // is an anonymous member (C11 6.7.2.1p13). The layouts are GCC's and Clang's
-// without -fms-extensions (#1706).
+// without -fms-extensions on x86_64-unknown-linux-gnu (#1706).
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tagged_member_declares_nothing(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    // A declarator-less tagged or typedef-named aggregate member declares
-    // nothing in GNU C but is an anonymous member in the Microsoft dialect.
-    // The expectations are clang's (18, `x86_64-unknown-linux-gnu` and
-    // `x86_64-pc-windows-msvc`), not the target under test, and each target
-    // must also reject the other dialect's answer.
-    String8 dialects[] = {
-        S8("#define MS 0\n"),
-        S8("#define MS 1\n"),
-    };
-    struct
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens;
+    CParseResult parse;
+    Target target = target_native;
+    target.cpu_arch = CPU_ARCH_X86_64;
+    target.os = OPERATING_SYSTEM_LINUX;
+    CIRLowerResult lowered = c_test_lower_source(temporary.arena,
+        S8("struct S { int a; }; union U { int a; double d; }; typedef struct { int z; } A;\n"
+           "struct T { struct S; int b; };\n"
+           "struct V { union U; int b; };\n"
+           "struct W { A; int b; };\n"
+           "struct Y { struct N { int n; }; int b; };\n"
+           "struct Z { struct Fwd; int b; };\n"
+           "struct X { struct { int p; }; const union { int q; char r[8]; }; int b; };\n"
+           "_Static_assert(sizeof(struct T) == 4 && __builtin_offsetof(struct T, b) == 0, \"tagged struct\");\n"
+           "_Static_assert(sizeof(struct V) == 4 && __builtin_offsetof(struct V, b) == 0, \"tagged union\");\n"
+           "_Static_assert(sizeof(struct W) == 4 && __builtin_offsetof(struct W, b) == 0, \"typedef name\");\n"
+           "_Static_assert(sizeof(struct Y) == 4 && sizeof(struct N) == 4, \"nested tagged definition\");\n"
+           "_Static_assert(sizeof(struct Z) == 4, \"forward tag\");\n"
+           "_Static_assert(sizeof(struct X) == 16 && __builtin_offsetof(struct X, b) == 12, \"anonymous members\");\n"
+           "int read(struct X *x) { return x->p + x->q + x->r[1]; }\n"),
+        S8("tagged-member-declares-nothing.c"), target, &tokens, &parse);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
+    scratch_end(temporary);
+    return result;
+}
+
+// On *-windows-msvc, where `_MSC_EXTENSIONS` is predefined, a tagged,
+// typedef-named or nested tagged complete aggregate named without a
+// declarator is an anonymous member whose fields are promoted, as with
+// clang *-pc-windows-msvc (#1750).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tagged_member_microsoft_anonymous(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch arches[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 arch_index = 0; arch_index < BUSTER_ARRAY_LENGTH(arches); arch_index += 1)
     {
-        String8 triple;
-        u32 dialect;
-    } cases[] = {
-        {S8("x86_64-unknown-linux-gnu"), 0},
-        {S8("aarch64-unknown-linux-gnu"), 0},
-        {S8("aarch64-apple-darwin"), 0},
-        {S8("x86_64-pc-windows-msvc"), 1},
-        {S8("aarch64-pc-windows-msvc"), 1},
-    };
-    String8 body = S8("struct S { int a; }; union U { int a; double d; }; typedef struct { int z; } A;\n"
-                      "struct T { struct S; int b; };\n"
-                      "struct V { union U; int b; };\n"
-                      "struct W { A; int b; };\n"
-                      "struct Y { struct N { int n; }; int b; };\n"
-                      "struct X { struct { int p; }; const union { int q; char r[8]; }; int b; };\n"
-                      "_Static_assert(sizeof(struct T) == (MS ? 8 : 4) && __builtin_offsetof(struct T, b) == (MS ? 4 : 0), \"tagged struct\");\n"
-                      "_Static_assert(sizeof(struct V) == (MS ? 16 : 4) && __builtin_offsetof(struct V, b) == (MS ? 8 : 0), \"tagged union\");\n"
-                      "_Static_assert(sizeof(struct W) == (MS ? 8 : 4) && __builtin_offsetof(struct W, b) == (MS ? 4 : 0), \"typedef name\");\n"
-                      "_Static_assert(sizeof(struct Y) == (MS ? 8 : 4) && sizeof(struct N) == 4, \"nested tagged definition\");\n"
-                      "_Static_assert(sizeof(struct X) == 16 && __builtin_offsetof(struct X, b) == 12, \"anonymous members\");\n"
-                      "int read(struct X *x) { return x->p + x->q + x->r[1]; }\n"
-                      "#if MS\n"
-                      "int promoted(struct T *t, struct V *v, struct W *w, struct Y *y) { return t->a + v->a + w->z + y->n; }\n"
-                      "#else\n"
-                      "struct Z { struct Fwd; int b; };\n"
-                      "_Static_assert(sizeof(struct Z) == 4, \"forward tag\");\n"
-                      "#endif\n");
-    for (u64 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
-    {
-        Target target = target_parse_triple(cases[case_index].triple).target;
-        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
-        {
-            TemporalArena temporary = scratch_begin(0, 0);
-            CPreprocessResult tokens;
-            CParseResult parse;
-            String8 pieces[] = {dialects[dialect], body};
-            String8 source = string_join_arena(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pieces), false);
-            CIRLowerResult lowered =
-                c_test_lower_source(temporary.arena, source, S8("tagged-member-declares-nothing.c"), target, &tokens, &parse);
-            bool accepted = tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.program != 0 && lowered.diagnostic_count == 0;
-            if (accepted != (dialect == cases[case_index].dialect))
-            {
-                arguments->show(arguments, S8("tagged member: {S8} {S8} the {S8} answer\n"), cases[case_index].triple,
-                                accepted ? S8("accepts") : S8("rejects"), dialect ? S8("Microsoft") : S8("GNU"));
-            }
-            BUSTER_TEST(arguments, accepted == (dialect == cases[case_index].dialect));
-            scratch_end(temporary);
-        }
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens;
+        CParseResult parse;
+        Target target = target_native;
+        target.cpu_arch = arches[arch_index];
+        target.os = OPERATING_SYSTEM_WINDOWS;
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena,
+            S8("struct S { int a; }; union U { int a; double d; }; typedef struct { int z; } A;\n"
+               "struct T { struct S; int b; };\n"
+               "struct V { union U; int b; };\n"
+               "struct W { A; int b; };\n"
+               "struct Y { struct N { int n; }; int b; };\n"
+               "struct X { struct { int p; }; const union { int q; char r[8]; }; int b; };\n"
+               "_Static_assert(sizeof(struct T) == 8 && __builtin_offsetof(struct T, b) == 4, \"tagged struct\");\n"
+               "_Static_assert(sizeof(struct V) == 16 && __builtin_offsetof(struct V, b) == 8, \"tagged union\");\n"
+               "_Static_assert(sizeof(struct W) == 8 && __builtin_offsetof(struct W, b) == 4, \"typedef name\");\n"
+               "_Static_assert(sizeof(struct Y) == 8 && sizeof(struct N) == 4, \"nested tagged definition\");\n"
+               "_Static_assert(sizeof(struct X) == 16 && __builtin_offsetof(struct X, b) == 12, \"anonymous members\");\n"
+               "struct phone { int areacode; long number; };\n"
+               "struct person { char name[30]; char gender; int age; int weight; struct phone; };\n"
+               "int area(struct person *p) { return p->areacode; }\n"
+               "int read(struct T *t, struct V *v, struct W *w, struct Y *y) { return t->a + t->b + v->a + (int)v->d + w->z + y->n + y->b; }\n"),
+            S8("tagged-member-microsoft-anonymous.c"), target, &tokens, &parse);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
+        scratch_end(temporary);
     }
     return result;
 }
@@ -13086,6 +13101,77 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unprototyped_call_arguments(UnitTestAr
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
     }
     scratch_end(temporary);
+    return result;
+}
+
+/* An unprototyped `long add();` followed by its prototyped definition declares
+   one function, and C11 6.2.7p3 makes the prototype the composite type. The
+   name index resolves every call through the prototype, so the entity's one
+   IrFunction and its symbol carry the prototype's type as well. The definition
+   used to take a second row for the same symbol: the LLVM writer refused the
+   duplicate, and with a function-pointer return the call's reference named a
+   return type the symbol's did not, which canonical validation rejected. */
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unprototyped_then_prototyped(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    struct
+    {
+        String8 source;
+        u32 parameter_count;
+    } cases[] = {
+        {S8("long add();\n"
+            "long add(long a, long b) { return a + b; }\n"
+            "int main(void) { return (int)add(2, 3) - 5; }\n"),
+         2},
+        {S8("static int twice(int x) { return 2 * x; }\n"
+            "int (*add())(int);\n"
+            "int (*add(int w))(int) { (void)w; return twice; }\n"
+            "int main(void) { int (*a)(int) = add(1); return a(4) != 8; }\n"),
+         1},
+        {S8("long add();\n"
+            "int main(void) { return (int)add(2L, 3L) - 5; }\n"
+            "long add(long a, long b);\n"
+            "long add(long a, long b) { return a + b; }\n"),
+         2},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = {0};
+        CParseResult parse = {0};
+        CIRLowerResult ir = c_test_lower_source(temporary.arena, cases[case_index].source, S8("unprototyped-then-prototyped.c"), target_native,
+                                                &tokens, &parse);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, ir.program != 0))
+        {
+            IrModule* module = &ir.program->modules[0];
+            IrFunction* row = 0;
+            u32 row_count = 0;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                if (string_equal(module->functions[function_index].name, S8("add")))
+                {
+                    row = &module->functions[function_index];
+                    row_count += 1;
+                }
+            }
+            if (BUSTER_REQUIRE(arguments, row_count == 1))
+            {
+                IrSymbol* symbol = ir_symbol_from_id(&ir.program->symbols, row->symbol);
+                IrType* type = ir_type_from_id(&ir.program->types, row->canonical_type);
+                BUSTER_TEST(arguments, row->state == IR_FUNCTION_LOWERED);
+                BUSTER_TEST(arguments, symbol && symbol->is_definition && symbol->type.value == row->canonical_type.value);
+                BUSTER_TEST(arguments, type && type->kind == IR_TYPE_FUNCTION && !type->is_unprototyped &&
+                                           type->parameter_count == cases[case_index].parameter_count);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
+
     return result;
 }
 
@@ -25612,6 +25698,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_void_object_refusals);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
+    BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
@@ -25730,6 +25817,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 
     BUSTER_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_parse);
     BUSTER_TEST_FIXTURE(arguments, c_test_tagged_member_declares_nothing);
+    BUSTER_TEST_FIXTURE(arguments, c_test_tagged_member_microsoft_anonymous);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_invalid_union_initializer);
 

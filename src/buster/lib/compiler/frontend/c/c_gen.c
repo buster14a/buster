@@ -12839,8 +12839,9 @@ BUSTER_C_INTERNAL bool c_ir_build_function_name_index(Arena* arena, CParseResult
             // unprototyped `long __cancel();` and a later one spells the
             // parameters, the call site needs the spelled signature: the
             // arity check below reads the candidate's declaration.  Both
-            // declarations share the entity's IrFunction, so moving the
-            // candidate changes which signature is consulted and nothing else.
+            // declarations share the entity's IrFunction, which takes the
+            // moved candidate's type when c_lower_to_ir_with_options builds
+            // the rows, so calls, the row and its symbol agree on one type.
             if (declaration_prototyped && candidate.type.value < parse->type_count && parse->types[candidate.type.value].is_unprototyped)
             {
                 index->candidates[candidate_index].declaration_index = declaration_index;
@@ -20658,10 +20659,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 return false;
             }
             selected->result = c_ir_emit_integer_value(builder, 0, false, token);
-            IrSourceRange unreachable_source = c_ir_token_source_range(builder, token);
-            IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type);
-            c_ir_append_instruction(builder, unreachable, unreachable_source);
-            builder->function->blocks[builder->current_block.value].terminated = true;
+            c_ir_end_control_flow_after_call(builder, true, c_ir_token_source_range(builder, token));
             selected->emitted = true;
             remaining -= 1;
             continue;
@@ -51169,23 +51167,26 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
         bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
         bool unneeded_definition = (internal || inline_definition) && declaration.is_definition && !function_needed[declaration_index];
+        // Every declaration of an entity shares one IrFunction: the first
+        // earlier declaration of the entity that took a row names it. Search
+        // the entity's own declarations rather than the name index, whose
+        // candidate for the entity may have moved past this declaration.
         IrFunction* existing_function = 0;
-        CIntegerIrBuilder lookup_builder = {
-            .function_names = &function_names,
-        };
-        CIrFunctionNameResolution* resolution = c_ir_function_name_resolution(&lookup_builder, declaration.name);
-        for (u32 candidate_index = resolution ? resolution->first_candidate : UINT32_MAX; candidate_index != UINT32_MAX;
-             candidate_index = function_names.candidates[candidate_index].next)
+        if (declaration.entity.value < parse.entity_count)
         {
-            u32 previous = function_names.candidates[candidate_index].declaration_index;
-            if (previous >= declaration_index)
+            u32 entity_bucket_end = declarations_by_entity_offsets[declaration.entity.value + 1];
+            for (u32 bucket_index = declarations_by_entity_offsets[declaration.entity.value]; bucket_index < entity_bucket_end; bucket_index += 1)
             {
-                break;
-            }
-            if (declaration_functions[previous] && parse.declarations[previous].entity.value == declaration.entity.value)
-            {
-                existing_function = declaration_functions[previous];
-                break;
+                u32 previous = declarations_by_entity[bucket_index];
+                if (previous >= declaration_index)
+                {
+                    break;
+                }
+                if (declaration_functions[previous])
+                {
+                    existing_function = declaration_functions[previous];
+                    break;
+                }
             }
         }
         if (existing_function && unneeded_definition)
@@ -51206,12 +51207,39 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         if (existing_function)
         {
             declaration_functions[declaration_index] = existing_function;
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, existing_function->symbol);
+            // The name index moves an entity's candidate from an unprototyped
+            // `long add();` to the first later declaration that spells the
+            // parameters, so every call resolves through that prototype's
+            // signature. C11 6.2.7p3 makes the prototype the composite type,
+            // and a definition's parameters are the prototype's, so the row
+            // and its symbol take the prototype's type too: a call's
+            // reference then names exactly its symbol's type, and the LLVM
+            // writer sees one function with one type.
+            CIntegerIrBuilder lookup_builder = {
+                .function_names = &function_names,
+            };
+            CIrFunctionNameResolution* resolution = c_ir_function_name_resolution(&lookup_builder, declaration.name);
+            bool entity_candidate = false;
+            for (u32 candidate_index = resolution ? resolution->first_candidate : UINT32_MAX; candidate_index != UINT32_MAX && !entity_candidate;
+                 candidate_index = function_names.candidates[candidate_index].next)
+            {
+                entity_candidate = function_names.candidates[candidate_index].declaration_index == declaration_index;
+            }
+            IrTypeId declared_type = declaration.type.value < parse.type_count ? c_type_ir_map[declaration.type.value] : IR_TYPE_ID_INVALID;
+            IrType* declared_type_value = ir_type_from_id(&program->types, declared_type);
+            if (entity_candidate && symbol && declared_type_value && declared_type_value->kind == IR_TYPE_FUNCTION)
+            {
+                existing_function->canonical_type = declared_type;
+                symbol->type = declared_type;
+            }
             // Each declarator builds its own C function types, and each of
             // those maps to its own IR function type, so a return type that
             // contains one -- `int (*f(int))(int)` spelled on a prototype and
             // again on the definition -- names a different pointer type in
             // each declaration. The function keeps the type of the declaration
-            // that registered it, and the validator checks RETURN rows and
+            // that registered it (or the prototype's, adopted above), and the
+            // validator checks RETURN rows and
             // direct call results against that type's return, so this
             // declaration's signature takes the same return type. A typedef'd
             // return type is one C type in every declaration and already did.
@@ -51222,7 +51250,6 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             }
             if (declaration.is_definition)
             {
-                IrSymbol* symbol = ir_symbol_from_id(&program->symbols, existing_function->symbol);
                 symbol->is_definition = true;
                 String8 section_name = c_declaration_section_name(arena, preprocess, declaration);
                 if (section_name.length)
