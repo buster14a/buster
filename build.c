@@ -40052,7 +40052,7 @@ BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
          * preparation, correctness, validator projection, store, reference
          * issuer, and replay fixtures beside the ordinary service suite. The
          * reference issuer fixture links its producer privately; the service
-         * binary keeps the unlinked fail-closed issuer. */
+         * binary links it for its unit caller, which nothing admitted calls. */
         String8 compiler = cmake_cc(arena, BUILD_COMPILER_CLANG);
         String8 sources[] = {S8("tools/bench_service/retirement_prepare_tests.c"),
                              S8("tools/bench_service/retirement_correctness_tests.c"),

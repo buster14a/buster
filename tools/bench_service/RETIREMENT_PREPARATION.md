@@ -147,11 +147,12 @@ importer fails closed today, and nothing in the worker calls it. Real pin
 values still need a reviewed installed template and inventory. This importer
 holds no `rows.tsv` or validator projection and does not check template
 `configuration_sha256` values itself. `bq_retirement_oracle_authority_begin`
-compares them with B's declared rows. `begin_service` binds those rows to the
-#1020 per-row digest derived from pinned `rows.tsv`
+compares them with B's rows. `project_service` derives those rows from the
+pinned census and binds them to the #1020 per-row digest derived from pinned
+`rows.tsv`
 ([definition](retirement_census_import.md#per-row-configuration_sha256-1020)),
-so a caller that passes the same B array to both binds the template
-transitively.
+and the unit passes that same array to `authority_begin`, which binds the
+template transitively.
 The fixture in `retirement_prepare_tests.c` exercises the importer through its
 `BQ_RETIREMENT_CORRECTNESS_TEST_ONLY` seam
 `bq_retirement_reference_policy_import_pinned` with a synthetic profile.
@@ -369,6 +370,146 @@ installs the reviewed binaries. That installation needs its own packet
 (new binary digests, and a disposable real-systemd rehearsal of the four
 units).
 
+## Unit-side projection and oracle (#1020)
+
+After `bq_retirement_unit_build`, the unit runs design steps 6 to 8 in
+`retirement_unit.c`. Step 9, the correctness gate, stays fail-closed until
+#509 same-attempt receipts exist. The ready record and the coordinator
+replay are the next PR.
+
+`bq_retirement_unit_project` is step 6. It performs these steps in order:
+
+1. It opens the nine pinned census files beside the reference template,
+   in `recipes/native-retirement-performance-v1.census/`. The files are
+   `support.tsv`, `source-applicability.tsv`, `inputs.tsv`, `rows.tsv`,
+   `manifest.txt`, `validator-report.json`, `applicability.tsv`,
+   `applicability-skips.tsv` and `performance-rows.json`. The last is
+   #508's canonical performance-row population. Each file is opened without
+   following links and held close-on-exec at descriptor 3 or above. The
+   projection then checks every file against its own profile pin. The
+   population's pin is the new key `performance-rows-sha256=`, and a profile
+   without it fails closed with `BQ_RECIPE_MISMATCH`.
+2. It opens the sealed `retirement-build/` directory and requires its exact
+   closure.
+3. It calls `bq_retirement_correctness_project_profile` with
+   `BqRetirementBuildStores` made of the export and `retirement-build/`,
+   never the queue. That re-imports A, the matched-build sequence (with its
+   broker binding) and the binary record, and joins their preparation,
+   source and binary identities into `BqRetirementPrepared`. It then runs
+   the eligibility projection. The report must declare `full-census`, and
+   its compiler and baseline digests must equal the two frozen binaries.
+4. `bq_retirement_performance_rows_derive` imports the whole
+   `BqRetirementTrustedRow` array from the pinned population, joined to that
+   projection, for the pinned template's `native_target`. No caller can
+   supply rows. The raw census join and `bq_retirement_validator_rows_join`
+   then check that same array.
+
+The projection is returned only when every check passes. It must name the
+binaries the unit holds, and its support and census digests must equal the
+template's.
+
+### The imported population
+
+The population artifact is the `performance_rows` support file that
+`tools/native_retirement_performance_binding.py` reads (`ROW_SCHEMA`
+`buster-native-retirement-performance-rows-v2`). Its bytes are exactly
+`json.dumps(record, sort_keys=True, separators=(",", ":"),
+ensure_ascii=False) + "\n"`. The C parser accepts only that canonical byte
+sequence, in its one fixed key order. It is bounded to 128 MiB and to one
+row per 256 bytes. Strings must be printable ASCII, and only the `\"` and
+`\\` escapes are accepted. Anything else fails closed.
+
+The import requires the following:
+
+- **`row_identity_fields`.** The binding's `ROW_IDENTITY_FIELDS`, exactly.
+- **Row numbering.** Rows are numbered contiguously from zero.
+- **Object rows.** Rows `0..N-1` are the census object rows in census order.
+  Row `i` must carry `artifact_stage=object` and the same approved #508
+  identity digest as census row `i`.
+- **Stage rows.** Every later row is a declared `link` or `self-host-stage1`
+  row, and at least one of each must appear. Its census row is the unique
+  census row whose identity it carries (every identity field except
+  `artifact_stage`), found through a table of the census identity digests.
+  The binding comes from the declaration, not a heuristic. The row's
+  identity is the same serialization with its own `artifact_stage`, and no
+  identity may repeat, as in the binding.
+- **Values from the census row.** Classification, compiler eligibility and
+  skip proof come from the census row's schema-2 projection. The source
+  digest is the subject's support-declaration digest, and
+  `configuration_sha256` is the census row's #1020 digest.
+- **Eligibility markers.** `compiler_wall_time` and `compiler_peak_rss`
+  must equal that compiler eligibility. The code-section and runtime-oracle
+  markers follow the binding's pairing rules. `code_obligation` is the
+  declared `generated_code_bytes`.
+- **Native runtime.** `execution_obligation` is set when the identity's
+  execution obligation is `semantic-gate-509`. `generated_runtime` must
+  equal compiler eligibility combined with `_native_runtime_required`: that
+  obligation, a `link` or `self-host-stage1` stage, and the native target.
+- **Sources.** The `sources` digests for `support_declaration`, `inputs`,
+  `rows`, `manifest` and `validator_report` must equal their profile pins.
+  `dependencies` and `environment` must be well-formed, but those files are
+  not held here.
+
+The reviewed template pins the result, because its `population_sha256`
+covers every row. Its reference rows are exactly the native-runtime stage
+rows, in row order.
+
+Command, oracle and #509 fields stay empty. `population_sha256` seals the
+rows that `rows_join` accepted. This is an in-process misuse check, not a
+security boundary. `bq_retirement_correctness_begin_service` now takes only
+that projection. An intact projection still returns `BQ_RECIPE_MISMATCH`,
+and one whose rows changed returns `BQ_SOURCE_MISMATCH`. Either way the gate
+is poisoned and no binary is held.
+
+`bq_retirement_unit_oracle` is steps 7 and 8. It requires these first:
+
+- the profile's `reference-template-sha256` equals the policy's template;
+- the projection still matches its seal;
+- the cancellation descriptor is not readable and the deadline has not
+  passed.
+
+It then performs these steps in order:
+
+1. `bq_retirement_oracle_authority_begin` receives the policy template, its
+   pin, the projection's `prepared` and the same `rows` array.
+2. The unit creates `retirement-work/reference-oracle/`, new and `0700`, as
+   the producer's output directory. A second oracle into the same attempt is
+   refused.
+3. It holds A's materialized `base/source` and `candidate/source` copies as
+   the producer's source roots. Each must still match the imported manifest
+   and same-job materialized inode closure. Both copies are made `0550` by
+   the materializer under the service UID, which also runs `worker-unit`, so
+   they satisfy the producer's owner and write-bit checks on source roots.
+4. `bq_retirement_reference_producer_begin` receives the decoded plan, both
+   pins, the held inventory, `policy.source`, the roots, the toolchain
+   manifest pin, the held Clang and the output directory.
+5. For each reference row, the unit calls `producer_next`, then
+   `bq_retirement_reference_producer_runtime`, then `authority_next`. The
+   producer builds the runtime command from its own plan row, with argv[0]
+   `/proc/self/fd/<held binary>` and cwd `/proc/self/fd/<output>`. The
+   caller never composes argv.
+6. It calls `authority_finish`, `authority_ready` and `producer_ready`.
+
+Each step's deadline is the unit's absolute deadline, or 3500 s away if
+that is earlier, because the producer and authority refuse child deadlines
+more than an hour away. A step that exhausts its own 3500 s also returns
+`BQ_WORKER_TIMEOUT`. The cancellation descriptor must be a close-on-exec,
+read-only FIFO or socket (the SIGTERM self-pipe); any other descriptor is
+refused up front with `BQ_CONFIGURATION_MISMATCH`. A readable cancellation descriptor returns
+`BQ_WORKER_CANCEL_SIGNAL` and an expired deadline `BQ_WORKER_TIMEOUT`. In
+both cases the running child's process group is killed and reaped. Any
+failure releases the producer, the directories and the references, and
+returns no facts. A partial reference directory stays in the attempt for
+the failure path. `BqRetirementUnitOracle` keeps the finished authority,
+which points into the prepared policy, the projection's rows and its
+references.
+
+`main.c` now defines `BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED` before it
+includes `retirement_oracle_authority.c`. The service's adapter therefore
+accepts only the pending token of the live producer bound to that authority.
+`bq_worker_unit` still calls none of these steps, and every recipe gate
+still rejects the job first.
+
 ## Capacity derivation
 
 At the inspected #923 head `ffdc9213e74128df5e759c76d52897eddfe4cd7e`,
@@ -555,8 +696,9 @@ individually capped at 16 MiB; each frozen binary at 512 MiB.
 `bq_retirement_matched_build_import` rederives the commands, rereads each
 immutable log and stage receipt, checks the exact final build record digest,
 and reimports A and both binary outputs. The public
-`bq_retirement_correctness_begin_service` requires that authenticated build
-record digest and workspace root before opening B's binary holder or gate.
+`bq_retirement_correctness_project_service` requires that authenticated build
+record digest before it derives B's rows, and `begin_service` accepts only
+that projection before it would open B's binary holder or gate.
 This is a private handoff, not an executable retirement recipe: the blocked
 profile has neither `build-driver-sha256` nor `toolchain-manifest-sha256`; the
 #923 runner has not been wired to these four commands and the final reviewed
@@ -658,6 +800,47 @@ Through the unit, four more jobs check the other broker outcomes:
 - A relayed `125` returns `BQ_CLEANUP_FAILED` with no receipt.
 Each of the four sends exactly one KILL. Descriptor counts match before and
 after.
+The unit-oracle fixture (`retirement_unit_oracle_tests.h`) runs the whole
+sequence on a separate real-A tree:
+
+- **Census.** `retirement_validator_eligibility_test.py --emit` writes the
+  genuine schema-2 census with that module's Python configuration digests.
+  It also writes a #508 performance-row population built the way the
+  binding test builds one, which the binding's own parser accepts, and that
+  module's `expected_population` for it. The population has a native `link`
+  row on census row 16, a native `self-host-stage1` row on census row 17, a
+  foreign-target `link` row on census row 64 and an untimed
+  `self-host-stage1` row on census row 0.
+- **Sources.** The baseline snapshot also holds the census subject's bytes
+  at `tests/unit.c`. This is the reference source.
+- **Toolchain.** `bin/clang` is a copy of the host compiler.
+- **Build.** A `census-fixture` marker makes the fixture driver freeze the
+  census manifest's literal compiler bytes, so the compiler/baseline join
+  holds.
+
+The sequence is prepare, a fixture-broker build, project and oracle. The
+fixture checks these properties:
+
+- Every imported row's census row, stage, native-runtime applicability and
+  configuration digest equal the Python reference.
+- Each stage row names the census row its declaration carries.
+- A profile without, or with a changed, `performance-rows-sha256` pin fails
+  closed.
+- The blocked profile, a missing census pin, a changed report pin and a
+  `full-census` requirement on the self-test report each fail closed.
+- `begin_service` stays fail-closed, and a changed row is refused by both
+  `begin_service` and the oracle.
+- The oracle's success produces the reference and oracle files, and a second
+  oracle is refused.
+- In the service translation unit, forged and foreign tokens are refused
+  before any child runs, and a consumed token is stale.
+- With a second template whose second reference program spins, a SIGALRM
+  cancellation and an expired deadline each fail closed with no live child
+  after the first row finished.
+- No descriptor leaks.
+- `worker_linux.c`, `main.c`, `workspace.c` and `queue.c` name none of these
+  entry points.
+
 The #1018 completion case builds on an attempt created by the real
 `bq_materialize`, so the attempt is the production `02710` rather than a
 fixture directory. Real materialization admits only the smoke recipe, so a

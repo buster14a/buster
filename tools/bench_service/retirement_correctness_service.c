@@ -1,18 +1,23 @@
 /* Service-side A -> B entry for #881.
  * The _pinned and _built_pinned functions remain lower-level fixture seams for
- * matched-build import and held binaries. Production begin_service reimports
- * the durable A preparation, matched-build and binary records, then validates
- * the raw #508 identity and staged source-ledger eligibility projection.
+ * matched-build import and held binaries. The raw #508 identity and staged
+ * source-ledger eligibility projection validate the pinned census files.
  * bq_retirement_validator_row_configuration_sha256 derives each census row's
  * #1020 configuration_sha256 from the pinned rows.tsv bytes and
- * bq_retirement_validator_rows_join requires B's rows to carry it. It still
- * fails closed before acquiring binaries or beginning correctness because
- * full validator, command, #509, and oracle authority is not yet imported.
- * bq_retirement_reference_policy_import (end of file) reads the installed,
- * profile-pinned #1020 reference template and inventory, joins them to A,
- * the support/census/toolchain pins and a held bin/clang, and keeps the read
- * inventory descriptor held for producer_begin; its synthetic-profile seam is
- * bq_retirement_reference_policy_import_pinned.
+ * bq_retirement_validator_rows_join requires B's rows to carry it.
+ * bq_retirement_correctness_project_service (#1020 design step 6) reimports
+ * A, the matched-build and binary records from the worker unit's stores,
+ * imports the complete B population from the pinned #508 performance-row
+ * artifact (bq_retirement_performance_rows_derive), joins it to the same
+ * projection and returns it only after rows_join accepts it; the caller
+ * supplies no rows. bq_retirement_correctness_begin_service accepts
+ * only that sealed projection and still fails closed before acquiring
+ * binaries or beginning correctness, because #509 receipts and command plans
+ * are not imported. bq_retirement_reference_policy_import (end of file) reads
+ * the installed, profile-pinned #1020 reference template and inventory, joins
+ * them to A, the support/census/toolchain pins and a held bin/clang, and
+ * keeps the read inventory descriptor held for producer_begin; its
+ * synthetic-profile seam is bq_retirement_reference_policy_import_pinned.
  */
 #include "retirement_correctness_service.h"
 #include <stdlib.h>
@@ -52,10 +57,29 @@ struct BqRetirementValidatorEligibility
     /* #1020 per-row configuration_sha256, derived from the pinned rows.tsv
      * bytes whose rows_identity_sha256 the report binds. */
     char (*configuration_sha256)[SHA256_HEX_CAPACITY];
+    /* #1020 population join inputs, filled only on request: each census
+     * row's approved object identity and each subject's source digest. */
+    char (*identity_sha256)[SHA256_HEX_CAPACITY];
+    char (*subject_sha256)[SHA256_HEX_CAPACITY];
+    u32 subject_count;
     char compiler_sha256[SHA256_HEX_CAPACITY];
     char baseline_sha256[SHA256_HEX_CAPACITY];
     char evidence_sha256[SHA256_HEX_CAPACITY];
 };
+
+BUSTER_GLOBAL_LOCAL void bq_retirement_validator_eligibility_release(BqRetirementValidatorEligibility* projection)
+{
+    if (projection)
+    {
+        free(projection->compiler_eligible);
+        free(projection->classification);
+        free(projection->skip_proof_sha256);
+        free(projection->configuration_sha256);
+        free(projection->identity_sha256);
+        free(projection->subject_sha256);
+        memset(projection, 0, sizeof(*projection));
+    }
+}
 
 typedef struct BqRetirementSupportSubject BqRetirementSupportSubject;
 struct BqRetirementSupportSubject
@@ -481,8 +505,10 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_census_json_value(Sha256* hash, String8 v
 }
 
 /* Match #508's approved performance identity serialization: a sorted-key JSON
- * object, UTF-8 strings, compact separators, and the object stage name. */
-BUSTER_GLOBAL_LOCAL bool bq_retirement_census_identity_sha256(String8 fields[17], char digest[65])
+ * object, UTF-8 strings and compact separators. artifact_stage is one of the
+ * performance binding's STAGES: object, link or self-host-stage1. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_census_stage_identity_sha256(String8 fields[17], String8 stage,
+    char digest[65])
 {
     static String8 const keys[15] = {
         S8_INITIALIZER("PIC"), S8_INITIALIZER("allocator"), S8_INITIALIZER("argv_evidence"),
@@ -493,13 +519,13 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_census_identity_sha256(String8 fields[17]
         S8_INITIALIZER("link_obligation"), S8_INITIALIZER("target"), S8_INITIALIZER("target_abi")
     };
     String8 const values[15] = {
-        fields[9], fields[7], fields[16], S8("object"), fields[12], fields[5], fields[6],
+        fields[9], fields[7], fields[16], stage, fields[12], fields[5], fields[6],
         fields[15], fields[14], fields[2], fields[11], fields[8], fields[13], fields[3], fields[4]
     };
     Sha256 hash;
     sha256_init(&hash);
     sha256_add(&hash, "{", 1);
-    bool ok = digest != NULL;
+    bool ok = digest != NULL && stage.length > 0;
     for (u32 i = 0; ok && i < BUSTER_ARRAY_LENGTH(keys); i += 1)
     {
         if (i) sha256_add(&hash, ",", 1);
@@ -512,6 +538,12 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_census_identity_sha256(String8 fields[17]
         sha256_add(&hash, "}", 1);
         sha256_finish_hex(&hash, (char8*)digest);
     }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_census_identity_sha256(String8 fields[17], char digest[65])
+{
+    bool ok = bq_retirement_census_stage_identity_sha256(fields, S8("object"), digest);
     return ok;
 }
 
@@ -1935,10 +1967,37 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String
     return ok;
 }
 
+/* #1020 population join inputs from the same report-bound raw rows: the
+ * approved object identity of every census row, and each subject's pinned
+ * support-declaration digest. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_derivation_inputs(BqRetirementValidatorRawRow const* raw_rows,
+    BqRetirementSupportSubject const* subjects, u32 subject_count, u32 row_count,
+    BqRetirementValidatorEligibility* projection)
+{
+    bool ok = raw_rows && subjects && subject_count && projection;
+    if (ok)
+    {
+        projection->identity_sha256 = calloc(row_count, sizeof(*projection->identity_sha256));
+        projection->subject_sha256 = calloc(subject_count, sizeof(*projection->subject_sha256));
+        ok = projection->identity_sha256 && projection->subject_sha256;
+    }
+    for (u32 subject = 0; ok && subject < subject_count; subject += 1)
+        memcpy(projection->subject_sha256[subject], subjects[subject].sha256, SHA256_HEX_CAPACITY);
+    for (u32 index = 0; ok && index < row_count; index += 1)
+    {
+        String8 fields[17];
+        memcpy(fields, raw_rows[index].fields, sizeof(fields));
+        ok = bq_retirement_census_identity_sha256(fields, projection->identity_sha256[index]);
+    }
+    if (ok) projection->subject_count = subject_count;
+    return ok;
+}
+
+/* derive also fills the #1020 population join inputs above. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_eligibility_projection(int support_file,
     int source_applicability_ledger_file, int inputs_file, int rows_file, int manifest_file,
     int report_file, int applicability_file, int skips_file,
-    String8 profile, BqRetirementValidatorEligibility* projection)
+    String8 profile, bool derive, BqRetirementValidatorEligibility* projection)
 {
     static String8 const report_classes[5] = {
         S8_INITIALIZER("admitted-supported"), S8_INITIALIZER("retained-control"),
@@ -2130,6 +2189,9 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_eligibility_projection(int supp
         for (u32 index = 0; ok && index < row_count; index += 1)
             ok = bq_retirement_validator_row_configuration_sha256(raw_rows + index,
                                                                   projection->configuration_sha256[index]);
+        if (ok && derive)
+            ok = bq_retirement_validator_derivation_inputs(raw_rows, subjects, subject_count, row_count,
+                                                           projection);
         if (ok)
         {
             memcpy(projection->compiler_sha256, manifest_compiler->value.pointer, 64);
@@ -2167,14 +2229,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_eligibility_projection(int supp
     free(report_bytes);
     free(applicability_bytes);
     free(skips_bytes);
-    if (!ok && projection)
-    {
-        free(projection->compiler_eligible);
-        free(projection->classification);
-        free(projection->skip_proof_sha256);
-        free(projection->configuration_sha256);
-        memset(projection, 0, sizeof(*projection));
-    }
+    if (!ok) bq_retirement_validator_eligibility_release(projection);
     return ok;
 }
 
@@ -2278,20 +2333,467 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_correctness_begin_service_built_pinned
 }
 #endif
 
-BqError bq_retirement_correctness_begin_service(BqQueue* queue, BqJob const* job,
-    int installed, int workspaces, int support_declaration, int source_applicability_ledger,
-    int census_inputs, int census_rows,
-    int census_manifest, int validator_report, int validator_applicability, int validator_skips,
-    String8 workspace_root,
-    char const preparation_sha256[SHA256_HEX_CAPACITY],
-    char const record_sha256[SHA256_HEX_CAPACITY],
-    char const build_record_sha256[SHA256_HEX_CAPACITY], BqRetirementPrepared const* prepared,
-    BqRetirementTrustedRow* rows, BqRetirementRequiredCheck const* checks, u32 check_count,
-    BqRetirementCheckResult* check_facts, BqRetirementRowFact* facts,
-    u32* identity_workspace, u32 identity_slots, u8* census_workspace, u32 census_slots,
-    BqRetirementHeldBinaries* held, BqRetirementCorrectness* gate)
+/* #1020 derived B population, imported from #508's installed performance-row
+ * artifact (native_retirement_performance_binding.py ROW_SCHEMA v2). The
+ * artifact is exactly json.dumps(record, sort_keys=True,
+ * separators=(",", ":"), ensure_ascii=False) + "\n", so its canonical form
+ * has one fixed key order and this parser accepts only that byte sequence.
+ * Strings must be printable ASCII; only the \" and \\ escapes are accepted
+ * (any other escape, or non-ASCII byte, fails closed). */
+#define BQ_RETIREMENT_POPULATION_FIELD_CAP 1024u
+#define BQ_RETIREMENT_POPULATION_BYTES_CAP (128u * 1024u * 1024u)
+/* A canonical row is far longer than this, so the row count is bounded by
+ * the byte count before the rows are trusted. */
+#define BQ_RETIREMENT_POPULATION_ROW_MIN_BYTES 256u
+
+typedef struct BqRetirementPopulationCursor
 {
-    String8 profile = job ? bq_recipe_profile(bq_request_recipe(&job->request)) : (String8){0};
+    String8 text;
+    u64 offset;
+    bool ok;
+} BqRetirementPopulationCursor;
+
+BUSTER_GLOBAL_LOCAL void bq_retirement_population_literal(BqRetirementPopulationCursor* cursor, String8 literal)
+{
+    cursor->ok = cursor->ok && literal.length <= cursor->text.length - cursor->offset &&
+                 !memcmp(cursor->text.pointer + cursor->offset, literal.pointer, (size_t)literal.length);
+    if (cursor->ok) cursor->offset += literal.length;
+}
+
+/* Decodes one canonical string into output (NUL-terminated) and value. */
+BUSTER_GLOBAL_LOCAL void bq_retirement_population_string(BqRetirementPopulationCursor* cursor, char* output,
+    u32 capacity, String8* value)
+{
+    u32 used = 0;
+    bq_retirement_population_literal(cursor, S8("\""));
+    bool closed = false;
+    while (cursor->ok && !closed)
+    {
+        cursor->ok = cursor->offset < cursor->text.length;
+        u8 byte = cursor->ok ? cursor->text.pointer[cursor->offset] : 0;
+        if (cursor->ok) cursor->offset += 1;
+        if (cursor->ok && byte == '"') closed = true;
+        else if (cursor->ok)
+        {
+            if (byte == '\\')
+            {
+                cursor->ok = cursor->offset < cursor->text.length;
+                byte = cursor->ok ? cursor->text.pointer[cursor->offset] : 0;
+                cursor->ok = cursor->ok && (byte == '"' || byte == '\\');
+                if (cursor->ok) cursor->offset += 1;
+            }
+            else cursor->ok = byte >= 0x20 && byte <= 0x7e;
+            cursor->ok = cursor->ok && used + 1u < capacity;
+            if (cursor->ok) output[used++] = (char)byte;
+        }
+    }
+    cursor->ok = cursor->ok && used > 0;
+    output[used] = 0;
+    *value = cursor->ok ? (String8){(char8*)output, used} : (String8){0};
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_population_bool(BqRetirementPopulationCursor* cursor)
+{
+    bool value = cursor->ok && cursor->text.length - cursor->offset >= 4 &&
+                 !memcmp(cursor->text.pointer + cursor->offset, "true", 4);
+    bq_retirement_population_literal(cursor, value ? S8("true") : S8("false"));
+    return value;
+}
+
+/* A canonical JSON natural number: no sign, no leading zero, no fraction. */
+BUSTER_GLOBAL_LOCAL u64 bq_retirement_population_number(BqRetirementPopulationCursor* cursor)
+{
+    u64 value = 0, digits = 0;
+    bool leading_zero = false;
+    while (cursor->ok && cursor->offset < cursor->text.length &&
+           cursor->text.pointer[cursor->offset] >= '0' && cursor->text.pointer[cursor->offset] <= '9')
+    {
+        u8 digit = cursor->text.pointer[cursor->offset] - '0';
+        leading_zero = leading_zero || (digits == 0 && digit == 0);
+        cursor->ok = digits < 10 && !(leading_zero && digits > 0);
+        value = value * 10u + digit;
+        digits += 1;
+        cursor->offset += 1;
+    }
+    cursor->ok = cursor->ok && digits > 0 && !(leading_zero && digits > 1);
+    return value;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_retirement_population_digest(BqRetirementPopulationCursor* cursor, String8 key,
+    char const expected[SHA256_HEX_CAPACITY])
+{
+    char buffer[SHA256_HEX_CAPACITY + 1] = {0};
+    String8 value = {0};
+    bq_retirement_population_literal(cursor, key);
+    bq_retirement_population_string(cursor, buffer, sizeof(buffer), &value);
+    cursor->ok = cursor->ok && bq_retirement_hex(value, 64) &&
+                 (!expected || !memcmp(value.pointer, expected, 64));
+}
+
+/* The census identity table: census object identity digest to census row. */
+BUSTER_GLOBAL_LOCAL u32 bq_retirement_population_slot(char const digest[SHA256_HEX_CAPACITY], u32 slots)
+{
+    u32 slot = 2166136261u;
+    for (u32 byte = 0; byte < 64; byte += 1) slot = (slot ^ (u8)digest[byte]) * 16777619u;
+    return slot & (slots - 1u);
+}
+
+/* One declared row: its eligibility markers and identity, in canonical key
+ * order. fields uses the rows.tsv column layout the identity serializer
+ * reads; stage is artifact_stage. */
+BUSTER_GLOBAL_LOCAL void bq_retirement_population_row(BqRetirementPopulationCursor* cursor, u64* row,
+    char (*storage)[BQ_RETIREMENT_POPULATION_FIELD_CAP], String8 fields[17], String8* stage, String8* code_section,
+    String8* runtime_oracle, bool metrics[4])
+{
+    /* Identity keys in sorted order with their rows.tsv column (16 is
+     * argv_evidence, 17 marks artifact_stage). */
+    static String8 const keys[15] = {
+        S8_INITIALIZER("\"PIC\":"), S8_INITIALIZER(",\"allocator\":"), S8_INITIALIZER(",\"argv_evidence\":"),
+        S8_INITIALIZER(",\"artifact_stage\":"), S8_INITIALIZER(",\"compile_obligation\":"),
+        S8_INITIALIZER(",\"cpu\":"), S8_INITIALIZER(",\"cpu_features\":"),
+        S8_INITIALIZER(",\"diagnostic_obligation\":"), S8_INITIALIZER(",\"execution_obligation\":"),
+        S8_INITIALIZER(",\"fixture\":"), S8_INITIALIZER(",\"fixture_recipe\":"),
+        S8_INITIALIZER(",\"frontend_lowering\":"), S8_INITIALIZER(",\"link_obligation\":"),
+        S8_INITIALIZER(",\"target\":"), S8_INITIALIZER(",\"target_abi\":")
+    };
+    static u8 const columns[15] = {9, 7, 16, 17, 12, 5, 6, 15, 14, 2, 11, 8, 13, 3, 4};
+    bq_retirement_population_literal(cursor, S8("{\"eligibility\":{\"code_section\":"));
+    bq_retirement_population_string(cursor, storage[15], BQ_RETIREMENT_POPULATION_FIELD_CAP, code_section);
+    bq_retirement_population_literal(cursor, S8(",\"compiler_peak_rss\":"));
+    metrics[1] = bq_retirement_population_bool(cursor);
+    bq_retirement_population_literal(cursor, S8(",\"compiler_wall_time\":"));
+    metrics[0] = bq_retirement_population_bool(cursor);
+    bq_retirement_population_literal(cursor, S8(",\"generated_code_bytes\":"));
+    metrics[2] = bq_retirement_population_bool(cursor);
+    bq_retirement_population_literal(cursor, S8(",\"generated_runtime\":"));
+    metrics[3] = bq_retirement_population_bool(cursor);
+    bq_retirement_population_literal(cursor, S8(",\"runtime_oracle\":"));
+    bq_retirement_population_string(cursor, storage[16], BQ_RETIREMENT_POPULATION_FIELD_CAP, runtime_oracle);
+    bq_retirement_population_literal(cursor, S8("},\"identity\":{"));
+    for (u32 key = 0; cursor->ok && key < BUSTER_ARRAY_LENGTH(keys); key += 1)
+    {
+        bq_retirement_population_literal(cursor, keys[key]);
+        String8* value = columns[key] == 17 ? stage : fields + columns[key];
+        bq_retirement_population_string(cursor, storage[key], BQ_RETIREMENT_POPULATION_FIELD_CAP, value);
+    }
+    bq_retirement_population_literal(cursor, S8("},\"row\":"));
+    *row = bq_retirement_population_number(cursor);
+    bq_retirement_population_literal(cursor, S8("}"));
+}
+
+/* Imports the whole B population from the pinned artifact text:
+ * - rows 0..N-1 are the census object rows, in census order (the same
+ *   approved identity digest as census row i);
+ * - every later row is a declared link or self-host-stage1 row whose census
+ *   row is the unique census row carrying the same identity (the
+ *   declaration's own binding, never a heuristic), and both stages appear;
+ * - compiler eligibility, classification and skip proof come from the
+ *   census row's schema-2 projection and must equal the declared
+ *   compiler_wall_time/compiler_peak_rss; generated_runtime must equal
+ *   compiler eligibility and _native_runtime_required (execution_obligation
+ *   semantic-gate-509, a link or self-host-stage1 stage and the native
+ *   target); the eligibility markers obey the binding's pairing rules;
+ * - configuration_sha256 is the census row's #1020 digest and the sources
+ *   bind the pinned support, inputs, rows, manifest and report bytes.
+ * code_obligation is the declared generated_code_bytes. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_performance_rows_derive(String8 text, String8 profile,
+    BqRetirementValidatorEligibility const* eligibility, u32 native_target, BqRetirementTrustedRow** rows_output,
+    u32* count_output)
+{
+    static String8 const identity_fields = S8_INITIALIZER("{\"row_identity_fields\":[\"fixture\",\"target\","
+        "\"target_abi\",\"cpu\",\"cpu_features\",\"allocator\",\"frontend_lowering\",\"PIC\",\"fixture_recipe\","
+        "\"compile_obligation\",\"link_obligation\",\"execution_obligation\",\"diagnostic_obligation\","
+        "\"argv_evidence\",\"artifact_stage\"],\"rows\":[");
+    char pins[5][SHA256_HEX_CAPACITY] = {{0}};
+    static String8 const pin_keys[5] = {
+        S8_INITIALIZER("census-inputs-sha256="), S8_INITIALIZER("census-manifest-sha256="),
+        S8_INITIALIZER("census-rows-sha256="), S8_INITIALIZER("support-declaration-sha256="),
+        S8_INITIALIZER("validator-report-sha256=")
+    };
+    u32 object_rows = eligibility ? eligibility->row_count : 0;
+    bool ok = rows_output && count_output && eligibility && object_rows && eligibility->identity_sha256 &&
+              eligibility->subject_sha256 && eligibility->classification && eligibility->compiler_eligible &&
+              eligibility->skip_proof_sha256 && eligibility->configuration_sha256 &&
+              eligibility->subject_count == object_rows / BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT &&
+              native_target >= 1 && native_target <= 12 && text.length <= BQ_RETIREMENT_POPULATION_BYTES_CAP;
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(pin_keys); index += 1)
+        ok = bq_retirement_profile_sha(profile, pin_keys[index], pins[index]);
+    if (rows_output) *rows_output = NULL;
+    if (count_output) *count_output = 0;
+    u32 slots = 1;
+    while (ok && slots < 2u * object_rows) slots <<= 1;
+    u32* table = ok ? calloc(slots, sizeof(*table)) : NULL;
+    ok = ok && table != NULL;
+    for (u32 census = 0; ok && census < object_rows; census += 1)
+    {
+        u32 slot = bq_retirement_population_slot(eligibility->identity_sha256[census], slots);
+        while (ok && table[slot])
+        {
+            ok = memcmp(eligibility->identity_sha256[table[slot] - 1u], eligibility->identity_sha256[census], 64);
+            slot = (slot + 1u) & (slots - 1u);
+        }
+        if (ok) table[slot] = census + 1u;
+    }
+    u64 capacity = text.length / BQ_RETIREMENT_POPULATION_ROW_MIN_BYTES + 1u;
+    if (capacity > BQ_RETIREMENT_CORRECTNESS_ROWS_CAP) capacity = BQ_RETIREMENT_CORRECTNESS_ROWS_CAP;
+    /* Every declared identity (with its stage) is unique, as the binding
+     * requires; row_slots indexes the rows already imported. */
+    u32 row_slots = 1;
+    while (ok && row_slots < 2u * capacity) row_slots <<= 1;
+    u32* seen = ok ? calloc(row_slots, sizeof(*seen)) : NULL;
+    BqRetirementTrustedRow* rows = ok ? calloc((size_t)capacity, sizeof(*rows)) : NULL;
+    char (*storage)[BQ_RETIREMENT_POPULATION_FIELD_CAP] = ok ? calloc(17, sizeof(*storage)) : NULL;
+    ok = ok && seen && rows && storage;
+    BqRetirementPopulationCursor cursor = {text, 0, ok};
+    bq_retirement_population_literal(&cursor, identity_fields);
+    u32 count = 0, links = 0, self_hosts = 0;
+    bool more = cursor.ok;
+    while (cursor.ok && more)
+    {
+        String8 fields[17] = {0};
+        String8 stage_name = {0}, code_section = {0}, runtime_oracle = {0};
+        bool metrics[4] = {0};
+        u64 declared = 0;
+        cursor.ok = count < capacity;
+        bq_retirement_population_row(&cursor, &declared, storage, fields, &stage_name, &code_section,
+                                     &runtime_oracle, metrics);
+        u32 stage = string_equal(stage_name, S8("object")) ? BQ_RETIREMENT_STAGE_OBJECT :
+                    string_equal(stage_name, S8("link")) ? BQ_RETIREMENT_STAGE_LINK :
+                    string_equal(stage_name, S8("self-host-stage1")) ? BQ_RETIREMENT_STAGE_SELF_HOST : 0;
+        char object_identity[SHA256_HEX_CAPACITY] = {0};
+        bool ok_row = cursor.ok && declared == count && stage &&
+                      (count < object_rows) == (stage == BQ_RETIREMENT_STAGE_OBJECT) &&
+                      bq_retirement_census_identity_sha256(fields, object_identity);
+        u32 census = object_rows;
+        if (ok_row && count < object_rows)
+        {
+            ok_row = !memcmp(object_identity, eligibility->identity_sha256[count], 64);
+            census = count;
+        }
+        else if (ok_row)
+        {
+            u32 slot = bq_retirement_population_slot(object_identity, slots);
+            while (table[slot] && census == object_rows)
+            {
+                if (!memcmp(eligibility->identity_sha256[table[slot] - 1u], object_identity, 64))
+                    census = table[slot] - 1u;
+                slot = (slot + 1u) & (slots - 1u);
+            }
+            ok_row = census < object_rows;
+        }
+        BqRetirementTrustedRow* row = rows + count;
+        if (ok_row)
+        {
+            row->row = count;
+            row->census_row = census;
+            row->target = bq_retirement_census_target_ids[(census % BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT) / 16u];
+            row->stage = stage;
+            row->classification = eligibility->classification[census];
+            row->compiler_eligible = eligibility->compiler_eligible[census] != 0;
+            row->code_obligation = metrics[2];
+            row->execution_obligation = string_equal(fields[14], S8("semantic-gate-509"));
+            if (stage == BQ_RETIREMENT_STAGE_OBJECT) memcpy(row->identity_sha256, object_identity, SHA256_HEX_CAPACITY);
+            else ok_row = bq_retirement_census_stage_identity_sha256(fields, stage_name, row->identity_sha256);
+            memcpy(row->source_sha256,
+                   eligibility->subject_sha256[census / BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT], SHA256_HEX_CAPACITY);
+            memcpy(row->configuration_sha256, eligibility->configuration_sha256[census], SHA256_HEX_CAPACITY);
+            if (!row->compiler_eligible)
+                memcpy(row->skip_proof_sha256, eligibility->skip_proof_sha256[census], SHA256_HEX_CAPACITY);
+            bool compile = row->compiler_eligible;
+            bool runtime = compile && row->execution_obligation && stage != BQ_RETIREMENT_STAGE_OBJECT &&
+                           row->target == native_target;
+            /* The binding's eligibility pairing rules, then the joins. */
+            bool code_marker = metrics[2] ? string_equal(code_section, S8("deterministic-code-section")) :
+                               string_equal(code_section, S8("not-applicable")) ||
+                               (compile && string_equal(code_section, S8("deterministic-zero-baseline-code-section")));
+            ok_row = ok_row && row->classification >= 1 && row->classification <= 5 &&
+                     metrics[0] == compile && metrics[1] == compile && metrics[3] == runtime &&
+                     (compile || !metrics[2]) && code_marker &&
+                     string_equal(runtime_oracle, runtime ? S8("independent-native-executable-oracle") :
+                                  S8("not-applicable"));
+            links += stage == BQ_RETIREMENT_STAGE_LINK;
+            self_hosts += stage == BQ_RETIREMENT_STAGE_SELF_HOST;
+            u32 slot = bq_retirement_population_slot(row->identity_sha256, row_slots);
+            while (ok_row && seen[slot])
+            {
+                ok_row = memcmp(rows[seen[slot] - 1u].identity_sha256, row->identity_sha256, 64);
+                slot = (slot + 1u) & (row_slots - 1u);
+            }
+            if (ok_row) seen[slot] = count + 1u;
+        }
+        cursor.ok = ok_row;
+        count += cursor.ok;
+        more = cursor.ok && cursor.offset < text.length && text.pointer[cursor.offset] == ',';
+        if (more) cursor.offset += 1;
+    }
+    bq_retirement_population_literal(&cursor,
+        S8("],\"schema\":\"buster-native-retirement-performance-rows-v2\",\"sources\":{"));
+    bq_retirement_population_digest(&cursor, S8("\"dependencies\":"), NULL);
+    bq_retirement_population_digest(&cursor, S8(",\"environment\":"), NULL);
+    bq_retirement_population_digest(&cursor, S8(",\"inputs\":"), pins[0]);
+    bq_retirement_population_digest(&cursor, S8(",\"manifest\":"), pins[1]);
+    bq_retirement_population_digest(&cursor, S8(",\"rows\":"), pins[2]);
+    bq_retirement_population_digest(&cursor, S8(",\"support_declaration\":"), pins[3]);
+    bq_retirement_population_digest(&cursor, S8(",\"validator_report\":"), pins[4]);
+    bq_retirement_population_literal(&cursor, S8("},\"version\":2}\n"));
+    ok = cursor.ok && cursor.offset == text.length && count >= object_rows + BQ_RETIREMENT_MIN_STAGE_ROWS &&
+         links > 0 && self_hosts > 0;
+    if (ok)
+    {
+        *rows_output = rows;
+        *count_output = count;
+    }
+    else free(rows);
+    free(storage);
+    free(seen);
+    free(table);
+    return ok;
+}
+
+bool bq_retirement_projection_release(BqRetirementProjection* projection)
+{
+    bool ok = projection != NULL;
+    if (projection && projection->owned) free(projection->rows);
+    if (projection) *projection = (BqRetirementProjection){0};
+    return ok;
+}
+
+/* #1020 design step 6. Reads A, the matched-build sequence and the binary
+ * record from the unit's per-attempt stores (never the queue), joins their
+ * source and binary identities, imports the whole B population from the
+ * pinned #508 performance-row artifact joined to the pinned census
+ * projection, and returns it only when bq_retirement_validator_rows_join
+ * accepts that same array. census_profile
+ * is the validator profile the report must declare (full-census in
+ * production). The seal is an in-process misuse check over the joined rows,
+ * which authority_begin must receive unchanged. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_correctness_project_profile(BqRetirementBuildStores stores,
+    BqJob const* job, int installed, int workspaces, String8 workspace_root, String8 profile,
+    String8 census_profile, char const* driver, char const* toolchain_root, char const* broker,
+    char const* broker_workspaces, BqRetirementCensusFiles const* census, u32 native_target,
+    char const preparation_sha256[SHA256_HEX_CAPACITY], char const binary_record_sha256[SHA256_HEX_CAPACITY],
+    char const build_record_sha256[SHA256_HEX_CAPACITY], BqRetirementProjection* projection)
+{
+    bool fresh = projection && !projection->owned;
+    if (fresh) *projection = (BqRetirementProjection){0};
+    BqError result = fresh && job && census && native_target >= 1 && native_target <= 12 ? BQ_OK : BQ_BAD_REQUEST;
+    BqRetirementPrepared prepared = {.native_target = native_target};
+    BqRetirementPreparation preparation = {0};
+    BqRetirementMatchedBuild build = {0};
+    BqRetirementBinaries binaries = {0};
+    if (result == BQ_OK)
+    {
+        char population_pin[SHA256_HEX_CAPACITY] = {0};
+        result = bq_retirement_profile_sha(profile, S8("support-declaration-sha256="), prepared.support_sha256) &&
+                 bq_retirement_profile_sha(profile, S8("census-rows-sha256="), prepared.census_sha256) &&
+                 bq_retirement_profile_sha(profile, S8("performance-rows-sha256="), population_pin) ?
+                 BQ_OK : BQ_RECIPE_MISMATCH;
+    }
+    if (result == BQ_OK)
+        result = bq_retirement_preparation_import_pinned(stores.preparation, job, installed, workspaces, profile,
+                                                         preparation_sha256, &preparation);
+    if (result == BQ_OK)
+        result = bq_retirement_matched_build_import_stores(stores, job, installed, workspaces, workspace_root,
+            profile, driver, toolchain_root, broker, broker_workspaces, preparation_sha256, binary_record_sha256,
+            build_record_sha256, &build);
+    if (result == BQ_OK)
+        result = bq_retirement_binaries_import_stores(stores, job, installed, workspaces, profile,
+                                                      preparation_sha256, binary_record_sha256, &binaries);
+    bool joined = result == BQ_OK &&
+        !memcmp(build.preparation_sha256, preparation_sha256, SHA256_HEX_CAPACITY) &&
+        !memcmp(binaries.preparation_sha256, preparation_sha256, SHA256_HEX_CAPACITY);
+    for (u32 side = 0; joined && side < 2; side += 1)
+    {
+        joined = !memcmp(preparation.subjects[side].manifest_sha256,
+                         build.prepared_source[side].manifest_sha256, SHA256_HEX_CAPACITY) &&
+                 !memcmp(preparation.subjects[side].manifest_sha256, binaries.source_sha256[side],
+                         SHA256_HEX_CAPACITY);
+        memcpy(prepared.source_sha256[side], binaries.source_sha256[side], SHA256_HEX_CAPACITY);
+        memcpy(prepared.binary_sha256[side], binaries.binary_sha256[side], SHA256_HEX_CAPACITY);
+    }
+    if (result == BQ_OK && !joined) result = BQ_SOURCE_MISMATCH;
+    if (result == BQ_OK) memcpy(prepared.preparation_sha256, preparation_sha256, SHA256_HEX_CAPACITY);
+    BqRetirementValidatorEligibility eligibility = {0};
+    if (result == BQ_OK)
+        result = bq_retirement_validator_eligibility_projection(
+            census->descriptors[BQ_RETIREMENT_CENSUS_SUPPORT_DECLARATION],
+            census->descriptors[BQ_RETIREMENT_CENSUS_SOURCE_APPLICABILITY_LEDGER],
+            census->descriptors[BQ_RETIREMENT_CENSUS_INPUTS], census->descriptors[BQ_RETIREMENT_CENSUS_ROWS],
+            census->descriptors[BQ_RETIREMENT_CENSUS_MANIFEST],
+            census->descriptors[BQ_RETIREMENT_CENSUS_VALIDATOR_REPORT],
+            census->descriptors[BQ_RETIREMENT_CENSUS_VALIDATOR_APPLICABILITY],
+            census->descriptors[BQ_RETIREMENT_CENSUS_VALIDATOR_SKIPS], profile, true, &eligibility) &&
+            string_equal(string_from_pointer(eligibility.profile), census_profile) &&
+            !memcmp(prepared.binary_sha256[1], eligibility.compiler_sha256, SHA256_HEX_CAPACITY) &&
+            !memcmp(prepared.binary_sha256[0], eligibility.baseline_sha256, SHA256_HEX_CAPACITY) ?
+            BQ_OK : BQ_SOURCE_MISMATCH;
+    u8* population = NULL;
+    u64 population_length = 0;
+    char population_file_sha256[SHA256_HEX_CAPACITY] = {0};
+    BqRetirementTrustedRow* rows = NULL;
+    u32 row_count = 0;
+    if (result == BQ_OK)
+        result = bq_retirement_validator_read_pinned(census->descriptors[BQ_RETIREMENT_CENSUS_PERFORMANCE_ROWS],
+                     profile, S8("performance-rows-sha256="), BQ_RETIREMENT_POPULATION_BYTES_CAP, &population,
+                     &population_length, population_file_sha256) &&
+                 bq_retirement_performance_rows_derive((String8){(char8*)population, population_length}, profile,
+                     &eligibility, native_target, &rows, &row_count) ? BQ_OK : BQ_SOURCE_MISMATCH;
+    free(population);
+    prepared.object_rows = eligibility.row_count;
+    prepared.rows = row_count;
+    char census_inputs_sha256[SHA256_HEX_CAPACITY] = {0}, census_rows_sha256[SHA256_HEX_CAPACITY] = {0};
+    char population_sha256[SHA256_HEX_CAPACITY] = {0};
+    /* The raw census join re-reads the pinned support, inputs and rows bytes
+     * against the imported array; rows_join then binds every row's
+     * configuration to the census row it names. */
+    if (result == BQ_OK)
+        result = bq_retirement_census_projection(census->descriptors[BQ_RETIREMENT_CENSUS_SUPPORT_DECLARATION],
+                     census->descriptors[BQ_RETIREMENT_CENSUS_INPUTS], census->descriptors[BQ_RETIREMENT_CENSUS_ROWS],
+                     profile, &prepared, rows, census_inputs_sha256, census_rows_sha256) &&
+                 !memcmp(prepared.census_sha256, census_rows_sha256, SHA256_HEX_CAPACITY) &&
+                 bq_retirement_validator_rows_join(&prepared, rows, &eligibility) &&
+                 bq_retirement_oracle_population_hash(rows, prepared.rows, population_sha256) ?
+                 BQ_OK : BQ_SOURCE_MISMATCH;
+    if (result == BQ_OK)
+    {
+        projection->prepared = prepared;
+        projection->rows = rows;
+        memcpy(projection->population_sha256, population_sha256, SHA256_HEX_CAPACITY);
+        memcpy(projection->evidence_sha256, eligibility.evidence_sha256, SHA256_HEX_CAPACITY);
+        projection->job_id = job->id;
+        projection->attempt_token = job->token;
+        projection->owned = 1;
+    }
+    else free(rows);
+    bq_retirement_validator_eligibility_release(&eligibility);
+    return result;
+}
+
+BqError bq_retirement_correctness_project_service(BqRetirementBuildStores stores, BqJob const* job,
+    int installed, int workspaces, BqRetirementCensusFiles const* census, u32 native_target,
+    char const preparation_sha256[SHA256_HEX_CAPACITY], char const binary_record_sha256[SHA256_HEX_CAPACITY],
+    char const build_record_sha256[SHA256_HEX_CAPACITY], BqRetirementProjection* projection)
+{
+    String8 profile = bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
+    BqError result = bq_retirement_correctness_project_profile(stores, job, installed, workspaces,
+        S8(BQ_RETIREMENT_STAGE_WORKSPACE_ROOT), profile, S8("full-census"), BQ_RETIREMENT_BUILD_DRIVER,
+        BQ_RETIREMENT_TOOLCHAIN_ROOT, BQ_RETIREMENT_STAGE_BROKER, BQ_RETIREMENT_STAGE_WORKSPACE_ROOT, census,
+        native_target, preparation_sha256, binary_record_sha256, build_record_sha256, projection);
+    return result;
+}
+
+/* The still fail-closed begin (#1020 design step 9). It accepts only a
+ * projection that project_service produced: the rows must still hash to the
+ * seal taken when rows_join accepted them, so no caller row enters. Even an
+ * intact projection returns BQ_RECIPE_MISMATCH before binaries are held or
+ * the gate begins, because #509 same-attempt receipts, command plans and the
+ * required-check list are not authenticated yet; a changed one returns
+ * BQ_SOURCE_MISMATCH. */
+BqError bq_retirement_correctness_begin_service(BqRetirementProjection const* projection,
+    BqRetirementRequiredCheck const* checks, u32 check_count, BqRetirementCheckResult* check_facts,
+    BqRetirementRowFact* facts, u32* identity_workspace, u32 identity_slots, u8* census_workspace,
+    u32 census_slots, BqRetirementHeldBinaries* held, BqRetirementCorrectness* gate)
+{
     (void)checks;
     (void)check_count;
     (void)check_facts;
@@ -2300,63 +2802,14 @@ BqError bq_retirement_correctness_begin_service(BqQueue* queue, BqJob const* job
     (void)identity_slots;
     (void)census_workspace;
     (void)census_slots;
-    bool fresh = gate && !gate->check_count && !gate->failed && !gate->finished &&
-        held && !held->owned;
-    BqRetirementPreparation preparation = {0};
-    BqRetirementMatchedBuild build = {0};
-    BqRetirementBinaries binaries = {0};
-    BqError a_result = fresh && prepared ?
-        bq_retirement_preparation_import(bq_retirement_queue_store(queue), job, installed, workspaces,
-            preparation_sha256, &preparation) : BQ_RECIPE_MISMATCH;
-    if (a_result == BQ_OK)
-        a_result = bq_retirement_matched_build_import(queue, job, installed, workspaces,
-            workspace_root, preparation_sha256, record_sha256, build_record_sha256, &build);
-    if (a_result == BQ_OK)
-        a_result = bq_retirement_binaries_import(queue, job, installed, workspaces,
-            preparation_sha256, record_sha256, &binaries);
-    bool joined_a = a_result == BQ_OK &&
-        !memcmp(prepared->preparation_sha256, preparation_sha256, SHA256_HEX_CAPACITY) &&
-        !memcmp(prepared->preparation_sha256, build.preparation_sha256, SHA256_HEX_CAPACITY) &&
-        !memcmp(prepared->preparation_sha256, binaries.preparation_sha256, SHA256_HEX_CAPACITY);
-    for (u32 side = 0; joined_a && side < 2; side += 1)
-        joined_a = !memcmp(prepared->source_sha256[side],
-                           preparation.subjects[side].manifest_sha256, SHA256_HEX_CAPACITY) &&
-                   !memcmp(prepared->source_sha256[side],
-                           build.prepared_source[side].manifest_sha256, SHA256_HEX_CAPACITY) &&
-                   !memcmp(prepared->source_sha256[side],
-                           binaries.source_sha256[side], SHA256_HEX_CAPACITY) &&
-                   !memcmp(prepared->binary_sha256[side],
-                           binaries.binary_sha256[side], SHA256_HEX_CAPACITY);
-    char census_inputs_sha256[SHA256_HEX_CAPACITY] = {0};
-    char census_rows_sha256[SHA256_HEX_CAPACITY] = {0};
-    BqRetirementValidatorEligibility eligibility = {0};
-    bool authenticated_raw = joined_a && rows &&
-        bq_retirement_census_projection(support_declaration, census_inputs, census_rows, profile,
-                                        prepared, rows, census_inputs_sha256, census_rows_sha256) &&
-        !memcmp(prepared->census_sha256, census_rows_sha256, SHA256_HEX_CAPACITY);
-    bool authenticated_eligibility = authenticated_raw &&
-        bq_retirement_validator_eligibility_projection(support_declaration, source_applicability_ledger,
-            census_inputs, census_rows,
-            census_manifest, validator_report, validator_applicability, validator_skips, profile,
-            &eligibility) &&
-        string_equal(string_from_pointer(eligibility.profile), S8("full-census")) &&
-        eligibility.row_count == prepared->object_rows &&
-        !memcmp(prepared->binary_sha256[1], eligibility.compiler_sha256, SHA256_HEX_CAPACITY) &&
-        !memcmp(prepared->binary_sha256[0], eligibility.baseline_sha256, SHA256_HEX_CAPACITY);
-    bool joined = authenticated_eligibility &&
-        bq_retirement_validator_rows_join(prepared, rows, &eligibility);
-    /* Eligibility and configuration identity are only part of B's authority.
-     * This staged importer does not independently authenticate #509 receipt
-     * bytes, command plans, or the oracle. A valid projection still fails
-     * closed before caller facts can enter the correctness gate. */
-    BqError result = !fresh ? BQ_RECIPE_MISMATCH :
-                     a_result != BQ_OK ? a_result :
-                     joined ? BQ_RECIPE_MISMATCH : BQ_SOURCE_MISMATCH;
-    free(eligibility.compiler_eligible);
-    free(eligibility.classification);
-    free(eligibility.skip_proof_sha256);
-    free(eligibility.configuration_sha256);
-    if (result != BQ_OK && fresh) gate->failed = 1;
+    bool fresh = gate && !gate->check_count && !gate->failed && !gate->finished && held && !held->owned;
+    char population_sha256[SHA256_HEX_CAPACITY] = {0};
+    bool sealed = fresh && projection && projection->owned && projection->rows &&
+        projection->prepared.rows >= projection->prepared.object_rows + BQ_RETIREMENT_MIN_STAGE_ROWS &&
+        bq_retirement_oracle_population_hash(projection->rows, projection->prepared.rows, population_sha256) &&
+        !memcmp(population_sha256, projection->population_sha256, SHA256_HEX_CAPACITY);
+    BqError result = !fresh ? BQ_RECIPE_MISMATCH : sealed ? BQ_RECIPE_MISMATCH : BQ_SOURCE_MISMATCH;
+    if (fresh) gate->failed = 1;
     return result;
 }
 
@@ -2370,9 +2823,10 @@ BqError bq_retirement_correctness_begin_service(BqQueue* queue, BqJob const* job
  * held inventory rather than reopening the name. It
  * holds no rows.tsv or validator projection, so it cannot derive the #1020
  * per-row configuration_sha256 itself. The derived value reaches template
- * rows only through B: begin_service's bq_retirement_validator_rows_join binds
- * every B row to it, and authority_begin compares each template row with the
- * same B row. A caller must pass that unchanged B array to both. */
+ * rows only through B: project_service's bq_retirement_validator_rows_join
+ * binds every derived B row to it, and authority_begin compares each template
+ * row with the same B row. The worker unit passes that unchanged projection
+ * array to both. */
 /* held, when present, receives the read descriptor (promoted to at least 3
  * for the producer's descriptor checks) instead of it being closed. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_reference_read_installed(int recipes, char const* name,

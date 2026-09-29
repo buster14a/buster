@@ -16,14 +16,19 @@ remain prerequisites before any timed child.
 
 The lower-level `_built_pinned` seams read same-attempt preparation,
 matched-build receipts and binary records through service-held descriptors.
-The public `begin_service` reimports A, matched-build and binary records before
-performing the staged eligibility projection. That projection separately pins #508 support, inputs, rows,
+The public `project_service` reimports A, matched-build and binary records
+from the worker unit's stores before performing the staged eligibility
+projection and deriving the B rows from it; `begin_service` accepts only that
+sealed projection. That projection separately pins #508 support, inputs, rows,
 manifest, the source applicability ledger, schema-2 report, and applicability
 and skip sidecars. It recomputes the raw identities, checks the complete fixed
 matrix and report class-row partition, and requires the exact source-derived
 non-executed set. For full-census it requires the approved source applicability
-ledger digest/count and exactly four shards. It then checks projection object
-ordinals against the supplied B row inventory. It derives classes, reasons, and
+ledger digest/count and exactly four shards. It then imports the B row
+inventory from #508's profile-pinned performance-row population, requiring
+its object rows to be the census rows in order and binding each declared
+stage row to the census row whose identity it carries, and checks its object
+ordinals. It derives classes, reasons, and
 ownership for default rows missing from the source applicability ledger using
 the raw row obligations, allocator role, and retained direct-reference failure
 set; it does not replay baseline shard results or independent supplements. It
@@ -50,10 +55,10 @@ carry the value for its `census_row`
 ([definition](retirement_census_import.md#per-row-configuration_sha256-1020)).
 It does not authenticate compiler/runtime command plans, #509
 required-check receipt bytes/digests, or independent-oracle bytes. A valid
-projection therefore returns fail-closed `BQ_RECIPE_MISMATCH` before the
-correctness gate begins. Before the validator projection, the production entry
-reimports the durable A preparation and fixed matched-build/binary records and
-compares their identities to B's declaration. The checked-in production profile
+projection therefore still makes `begin_service` return fail-closed
+`BQ_RECIPE_MISMATCH` before the correctness gate begins. Before the validator
+projection, `project_service` reimports the durable A preparation and fixed
+matched-build/binary records and joins their identities. The checked-in production profile
 lacks the new validator pins and fails earlier. The low-level fixture probe tests projection
 mechanics only; it does not authorize readiness or a timed launch.
 The separate `_built_pinned` fixture seam can import matched-build evidence and
@@ -175,20 +180,21 @@ before any timed child. Rehashing the whole template before every reference
 child also gives quadratic work in the number of reference rows; full-population
 time/capacity has not been qualified.
 
-There is no production verified-build issuer or service caller yet. The issuer
-used by the miniature fixture is compiled only under
+The issuer used by the miniature fixture is compiled only under
 `BQ_RETIREMENT_ORACLE_AUTHORITY_TEST_ONLY`; the blocked profile contains no
 admitted installed template or authenticated independent build receipts.
 `retirement_reference_producer.{h,c}` is the pinned independent reference build
 issuer. The adapter consults its one-use token only when a translation unit
-defines `BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED`. The service binary now
-compiles the producer so that the reference-policy importer can re-run its
-canonical inventory encoder. It still does not define that macro, so its
-compiled adapter keeps `issued = false` and launches no reference child.
-Existing private test registration compiles the adapter through the correctness
-test translation unit, and `retirement_reference_producer_tests.c` links the
-producer privately; `bench_service self-test` (and `--sanitize`) builds and runs
-both. The real-child fixtures prove bounded mechanics and
+defines `BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED`. The service translation
+unit (`main.c`) now defines it together with its only caller,
+`bq_retirement_unit_oracle` in `retirement_unit.c`, so the service accepts
+the live producer's pending token and nothing else. No production path calls
+the unit oracle yet: `bq_worker_unit` and the recipe gates reject the job
+first. The correctness test translation unit keeps the fixture issuer, and
+`retirement_reference_producer_tests.c` links the producer privately;
+`bench_service self-test` (and `--sanitize`) builds and runs both, and the
+unit-oracle fixture exercises forged, foreign and stale tokens in the service
+translation unit. The real-child fixtures prove bounded mechanics and
 mutation rejection, not a full-corpus oracle run, #509 proof or recipe admission.
 
 `producer_begin` still compares the installed template and inventory digests
@@ -212,17 +218,18 @@ coordinator's export of A
 record and held executables, with the evidence sealed in the attempt's
 `retirement-build/` directory
 ([unit-side matched builds](RETIREMENT_PREPARATION.md#unit-side-matched-builds-1020)).
-`begin_service` still imports those records from the queue, so the in-unit
-caller must pass it the unit's stores. The installed broker does not yet
-accept the unit's broker stages.
+`bq_retirement_unit_project` then derives the B rows from the pinned census
+through `project_service`, reading those records from the unit's stores, and
+`bq_retirement_unit_oracle` runs the authority and the producer over them
+([unit-side projection and oracle](RETIREMENT_PREPARATION.md#unit-side-projection-and-oracle-1020)).
+The installed broker does not yet accept the unit's broker stages.
 The checked-in blocked profile lacks both reference pins, so the public
-importer fails closed and no worker path calls it. Real reviewed pin values and a
-producer caller in the worker remain open. The importer holds no `rows.tsv`
-or validator projection, so it does not compare template configuration
-digests with the derived #1020 value directly. `begin_service` binds B's rows
-to that value and `bq_retirement_oracle_authority_begin` compares template
-rows with the same B rows. The future worker caller must pass the unchanged
-joined B array to both for the template to inherit the binding. [RETIREMENT_PREPARATION.md](RETIREMENT_PREPARATION.md#installed-reference-policy-1020)
+importer fails closed and no worker path calls it. Real reviewed pin values
+remain open. The importer holds no `rows.tsv` or validator projection, so it
+does not compare template configuration digests with the derived #1020 value
+directly. `project_service` binds the derived rows to that value and
+`bq_retirement_oracle_authority_begin` compares template rows with the same
+array, which the unit passes unchanged, so the template inherits the binding. [RETIREMENT_PREPARATION.md](RETIREMENT_PREPARATION.md#installed-reference-policy-1020)
 describes the file formats and joins.
 
 Before `row`, the service derives exact compiler and applicable runtime command

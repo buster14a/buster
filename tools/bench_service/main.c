@@ -14,17 +14,17 @@
 #include "workspace.c"
 #ifdef __linux__
 /* Keep the private B adapters in the installed service translation unit.
- * Their production importer remains fail-closed until independent policy,
- * semantic receipts and the reference-build producer are connected. The
- * producer is compiled for its canonical inventory encoder, which the pinned
- * reference-policy importer re-runs; without
- * BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED the adapter never accepts its
- * token, so this unit still launches no reference child. The worker-unit
- * side of the A handoff is compiled but not yet called by bq_worker_unit. */
+ * The in-unit lane-B caller (retirement_unit.c: project, oracle authority and
+ * reference producer, #1020 PR 3) is linked here, so the oracle adapter
+ * accepts only live tokens this unit's reference producer issued. The
+ * correctness gate stays fail-closed until #509 receipts are joined, and
+ * bq_worker_unit still calls none of the worker-unit B steps: the recipe
+ * gates reject the job first. */
 #include "retirement_correctness.c"
 #include "retirement_correctness_service.c"
 #include "retirement_artifact_service.c"
 #include "retirement_correctness_oracle.c"
+#define BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED 1
 #include "retirement_oracle_authority.c"
 #include "retirement_reference_producer.c"
 #include "retirement_reference_template.c"

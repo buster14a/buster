@@ -2,8 +2,10 @@
  * The inventory encoder fixes source, configuration and literal command bytes
  * before the job. begin joins its installed pin to A's held source roots and
  * Clang closure. next executes the exact held compiler via the bounded service
- * runner, freezes binary/log/receipt and issues a one-use token. The worker
- * must supply its sandbox/cgroup and retain the lease through final sealing.
+ * runner, freezes binary/log/receipt and issues a one-use token; runtime then
+ * builds that token's runtime command from the same plan row for
+ * authority_next. The worker must supply its sandbox/cgroup and retain the
+ * lease through final sealing.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -78,6 +80,11 @@ BUSTER_GLOBAL_LOCAL bool bq_ref_path(char const* value)
     return ok;
 }
 
+/* Source roots are A's materialized copies (<attempt>/<subject>/source, made
+ * 0550 by bq_make_sources_read_only) and the output directory is the unit's
+ * private retirement-work/ child. The materializer and worker-unit both run
+ * as the service UID, so both must be owned by the effective UID and neither
+ * group- nor world-writable; an installed root-owned tree is not a root. */
 BUSTER_GLOBAL_LOCAL bool bq_ref_folder(int descriptor)
 {
     struct stat info = {0};
@@ -834,6 +841,49 @@ bool bq_retirement_reference_producer_consume(
         producer->next += 1;
     }
     else if (producer) producer->failed = 1;
+    return ok;
+}
+
+bool bq_retirement_reference_producer_runtime(BqRetirementReferenceProducer const* producer,
+    BqRetirementOracleVerifiedBuild const* token, BqRetirementReferenceRuntime* runtime)
+{
+    if (runtime) *runtime = (BqRetirementReferenceRuntime){0};
+    uint32_t index = producer ? producer->next : 0;
+    BqRetirementReferencePlanRow const* row = producer && producer->plan &&
+        index < producer->plan->count ? producer->plan->rows + index : NULL;
+    BqRetirementOracleTemplateRow const* approved = row && producer->plan->template &&
+        index < producer->plan->template->reference_count ?
+        producer->plan->template->references + index : NULL;
+    char logical_sha256[65] = {0};
+    bool ok = runtime && token && approved && token == &producer->token &&
+        producer->pending == 1 && !producer->failed && token->producer == producer &&
+        token->binary >= 3 && token->binary == producer->binary_file &&
+        bq_ref_folder(producer->output_directory) &&
+        row->runtime_argument_count >= 1 &&
+        row->runtime_argument_count <= BQ_RETIREMENT_REFERENCE_ARGS_CAP &&
+        row->runtime_environment_count <= BQ_RETIREMENT_REFERENCE_ENV_CAP;
+    int executable = ok ? snprintf(runtime->executable, sizeof(runtime->executable),
+        "/proc/self/fd/%d", token->binary) : -1;
+    int directory = ok ? snprintf(runtime->directory, sizeof(runtime->directory),
+        "/proc/self/fd/%d", producer->output_directory) : -1;
+    ok = ok && executable > 0 && (size_t)executable < sizeof(runtime->executable) &&
+        directory > 0 && (size_t)directory < sizeof(runtime->directory);
+    if (ok)
+    {
+        runtime->arguments[0] = runtime->executable;
+        for (uint32_t i = 1; i < row->runtime_argument_count; i += 1)
+            runtime->arguments[i] = (char*)row->runtime_arguments[i - 1];
+        for (uint32_t i = 0; i < row->runtime_environment_count; i += 1)
+            runtime->environment[i] = (char*)row->runtime_environment[i];
+        runtime->command = (BqRetirementProcessCommand){runtime->arguments, runtime->environment,
+            runtime->directory, row->runtime_argument_count, row->runtime_environment_count};
+        runtime->output = (BqRetirementArtifactLocation){producer->output_directory,
+            approved->output_name};
+        /* The same logical identity the installed template pinned. */
+        ok = bq_retirement_oracle_logical_command_hash(&runtime->command, logical_sha256) &&
+            !strcmp(logical_sha256, approved->logical_command_sha256);
+    }
+    if (!ok && runtime) *runtime = (BqRetirementReferenceRuntime){0};
     return ok;
 }
 
