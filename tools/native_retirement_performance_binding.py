@@ -9,6 +9,14 @@ service/host, and the statistical rules are all bound before measurements are
 considered.  The evidence form parses the versioned canonical row artifact,
 streams typed observations, and replays the reviewed C statistics adapter from
 checked-in sources; the structural form is explicitly not proof.
+
+Contract amendment A1 (batched native-host sampling) is implemented here: the
+timed projection is pinned to ``NATIVE_TIMED_TARGET``; compiler invocations
+are batch processes over derived batch groups (``_batch_groups``) frozen by a
+v3 execution plan; per-input metrics artifacts supply per-fixture samples;
+the batch process metric pair is gated over object batch groups through a
+``group-round-pair`` result population; and code bytes are measured once per
+(variant, row) on every target through a per-row code record set.
 """
 
 import argparse
@@ -84,21 +92,48 @@ ROW_IDENTITY_FIELDS = [
     "argv_evidence", "artifact_stage",
 ]
 OUTCOMES = ["pass", "regression", "inconclusive", "invalid"]
-METRICS = ["compiler_wall_time", "compiler_peak_rss", "generated_code_bytes",
-           "generated_runtime"]
-STATISTICAL_METRICS = ["compiler_wall_time", "compiler_peak_rss", "generated_runtime"]
+# Amendment A1 (batched native-host sampling).  Only compiler-eligible rows on
+# this pinned native-host target are timed; every other row is correctness and
+# code-byte evidence only.  The admitted host profile must name the same target.
+NATIVE_TIMED_TARGET = "x86_64-unknown-linux-gnu"
+# Per-row metric map.  The canonical row artifact keeps its census field
+# ``compiler_peak_rss``; under A1 that unchanged bit gates the per-input
+# ``compiler_peak_memory`` metric, so the validator renames it when parsing.
+ROW_METRICS = ["compiler_wall_time", "compiler_peak_memory", "generated_code_bytes",
+               "generated_runtime"]
+# Metrics carried by ``row-round-pair`` result records (timed rows only).
+ROW_SAMPLE_METRICS = ["compiler_wall_time", "compiler_peak_memory", "generated_runtime"]
+# The gated batch process metric pair, carried by ``group-round-pair`` records
+# whose cells are object batch groups.
+BATCH_METRICS = ["compiler_batch_wall_time", "compiler_batch_peak_rss"]
+# Every metric with an approved limit.
+METRICS = ["compiler_wall_time", "compiler_peak_memory", "compiler_batch_wall_time",
+           "compiler_batch_peak_rss", "generated_code_bytes", "generated_runtime"]
+# The five #619 variable metrics, in ``TpRetirementMetric`` index order.
+STATISTICAL_METRICS = ["compiler_wall_time", "compiler_peak_memory", "generated_runtime",
+                       "compiler_batch_wall_time", "compiler_batch_peak_rss"]
 AGGREGATE_THRESHOLDS = {
     "compiler_wall_time": Decimal("1.02"),
-    "compiler_peak_rss": Decimal("1.02"),
+    "compiler_peak_memory": Decimal("1.02"),
+    "compiler_batch_wall_time": Decimal("1.02"),
+    "compiler_batch_peak_rss": Decimal("1.02"),
     "generated_code_bytes": Decimal("1.01"),
     "generated_runtime": Decimal("1.03"),
 }
 CELL_THRESHOLDS = {
     "compiler_wall_time": Decimal("1.05"),
-    "compiler_peak_rss": Decimal("1.05"),
+    "compiler_peak_memory": Decimal("1.05"),
+    "compiler_batch_wall_time": Decimal("1.05"),
+    "compiler_batch_peak_rss": Decimal("1.05"),
     "generated_code_bytes": Decimal("1.01"),
     "generated_runtime": Decimal("1.03"),
 }
+# A batch group shares one configuration and one frozen argv apart from its
+# input/output lists: the same fixture recipe (hence recipe flags) and CPU.
+BATCH_GROUP_KEY_FIELDS = ("allocator", "frontend_lowering", "PIC", "fixture_recipe",
+                          "cpu", "cpu_features")
+OBJECT_BATCH_GROUP = "object-batch"
+SINGLETON_STAGE_GROUP = "singleton-stage"
 SUPPORT_FILE_ROLES = [
     "support_declaration", "performance_declaration", "manifest", "inputs",
     "rows", "dependencies", "environment", "performance_rows", "validator_report",
@@ -170,9 +205,29 @@ WORKFLOW_PHASES = ("pre_sample_plan", "post_aa_binding", "sealed_result",
                    "independent_replay")
 ADMISSION_SCHEMA = "buster-native-retirement-admission-v1"
 ORACLE_SCHEMA = "buster-native-retirement-oracle-v1"
-RESULT_INPUT_PLAN_SCHEMA = "buster-native-retirement-result-input-plan-v2"
+RESULT_INPUT_PLAN_SCHEMA = "buster-native-retirement-result-input-plan-v3"
+# (A1) The plan declares two #615 populations with the same coordinate schema.
+RESULT_INPUT_POPULATIONS = {
+    "rows": {
+        "coordinate_schema": "row-round-pair-v1",
+        "sample_population": "native-host-timed-rows-with-sampled-metrics",
+        "eligible_population":
+            "authenticated-applicability-minus-nonexecuted-rows-on-native-host-target",
+    },
+    "batches": {
+        "coordinate_schema": "group-round-pair-v1",
+        "sample_population": "native-host-object-batch-groups",
+        "eligible_population": "frozen-batch-groups-of-the-native-host-timed-projection",
+    },
+}
+RESULT_INPUT_MAX_PARTITIONS = 3
+CODE_RECORD_LINE_CAP = 8192
+# Per-input metrics artifacts: records use the #615 1 MiB record bound and one
+# artifact is at most 64 MiB.
+METRICS_RECORD_BYTE_CAP = 1024 * 1024
+METRICS_ARTIFACT_BYTE_CAP = 64 * 1024 * 1024
 SEALED_RESULT_SCHEMA = "buster-native-retirement-sealed-result-v1"
-RESULT_BUNDLE_SCHEMA = "buster-native-retirement-result-bundle-v1"
+RESULT_BUNDLE_SCHEMA = "buster-native-retirement-result-bundle-v2"
 REPLAY_BUNDLE_SCHEMA = "buster-native-retirement-independent-replay-bundle-v1"
 PUBLICATION_SCHEMA = "buster-native-retirement-performance-publication-v1"
 PHASE_SCHEMA = {
@@ -543,6 +598,108 @@ def _native_runtime_required(row, native_target):
         and identity["target"] == native_target
 
 
+def _timed(row):
+    """(A1) The timed projection: compiler eligible on the pinned native host."""
+    return bool(row["metrics"].get("compiler_wall_time", False)) \
+        and row["identity"]["target"] == NATIVE_TIMED_TARGET
+
+
+def _timed_rows(rows):
+    """Return the timed projection in ascending canonical row order.
+
+    Runtime is measured only over native rows; a runtime-eligible row outside
+    the timed projection would be cross-target timing and is rejected.
+    """
+    ordered = sorted(rows, key=lambda row: row["row"])
+    for row in ordered:
+        if row["metrics"].get("generated_runtime", False) and not _timed(row):
+            _fail(f"row {row['row']} gives generated runtime to a row outside the "
+                  "native-host timed projection")
+    return [row for row in ordered if _timed(row)]
+
+
+def _code_observed(row):
+    """Rows whose deterministic code section is frozen (including zero baselines)."""
+    return row["eligibility"]["code_section"] != "not-applicable"
+
+
+def _batch_groups(rows):
+    """Derive the frozen A1 batch-group partition of the timed projection.
+
+    Object rows sharing a configuration and frozen argv (recipe and CPU) form
+    one multi-input batch group; each timed link or self-host stage-1 row is a
+    singleton group.  A group's ordinal is its campaign position: ascending
+    order of its smallest member row.  ``object_ordinal`` is the dense ordinal
+    over object groups used by the ``group-round-pair`` result population.
+    The producer never chooses this partition.
+    """
+    groups = []
+    object_groups = {}
+    for row in _timed_rows(rows):
+        identity = row["identity"]
+        key = tuple(identity[field] for field in BATCH_GROUP_KEY_FIELDS)
+        if identity["artifact_stage"] == "object":
+            group = object_groups.get(key)
+            if group is None:
+                group = {"kind": OBJECT_BATCH_GROUP, "key": key, "rows": [],
+                         "identity": {"target": identity["target"],
+                                      "artifact_stage": "object"}}
+                object_groups[key] = group
+                groups.append(group)
+        else:
+            group = {"kind": SINGLETON_STAGE_GROUP, "key": key, "rows": [],
+                     "identity": {"target": identity["target"],
+                                  "artifact_stage": identity["artifact_stage"]}}
+            groups.append(group)
+        group["rows"].append(row["row"])
+        for field in BATCH_GROUP_KEY_FIELDS:
+            group["identity"][field] = identity[field]
+    object_ordinal = 0
+    for ordinal, group in enumerate(groups):
+        group["group"] = ordinal
+        if group["kind"] == OBJECT_BATCH_GROUP:
+            group["object_ordinal"] = object_ordinal
+            object_ordinal += 1
+        else:
+            group["object_ordinal"] = None
+    return groups
+
+
+def _object_groups(groups):
+    return [group for group in groups if group["kind"] == OBJECT_BATCH_GROUP]
+
+
+def _family_cells(rows):
+    """Map each #619 variable metric to its ordered exact cells.
+
+    Wall time and peak memory cells are timed rows; runtime cells are the
+    runtime-eligible timed rows; the batch metric pair's cells are object
+    batch groups.  Cross-target rows are never cells.
+    """
+    timed = _timed_rows(rows)
+    groups = _batch_groups(rows)
+    cells = {}
+    for metric in STATISTICAL_METRICS:
+        if metric in BATCH_METRICS:
+            cells[metric] = [{
+                "cell": f"group={group['group']}", "unit": ("group", group["group"]),
+                "dimensions": group["identity"],
+                "identity": {"group": group["group"],
+                             "key": [group["identity"][field]
+                                     for field in BATCH_GROUP_KEY_FIELDS],
+                             "rows": group["rows"]},
+            } for group in _object_groups(groups)]
+        else:
+            cells[metric] = [{
+                "cell": f"row={row['row']}", "unit": ("row", row["row"]),
+                "dimensions": row["identity"],
+                "identity": {"row": row["row"],
+                             "identity": [row["identity"][field]
+                                          for field in ROW_IDENTITY_FIELDS]},
+            } for row in timed if row["metrics"].get(metric, False)]
+    return cells
+
+
 def _derive_axes(rows):
     def ordered(values, expected):
         present = set(values)
@@ -566,27 +723,28 @@ def _derive_statistical_family(rows):
     and returns round-1, round-2, and pooled bounds together.  Consequently
     scope names are metadata on the family, never prefixes that create three
     independent calls for the same member.
+
+    (A1) Members are derived over the native-host timed projection only; the
+    batch metric pair adds object batch groups as cells under the same
+    aggregate/slice/cell construction rule.
     """
     members = set()
     cell_counts = {}
     cell_digests = {}
-    for metric in STATISTICAL_METRICS:
-        eligible = [row for row in rows if row["metrics"].get(metric, False)]
+    for metric, eligible in _family_cells(rows).items():
         if not eligible:
-            _fail(f"statistical family has no eligible rows for {metric}")
+            _fail(f"statistical family has no eligible cells for {metric}")
         prefix = metric
         members.add(f"{prefix}/aggregate")
         for dimension in STATISTICAL_DIMENSIONS:
-            values = {row["identity"][dimension] for row in eligible}
+            values = {cell["dimensions"][dimension] for cell in eligible}
             for value in values:
                 members.add(f"{prefix}/slice/{dimension}={value}")
-        for row in eligible:
-            members.add(f"{prefix}/cell/row={row['row']}")
+        for cell in eligible:
+            members.add(f"{prefix}/cell/{cell['cell']}")
         cell_digest = hashlib.sha256()
-        for row in eligible:
-            identity = [row["identity"][field] for field in ROW_IDENTITY_FIELDS]
-            encoded = json.dumps({"row": row["row"], "identity": identity},
-                                 sort_keys=True, separators=(",", ":"),
+        for cell in eligible:
+            encoded = json.dumps(cell["identity"], sort_keys=True, separators=(",", ":"),
                                  ensure_ascii=False).encode("utf-8")
             cell_digest.update(encoded)
             cell_digest.update(b"\n")
@@ -597,6 +755,7 @@ def _derive_statistical_family(rows):
         "scopes": list(STATISTICAL_SCOPES),
         "dimensions": list(STATISTICAL_DIMENSIONS),
         "metrics": list(STATISTICAL_METRICS),
+        "timed_target": NATIVE_TIMED_TARGET,
         "members": ordered,
         "cell_counts": cell_counts,
         "cell_identity_sha256": cell_digests,
@@ -611,7 +770,7 @@ def _family_member_counts(family):
     """Derive #619's two per-scope partitions from the canonical family map.
 
     Bootstrap members are every aggregate/slice identity in a scope across
-    the three variable metrics.  Exact-cell members are the sum of the three
+    the five variable metrics.  Exact-cell members are the sum of the five
     metric cell counts in that same scope.  The counts are derived from the
     member identities and eligibility rows, never from a producer total.
     """
@@ -670,11 +829,13 @@ def _performance_rows_with_sources(value, name="performance_rows"):
         eligibility = _keys(item["eligibility"], ROW_ELIGIBILITY_FIELDS,
                             f"{name}.rows[{index}].eligibility")
         metrics = {}
-        for metric in METRICS:
-            metrics[metric] = _boolean(eligibility[metric],
-                                       f"{name}.rows[{index}].eligibility.{metric}")
+        for metric in ROW_METRICS:
+            # (A1) The census bit keeps its name; it gates peak memory.
+            field = "compiler_peak_rss" if metric == "compiler_peak_memory" else metric
+            metrics[metric] = _boolean(eligibility[field],
+                                       f"{name}.rows[{index}].eligibility.{field}")
         compile_eligible = metrics["compiler_wall_time"]
-        if metrics["compiler_peak_rss"] is not compile_eligible:
+        if metrics["compiler_peak_memory"] is not compile_eligible:
             _fail(f"{name}.rows[{index}] must keep wall-time and peak-RSS eligibility paired")
         if not compile_eligible:
             if metrics["generated_code_bytes"] or metrics["generated_runtime"] \
@@ -735,7 +896,7 @@ def _population(value, support, row_data=None):
     _exact_list(value["row_identity_fields"], ROW_IDENTITY_FIELDS,
                 "population.row_identity_fields")
     family = _keys(value["statistical_family"], ("scopes", "dimensions", "metrics",
-                                                  "members", "cell_counts",
+                                                  "timed_target", "members", "cell_counts",
                                                   "cell_identity_sha256", "sha256"),
                    "population.statistical_family")
     _exact_list(family["scopes"], STATISTICAL_SCOPES,
@@ -744,6 +905,8 @@ def _population(value, support, row_data=None):
                 "population.statistical_family.dimensions")
     _exact_list(family["metrics"], STATISTICAL_METRICS,
                 "population.statistical_family.metrics")
+    if family["timed_target"] != NATIVE_TIMED_TARGET:
+        _fail("population.statistical_family is not derived over the pinned native-host target")
     members = _list(family["members"], "population.statistical_family.members")
     if any(type(member) is not str or not member for member in members):
         _fail("population.statistical_family.members must be non-empty strings")
@@ -1222,17 +1385,31 @@ def _rules(value):
     if not sampling["retain_all_samples"]:
         _fail("all samples must be retained")
 
-    aggregation = _keys(value["aggregation"], ("ratio", "wall_time", "peak_rss",
+    aggregation = _keys(value["aggregation"], ("ratio", "wall_time", "peak_memory",
+                                                "batch_wall_time", "batch_peak_rss",
                                                 "code_bytes", "runtime", "cell_weight",
                                                 "denominator", "scope", "runtime_eligibility",
-                                                "code_bytes_scope"), "rules.aggregation")
+                                                "code_bytes_scope", "timed_population",
+                                                "sampling_unit", "batch_cells",
+                                                "code_bytes_measurement"), "rules.aggregation")
     if aggregation["ratio"] != "candidate-over-baseline":
         _fail("rules.aggregation.ratio is not candidate/baseline")
-    for name in ("wall_time", "peak_rss", "runtime"):
+    for name in ("wall_time", "peak_memory", "batch_wall_time", "batch_peak_rss", "runtime"):
         if aggregation[name] != "median-of-two-pair-block-geometric-means":
             _fail(f"rules.aggregation.{name} must use #619 block geometric means")
     if aggregation["code_bytes"] != "exact-code-section-sum-ratio":
         _fail("rules.aggregation.code_bytes must use exact code-section bytes")
+    # (A1) Bind the amended sampling policy so an unreviewed variant fails.
+    if aggregation["timed_population"] != f"compiler-eligible-rows-on-{NATIVE_TIMED_TARGET}":
+        _fail("rules.aggregation.timed_population is not the pinned native-host projection")
+    if aggregation["sampling_unit"] != "native-host-batch-group":
+        _fail("rules.aggregation.sampling_unit must be the native-host batch group")
+    if aggregation["batch_cells"] != "object-batch-groups":
+        _fail("rules.aggregation.batch_cells must be the object batch groups")
+    if aggregation["code_bytes_measurement"] != \
+            "once-per-variant-and-row-on-every-target-with-reproduction":
+        _fail("rules.aggregation.code_bytes_measurement must measure code bytes once "
+              "per variant and row with a reproduction check")
     if aggregation["cell_weight"] != "one-equal-weight-per-required-cell":
         _fail("rules.aggregation.cell_weight changes required-cell weighting")
     if aggregation["denominator"] != "requested-work-from-manifest":
@@ -1629,6 +1806,20 @@ def _check_census_cpu_axes(census_rows, axes):
         _fail("canonical performance CPU profiles differ from the census")
 
 
+def _check_batch_recipe_flags(parsed, inputs_by_path):
+    """(A1) One batch process compiles every member with one frozen argv.
+
+    Members already share a recipe name and CPU; they must also share the
+    #508 recipe flags that ``inputs.tsv`` records for their fixtures.
+    """
+    row_by_id = {row["row"]: row for row in parsed}
+    for group in _batch_groups(parsed):
+        flags = {inputs_by_path[row_by_id[row]["identity"]["fixture"]]["fixture_flags"]
+                 for row in group["rows"]}
+        if len(flags) != 1:
+            _fail(f"batch group {group['group']} members disagree on frozen recipe flags")
+
+
 def _check_support_output(root, binding, row_data, native_target=None):
     """Cross-check every performance row against the independent #508 output.
 
@@ -1937,10 +2128,10 @@ def _check_support_output(root, binding, row_data, native_target=None):
         census_row = int(source["row"])
         compiler_eligible = census_row not in applicability_skip_rows
         if row["metrics"]["compiler_wall_time"] is not compiler_eligible \
-                or row["metrics"]["compiler_peak_rss"] is not compiler_eligible:
+                or row["metrics"]["compiler_peak_memory"] is not compiler_eligible:
             _fail("canonical compiler eligibility differs from authenticated skip provenance")
         if not compiler_eligible:
-            if any(row["metrics"][metric] for metric in METRICS) \
+            if any(row["metrics"][metric] for metric in ROW_METRICS) \
                     or row["eligibility"]["runtime_oracle"] != "not-applicable" \
                     or row["eligibility"]["code_section"] != "not-applicable":
                 _fail("authenticated non-executed row contains measurement eligibility")
@@ -1954,6 +2145,7 @@ def _check_support_output(root, binding, row_data, native_target=None):
             "reason": projection_evidence["reasons"][census_row],
             "compiler_eligible": compiler_eligible,
         }
+    _check_batch_recipe_flags(parsed, inputs_by_path)
 
     # Keep the byte-level identities available to the workflow validator.  A
     # result-input plan must bind the actual schema-2 artifacts, not a digest
@@ -2007,67 +2199,22 @@ def _workflow_phase(root, artifact, schema, name):
     return value
 
 
-def _result_input_plan(root, artifact, support_output, population, rules):
-    value = _read_json_evidence(root, artifact, "workflow.result_input_plan")
-    value = _keys(value, ("schema", "version", "source_manifest_sha256",
-                          "source_rows_sha256", "identity_field", "coordinate_schema",
-                          "sample_population", "eligible_population", "object_row_count",
-                          "sample_row_count",
-                          "rounds", "pairs_per_round", "records_per_row",
-                          "required_records", "max_records_per_manifest", "manifest_count",
-                          "manifests", "predeclared"), "result_input_plan")
-    if value["schema"] != RESULT_INPUT_PLAN_SCHEMA or value["version"] != 1:
-        _fail("result-input plan schema/version is not approved")
-    if value["identity_field"] != "record_id":
-        _fail("result-input plan must use the #615 record_id identity")
-    if value["coordinate_schema"] != "row-round-pair-v1":
-        _fail("result-input plan coordinate schema is not approved")
-    if value["sample_population"] != \
-            "trusted-census-eligible-performance-rows-with-required-metrics":
-        _fail("result-input plan must sample every authenticated eligible row")
-    if value["eligible_population"] != \
-            "authenticated-applicability-minus-nonexecuted-rows":
-        _fail("result-input plan must bind the trusted applicability projection")
-    if value["source_manifest_sha256"] != support_output["manifest_sha256"]:
-        _fail("result-input plan does not bind the actual schema-2 manifest")
-    if value["source_rows_sha256"] != support_output["rows_sha256"]:
-        _fail("result-input plan does not bind the canonical rows artifact")
-    object_row_count = support_output["object_row_count"]
-    if value["object_row_count"] != object_row_count:
-        _fail("result-input plan object row count is not derived from schema-2 rows")
-    _positive_int(value["sample_row_count"], "result_input_plan.sample_row_count")
-    sampling = rules["sampling"]
-    expected_records = value["sample_row_count"] * sampling["rounds"] * sampling["pairs_per_round"]
-    if value["rounds"] != sampling["rounds"] \
-            or value["pairs_per_round"] != sampling["pairs_per_round"] \
-            or value["records_per_row"] != sampling["rounds"] * sampling["pairs_per_round"]:
-        _fail("result-input plan does not bind the frozen sample dimensions")
-    if value["required_records"] != expected_records:
-        _fail("result-input plan record count does not cover every object row")
-    if expected_records > RESULT_INPUT_MAX_TOTAL_RECORDS:
-        _fail("result-input plan exceeds the immutable total-record ceiling")
-    if value["max_records_per_manifest"] != RESULT_INPUT_MAX_RECORDS:
-        _fail("result-input plan does not use #615's immutable record cap")
-    if value["predeclared"] is not True:
-        _fail("result-input plan must be predeclared")
-    _boolean(value["predeclared"], "result_input_plan.predeclared")
-    manifests = _list(value["manifests"], "result_input_plan.manifests")
+def _result_input_partitions(value, name, expected_records):
+    """Validate one population's canonical contiguous #615 partition plan."""
+    manifests = _list(value["manifests"], f"{name}.manifests")
     if value["manifest_count"] != len(manifests) or not manifests:
-        _fail("result-input plan manifest count is inconsistent")
+        _fail(f"{name} manifest count is inconsistent")
     expected_manifest_count = (expected_records + RESULT_INPUT_MAX_RECORDS - 1) // RESULT_INPUT_MAX_RECORDS
     if value["manifest_count"] != expected_manifest_count:
-        _fail("result-input plan must use the canonical minimal bounded shard count")
-    identities = set()
-    paths = set()
+        _fail(f"{name} must use the canonical minimal bounded shard count")
     total = 0
     for index, item in enumerate(manifests):
         item = _keys(item, ("identity", "path", "start_record", "records"),
-                     f"result_input_plan.manifests[{index}]")
-        _token(item["identity"], f"result_input_plan.manifests[{index}].identity")
-        _relative_path(item["path"], f"result_input_plan.manifests[{index}].path")
-        _nonnegative_int(item["start_record"],
-                         f"result_input_plan.manifests[{index}].start_record")
-        _positive_int(item["records"], f"result_input_plan.manifests[{index}].records")
+                     f"{name}.manifests[{index}]")
+        _token(item["identity"], f"{name}.manifests[{index}].identity")
+        _relative_path(item["path"], f"{name}.manifests[{index}].path")
+        _nonnegative_int(item["start_record"], f"{name}.manifests[{index}].start_record")
+        _positive_int(item["records"], f"{name}.manifests[{index}].records")
         if item["records"] > RESULT_INPUT_MAX_RECORDS:
             _fail("result-input manifest exceeds #615's immutable record cap")
         expected_partition_records = (RESULT_INPUT_MAX_RECORDS
@@ -2075,21 +2222,91 @@ def _result_input_plan(root, artifact, support_output, population, rules):
                                       else expected_records - total)
         if item["records"] != expected_partition_records:
             _fail("result-input manifest partitions must fill every cap-sized shard before the final shard")
-        if item["identity"] in identities or item["path"] in paths:
-            _fail("result-input manifests must have unique identities and paths")
         if item["start_record"] != total:
             _fail("result-input manifests must be contiguous predeclared partitions")
-        identities.add(item["identity"])
-        paths.add(item["path"])
         total += item["records"]
     if total != expected_records:
-        _fail("result-input manifests do not cover every required record")
+        _fail(f"{name} manifests do not cover every required record")
+    return manifests
+
+
+def _result_input_plan(root, artifact, support_output, population, rules):
+    """Parse the pre-sample v3 plan for the row and batch result populations.
+
+    (A1) The ``rows`` population is the native-host timed projection with the
+    unchanged ``row-round-pair`` identity; the ``batches`` population is every
+    object batch group with ``group-round-pair`` identity.  Both are streamed
+    through #615 as separate contiguous partition sets.  The immutable total
+    record ceiling and the three-partition bound apply to their union, so the
+    second population never widens either limit.
+    """
+    value = _read_json_evidence(root, artifact, "workflow.result_input_plan")
+    value = _keys(value, ("schema", "version", "source_manifest_sha256",
+                          "source_rows_sha256", "identity_field", "timed_target",
+                          "object_row_count", "rounds", "pairs_per_round",
+                          "max_records_per_manifest", "populations", "predeclared"),
+                  "result_input_plan")
+    if value["schema"] != RESULT_INPUT_PLAN_SCHEMA or value["version"] != 1:
+        _fail("result-input plan schema/version is not approved")
+    if value["identity_field"] != "record_id":
+        _fail("result-input plan must use the #615 record_id identity")
+    if value["timed_target"] != NATIVE_TIMED_TARGET:
+        _fail("result-input plan is not the pinned native-host timed population")
+    if value["source_manifest_sha256"] != support_output["manifest_sha256"]:
+        _fail("result-input plan does not bind the actual schema-2 manifest")
+    if value["source_rows_sha256"] != support_output["rows_sha256"]:
+        _fail("result-input plan does not bind the canonical rows artifact")
+    object_row_count = support_output["object_row_count"]
+    if value["object_row_count"] != object_row_count:
+        _fail("result-input plan object row count is not derived from schema-2 rows")
+    sampling = rules["sampling"]
+    if value["rounds"] != sampling["rounds"] \
+            or value["pairs_per_round"] != sampling["pairs_per_round"]:
+        _fail("result-input plan does not bind the frozen sample dimensions")
+    if value["max_records_per_manifest"] != RESULT_INPUT_MAX_RECORDS:
+        _fail("result-input plan does not use #615's immutable record cap")
+    if value["predeclared"] is not True:
+        _fail("result-input plan must be predeclared")
+    _boolean(value["predeclared"], "result_input_plan.predeclared")
+    populations = _keys(value["populations"], tuple(RESULT_INPUT_POPULATIONS),
+                        "result_input_plan.populations")
+    records_per_unit = sampling["rounds"] * sampling["pairs_per_round"]
+    total_records = 0
+    total_manifests = 0
+    identities = set()
+    paths = set()
+    for kind, tokens in RESULT_INPUT_POPULATIONS.items():
+        name = f"result_input_plan.populations.{kind}"
+        item = _keys(populations[kind], ("coordinate_schema", "sample_population",
+                                         "eligible_population", "sample_count",
+                                         "records_per_unit", "required_records",
+                                         "manifest_count", "manifests"), name)
+        for field, expected in tokens.items():
+            if item[field] != expected:
+                _fail(f"{name}.{field} is not the approved A1 population")
+        _positive_int(item["sample_count"], f"{name}.sample_count")
+        if item["records_per_unit"] != records_per_unit:
+            _fail("result-input plan does not bind the frozen sample dimensions")
+        expected_records = item["sample_count"] * records_per_unit
+        if item["required_records"] != expected_records:
+            _fail(f"{name} record count does not cover every sampled unit")
+        total_records += expected_records
+        if total_records > RESULT_INPUT_MAX_TOTAL_RECORDS:
+            _fail("result-input plan exceeds the immutable total-record ceiling")
+        for manifest in _result_input_partitions(item, name, expected_records):
+            if manifest["identity"] in identities or manifest["path"] in paths:
+                _fail("result-input manifests must have unique identities and paths")
+            identities.add(manifest["identity"])
+            paths.add(manifest["path"])
+        total_manifests += item["manifest_count"]
+    if total_manifests > RESULT_INPUT_MAX_PARTITIONS:
+        _fail("result-input plan exceeds the immutable three-partition bound")
     return value
 
 
-def _result_manifest_descriptors(value, result_plan):
-    manifests = _list(value, "sealed_result_bundle.result_manifests")
-    planned = result_plan["manifests"]
+def _result_manifest_descriptors(value, planned, name="sealed_result_bundle.result_manifests"):
+    """Join sealed #615 manifest descriptors to one population's frozen partitions."""
+    manifests = _list(value, name)
     if len(manifests) != len(planned):
         _fail("sealed result manifest count differs from the pre-sample partition plan")
     total_bytes = 0
@@ -2097,14 +2314,11 @@ def _result_manifest_descriptors(value, result_plan):
     for index, (item, partition) in enumerate(zip(manifests, planned)):
         item = _keys(item, ("identity", "path", "bytes", "sha256", "start_record",
                             "records", "input_bytes"),
-                     f"sealed_result_bundle.result_manifests[{index}]")
-        _token(item["identity"],
-               f"sealed_result_bundle.result_manifests[{index}].identity")
+                     f"{name}[{index}]")
+        _token(item["identity"], f"{name}[{index}].identity")
         _artifact({"path": item["path"], "bytes": item["bytes"],
-                   "sha256": item["sha256"]},
-                  f"sealed_result_bundle.result_manifests[{index}]")
-        _positive_int(item["input_bytes"],
-                      f"sealed_result_bundle.result_manifests[{index}].input_bytes")
+                   "sha256": item["sha256"]}, f"{name}[{index}]")
+        _positive_int(item["input_bytes"], f"{name}[{index}].input_bytes")
         for field in ("identity", "path", "start_record", "records"):
             if item[field] != partition[field]:
                 _fail("sealed result manifest differs from the pre-sample partition plan")
@@ -2118,7 +2332,8 @@ def _result_manifest_descriptors(value, result_plan):
 # Execution evidence is a separate trust boundary from result-file integrity.
 # The caller obtains the receipt digest independently from the admitted control
 # service; neither the result bundle nor the receipt may choose that trust root.
-EXECUTION_PLAN_SCHEMA = "buster-native-retirement-execution-plan-v2"
+# (A1) Plan v3 adds the pinned native-host target and the batch group contracts.
+EXECUTION_PLAN_SCHEMA = "buster-native-retirement-execution-plan-v3"
 EXECUTION_RECEIPT_SCHEMA = "buster-native-retirement-execution-receipt-v1"
 EXECUTION_SCHEDULE = "tp-retirement-block-schedule-v2"
 EXECUTION_LINE_CAP = 8192
@@ -2160,30 +2375,42 @@ def _execution_block_schedule(seed, round_id, block, count):
     return first, orders
 
 
+def _schedule_event(sequence, kind, phase, unit, round_id, pair, warmup, position, variant):
+    """One scheduled invocation identity; fields not meaningful for it are null."""
+    compiler = kind == "compiler"
+    return {"sequence": sequence, "kind": kind, "phase": phase,
+            "group": unit if compiler else None, "row": None if compiler else unit,
+            "round": round_id, "pair": pair, "warmup": warmup, "position": position,
+            "variant": variant}
+
+
 def _execution_schedule(rows, sampling):
     """Replay warmups and #619's uint64 seeded blocked/shuffled schedule.
 
-    Compilation and eligible native runtime are separate serial campaigns.
-    Each campaign uses the same frozen schedule seed; neither includes a PMU
-    or allocation diagnostic replay. Memory is O(rows), not O(invocations).
+    (A1) Compilation is one serial campaign over the ``G`` batch groups of the
+    native-host timed projection: its cell count is ``G`` and a group's dense
+    position is ascending order of its smallest member row.  Eligible native
+    runtime is a second serial campaign over the runtime-eligible timed rows.
+    Each campaign uses the same frozen schedule seed; neither includes a PMU or
+    allocation diagnostic replay.  Memory is O(rows), not O(invocations).
     """
     seed = sampling["seed"]
     if type(seed) is not int or not 1 <= seed <= (1 << 64) - 1:
         _fail("execution schedule seed must fit the #619 uint64 domain")
+    campaigns = (
+        ("compiler", [group["group"] for group in _batch_groups(rows)]),
+        ("runtime", [row["row"] for row in _timed_rows(rows)
+                     if row["metrics"].get("generated_runtime", False)]),
+    )
     sequence = 0
-    for kind in ("compiler", "runtime"):
-        selected = sorted(
-            row["row"] for row in rows
-            if (kind == "compiler" and row["metrics"]["compiler_wall_time"])
-            or (kind == "runtime" and row["metrics"]["generated_runtime"]))
+    for kind, selected in campaigns:
         if len(selected) > 100000:
             _fail("execution schedule exceeds the #619 cell limit")
-        for row in selected:
+        for unit in selected:
             for repeat in range(sampling["warmups_per_variant"]):
                 for variant in ("baseline", "candidate"):
-                    yield {"sequence": sequence, "kind": kind, "phase": "warmup",
-                           "row": row, "round": None, "pair": None,
-                           "warmup": repeat, "position": None, "variant": variant}
+                    yield _schedule_event(sequence, kind, "warmup", unit, None, None,
+                                          repeat, None, variant)
                     sequence += 1
         for round_id in range(sampling["rounds"]):
             for block in range(sampling["pairs_per_round"] // 2):
@@ -2192,11 +2419,27 @@ def _execution_schedule(rows, sampling):
                     for index in order:
                         for position in range(2):
                             variant = ("baseline", "candidate")[first[index] ^ pair_in_block ^ position]
-                            yield {"sequence": sequence, "kind": kind, "phase": "sample",
-                                   "row": selected[index], "round": round_id,
-                                   "pair": block * 2 + pair_in_block, "warmup": None,
-                                   "position": position, "variant": variant}
+                            yield _schedule_event(sequence, kind, "sample", selected[index],
+                                                  round_id, block * 2 + pair_in_block, None,
+                                                  position, variant)
                             sequence += 1
+
+
+def _execution_invocation_count(rows, sampling):
+    """(A1) ``(G + U) * 2 * (warmups + rounds * pairs)`` for one collection."""
+    groups = len(_batch_groups(rows))
+    runtime = sum(bool(row["metrics"].get("generated_runtime", False))
+                  for row in _timed_rows(rows))
+    return (groups + runtime) * 2 * (sampling["warmups_per_variant"]
+                                     + sampling["rounds"] * sampling["pairs_per_round"])
+
+
+def _batch_output_digest(object_digests):
+    """A batch's output digest: SHA-256 of its ordered per-input object digests.
+
+    Inputs that emit no object (a frozen rejection control) contribute null.
+    """
+    return _canonical_json_digest(list(object_digests))
 
 
 def _execution_context(binding, raw_measurements_sha256):
@@ -2216,13 +2459,104 @@ def _execution_context(binding, raw_measurements_sha256):
     }
 
 
+INPUT_COMPILED = "compiled"
+
+
+def _check_group_contracts(values, groups, row_by_id):
+    """Join v3 batch group contracts to the independently derived partition.
+
+    Each object group freezes its ordered timed members, any status-checked
+    controls, and per variant the batch command digest and expected exit
+    status.  A control is never a timed cell; when it names a canonical row,
+    that row must be outside the timed projection and compiled with the same
+    frozen argv.  Object paths are ``cwd/basename.o``, so basenames collide.
+    """
+    contracts = _list(values, "execution_plan.groups")
+    if len(contracts) != len(groups):
+        _fail("execution plan batch groups differ from the derived A1 partition")
+    by_group = {}
+    control_rows = set()
+    for contract, group in zip(contracts, groups):
+        contract = _keys(contract, ("group", "kind", "configuration", "recipe", "members",
+                                    "controls", "baseline", "candidate"),
+                         "execution_plan.group")
+        if type(contract["group"]) is not int or contract["group"] != group["group"] \
+                or contract["kind"] != group["kind"]:
+            _fail("execution plan batch group is not the derived A1 partition")
+        identity = group["identity"]
+        if contract["configuration"] != {field: identity[field] for field in
+                                         ("allocator", "frontend_lowering", "PIC")} \
+                or contract["recipe"] != {field: identity[field] for field in
+                                          ("fixture_recipe", "cpu", "cpu_features")}:
+            _fail("execution plan batch group configuration or recipe differs from its rows")
+        members = _list(contract["members"], "execution_plan.group.members")
+        if [member.get("row") if type(member) is dict else None
+                for member in members] != group["rows"]:
+            _fail("execution plan batch group members differ from the derived partition")
+        object_group = group["kind"] == OBJECT_BATCH_GROUP
+        stems = []
+        for member in members:
+            member = _keys(member, ("row", "diagnostic_sha256"), "execution_plan.group.member")
+            if object_group:
+                _sha(member["diagnostic_sha256"], "execution_plan.group.member.diagnostic_sha256")
+            elif member["diagnostic_sha256"] is not None:
+                _fail("a singleton stage group has no per-input diagnostic record")
+            stems.append(PurePosixPath(row_by_id[member["row"]]["identity"]["fixture"]).stem)
+        controls = _list(contract["controls"], "execution_plan.group.controls")
+        if controls and not object_group:
+            _fail("a singleton stage group cannot carry batch controls")
+        contributions = []
+        for control in controls:
+            control = _keys(control, ("fixture", "row", "status", "exit_contribution",
+                                      "diagnostic_sha256", "object_sha256"),
+                            "execution_plan.group.control")
+            _relative_path(control["fixture"], "execution_plan.group.control.fixture")
+            _token(control["status"], "execution_plan.group.control.status")
+            contribution = control["exit_contribution"]
+            if type(contribution) is not int or not 0 <= contribution <= 255:
+                _fail("execution plan batch control exit contribution is not an exit status")
+            _sha(control["diagnostic_sha256"], "execution_plan.group.control.diagnostic_sha256")
+            if control["object_sha256"] is not None:
+                _sha(control["object_sha256"], "execution_plan.group.control.object_sha256")
+            compiled = control["status"] == INPUT_COMPILED
+            if compiled != (control["object_sha256"] is not None) \
+                    or compiled != (contribution == 0):
+                _fail("execution plan batch control status, exit contribution and object disagree")
+            if control["row"] is not None:
+                row = row_by_id.get(control["row"]) if type(control["row"]) is int else None
+                if row is None or _timed(row) or control["row"] in control_rows \
+                        or row["identity"]["fixture"] != control["fixture"] \
+                        or row["identity"]["target"] != NATIVE_TIMED_TARGET \
+                        or tuple(row["identity"][field] for field in BATCH_GROUP_KEY_FIELDS) \
+                        != group["key"]:
+                    _fail("execution plan batch control row is timed, duplicated, or compiled "
+                          "with a different frozen argv")
+                control_rows.add(control["row"])
+            stems.append(PurePosixPath(control["fixture"]).stem)
+            contributions.append(contribution)
+        if len(set(stems)) != len(stems):
+            _fail("execution plan batch group inputs collide on their object basename")
+        for variant in ("baseline", "candidate"):
+            side = _keys(contract[variant], ("command_sha256", "exit_status"),
+                         f"execution_plan.group.{variant}")
+            _sha(side["command_sha256"], f"execution_plan.group.{variant}.command_sha256")
+            status = side["exit_status"]
+            if type(status) is not int or not 0 <= status <= 255:
+                _fail("execution plan batch exit status is not an exit status")
+            if (status != 0) != any(contributions):
+                _fail("execution plan batch exit status contradicts its frozen input statuses")
+        by_group[contract["group"]] = contract
+    return by_group
+
+
 def _check_execution_plan(root, descriptor, binding, parsed, sampling,
                           admitted_cpu, native_target):
+    """Validate the frozen v3 plan; return it with group and row contract maps."""
     _artifact(descriptor, "execution_plan")
     plan = _read_json_evidence(root, descriptor, "execution_plan")
     plan = _keys(plan, ("schema", "version", "schedule", "seed", "rounds",
-                        "pairs_per_round", "warmups_per_variant", "cpu",
-                        "performance_rows_sha256", "rows"), "execution_plan")
+                        "pairs_per_round", "warmups_per_variant", "cpu", "native_target",
+                        "performance_rows_sha256", "rows", "groups"), "execution_plan")
     if plan["schema"] != EXECUTION_PLAN_SCHEMA or type(plan["version"]) is not int \
             or plan["version"] != 1 or plan["schedule"] != EXECUTION_SCHEDULE:
         _fail("execution plan schema/version/schedule is not supported")
@@ -2237,6 +2571,8 @@ def _check_execution_plan(root, descriptor, binding, parsed, sampling,
         _fail("execution plan CPU differs from the admitted host profile")
     if native_target not in TARGETS:
         _fail("admitted host profile does not identify a supported native target")
+    if native_target != NATIVE_TIMED_TARGET or plan["native_target"] != NATIVE_TIMED_TARGET:
+        _fail("execution plan does not bind the pinned native-host timed target")
     performance_rows = _support_file(binding["support"], "performance_rows")
     if plan["performance_rows_sha256"] != performance_rows["sha256"]:
         _fail("execution plan does not bind the canonical performance rows")
@@ -2253,13 +2589,23 @@ def _check_execution_plan(root, descriptor, binding, parsed, sampling,
     rows = sorted(parsed, key=lambda row: row["row"])
     if len(contracts) != len(rows) or set(oracle_by_row) != {row["row"] for row in rows}:
         _fail("execution plan/oracles do not cover the complete canonical population")
+    row_by_id = {row["row"]: row for row in rows}
+    groups = _batch_groups(rows)
+    group_of_row = {row: group["group"] for group in groups for row in group["rows"]}
+    group_contracts = _check_group_contracts(plan["groups"], groups, row_by_id)
+    row_contracts = {}
     for contract, row in zip(contracts, rows):
-        _keys(contract, ("row", "identity_sha256", "oracle_sha256", "baseline", "candidate"),
-              "execution_plan.row")
+        _keys(contract, ("row", "identity_sha256", "oracle_sha256", "group", "baseline",
+                         "candidate"), "execution_plan.row")
         if type(contract["row"]) is not int or contract["row"] != row["row"] \
                 or contract["identity_sha256"] != _canonical_json_digest(row["identity"]) \
                 or contract["oracle_sha256"] != _canonical_json_digest(oracle_by_row[row["row"]]):
             _fail("execution plan row is not joined to its frozen identity and oracle")
+        timed = _timed(row)
+        expected_group = group_of_row.get(row["row"]) if timed else None
+        if type(contract["group"]) is not type(expected_group) \
+                or contract["group"] != expected_group:
+            _fail("execution plan row is not joined to its derived batch group")
         # Eligibility is not a caller-controlled escape hatch. Check the
         # bound independent oracle before any invocation reaches statistics;
         # the wider census/source joins remain part of workflow validation.
@@ -2307,15 +2653,36 @@ def _check_execution_plan(root, descriptor, binding, parsed, sampling,
             _fail("execution eligibility is not derived from the independent oracle")
         for variant in ("baseline", "candidate"):
             side = _keys(contract[variant], ("compiler_command_sha256", "artifact_sha256",
-                          "code_section_sha256", "code_section_bytes",
+                          "reproduction_sha256", "code_section_sha256", "code_section_bytes",
                           "runtime_command_sha256", "runtime_output_sha256"),
                          f"execution_plan.row.{variant}")
-            compile_eligible = row["metrics"]["compiler_wall_time"]
-            for key in ("compiler_command_sha256", "artifact_sha256"):
-                if compile_eligible:
-                    _sha(side[key], f"execution_plan.row.{variant}.{key}")
-                elif side[key] is not None:
-                    _fail("untimed row compiler evidence must be explicitly null")
+            # (A1) Only the timed projection has a timed compiler command; a
+            # batched object row's command is its group's batch command.
+            if timed:
+                _sha(side["compiler_command_sha256"],
+                     f"execution_plan.row.{variant}.compiler_command_sha256")
+                if side["compiler_command_sha256"] != \
+                        group_contracts[expected_group][variant]["command_sha256"]:
+                    _fail("timed row compiler command differs from its batch group command")
+            elif side["compiler_command_sha256"] is not None:
+                _fail("untimed row compiler evidence must be explicitly null "
+                      "(cross-target rows are never timed)")
+            if compile_eligible:
+                _sha(side["artifact_sha256"], f"execution_plan.row.{variant}.artifact_sha256")
+            elif side["artifact_sha256"] is not None:
+                _fail("untimed row compiler evidence must be explicitly null")
+            # A timed row's batches reproduce its frozen artifact; an untimed
+            # code row needs one further independent reproduction compile.
+            if not timed and code_observed:
+                if side["reproduction_sha256"] is None:
+                    _fail("untimed code-eligible row lacks its reproduction digest")
+                _sha(side["reproduction_sha256"],
+                     f"execution_plan.row.{variant}.reproduction_sha256")
+                if side["reproduction_sha256"] != side["artifact_sha256"]:
+                    _fail("untimed code-eligible row reproduction differs from its frozen "
+                          "artifact (nondeterminism)")
+            elif side["reproduction_sha256"] is not None:
+                _fail("reproduction digest is only bound for untimed code-eligible rows")
             if code_observed:
                 _sha(side["code_section_sha256"], "execution plan code-section identity")
                 _bounded_code_bytes(
@@ -2335,7 +2702,118 @@ def _check_execution_plan(root, descriptor, binding, parsed, sampling,
                     _sha(side[key], f"execution_plan.row.{variant}.{key}")
                 elif side[key] is not None:
                     _fail("ineligible runtime evidence must be explicitly absent")
-    return plan
+        row_contracts[row["row"]] = contract
+    return plan, group_contracts, row_contracts
+
+
+def _stream_canonical_jsonl(root, descriptor, records, line_cap, byte_cap, name):
+    """Yield exactly ``records`` canonical JSON lines from one authenticated file.
+
+    The same consumed bytes are hashed, so a replaced file cannot supply other
+    observations under a checked descriptor.  Callers must exhaust the
+    generator: the digest and trailing-byte checks run after the last record.
+    """
+    if descriptor["bytes"] > byte_cap:
+        _fail(f"{name} exceeds its bounded size")
+    _check_evidence(root, descriptor, name)
+    path = Path(root).resolve().joinpath(*PurePosixPath(descriptor["path"]).parts)
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        for _ in range(records):
+            line = stream.readline(line_cap + 1)
+            if not line.endswith(b"\n") or len(line) > line_cap:
+                _fail(f"{name} record is missing, truncated, or oversized")
+            size += len(line)
+            digest.update(line)
+            try:
+                value = json.loads(line.decode("utf-8"), object_pairs_hook=_json_object)
+            except (ValueError, UnicodeError) as error:
+                _fail(f"invalid {name} JSON: {error}")
+            canonical = (json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                    ensure_ascii=False) + "\n").encode("utf-8")
+            if line != canonical:
+                _fail(f"{name} is not canonical JSONL")
+            yield value
+        if stream.read(1):
+            _fail(f"{name} contains undeclared extra records")
+    if size != descriptor["bytes"] or digest.hexdigest() != descriptor["sha256"]:
+        _fail(f"consumed {name} differs from its authenticated digest")
+
+
+METRICS_RECORD_FIELDS = ("input", "fixture", "row", "status", "exit_contribution",
+                         "diagnostic_sha256", "started_ns", "finished_ns", "phase_ns",
+                         "arena_high_water_bytes", "object_sha256", "code_sections",
+                         "code_functions")
+
+
+def _check_batch_metrics(root, descriptor, contract, row_contracts, row_by_id, variant,
+                         started_ns, finished_ns, name):
+    """Authenticate one batch's per-input metrics artifact without trusting it.
+
+    Returns each timed member's ``(interval_ns, arena_high_water_bytes)`` and
+    the batch output digest.  Inputs must be exactly the frozen members then
+    controls; statuses, exit contributions and diagnostics must equal the
+    frozen oracle; intervals must be ordered, non-overlapping and inside the
+    process interval; phase sums may not exceed their interval; and every
+    emitted object must equal its frozen artifact.
+    """
+    descriptor = _artifact(descriptor, name)
+    inputs = [{"fixture": row_by_id[member["row"]]["identity"]["fixture"],
+               "row": member["row"], "status": INPUT_COMPILED, "exit_contribution": 0,
+               "diagnostic_sha256": member["diagnostic_sha256"],
+               "object_sha256": row_contracts[member["row"]][variant]["artifact_sha256"],
+               "member": True} for member in contract["members"]]
+    inputs.extend({**control, "member": False} for control in contract["controls"])
+    members = {}
+    objects = []
+    previous_end = started_ns
+    for index, record in enumerate(_stream_canonical_jsonl(
+            root, descriptor, len(inputs), METRICS_RECORD_BYTE_CAP,
+            METRICS_ARTIFACT_BYTE_CAP, name)):
+        expected = inputs[index]
+        record = _keys(record, METRICS_RECORD_FIELDS, f"{name} record")
+        if type(record["input"]) is not int or record["input"] != index \
+                or record["fixture"] != expected["fixture"] \
+                or type(record["row"]) is not type(expected["row"]) \
+                or record["row"] != expected["row"]:
+            _fail("per-input metrics do not follow the frozen batch input order")
+        if record["status"] != expected["status"] \
+                or type(record["exit_contribution"]) is not int \
+                or record["exit_contribution"] != expected["exit_contribution"] \
+                or record["diagnostic_sha256"] != expected["diagnostic_sha256"]:
+            _fail("per-input status, exit contribution or diagnostics differ from the frozen oracle")
+        if record["object_sha256"] != expected["object_sha256"]:
+            _fail("per-input object is not byte-identical to its frozen artifact (nondeterminism)")
+        _positive_int(record["started_ns"], f"{name}.started_ns")
+        _positive_int(record["finished_ns"], f"{name}.finished_ns")
+        if record["started_ns"] < previous_end \
+                or record["finished_ns"] <= record["started_ns"] \
+                or record["finished_ns"] > finished_ns:
+            _fail("per-input intervals overlap, are unordered, or leave the batch process interval")
+        previous_end = record["finished_ns"]
+        interval_ns = record["finished_ns"] - record["started_ns"]
+        phases = _object(record["phase_ns"], f"{name}.phase_ns")
+        for phase, elapsed in phases.items():
+            _token(phase, f"{name}.phase_ns key")
+            _nonnegative_int(elapsed, f"{name}.phase_ns.{phase}")
+        if sum(phases.values()) > interval_ns:
+            _fail("per-input phase timings exceed their per-input interval")
+        if expected["member"]:
+            _positive_int(record["arena_high_water_bytes"], f"{name}.arena_high_water_bytes")
+        else:
+            _nonnegative_int(record["arena_high_water_bytes"], f"{name}.arena_high_water_bytes")
+        for field in ("code_sections", "code_functions"):
+            for entry in _list(record[field], f"{name}.{field}"):
+                entry = _keys(entry, ("name", "bytes"), f"{name}.{field}[]")
+                _single_line_string(entry["name"], f"{name}.{field}[].name")
+                _bounded_code_bytes(entry["bytes"], f"{name}.{field}[].bytes")
+        objects.append(record["object_sha256"])
+        if expected["member"]:
+            members[expected["row"]] = (interval_ns, record["arena_high_water_bytes"])
+    if finished_ns - started_ns < sum(interval for interval, _arena in members.values()):
+        _fail("batch process metric is inconsistent with its per-input intervals")
+    return members, _batch_output_digest(objects)
 
 
 def _execution_trace_records(root, shards, expected_count):
@@ -2387,6 +2865,31 @@ def _execution_trace_records(root, shards, expected_count):
         _fail("execution transcript omits required invocations")
 
 
+def _check_sample_values(sample_db, table, unit, round_id, pair, variant, observed, name):
+    """Require each numeric sample to equal its authenticated observation.
+
+    ``observed`` maps metric -> (value, tolerance_ns).  A tolerance of zero is
+    exact decimal equality; a per-input nanosecond interval allows one
+    nanosecond of decimal-seconds serialization error.
+    """
+    column = "row_id" if table == "samples" else "group_id"
+    samples = sample_db.execute(
+        f"SELECT metric, baseline, candidate FROM {table} "
+        f"WHERE {column}=? AND round_id=? AND pair_id=?",
+        (unit, round_id, pair)).fetchall()
+    actual = {key: baseline if variant == "baseline" else candidate
+              for key, baseline, candidate in samples if key in observed}
+    if set(actual) != set(observed):
+        _fail(f"result sample is not the authenticated invocation's measurement ({name})")
+    for key, (number, interval_ns) in observed.items():
+        if interval_ns is None:
+            matches = Decimal(actual[key]) == Decimal(str(number))
+        else:
+            matches = abs(Decimal(actual[key]) * 1_000_000_000 - interval_ns) <= 1
+        if not matches:
+            _fail(f"result sample is not the authenticated invocation's measurement ({name})")
+
+
 def _check_execution_transcript(root, descriptor, plan_descriptor, binding, parsed,
                                  sampling, sample_db, raw_measurements_sha256,
                                  trusted_receipt_sha256, admitted_cpu,
@@ -2396,6 +2899,12 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
     The receipt digest is an OUT-OF-BAND caller input. Hashes supplied only by
     the result producer establish integrity, not execution authority. This
     function executes no code from the evidence bundle.
+
+    (A1) A compiler invocation is one batch process of one batch group.  An
+    object group's per-input metrics artifact supplies each timed member's
+    wall and peak-memory sample and proves every object byte-identical to its
+    frozen artifact; the process's own wall/RSS are the batch metric pair.  A
+    singleton stage group's process metrics are that row's samples.
     """
     if trusted_receipt_sha256 is None:
         _fail("independently obtained trusted execution receipt digest is required")
@@ -2424,14 +2933,11 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
         _positive_int(receipt[key], f"execution receipt.{key}")
     if receipt["completed_at_ns"] <= receipt["bound_at_ns"]:
         _fail("execution receipt completion must follow pre-sample binding")
-    plan = _check_execution_plan(root, plan_descriptor, binding, parsed, sampling,
-                                 admitted_cpu, native_target)
-    contracts = {item["row"]: item for item in plan["rows"]}
+    plan, group_contracts, row_contracts = _check_execution_plan(
+        root, plan_descriptor, binding, parsed, sampling, admitted_cpu, native_target)
     row_by_id = {row["row"]: row for row in parsed}
-    campaigns = (sum(row["metrics"]["compiler_wall_time"] for row in parsed)
-                 + sum(row["metrics"]["generated_runtime"] for row in parsed))
-    expected_count = campaigns * 2 * (sampling["warmups_per_variant"]
-                                      + sampling["rounds"] * sampling["pairs_per_round"])
+    group_by_id = {group["group"]: group for group in _batch_groups(parsed)}
+    expected_count = _execution_invocation_count(parsed, sampling)
     if receipt["invocations"] != expected_count:
         _fail("execution receipt invocation count omits warmups or complete paired sampling")
     shards = _list(receipt["shards"], "execution receipt.shards")
@@ -2439,6 +2945,7 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
     last_end = receipt["bound_at_ns"]
     count = 0
     process_instances = set()
+    metrics_paths = set()
     observations = _execution_trace_records(root, shards, expected_count)
     try:
         for value in observations:
@@ -2449,7 +2956,8 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
                   "process_instance_sha256", "cpu", "started_ns", "finished_ns",
                   "exit_code", "signal", "timed_out", "cancelled", "executable_sha256",
                   "command_sha256", "output_sha256", "code_section_sha256",
-                  "code_section_bytes", "wall_seconds", "peak_rss_bytes"),
+                  "code_section_bytes", "wall_seconds", "peak_rss_bytes",
+                  "metrics_artifact"),
                   "execution invocation")
             for key, identity in expected.items():
                 if type(value[key]) is not type(identity) or value[key] != identity:
@@ -2474,25 +2982,54 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
             last_end = value["finished_ns"]
             if type(value["cpu"]) is not int or value["cpu"] != plan["cpu"]:
                 _fail("execution invocation does not use its admitted CPU")
-            if type(value["exit_code"]) is not int or value["exit_code"] != 0 \
+            compiler = value["kind"] == "compiler"
+            variant = value["variant"]
+            if compiler:
+                group = group_by_id[value["group"]]
+                group_side = group_contracts[group["group"]][variant]
+                expected_exit = group_side["exit_status"]
+            else:
+                expected_exit = 0
+            if type(value["exit_code"]) is not int or value["exit_code"] != expected_exit \
                     or type(value["signal"]) is not int or value["signal"] != 0 \
                     or value["timed_out"] is not False or value["cancelled"] is not False:
                 _fail("execution invocation did not complete successfully")
-            side = contracts[value["row"]][value["variant"]]
-            row = row_by_id[value["row"]]
-            compiler = value["kind"] == "compiler"
-            expected_binary = (binding["subjects"][value["variant"]]["binary"]["sha256"]
-                               if compiler else side["artifact_sha256"])
-            expected_output = side["artifact_sha256"] if compiler else side["runtime_output_sha256"]
-            expected_command = side["compiler_command_sha256" if compiler else "runtime_command_sha256"]
+            members = {}
+            if compiler:
+                expected_binary = binding["subjects"][variant]["binary"]["sha256"]
+                expected_command = group_side["command_sha256"]
+                if group["kind"] == OBJECT_BATCH_GROUP:
+                    metrics_artifact = value["metrics_artifact"]
+                    if type(metrics_artifact) is not dict:
+                        _fail("batch invocation lacks its per-input metrics artifact")
+                    _artifact(metrics_artifact, "execution invocation.metrics_artifact")
+                    if metrics_artifact["path"] in metrics_paths:
+                        _fail("batch invocation reuses another batch's per-input metrics artifact")
+                    metrics_paths.add(metrics_artifact["path"])
+                    members, expected_output = _check_batch_metrics(
+                        root, metrics_artifact, group_contracts[group["group"]],
+                        row_contracts, row_by_id, variant, value["started_ns"],
+                        value["finished_ns"], f"per-input metrics {value['sequence']}")
+                else:
+                    if value["metrics_artifact"] is not None:
+                        _fail("singleton stage invocation cannot carry a per-input metrics artifact")
+                    expected_output = _batch_output_digest(
+                        [row_contracts[group["rows"][0]][variant]["artifact_sha256"]])
+            else:
+                side = row_contracts[value["row"]][variant]
+                expected_binary = side["artifact_sha256"]
+                expected_command = side["runtime_command_sha256"]
+                expected_output = side["runtime_output_sha256"]
+                if value["metrics_artifact"] is not None:
+                    _fail("runtime invocation cannot carry a per-input metrics artifact")
             if value["executable_sha256"] != expected_binary \
                     or value["output_sha256"] != expected_output \
                     or value["command_sha256"] != expected_command:
                 _fail("execution invocation binary, command, or oracle output is mismatched")
-            for key in ("code_section_sha256", "code_section_bytes"):
-                expected_value = side[key] if compiler else None
-                if type(value[key]) is not type(expected_value) or value[key] != expected_value:
-                    _fail("execution invocation code-section evidence is mismatched")
+            # Code bytes are measured once from frozen artifacts; every batch
+            # proves its objects byte-identical instead of re-reporting code.
+            if value["code_section_sha256"] is not None or value["code_section_bytes"] is not None:
+                _fail("execution invocation code-section evidence is mismatched")
             seconds = value["wall_seconds"]
             if type(seconds) not in (int, float) or seconds <= 0 \
                     or (type(seconds) is float and not math.isfinite(seconds)):
@@ -2508,39 +3045,51 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
             elif value["peak_rss_bytes"] is not None:
                 _fail("runtime evidence cannot masquerade as compiler peak RSS")
             if value["phase"] == "sample":
-                samples = sample_db.execute(
-                    "SELECT metric, baseline, candidate FROM samples "
-                    "WHERE row_id=? AND round_id=? AND pair_id=?",
-                    (value["row"], value["round"], value["pair"])).fetchall()
-                selected_metrics = ({"compiler_wall_time": seconds,
-                                     "compiler_peak_rss": value["peak_rss_bytes"],
-                                     "generated_code_bytes": value["code_section_bytes"]}
-                                    if compiler else {"generated_runtime": seconds})
-                selected_metrics = {key: number for key, number in selected_metrics.items()
-                                    if row["metrics"][key]}
-                actual = {key: baseline if value["variant"] == "baseline" else candidate
-                          for key, baseline, candidate in samples if key in selected_metrics}
-                if set(actual) != set(selected_metrics) or any(
-                        Decimal(actual[key]) != Decimal(str(number))
-                        for key, number in selected_metrics.items()):
-                    _fail("result sample is not the authenticated invocation's measurement")
+                coordinate = (value["round"], value["pair"], variant)
+                if not compiler:
+                    _check_sample_values(sample_db, "samples", value["row"], *coordinate,
+                                         {"generated_runtime": (seconds, None)}, "runtime")
+                elif group["kind"] == SINGLETON_STAGE_GROUP:
+                    _check_sample_values(sample_db, "samples", group["rows"][0], *coordinate,
+                                         {"compiler_wall_time": (seconds, None),
+                                          "compiler_peak_memory": (value["peak_rss_bytes"], None)},
+                                         "singleton stage process")
+                else:
+                    _check_sample_values(sample_db, "batch_samples", group["group"], *coordinate,
+                                         {"compiler_batch_wall_time": (seconds, None),
+                                          "compiler_batch_peak_rss": (value["peak_rss_bytes"], None)},
+                                         "batch process")
+                    for row, (interval_ns, arena) in members.items():
+                        _check_sample_values(sample_db, "samples", row, *coordinate,
+                                             {"compiler_wall_time": (interval_ns / 1e9, interval_ns),
+                                              "compiler_peak_memory": (arena, None)},
+                                             "per-input record")
             count += 1
     finally:
         observations.close()
     if count != expected_count or next(expected_order, None) is not None:
         _fail("execution transcript is missing required warmups or timed invocations")
     return {"receipt_sha256": trusted_receipt_sha256, "invocations": count,
-            "job_id": receipt["job_id"], "attempt": receipt["attempt"]}
+            "job_id": receipt["job_id"], "attempt": receipt["attempt"],
+            "row_contracts": row_contracts}
+
+
+def _finite_positive_sample(sample):
+    if type(sample) not in (int, float) or isinstance(sample, bool) \
+            or not math.isfinite(float(sample)) or sample <= 0:
+        _fail("result-input measurements must be finite positive numbers")
 
 
 def _consume_result_record(value, row_ordinals, row_by_id, rounds, pairs,
                            start_record, seen, measurement_digest, sample_db=None):
-    """Validate one streamed #615 record without retaining the population.
+    """Validate one streamed ``row-round-pair`` record without retaining the population.
 
     ``start_record`` and ``seen`` form a predeclared contiguous partition.  A
     globally disjoint and complete row/round/pair join therefore needs only
     O(number-of-canonical-rows) memory, never a set of tens of millions of
-    coordinates.
+    coordinates.  (A1) ``row_ordinals`` is the dense ordinal over the timed
+    projection; records carry wall time, peak memory and eligible runtime,
+    never code bytes, which are measured once per row in the code records.
     """
     value = _keys(value, ("record_id", "row", "round", "pair", "measurements"),
                   "result-input record")
@@ -2558,7 +3107,7 @@ def _consume_result_record(value, row_ordinals, row_by_id, rounds, pairs,
               + value["pair"])
     if linear != start_record + seen[0]:
         _fail("result-input manifests are not disjoint contiguous partitions")
-    expected_metrics = {metric for metric in METRICS
+    expected_metrics = {metric for metric in ROW_SAMPLE_METRICS
                         if row_by_id[value["row"]]["metrics"].get(metric, False)}
     measurements = _keys(value["measurements"], expected_metrics,
                           "result-input measurements")
@@ -2566,16 +3115,7 @@ def _consume_result_record(value, row_ordinals, row_by_id, rounds, pairs,
         pair_value = _keys(measurements[metric], ("baseline", "candidate"),
                            f"result-input measurements.{metric}")
         for side in ("baseline", "candidate"):
-            sample = pair_value[side]
-            if metric == "generated_code_bytes":
-                minimum = 1 if side == "baseline" else 0
-                if type(sample) is not int or sample < minimum or sample > (1 << 63) - 1:
-                    _fail("generated code-byte observations require a positive baseline and "
-                          "a nonnegative candidate")
-                continue
-            if type(sample) not in (int, float) or isinstance(sample, bool) \
-                    or not math.isfinite(float(sample)) or sample <= 0:
-                _fail("result-input measurements must be finite positive numbers")
+            _finite_positive_sample(pair_value[side])
     encoded = (json.dumps(value, sort_keys=True, separators=(",", ":"),
                           ensure_ascii=False) + "\n").encode("utf-8")
     measurement_digest.update(encoded)
@@ -2588,6 +3128,95 @@ def _consume_result_record(value, row_ordinals, row_by_id, rounds, pairs,
                 (value["row"], value["round"], value["pair"], metric,
                  str(pair_value["baseline"]), str(pair_value["candidate"])))
     seen[0] += 1
+
+
+def _consume_batch_record(value, group_ordinals, rounds, pairs, start_record, seen,
+                          measurement_digest, sample_db=None):
+    """Validate one streamed ``group-round-pair`` batch metric record.
+
+    ``group_ordinals`` maps each object group's campaign ordinal to its dense
+    ordinal among object groups, the linear ordinal's group coordinate.
+    """
+    value = _keys(value, ("record_id", "group", "round", "pair", "measurements"),
+                  "batch result-input record")
+    if type(value["group"]) is not int or type(value["round"]) is not int \
+            or type(value["pair"]) is not int:
+        _fail("batch result-input coordinates must be integers")
+    if value["group"] not in group_ordinals \
+            or not 0 <= value["round"] < rounds \
+            or not 0 <= value["pair"] < pairs:
+        _fail("batch result-input record is outside the object batch-group population")
+    expected_id = f"group-{value['group']}/round-{value['round']}/pair-{value['pair']}"
+    if value["record_id"] != expected_id:
+        _fail("batch result-input record identity is not its frozen coordinate")
+    linear = ((group_ordinals[value["group"]] * rounds + value["round"]) * pairs
+              + value["pair"])
+    if linear != start_record + seen[0]:
+        _fail("batch result-input manifests are not disjoint contiguous partitions")
+    measurements = _keys(value["measurements"], BATCH_METRICS,
+                         "batch result-input measurements")
+    for metric in BATCH_METRICS:
+        pair_value = _keys(measurements[metric], ("baseline", "candidate"),
+                           f"batch result-input measurements.{metric}")
+        for side in ("baseline", "candidate"):
+            _finite_positive_sample(pair_value[side])
+    encoded = (json.dumps(value, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False) + "\n").encode("utf-8")
+    measurement_digest.update(encoded)
+    if sample_db is not None:
+        for metric in BATCH_METRICS:
+            pair_value = value["measurements"][metric]
+            sample_db.execute(
+                "INSERT INTO batch_samples(group_id, round_id, pair_id, metric, baseline, "
+                "candidate) VALUES (?, ?, ?, ?, ?, ?)",
+                (value["group"], value["round"], value["pair"], metric,
+                 str(pair_value["baseline"]), str(pair_value["candidate"])))
+    seen[0] += 1
+
+
+CODE_RECORD_SIDE_FIELDS = ("artifact_sha256", "code_section_bytes", "code_section_sha256",
+                           "reproduction_sha256")
+
+
+def _check_code_records(root, descriptor, parsed, row_contracts):
+    """Stream the per-row code record set; return exact ``row -> (base, cand)`` bytes.
+
+    (A1) One record per code-observed row on every target, in ascending row
+    order, holding the frozen baseline and candidate artifact, code-section
+    bytes and digest, and the reproduction digest.  Each must equal the frozen
+    execution-plan facts, and every reproduction must equal its artifact.
+    """
+    descriptor = _keys(descriptor, ("path", "bytes", "sha256", "records"),
+                       "sealed_result_bundle.code_records")
+    artifact = _artifact({key: descriptor[key] for key in ("path", "bytes", "sha256")},
+                         "sealed_result_bundle.code_records")
+    expected_rows = [row for row in sorted(parsed, key=lambda row: row["row"])
+                     if _code_observed(row)]
+    if type(descriptor["records"]) is not int or descriptor["records"] != len(expected_rows):
+        _fail("code record set does not cover every code-eligible row on every target")
+    facts = {}
+    records = _stream_canonical_jsonl(root, artifact, len(expected_rows), CODE_RECORD_LINE_CAP,
+                                      len(expected_rows) * CODE_RECORD_LINE_CAP,
+                                      "code record set")
+    for index, record in enumerate(records):
+        row = expected_rows[index]
+        record = _keys(record, ("row", "baseline", "candidate"), "code record")
+        if type(record["row"]) is not int or record["row"] != row["row"]:
+            _fail("code record set does not cover every code-eligible row in canonical order")
+        sides = {}
+        for variant in ("baseline", "candidate"):
+            side = _keys(record[variant], CODE_RECORD_SIDE_FIELDS, f"code record.{variant}")
+            frozen = row_contracts[row["row"]][variant]
+            if side["reproduction_sha256"] is None:
+                _fail("code record lacks its reproduction digest")
+            if side["reproduction_sha256"] != side["artifact_sha256"]:
+                _fail("code record reproduction differs from its frozen artifact (nondeterminism)")
+            for field in ("artifact_sha256", "code_section_bytes", "code_section_sha256"):
+                if type(side[field]) is not type(frozen[field]) or side[field] != frozen[field]:
+                    _fail("code record differs from the frozen execution-plan code facts")
+            sides[variant] = side["code_section_bytes"]
+        facts[row["row"]] = (sides["baseline"], sides["candidate"])
+    return facts
 
 
 def _family_member_indexes(family):
@@ -2603,7 +3232,9 @@ def _check_adapter_series(root, artifact, family, parsed, rules, sample_db):
     """Parse every C-adapter series and join ratios back to raw samples."""
     _check_evidence(root, artifact, "sealed_result_bundle.adapter_input")
     bootstrap_index, cell_index = _family_member_indexes(family)
-    row_by_id = {row["row"]: row for row in parsed}
+    family_cells = _family_cells(parsed)
+    cell_by_member = {f"{metric}/cell/{cell['cell']}": cell
+                      for metric, cells in family_cells.items() for cell in cells}
     expected_members = family["members"]
     rounds = rules["sampling"]["rounds"]
     pairs = rules["sampling"]["pairs_per_round"]
@@ -2674,49 +3305,36 @@ def _check_adapter_series(root, artifact, family, parsed, rules, sample_db):
                     or limit != expected_limit):
                 _fail("statistics adapter member header changes #619's member map or limit")
             if is_cell:
-                try:
-                    row_id = int(member.rsplit("=", 1)[1])
-                except (ValueError, IndexError):
+                if member not in cell_by_member:
                     _fail("statistics adapter cell identity is malformed")
-                selected_rows = [row_id]
+                selected = [cell_by_member[member]]
             elif member.endswith("/aggregate"):
-                selected_rows = sorted(row["row"] for row in parsed
-                                       if row["metrics"].get(metric_name, False))
+                selected = family_cells[metric_name]
             else:
                 dimension, value = member.split("/slice/", 1)[1].split("=", 1)
                 if dimension not in STATISTICAL_DIMENSIONS:
                     _fail("statistics adapter slice dimension is not approved")
-                selected_rows = sorted(row["row"] for row in parsed
-                                       if row["metrics"].get(metric_name, False)
-                                       and str(row["identity"][dimension]) == value)
-            if cells != len(selected_rows) or not selected_rows:
+                selected = [cell for cell in family_cells[metric_name]
+                            if str(cell["dimensions"][dimension]) == value]
+            if cells != len(selected) or not selected:
                 _fail("statistics adapter member cell count differs from eligibility")
-            for row_id in selected_rows:
-                if row_id not in row_by_id or not row_by_id[row_id]["metrics"].get(metric_name, False):
-                    _fail("statistics adapter member includes an ineligible row")
-                expected = sample_db.execute(
-                    "SELECT round_id, pair_id, baseline, candidate FROM samples "
-                    "WHERE row_id=? AND metric=? ORDER BY round_id, pair_id",
-                    (row_id, metric_name)).fetchall()
+            for cell in selected:
+                table, unit = cell["unit"]
+                if table == "row":
+                    query = ("SELECT round_id, pair_id, baseline, candidate FROM samples "
+                             "WHERE row_id=? AND metric=? ORDER BY round_id, pair_id")
+                else:
+                    query = ("SELECT round_id, pair_id, baseline, candidate FROM batch_samples "
+                             "WHERE group_id=? AND metric=? ORDER BY round_id, pair_id")
+                expected = sample_db.execute(query, (unit, metric_name)).fetchall()
                 if len(expected) != rounds * pairs:
                     _fail("statistics adapter member is missing raw samples")
                 for round_id, pair_id, baseline_text, candidate_text in expected:
-                    if metric_name == "generated_code_bytes":
-                        try:
-                            baseline = int(baseline_text)
-                            candidate = int(candidate_text)
-                        except (TypeError, ValueError):
-                            _fail("raw code-byte observations are not integers")
-                        if baseline <= 0 or candidate <= 0 \
-                                or baseline > (1 << 63) - 1 \
-                                or candidate > (1 << 63) - 1:
-                            _fail("raw code-byte observations exceed the bounded integer domain")
-                    else:
-                        try:
-                            baseline = float(baseline_text)
-                            candidate = float(candidate_text)
-                        except (TypeError, ValueError):
-                            _fail("raw sample observations are not numeric")
+                    try:
+                        baseline = float(baseline_text)
+                        candidate = float(candidate_text)
+                    except (TypeError, ValueError):
+                        _fail("raw sample observations are not numeric")
                     ratio_line = stream.readline()
                     ratio_match = re.fullmatch(r"ratio=([^\s]+)\n?", ratio_line)
                     if not ratio_match:
@@ -2739,33 +3357,32 @@ def _check_adapter_series(root, artifact, family, parsed, rules, sample_db):
         _fail("statistics adapter input does not cover the dense family exactly once")
 
 
-def _code_bytes_summary(parsed, sample_db, rounds, pairs):
-    rows = [row for row in parsed if row["metrics"].get("generated_code_bytes", False)]
+def _code_bytes_summary(parsed, code_facts):
+    """Exact code-byte ratios from the once-measured per-row code records.
+
+    Every code-eligible row on every target enters the ratio.  Zero-baseline
+    code rows are retained in the code records but have no ratio denominator.
+    """
+    rows = sorted((row for row in parsed if row["metrics"].get("generated_code_bytes", False)),
+                  key=lambda row: row["row"])
+    if not rows:
+        _fail("code-byte summary has no code-eligible rows")
     ratios = []
     baseline_total = 0
     candidate_total = 0
     per_cell_pass = True
     for row in rows:
-        values = sample_db.execute(
-            "SELECT baseline, candidate FROM samples WHERE row_id=? AND metric=? "
-            "ORDER BY round_id, pair_id", (row["row"], "generated_code_bytes")).fetchall()
-        if len(values) != rounds * pairs:
-            _fail("code-byte summary is missing required raw samples")
-        try:
-            first = (int(values[0][0]), int(values[0][1]))
-        except (TypeError, ValueError):
-            _fail("code-byte observations are not bounded integers")
-        for baseline_text, candidate_text in values:
-            try:
-                pair = (int(baseline_text), int(candidate_text))
-            except (TypeError, ValueError):
-                _fail("code-byte observations are not bounded integers")
-            if pair != first:
-                _fail("deterministic code-byte observations vary across pairs")
-        baseline_total += first[0]
-        candidate_total += first[1]
-        per_cell_pass = per_cell_pass and first[1] * 100 <= first[0] * 101
-        ratios.append({"row": row["row"], "ratio": first[1] / first[0]})
+        if row["row"] not in code_facts:
+            _fail("code-byte summary is missing a code-eligible row")
+        baseline, candidate = code_facts[row["row"]]
+        if type(baseline) is not int or type(candidate) is not int \
+                or baseline <= 0 or candidate < 0 \
+                or baseline > (1 << 63) - 1 or candidate > (1 << 63) - 1:
+            _fail("code-byte observations require a positive baseline and a nonnegative candidate")
+        baseline_total += baseline
+        candidate_total += candidate
+        per_cell_pass = per_cell_pass and candidate * 100 <= baseline * 101
+        ratios.append({"row": row["row"], "ratio": candidate / baseline})
     summary = {
         "rows": len(rows),
         "aggregate_ratio": float(Decimal(candidate_total) / Decimal(baseline_total)),
@@ -2988,7 +3605,21 @@ def _sealed_closure_files(root, binding, support_output, records, phases,
         root, result_bundle["execution_receipt"], "execution_receipt")
     for index, shard in enumerate(execution_receipt["shards"]):
         add(f"execution.shard.{index}", shard)
-    for index, item in enumerate(result_bundle["result_manifests"]):
+    # (A1) Every batch's per-input metrics artifact and the code record set
+    # are sealed evidence; replay must be able to re-authenticate both.
+    invocations = _execution_trace_records(root, execution_receipt["shards"],
+                                           execution_receipt["invocations"])
+    try:
+        for invocation in invocations:
+            if invocation.get("metrics_artifact") is not None:
+                add(f"execution.metrics.{invocation['sequence']}",
+                    invocation["metrics_artifact"])
+    finally:
+        invocations.close()
+    add("workflow.code_records", result_bundle["code_records"])
+    manifests = list(result_bundle["result_manifests"]) \
+        + list(result_bundle["batch_result_manifests"])
+    for index, item in enumerate(manifests):
         add(f"result_input.manifest.{item['identity']}",
             {key: item[key] for key in ("path", "bytes", "sha256")})
         manifest = _read_json_evidence(
@@ -3223,6 +3854,9 @@ def _check_workflow_evidence(root, binding, workflow, support_output, row_data,
             sample_db.execute("CREATE TABLE samples(row_id INTEGER, round_id INTEGER, pair_id INTEGER, "
                               "metric TEXT, baseline TEXT, candidate TEXT, "
                               "PRIMARY KEY(row_id, round_id, pair_id, metric))")
+            sample_db.execute("CREATE TABLE batch_samples(group_id INTEGER, round_id INTEGER, "
+                              "pair_id INTEGER, metric TEXT, baseline TEXT, candidate TEXT, "
+                              "PRIMARY KEY(group_id, round_id, pair_id, metric))")
             return _check_workflow_evidence_open(root, binding, workflow, support_output,
                                                  row_data, population, rules, sample_db,
                                                  repository_root,
@@ -3248,16 +3882,24 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
 
     result_plan = _result_input_plan(root, records["result_input_plan"],
                                      support_output, population, rules)
-    sampled_rows = sorted(row["row"] for row in parsed
+    row_plan = result_plan["populations"]["rows"]
+    batch_plan = result_plan["populations"]["batches"]
+    # (A1) Row records cover the timed projection; batch records cover every
+    # object batch group.  Cross-target rows appear in neither population.
+    sampled_rows = sorted(row["row"] for row in _timed_rows(parsed)
                           if any(row["metrics"].get(metric, False)
-                                 for metric in METRICS))
+                                 for metric in ROW_SAMPLE_METRICS))
     row_by_id = {row["row"]: row for row in parsed}
     row_ordinals = {row: ordinal for ordinal, row in enumerate(sampled_rows)}
-    expected_records = len(sampled_rows) * result_plan["rounds"] * result_plan["pairs_per_round"]
-    if result_plan["sample_row_count"] != len(sampled_rows):
-        _fail("result-input plan does not cover every eligible canonical row")
-    if expected_records != result_plan["required_records"]:
-        _fail("result-input plan population is not the complete eligible row set")
+    group_ordinals = {group["group"]: group["object_ordinal"]
+                      for group in _object_groups(_batch_groups(parsed))}
+    records_per_unit = result_plan["rounds"] * result_plan["pairs_per_round"]
+    if row_plan["sample_count"] != len(sampled_rows) \
+            or row_plan["required_records"] != len(sampled_rows) * records_per_unit:
+        _fail("result-input plan does not cover every timed canonical row")
+    if batch_plan["sample_count"] != len(group_ordinals) \
+            or batch_plan["required_records"] != len(group_ordinals) * records_per_unit:
+        _fail("result-input plan batch population is not every object batch group")
     if RESULT_INPUT is None:
         _fail("#615 result-input verifier is unavailable")
 
@@ -3284,47 +3926,57 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
                                         "workflow.sealed_result.result_bundle")
     result_bundle = _keys(result_bundle, (
         "schema", "version", "source_rows_sha256", "result_input_plan_sha256",
-        "family_sha256", "result_manifests", "raw_measurements_sha256",
-        "member_invocations_sha256", "member_count", "scopes_per_member",
-        "adapter_input", "code_bytes_summary", "execution_receipt"), "sealed_result_bundle")
+        "family_sha256", "result_manifests", "batch_result_manifests",
+        "raw_measurements_sha256", "member_invocations_sha256", "member_count",
+        "scopes_per_member", "adapter_input", "code_records", "code_bytes_summary",
+        "execution_receipt"), "sealed_result_bundle")
     if result_bundle["schema"] != RESULT_BUNDLE_SCHEMA or result_bundle["version"] != 1:
         _fail("sealed result bundle schema/version is not approved")
     if result_bundle["source_rows_sha256"] != support_output["rows_sha256"] \
             or result_bundle["result_input_plan_sha256"] != records["result_input_plan"]["sha256"] \
             or result_bundle["family_sha256"] != family["sha256"]:
         _fail("sealed result bundle does not bind the frozen inputs")
-    result_manifests = _result_manifest_descriptors(
-        result_bundle["result_manifests"], result_plan)
+    populations = (
+        (_result_manifest_descriptors(result_bundle["result_manifests"],
+                                      row_plan["manifests"]),
+         lambda value, start, seen, digest: _consume_result_record(
+             value, row_ordinals, row_by_id, result_plan["rounds"],
+             result_plan["pairs_per_round"], start, seen, digest, sample_db)),
+        (_result_manifest_descriptors(result_bundle["batch_result_manifests"],
+                                      batch_plan["manifests"],
+                                      "sealed_result_bundle.batch_result_manifests"),
+         lambda value, start, seen, digest: _consume_batch_record(
+             value, group_ordinals, result_plan["rounds"],
+             result_plan["pairs_per_round"], start, seen, digest, sample_db)),
+    )
 
+    # One measurement digest covers the row records, then the batch records.
     measurement_digest = hashlib.sha256()
-    for index, item in enumerate(result_manifests):
-        manifest_descriptor = {"path": item["path"], "bytes": item["bytes"],
-                               "sha256": item["sha256"]}
-        _check_evidence(root, manifest_descriptor,
-                        f"result_input_plan.manifests[{index}]")
+    for result_manifests, consumer in populations:
+        for index, item in enumerate(result_manifests):
+            manifest_descriptor = {"path": item["path"], "bytes": item["bytes"],
+                                   "sha256": item["sha256"]}
+            _check_evidence(root, manifest_descriptor,
+                            f"result_input_plan.manifests[{index}]")
 
-        seen = [0]
+            seen = [0]
 
-        def consume(_shard_identity, _shard_record, value):
-            _consume_result_record(value, row_ordinals, row_by_id,
-                                    result_plan["rounds"], result_plan["pairs_per_round"],
-                                    item["start_record"], seen, measurement_digest, sample_db)
+            def consume(_shard_identity, _shard_record, value):
+                consumer(value, item["start_record"], seen, measurement_digest)
 
-        try:
-            receipt = RESULT_INPUT.verify(root, item["path"],
-                                         RESULT_INPUT.Limits(
-                                             max_records=RESULT_INPUT_MAX_RECORDS),
-                                         record_consumer=consume)
-        except Exception as error:
-            _fail(f"#615 result-input manifest verification failed: {error}")
-        if receipt["manifest"]["path"] != item["path"] \
-                or receipt["manifest"]["bytes"] <= 0 \
-                or receipt["records"] != item["records"] \
-                or receipt["input_bytes"] != item["input_bytes"] \
-                or seen[0] != item["records"]:
-            _fail("sealed result manifest count/digest differs from #615's streamed receipt")
-    if sum(item["records"] for item in result_plan["manifests"]) != expected_records:
-        _fail("result-input manifests omit required row/round/pair coordinates")
+            try:
+                receipt = RESULT_INPUT.verify(root, item["path"],
+                                             RESULT_INPUT.Limits(
+                                                 max_records=RESULT_INPUT_MAX_RECORDS),
+                                             record_consumer=consume)
+            except Exception as error:
+                _fail(f"#615 result-input manifest verification failed: {error}")
+            if receipt["manifest"]["path"] != item["path"] \
+                    or receipt["manifest"]["bytes"] <= 0 \
+                    or receipt["records"] != item["records"] \
+                    or receipt["input_bytes"] != item["input_bytes"] \
+                    or seen[0] != item["records"]:
+                _fail("sealed result manifest count/digest differs from #615's streamed receipt")
     sample_db.commit()
 
     expected_sources = {
@@ -3384,16 +4036,19 @@ def _check_workflow_evidence_open(root, binding, workflow, support_output, row_d
     _artifact(result_bundle["adapter_input"], "sealed_result_bundle.adapter_input")
     _check_evidence(root, result_bundle["adapter_input"],
                     "sealed_result_bundle.adapter_input")
-    code_summary = _code_bytes_summary(parsed, sample_db,
-                                       result_plan["rounds"], result_plan["pairs_per_round"])
-    if result_bundle["code_bytes_summary"] != code_summary:
-        _fail("sealed result bundle code-byte summary differs from raw observations")
     if post["execution_plan"] != pre["execution_plan"]:
         _fail("post-AA execution plan differs from its pre-sample plan")
-    _check_execution_transcript(
+    execution = _check_execution_transcript(
         root, result_bundle["execution_receipt"], pre["execution_plan"], binding,
         parsed, sampling, sample_db, measurement_digest.hexdigest(),
         trusted_execution_receipt_sha256, admitted_cpu, native_target)
+    # (A1) Code bytes are measured once per (variant, row) on every target;
+    # the transcript above proved every timed batch reproduced its artifacts.
+    code_facts = _check_code_records(root, result_bundle["code_records"], parsed,
+                                     execution["row_contracts"])
+    code_summary = _code_bytes_summary(parsed, code_facts)
+    if result_bundle["code_bytes_summary"] != code_summary:
+        _fail("sealed result bundle code-byte summary differs from the code records")
     _check_adapter_series(root, result_bundle["adapter_input"], family, parsed,
                           rules, sample_db)
     seal = _keys(sealed["seal"], ("schema", "version", "files", "root_sha256"),
@@ -3913,6 +4568,9 @@ def _check_execution_evidence(root, binding):
     _nonnegative_int(profile["logical_cpu"], "profile_receipt.logical_cpu")
     if profile["native_target"] not in TARGETS:
         _fail("host profile native target is not supported")
+    # (A1) The timed projection is pinned; the admitted host must be that target.
+    if profile["native_target"] != NATIVE_TIMED_TARGET:
+        _fail("host profile native target is not the pinned native-host timed target")
 
     host = execution["host"]
     qualification = _read_json_evidence(root, host["qualification_receipt"],
@@ -3938,6 +4596,8 @@ def _check_execution_evidence(root, binding):
                      "qualification_receipt.logical_cpu")
     if qualification["native_target"] not in TARGETS:
         _fail("host qualification native target is not supported")
+    if qualification["native_target"] != NATIVE_TIMED_TARGET:
+        _fail("host qualification native target is not the pinned native-host timed target")
     if (qualification["logical_cpu"], qualification["native_target"]) != \
             (profile["logical_cpu"], profile["native_target"]):
         _fail("host qualification CPU/target differs from the admitted profile")
@@ -3971,6 +4631,8 @@ def _check_execution_evidence(root, binding):
     _nonnegative_int(admission["logical_cpu"], "aa_admission_receipt.logical_cpu")
     if admission["native_target"] not in TARGETS:
         _fail("A/A admission native target is not supported")
+    if admission["native_target"] != NATIVE_TIMED_TARGET:
+        _fail("A/A admission native target is not the pinned native-host timed target")
     if (admission["logical_cpu"], admission["native_target"]) != \
             (profile["logical_cpu"], profile["native_target"]):
         _fail("A/A admission CPU/target differs from the admitted profile")

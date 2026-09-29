@@ -132,30 +132,12 @@ class PerformanceIdentityTests(unittest.TestCase):
                 with self.subTest(field=field), self.assertRaisesRegex(ValueError, message):
                     binding._check_support_output(root, candidate, None)
 
-    def check_plan(self, root, pairs):
-        # This is the mandatory stage lower bound. Real population validation
-        # separately joins every admitted link/self-host/workload row.
-        sample_rows = self.object_rows + len(binding.STAGES) - 1
-        required = sample_rows * 2 * pairs
-        cap = binding.RESULT_INPUT_MAX_RECORDS
-        manifests = [{
-            "identity": f"manifest-{index}", "path": f"results/manifest-{index}.json",
-            "start_record": start, "records": min(cap, required - start),
-        } for index, start in enumerate(range(0, required, cap))]
+    def check_plan(self, root, pairs, sample_rows, groups):
         support = {"manifest_sha256": "a" * 64, "rows_sha256": "b" * 64,
                    "object_row_count": self.object_rows}
-        plan = {
-            "schema": binding.RESULT_INPUT_PLAN_SCHEMA, "version": 1,
-            "source_manifest_sha256": support["manifest_sha256"],
-            "source_rows_sha256": support["rows_sha256"],
-            "identity_field": "record_id", "coordinate_schema": "row-round-pair-v1",
-            "sample_population": "trusted-census-eligible-performance-rows-with-required-metrics",
-            "eligible_population": "authenticated-applicability-minus-nonexecuted-rows",
-            "object_row_count": self.object_rows, "sample_row_count": sample_rows,
-            "rounds": 2, "pairs_per_round": pairs, "records_per_row": 2 * pairs,
-            "required_records": required, "max_records_per_manifest": cap,
-            "manifest_count": len(manifests), "manifests": manifests, "predeclared": True,
-        }
+        plan = InvocationEvidenceTests.result_input_plan(
+            support["manifest_sha256"], support["rows_sha256"], self.object_rows,
+            sample_rows, groups, pairs=pairs)
         data = (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
         path = root / "plan.json"
         path.write_bytes(data)
@@ -163,25 +145,48 @@ class PerformanceIdentityTests(unittest.TestCase):
         return binding._result_input_plan(root, self.descriptor(path.name, data),
                                           support, {}, rules)
 
-    def test_current_population_and_stage_floor_fit_predeclared_partition(self):
+    def native_population_bounds(self):
+        """(A1) Upper bounds of the native-host timed population and groups.
+
+        Timed rows are at most every subject in the 16 native-host
+        configurations (before authenticated skips) plus the stage floor.
+        Object groups are the configurations times the distinct x86 recipe/CPU
+        profiles that #508 assigns to the subjects.
+        """
+        import native_retirement_contract as census
+        subjects = [row["path"] for row in self.rows if row["role"] == "subject"]
+        configurations = len(binding.FRONTENDS) * len(binding.PIC) * len(binding.ALLOCATORS)
+        recipes = {(census.expected_fixture_recipe(path)[0],
+                    census.expected_cpu(path, binding.NATIVE_TIMED_TARGET, "baseline"))
+                   for path in subjects}
+        sample_rows = len(subjects) * configurations + len(binding.STAGES) - 1
+        return sample_rows, configurations * len(recipes)
+
+    def test_native_population_fits_one_partition_per_population(self):
         self.assertEqual(binding.RESULT_INPUT_MAX_TOTAL_RECORDS, 39_518_208)
-        sample_rows = self.object_rows + len(binding.STAGES) - 1
-        maximum_even = min(256, binding.RESULT_INPUT_MAX_TOTAL_RECORDS // (2 * sample_rows))
-        maximum_even -= maximum_even % 2
-        self.assertGreaterEqual(maximum_even, 60, "current population cannot fit minimum sampling")
-        with tempfile.TemporaryDirectory() as directory:
-            plan = self.check_plan(Path(directory), maximum_even)
-            self.assertEqual(plan["sample_row_count"], sample_rows)
-            self.assertEqual(sum(part["records"] for part in plan["manifests"]),
-                             sample_rows * 2 * maximum_even)
+        sample_rows, groups = self.native_population_bounds()
+        self.assertEqual(groups, 80)
+        # The contract's 254-pair collection maximum still fits, each
+        # population in one partition; so does the 60-pair minimum.
+        for pairs in (60, 254):
+            with tempfile.TemporaryDirectory() as directory:
+                plan = self.check_plan(Path(directory), pairs, sample_rows, groups)
+                populations = plan["populations"]
+                self.assertEqual(populations["rows"]["sample_count"], sample_rows)
+                self.assertEqual(populations["batches"]["sample_count"], groups)
+                self.assertEqual([populations[kind]["manifest_count"]
+                                  for kind in ("rows", "batches")], [1, 1])
+                self.assertLessEqual(sample_rows * 2 * pairs, binding.RESULT_INPUT_MAX_RECORDS)
 
     def test_current_population_over_cap_cannot_be_rescued_by_more_shards(self):
+        # The immutable ceiling is kept: the full census at 256 pairs, even
+        # ignoring the native projection, is rejected before any sample.
         sample_rows = self.object_rows + len(binding.STAGES) - 1
         required = sample_rows * 2 * 256
         self.assertGreater(required, binding.RESULT_INPUT_MAX_TOTAL_RECORDS)
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "immutable total-record ceiling"):
-                self.check_plan(Path(directory), 256)
+                self.check_plan(Path(directory), 256, sample_rows, 1)
 
 
 class ReviewBoundaryTests(unittest.TestCase):
@@ -254,45 +259,133 @@ class InvocationEvidenceTests(unittest.TestCase):
         target.write_bytes(data)
         return {"path": path, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
-    @classmethod
-    def attach_execution(cls, root, record, parsed, samples):
-        """Attach a complete test-only transcript to an existing small fixture.
+    EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
-        ``samples`` maps (row, round, pair) to metric -> {baseline, candidate}.
-        Frozen oracle outputs are test values, never deployment evidence.
-        """
+    @staticmethod
+    def digest(text):
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    @classmethod
+    def rejection_control(cls, fixture="tests/rejection-control.c"):
+        """A frozen, status-checked (never timed) rejection control input."""
+        return {"fixture": fixture, "row": None, "status": "rejected", "exit_contribution": 1,
+                "diagnostic_sha256": cls.digest(f"diagnostic/{fixture}"),
+                "object_sha256": None}
+
+    @classmethod
+    def execution_plan(cls, root, record, parsed, controls=None):
+        """Build a v3 plan: row contracts plus derived batch group contracts."""
         sampling = record["rules"]["sampling"]
         oracle_path = record["workflow"]["records"]["oracle"]["path"]
-        oracle_by_row = {item["row"]: item for item in json.loads((root / oracle_path).read_text())["records"]}
+        oracle_by_row = {item["row"]: item for item in
+                         json.loads((root / oracle_path).read_text())["records"]}
+        controls = controls or {}
+        groups = binding._batch_groups(parsed)
+        group_of_row = {row: group["group"] for group in groups for row in group["rows"]}
+        group_contracts = []
+        for group in groups:
+            object_group = group["kind"] == binding.OBJECT_BATCH_GROUP
+            group_controls = copy.deepcopy(controls.get(group["group"], []))
+            exit_status = 1 if any(item["exit_contribution"] for item in group_controls) else 0
+            sides = {}
+            for side in ("baseline", "candidate"):
+                command = (cls.digest(f"batch/{group['group']}/{side}") if object_group
+                           else cls.digest(f"compile/{group['rows'][0]}/{side}"))
+                sides[side] = {"command_sha256": command, "exit_status": exit_status}
+            group_contracts.append({
+                "group": group["group"], "kind": group["kind"],
+                "configuration": {field: group["identity"][field]
+                                  for field in ("allocator", "frontend_lowering", "PIC")},
+                "recipe": {field: group["identity"][field]
+                           for field in ("fixture_recipe", "cpu", "cpu_features")},
+                "members": [{"row": row,
+                             "diagnostic_sha256": cls.EMPTY_SHA256 if object_group else None}
+                            for row in group["rows"]],
+                "controls": group_controls, **sides})
         contracts = []
         for row in parsed:
-            contract = {"row": row["row"], "identity_sha256": binding._canonical_json_digest(row["identity"]),
-                        "oracle_sha256": binding._canonical_json_digest(oracle_by_row[row["row"]])}
+            oracle = oracle_by_row[row["row"]]
+            timed = binding._timed(row)
+            group = group_of_row.get(row["row"]) if timed else None
+            compile_eligible = row["metrics"]["compiler_wall_time"]
+            observed = oracle["code_section_status"] == "parsed-deterministic"
+            contract = {"row": row["row"], "group": group,
+                        "identity_sha256": binding._canonical_json_digest(row["identity"]),
+                        "oracle_sha256": binding._canonical_json_digest(oracle)}
             for side in ("baseline", "candidate"):
-                metrics = samples.get((row["row"], 0, 0), {})
-                observed = oracle_by_row[row["row"]]["code_section_status"] == "parsed-deterministic"
-                code_bytes = (metrics["generated_code_bytes"][side]
-                              if row["metrics"]["generated_code_bytes"] else 0 if observed else None)
+                artifact = (cls.digest(f"artifact/{row['row']}/{side}")
+                            if compile_eligible else None)
+                code_bytes = oracle["code_section_bytes"] if observed else None
                 contract[side] = {
-                    "compiler_command_sha256": (hashlib.sha256(f"compile/{row['row']}/{side}".encode()).hexdigest()
-                                                if row["metrics"]["compiler_wall_time"] else None),
-                    "artifact_sha256": (hashlib.sha256(f"artifact/{row['row']}/{side}".encode()).hexdigest()
-                                        if row["metrics"]["compiler_wall_time"] else None),
-                    "code_section_sha256": (hashlib.sha256(b"").hexdigest() if code_bytes == 0
-                                             else "b" * 64 if code_bytes is not None else None),
+                    "compiler_command_sha256": (group_contracts[group][side]["command_sha256"]
+                                                if timed else None),
+                    "artifact_sha256": artifact,
+                    "reproduction_sha256": artifact if observed and not timed else None,
+                    "code_section_sha256": (None if code_bytes is None
+                                            else cls.EMPTY_SHA256 if code_bytes == 0
+                                            else oracle["code_section_sha256"]),
                     "code_section_bytes": code_bytes,
-                    "runtime_command_sha256": ("c" * 64 if row["metrics"]["generated_runtime"] else None),
-                    "runtime_output_sha256": ("d" * 64 if row["metrics"]["generated_runtime"] else None),
+                    "runtime_command_sha256": ("c" * 64 if row["metrics"]["generated_runtime"]
+                                               else None),
+                    "runtime_output_sha256": ("d" * 64 if row["metrics"]["generated_runtime"]
+                                              else None),
                 }
             contracts.append(contract)
         plan = {"schema": binding.EXECUTION_PLAN_SCHEMA, "version": 1,
                 "schedule": binding.EXECUTION_SCHEDULE, "cpu": 3,
-                "performance_rows_sha256": binding._support_file(record["support"], "performance_rows")["sha256"],
-                "rows": contracts}
+                "native_target": binding.NATIVE_TIMED_TARGET,
+                "performance_rows_sha256": binding._support_file(
+                    record["support"], "performance_rows")["sha256"],
+                "rows": contracts, "groups": group_contracts}
         for key in ("seed", "rounds", "pairs_per_round", "warmups_per_variant"):
             plan[key] = sampling[key]
+        return plan
+
+    @classmethod
+    def metrics_records(cls, contract, fixtures, plan_rows, variant, started_ns, intervals,
+                        arenas):
+        """Per-input metrics records for one batch, members then controls."""
+        records = []
+        cursor = started_ns + 1
+        inputs = [(member["row"], member["diagnostic_sha256"], "compiled", 0,
+                   plan_rows[member["row"]][variant]["artifact_sha256"], True)
+                  for member in contract["members"]]
+        inputs.extend((control["row"], control["diagnostic_sha256"], control["status"],
+                       control["exit_contribution"], control["object_sha256"], False)
+                      for control in contract["controls"])
+        for index, (row, diagnostic, status, contribution, obj, member) in enumerate(inputs):
+            interval = intervals[row] if member else 10
+            records.append({
+                "input": index, "fixture": fixtures[index], "row": row, "status": status,
+                "exit_contribution": contribution, "diagnostic_sha256": diagnostic,
+                "started_ns": cursor, "finished_ns": cursor + interval,
+                "phase_ns": {"backend": interval // 2, "frontend": interval // 4},
+                "arena_high_water_bytes": arenas[row] if member else 0,
+                "object_sha256": obj,
+                "code_sections": [{"bytes": 100, "name": ".text"}] if member else [],
+                "code_functions": [{"bytes": 100, "name": "main"}] if member else [],
+            })
+            cursor += interval
+        return records
+
+    @classmethod
+    def attach_execution(cls, root, record, parsed, samples, batch_samples=None,
+                         controls=None, mutate_metrics=None):
+        """Attach a complete test-only v3 plan and batch transcript to a fixture.
+
+        ``samples`` maps (row, round, pair) to metric -> {baseline, candidate};
+        ``batch_samples`` maps (group, round, pair) the same way for the batch
+        process pair.  Warmups reuse coordinate (unit, 0, 0).  Frozen oracle
+        outputs are test values, never deployment evidence.
+        ``mutate_metrics(sequence, records)`` may corrupt one metrics artifact.
+        """
+        sampling = record["rules"]["sampling"]
+        plan = cls.execution_plan(root, record, parsed, controls)
         plan_descriptor = cls.put(root, "execution/invocation-plan.json", plan)
-        by_row = {item["row"]: item for item in contracts}
+        plan_rows = {item["row"]: item for item in plan["rows"]}
+        group_contracts = {item["group"]: item for item in plan["groups"]}
+        row_by_id = {row["row"]: row for row in parsed}
+        groups = {group["group"]: group for group in binding._batch_groups(parsed)}
         events = []
         last_end = 100
         job_id = "synthetic-job"
@@ -300,30 +393,70 @@ class InvocationEvidenceTests(unittest.TestCase):
         boot_id = "synthetic-boot"
         for identity in binding._execution_schedule(parsed, sampling):
             event = dict(identity)
-            compiler = event["kind"] == "compiler"
-            side = by_row[event["row"]][event["variant"]]
-            key = ((event["row"], event["round"], event["pair"]) if event["phase"] == "sample"
-                   else (event["row"], 0, 0))
-            metrics = samples[key]
-            seconds = metrics["compiler_wall_time" if compiler else "generated_runtime"][event["variant"]]
-            duration_ns = int(round(seconds * 1_000_000_000))
+            variant = event["variant"]
+            sample = event["phase"] == "sample"
             pid = 2000 + event["sequence"]
             process_start_token = f"synthetic-process-{event['sequence']}"
+            started = last_end + 1
+            metrics_artifact = None
+            if event["kind"] == "compiler":
+                group = groups[event["group"]]
+                contract = group_contracts[group["group"]]
+                if group["kind"] == binding.OBJECT_BATCH_GROUP:
+                    key = ((group["group"], event["round"], event["pair"]) if sample
+                           else (group["group"], 0, 0))
+                    process = batch_samples[key]
+                    seconds = process["compiler_batch_wall_time"][variant]
+                    rss = process["compiler_batch_peak_rss"][variant]
+                    intervals, arenas = {}, {}
+                    for row in group["rows"]:
+                        row_key = ((row, event["round"], event["pair"]) if sample else (row, 0, 0))
+                        intervals[row] = int(round(
+                            samples[row_key]["compiler_wall_time"][variant] * 1_000_000_000))
+                        arenas[row] = samples[row_key]["compiler_peak_memory"][variant]
+                    fixtures = ([row_by_id[row]["identity"]["fixture"] for row in group["rows"]]
+                                + [item["fixture"] for item in contract["controls"]])
+                    metrics = cls.metrics_records(contract, fixtures, plan_rows, variant,
+                                                  started, intervals, arenas)
+                    output = binding._batch_output_digest(
+                        [item["object_sha256"] for item in metrics])
+                    if mutate_metrics is not None:
+                        mutate_metrics(event["sequence"], metrics)
+                    data = b"".join((json.dumps(item, sort_keys=True, separators=(",", ":"))
+                                     + "\n").encode() for item in metrics)
+                    metrics_artifact = cls.put(
+                        root, f"execution/metrics/batch-{event['sequence']:06d}.jsonl", data)
+                else:
+                    row = group["rows"][0]
+                    key = (row, event["round"], event["pair"]) if sample else (row, 0, 0)
+                    seconds = samples[key]["compiler_wall_time"][variant]
+                    rss = samples[key]["compiler_peak_memory"][variant]
+                    output = binding._batch_output_digest(
+                        [plan_rows[row][variant]["artifact_sha256"]])
+                exit_code = contract[variant]["exit_status"]
+                executable = record["subjects"][variant]["binary"]["sha256"]
+                command = contract[variant]["command_sha256"]
+            else:
+                side = plan_rows[event["row"]][variant]
+                key = ((event["row"], event["round"], event["pair"]) if sample
+                       else (event["row"], 0, 0))
+                seconds = samples[key]["generated_runtime"][variant]
+                rss = None
+                output = side["runtime_output_sha256"]
+                exit_code = 0
+                executable = side["artifact_sha256"]
+                command = side["runtime_command_sha256"]
+            duration_ns = int(round(seconds * 1_000_000_000))
             event.update({
                 "pid": pid, "process_start_token": process_start_token,
                 "process_instance_sha256": binding._process_instance_digest(
                     job_id, attempt, boot_id, pid, process_start_token),
-                "cpu": 3,
-                "started_ns": last_end + 1, "finished_ns": last_end + 1 + duration_ns,
-                "exit_code": 0, "signal": 0, "timed_out": False, "cancelled": False,
-                "executable_sha256": (record["subjects"][event["variant"]]["binary"]["sha256"]
-                                      if compiler else side["artifact_sha256"]),
-                "command_sha256": side["compiler_command_sha256" if compiler else "runtime_command_sha256"],
-                "output_sha256": side["artifact_sha256" if compiler else "runtime_output_sha256"],
-                "code_section_sha256": side["code_section_sha256"] if compiler else None,
-                "code_section_bytes": side["code_section_bytes"] if compiler else None,
-                "wall_seconds": seconds,
-                "peak_rss_bytes": metrics["compiler_peak_rss"][event["variant"]] if compiler else None,
+                "cpu": 3, "started_ns": started, "finished_ns": started + duration_ns,
+                "exit_code": exit_code, "signal": 0, "timed_out": False, "cancelled": False,
+                "executable_sha256": executable, "command_sha256": command,
+                "output_sha256": output, "code_section_sha256": None,
+                "code_section_bytes": None, "wall_seconds": seconds,
+                "peak_rss_bytes": rss, "metrics_artifact": metrics_artifact,
             })
             last_end = event["finished_ns"]
             events.append(event)
@@ -344,6 +477,109 @@ class InvocationEvidenceTests(unittest.TestCase):
         receipt["shards"] = [{**shard, "records": len(events)}]
         return cls.put(root, "execution/invocation-receipt.json", receipt)
 
+    @classmethod
+    def code_records(cls, root, plan_descriptor, parsed, path="execution/code-records.jsonl",
+                     mutate=None):
+        """Write the per-row code record set from a plan's frozen code facts."""
+        plan = json.loads((root / plan_descriptor["path"]).read_text())
+        by_row = {item["row"]: item for item in plan["rows"]}
+        lines = []
+        for row in sorted(parsed, key=lambda item: item["row"]):
+            if not binding._code_observed(row):
+                continue
+            value = {"row": row["row"]}
+            for side in ("baseline", "candidate"):
+                frozen = by_row[row["row"]][side]
+                value[side] = {"artifact_sha256": frozen["artifact_sha256"],
+                               "code_section_bytes": frozen["code_section_bytes"],
+                               "code_section_sha256": frozen["code_section_sha256"],
+                               "reproduction_sha256": frozen["artifact_sha256"]}
+            if mutate is not None:
+                mutate(value)
+            lines.append(value)
+        data = b"".join((json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                        for item in lines)
+        descriptor = cls.put(root, path, data)
+        return {**descriptor, "records": len(lines)}
+
+    @staticmethod
+    def result_input_plan(source_manifest, source_rows, object_rows, row_count, group_count,
+                          rounds=2, pairs=60, row_path="results/input.json",
+                          batch_path="results/batch-input.json"):
+        """A v3 result-input plan with one row and one batch partition set."""
+        cap = binding.RESULT_INPUT_MAX_RECORDS
+        populations = {}
+        for kind, count, path in (("rows", row_count, row_path),
+                                  ("batches", group_count, batch_path)):
+            required = count * rounds * pairs
+            manifests = [{"identity": f"{kind}-{index}",
+                          "path": path if index == 0 else f"{path}.{index}",
+                          "start_record": start, "records": min(cap, required - start)}
+                         for index, start in enumerate(range(0, required, cap))]
+            populations[kind] = dict(binding.RESULT_INPUT_POPULATIONS[kind],
+                                     sample_count=count, records_per_unit=rounds * pairs,
+                                     required_records=required,
+                                     manifest_count=len(manifests), manifests=manifests)
+        return {"schema": binding.RESULT_INPUT_PLAN_SCHEMA, "version": 1,
+                "source_manifest_sha256": source_manifest, "source_rows_sha256": source_rows,
+                "identity_field": "record_id", "timed_target": binding.NATIVE_TIMED_TARGET,
+                "object_row_count": object_rows, "rounds": rounds, "pairs_per_round": pairs,
+                "max_records_per_manifest": cap, "populations": populations,
+                "predeclared": True}
+
+    @staticmethod
+    def create_sample_tables(db):
+        db.execute("CREATE TABLE samples(row_id INTEGER, round_id INTEGER, pair_id INTEGER, "
+                   "metric TEXT, baseline TEXT, candidate TEXT, "
+                   "PRIMARY KEY(row_id, round_id, pair_id, metric))")
+        db.execute("CREATE TABLE batch_samples(group_id INTEGER, round_id INTEGER, "
+                   "pair_id INTEGER, metric TEXT, baseline TEXT, candidate TEXT, "
+                   "PRIMARY KEY(group_id, round_id, pair_id, metric))")
+
+    @staticmethod
+    def synthetic_samples(rows, db=None):
+        """Deterministic per-row and per-batch samples with exact nanosecond seconds."""
+        samples, batch_samples = {}, {}
+        for row in rows:
+            for round_id in range(2):
+                for pair in range(60):
+                    metrics = {}
+                    for metric in binding.ROW_SAMPLE_METRICS:
+                        if not row["metrics"].get(metric, False):
+                            continue
+                        values = {}
+                        for side_index, side in enumerate(("baseline", "candidate")):
+                            if metric in ("compiler_wall_time", "generated_runtime"):
+                                values[side] = (1_000_000 + 1000 * row["row"] + 100 * side_index
+                                                + 60 * round_id + pair) / 1e9
+                            else:
+                                values[side] = 100 + side_index
+                        metrics[metric] = values
+                        if db is not None:
+                            db.execute("INSERT INTO samples VALUES (?, ?, ?, ?, ?, ?)",
+                                       (row["row"], round_id, pair, metric,
+                                        str(values["baseline"]), str(values["candidate"])))
+                    samples[(row["row"], round_id, pair)] = metrics
+        for group in binding._object_groups(binding._batch_groups(rows)):
+            for round_id in range(2):
+                for pair in range(60):
+                    metrics = {
+                        "compiler_batch_wall_time": {
+                            side: (10_000_000 + 1000 * group["group"] + 100 * index
+                                   + 60 * round_id + pair) / 1e9
+                            for index, side in enumerate(("baseline", "candidate"))},
+                        "compiler_batch_peak_rss": {
+                            side: 4096 + index
+                            for index, side in enumerate(("baseline", "candidate"))},
+                    }
+                    if db is not None:
+                        for metric, values in metrics.items():
+                            db.execute("INSERT INTO batch_samples VALUES (?, ?, ?, ?, ?, ?)",
+                                       (group["group"], round_id, pair, metric,
+                                        str(values["baseline"]), str(values["candidate"])))
+                    batch_samples[(group["group"], round_id, pair)] = metrics
+        return samples, batch_samples
+
     def setUp(self):
         import sqlite3
         from native_retirement_performance_binding_test import BindingTests
@@ -352,10 +588,11 @@ class InvocationEvidenceTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.db = sqlite3.connect(":memory:")
         self.addCleanup(self.db.close)
-        self.db.execute("CREATE TABLE samples(row_id INTEGER, round_id INTEGER, pair_id INTEGER, "
-                        "metric TEXT, baseline TEXT, candidate TEXT, PRIMARY KEY(row_id, round_id, pair_id, metric))")
+        self.create_sample_tables(self.db)
         self.rules = BindingTests._rules()
         template = BindingTests._series_join_fixture()[0][0]
+        # Row 0 is a native link row (singleton group 0 with runtime); row 1 is
+        # a native object row (object batch group 1 with one rejection control).
         self.rows = []
         for i in range(2):
             row = copy.deepcopy(template)
@@ -370,12 +607,13 @@ class InvocationEvidenceTests(unittest.TestCase):
         self.family = binding._derive_statistical_family(self.rows)
         self.rules["sampling"].update(binding._family_member_counts(self.family))
         artifact = {"path": "placeholder", "bytes": 1, "sha256": "a" * 64}
-        oracle = self.put(self.root, "execution/oracle.json", {"records": [
+        self.oracle_records = [
             {"row": i, "code_section_status": "parsed-deterministic",
              "code_section_bytes": 100, "code_section_sha256": "b" * 64,
              "runtime_oracle_status": "passed-native" if i == 0 else "not-applicable",
              "runtime_exit_code": 0 if i == 0 else -1, "native_runtime": i == 0}
-            for i in range(2)]})
+            for i in range(2)]
+        oracle = self.put(self.root, "execution/oracle.json", {"records": self.oracle_records})
         self.record = {
             "subjects": {side: {"binary": {**artifact, "sha256": str(i + 1) * 64}}
                          for i, side in enumerate(("baseline", "candidate"))},
@@ -387,27 +625,15 @@ class InvocationEvidenceTests(unittest.TestCase):
                                       for i, name in enumerate(("pre_sample_plan", "post_aa_binding"))},
                          "records": {"admission": artifact, "oracle": oracle}},
         }
-        self.samples = {}
-        for row in self.rows:
-            for round_id in range(2):
-                for pair in range(60):
-                    metrics = {}
-                    for metric in binding.METRICS:
-                        if not row["metrics"][metric]:
-                            continue
-                        values = {}
-                        for side_index, side in enumerate(("baseline", "candidate")):
-                            if metric in ("compiler_wall_time", "generated_runtime"):
-                                values[side] = (1_000_000 + 1000 * row["row"] + 100 * side_index + 60 * round_id + pair) / 1e9
-                            else:
-                                values[side] = 100 + side_index
-                        metrics[metric] = values
-                        self.db.execute("INSERT INTO samples VALUES (?, ?, ?, ?, ?, ?)",
-                                        (row["row"], round_id, pair, metric,
-                                         str(values["baseline"]), str(values["candidate"])))
-                    self.samples[(row["row"], round_id, pair)] = metrics
-        (self.plan, self.receipt, self.descriptor, self.events, self.raw_digest) = self.attach_execution(
-            self.root, self.record, self.rows, self.samples)
+        self.controls = {1: [self.rejection_control()]}
+        self.samples, self.batch_samples = self.synthetic_samples(self.rows, self.db)
+        self.attach()
+
+    def attach(self, **options):
+        (self.plan, self.receipt, self.descriptor, self.events, self.raw_digest) = \
+            self.attach_execution(self.root, self.record, self.rows, self.samples,
+                                  self.batch_samples, options.pop("controls", self.controls),
+                                  **options)
 
     def check(self, descriptor=None, trusted=None):
         descriptor = descriptor or self.descriptor
@@ -417,44 +643,86 @@ class InvocationEvidenceTests(unittest.TestCase):
             trusted if trusted is not None else descriptor["sha256"],
             3, "x86_64-unknown-linux-gnu")
 
-    def test_complete_warmups_and_native_runtime_join(self):
-        result = self.check()
-        self.assertEqual(result["invocations"], 3 * (4 + 2 * 60 * 2))
+    def rewrite_plan(self, change):
+        """Apply ``change`` to the frozen plan and rebind the receipt to it."""
+        plan = json.loads((self.root / self.plan["path"]).read_text())
+        change(plan)
+        self.plan = self.put(self.root, self.plan["path"], plan)
+        self.receipt["execution_plan_sha256"] = self.plan["sha256"]
+        self.descriptor = self.write_transcript(self.root, self.receipt, self.events)
 
-    def test_mixed_untimed_and_empty_code_rows_replay_complete_transcript(self):
-        # The zero-code row still runs its compiler; the retained control does not.
+    def test_complete_warmups_and_native_runtime_join(self):
+        # (A1) (G + U) * 2 * (warmups + rounds * pairs): one singleton stage
+        # group, one object batch group, and one runtime-eligible row.
+        result = self.check()
+        self.assertEqual(result["invocations"], (2 + 1) * 2 * (2 + 2 * 60))
+        batches = [event for event in self.events
+                   if event["kind"] == "compiler" and event["group"] == 1]
+        self.assertEqual(len(batches), 2 * (2 + 2 * 60))
+        self.assertTrue(all(event["metrics_artifact"] is not None and event["exit_code"] == 1
+                            for event in batches))
+        self.assertTrue(all(event["row"] is None and event["code_section_bytes"] is None
+                            for event in self.events if event["kind"] == "compiler"))
+
+    def add_untimed_rows(self):
+        """Append a retained non-object control and a cross-target object row."""
+        template = self.rows[1]
+        control = copy.deepcopy(template)
+        control["row"] = 2
+        control["identity"]["fixture"] = "tests/untimed-control.c"
+        control["identity"]["compile_obligation"] = "registered-non-object-control"
+        for metric in binding.ROW_METRICS:
+            control["metrics"][metric] = False
+        for field in ("compiler_wall_time", "compiler_peak_rss", "generated_code_bytes",
+                      "generated_runtime"):
+            control["eligibility"][field] = False
+        control["eligibility"]["code_section"] = "not-applicable"
+        cross = copy.deepcopy(template)
+        cross["row"] = 3
+        cross["identity"]["fixture"] = "tests/invocation-cross.c"
+        cross["identity"]["target"] = "aarch64-unknown-linux-gnu"
+        cross["identity"]["target_abi"] = "aapcs64"
+        self.rows.extend((control, cross))
+        self.oracle_records.extend((
+            {"row": 2, "code_section_status": "not-applicable",
+             "code_section_bytes": None, "code_section_sha256": None,
+             "runtime_oracle_status": "not-applicable",
+             "runtime_exit_code": None, "native_runtime": False},
+            {"row": 3, "code_section_status": "parsed-deterministic",
+             "code_section_bytes": 100, "code_section_sha256": "b" * 64,
+             "runtime_oracle_status": "not-applicable",
+             "runtime_exit_code": -1, "native_runtime": False}))
+        oracle_path = self.record["workflow"]["records"]["oracle"]["path"]
+        self.record["workflow"]["records"]["oracle"] = self.put(
+            self.root, oracle_path, {"records": self.oracle_records})
+
+    def test_mixed_untimed_empty_code_and_cross_target_rows_replay_complete_transcript(self):
+        # The zero-code row still runs its compiler; the retained control and
+        # the cross-target row are never timed, and neither joins a group.
         empty = hashlib.sha256(b"").hexdigest()
+        self.add_untimed_rows()
         zero = self.rows[1]
         zero["metrics"]["generated_code_bytes"] = False
         zero["eligibility"]["generated_code_bytes"] = False
         zero["eligibility"]["code_section"] = "deterministic-zero-baseline-code-section"
-        for coordinate, metrics in self.samples.items():
-            if coordinate[0] == 1:
-                del metrics["generated_code_bytes"]
-        self.db.execute("DELETE FROM samples WHERE row_id=1 AND metric='generated_code_bytes'")
-        control = copy.deepcopy(zero)
-        control["row"] = 2
-        control["identity"]["fixture"] = "tests/untimed-control.c"
-        control["identity"]["compile_obligation"] = "registered-non-object-control"
-        for metric in binding.METRICS:
-            control["metrics"][metric] = False
-            control["eligibility"][metric] = False
-        control["eligibility"]["code_section"] = "not-applicable"
-        self.rows.append(control)
+        self.oracle_records[1].update(code_section_bytes=0, code_section_sha256=empty)
         oracle_path = self.record["workflow"]["records"]["oracle"]["path"]
-        oracle = json.loads((self.root / oracle_path).read_text())
-        oracle["records"][1].update(code_section_bytes=0, code_section_sha256=empty)
-        oracle["records"].append({"row": 2, "code_section_status": "not-applicable",
-                                  "code_section_bytes": None, "code_section_sha256": None,
-                                  "runtime_oracle_status": "not-applicable",
-                                  "runtime_exit_code": None, "native_runtime": False})
-        self.record["workflow"]["records"]["oracle"] = self.put(self.root, oracle_path, oracle)
-        self.plan, self.receipt, self.descriptor, self.events, self.raw_digest = self.attach_execution(
-            self.root, self.record, self.rows, self.samples)
-        self.assertEqual(self.check()["invocations"], 3 * (4 + 2 * 60 * 2))
-        self.assertNotIn(2, {event["row"] for event in self.events})
-        self.assertEqual({event["code_section_bytes"] for event in self.events
-                          if event["row"] == 1}, {0})
+        self.record["workflow"]["records"]["oracle"] = self.put(
+            self.root, oracle_path, {"records": self.oracle_records})
+        self.attach()
+        self.assertEqual(self.check()["invocations"], (2 + 1) * 2 * (2 + 2 * 60))
+        self.assertEqual([group["rows"] for group in binding._batch_groups(self.rows)],
+                         [[0], [1]])
+        self.assertFalse({2, 3} & {event["row"] for event in self.events})
+        plan = json.loads((self.root / self.plan["path"]).read_text())
+        rows = {item["row"]: item for item in plan["rows"]}
+        self.assertEqual((rows[1]["baseline"]["code_section_bytes"],
+                          rows[1]["baseline"]["code_section_sha256"]), (0, empty))
+        self.assertIsNone(rows[3]["group"])
+        self.assertIsNone(rows[3]["baseline"]["compiler_command_sha256"])
+        self.assertEqual(rows[3]["baseline"]["reproduction_sha256"],
+                         rows[3]["baseline"]["artifact_sha256"])
+        self.assertTrue(all(value is None for value in rows[2]["candidate"].values()))
 
     def test_missing_or_self_selected_trust_root_is_rejected(self):
         for trusted in (None, "0" * 64, "main"):
@@ -517,6 +785,11 @@ class InvocationEvidenceTests(unittest.TestCase):
             with self.subTest(case=index), self.assertRaises(ValueError):
                 self.check(self.write_transcript(self.root, self.receipt, events))
 
+    def batch_index(self, phase="sample"):
+        return next(index for index, event in enumerate(self.events)
+                    if event["kind"] == "compiler" and event["group"] == 1
+                    and event["phase"] == phase)
+
     def test_rehashed_failed_runtime_and_warmup_invocations_reject(self):
         runtime = next(i for i, event in enumerate(self.events)
                        if event["kind"] == "runtime" and event["phase"] == "sample")
@@ -527,43 +800,54 @@ class InvocationEvidenceTests(unittest.TestCase):
                 events[index][field] = bad
                 with self.subTest(index=index, field=field, bad=bad), self.assertRaises(ValueError):
                     self.check(self.write_transcript(self.root, self.receipt, events))
+        # A batch with a frozen rejection control must exit with its frozen
+        # nonzero status; a clean exit contradicts the control's oracle.
+        for phase in ("warmup", "sample"):
+            for field, bad in (("exit_code", 0), ("signal", 9), ("timed_out", True)):
+                events = copy.deepcopy(self.events)
+                events[self.batch_index(phase)][field] = bad
+                with self.subTest(phase=phase, field=field), \
+                        self.assertRaisesRegex(ValueError, "did not complete successfully"):
+                    self.check(self.write_transcript(self.root, self.receipt, events))
 
     def test_mismatched_binary_command_oracle_and_sections_reject(self):
-        for field, bad in (("executable_sha256", "0" * 64), ("command_sha256", "0" * 64),
-                           ("output_sha256", "0" * 64), ("code_section_sha256", "0" * 64),
-                           ("code_section_bytes", 2), ("cpu", 4)):
-            events = copy.deepcopy(self.events)
-            events[0][field] = bad
-            with self.subTest(field=field), self.assertRaises(ValueError):
-                self.check(self.write_transcript(self.root, self.receipt, events))
+        for index in (0, self.batch_index()):
+            for field, bad in (("executable_sha256", "0" * 64), ("command_sha256", "0" * 64),
+                               ("output_sha256", "0" * 64), ("code_section_sha256", "0" * 64),
+                               ("code_section_bytes", 2), ("cpu", 4)):
+                events = copy.deepcopy(self.events)
+                events[index][field] = bad
+                with self.subTest(index=index, field=field), self.assertRaises(ValueError):
+                    self.check(self.write_transcript(self.root, self.receipt, events))
 
     def test_workflow_checks_actual_invocations_before_calling_statistics(self):
-        # Exercise the production workflow, real #615 streaming, and the new
-        # receipt join. The sole sentinel is the NEXT stage: this deliberately
-        # does not stand in for the separately required full C/replay test.
+        # Exercise the production workflow, real #615 streaming of both result
+        # populations, and the receipt join. The sole sentinel is the NEXT
+        # stage: this deliberately does not stand in for the full replay test.
         support = {"support_declaration_sha256": "a" * 64,
                    "manifest_sha256": "b" * 64, "rows_sha256": "c" * 64,
                    "object_row_count": len(self.rows)}
-        data = b"".join((json.dumps({
-            "record_id": f"row-{row}/round-{round_id}/pair-{pair}",
-            "row": row, "round": round_id, "pair": pair, "measurements": measurements,
-        }, sort_keys=True, separators=(",", ":")) + "\n").encode()
-            for (row, round_id, pair), measurements in sorted(self.samples.items()))
+
+        def records(prefix, samples):
+            return b"".join((json.dumps({
+                "record_id": f"{prefix}-{unit}/round-{round_id}/pair-{pair}",
+                prefix: unit, "round": round_id, "pair": pair, "measurements": measurements,
+            }, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                for (unit, round_id, pair), measurements in sorted(samples.items()))
+
+        data = records("row", self.samples)
+        batch_data = records("group", self.batch_samples)
         shard = self.put(self.root, "results/numeric.jsonl", data)
         manifest = self.put(self.root, "results/input.json", {
             "schema": binding.RESULT_INPUT.MANIFEST_SCHEMA, "version": 1,
             "identity_field": "record_id", "shards": [{"identity": "numeric", **shard}]})
-        plan = self.put(self.root, "results/input-plan.json", {
-            "schema": binding.RESULT_INPUT_PLAN_SCHEMA, "version": 1,
-            "source_manifest_sha256": support["manifest_sha256"],
-            "source_rows_sha256": support["rows_sha256"],
-            "identity_field": "record_id", "coordinate_schema": "row-round-pair-v1",
-            "sample_population": "trusted-census-eligible-performance-rows-with-required-metrics",
-            "eligible_population": "authenticated-applicability-minus-nonexecuted-rows", "object_row_count": 2,
-            "sample_row_count": 2, "rounds": 2, "pairs_per_round": 60, "records_per_row": 120,
-            "required_records": 240, "max_records_per_manifest": binding.RESULT_INPUT_MAX_RECORDS,
-            "manifest_count": 1, "manifests": [{"identity": "numeric", "path": manifest["path"],
-                "start_record": 0, "records": 240}], "predeclared": True})
+        batch_shard = self.put(self.root, "results/batch-numeric.jsonl", batch_data)
+        batch_manifest = self.put(self.root, "results/batch-input.json", {
+            "schema": binding.RESULT_INPUT.MANIFEST_SCHEMA, "version": 1,
+            "identity_field": "record_id",
+            "shards": [{"identity": "batch-numeric", **batch_shard}]})
+        plan = self.put(self.root, "results/input-plan.json", self.result_input_plan(
+            support["manifest_sha256"], support["rows_sha256"], 2, 2, 1))
         self.record["workflow"]["records"]["result_input_plan"] = plan
         self.record["execution"]["host"] = {"aa_admission_receipt": {"sha256": "7" * 64}}
         pre = {"schema": binding.PHASE_SCHEMA["pre_sample_plan"], "version": 1,
@@ -581,21 +865,28 @@ class InvocationEvidenceTests(unittest.TestCase):
                     pre_sample_plan_sha256=phases["pre_sample_plan"]["sha256"],
                     aa_admission_sha256="7" * 64)
         phases["post_aa_binding"] = self.put(self.root, "workflow/post.json", post)
-        self.raw_digest = hashlib.sha256(data).hexdigest()
+        self.raw_digest = hashlib.sha256(data + batch_data).hexdigest()
         self.receipt["context_sha256"] = binding._canonical_json_digest(
             binding._execution_context(self.record, self.raw_digest))
         self.descriptor = self.write_transcript(self.root, self.receipt, self.events)
         adapter = self.put(self.root, "results/series.txt", b"not reached by this boundary test\n")
+        code_records = self.code_records(self.root, self.plan, self.rows)
         result = {"schema": binding.RESULT_BUNDLE_SCHEMA, "version": 1,
                   "source_rows_sha256": "c" * 64, "result_input_plan_sha256": plan["sha256"],
                   "family_sha256": self.family["sha256"], "result_manifests": [{
-                      "identity": "numeric", **manifest, "start_record": 0, "records": 240,
+                      "identity": "rows-0", **manifest, "start_record": 0, "records": 240,
                       "input_bytes": manifest["bytes"] + shard["bytes"]}],
+                  "batch_result_manifests": [{
+                      "identity": "batches-0", **batch_manifest, "start_record": 0,
+                      "records": 120,
+                      "input_bytes": batch_manifest["bytes"] + batch_shard["bytes"]}],
                   "raw_measurements_sha256": self.raw_digest,
                   "member_invocations_sha256": binding._family_invocation_digest(self.family),
                   "member_count": len(self.family["members"]), "scopes_per_member": 3,
                   "adapter_input": adapter, "execution_receipt": self.descriptor,
-                  "code_bytes_summary": binding._code_bytes_summary(self.rows, self.db, 2, 60)}
+                  "code_records": code_records,
+                  "code_bytes_summary": binding._code_bytes_summary(
+                      self.rows, {0: (100, 100), 1: (100, 100)})}
         result_descriptor = self.put(self.root, "results/bundle.json", result)
         sealed = {"schema": binding.SEALED_RESULT_SCHEMA, "version": 1,
                   "status": "sealed-for-independent-replay",
@@ -620,6 +911,41 @@ class InvocationEvidenceTests(unittest.TestCase):
                 run(self.descriptor["sha256"])
             statistics.assert_called_once()
             statistics.reset_mock()
+            # Batch cell population mismatch: the plan must cover every object
+            # batch group, not a producer-chosen count.
+            self.record["workflow"]["records"]["result_input_plan"] = self.put(
+                self.root, "results/wrong-batch-plan.json", self.result_input_plan(
+                    support["manifest_sha256"], support["rows_sha256"], 2, 2, 2))
+            with self.assertRaisesRegex(ValueError, "batch population is not every object batch group"):
+                run(self.descriptor["sha256"])
+            self.record["workflow"]["records"]["result_input_plan"] = plan
+            # A missing batch metric in the sealed group records fails closed.
+            broken = json.loads(batch_data.splitlines()[0])
+            del broken["measurements"]["compiler_batch_peak_rss"]
+            broken_data = (json.dumps(broken, sort_keys=True, separators=(",", ":"))
+                           + "\n").encode() + b"".join(
+                               line + b"\n" for line in batch_data.splitlines()[1:])
+            self.put(self.root, "results/batch-numeric.jsonl", broken_data)
+            broken_shard = {"identity": "batch-numeric", "path": "results/batch-numeric.jsonl",
+                            "bytes": len(broken_data),
+                            "sha256": hashlib.sha256(broken_data).hexdigest()}
+            broken_manifest = self.put(self.root, "results/batch-input.json", {
+                "schema": binding.RESULT_INPUT.MANIFEST_SCHEMA, "version": 1,
+                "identity_field": "record_id", "shards": [broken_shard]})
+            result["batch_result_manifests"][0].update(
+                broken_manifest, input_bytes=broken_manifest["bytes"] + broken_shard["bytes"])
+            sealed["result_bundle"] = self.put(self.root, "results/bundle.json", result)
+            phases["sealed_result"] = self.put(self.root, "workflow/sealed.json", sealed)
+            with self.assertRaisesRegex(ValueError, "compiler_batch_peak_rss"):
+                run(self.descriptor["sha256"])
+            statistics.assert_not_called()
+            self.put(self.root, "results/batch-numeric.jsonl", batch_data)
+            self.put(self.root, "results/batch-input.json", {
+                "schema": binding.RESULT_INPUT.MANIFEST_SCHEMA, "version": 1,
+                "identity_field": "record_id",
+                "shards": [{"identity": "batch-numeric", **batch_shard}]})
+            result["batch_result_manifests"][0].update(
+                batch_manifest, input_bytes=batch_manifest["bytes"] + batch_shard["bytes"])
             events = copy.deepcopy(self.events)
             events[0]["exit_code"] = 1
             changed = self.write_transcript(self.root, self.receipt, events)
@@ -631,16 +957,16 @@ class InvocationEvidenceTests(unittest.TestCase):
             statistics.assert_not_called()
 
     def test_rehashed_failed_or_non_native_oracles_reject_before_statistics(self):
+        original = copy.deepcopy(self.oracle_records)
         oracle_path = self.record["workflow"]["records"]["oracle"]["path"]
-        original = json.loads((self.root / oracle_path).read_text())
         for field, bad in (("runtime_oracle_status", "not-applicable"),
                            ("runtime_exit_code", 1), ("runtime_exit_code", False),
                            ("native_runtime", False), ("code_section_status", "unknown")):
             oracle = copy.deepcopy(original)
-            oracle["records"][0][field] = bad
-            self.record["workflow"]["records"]["oracle"] = self.put(self.root, oracle_path, oracle)
-            (self.plan, self.receipt, self.descriptor, self.events, self.raw_digest) = self.attach_execution(
-                self.root, self.record, self.rows, self.samples)
+            oracle[0][field] = bad
+            self.record["workflow"]["records"]["oracle"] = self.put(
+                self.root, oracle_path, {"records": oracle})
+            self.attach()
             with self.subTest(field=field, bad=bad), self.assertRaisesRegex(ValueError, "oracle"):
                 self.check()
 
@@ -648,25 +974,264 @@ class InvocationEvidenceTests(unittest.TestCase):
         rows = copy.deepcopy(self.rows)
         rows[0]["identity"]["execution_obligation"] = "unavailable-platform-control"
         plan, receipt, descriptor, _events, raw_digest = self.attach_execution(
-            self.root, self.record, rows, self.samples)
+            self.root, self.record, rows, self.samples, self.batch_samples, self.controls)
         with self.assertRaisesRegex(ValueError, "frozen row obligation"):
             binding._check_execution_transcript(
                 self.root, descriptor, plan, self.record, rows,
                 self.rules["sampling"], self.db, raw_digest,
                 descriptor["sha256"], 3, "x86_64-unknown-linux-gnu")
 
+    def reset_samples(self):
+        self.db.execute("DELETE FROM samples")
+        self.db.execute("DELETE FROM batch_samples")
+        self.synthetic_samples(self.rows, self.db)
+
     def test_positive_but_wrong_result_measurement_rejects(self):
-        self.db.execute("UPDATE samples SET baseline='1000' WHERE metric='compiler_peak_rss'")
-        with self.assertRaisesRegex(ValueError, "not the authenticated invocation"):
+        # Row samples join to singleton processes and per-input records;
+        # batch samples join to the batch process's own wall time and RSS.
+        for table, metric, change in (
+                ("samples", "compiler_peak_memory", "baseline='1000'"),
+                ("samples", "compiler_wall_time", "candidate='0.5'"),
+                ("batch_samples", "compiler_batch_peak_rss", "baseline='1000'"),
+                ("batch_samples", "compiler_batch_wall_time", "candidate='0.5'")):
+            self.reset_samples()
+            self.db.execute(f"UPDATE {table} SET {change} WHERE metric=?", (metric,))
+            with self.subTest(metric=metric), \
+                    self.assertRaisesRegex(ValueError, "not the authenticated invocation"):
+                self.check()
+        # One nanosecond of decimal-seconds error is the only per-input slack.
+        self.reset_samples()
+        self.db.execute("UPDATE samples SET candidate=? WHERE row_id=1 AND round_id=0 "
+                        "AND pair_id=0 AND metric='compiler_wall_time'",
+                        (str(float(self.samples[(1, 0, 0)]["compiler_wall_time"]["candidate"])
+                             + 2e-9),))
+        with self.assertRaisesRegex(ValueError, "per-input record"):
             self.check()
 
     def test_overlapping_processes_and_false_clock_measurement_reject(self):
         for field, bad in (("started_ns", 99), ("finished_ns", 10), ("wall_seconds", 50),
-                           ("row", False), ("sequence", False), ("peak_rss_bytes", True)):
+                           ("row", False), ("group", None), ("sequence", False),
+                           ("peak_rss_bytes", True)):
             events = copy.deepcopy(self.events)
             events[0][field] = bad
             with self.subTest(field=field), self.assertRaises(ValueError):
                 self.check(self.write_transcript(self.root, self.receipt, events))
+
+    def batch_sequences(self):
+        return [event["sequence"] for event in self.events
+                if event["kind"] == "compiler" and event["group"] == 1]
+
+    def assert_metrics_rejected(self, mutate, message, sequences=None):
+        for target in sequences or (self.batch_sequences()[0], self.batch_sequences()[-1]):
+            def corrupt(sequence, records, target=target):
+                if sequence == target:
+                    mutate(records)
+            self.attach(mutate_metrics=corrupt)
+            with self.subTest(sequence=target, message=message), \
+                    self.assertRaisesRegex(ValueError, message):
+                self.check()
+
+    def test_cross_target_rows_are_never_timed(self):
+        self.add_untimed_rows()
+        self.attach()
+        self.check()
+        for field, value in (("compiler_command_sha256", "e" * 64),):
+            def change(plan, field=field, value=value):
+                row = next(item for item in plan["rows"] if item["row"] == 3)
+                row["baseline"][field] = value
+            self.rewrite_plan(change)
+            with self.assertRaisesRegex(ValueError, "cross-target rows are never timed"):
+                self.check()
+        # A cross-target row cannot be moved into a batch group either.
+        self.attach()
+
+        def join_group(plan):
+            next(item for item in plan["rows"] if item["row"] == 3)["group"] = 1
+        self.rewrite_plan(join_group)
+        with self.assertRaisesRegex(ValueError, "derived batch group"):
+            self.check()
+
+    def test_batch_objects_must_reproduce_their_frozen_artifacts(self):
+        # Determinism: every warmup and sample batch must emit each fixture's
+        # object byte-identical to its frozen artifact.
+        def mismatch(records):
+            records[0]["object_sha256"] = "f" * 64
+        self.assert_metrics_rejected(mismatch, "nondeterminism")
+
+    def test_per_input_intervals_are_ordered_and_inside_the_batch(self):
+        def overlap(records):
+            records[1]["started_ns"] = records[0]["finished_ns"] - 1
+            records[1]["finished_ns"] = records[1]["started_ns"] + 10
+
+        def early(records):
+            records[0]["started_ns"] -= 2
+
+        def late(records):
+            records[-1]["finished_ns"] += 10 ** 9
+
+        def empty(records):
+            records[0]["finished_ns"] = records[0]["started_ns"]
+
+        for mutate in (overlap, early, late, empty):
+            self.assert_metrics_rejected(mutate, "per-input intervals")
+
+        def phases(records):
+            interval = records[0]["finished_ns"] - records[0]["started_ns"]
+            records[0]["phase_ns"] = {"backend": interval, "frontend": 1}
+        self.assert_metrics_rejected(phases, "phase timings exceed")
+
+    def test_control_status_and_diagnostics_match_the_frozen_oracle(self):
+        for field, value in (("status", "compiled"), ("exit_contribution", 0),
+                             ("diagnostic_sha256", "e" * 64)):
+            def change(records, field=field, value=value):
+                records[1][field] = value
+            self.assert_metrics_rejected(change, "status, exit contribution or diagnostics")
+
+        def member_diagnostic(records):
+            records[0]["diagnostic_sha256"] = "e" * 64
+        self.assert_metrics_rejected(member_diagnostic, "status, exit contribution or diagnostics")
+
+        def reorder(records):
+            records.reverse()
+        self.assert_metrics_rejected(reorder, "frozen batch input order")
+
+        def inconsistent_control(plan):
+            plan["groups"][1]["controls"][0]["status"] = "compiled"
+        self.rewrite_plan(inconsistent_control)
+        with self.assertRaisesRegex(ValueError, "status, exit contribution and object disagree"):
+            self.check()
+        self.attach()
+
+        def clean_exit(plan):
+            for side in ("baseline", "candidate"):
+                plan["groups"][1][side]["exit_status"] = 0
+        self.rewrite_plan(clean_exit)
+        with self.assertRaisesRegex(ValueError, "exit status contradicts"):
+            self.check()
+
+    def test_metrics_artifacts_are_bounded_and_exactly_the_frozen_inputs(self):
+        _plan, groups, rows = binding._check_execution_plan(
+            self.root, self.plan, self.record, self.rows, self.rules["sampling"], 3,
+            binding.NATIVE_TIMED_TARGET)
+        event = self.events[self.batch_index()]
+        oversized = dict(event["metrics_artifact"], bytes=binding.METRICS_ARTIFACT_BYTE_CAP + 1)
+        with mock.patch.object(binding, "_check_evidence") as read:
+            with self.assertRaisesRegex(ValueError, "exceeds its bounded size"):
+                binding._check_batch_metrics(
+                    self.root, oversized, groups[1], rows, {row["row"]: row for row in self.rows},
+                    event["variant"], event["started_ns"], event["finished_ns"], "metrics")
+            read.assert_not_called()
+
+        def huge_record(records):
+            records[0]["code_functions"] = [{"bytes": 1, "name": "f" * binding.METRICS_RECORD_BYTE_CAP}]
+        self.assert_metrics_rejected(huge_record, "missing, truncated, or oversized")
+
+        def extra(records):
+            records.append(dict(records[-1], input=len(records)))
+        self.assert_metrics_rejected(extra, "undeclared extra records")
+
+        def missing(records):
+            records.pop()
+        self.assert_metrics_rejected(missing, "missing, truncated, or oversized")
+
+    def test_batch_process_metrics_and_artifacts_are_required(self):
+        for index in (self.batch_index("warmup"), self.batch_index()):
+            for field, value, message in (
+                    ("metrics_artifact", None, "lacks its per-input metrics artifact"),
+                    ("peak_rss_bytes", None, "peak_rss_bytes"),
+                    ("peak_rss_bytes", 0, "peak_rss_bytes")):
+                events = copy.deepcopy(self.events)
+                events[index][field] = value
+                with self.subTest(index=index, field=field, value=value), \
+                        self.assertRaisesRegex(ValueError, message):
+                    self.check(self.write_transcript(self.root, self.receipt, events))
+        events = copy.deepcopy(self.events)
+        batch = events[self.batch_index()]
+        batch["metrics_artifact"] = events[self.batch_index("warmup")]["metrics_artifact"]
+        with self.assertRaisesRegex(ValueError, "reuses another batch"):
+            self.check(self.write_transcript(self.root, self.receipt, events))
+        events = copy.deepcopy(self.events)
+        events[0]["metrics_artifact"] = batch["metrics_artifact"]
+        with self.assertRaisesRegex(ValueError, "singleton stage invocation"):
+            self.check(self.write_transcript(self.root, self.receipt, events))
+        self.descriptor = self.write_transcript(self.root, self.receipt, self.events)
+        self.check()
+        self.db.execute("DELETE FROM batch_samples WHERE metric='compiler_batch_peak_rss'")
+        with self.assertRaisesRegex(ValueError, "batch process"):
+            self.check()
+
+    def test_batch_group_contracts_are_the_derived_partition(self):
+        changes = (
+            (lambda plan: plan["groups"].pop(), "derived A1 partition"),
+            (lambda plan: plan["groups"][1].update(members=[]), "members differ"),
+            (lambda plan: plan["groups"][1]["recipe"].update(cpu="haswell"),
+             "configuration or recipe"),
+            (lambda plan: plan["groups"][1].update(kind=binding.SINGLETON_STAGE_GROUP),
+             "derived A1 partition"),
+            (lambda plan: plan["groups"][1]["controls"].append(
+                dict(self.rejection_control("other/invocation-1.c"))),
+             "collide on their object basename"),
+            (lambda plan: plan["groups"][1]["controls"][0].update(
+                row=0, fixture="tests/invocation-0.c"), "control row is timed"),
+            (lambda plan: plan["groups"][0]["controls"].append(self.rejection_control()),
+             "singleton stage group cannot carry"),
+            (lambda plan: plan["rows"][1].update(group=0), "derived batch group"),
+            (lambda plan: plan["rows"][1]["candidate"].update(
+                compiler_command_sha256="e" * 64), "batch group command"),
+        )
+        for change, message in changes:
+            self.attach()
+            self.rewrite_plan(change)
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                self.check()
+
+    def test_untimed_code_rows_bind_a_reproduction_digest(self):
+        self.add_untimed_rows()
+        changes = (
+            (lambda row: row["baseline"].update(reproduction_sha256=None),
+             3, "lacks its reproduction digest"),
+            (lambda row: row["candidate"].update(reproduction_sha256="e" * 64),
+             3, "nondeterminism"),
+            (lambda row: row["baseline"].update(reproduction_sha256="e" * 64),
+             1, "only bound for untimed"),
+        )
+        for mutate, target, message in changes:
+            self.attach()
+
+            def change(plan, mutate=mutate, target=target):
+                mutate(next(item for item in plan["rows"] if item["row"] == target))
+            self.rewrite_plan(change)
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                self.check()
+
+    def test_code_records_cover_every_code_row_with_its_reproduction(self):
+        self.add_untimed_rows()
+        self.attach()
+        _plan, _groups, rows = binding._check_execution_plan(
+            self.root, self.plan, self.record, self.rows, self.rules["sampling"], 3,
+            binding.NATIVE_TIMED_TARGET)
+        good = self.code_records(self.root, self.plan, self.rows)
+        facts = binding._check_code_records(self.root, good, self.rows, rows)
+        self.assertEqual(facts, {0: (100, 100), 1: (100, 100), 3: (100, 100)})
+        for mutate, message in (
+                (lambda value: value["baseline"].update(reproduction_sha256=None),
+                 "lacks its reproduction digest"),
+                (lambda value: value["candidate"].update(reproduction_sha256="e" * 64),
+                 "nondeterminism"),
+                (lambda value: value["candidate"].update(code_section_bytes=99),
+                 "frozen execution-plan code facts")):
+            descriptor = self.code_records(self.root, self.plan, self.rows,
+                                           path="execution/bad-code-records.jsonl",
+                                           mutate=lambda value, mutate=mutate: (
+                                               mutate(value) if value["row"] == 3 else None))
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                binding._check_code_records(self.root, descriptor, self.rows, rows)
+        lines = (self.root / good["path"]).read_bytes().splitlines(keepends=True)
+        omitted = self.put(self.root, "execution/omitted-code-records.jsonl", b"".join(lines[:2]))
+        with self.assertRaisesRegex(ValueError, "missing, truncated, or oversized"):
+            binding._check_code_records(self.root, {**omitted, "records": 3}, self.rows, rows)
+        with self.assertRaisesRegex(ValueError, "every code-eligible row"):
+            binding._check_code_records(self.root, {**omitted, "records": 2}, self.rows, rows)
 
     def test_rehashed_wrong_context_or_plan_rejects(self):
         for field in ("context_sha256", "execution_plan_sha256"):
@@ -771,7 +1336,8 @@ int main(int argc, char **argv) {
                                         capture_output=True, text=True, timeout=10)
                 expected = [tuple(map(int, line.split())) for line in native.stdout.splitlines()]
                 sampling = dict(self.rules["sampling"], seed=seed)
-                actual = [(e["round"], e["pair"], e["row"], e["position"],
+                # (A1) The compiler campaign's cells are the two batch groups.
+                actual = [(e["round"], e["pair"], e["group"], e["position"],
                            int(e["variant"] == "candidate"))
                           for e in binding._execution_schedule(self.rows, sampling)
                           if e["kind"] == "compiler" and e["phase"] == "sample"]
@@ -781,12 +1347,15 @@ int main(int argc, char **argv) {
         by_pair = {}
         for event in binding._execution_schedule(self.rows, self.rules["sampling"]):
             if event["phase"] == "sample":
-                key = event["kind"], event["row"], event["round"], event["pair"]
+                unit = event["group"] if event["kind"] == "compiler" else event["row"]
+                key = event["kind"], unit, event["round"], event["pair"]
                 by_pair.setdefault(key, []).append(event["variant"])
-        for (kind, row, round_id, pair), variants in by_pair.items():
+        for (kind, unit, round_id, pair), variants in by_pair.items():
             self.assertEqual(set(variants), {"baseline", "candidate"})
             if not pair & 1:
-                self.assertEqual(variants[::-1], by_pair[(kind, row, round_id, pair + 1)])
+                self.assertEqual(variants[::-1], by_pair[(kind, unit, round_id, pair + 1)])
+        self.assertEqual({key[:2] for key in by_pair},
+                         {("compiler", 0), ("compiler", 1), ("runtime", 0)})
         for seed in (0, 1 << 64, True):
             rules = copy.deepcopy(self.rules["sampling"])
             rules["seed"] = seed

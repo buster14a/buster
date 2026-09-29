@@ -17,6 +17,17 @@ import native_retirement_performance_binding as binding
 import native_retirement_performance_schema as schema
 
 
+def planned_row(row, source, compiler_eligible, stage="object", runtime=False):
+    """A schedule-shaped row carrying the identity fields A1 groups by."""
+    identity = {field: source[field] for field in
+                ("fixture", "target", "cpu", "cpu_features", "allocator",
+                 "frontend_lowering", "PIC", "fixture_recipe")}
+    identity["artifact_stage"] = stage
+    return {"row": row, "identity": identity,
+            "metrics": {"compiler_wall_time": compiler_eligible,
+                        "generated_runtime": runtime}}
+
+
 class RetirementEligibilityTests(unittest.TestCase):
     def report(self):
         rows_by_class = {name: [] for name in schema.APPLICABILITY_CLASSES}
@@ -204,18 +215,33 @@ class RetirementEligibilityTests(unittest.TestCase):
         self.assertEqual(len(controls), 6)
         self.assertEqual(sum(row["fixture"] in controls for row in rows), 1152)
         self.assertTrue(all(int(row["row"]) in skipped for row in rows if row["fixture"] in controls))
-        planned = [{"row": int(row["row"]), "metrics": {
-            "compiler_wall_time": int(row["row"]) not in skipped,
-            "generated_runtime": False}} for row in rows]
+        planned = [planned_row(int(row["row"]), row, int(row["row"]) not in skipped)
+                   for row in rows]
         sampling = {"seed": 7, "warmups_per_variant": 2, "rounds": 2, "pairs_per_round": 60}
-        counts = [0] * len(rows)
+        # (A1) The timed projection is derived from the replayed census: the
+        # compiler-eligible rows on the pinned native host.  Its batch groups
+        # partition it and are the compiler campaign's scheduled cells.
+        timed = {row["row"] for row in binding._timed_rows(planned)}
+        self.assertEqual(timed, {int(row["row"]) for row in rows
+                                 if int(row["row"]) not in skipped
+                                 and row["target"] == binding.NATIVE_TIMED_TARGET})
+        groups = binding._batch_groups(planned)
+        members = [row for group in groups for row in group["rows"]]
+        self.assertEqual(sorted(members), sorted(timed))
+        self.assertEqual(len(members), len(set(members)))
+        for group in groups:
+            self.assertEqual(len({tuple(rows[row][field] for field in binding.BATCH_GROUP_KEY_FIELDS)
+                                  for row in group["rows"]}), 1)
+        counts = [0] * len(groups)
         for event in binding._execution_schedule(planned, sampling):
-            counts[event["row"]] += 1
-        self.assertEqual(counts, [0 if index in skipped else 244 for index in range(len(rows))])
+            self.assertEqual(event["kind"], "compiler")
+            counts[event["group"]] += 1
+        self.assertEqual(counts, [244] * len(groups))
         print(json.dumps({"proof": "full-census-compiler-schedule-and-independent-replay",
                           "rows": len(rows), "untimed_rows": len(skipped),
                           "compiler_eligible_rows": len(rows) - len(skipped),
-                          "scheduled_invocations": sum(counts), "cpu_profiles": cpus,
+                          "native_timed_rows": len(timed), "batch_groups": len(groups),
+                          "scheduled_batch_invocations": sum(counts), "cpu_profiles": cpus,
                           "performance_measurements_executed": False}, sort_keys=True))
 
     def test_report_directories_are_existing_contained_directories(self):
@@ -292,9 +318,13 @@ class RetirementEligibilityTests(unittest.TestCase):
                                 skipped.add(index)
                             if subject["compile_obligation"] == census.NON_OBJECT_CONTROL_OBLIGATION:
                                 controls.add(subject["path"])
-                            rows.append({"row": index, "metrics": {
-                                "compiler_wall_time": not bool(nonexecuted),
-                                "generated_runtime": False}})
+                            recipe = census.expected_fixture_recipe(subject["path"])[0]
+                            cpu = census.expected_cpu(subject["path"], target, "baseline")
+                            rows.append(planned_row(index, {
+                                "fixture": subject["path"], "target": target, "cpu": cpu,
+                                "cpu_features": cpu, "allocator": allocator,
+                                "frontend_lowering": frontend, "PIC": pic,
+                                "fixture_recipe": recipe}, not bool(nonexecuted)))
         self.assertEqual(len(controls), 6)
         self.assertEqual(len(rows_by_class["retained-control"]), 1152)
         self.assertEqual(len(rows), census.FULL_ROW_COUNT)
@@ -307,14 +337,26 @@ class RetirementEligibilityTests(unittest.TestCase):
                   "applicability_skip_rows": sorted(skipped), "global_identity_unique": True}
         by_row, actual_skips = binding._validator_projection(report, len(rows))
         self.assertEqual(actual_skips, skipped)
+        # (A1) Only the native host is timed; its eligible rows form the
+        # declared five recipe groups in each of the 16 configurations.
+        native = {row["row"] for row in rows
+                  if row["identity"]["target"] == binding.NATIVE_TIMED_TARGET}
+        groups = binding._batch_groups(rows)
+        self.assertEqual({row for group in groups for row in group["rows"]},
+                         (set(by_row) - skipped) & native)
+        self.assertEqual(len(groups), 16 * 5)
+        self.assertEqual({group["identity"]["fixture_recipe"] for group in groups},
+                         {"compiler-default", "c23", "c23-dialect-assertions",
+                          "x86-avx512", "x86-cx16"})
+        self.assertTrue(all(group["kind"] == binding.OBJECT_BATCH_GROUP for group in groups))
         selected = set()
         count = 0
         for event in binding._execution_schedule(rows, {"seed": 7, "warmups_per_variant": 2,
                                                        "rounds": 2, "pairs_per_round": 2}):
-            selected.add(event["row"])
+            selected.add(event["group"])
             count += 1
-        self.assertEqual(selected, set(by_row) - skipped)
-        self.assertEqual(count, len(selected) * 12)
+        self.assertEqual(selected, set(range(len(groups))))
+        self.assertEqual(count, len(groups) * 12)
 
     def test_projection_retains_complete_audit_and_sparse_measurement_set(self):
         by_row, skipped = binding._validator_projection(self.report(), 5)
@@ -409,44 +451,40 @@ class RetirementEligibilityTests(unittest.TestCase):
                          "deterministic-zero-baseline-code-section")
 
     def test_execution_schedule_excludes_authenticated_untimed_rows(self):
+        source = {"fixture": "tests/a.c", "target": binding.NATIVE_TIMED_TARGET,
+                  "cpu": "baseline", "cpu_features": "baseline", "allocator": "none",
+                  "frontend_lowering": "direct-ssa", "PIC": "0",
+                  "fixture_recipe": "compiler-default"}
+        cross = dict(source, target="aarch64-unknown-linux-gnu")
         rows = [
-            {"row": 0, "metrics": {"compiler_wall_time": True,
-                                    "generated_runtime": False}},
-            {"row": 1, "metrics": {"compiler_wall_time": False,
-                                    "generated_runtime": False}},
-            {"row": 2, "metrics": {"compiler_wall_time": True,
-                                    "generated_runtime": True}},
+            planned_row(0, source, True),
+            planned_row(1, dict(source, fixture="tests/b.c"), False),
+            planned_row(2, source, True, stage="link", runtime=True),
+            planned_row(3, dict(cross, fixture="tests/c.c"), True),
         ]
         sampling = {"seed": 7, "warmups_per_variant": 0,
                     "rounds": 1, "pairs_per_round": 2}
         schedule = list(binding._execution_schedule(rows, sampling))
-        compiler_rows = {item["row"] for item in schedule
-                         if item["kind"] == "compiler"}
+        groups = binding._batch_groups(rows)
+        self.assertEqual([group["rows"] for group in groups], [[0], [2]])
+        compiler_groups = {item["group"] for item in schedule
+                           if item["kind"] == "compiler"}
         runtime_rows = {item["row"] for item in schedule
                         if item["kind"] == "runtime"}
-        self.assertEqual(compiler_rows, {0, 2})
+        self.assertEqual(compiler_groups, {0, 1})
         self.assertEqual(runtime_rows, {2})
-        self.assertNotIn(1, {item["row"] for item in schedule})
+        self.assertFalse({1, 3} & {row for group in groups for row in group["rows"]})
+        self.assertEqual(len(schedule), (2 + 1) * 2 * 2)
 
     def test_zero_candidate_code_is_retained_but_zero_baseline_has_no_ratio(self):
-        row = {"row": 0, "metrics": {
-            "compiler_wall_time": False, "compiler_peak_rss": False,
-            "generated_code_bytes": True, "generated_runtime": False}}
-        value = {
-            "record_id": "row-0/round-0/pair-0", "row": 0,
-            "round": 0, "pair": 0,
-            "measurements": {
-                "generated_code_bytes": {"baseline": 1, "candidate": 0},
-            },
-        }
-        seen = [0]
-        binding._consume_result_record(
-            value, {0: 0}, {0: row}, 1, 1, 0, seen, hashlib.sha256())
-        self.assertEqual(seen, [1])
-        value["measurements"]["generated_code_bytes"]["baseline"] = 0
+        # (A1) Code bytes come from the once-measured per-row code records.
+        rows = [{"row": 0, "metrics": {"generated_code_bytes": True}},
+                {"row": 1, "metrics": {"generated_code_bytes": False}}]
+        summary = binding._code_bytes_summary(rows, {0: (1, 0), 1: (0, 0)})
+        self.assertEqual((summary["rows"], summary["aggregate_ratio"]), (1, 0.0))
+        self.assertTrue(summary["aggregate_pass"] and summary["per_cell_pass"])
         with self.assertRaises(ValueError):
-            binding._consume_result_record(
-                value, {0: 0}, {0: row}, 1, 1, 0, [0], hashlib.sha256())
+            binding._code_bytes_summary(rows, {0: (0, 0)})
 
     def test_zero_code_payload_is_exact_not_padded(self):
         empty = hashlib.sha256(b"").hexdigest()
