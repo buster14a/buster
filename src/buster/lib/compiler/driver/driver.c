@@ -1061,21 +1061,34 @@ BUSTER_GLOBAL_LOCAL SliceString8 compiler_driver_expand_response_files(Arena* ar
         {
             String8* expanded = arena_allocate(arena, String8, argument_count);
             u64 expanded_count = 0;
-            for (u64 index = 0; index < arguments.length; index += 1)
+            if (!expanded && argument_count)
+            {
+                invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                invocation->diagnostic = S8("could not allocate expanded response-file arguments");
+            }
+            for (u64 index = 0; expanded && index < arguments.length; index += 1)
             {
                 String8 argument = arguments.pointer[index];
                 if (argument.length && argument.pointer[0] == '@')
                 {
                     char8* bytes = arena_allocate(arena, char8, splits[index].byte_count);
-                    compiler_driver_response_file_split(contents[index], expanded + expanded_count, bytes);
-                    expanded_count += splits[index].argument_count;
+                    if (bytes || !splits[index].byte_count)
+                    {
+                        compiler_driver_response_file_split(contents[index], expanded + expanded_count, bytes);
+                        expanded_count += splits[index].argument_count;
+                    }
+                    else
+                    {
+                        invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                        invocation->diagnostic = S8("could not allocate expanded response-file arguments");
+                    }
                 }
                 else
                 {
                     expanded[expanded_count++] = argument;
                 }
             }
-            result = (SliceString8){.pointer = expanded, .length = expanded_count};
+            result = expanded && invocation->error == COMPILER_DRIVER_ERROR_NONE ? (SliceString8){.pointer = expanded, .length = expanded_count} : (SliceString8){0};
         }
     }
     return result;
