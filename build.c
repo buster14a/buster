@@ -22985,7 +22985,13 @@ struct MatrixTestTree
     u32 unity_only : 1;
     u32 unity_analysis_scheduled : 1;
     u32 table_audit_scheduled : 1;
+    u32 runs_tests : 1;
 };
+
+// Hosted GitHub runners have three or four logical CPUs; at or below this
+// budget the superbuild admits one tree per CPU (matrix_superbuild_outer_jobs)
+// and shares the budget between test trees (matrix_superbuild_allocate_jobs).
+#define MATRIX_SUPERBUILD_LOW_CORE_THREADS 4
 
 typedef struct MatrixSuperbuildSelfHostPlan MatrixSuperbuildSelfHostPlan;
 struct MatrixSuperbuildSelfHostPlan
@@ -24044,10 +24050,9 @@ BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_outer_jobs(u32 thread_count, u32 tree_
         return 0;
     }
     thread_count = BUSTER_MAX(thread_count, 1);
-    // On a low-core runner, admit one tree per logical CPU and give every
-    // inner build one job. This keeps the complete matrix moving without
-    // nesting several two-job Ninja processes on the same four CPUs.
-    if (thread_count <= 4)
+    // On a low-core runner, admit one tree per logical CPU. Inner quotas are
+    // set by matrix_superbuild_allocate_jobs.
+    if (thread_count <= MATRIX_SUPERBUILD_LOW_CORE_THREADS)
     {
         return BUSTER_MIN(thread_count, tree_count);
     }
@@ -24099,9 +24104,8 @@ BUSTER_GLOBAL_LOCAL void matrix_superbuild_order_trees(MatrixTestTree* trees, u3
     }
 }
 
-BUSTER_GLOBAL_LOCAL void matrix_superbuild_allocate_jobs(MatrixTestTree* trees, u32 tree_count, u32 thread_count)
+BUSTER_GLOBAL_LOCAL void matrix_superbuild_allocate_legacy_jobs(MatrixTestTree* trees, u32 tree_count, u32 thread_count)
 {
-    thread_count = BUSTER_MAX(thread_count, 1);
     u32 outer_jobs = matrix_superbuild_outer_jobs(thread_count, tree_count);
     if (outer_jobs < tree_count)
     {
@@ -24110,39 +24114,37 @@ BUSTER_GLOBAL_LOCAL void matrix_superbuild_allocate_jobs(MatrixTestTree* trees, 
         {
             trees[tree_i].parallel_jobs = trees[tree_i].unity_only ? 1 : split_jobs;
         }
-        return;
     }
-
-    for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
+    else
     {
-        trees[tree_i].parallel_jobs = 1;
-    }
-
-    u32 remaining_jobs = thread_count > tree_count ? thread_count - tree_count : 0;
-    for (u32 tree_i = 0; tree_i < tree_count && remaining_jobs; tree_i += 1)
-    {
-        if (trees[tree_i].unity_only)
+        for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
         {
-            trees[tree_i].parallel_jobs += 1;
-            remaining_jobs -= 1;
+            trees[tree_i].parallel_jobs = 1;
         }
-    }
 
-    while (remaining_jobs)
-    {
-        bool assigned = false;
+        u32 remaining_jobs = thread_count > tree_count ? thread_count - tree_count : 0;
         for (u32 tree_i = 0; tree_i < tree_count && remaining_jobs; tree_i += 1)
         {
-            if (!trees[tree_i].unity_only)
+            if (trees[tree_i].unity_only)
             {
                 trees[tree_i].parallel_jobs += 1;
                 remaining_jobs -= 1;
-                assigned = true;
             }
         }
-        if (!assigned)
+
+        bool assigned = true;
+        while (remaining_jobs && assigned)
         {
-            break;
+            assigned = false;
+            for (u32 tree_i = 0; tree_i < tree_count && remaining_jobs; tree_i += 1)
+            {
+                if (!trees[tree_i].unity_only)
+                {
+                    trees[tree_i].parallel_jobs += 1;
+                    remaining_jobs -= 1;
+                    assigned = true;
+                }
+            }
         }
     }
 }
@@ -24182,6 +24184,42 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_self_host_cpu_budget_valid(MatrixTest
         selected_count += 1;
     }
     return cpu_budget <= BUSTER_MAX(thread_count, 1);
+}
+
+// A hosted runner has three (macOS arm64) or four logical CPUs. Giving every
+// admitted tree one job there leaves the sanitized trees, which carry nearly
+// all compile and test work, single-threaded for the whole matrix while the
+// CPUs of the finished compile-only portability trees sit idle (#892 measured
+// macOS arm64 checks at 454 s build + 532 s test in its one-job sanitized tree
+// beside 120 s and 90 s GCC/Zig trees). Trees that run tests therefore divide
+// the whole budget between them; compile-only trees keep one job and finish
+// early, so the overlap is bounded by the compile-only tree count. The legacy
+// allocation remains whenever no tree runs tests or the concurrent self-host
+// worker would otherwise exceed the CPU budget.
+BUSTER_GLOBAL_LOCAL void matrix_superbuild_allocate_jobs(MatrixTestTree* trees, u32 tree_count, u32 thread_count, u32 self_host_jobs)
+{
+    thread_count = BUSTER_MAX(thread_count, 1);
+    u32 test_tree_count = 0;
+    for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
+    {
+        test_tree_count += trees[tree_i].runs_tests;
+    }
+
+    bool test_share = thread_count <= MATRIX_SUPERBUILD_LOW_CORE_THREADS && test_tree_count;
+    if (test_share)
+    {
+        u32 test_jobs = BUSTER_MAX(thread_count / test_tree_count, 1);
+        for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
+        {
+            trees[tree_i].parallel_jobs = trees[tree_i].runs_tests ? test_jobs : 1;
+        }
+        test_share = !self_host_jobs || matrix_superbuild_self_host_cpu_budget_valid(trees, tree_count, thread_count, self_host_jobs);
+    }
+
+    if (!test_share)
+    {
+        matrix_superbuild_allocate_legacy_jobs(trees, tree_count, thread_count);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL bool matrix_superbuild_self_host_plan_valid(MatrixSuperbuildSelfHostPlan plan, MatrixTestTree* trees, u32 tree_count,
@@ -24251,8 +24289,78 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_ordering_tests(void)
     return PROCESS_RESULT_SUCCESS;
 }
 
+typedef struct MatrixSuperbuildAllocationCase MatrixSuperbuildAllocationCase;
+struct MatrixSuperbuildAllocationCase
+{
+    String8 name;
+    u32 thread_count;
+    u32 self_host_jobs;
+    u32 tree_count;
+    u8 unity_only[MATRIX_COVERAGE_MAX_TREES];
+    u8 runs_tests[MATRIX_COVERAGE_MAX_TREES];
+    u8 expected_jobs[MATRIX_COVERAGE_MAX_TREES];
+};
+
+// Hosted shard shapes after longest-first ordering (#892 tree inventories).
+BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_low_core_allocation_tests(void)
+{
+    BUSTER_GLOBAL_LOCAL MatrixSuperbuildAllocationCase cases[] = {
+        // Shared sanitized Debug;Release tree, GCC, Zig on three Apple-Silicon CPUs.
+        {.name = S8_INITIALIZER("macOS arm64 checks"), .thread_count = 3, .tree_count = 3,
+         .runs_tests = {1, 0, 0}, .expected_jobs = {3, 1, 1}},
+        // Sanitized Debug, sanitized Release, GCC, Zig.
+        {.name = S8_INITIALIZER("Linux checks"), .thread_count = 4, .tree_count = 4,
+         .runs_tests = {1, 1, 0, 0}, .expected_jobs = {2, 2, 1, 1}},
+        // Five trees on four slots: the two sanitized trees plus MSVC, GCC, Zig.
+        {.name = S8_INITIALIZER("Windows x86-64 checks"), .thread_count = 4, .tree_count = 5,
+         .runs_tests = {1, 1, 0, 0, 0}, .expected_jobs = {2, 2, 1, 1, 1}},
+        // The canonical unity tree serializes with the self-host worker in one slot.
+        {.name = S8_INITIALIZER("four-CPU release"), .thread_count = 4, .self_host_jobs = 1, .tree_count = 1,
+         .unity_only = {1}, .runs_tests = {1}, .expected_jobs = {4}},
+        {.name = S8_INITIALIZER("macOS arm64 release"), .thread_count = 3, .self_host_jobs = 1, .tree_count = 1,
+         .unity_only = {1}, .runs_tests = {1}, .expected_jobs = {3}},
+        // A compile-only MSVC tree keeps the legacy whole-budget allocation.
+        {.name = S8_INITIALIZER("Windows arm64 checks"), .thread_count = 4, .tree_count = 1,
+         .runs_tests = {0}, .expected_jobs = {4}},
+        // Sharing would let the concurrent self-host worker oversubscribe.
+        {.name = S8_INITIALIZER("four-CPU Apple full matrix"), .thread_count = 4, .self_host_jobs = 1, .tree_count = 4,
+         .unity_only = {0, 1, 0, 0}, .runs_tests = {1, 1, 0, 0}, .expected_jobs = {1, 1, 1, 1}},
+        {.name = S8_INITIALIZER("three-CPU Apple full matrix"), .thread_count = 3, .self_host_jobs = 1, .tree_count = 4,
+         .unity_only = {0, 1, 0, 0}, .runs_tests = {1, 1, 0, 0}, .expected_jobs = {1, 1, 1, 1}},
+        // Larger hosts keep the weighted legacy schedule.
+        {.name = S8_INITIALIZER("sixteen-CPU checks"), .thread_count = 16, .tree_count = 4,
+         .runs_tests = {1, 1, 0, 0}, .expected_jobs = {4, 4, 4, 4}},
+    };
+
+    ProcessResult result = PROCESS_RESULT_SUCCESS;
+    for (u32 case_i = 0; case_i < BUSTER_ARRAY_LENGTH(cases); case_i += 1)
+    {
+        MatrixSuperbuildAllocationCase test_case = cases[case_i];
+        MatrixTestTree trees[MATRIX_COVERAGE_MAX_TREES] = {0};
+        for (u32 tree_i = 0; tree_i < test_case.tree_count; tree_i += 1)
+        {
+            trees[tree_i].unity_only = test_case.unity_only[tree_i];
+            trees[tree_i].runs_tests = test_case.runs_tests[tree_i];
+        }
+        matrix_superbuild_allocate_jobs(trees, test_case.tree_count, test_case.thread_count, test_case.self_host_jobs);
+        bool valid = !test_case.self_host_jobs ||
+                     matrix_superbuild_self_host_cpu_budget_valid(trees, test_case.tree_count, test_case.thread_count, test_case.self_host_jobs);
+        for (u32 tree_i = 0; tree_i < test_case.tree_count; tree_i += 1)
+        {
+            valid = valid && trees[tree_i].parallel_jobs == test_case.expected_jobs[tree_i];
+        }
+        if (!valid)
+        {
+            string_print(S8("error: superbuild low-core allocation test failed: {S8}\n"), test_case.name);
+            result = PROCESS_RESULT_FAILED;
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* arena)
 {
+    ProcessResult low_core_result = matrix_superbuild_low_core_allocation_tests();
     ProcessResult ordering_result = matrix_superbuild_ordering_tests();
     if (ordering_result != PROCESS_RESULT_SUCCESS)
     {
@@ -24260,13 +24368,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
     }
 
     MatrixTestTree linux_trees[5] = {
-        {.build_directory = S8("linux-debug")},
-        {.build_directory = S8("linux-canonical"), .unity_only = 1},
-        {.build_directory = {0}},
+        {.build_directory = S8("linux-debug"), .runs_tests = 1},
+        {.build_directory = S8("linux-canonical"), .unity_only = 1, .runs_tests = 1},
+        {.build_directory = {0}, .runs_tests = 1},
         {.build_directory = {0}},
         {.build_directory = {0}},
     };
-    matrix_superbuild_allocate_jobs(linux_trees, BUSTER_ARRAY_LENGTH(linux_trees), 16);
+    matrix_superbuild_allocate_jobs(linux_trees, BUSTER_ARRAY_LENGTH(linux_trees), 16, 1);
     u32 expected_linux_unity[] = {0, 1, 0, 0, 0};
     u32 expected_linux_jobs[] = {4, 2, 4, 3, 3};
     for (u32 tree_i = 0; tree_i < BUSTER_ARRAY_LENGTH(linux_trees); tree_i += 1)
@@ -24281,14 +24389,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
     }
 
     MatrixTestTree windows_trees[6] = {
-        {.build_directory = {0}},
-        {.build_directory = {0}},
-        {.build_directory = S8("windows-canonical"), .unity_only = 1},
+        {.build_directory = {0}, .runs_tests = 1},
+        {.build_directory = {0}, .runs_tests = 1},
+        {.build_directory = S8("windows-canonical"), .unity_only = 1, .runs_tests = 1},
         {.build_directory = {0}},
         {.build_directory = {0}},
         {.build_directory = {0}},
     };
-    matrix_superbuild_allocate_jobs(windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4);
+    matrix_superbuild_allocate_jobs(windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4, 1);
     u32 expected_windows_unity[] = {0, 0, 1, 0, 0, 0};
     u32 expected_windows_jobs[] = {1, 1, 1, 1, 1, 1};
     for (u32 tree_i = 0; tree_i < BUSTER_ARRAY_LENGTH(windows_trees); tree_i += 1)
@@ -24395,7 +24503,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_CONFIG )")) != BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_TARGET )")) != BUSTER_STRING_NO_MATCH;
     remove_path_recursive(arena, manifest_path);
-    if (matrix_superbuild_outer_jobs(4, BUSTER_ARRAY_LENGTH(windows_trees)) != 4 || matrix_superbuild_outer_jobs(16, 5) != 5 ||
+    if (low_core_result != PROCESS_RESULT_SUCCESS ||
+        matrix_superbuild_outer_jobs(4, BUSTER_ARRAY_LENGTH(windows_trees)) != 4 || matrix_superbuild_outer_jobs(16, 5) != 5 ||
         matrix_superbuild_outer_jobs(0, 0) != 0 || matrix_superbuild_self_host_enabled(true, true) ||
         !matrix_superbuild_self_host_enabled(false, true) || matrix_superbuild_self_host_enabled(false, false) ||
         !matrix_superbuild_self_host_plan_valid(windows_self_host, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
@@ -24835,6 +24944,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             MatrixTestCombination combination = combinations[tree->combination_indices[0]];
             tree->unity_only = combination.compiler == BUILD_COMPILER_CLANG && !combination.sanitize && combination.options.optimize;
         }
+        for (u32 tree_combination_i = 0; tree_combination_i < tree->combination_count; tree_combination_i += 1)
+        {
+            tree->runs_tests |= combinations[tree->combination_indices[tree_combination_i]].run_tests;
+        }
         tree->unity_analysis_scheduled = coverage_obligations.unity_analysis_scheduled && tree->unity_only;
         tree->table_audit_scheduled = coverage_obligations.table_audit_scheduled && tree->unity_only;
     }
@@ -24910,14 +25023,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     String8 superbuild_directory = {0};
     if (!direct_matrix)
     {
-        matrix_superbuild_allocate_jobs(trees, tree_count, thread_count);
+        u32 self_host_jobs = coverage_obligations.self_host_scheduled && fanout && fanout_requested ? 1 : 0;
+        matrix_superbuild_allocate_jobs(trees, tree_count, thread_count, self_host_jobs);
         matrix_phase.outer_jobs = matrix_superbuild_outer_jobs(thread_count, tree_count);
         string_print(S8("BUSTER_SUPERBUILD_PARALLELISM: threads={u32} trees={u32} outer_jobs={u32}\n"), thread_count, tree_count,
                      matrix_superbuild_outer_jobs(thread_count, tree_count));
         for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
         {
-            string_print(S8("BUSTER_SUPERBUILD_TREE: index={u32} configs={u32} unity_only={u32} jobs={u32} directory={S8}\n"), tree_i,
-                         trees[tree_i].combination_count, trees[tree_i].unity_only, trees[tree_i].parallel_jobs, trees[tree_i].build_directory);
+            string_print(S8("BUSTER_SUPERBUILD_TREE: index={u32} configs={u32} unity_only={u32} tests={u32} jobs={u32} directory={S8}\n"), tree_i,
+                         trees[tree_i].combination_count, trees[tree_i].unity_only, trees[tree_i].runs_tests, trees[tree_i].parallel_jobs,
+                         trees[tree_i].build_directory);
         }
 
         superbuild_directory = string_format(arena, S8("{S8}superbuild-ci_{S8}"), build_prefix, ci ? S8("on") : S8("off"));
