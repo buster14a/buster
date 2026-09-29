@@ -214,10 +214,10 @@ class NativeExecutionTests(unittest.TestCase):
             self.assertEqual(descriptor["path"], "retirement-metrics-mb-0000.txt")
             self.assertNotIn(descriptor["sha256"], paths)
             paths.add(descriptor["sha256"])
-            shards.add(descriptor, "real batch metrics")
+            feed = shards.add(descriptor, "real batch metrics")
             members = binding._check_batch_metrics(
                 self.root, descriptor, contract, frozen, 1, binding.NATIVE_TIMED_TARGET,
-                event["finished_ns"] - event["started_ns"], "real batch metrics")
+                event["finished_ns"] - event["started_ns"], "real batch metrics", feed)
             self.assertEqual(set(members), {0, 1})
             if event["phase"] == "sample":
                 members_by_coordinate[event["round"], event["pair"], event["variant"]] = (members, event)
@@ -589,15 +589,15 @@ class NativeExecutionTests(unittest.TestCase):
                     "input_list_sha256": hashlib.sha256(binding._input_list_bytes(
                         [f"tests/native-execution-{rows.index(row_by_row[item])}.c"
                          for item in group["rows"]], "list")).hexdigest() if object_group else None,
-                    "metrics_bytes_max": binding.METRICS_ARTIFACT_BYTE_CAP if object_group else None,
+                    "metrics_bytes_max": 4096 + 16384 * len(group["rows"]) if object_group else None,
                     "baseline": {"command_sha256": "b" * 64, "exit_status": 0},
                     "candidate": {"command_sha256": "b" * 64, "exit_status": 0}})
             plan = put("plan.json", {"schema": binding.EXECUTION_PLAN_SCHEMA, "version": 1,
                 "schedule": binding.EXECUTION_SCHEDULE, "seed": 1, "rounds": 2,
                 "pairs_per_round": 60, "warmups_per_variant": 2, "cpu": 2,
                 "native_target": binding.NATIVE_TIMED_TARGET,
-                "performance_rows_sha256": "a" * 64, "rows": contracts, "groups": group_contracts,
-                "untimed_groups": []})
+                "performance_rows_sha256": "a" * 64, "campaign_budget": self.campaign_budget(),
+                "rows": contracts, "groups": group_contracts, "untimed_groups": []})
             (root / self.shard["path"]).write_bytes(self.data)
             metrics_paths = []
             for event in events:
@@ -660,6 +660,37 @@ class NativeExecutionTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "per-input metrics 4 differs from its authenticated"):
                     check()
 
+    def campaign_budget(self):
+        """The C test budget's canonical record, as the plan binds it."""
+        record = (self.root / "retirement-campaign-budget.txt").read_text(encoding="ascii")
+        return {"record": record, "sha256": hashlib.sha256(record.encode("ascii")).hexdigest()}
+
+    @unittest.skipUnless(sys.platform == "linux", "descriptor-bound execution requires Linux")
+    def test_campaign_budget_record(self):
+        """(L7) The producer's canonical budget record parses in the validator,
+        which rejects any other digest, spelling, order or missing bound."""
+        budget = self.campaign_budget()
+        scalars = binding._campaign_budget(budget)
+        self.assertEqual((scalars["metrics-header-bytes"], scalars["metrics-input-bytes"]), (4096, 16384))
+        record = budget["record"]
+        edits = (("metrics-input-bytes=16384", "metrics-input-bytes=016384"),
+                 ("\nbatch=1:40000000", "\nbatch=4:40000000"),
+                 ("singleton=link:45000000\n", ""),
+                 ("untimed-singleton=link:60000000\n", ""),
+                 ("\nsingleton=link:45000000\nsingleton=self-host-stage1:900000000",
+                  "\nsingleton=self-host-stage1:900000000\nsingleton=link:45000000"),
+                 ("derivation=fixed", "derivation=other"),
+                 ("schema=tp-retirement-campaign-budget-v2", "schema=tp-retirement-campaign-budget-v1"))
+        for old, new in edits:
+            with self.subTest(old=old):
+                self.assertIn(old, record)
+                changed = record.replace(old, new, 1)
+                with self.assertRaises(ValueError):
+                    binding._campaign_budget({"record": changed,
+                                              "sha256": hashlib.sha256(changed.encode()).hexdigest()})
+        with self.assertRaisesRegex(ValueError, "digest of its record"):
+            binding._campaign_budget(dict(budget, sha256="e" * 64))
+
     @unittest.skipUnless(sys.platform == "linux", "descriptor-bound execution requires Linux")
     def test_real_untimed_code_artifact_batches(self):
         """Untimed production and reproduction batches: sealed records and shards."""
@@ -698,10 +729,10 @@ class NativeExecutionTests(unittest.TestCase):
                                                   record["variant"], field)
             self.assertEqual(record["output_sha256"],
                              binding._batch_output_digest([artifact_digest, artifact_digest, None]))
-            shards.add(record["metrics_artifact"], "untimed metrics")
+            feed = shards.add(record["metrics_artifact"], "untimed metrics")
             members = binding._check_batch_metrics(
                 self.root, record["metrics_artifact"], contract, frozen, 1, binding.NATIVE_TIMED_TARGET,
-                record["finished_ns"] - record["started_ns"], "untimed batch metrics")
+                record["finished_ns"] - record["started_ns"], "untimed batch metrics", feed)
             self.assertEqual(set(members), {0, 1})
         self.assertEqual([item["path"] for item in shards.finish()], ["retirement-metrics-untimed-0000.txt"])
 

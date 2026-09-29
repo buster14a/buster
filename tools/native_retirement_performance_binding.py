@@ -236,10 +236,33 @@ METRICS_ARTIFACT_BYTE_CAP = 64 * 1024 * 1024
 # shard is one evidence-store entry (at most the store's 64 MiB file cap), so a
 # full campaign's per-batch artifacts fit the 4,096-entry store.  A shard leaf
 # names its writer tag and index; artifacts tile each shard contiguously in
-# record order.
+# record order.  One writer (one tag) has at most 2,048 shards, indexed from 0
+# in order (the producer's TP_RETIREMENT_METRICS_SHARDS); the untimed writer's
+# tag differs from the timed stage's.
 METRICS_SHARD_BYTE_CAP = 64 * 1024 * 1024
-METRICS_SHARD_CAP = 4096
-METRICS_SHARD_RE = re.compile(r"^retirement-metrics-[a-z]{1,8}-[0-9]{4}\.txt$")
+METRICS_SHARD_CAP = 2048
+METRICS_SHARD_RE = re.compile(r"^retirement-metrics-([a-z]{1,8})-([0-9]{4})\.txt$")
+# (A1, M4, L7) The execution plan binds the reviewed campaign budget record
+# (tools/throughput/retirement_budget.h canonical text) and its SHA-256, the
+# recipe-profile pin `campaign-budget-sha256=`.  Every object group's
+# metrics_bytes_max must be header + inputs * per-input from that record.
+CAMPAIGN_BUDGET_SCHEMA = "tp-retirement-campaign-budget-v2"
+CAMPAIGN_BUDGET_DERIVATION = (
+    "fixed+stages*(settling+export)+sum_g(stages*2*(W+R*P)*timed(kind_g,stage_g,n_g))"
+    "+U*stages*2*(W+R*P)*runtime+sum_u(4*untimed(kind_u,stage_u,n_u));"
+    "object:first batch class with max_inputs>=n;singleton:its stage bound,never a one-input batch;"
+    "untimed:separate tables measured on the slowest untimed target")
+CAMPAIGN_BUDGET_SCALARS = (
+    "reviewed-ns", "reservation-ns", "materialization-ns", "baseline-build-ns", "candidate-build-ns",
+    "correctness-ns", "settling-per-stage-ns", "aa-qualification-ns", "aa-receipt-sealing-ns",
+    "sample-export-per-stage-ns", "final-statistics-ns", "final-sealing-ns", "cleanup-ns",
+    "runtime-process-ns", "metrics-header-bytes", "metrics-input-bytes")
+CAMPAIGN_BUDGET_STAGES = ("link", "self-host-stage1")
+CAMPAIGN_BUDGET_CLASS_CAP = 16
+# A budget class holds at most the producer's TP_RETIREMENT_BATCH_INPUTS inputs.
+BATCH_INPUT_CAP = 1024
+CAMPAIGN_BUDGET_BYTE_CAP = 4096
+CAMPAIGN_BUDGET_NUMBER_RE = re.compile(r"^(?:0|[1-9][0-9]{0,19})$")
 # (A1, recorded Q10 default) Each batch passes its inputs as one digest-bound
 # `@file` response file (docs/agents/driver.md "Response files"): the driver
 # reads at most 4 MiB and 65,536 expanded arguments from response files.
@@ -1547,6 +1570,17 @@ def _check_sampling_family(population, rules):
 
 
 def _check_evidence(root, artifact, name):
+    target = _check_evidence_file(root, artifact, name)
+    digest = hashlib.sha256()
+    with target.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != artifact["sha256"]:
+        _fail(f"{name} digest does not match evidence")
+
+
+def _check_evidence_file(root, artifact, name):
+    """Path, symbolic-link and size checks of one evidence file (no read)."""
     root = Path(root).resolve()
     relative = PurePosixPath(artifact["path"])
     target = root.joinpath(*relative.parts)
@@ -1563,12 +1597,7 @@ def _check_evidence(root, artifact, name):
         _fail(f"{name} is missing or is a symbolic link: {artifact['path']}")
     if target.stat().st_size != artifact["bytes"]:
         _fail(f"{name} byte count does not match evidence")
-    digest = hashlib.sha256()
-    with target.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    if digest.hexdigest() != artifact["sha256"]:
-        _fail(f"{name} digest does not match evidence")
+    return target
 
 
 def _evidence_bytes(root, artifact, name):
@@ -2590,8 +2619,69 @@ def _input_list_bytes(fixtures, name):
     return data
 
 
+def _campaign_budget(value, name="execution_plan.campaign_budget"):
+    """Strictly parse the bound reviewed campaign budget record.
+
+    The record is the producer's canonical text: schema, derivation, every
+    scalar once in order, then the timed and ``untimed-`` tables (ascending
+    batch classes with nondecreasing nonzero bounds, one nonzero singleton
+    bound per named non-object stage).  Its SHA-256 is the recipe pin.
+    Returns the scalars as integers.
+    """
+    value = _keys(value, ("record", "sha256"), name)
+    record = value["record"]
+    if type(record) is not str or not record or len(record) >= CAMPAIGN_BUDGET_BYTE_CAP \
+            or not record.isascii() or not record.endswith("\n"):
+        _fail(f"{name}.record is not a bounded canonical budget record")
+    _sha(value["sha256"], f"{name}.sha256")
+    if hashlib.sha256(record.encode("ascii")).hexdigest() != value["sha256"]:
+        _fail(f"{name}.sha256 is not the digest of its record")
+    lines = record[:-1].split("\n")
+    if lines[:2] != [f"schema={CAMPAIGN_BUDGET_SCHEMA}",
+                     f"derivation={CAMPAIGN_BUDGET_DERIVATION}"]:
+        _fail(f"{name} does not name the reviewed budget schema and derivation")
+
+    def number(text):
+        if not CAMPAIGN_BUDGET_NUMBER_RE.fullmatch(text) or int(text) > (1 << 64) - 1:
+            _fail(f"{name} value is not a canonical uint64")
+        return int(text)
+
+    scalars = {}
+    for key, line in zip(CAMPAIGN_BUDGET_SCALARS, lines[2:]):
+        prefix = f"{key}="
+        if not line.startswith(prefix):
+            _fail(f"{name} scalars are missing or out of order")
+        scalars[key] = number(line[len(prefix):])
+    if len(scalars) != len(CAMPAIGN_BUDGET_SCALARS) or not all(scalars.values()):
+        _fail(f"{name} lacks a nonzero reviewed bound")
+    rest = lines[2 + len(CAMPAIGN_BUDGET_SCALARS):]
+    for prefix in ("", "untimed-"):
+        classes = []
+        while rest and rest[0].startswith(f"{prefix}batch="):
+            size, colon, bound = rest.pop(0)[len(prefix) + 6:].partition(":")
+            if not colon:
+                _fail(f"{name} batch class is malformed")
+            classes.append((number(size), number(bound)))
+        if not 0 < len(classes) <= CAMPAIGN_BUDGET_CLASS_CAP \
+                or any(not 0 < size <= BATCH_INPUT_CAP or not bound for size, bound in classes) \
+                or any(left[0] >= right[0] or left[1] > right[1]
+                       for left, right in zip(classes, classes[1:])):
+            _fail(f"{name} batch classes are missing, unordered or shrinking")
+        for stage in CAMPAIGN_BUDGET_STAGES:
+            line = rest.pop(0) if rest else ""
+            head = f"{prefix}singleton={stage}:"
+            if not line.startswith(head) or not number(line[len(head):]):
+                _fail(f"{name} lacks its {prefix}{stage} singleton bound")
+    if rest:
+        _fail(f"{name} has lines outside the canonical record")
+    header, per_input = scalars["metrics-header-bytes"], scalars["metrics-input-bytes"]
+    if header >= METRICS_ARTIFACT_BYTE_CAP or per_input > METRICS_ARTIFACT_BYTE_CAP - header:
+        _fail(f"{name} metrics bound cannot hold one input")
+    return scalars
+
+
 def _check_group_contracts(values, groups, row_by_id, name="execution_plan.groups",
-                           untimed=False):
+                           untimed=False, budget=None):
     """Join v3 batch group contracts to an independently derived partition.
 
     Each object group freezes its ordered members, any status-checked
@@ -2604,8 +2694,11 @@ def _check_group_contracts(values, groups, row_by_id, name="execution_plan.group
     (A1, M4) An object group also binds its response-file input list digest
     (canonical encoding of the frozen inputs, which must tokenize back to
     exactly that order) and the reviewed per-artifact metrics bound from the
-    pinned campaign budget.  A singleton stage group has neither.
+    pinned campaign budget: exactly header + inputs * per-input from the
+    plan's bound ``budget`` record.  A singleton stage group has neither.
     """
+    if budget is None:
+        _fail(f"{name} is checked without the bound campaign budget")
     contracts = _list(values, name)
     if len(contracts) != len(groups):
         _fail(f"{name} differ from the derived A1 partition")
@@ -2682,8 +2775,10 @@ def _check_group_contracts(values, groups, row_by_id, name="execution_plan.group
             if contract["input_list_sha256"] != hashlib.sha256(listing).hexdigest():
                 _fail(f"{name} input list digest is not the canonical response file of its frozen inputs")
             bound = contract["metrics_bytes_max"]
-            if type(bound) is not int or not 0 < bound <= METRICS_ARTIFACT_BYTE_CAP:
-                _fail(f"{name} metrics bound is not a reviewed per-artifact bound")
+            reviewed = budget["metrics-header-bytes"] + len(fixtures) * budget["metrics-input-bytes"]
+            if type(bound) is not int or not 0 < bound <= METRICS_ARTIFACT_BYTE_CAP \
+                    or bound != reviewed:
+                _fail(f"{name} metrics bound is not the bound budget's reviewed per-artifact bound")
         elif contract["input_list_sha256"] is not None or contract["metrics_bytes_max"] is not None:
             _fail("a singleton stage group has no response file or metrics bound")
         for variant in ("baseline", "candidate"):
@@ -2706,7 +2801,8 @@ def _check_execution_plan(root, descriptor, binding, parsed, sampling,
     plan = _read_json_evidence(root, descriptor, "execution_plan")
     plan = _keys(plan, ("schema", "version", "schedule", "seed", "rounds",
                         "pairs_per_round", "warmups_per_variant", "cpu", "native_target",
-                        "performance_rows_sha256", "rows", "groups", "untimed_groups"),
+                        "performance_rows_sha256", "campaign_budget", "rows", "groups",
+                        "untimed_groups"),
                  "execution_plan")
     if plan["schema"] != EXECUTION_PLAN_SCHEMA or type(plan["version"]) is not int \
             or plan["version"] != 1 or plan["schedule"] != EXECUTION_SCHEDULE:
@@ -2744,10 +2840,11 @@ def _check_execution_plan(root, descriptor, binding, parsed, sampling,
     row_by_id = {row["row"]: row for row in rows}
     groups = _batch_groups(rows)
     group_of_row = {row: group["group"] for group in groups for row in group["rows"]}
-    group_contracts = _check_group_contracts(plan["groups"], groups, row_by_id)
+    budget = _campaign_budget(plan["campaign_budget"])
+    group_contracts = _check_group_contracts(plan["groups"], groups, row_by_id, budget=budget)
     untimed_contracts = _check_group_contracts(plan["untimed_groups"], _untimed_groups(rows),
                                                row_by_id, "execution_plan.untimed_groups",
-                                               untimed=True)
+                                               untimed=True, budget=budget)
     row_contracts = {}
     for contract, row in zip(contracts, rows):
         _keys(contract, ("row", "identity_sha256", "oracle_sha256", "group", "baseline",
@@ -3024,64 +3121,113 @@ def _metrics_artifact(value, name):
 class _MetricsShards:
     """Contiguous packing of per-batch metrics artifacts into metrics shards.
 
-    In record order, a shard's first artifact starts at offset 0 and each next
-    artifact at the previous artifact's end; a shard left for another is never
-    revisited; timed and untimed batches never share a shard.  ``finish``
-    requires each shard file to hold exactly its artifacts (no trailing bytes)
-    and returns the sealed ``{path, bytes, sha256}`` shard descriptors.
+    One tracker is one writer: every shard carries the tracker's single tag,
+    shard indexes follow their order from 0, and a writer has at most
+    ``METRICS_SHARD_CAP`` shards.  In record order, a shard's first artifact
+    starts at offset 0 and each next artifact at the previous artifact's end;
+    a shard left for another is never revisited; timed and untimed batches
+    never share a shard or a tag.  (L6) Each shard is hashed from the artifact
+    bytes as they are streamed and parsed (``add`` returns the feed for that
+    range), never by a second read; ``finish`` requires every range fed in
+    full and each shard file to hold exactly its artifacts, and returns the
+    sealed ``{path, bytes, sha256}`` shard descriptors.
     """
 
-    def __init__(self, root, closed=frozenset()):
+    def __init__(self, root, closed=frozenset(), closed_tags=frozenset()):
         self.root = root
         self.closed = frozenset(closed)
+        self.closed_tags = frozenset(closed_tags)
+        self.tag = None
         self.order = []
         self.ends = {}
+        self.hashes = {}
+        self.fed = {}
         self.current = None
 
     def fork(self):
-        """A tracker for further artifacts that may not reuse any shard seen here."""
-        return _MetricsShards(self.root, self.closed | frozenset(self.ends))
+        """A tracker for another writer: no shard or tag seen here is reused."""
+        tags = self.closed_tags | ({self.tag} if self.tag is not None else set())
+        return _MetricsShards(self.root, self.closed | frozenset(self.ends), tags)
 
     def add(self, artifact, name):
+        """Register one artifact range; return the callable that feeds its bytes."""
         path = artifact["path"]
+        match = METRICS_SHARD_RE.fullmatch(path)
+        if match is None:
+            _fail(f"{name} is not a metrics shard leaf")
+        tag, index = match.group(1), int(match.group(2))
         if path != self.current:
             if path in self.ends or path in self.closed or artifact["offset"] != 0:
                 _fail(f"{name} is not packed contiguously into a fresh metrics shard")
-            if len(self.order) + len(self.closed) >= METRICS_SHARD_CAP:
-                _fail("metrics shards exceed the evidence-store entry bound")
+            if self.tag is None:
+                if tag in self.closed_tags:
+                    _fail(f"{name} reuses another writer's metrics shard tag")
+                self.tag = tag
+            if tag != self.tag or index != len(self.order):
+                _fail(f"{name} does not continue its writer's metrics shard sequence")
+            if len(self.order) >= METRICS_SHARD_CAP:
+                _fail("metrics shards exceed one writer's shard bound")
             self.order.append(path)
             self.ends[path] = 0
+            self.hashes[path] = hashlib.sha256()
+            self.fed[path] = 0
             self.current = path
         elif artifact["offset"] != self.ends[path]:
             _fail(f"{name} is not packed contiguously in its metrics shard")
-        self.ends[path] = artifact["offset"] + artifact["bytes"]
+        start = artifact["offset"]
+        self.ends[path] = start + artifact["bytes"]
+        end = self.ends[path]
+
+        def feed(chunk):
+            if self.fed[path] + len(chunk) > end or self.fed[path] < start:
+                _fail(f"{name} streamed bytes outside its range")
+            self.hashes[path].update(chunk)
+            self.fed[path] += len(chunk)
+        return feed
+
+    def stream(self, artifact, name):
+        """Register and stream one range without parsing it (sealed closure)."""
+        feed = self.add(artifact, name)
+        target = Path(self.root).resolve().joinpath(*PurePosixPath(artifact["path"]).parts)
+        if target.is_symlink() or not target.is_file():
+            _fail(f"{name} shard is missing or is a symbolic link")
+        digest = hashlib.sha256()
+        remaining = artifact["bytes"]
+        with target.open("rb") as handle:
+            handle.seek(artifact["offset"])
+            while remaining:
+                chunk = handle.read(min(remaining, 1024 * 1024))
+                if not chunk:
+                    _fail(f"{name} lies outside its metrics shard")
+                digest.update(chunk)
+                feed(chunk)
+                remaining -= len(chunk)
+        if digest.hexdigest() != artifact["sha256"]:
+            _fail(f"{name} differs from its authenticated digest")
 
     def finish(self):
         descriptors = []
-        root = Path(self.root).resolve()
         for path in self.order:
-            descriptor = {"path": path, "bytes": self.ends[path], "sha256": "0" * 64}
-            target = root.joinpath(*PurePosixPath(path).parts)
-            if target.is_symlink() or not target.is_file() \
-                    or target.stat().st_size != self.ends[path]:
+            if self.fed[path] != self.ends[path]:
+                _fail("metrics shard bytes were not all streamed and authenticated")
+            descriptor = {"path": path, "bytes": self.ends[path],
+                          "sha256": self.hashes[path].hexdigest()}
+            try:
+                _check_evidence_file(self.root, descriptor, "metrics shard")
+            except ValueError:
                 _fail("metrics shard holds bytes outside its authenticated artifacts")
-            digest = hashlib.sha256()
-            with target.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            descriptor["sha256"] = digest.hexdigest()
-            _check_evidence(self.root, descriptor, "metrics shard")
             descriptors.append(descriptor)
         return descriptors
 
 
-def _read_cc_metrics(root, descriptor, inputs, name):
+def _read_cc_metrics(root, descriptor, inputs, name, feed=None):
     """Strictly parse one bounded compiler metrics artifact, streamed from its shard.
 
     Returns the header and exactly ``inputs`` input records in order.  Each
     input is followed by exactly its ``function_records`` function lines.
     The consumed bytes are exactly the artifact's authenticated shard range,
-    and they are the hashed bytes.
+    and they are the hashed bytes; ``feed`` (the shard tracker's) receives
+    the same bytes, so the shard digest comes from this single read.
     """
     descriptor = _metrics_artifact(descriptor, name)
     path = Path(root).resolve().joinpath(*PurePosixPath(descriptor["path"]).parts)
@@ -3105,6 +3251,8 @@ def _read_cc_metrics(root, descriptor, inputs, name):
                 _fail(f"{name} record is missing, truncated, or oversized")
             size += len(line)
             digest.update(line)
+            if feed is not None:
+                feed(line)
             return line
 
         header = _cc_metrics_line(next_line(), "CC_METRICS", CC_METRICS_HEADER_FIELDS,
@@ -3149,7 +3297,7 @@ def _frozen_batch_inputs(contract, row_contracts, row_by_id, variant, object_fie
 
 
 def _check_batch_metrics(root, descriptor, contract, frozen_inputs, exit_status, target,
-                         elapsed_ns, name):
+                         elapsed_ns, name, feed=None):
     """Authenticate one batch's compiler metrics artifact without trusting it.
 
     Returns each timed member's ``(interval_ns, arena_peak_bytes)``.  The
@@ -3161,7 +3309,7 @@ def _check_batch_metrics(root, descriptor, contract, frozen_inputs, exit_status,
     phase sums within each interval.  Object bytes are bound separately, by
     the invocation's output digest over the frozen per-input object digests.
     """
-    header, records = _read_cc_metrics(root, descriptor, len(frozen_inputs), name)
+    header, records = _read_cc_metrics(root, descriptor, len(frozen_inputs), name, feed)
     if descriptor["bytes"] > contract["metrics_bytes_max"]:
         _fail(f"{name} exceeds its group's reviewed metrics bound")
     statuses = [record["status"] for record in records]
@@ -3405,8 +3553,8 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
                     if type(metrics_artifact) is not dict:
                         _fail("batch invocation lacks its per-input metrics artifact")
                     _metrics_artifact(metrics_artifact, "execution invocation.metrics_artifact")
-                    metrics_shards.add(metrics_artifact,
-                                       "batch invocation's per-input metrics artifact")
+                    feed = metrics_shards.add(metrics_artifact,
+                                              "batch invocation's per-input metrics artifact")
                     if metrics_artifact["sha256"] in metrics_digests:
                         _fail("batch invocation reuses another batch's per-input metrics content")
                     metrics_digests.add(metrics_artifact["sha256"])
@@ -3416,7 +3564,7 @@ def _check_execution_transcript(root, descriptor, plan_descriptor, binding, pars
                     members = _check_batch_metrics(
                         root, metrics_artifact, contract, frozen_inputs, expected_exit,
                         group["identity"]["target"], value["finished_ns"] - value["started_ns"],
-                        f"per-input metrics {value['sequence']}")
+                        f"per-input metrics {value['sequence']}", feed)
                     expected_output = _batch_output_digest(
                         [item["object_sha256"] for item in frozen_inputs])
                 else:
@@ -3695,11 +3843,13 @@ def _check_untimed_batches(root, descriptor, parsed, row_contracts, untimed_cont
     instances = set(execution["process_instances"])
     # Untimed batches start their own shards: none continues a timed shard.
     shards = execution["metrics_shards"].fork()
-    artifacts = []
     digests = set(execution["metrics_digests"])
     production_instances = {}
     intervals = []
-    for index, record in enumerate(records):
+    # Every record's (group, variant, purpose) is known, unique and ordered
+    # before any metrics range is streamed into its shard (records follow the
+    # runner's order, which is also the untimed shard packing order).
+    for record in records:
         record = _keys(record, UNTIMED_BATCH_FIELDS, "untimed batch record")
         if type(record["group"]) is not int or not 0 <= record["group"] < len(groups) \
                 or record["variant"] not in ("baseline", "candidate") \
@@ -3710,6 +3860,9 @@ def _check_untimed_batches(root, descriptor, parsed, row_contracts, untimed_cont
         if last is not None and key <= last:
             _fail("untimed batch records are not unique and ordered")
         last = key
+    for index, record in enumerate(records):
+        key = (record["group"], ("baseline", "candidate").index(record["variant"]),
+               UNTIMED_BATCH_PURPOSES.index(record["purpose"]))
         seen.add(key)
         group = groups[record["group"]]
         contract = untimed_contracts[group["group"]]
@@ -3751,14 +3904,14 @@ def _check_untimed_batches(root, descriptor, parsed, row_contracts, untimed_cont
             if type(metrics_artifact) is not dict:
                 _fail("untimed batch lacks its per-input metrics artifact")
             _metrics_artifact(metrics_artifact, "untimed batch record.metrics_artifact")
-            artifacts.append(metrics_artifact)
             if metrics_artifact["sha256"] in digests:
                 _fail("untimed batch reuses another batch's per-input metrics content")
             digests.add(metrics_artifact["sha256"])
+            feed = shards.add(metrics_artifact, "untimed batch's per-input metrics artifact")
             _check_batch_metrics(root, metrics_artifact, contract, frozen_inputs,
                                  record["exit_status"], group["identity"]["target"],
                                  record["finished_ns"] - record["started_ns"],
-                                 f"untimed batch metrics {index}")
+                                 f"untimed batch metrics {index}", feed)
         elif record["metrics_artifact"] is not None:
             _fail("untimed singleton stage batch cannot carry a per-input metrics artifact")
         if record["output_sha256"] != _batch_output_digest(
@@ -3773,8 +3926,6 @@ def _check_untimed_batches(root, descriptor, parsed, row_contracts, untimed_cont
         for variant in range(2):
             if (group["group"], variant, 1) not in seen:
                 _fail("an untimed code-artifact group lacks its reproduction batch")
-    for artifact in artifacts:
-        shards.add(artifact, "untimed batch's per-input metrics artifact")
     shards.finish()
     return records
 
@@ -4174,9 +4325,9 @@ def _sealed_closure_files(root, binding, support_output, records, phases,
     try:
         for invocation in invocations:
             if invocation.get("metrics_artifact") is not None:
-                metrics_shards.add(_metrics_artifact(invocation["metrics_artifact"],
-                                                     "execution metrics artifact"),
-                                   "execution metrics artifact")
+                metrics_shards.stream(_metrics_artifact(invocation["metrics_artifact"],
+                                                        "execution metrics artifact"),
+                                      "execution metrics artifact")
     finally:
         invocations.close()
     for index, shard in enumerate(metrics_shards.finish()):
@@ -4186,12 +4337,12 @@ def _sealed_closure_files(root, binding, support_output, records, phases,
         add("workflow.untimed_batches", result_bundle["untimed_batches"])
         untimed = _read_jsonl_evidence(root, result_bundle["untimed_batches"],
                                        "untimed batch records")
-        untimed_shards = _MetricsShards(root)
+        untimed_shards = metrics_shards.fork()
         for record in untimed:
             if record.get("metrics_artifact") is not None:
-                untimed_shards.add(_metrics_artifact(record["metrics_artifact"],
-                                                     "untimed metrics artifact"),
-                                   "untimed metrics artifact")
+                untimed_shards.stream(_metrics_artifact(record["metrics_artifact"],
+                                                        "untimed metrics artifact"),
+                                      "untimed metrics artifact")
         for index, shard in enumerate(untimed_shards.finish()):
             add(f"untimed.metrics_shard.{index}", shard)
     manifests = list(result_bundle["result_manifests"]) \

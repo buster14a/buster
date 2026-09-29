@@ -272,8 +272,28 @@ class InvocationEvidenceTests(unittest.TestCase):
         return {"path": path, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
     EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
-    # The reviewed per-artifact metrics bound these fixtures freeze.
-    METRICS_BYTES_MAX = 1 << 20
+    # (L7) The reviewed budget these fixtures bind: every object group's
+    # metrics bound is header + inputs * per-input from its record.
+    METRICS_HEADER_BYTES = 4096
+    METRICS_INPUT_BYTES = 16384
+
+    @classmethod
+    def campaign_budget(cls, header=None, per_input=None, edit=None):
+        """A canonical campaign budget record (retirement_budget.h layout)."""
+        values = dict.fromkeys(binding.CAMPAIGN_BUDGET_SCALARS, 1000000000)
+        values["reviewed-ns"] = 36000000000000
+        values["metrics-header-bytes"] = cls.METRICS_HEADER_BYTES if header is None else header
+        values["metrics-input-bytes"] = cls.METRICS_INPUT_BYTES if per_input is None else per_input
+        lines = [f"schema={binding.CAMPAIGN_BUDGET_SCHEMA}",
+                 f"derivation={binding.CAMPAIGN_BUDGET_DERIVATION}"]
+        lines += [f"{key}={values[key]}" for key in binding.CAMPAIGN_BUDGET_SCALARS]
+        for prefix in ("", "untimed-"):
+            lines += [f"{prefix}batch=4:100000000", f"{prefix}batch=1024:2000000000"]
+            lines += [f"{prefix}singleton={stage}:900000000" for stage in binding.CAMPAIGN_BUDGET_STAGES]
+        record = "\n".join(lines) + "\n"
+        if edit is not None:
+            record = edit(record)
+        return {"record": record, "sha256": hashlib.sha256(record.encode("ascii")).hexdigest()}
 
     class MetricsShards:
         """Pack per-batch metrics artifacts into ``retirement-metrics-<tag>-NNNN.txt``
@@ -346,7 +366,8 @@ class InvocationEvidenceTests(unittest.TestCase):
                          "diagnostic_sha256": cls.EMPTY_SHA256 if object_group else None}
                         for row in group["rows"]],
             "controls": controls, "input_list_sha256": listing,
-            "metrics_bytes_max": cls.METRICS_BYTES_MAX if object_group else None, **sides}
+            "metrics_bytes_max": (cls.METRICS_HEADER_BYTES + cls.METRICS_INPUT_BYTES * len(names)
+                                  if object_group else None), **sides}
 
     @classmethod
     def execution_plan(cls, root, record, parsed, controls=None):
@@ -401,6 +422,7 @@ class InvocationEvidenceTests(unittest.TestCase):
                 "native_target": binding.NATIVE_TIMED_TARGET,
                 "performance_rows_sha256": binding._support_file(
                     record["support"], "performance_rows")["sha256"],
+                "campaign_budget": cls.campaign_budget(),
                 "rows": contracts, "groups": group_contracts,
                 "untimed_groups": untimed_contracts}
         for key in ("seed", "rounds", "pairs_per_round", "warmups_per_variant"):
@@ -1521,6 +1543,22 @@ class InvocationEvidenceTests(unittest.TestCase):
             (lambda plan: plan["groups"][1].update(
                 metrics_bytes_max=binding.METRICS_ARTIFACT_BYTE_CAP + 1), "reviewed per-artifact bound"),
             (lambda plan: plan["groups"][0].update(metrics_bytes_max=1), "no response file"),
+            # (L7) The bound is exactly the plan's budget record's, and that
+            # record is canonical and digest-bound.
+            (lambda plan: plan["groups"][1].update(
+                metrics_bytes_max=plan["groups"][1]["metrics_bytes_max"] - 1), "reviewed per-artifact bound"),
+            (lambda plan: plan.update(campaign_budget=self.campaign_budget(per_input=8192)),
+             "reviewed per-artifact bound"),
+            (lambda plan: plan.update(campaign_budget=dict(plan["campaign_budget"], sha256="e" * 64)),
+             "digest of its record"),
+            (lambda plan: plan.update(campaign_budget=self.campaign_budget(
+                edit=lambda record: record.replace("singleton=link:900000000\n", "", 1))),
+             "singleton bound"),
+            (lambda plan: plan.update(campaign_budget=self.campaign_budget(
+                edit=lambda record: record.replace("batch=4:", "batch=04:", 1))), "canonical uint64"),
+            (lambda plan: plan.update(campaign_budget=self.campaign_budget(
+                edit=lambda record: record.replace("-v2", "-v1", 1))), "schema and derivation"),
+            (lambda plan: plan.pop("campaign_budget"), "missing fields"),
             (lambda plan: plan["groups"][0].update(input_list_sha256="e" * 64), "no response file"),
             (lambda plan: plan["groups"][1].pop("input_list_sha256"), "missing fields"),
         )
@@ -1560,7 +1598,7 @@ class InvocationEvidenceTests(unittest.TestCase):
         # A sealed shard must hold exactly its artifacts: trailing bytes reject.
         tracker = binding._MetricsShards(self.root)
         for index in batches:
-            tracker.add(self.events[index]["metrics_artifact"], "artifact")
+            tracker.stream(self.events[index]["metrics_artifact"], "artifact")
         shards = tracker.finish()
         self.assertEqual([item["path"] for item in shards], sorted(paths))
         self.assertEqual(sum(item["bytes"] for item in shards),
@@ -1569,10 +1607,38 @@ class InvocationEvidenceTests(unittest.TestCase):
             stream.write(b"hidden\n")
         with self.assertRaisesRegex(ValueError, "outside its authenticated artifacts"):
             tracker.finish()
-        # The untimed batches may not continue or reuse a timed shard.
+        # The untimed batches may not continue or reuse a timed shard, nor
+        # reuse the timed writer's tag.
         forked = tracker.fork()
         with self.assertRaisesRegex(ValueError, "fresh metrics shard"):
             forked.add(first["metrics_artifact"], "artifact")
+        (self.root / "retirement-metrics-ab-0099.txt").write_bytes(b"x")
+        with self.assertRaisesRegex(ValueError, "another writer's metrics shard tag"):
+            tracker.fork().add({"path": "retirement-metrics-ab-0099.txt", "offset": 0, "bytes": 1,
+                                "sha256": hashlib.sha256(b"x").hexdigest()}, "artifact")
+        # (L6) A registered range must be streamed in full before finish.
+        unfed = binding._MetricsShards(self.root)
+        unfed.add(first["metrics_artifact"], "artifact")
+        with self.assertRaisesRegex(ValueError, "not all streamed"):
+            unfed.finish()
+        # (L5) One tag per writer, shard index equal to its position, and at
+        # most 2048 shards per writer.
+        def artifact(path):
+            return {"path": path, "offset": 0, "bytes": 1, "sha256": "e" * 64}
+        for paths, message in (
+                (["retirement-metrics-ab-0000.txt", "retirement-metrics-aa-0001.txt"], "shard sequence"),
+                (["retirement-metrics-ab-0001.txt"], "shard sequence"),
+                (["retirement-metrics-ab-0000.txt", "retirement-metrics-ab-0002.txt"], "shard sequence")):
+            sequence = binding._MetricsShards(self.root)
+            with self.subTest(paths=paths), self.assertRaisesRegex(ValueError, message):
+                for path in paths:
+                    sequence.add(artifact(path), "artifact")
+        capped = binding._MetricsShards(self.root)
+        for index in range(binding.METRICS_SHARD_CAP):
+            capped.add(artifact(f"retirement-metrics-ab-{index:04d}.txt"), "artifact")
+        with self.assertRaisesRegex(ValueError, "one writer's shard bound"):
+            capped.add(artifact(f"retirement-metrics-ab-{binding.METRICS_SHARD_CAP:04d}.txt"), "artifact")
+        self.assertEqual(binding.METRICS_SHARD_CAP, 2048)
 
     def test_untimed_code_rows_bind_a_reproduction_digest(self):
         self.add_untimed_rows()
@@ -1758,7 +1824,9 @@ class InvocationEvidenceTests(unittest.TestCase):
                    if event["metrics_artifact"] is not None]
         events = copy.deepcopy(self.events)
         first, later = events[batches[0]], events[batches[-1]]
-        duplicate = self.put_metrics(self.root, "retirement-metrics-dup-0000.txt",
+        # The copy starts the writer's next shard, so only its content repeats.
+        index = len({events[item]["metrics_artifact"]["path"] for item in batches[:-1]})
+        duplicate = self.put_metrics(self.root, f"retirement-metrics-ab-{index:04d}.txt",
                                      self.metrics_slice(self.root, first["metrics_artifact"]))
         later["metrics_artifact"] = duplicate
         with self.assertRaisesRegex(ValueError, "per-input metrics content"):
