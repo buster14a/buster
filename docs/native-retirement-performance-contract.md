@@ -610,7 +610,14 @@ group. A group contract holds the group ordinal, its configuration and recipe,
 the ordered timed member rows and any frozen controls, and, per variant, the
 batch command digest (canonical argv including every input and output path,
 the continue-on-failure and `-fmetrics-out` options, cwd and environment) and
-the expected batch exit status. For a batched object row, the row contract's
+the expected batch exit status. (A1, the recorded Q10 default) The batch argv
+stays within the admitted command caps by passing its inputs as one response
+file, `@retirement-inputs-<sha256>.rsp`, in the output directory, which is also
+the batch cwd. The file holds the frozen member order, then the controls, in the
+driver's canonical response-file quoting. Its name is its own SHA-256, so the
+batch command digest binds the exact input list. The group contract records
+that `input_list_sha256`, and the validator rebuilds the list from the frozen
+order and checks it. For a batched object row, the row contract's
 compiler-command digest is its group's batch command digest. Its
 output-artifact digest remains that fixture's own object, and its code facts
 remain the once-parsed frozen artifact. Rows outside the timed projection carry
