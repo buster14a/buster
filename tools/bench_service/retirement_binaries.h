@@ -6,6 +6,7 @@
  */
 #ifndef BUSTER_BENCH_RETIREMENT_BINARIES_H
 #define BUSTER_BENCH_RETIREMENT_BINARIES_H
+#include "retirement_prepare.h"
 
 /* The matched-build helper's private per-attempt directory (#1018, #1020):
  * job-<id>-attempt-<token>/retirement-work, service-owned with no group or
