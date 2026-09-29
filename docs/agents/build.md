@@ -72,6 +72,22 @@ installing a pinned and checksummed Zig and the distribution's mold, both of
 which the images lack. Canonical local and Forgejo workflows continue to
 bootstrap with TCC.
 
+The separately installed Benchpress recipe driver is compiled from the
+reviewed `build.c` with Clang and checked for a nonexecutable `GNU_STACK`
+header. Its transient unit keeps `MemoryDenyWriteExecute=yes`; the TCC
+bootstrap executable lacks that header and cannot spawn stages there. This
+installed artifact is reviewed by digest and is never a local-bootstrap
+substitute. See the [broker installation contract](../../tools/bench_service/deploy/SYSTEMD_BROKER.md).
+
+Because every hosted driver is Clang-built, the `Workflow lint` job in
+`.github/workflows/ci.yml` also runs the Ubuntu image's GCC over `build.c` with
+`-Wall -Werror -fsyntax-only` and the driver's usual flags. It covers only the
+POSIX side of the driver, produces no binary, and cannot see GCC diagnostics
+emitted during code generation, such as the fortify-dependent
+`-Wunused-result` at `-O1` and above. GCC exempts only a top-level
+`{0}` from `-Wmissing-braces`, so a zeroed element of an array whose first
+member is a struct needs a designator such as `{.build_directory = {0}}`.
+
 The separate `TCC bootstrap / Canonical TCC bootstrap` check guards the
 canonical path on an ephemeral GitHub-hosted Ubuntu runner. For pull requests,
 merge groups, pushes to `main`, and manual runs it builds TinyCC at the pinned
@@ -80,8 +96,12 @@ the local bootstrap cache, and runs `./build.sh time_trace_summary_self_test`
 twice to prove both cold publication and warm reuse. This check does not select
 the dedicated benchmark runner or require privileged installation.
 The same hosted check runs native service tests, their ASan/UBSan variant, and
-the fixed smoke recipe self-test through this TCC-built driver. These use
-temporary fixtures and do not provision or qualify the benchmark host.
+the fixed smoke recipe self-test through this TCC-built driver. It also builds
+the broker and both static gates and runs their component regressions with
+`bench_service_broker self-test`. These use
+temporary fixtures and do not provision or qualify the benchmark host. It also
+runs the [source-size report and change ratchet](../source-size.md) on the
+validated merge revision against its first parent.
 
 On Linux, distribution TCC 0.9.27 can reject inferred-size arrays containing
 compound literals in shared `string.c`/`os.c` before the driver runs. TinyCC
@@ -99,6 +119,42 @@ general scripting in the CMake language when `build.c` can do the work
 directly. Prefer one persistent native build-driver process over chains of
 shell, CMake, and utility subprocesses.
 
+Native GNU-family builds compile with `-march=native`
+(`GNU_FAMILY_NATIVE_TARGET` in `CMakeLists.txt`). The only compatibility
+exception lives in `cmake/NativeTargetCompatibility.cmake`: upstream Clang
+before LLVM 22.1.0 misreads AVX10 CPUID leaf 0x24 (llvm/llvm-project#172350),
+so on some x86-64 AVX10 hosts `-march=native -Werror` fails with
+`+avx10.1-256; will be promoted to avx10.1-512`. For native x86-64 upstream
+Clang older than 22.1.0 only, CMake probes whether `-march=native` fails with
+`-Werror=invalid-feature-combination` and succeeds with
+`-Wno-error=invalid-feature-combination`; only then does it append the latter.
+The warning stays visible, unaffected hosts and compilers get no exception, and
+any other `-march=native` failure stays fatal. This is not a CPU-detection fix;
+retire it once no supported native producer uses upstream Clang older than
+22.1.0. `tools/native_target_compatibility_test.py` covers the policy. Do not
+add diagnostic flags for it through `CFLAGS` in workflows or reproduction
+steps: artifact fan-out's provenance capture rejects a nonempty `CFLAGS`.
+
+The Linux fixed `bench_service_recipe` publishes private frozen-tree receipts
+after each successful base-build and candidate-build cleanup. The files
+`validate-buster-v1.base-build.inventory` and
+`validate-buster-v1.candidate-build.inventory` contain complete bounded node
+identities, modes and owners, executable SHA-256 digests, exact recipe
+job/token/revisions, boot ID and scan-completion monotonic time. The source
+publishes each receipt without replacement and syncs its file and result
+directory before reporting that stage successful; a scan, identity, capacity
+or publication failure prevents the next stage from launching. These private
+result files are conserved by the existing BQ bundle index. A separate 64 MiB
+serialized-file limit applies in addition to node, depth, path and hashing
+limits; overflow fails the recipe. These are source-owned statements, while
+the external stage observer records its own inventory and timing independently.
+The build and result descriptors are pinned at preparation, before the stages
+create anything, so every tree walk (locking, receipts, temporary sweeps and
+syncs) reads a fresh open file of the same inode rather than a dup: btrfs
+(Linux 6.5+) never lists entries created after a directory's open file, and a
+consumed offset hides them everywhere (`BENCH_SERVICE_RECIPE_PINNED_WALK_TEST`).
+A failed post-stage check prints `error: STAGE post-stage check failed: CHECK`.
+
 ```sh
 ./build.sh generate                 # configure a fresh tree (Debug, clang)
 ./build.sh                          # build the configured tree (Debug by default)
@@ -108,7 +164,27 @@ shell, CMake, and utility subprocesses.
 ./build.sh test_all_combinations    # the full local matrix CI runs
 ```
 
-Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `bench_throughput`, `bench_throughput_ci`, `generate`, `build` (default), `clang_analyze`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`, `test_cpython`,
+On Linux, native Clang sanitizer configurations require Clang's shared
+compiler-rt ASan runtime. Configuration fails before graph generation when it
+is missing; on Debian/Ubuntu, install `libclang-rt-<clang-major>-dev`. GCC
+sanitizer configurations continue to discover `libasan.so`, while Zig keeps
+its separate compiler-rt lookup and fallback policy.
+
+`optnone_audit BUILD_DIRECTORY [--config C]` guards the trusted Clang unity
+`ide`. Its test bodies compile under `#pragma clang optimize off` in
+`src/buster/apps/ide/ide.c` to bound compile memory (#781), and a production
+function must never inherit that: #1376 found 156 of them running at -O0 when
+the region was a `#pragma clang attribute` that also marked declarations. The
+audit replays the database row for `ide.c` through the Clang frontend only
+(LLVM IR, no optimization or code generation; about ten seconds) and fails
+when a function defined outside `src/buster/tests/` carries `optnone`. The
+`optnone_audit` CMake target runs it on the same canonical unsanitized
+optimized Clang tree as `clang_analyze`, in the same superbuild step (the
+direct matrix schedules the command beside `clang_analyze` too). A production
+header that defines functions must be included before the test region, as
+`simd.h` is.
+
+Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `bench_throughput`, `bench_throughput_ci`, `generate`, `build` (default), `clang_analyze`, `optnone_audit`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`, `test_cpython`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
 `test_timing_summary_self_test`, `musl_directory_self_test`,
@@ -118,8 +194,12 @@ Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `benc
 `native_retirement_census`,
 `x86_64_completion_census`,
 `test_all_combinations`,
-`test_all_combinations_ci`, `test_uefi`; `self_host_from_existing` is an internal
+`test_all_combinations_ci`, `test_uefi`, `source_size`; `self_host_from_existing` is an internal
 build-driver worker command used only by the pooled artifact-fanout target.
+
+`source_size` reports the tracked bytes of a revision by category and enforces
+the per-change ratchet on hand-maintained production and build code; see
+[source-size policy](../source-size.md).
 
 `native_retirement_census` freezes the tracked C regression inputs and the full
 native target/allocator/frontend/PIC object matrix before running any selected
@@ -220,7 +300,8 @@ fallback. Compiler invocations default to one worker. The opt-in
 `ide cc -fcompile-jobs=N` native C link path also owns a bounded TU gang;
 callers enabling it must budget compiler workers together with build-level
 concurrency. It does not infer available RAM from virtual arena reservations. Trees are declared longest-first — sanitized Debug,
-sanitized Release, the unity Release tree that also runs `clang_analyze`, trees
+sanitized Release, the unity Release tree that also runs `clang_analyze` and
+`optnone_audit`, trees
 covering two configurations, then the rest — because Ninja admits ready edges
 from a shared pool in declaration order and a fresh CI checkout has no
 `.ninja_log` for its critical-path scheduler to learn from. Set
