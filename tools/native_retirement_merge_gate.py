@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 """Fail-closed admission for native-retirement-sensitive pull requests.
 
-Ordinary feature heads may validate the retirement closure ephemerally, but a
-retirement-sensitive pull request is mergeable only after the trusted writer
-has replaced its head with an attested integration commit for exact current
-main.  The default-branch policy workflow also invalidates those attestations
-when main advances, preserving the repository's deliberately non-strict
-behind-branch policy for unrelated pull requests.
+Ordinary pull requests, including ones that change admitted repository
+sources ("ordinary-bound"), land through the native merge queue without a
+writer step. Their exact group tree is validated by the read-only ephemeral
+reconstruction job, which queue admission requires for ordinary-bound groups.
+Bootstrap and policy transitions are mergeable only after the trusted writer
+has replaced their head with an attested integration commit for exact current
+main. A catch-up (a writer integration of an empty candidate, #1893) publishes
+generated state for an earlier main; it stays admissible while no generated
+state has changed on main since its recorded base. The default-branch policy
+workflow invalidates every other attestation when main advances.
+
+Map: git helpers; classification helpers (classification_is_bound,
+classification_requires_writer, generated_changed_between); status checks;
+check_pull_request; check_merge_group; source_candidate; invalidate_stale.
 """
 
 from __future__ import annotations
@@ -48,6 +56,10 @@ TRAILER_KEYS = (
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 MAX_API_PAGES = 10
+# The controller opens catch-up requests from this bot-owned branch only.
+CATCH_UP_BRANCH = "native-retirement/catch-up"
+# GitHub's compare API lists at most this many files; more means "unknown".
+COMPARE_FILE_LIMIT = 300
 
 
 class AdmissionError(Exception):
@@ -122,10 +134,30 @@ def changed_paths(repo: Path, base: str, head: str) -> tuple[str, ...]:
     return integration.changed_paths(repo, base, head)
 
 
-def classification_requires_writer(classification, changed: tuple[str, ...],
-                                   sources: frozenset[str]) -> bool:
+def classification_is_bound(classification, changed: tuple[str, ...],
+                            sources: frozenset[str]) -> bool:
+    """True when the candidate changes admitted sources or trusted state."""
     source_change = any(path in sources for path in changed)
     return source_change or classification.kind in ("bootstrap", "policy")
+
+
+def classification_requires_writer(classification) -> bool:
+    """Only trust transitions still need pre-integration by the writer."""
+    return classification.kind in ("bootstrap", "policy")
+
+
+def generated_changed_between(repo: Path, old: str, new: str) -> bool:
+    result = integration._git(
+        repo, "diff", "--name-only", "--no-renames", "-z", old, new, "--",
+        *sorted(integration.GENERATED_PATHS),
+    )
+    return any(path for path in result.stdout.split("\0"))
+
+
+def require_ancestor(repo: Path, old: str, new: str, message: str) -> None:
+    result = integration._git(repo, "merge-base", "--is-ancestor", old, new, check=False)
+    if result.returncode != 0:
+        raise AdmissionError(message)
 
 
 def clean_merge_tree(repo: Path, base: str, candidate: str) -> str:
@@ -222,35 +254,51 @@ def check_pull_request(repo: Path, base: str, head: str, current_main: str,
         transition_kind = trailers[TRAILER_KIND]
         if transition_kind not in integration.TRANSITION_KINDS:
             raise AdmissionError("integration commit has an invalid transition kind")
-        if recorded_base != base or parents[0] != base:
-            raise AdmissionError("integration commit is not based on the pull request base")
-        if recorded_base != current_main:
-            raise AdmissionError(
-                "main advanced after trusted integration; dispatch the writer again"
-            )
+        if parents[0] != recorded_base:
+            raise AdmissionError("integration commit is not based on its recorded base")
         if parents[1] != candidate:
             raise AdmissionError("integration candidate trailer does not match second parent")
         if tree(repo, head) != final_tree:
             raise AdmissionError("integration final-tree trailer does not match the head tree")
+        # A catch-up integrates an empty candidate: it only publishes generated
+        # state for its recorded main. It remains a truthful identity for that
+        # revision until main itself publishes newer generated state.
+        catch_up = not changed_paths(repo, recorded_base, candidate)
+        if base != current_main:
+            raise AdmissionError(
+                "main advanced after trusted integration; dispatch the writer again"
+            )
+        if catch_up and recorded_base != base:
+            require_ancestor(repo, recorded_base, base,
+                             "catch-up integration is not based on an ancestor of main")
+            if generated_changed_between(repo, recorded_base, base):
+                raise AdmissionError(
+                    "main published newer generated state after this catch-up; "
+                    "the writer must publish a new catch-up"
+                )
+        elif recorded_base != base:
+            raise AdmissionError("integration commit is not based on the pull request base")
 
-        candidate_changed = changed_paths(repo, base, candidate)
-        candidate_classification = integration.classify_candidate(repo, base, candidate)
+        candidate_changed = changed_paths(repo, recorded_base, candidate)
+        candidate_classification = integration.classify_candidate(repo, recorded_base, candidate)
         integration.enforce_classification(
             candidate_classification, transition_kind, True
         )
-        if not classification_requires_writer(
-                candidate_classification, candidate_changed, sources):
+        if not catch_up and not classification_is_bound(
+                candidate_classification, candidate_changed, bound_sources(repo, recorded_base)):
             raise AdmissionError(
                 "trusted integration was used for a pull request that does not require it"
             )
 
-        combined = clean_merge_tree(repo, base, candidate)
+        combined = clean_merge_tree(repo, recorded_base, candidate)
         final_changes = set(tree_changed_paths(repo, combined, final_tree))
         if not final_changes <= integration.GENERATED_PATHS:
             raise AdmissionError(
                 "trusted integration changed non-generated paths after the reviewed candidate: " +
                 ", ".join(sorted(final_changes - integration.GENERATED_PATHS))
             )
+        if catch_up and not final_changes:
+            raise AdmissionError("catch-up integration publishes no generated change")
         if status_path is None and status_data is None:
             raise AdmissionError("trusted integration status evidence is required")
         status_row = verify_status(status_data if status_data is not None else load_status(status_path),
@@ -262,6 +310,8 @@ def check_pull_request(repo: Path, base: str, head: str, current_main: str,
             "base": base,
             "head": head,
             "candidate": candidate,
+            "recorded_base": recorded_base,
+            "catch_up": catch_up,
             "final_tree": final_tree,
             "transition_kind": transition_kind,
             "generated_paths": sorted(final_changes),
@@ -272,10 +322,7 @@ def check_pull_request(repo: Path, base: str, head: str, current_main: str,
         integration.enforce_classification(direct_classification, None, True)
     if direct_classification.kind == "split-required":
         integration.enforce_classification(direct_classification, None, True)
-    requires_writer = classification_requires_writer(
-        direct_classification, direct_changed, sources
-    )
-    if requires_writer:
+    if classification_requires_writer(direct_classification):
         if allow_pending:
             return {
                 "schema": SCHEMA,
@@ -286,14 +333,17 @@ def check_pull_request(repo: Path, base: str, head: str, current_main: str,
                 "transition_kind": direct_classification.kind,
             }
         raise AdmissionError(
-            "this pull request changes native-retirement-bound or trusted state; "
+            "this pull request changes trusted native-retirement implementation or policy; "
             "ordinary merge is blocked until the trusted integration workflow "
             "publishes and attests the exact current-main combined head"
         )
+    # Admitted sources need no writer: the merge group's ephemeral
+    # reconstruction validates the exact tree and a catch-up follows.
+    bound = classification_is_bound(direct_classification, direct_changed, sources)
     return {
         "schema": SCHEMA,
         "status": "admitted",
-        "mode": "ordinary",
+        "mode": "ordinary-bound" if bound else "ordinary",
         "base": base,
         "head": head,
     }
@@ -381,10 +431,12 @@ def check_merge_group(repo: Path, base: str, head: str, current_main: str, api) 
 
     classification = integration.classify_candidate(repo, base, head)
     changed = changed_paths(repo, base, head)
-    sensitive = bool(classification.generated_paths) or classification_requires_writer(
-        classification, changed, bound_sources(repo, base)
-    ) or classification.kind == "split-required"
-    report = {"schema": SCHEMA, "status": "admitted", "mode": "ordinary-merge-group",
+    sensitive = (bool(classification.generated_paths) or
+                 classification_requires_writer(classification) or
+                 classification.kind == "split-required")
+    bound = classification_is_bound(classification, changed, bound_sources(repo, base))
+    report = {"schema": SCHEMA, "status": "admitted",
+              "mode": "ordinary-bound-merge-group" if bound else "ordinary-merge-group",
               "base": base, "head": head, "final_tree": tree(repo, head)}
     if sensitive:
         if api is None:
@@ -409,11 +461,24 @@ def check_merge_group(repo: Path, base: str, head: str, current_main: str, api) 
         # current-base identity, transition class and generated-only final delta.
         admitted = check_pull_request(repo, base, member, current_main, None, False,
                                       status_data=statuses)
-        if admitted.get("mode") != "trusted-integration" or report["final_tree"] != admitted["final_tree"]:
+        if admitted.get("mode") != "trusted-integration":
             raise AdmissionError("merge group tree differs from the exact attested final tree")
-        publication = verify_group_publication(api, status, base)
+        if admitted["catch_up"]:
+            # Sources may have moved on since the recorded base; the group
+            # must still add exactly the attested generated bytes and nothing else.
+            group_changes = set(tree_changed_paths(repo, tree(repo, base), report["final_tree"]))
+            if not group_changes or not group_changes <= integration.GENERATED_PATHS:
+                raise AdmissionError("catch-up group changes more than the attested generated state")
+            for path in sorted(integration.GENERATED_PATHS):
+                if (integration._git(repo, "rev-parse", head + ":" + path).stdout !=
+                        integration._git(repo, "rev-parse", member + ":" + path).stdout):
+                    raise AdmissionError("catch-up group differs from the attested generated bytes")
+        elif report["final_tree"] != admitted["final_tree"]:
+            raise AdmissionError("merge group tree differs from the exact attested final tree")
+        publication = verify_group_publication(api, status, admitted["recorded_base"])
         report.update(mode="trusted-integration-merge-group", integration_head=member,
                       candidate=admitted["candidate"], pull_request=matches[0]["number"],
+                      catch_up=admitted["catch_up"],
                       attestation_id=admitted["attestation_id"], publication=publication)
     return report
 
@@ -469,6 +534,20 @@ class GitHub:
         raise AdmissionError("GitHub pagination limit reached")
 
 
+def catch_up_still_admissible(api: GitHub, recorded_base: str, new_main: str) -> bool:
+    """Cheap pre-filter only: the gate re-verifies catch-up heads from git."""
+    comparison = api.request("compare/" + recorded_base + "..." + new_main)
+    files = comparison.get("files")
+    if comparison.get("status") not in ("ahead", "identical") or not isinstance(files, list):
+        return False
+    if len(files) >= COMPARE_FILE_LIMIT:
+        return False
+    return not any(not isinstance(item, dict) or
+                   item.get("filename") in integration.GENERATED_PATHS or
+                   item.get("previous_filename") in integration.GENERATED_PATHS
+                   for item in files)
+
+
 def invalidate_stale(api: GitHub, new_main: str, details_url: str) -> dict:
     new_main = require_hex(new_main, HEX40, "new main")
     invalidated = []
@@ -487,6 +566,9 @@ def invalidate_stale(api: GitHub, new_main: str, details_url: str) -> dict:
         if recorded_base is None or recorded_base == new_main:
             continue
         require_hex(recorded_base, HEX40, "stale integration base")
+        if head.get("ref") == CATCH_UP_BRANCH and catch_up_still_admissible(
+                api, recorded_base, new_main):
+            continue
         api.request("check-runs", method="POST", body={
             "name": REQUIRED_CHECK_NAME,
             "head_sha": head_sha,
