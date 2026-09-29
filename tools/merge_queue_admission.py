@@ -31,6 +31,8 @@ import urllib.request
 SCHEMA = "buster-merge-queue-admission-v1"
 CONTEXT = "Main integration admission"
 RETIREMENT_CONTEXT = "Native retirement merge admission"
+RETIREMENT_MARKER = "buster-native-retirement-admission-v1"
+RETIREMENT_WORKFLOW = ".github/workflows/api-migration-policy.yml"
 RULESET_ID = 22537199
 GITHUB_ACTIONS_APP_ID = 15368
 QUEUE_REF_PREFIX = "refs/heads/gh-readonly-queue/main/"
@@ -76,6 +78,7 @@ POLICY_PATHS = (
     ".github/workflows/merge-queue-reconcile.yml",
     ".github/scripts/recover-ci.py",
     ".github/workflows/api-migration-policy.yml",
+    ".github/workflows/native-retirement-admission.yml",
     ".github/workflows/native-retirement-rebind.yml",
     ".github/workflows/native-retirement-rebind-dispatch.yml",
     "tools/native_retirement_rebind_dispatch.py",
@@ -462,14 +465,16 @@ def queue_refs(repo: Path) -> tuple[str, dict]:
     return main, refs
 
 
-def published_checks(api: GitHub, head: str) -> tuple[dict | None, list]:
-    rows = api.pages(f"commits/{head}/check-runs", "check_runs", check_name=CONTEXT,
+def published_checks(api: GitHub, head: str, context: str = CONTEXT,
+                     marker: str | None = None) -> tuple[dict | None, list]:
+    marker = check_marker(head) if marker is None else marker
+    rows = api.pages(f"commits/{head}/check-runs", "check_runs", check_name=context,
                      filter="all", app_id=GITHUB_ACTIONS_APP_ID)
     ours, foreign = [], []
     for row in rows:
-        require(isinstance(row, dict) and row.get("name") == CONTEXT and row.get("head_sha") == head and
+        require(isinstance(row, dict) and row.get("name") == context and row.get("head_sha") == head and
                 row.get("app", {}).get("id") == GITHUB_ACTIONS_APP_ID, "malformed check-run row")
-        (ours if row.get("external_id") == check_marker(head) else foreign).append(row)
+        (ours if row.get("external_id") == marker else foreign).append(row)
     require(len(ours) <= 1, "duplicate reconciler check runs on " + head)
     return (ours[0] if ours else None), [row.get("id") for row in foreign]
 
@@ -508,7 +513,7 @@ def evaluate(api: GitHub, arguments, candidate: dict) -> tuple[str, object]:
 
 
 class CheckWriter:
-    """The reconciler's only write: its own exact-group CONTEXT check run."""
+    """The reconciler's only write: its two exact-group admission checks."""
 
     def __init__(self, repository: str, token: str):
         require(REPOSITORY.fullmatch(repository) is not None, "invalid repository")
@@ -517,6 +522,12 @@ class CheckWriter:
         self.token = token
 
     def send(self, existing: dict | None, body: dict) -> dict:
+        head = body.get("head_sha") if existing is None else existing.get("head_sha")
+        require(body.get("name") in (CONTEXT, RETIREMENT_CONTEXT) and
+                digest(head, "check head") == head and
+                body.get("external_id") == (check_marker(head) if body["name"] == CONTEXT
+                                             else native_marker(head)),
+                "check writer accepts only reviewed exact-head admission contexts")
         url = self.prefix if existing is None else self.prefix + "/" + str(existing["id"])
         request = urllib.request.Request(url, data=json.dumps(body).encode(),
                                          method="POST" if existing is None else "PATCH", headers={
@@ -589,6 +600,85 @@ def reconcile_group(api: GitHub, writer: CheckWriter, arguments, policy: str, ma
     return result
 
 
+def native_owner(repo: Path, head: str) -> str:
+    # The API compatibility job remains in this workflow after activation. Only
+    # the native-admission job moves, so the workflow's merge_group event alone
+    # cannot determine ownership. Candidate YAML is inspected as inert data.
+    listed = git(repo, "ls-tree", "--name-only", head, "--", RETIREMENT_WORKFLOW)
+    if not listed:
+        return "missing"
+    source = git(repo, "show", head + ":" + RETIREMENT_WORKFLOW)
+    return "legacy" if "\n  native-retirement-admission:\n" in source else "reconciler"
+
+
+def native_marker(head: str) -> str:
+    return RETIREMENT_MARKER + ":" + digest(head, "group head")
+
+
+def native_evaluate(api: GitHub, arguments, candidate: dict) -> tuple[str, object]:
+    state, detail = "pending", ["queued predecessor has not landed"]
+    if not live_identity(api, candidate):
+        pass
+    elif candidate["policy_sha"] != candidate["base"]:
+        detail = ["trusted checkout predates the landed base; its main push reconciles"]
+    else:
+        verify_trusted_policy(candidate, arguments.repo_root)
+        before = live_ruleset(api, arguments.repository)
+        retirement = retirement_admission(arguments, candidate)
+        require(retirement_admission(arguments, candidate) == retirement,
+                "trusted retirement publication changed during validation")
+        require(live_identity(api, candidate), "group changed before native admission")
+        verify_trusted_policy(candidate, arguments.repo_root)
+        after = live_ruleset(api, arguments.repository)
+        state = "admitted"
+        detail = dict(candidate, status="admitted", retirement=retirement,
+                      ruleset_reads=[before, after])
+    return state, detail
+
+
+def reconcile_native_group(api: GitHub, writer: CheckWriter, arguments, policy: str,
+                           main: str, ref: str, head: str) -> dict:
+    result = {"ref": ref, "head": head, "published": False}
+    base = None if ancestor(arguments.repo_root, head, main) else git(
+        arguments.repo_root, "rev-parse", head + "^1")
+    if base is None:
+        result["state"] = "landed"
+    elif base != main and ancestor(arguments.repo_root, main, base):
+        result.update(state="pending", detail=["queued predecessor has not landed"])
+    else:
+        owner = native_owner(arguments.repo_root, head)
+        result["owner"] = owner
+        if owner == "missing":
+            result.update(state="rejected", detail="native admission workflow is absent")
+        else:
+            existing, foreign = published_checks(api, head, RETIREMENT_CONTEXT,
+                                                 native_marker(head)) if owner == "reconciler" else (None, [])
+            if existing is not None and existing.get("status") == "completed":
+                result.update(state="published", conclusion=existing.get("conclusion"))
+            else:
+                event = {"action": "checks_requested", "repository": {"full_name": arguments.repository},
+                         "merge_group": {"base_ref": "refs/heads/main", "head_ref": ref,
+                                         "base_sha": base, "head_sha": head}}
+                try:
+                    require(not foreign, "unexpected second native admission producer: " + str(foreign))
+                    candidate = identity(event, arguments.repository, head,
+                                         arguments.repo_root, trusted_sha=policy)
+                    state, detail = native_evaluate(api, arguments, candidate)
+                except AdmissionError as error:
+                    state, detail = "rejected", str(error)
+                body = check_body(head, state, detail, arguments.details_url)
+                body["name"] = RETIREMENT_CONTEXT
+                body["external_id"] = native_marker(head)
+                unchanged = (existing is not None and state == "pending" and
+                             existing.get("output", {}).get("summary") == body["output"]["summary"])
+                if owner == "reconciler" and not unchanged:
+                    if existing is not None:
+                        del body["head_sha"]
+                    writer.send(existing, body)
+                result.update(state=state, detail=detail, published=owner == "reconciler")
+    return result
+
+
 def reconcile(arguments) -> dict:
     policy = git(arguments.repo_root, "rev-parse", "HEAD")
     main, refs = queue_refs(arguments.repo_root)
@@ -598,7 +688,9 @@ def reconcile(arguments) -> dict:
     groups = []
     for ref, head in sorted(refs.items()):
         try:
-            groups.append(reconcile_group(api, writer, arguments, policy, main, ref, head))
+            group = reconcile_group(api, writer, arguments, policy, main, ref, head)
+            group["native"] = reconcile_native_group(api, writer, arguments, policy, main, ref, head)
+            groups.append(group)
         except (OSError, KeyError, TypeError, ValueError) as error:
             # Transport or response failure: publish nothing; the next event or
             # the scheduled sweep retries. Correctness failures never land here.
