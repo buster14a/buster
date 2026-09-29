@@ -1,0 +1,40 @@
+name: Isolated memory effects research
+on:
+  push:
+    branches: [codex/49-memory-effects-diagnostic]
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Independent semantic oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir memory-evidence
+          git rev-parse HEAD HEAD^{tree} | tee memory-evidence/revisions.txt
+          clang --version | tee memory-evidence/clang.txt
+          gcc --version | tee memory-evidence/gcc.txt
+          gcc -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror tools/research/memory_effects/memory_effects_oracle.c -o /tmp/memory-oracle
+          /tmp/memory-oracle | tee memory-evidence/oracle.txt
+          clang -std=c11 -O1 -g -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined -fno-omit-frame-pointer tools/research/memory_effects/memory_effects_oracle.c -o /tmp/memory-oracle-sanitize
+          /tmp/memory-oracle-sanitize | tee memory-evidence/oracle-sanitize.txt
+      - name: Count canonical opportunities after preparation
+        shell: bash
+        run: python3 tools/research/memory_effects/run_census.py
+      - name: Retain exact diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: memory-effects-research
+          path: |
+            memory-evidence
+            build/compile_commands.json
+          retention-days: 7
