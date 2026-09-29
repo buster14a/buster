@@ -15,9 +15,12 @@ permissions:
   statuses: read
   checks: write
 
+# Candidate heads retain ordinary cancellation. A main push has an exact-SHA
+# group and is never externally cancelled: tools/main_push_maintenance.py makes
+# an already-superseded push a successful no-op and converges a mid-run move.
 concurrency:
-  group: api-migration-policy-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: api-migration-policy-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   policy:
@@ -48,6 +51,9 @@ jobs:
       - name: Test the migration audit
         working-directory: candidate
         run: python3 -B tools/api_migration_audit_test.py -v
+      - name: Test main-push maintenance policy
+        working-directory: candidate
+        run: python3 -B tools/main_push_maintenance_test.py -v
 
   native-retirement-admission:
     name: Native retirement merge admission
@@ -186,14 +192,14 @@ jobs:
               fi
             fi
           fi
-      - name: Invalidate stale trusted integrations after main advances
+      - name: Reconcile stale trusted integrations after main advances
         if: ${{ github.event_name == 'push' }}
         working-directory: candidate
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python3 tools/native_retirement_merge_gate.py invalidate-stale \
+          python3 -B tools/main_push_maintenance.py invalidate-native-retirement \
             --repository "$GITHUB_REPOSITORY" \
-            --new-main "$GITHUB_SHA" \
+            --event-main "$GITHUB_SHA" \
             --details-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             | tee "$RUNNER_TEMP/native-retirement-invalidation.json"
