@@ -362,11 +362,53 @@ foundation linkage used by the throughput tool. There is no new dependency,
 measurement loop or general-purpose testing framework.
 
 On Linux, both service self-test commands also build and run the private
-retirement preparation, correctness and durable-store fixtures, plus the
-offline export/replay Python test. The throughput self-test registers the
+retirement preparation, correctness, durable-store and result-composer
+fixtures, the composer's end-to-end binding-validator test and the offline
+export/replay Python test. The throughput self-test registers the
 fixed-campaign child fixture. These tests check the combined adapters; they do
 not replace a complete service-owned producer, authenticated receipt handoff,
 physical A/A qualification or an admitted retirement recipe.
+
+### Retirement result composition (#881-E)
+
+`retirement_result.c` (the durable store) and `retirement_compose.c` (the
+result composer, `retirement_compose.h`) are separate translation units linked
+into the service. The service order is:
+
+1. Before any timing, `tp_retirement_compose_plan` derives the statistical
+   family from the frozen timed layout, bounds every composer output and
+   reserves both campaign stages, the composer outputs and every retained file
+   (A/A evidence, logs, lifecycle records) through
+   `tp_retirement_campaign_store_preflight` and `tp_retirement_store_plan`.
+   A family whose single #619 adapter input exceeds the 64 MiB store file cap
+   is refused here.
+2. Lane D publishes its A/B transcript shards, row/batch numeric shards,
+   per-batch metrics shards and untimed batch records into that store.
+3. `tp_retirement_compose` requires every store file to be a declared input or
+   retained file, rehashes each through its sealed inode, replays the frozen
+   #619 schedule with D's cursor, checks process-instance bindings, interval
+   windows, metrics-shard tiling, untimed reproduction coverage and every
+   numeric record's coordinate, and rehashes the pre-sample closure. It then
+   settles the reservation to the exact final inventory
+   (`tp_retirement_store_settle`) and publishes the #615 manifests, the code
+   record set, the statistics input, the output of the reviewed
+   `bench_throughput retirement-replay` adapter, the post-sample execution
+   receipt (context = the frozen `_execution_context` template with the
+   streamed numeric digest), the result bundle and the
+   `workflow.phases.sealed_result` record. Any refusal poisons the store and
+   names the failing check; nothing is repaired or overwritten.
+4. The producer issues `tp_retirement_store_receipt_authority` for the composed
+   context. After the private phase handoff is authenticated, the worker calls
+   `tp_retirement_store_authority_handoff` with the handoff's numeric job and
+   attempt; it copies the authority to the queue-private root, publishes and
+   reopens a journal record, and only its success permits the final ACK and
+   lease release. `tp_retirement_store_authority_state` classifies a restart as
+   complete, incomplete (poison the attempt, keep the evidence) or absent.
+
+`retirement_compose_test.py` composes the bounded A1 binding fixture and runs
+the unchanged validator end to end; given the throughput self-test directory it
+also composes lane D's own C-encoded full-invocation fixture. Neither is
+service admission or performance evidence, and the recipe stays blocked.
 
 Linux supervisor deadline coverage lives in `worker_deadline_tests.c`. Timed
 commands use explicit `exec` so the test retains an owned direct child rather

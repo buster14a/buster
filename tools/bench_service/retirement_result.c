@@ -5,6 +5,11 @@
  * validate reopens every file before service completion or receipt handoff.
  * The owner supplies the external job/attempt/plan/context authority through
  * the private phase channel; bundle bytes cannot authorize themselves.
+ * tp_retirement_store_read reopens one sealed inode for the #881-E composer,
+ * tp_retirement_store_settle lowers the pre-timing reservation to the exact
+ * final inventory, and tp_retirement_store_authority_handoff /
+ * tp_retirement_store_authority_state are the coordinator's queue-private
+ * copy, journal and restart classification before its final ACK.
  */
 #define _GNU_SOURCE 1
 #include "../throughput/retirement_store.h"
@@ -833,6 +838,200 @@ int tp_retirement_store_authority_matches(TpRetirementStore* store, int authorit
                 job, attempt, plan_sha256, context_sha256, trusted);
     if (store && !valid) store->failed = 1;
     return valid;
+}
+
+int tp_retirement_store_read(TpRetirementStore* store, char const* path, TpRetirementStoredFile const** entry)
+{
+    TpRetirementStoredFile const* found = NULL;
+    unsigned matches = 0;
+    int valid = store && !store->failed && !store->active && path && entry && tp_retirement_store_path(path);
+    for (unsigned i = 0; valid && i < store->count; ++i)
+        if (!strcmp(store->files[i].path, path))
+        {
+            found = store->files + i;
+            ++matches;
+        }
+    valid = valid && matches == 1;
+    char leaf[193] = {0};
+    struct stat parent_info = {0}, opened = {0}, named = {0};
+    int parent = valid ? tp_retirement_store_parent(store, path, leaf, &parent_info) : -1;
+    int fd = parent >= 0 ? openat(parent, leaf, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC) : -1;
+    valid = fd >= 0 && parent_info.st_dev == found->parent_device && parent_info.st_ino == found->parent_inode &&
+            fstat(fd, &opened) == 0 && S_ISREG(opened.st_mode) && opened.st_dev == found->device &&
+            opened.st_ino == found->inode && opened.st_uid == found->owner && opened.st_uid == geteuid() &&
+            opened.st_nlink == 1 && (opened.st_mode & 0777) == 0400 && opened.st_size >= 0 &&
+            (uint64_t)opened.st_size == found->bytes && opened.st_ctim.tv_sec == found->changed.tv_sec &&
+            opened.st_ctim.tv_nsec == found->changed.tv_nsec &&
+            fstatat(parent, leaf, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+            named.st_dev == opened.st_dev && named.st_ino == opened.st_ino;
+    if (parent >= 0 && close(parent) != 0) valid = 0;
+    if (!valid && fd >= 0)
+    {
+        close(fd);
+        fd = -1;
+    }
+    if (entry) *entry = valid ? found : NULL;
+    return fd;
+}
+
+int tp_retirement_store_settle(TpRetirementStore* store, unsigned exact_files)
+{
+    int valid = store && !store->failed && !store->active && store->planned && exact_files &&
+                store->count <= exact_files && exact_files <= store->planned_files &&
+                store->external_entries <= TP_RETIREMENT_STORE_FILES - exact_files;
+    if (valid) store->planned_files = exact_files;
+    else if (store) store->failed = 1;
+    return valid;
+}
+
+/* The queue-private journal record names every authenticated identity the
+ * copied authority binds, plus that authority's own digest. */
+BUSTER_GLOBAL_LOCAL int tp_retirement_store_journal_bytes(TpRetirementReceiptAuthority const* authority,
+    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], char body[640], size_t* length)
+{
+    char authority_name[TP_RETIREMENT_STORE_PATH_BYTES + 1], authority_body[512];
+    size_t authority_length = 0;
+    int valid = tp_retirement_store_authority_bytes(authority, authority_name, authority_body, &authority_length) &&
+                tp_retirement_store_digest(authority->authority_sha256);
+    int count = valid ? snprintf(name, TP_RETIREMENT_STORE_PATH_BYTES + 1, "authority-%s-%" PRIu64 ".journal",
+                                 authority->job, authority->attempt) : -1;
+    valid = valid && count > 0 && count <= (int)TP_RETIREMENT_STORE_PATH_BYTES - 8;
+    count = valid ? snprintf(body, 640, "BQ-RETIREMENT-AUTHORITY-JOURNAL-V1\n%s\n%" PRIu64 "\n%s\n%s\n%s\n%s\n%s\n",
+        authority->job, authority->attempt, authority->plan_sha256, authority->context_sha256,
+        authority->receipt_sha256, authority->identity_sha256, authority->authority_sha256) : -1;
+    valid = valid && count > 0 && count < 640;
+    if (length) *length = valid ? (size_t)count : 0;
+    return valid;
+}
+
+/* The authenticated handoff carries numeric identities; the authority's job
+ * must be their `job-<id>` label and its attempt the same token. */
+BUSTER_GLOBAL_LOCAL int tp_retirement_store_handoff_identity(uint64_t job, uint64_t attempt,
+    char const* plan_sha256, char const* context_sha256, TpRetirementReceiptAuthority const* trusted)
+{
+    char label[129];
+    int count = job ? snprintf(label, sizeof(label), "job-%" PRIu64, job) : -1;
+    int valid = count > 0 && count < (int)sizeof(label) && attempt && trusted &&
+                tp_retirement_store_digest(plan_sha256) && tp_retirement_store_digest(context_sha256) &&
+                !strcmp(trusted->job, label) && trusted->attempt == attempt &&
+                !strcmp(trusted->plan_sha256, plan_sha256) && !strcmp(trusted->context_sha256, context_sha256);
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL int tp_retirement_store_journal_reopen(int queue_authority_root,
+    TpRetirementReceiptAuthority const* trusted, TpRetirementAuthorityJournal* journal)
+{
+    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], body[640], digest[65] = {0};
+    size_t length = 0;
+    int valid = tp_retirement_store_journal_bytes(trusted, name, body, &length);
+    if (valid)
+    {
+        Sha256 hash;
+        sha256_init(&hash);
+        sha256_add(&hash, body, length);
+        sha256_finish_hex(&hash, (char8*)digest);
+    }
+    TpRetirementStore queue;
+    TpRetirementStoredFile file;
+    int opened = valid && tp_retirement_store_open(&queue, queue_authority_root, &file, 1);
+    TpRetirementStoredFile reopened = {0};
+    valid = opened && tp_retirement_store_reopen_file(&queue, name, digest, length, &reopened, NULL) &&
+            reopened.bytes == length;
+    if (opened) tp_retirement_store_close(&queue);
+    if (journal)
+    {
+        *journal = (TpRetirementAuthorityJournal){0};
+        if (valid)
+        {
+            strcpy(journal->path, name);
+            strcpy(journal->sha256, digest);
+            journal->bytes = length;
+        }
+    }
+    return valid;
+}
+
+int tp_retirement_store_authority_handoff(int result_root, int authority_root, int queue_authority_root,
+    uint64_t authenticated_job, uint64_t authenticated_attempt,
+    char const* plan_sha256, char const* final_context_sha256,
+    TpRetirementReceiptAuthority const* trusted, TpRetirementAuthorityJournal* journal)
+{
+    int valid = journal && tp_retirement_store_handoff_identity(authenticated_job, authenticated_attempt,
+        plan_sha256, final_context_sha256, trusted);
+    if (journal) *journal = (TpRetirementAuthorityJournal){0};
+    valid = valid && tp_retirement_store_authority_copy(result_root, authority_root, queue_authority_root,
+        trusted->job, authenticated_attempt, plan_sha256, final_context_sha256, trusted);
+    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], body[640], digest[65] = {0};
+    size_t length = 0;
+    if (valid) valid = tp_retirement_store_journal_bytes(trusted, name, body, &length);
+    TpRetirementStore queue;
+    TpRetirementStoredFile file;
+    int opened = valid && tp_retirement_store_open(&queue, queue_authority_root, &file, 1);
+    TpRetirementPending pending = {0};
+    valid = opened && tp_retirement_store_begin(&queue, name, sizeof(body), &pending);
+    if (valid) valid = fwrite(body, 1, length, pending.stream) == length;
+    if (valid)
+    {
+        Sha256 hash;
+        sha256_init(&hash);
+        sha256_add(&hash, body, length);
+        sha256_finish_hex(&hash, (char8*)digest);
+        valid = tp_retirement_store_publish(&queue, &pending, length, digest) && tp_retirement_store_validate(&queue);
+    }
+    else if (opened && queue.active) tp_retirement_store_abort(&queue, &pending);
+    if (opened) tp_retirement_store_close(&queue);
+    /* Reopen the copy and the journal from their names before any ACK. */
+    valid = valid && tp_retirement_store_authority_reopen(result_root, queue_authority_root, trusted->job,
+        authenticated_attempt, plan_sha256, final_context_sha256, trusted) &&
+        tp_retirement_store_journal_reopen(queue_authority_root, trusted, journal);
+    if (!valid && journal) *journal = (TpRetirementAuthorityJournal){0};
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL int tp_retirement_store_entry_state(int root, char const* name, int* present)
+{
+    char pending[TP_RETIREMENT_STORE_PATH_BYTES + 16];
+    struct stat info = {0};
+    int count = snprintf(pending, sizeof(pending), "%s.pending", name);
+    int named = fstatat(root, name, &info, AT_SYMLINK_NOFOLLOW);
+    int named_errno = named == 0 ? 0 : errno;
+    int temporary = count > 0 && (size_t)count < sizeof(pending) ?
+                    fstatat(root, pending, &info, AT_SYMLINK_NOFOLLOW) : 0;
+    int temporary_errno = temporary == 0 ? 0 : errno;
+    /* A pending temporary is a crash prefix: it is present evidence. */
+    int valid = count > 0 && (size_t)count < sizeof(pending) &&
+                (named == 0 || named_errno == ENOENT) && (temporary == 0 || temporary_errno == ENOENT);
+    *present = valid && (named == 0 || temporary == 0);
+    return valid;
+}
+
+TpRetirementAuthorityState tp_retirement_store_authority_state(int result_root, int queue_authority_root,
+    uint64_t authenticated_job, uint64_t authenticated_attempt,
+    char const* plan_sha256, char const* final_context_sha256,
+    TpRetirementReceiptAuthority const* trusted)
+{
+    TpRetirementAuthorityState state = TP_RETIREMENT_AUTHORITY_INVALID;
+    char authority_name[TP_RETIREMENT_STORE_PATH_BYTES + 1], authority_body[512];
+    char journal_name[TP_RETIREMENT_STORE_PATH_BYTES + 1], journal_body[640];
+    size_t authority_length = 0, journal_length = 0;
+    int valid = queue_authority_root >= 0 &&
+                tp_retirement_store_handoff_identity(authenticated_job, authenticated_attempt,
+                    plan_sha256, final_context_sha256, trusted) &&
+                tp_retirement_store_authority_bytes(trusted, authority_name, authority_body, &authority_length) &&
+                tp_retirement_store_journal_bytes(trusted, journal_name, journal_body, &journal_length);
+    int authority_present = 0, journal_present = 0;
+    valid = valid && tp_retirement_store_entry_state(queue_authority_root, authority_name, &authority_present) &&
+            tp_retirement_store_entry_state(queue_authority_root, journal_name, &journal_present);
+    if (valid && !authority_present && !journal_present) state = TP_RETIREMENT_AUTHORITY_ABSENT;
+    else if (valid)
+    {
+        int complete = authority_present && journal_present &&
+            tp_retirement_store_authority_reopen(result_root, queue_authority_root, trusted->job,
+                authenticated_attempt, plan_sha256, final_context_sha256, trusted) &&
+            tp_retirement_store_journal_reopen(queue_authority_root, trusted, NULL);
+        state = complete ? TP_RETIREMENT_AUTHORITY_COMPLETE : TP_RETIREMENT_AUTHORITY_INCOMPLETE;
+    }
+    return state;
 }
 
 void tp_retirement_store_close(TpRetirementStore* store)

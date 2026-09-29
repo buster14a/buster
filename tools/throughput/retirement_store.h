@@ -3,6 +3,9 @@
  * handoff. begin/publish create and seal one file without replacement;
  * validate rereads every sealed inode. receipt_authority returns a reference
  * for the private service channel, never an authority embedded in the bundle.
+ * read/settle serve the #881-E composer (retirement_compose.h);
+ * authority_handoff/authority_state are the coordinator's copy-and-journal
+ * call site before its final ACK.
  * Definitions live in tools/bench_service/retirement_result.c.
  */
 #ifndef BUSTER_THROUGHPUT_RETIREMENT_STORE_H
@@ -106,6 +109,54 @@ int tp_retirement_store_authority_reopen(int result_root, int authority_root,
  * overwriting or deleting that evidence. */
 int tp_retirement_store_authority_copy(int result_root, int authority_root,
     int queue_authority_root, char const* job, uint64_t attempt,
+    char const* plan_sha256, char const* final_context_sha256,
+    TpRetirementReceiptAuthority const* trusted);
+/* Open one sealed store file read-only after rechecking its recorded parent,
+ * inode, size, owner, mode and change time. Returns the descriptor (the
+ * caller closes it) or -1; entry receives the sealed record. The caller must
+ * hash what it reads and compare it with entry->sha256. */
+int tp_retirement_store_read(TpRetirementStore* store, char const* path, TpRetirementStoredFile const** entry);
+/* The plan reserves upper bounds before timing (metrics shard counts are only
+ * bounded, never exact). Once every remaining output is known, settle lowers
+ * the reservation to the exact final inventory; validate then requires
+ * exactly that many files. It never raises the reservation. */
+int tp_retirement_store_settle(TpRetirementStore* store, unsigned exact_files);
+
+/* The coordinator's authority call site (#1023 / #1021). Call it in the
+ * worker only after the private phase handoff has been authenticated, with
+ * the numeric job and attempt that handoff carried and the producer-issued
+ * authority it delivered; the authority's job must be `job-<id>`. It copies
+ * the authority into the queue-private root (tp_retirement_store_authority_copy),
+ * then durably publishes one journal record beside it without replacement and
+ * reopens both. Only after it returns 1 may the worker send its final ACK and
+ * release the lease. Any failure leaves the published evidence in place; a
+ * retry never overwrites or deletes it. */
+typedef struct TpRetirementAuthorityJournal
+{
+    char path[TP_RETIREMENT_STORE_PATH_BYTES + 1];
+    char sha256[65];
+    uint64_t bytes;
+} TpRetirementAuthorityJournal;
+
+typedef enum TpRetirementAuthorityState
+{
+    TP_RETIREMENT_AUTHORITY_INVALID,
+    TP_RETIREMENT_AUTHORITY_ABSENT,
+    TP_RETIREMENT_AUTHORITY_INCOMPLETE,
+    TP_RETIREMENT_AUTHORITY_COMPLETE
+} TpRetirementAuthorityState;
+
+int tp_retirement_store_authority_handoff(int result_root, int authority_root, int queue_authority_root,
+    uint64_t authenticated_job, uint64_t authenticated_attempt,
+    char const* plan_sha256, char const* final_context_sha256,
+    TpRetirementReceiptAuthority const* trusted, TpRetirementAuthorityJournal* journal);
+/* Restart classification of the queue-private root for one attempt:
+ * COMPLETE when the copied authority and its journal both reopen against the
+ * result; INCOMPLETE when any of them exists without the other or fails to
+ * reopen (the attempt must be poisoned, its evidence retained); ABSENT when
+ * neither exists. It never repairs or completes a partial handoff. */
+TpRetirementAuthorityState tp_retirement_store_authority_state(int result_root, int queue_authority_root,
+    uint64_t authenticated_job, uint64_t authenticated_attempt,
     char const* plan_sha256, char const* final_context_sha256,
     TpRetirementReceiptAuthority const* trusted);
 void tp_retirement_store_close(TpRetirementStore* store);
