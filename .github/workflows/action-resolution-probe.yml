@@ -1,0 +1,34 @@
+name: Action resolution probe
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Action resolution continue-on-error probe
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Invoke local action with unavailable nested dependency
+        id: resolution
+        continue-on-error: true
+        uses: ./.github/actions/action-resolution-probe
+      - name: Prove control returned after resolution failure
+        if: ${{ always() }}
+        shell: bash
+        env:
+          RESOLUTION_OUTCOME: ${{ steps.resolution.outcome }}
+          RESOLUTION_CONCLUSION: ${{ steps.resolution.conclusion }}
+        run: |
+          set -euo pipefail
+          printf 'ACTION_RESOLUTION_PROBE outcome=%s conclusion=%s\n' \
+            "$RESOLUTION_OUTCOME" "$RESOLUTION_CONCLUSION"
+          test "$RESOLUTION_OUTCOME" = failure
+          test "$RESOLUTION_CONCLUSION" = success
