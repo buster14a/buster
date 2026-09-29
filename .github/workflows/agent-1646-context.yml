@@ -1,0 +1,94 @@
+name: agent-1646-context
+
+on:
+  push:
+    branches:
+      - codex/1646-static-assert-message
+
+permissions:
+  contents: write
+
+jobs:
+  extract-context:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/1646-static-assert-message
+
+      - name: Extract static-assert implementation context
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          root = Path('.')
+          output = []
+          needles = (
+              '_Static_assert', 'static_assert', 'StaticAssert', 'STATIC_ASSERT',
+              'static assertion', 'c_parse_static_assert',
+          )
+
+          candidates = []
+          frontend = root / 'src/buster/lib/compiler/frontend/c'
+          for path in frontend.rglob('*'):
+              if path.is_file() and path.suffix in {'.c', '.h'}:
+                  candidates.append(path)
+
+          for base in ('test', 'tests', 'src'):
+              directory = root / base
+              if not directory.exists():
+                  continue
+              for path in directory.rglob('*'):
+                  if not path.is_file() or path in candidates:
+                      continue
+                  if path.suffix.lower() not in {'.c', '.h', '.txt', '.md', '.py', '.sh', '.json', '.yml', '.yaml'}:
+                      continue
+                  try:
+                      text = path.read_text(encoding='utf-8')
+                  except (UnicodeDecodeError, OSError):
+                      continue
+                  if any(needle in text for needle in needles):
+                      candidates.append(path)
+
+          for path in sorted(set(candidates)):
+              try:
+                  lines = path.read_text(encoding='utf-8').splitlines()
+              except (UnicodeDecodeError, OSError):
+                  continue
+              hits = [i for i, line in enumerate(lines) if any(needle in line for needle in needles)]
+              if not hits:
+                  continue
+
+              ranges = []
+              for hit in hits:
+                  start = max(0, hit - 55)
+                  end = min(len(lines), hit + 56)
+                  if ranges and start <= ranges[-1][1] + 1:
+                      ranges[-1] = (ranges[-1][0], max(ranges[-1][1], end))
+                  else:
+                      ranges.append((start, end))
+
+              output.append(f'===== {path.as_posix()} =====')
+              for start, end in ranges:
+                  output.append(f'--- lines {start + 1}-{end} ---')
+                  output.extend(f'{line_no + 1:6}: {lines[line_no]}' for line_no in range(start, end))
+              output.append('')
+
+          destination = root / '.agent/issue-1646-context.txt'
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          destination.write_text('\n'.join(output) + '\n', encoding='utf-8')
+          print(f'wrote {destination} ({destination.stat().st_size} bytes)')
+          PY
+
+      - name: Publish extracted context
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .agent/issue-1646-context.txt
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "chore: publish issue 1646 source context"
+          git push origin HEAD:codex/1646-static-assert-message
