@@ -14,7 +14,9 @@ on:
     - cron: '2,32 * * * *'
   workflow_dispatch:
 
-permissions: {}
+# Least privilege by default; only the opener job below may write.
+permissions:
+  contents: read
 concurrency:
   group: native-retirement-catch-up
   cancel-in-progress: false

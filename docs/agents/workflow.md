@@ -185,12 +185,20 @@ Ordinary feature branches do not own
 an admitted source changed. The read-only rebinding workflow reconstructs the
 exact candidate state in a disposable checkout. The repository ruleset's
 required `Native retirement merge admission` check is the merge-admission
-authority. `API migration policy` remains a separate compatibility check. For
-retirement-sensitive changes it accepts only a current-main, two-parent
-integration head with a successful exact-head
-`Native retirement trusted integration` status from `github-actions[bot]`.
-When `main` advances that status is invalidated; rerun the protected writer
-instead of hand-editing generated state or requiring a manual rebase.
+authority. `API migration policy` remains a separate compatibility check.
+
+An ordinary PR that changes admitted sources needs no writer step. It queues
+like any other PR, and queue admission requires the ephemeral reconstruction
+of its exact group tree. Afterwards an automatic catch-up PR
+(`native-retirement/catch-up`) publishes the regenerated pair for `main`.
+Leave that PR to the automation: do not edit it, push to it or merge it by hand.
+
+`bootstrap` and `policy` transitions still need the writer first. For them,
+admission accepts only a current-main, two-parent integration head with a
+successful exact-head `Native retirement trusted integration` status from
+`github-actions[bot]`. When `main` advances that status is invalidated; rerun
+the protected writer instead of hand-editing generated state or requiring a
+manual rebase.
 
 Changes to rebinder/materializer/validator/workflow implementation are a
 `bootstrap` transition. Changes to reviewed policy, generated schema, or
@@ -233,8 +241,8 @@ Respond to its numbered classification exactly as follows:
    `docs/native-retirement-repository-sources-v1.json` and/or
    `tools/native_retirement_dependency_binding.generated.h` from the PR. Do not
    hand-resolve hashes or refresh generated state on the feature branch; rerun
-   ephemeral validation and let the serialized trusted writer publish the
-   integrated result.
+   ephemeral validation and let the automatic catch-up (or, for a trust
+   transition, the trusted writer) publish the integrated result.
 2. **Genuine source overlap.** Stop the expensive matrix and inspect the exact
    named paths. Choose an intentional order, rebase or explicit stack; preserve
    both changes where required, run the affected focused tests, then let the

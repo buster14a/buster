@@ -114,8 +114,9 @@ unavailable gates; never call an unrun check green. Follow the existing
 
 Native-retirement generated source identities and the aggregate binding are
 integration-owned. Ordinary feature PRs must not refresh or commit them;
-the read-only gate reconstructs them ephemerally and the serialized trusted
-writer publishes the exact integrated tree. Read
+the read-only gate reconstructs them ephemerally, ordinary PRs land through
+the native queue, and an automatic catch-up publishes the pair afterwards.
+Trust transitions still go through the trusted writer first. Read
 [native-retirement rebinding](docs/native-retirement-rebinding.md) before
 changing its policy, authority code, schema, consumers, or workflows.
 

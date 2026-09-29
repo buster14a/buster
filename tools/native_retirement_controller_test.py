@@ -255,6 +255,34 @@ class CatchUpDetectionTests(unittest.TestCase):
         refreshed = self.commit(later, header, b"/* newest */\n")
         self.assertFalse(c.catch_up_admissible(self.repo, refreshed, published))
 
+    def test_writer_is_requested_only_for_trust_transitions_and_needed_catch_ups(self):
+        import native_retirement_merge_gate as gate
+        human = {"number": 7, "state": "open", "draft": False, "user": {"login": "author", "id": 5, "type": "User"},
+                 "head": {"ref": "feature", "sha": HEAD, "repo": {"full_name": REPOSITORY}},
+                 "base": {"ref": "main", "repo": {"full_name": REPOSITORY}}}
+        bot = copy.deepcopy(human)
+        bot["user"] = copy.deepcopy(BOT)
+        bot["head"]["ref"] = gate.CATCH_UP_BRANCH
+        api = mock.Mock(repository=REPOSITORY)
+        cases = (
+            (human, ["src/buster/lib/hash.h"], None, None, False),
+            (human, ["tools/native_retirement_rebind.py"], None, None, True),
+            (bot, [], False, True, True),
+            (bot, [], True, True, False),
+            (bot, [], False, False, False),
+        )
+        for pr, paths, admissible, stale, expected in cases:
+            with self.subTest(paths=paths, admissible=admissible, stale=stale), \
+                    mock.patch.object(i, "_git"), mock.patch.object(i, "_commit", return_value=HEAD), \
+                    mock.patch.object(gate, "source_candidate", return_value={"source_head": HEAD}), \
+                    mock.patch.object(gate, "integration_record", return_value=((), {})), \
+                    mock.patch.object(i, "classify_candidate", return_value=i.classify_paths(paths)), \
+                    mock.patch.object(c, "catch_up_admissible", return_value=admissible), \
+                    mock.patch.object(c, "snapshot_stale", return_value=stale):
+                record = c.resolve_candidate(self.repo, BASE, pr, api)
+                self.assertEqual(record["requires_writer"], expected)
+                self.assertEqual(record["catch_up"], pr is bot)
+
     def test_only_bot_owned_catch_up_branch_is_a_catch_up_request(self):
         import native_retirement_merge_gate as gate
         pr = {"number": 7, "state": "open", "draft": False, "user": copy.deepcopy(BOT),
@@ -409,7 +437,7 @@ class WorkflowTests(unittest.TestCase):
         text = (ROOT / c.CATCH_UP_PATH).read_text()
         self.assertIn("ref: ${{ github.workflow_sha }}", text)
         self.assertIn("persist-credentials: false", text)
-        self.assertIn("permissions: {}", text)
+        self.assertIn("\npermissions:\n  contents: read\n", text)
         self.assertIn("github.run_attempt == 1", text)
         self.assertIn("vars.GH_ACTIONS_CI_ENABLED == 'true'", text)
         for forbidden in ("pull_request", "secrets.", "self-hosted", "actions: write",

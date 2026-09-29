@@ -256,7 +256,8 @@ def resolve_candidate(repo: Path, base: str, pr: dict, api) -> dict:
     record["catch_up"] = is_catch_up_pr(pr, api.repository) and not classification.changed_paths
     if record["catch_up"]:
         record["already_current"] = catch_up_admissible(repo, base, expected)
-        record["requires_writer"] = not record["already_current"]
+        # A request that main no longer needs is closed by the opener, not rebuilt.
+        record["requires_writer"] = not record["already_current"] and snapshot_stale(repo, base)
     else:
         # Ordinary-bound sources land through the queue; only trust
         # transitions still need pre-integration (#1893).
