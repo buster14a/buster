@@ -1,0 +1,137 @@
+name: Refresh 1793 support identity
+
+on:
+  push:
+    branches:
+      - fix/1793-wasm-integer-exit
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-1793-support
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Refresh reviewed support identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from hashlib import sha256
+          from pathlib import Path
+
+          old_digest = "932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82"
+          new_digest = "c37b0807e3b30530860f343ceaa220e2e445af8e622944ddee23659219711131"
+          old_row = "tests/wasm_integer_execution.js\tsupport-file\tdependency-only\t2390\t07d0294ae7661f5057f583b53488a48b62f70f0cb35013beedc97c5586c5a4d6"
+          new_row = "tests/wasm_integer_execution.js\tsupport-file\tdependency-only\t2676\t6a58901bcaa5fd1974a5b568112a27e80c9903628afdbb407541e1f9efced36a"
+
+          def replace_once(path, old, new):
+              file = Path(path)
+              text = file.read_text(encoding="utf-8")
+              if text.count(old) != 1:
+                  raise SystemExit(f"{path}: expected one replacement, found {text.count(old)}")
+              file.write_text(text.replace(old, new), encoding="utf-8")
+
+          replace_once("docs/native-retirement-support-v1.tsv", old_row, new_row)
+          support = Path("docs/native-retirement-support-v1.tsv").read_bytes()
+          if sha256(support).hexdigest() != new_digest:
+              raise SystemExit("support declaration digest does not match reviewed value")
+          oracle = Path("tests/wasm_integer_execution.js").read_bytes()
+          if len(oracle) != 2676 or sha256(oracle).hexdigest() != new_row.rsplit("\t", 1)[1]:
+              raise SystemExit("oracle identity does not match support row")
+
+          replace_once(
+              "tools/native_retirement_contract.py",
+              'FULL_SUPPORT_CONTRACT_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376669d90e192f5b8"\n'
+              'NEXT_SUPPORT_CONTRACT_SHA256 = "' + old_digest + '"',
+              'LEGACY_SUPPORT_CONTRACT_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376669d90e192f5b8"\n'
+              'FULL_SUPPORT_CONTRACT_SHA256 = "' + old_digest + '"\n'
+              'NEXT_SUPPORT_CONTRACT_SHA256 = "' + new_digest + '"')
+          replace_once(
+              "tools/native_retirement_contract.py",
+              '            FULL_SUPPORT_CONTRACT_SHA256, NEXT_SUPPORT_CONTRACT_SHA256)',
+              '            LEGACY_SUPPORT_CONTRACT_SHA256, FULL_SUPPORT_CONTRACT_SHA256,\n'
+              '            NEXT_SUPPORT_CONTRACT_SHA256)')
+
+          replace_once(
+              "tools/native_retirement_performance_binding.py",
+              'SUPPORT_DECLARATION_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376669d90e192f5b8"\n'
+              'NEXT_SUPPORT_DECLARATION_SHA256 = "' + old_digest + '"',
+              'LEGACY_SUPPORT_DECLARATION_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376669d90e192f5b8"\n'
+              'SUPPORT_DECLARATION_SHA256 = "' + old_digest + '"\n'
+              'NEXT_SUPPORT_DECLARATION_SHA256 = "' + new_digest + '"')
+          replace_once(
+              "tools/native_retirement_performance_binding.py",
+              '    if support_sha256 not in (SUPPORT_DECLARATION_SHA256,\n'
+              '                             NEXT_SUPPORT_DECLARATION_SHA256):',
+              '    if support_sha256 not in (LEGACY_SUPPORT_DECLARATION_SHA256,\n'
+              '                             SUPPORT_DECLARATION_SHA256,\n'
+              '                             NEXT_SUPPORT_DECLARATION_SHA256):')
+
+          replace_once(
+              "tools/native_retirement_materializer.py",
+              'SUPPORT_CONTRACT_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376669d90e192f5b8"\n'
+              'NEXT_SUPPORT_CONTRACT_SHA256 = "' + old_digest + '"',
+              'LEGACY_SUPPORT_CONTRACT_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376669d90e192f5b8"\n'
+              'SUPPORT_CONTRACT_SHA256 = "' + old_digest + '"\n'
+              'NEXT_SUPPORT_CONTRACT_SHA256 = "' + new_digest + '"')
+          replace_once(
+              "tools/native_retirement_materializer.py",
+              '            SUPPORT_CONTRACT_SHA256, NEXT_SUPPORT_CONTRACT_SHA256):',
+              '            LEGACY_SUPPORT_CONTRACT_SHA256, SUPPORT_CONTRACT_SHA256,\n'
+              '            NEXT_SUPPORT_CONTRACT_SHA256):')
+
+          for path in (
+              "tools/bench_service/profiles/native-retirement-performance-v1.blocked",
+              "tools/bench_service/queue.c",
+          ):
+              replace_once(path, old_digest, new_digest)
+
+          old_doc = (
+              "The #935 support decision updates only the byte/hash identity of\n"
+              "`tests/ci_tools_test.py` after giving its 633-case real-shell aggregate check\n"
+              "120 seconds on Windows (30 seconds elsewhere). Its role and compilation\n"
+              "obligation remain `support-file` and `dependency-only`; the 559 inputs, 411\n"
+              "subjects, and 78,912 row identities do not change. The previously approved\n"
+              "declaration digest remains accepted for historical evidence. The new exact\n"
+              "declaration digest is `" + old_digest + "`.\n"
+          )
+          new_doc = old_doc + (
+              "The #1793/#1796 support decision likewise updates only the byte/hash identity\n"
+              "of `tests/wasm_integer_execution.js`: the oracle now writes its terminal marker\n"
+              "synchronously and exits zero explicitly after all 1,504 checks pass. Its role,\n"
+              "obligation, population, and row identities remain unchanged. Both earlier\n"
+              "declaration digests remain accepted for historical evidence; the new exact\n"
+              "declaration digest is `" + new_digest + "`.\n"
+          )
+          replace_once("docs/native-retirement-census.md", old_doc, new_doc)
+          PY
+
+          git diff --check
+          python3 tools/native_retirement_contract_test.py
+          python3 tools/native_retirement_materializer_test.py
+          python3 tools/native_retirement_performance_identity_test.py
+
+      - name: Commit reviewed refresh
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/native-retirement-support-v1.tsv docs/native-retirement-census.md \
+            tools/native_retirement_contract.py tools/native_retirement_materializer.py \
+            tools/native_retirement_performance_binding.py \
+            tools/bench_service/profiles/native-retirement-performance-v1.blocked \
+            tools/bench_service/queue.c
+          git commit -m "ci: refresh wasm oracle support identity"
+          git push origin HEAD:fix/1793-wasm-integer-exit
