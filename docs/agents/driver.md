@@ -34,8 +34,9 @@ uses a private TU arena and diagnostic collector. No worker writes an output
 file. The caller deep-copies compact objects and diagnostics in input order,
 retains constructor priorities, and uses the existing ordered linker. The
 first failing input wins; later completed results and warnings are discarded
-and all cohort arenas are released. The one-worker and
-`BUSTER_SINGLE_THREADED` builds run the same unit kernel.
+and all cohort arenas are released (with `-fkeep-going`, later inputs still
+compile, see [per-input records](#per-input-records-and-continue-on-failure)).
+The one-worker and `BUSTER_SINGLE_THREADED` builds run the same unit kernel.
 
 `compiler_parallel_prewarm()` prepares both native target families, including
 all x86 per-form caches and exact plans, before the first persistent worker.
@@ -54,6 +55,96 @@ bounded by the worker request, but compact objects still accumulate for the
 link as before. Function compilation remains serial within each TU, preserving
 signature/source-cursor and inline-assembly ordering. Existing SIMD kernels
 inside each lane are unchanged.
+
+## Per-input records and continue-on-failure
+
+A batched invocation (`ide cc -c a.c b.c ...`, one translation unit and one
+object per input) can publish everything a one-input-per-process run would
+have told a harness. `-fmetrics-out=FILE` (API: `collect_input_metrics`)
+fills `CompilerDriverResult.inputs`, one `CompilerDriverInputResult` per input
+in input order, and `ide cc` writes them to FILE after everything else it
+prints. `-fmetrics-functions` (`collect_function_sizes`) adds each compiled
+function's name and code bytes. `-fkeep-going` (`keep_going`, `-fno-keep-going`
+restores the default) keeps compiling after a failed translation unit: later
+inputs still compile, and `-c` still writes their objects; the invocation
+fails with the first failure's error, prints one `cc: error:` line per failed
+input, exits nonzero and never links. It also allocates the records, with
+statuses only. Without any of these options nothing changes: no clock is read,
+no record is allocated, objects are byte-identical, and the first failing
+input still stops the batch. GPU pipelines reject all three options.
+
+Records work in the one-input path, the serial multi-input path and the
+`-fcompile-jobs` link lanes; lanes fill a private slot and the caller
+publishes in input order, so records do not depend on the worker count.
+What each field measures:
+
+- **Status.** `ok`; `rejected` for source refused with diagnostics
+  (`driver.tokenize`, `driver.parse`, `driver.analysis`, and
+  `driver.invalid-input` from the assembler); `failed` for every other stage
+  (file I/O, IR validation, code generation, object construction, writing, TU
+  arena allocation); `not_run` for inputs after a batch-stopping failure or
+  when the invocation failed before compiling; `prebuilt` for object and
+  archive link inputs. Error and warning counts come from the input's own
+  structured diagnostics (zero when `suppress_diagnostic_records` is set);
+  the message is the driver's rendered first error, and the code, path, line
+  and column are the first error record's (the code falls back to the
+  driver stage).
+- **Phases** (`CompilerDriverPhase`), monotonic nanoseconds that partition
+  one `compiler_driver_execute_c_single` call: `read` (map the input),
+  `preprocess` (including publishing its diagnostics), `parse`, `analysis`
+  (semantic analysis and canonical-IR lowering are one call), `ir`
+  (`ir_prepare_canonical_module`: validation, local promotion and FAST),
+  `codegen`, `object` (object-model construction), and `emit` (serialize and
+  publish for `-c`, print for `-S`, the single-input link, or a
+  `-E`/LLVM/Wasm/eBPF artifact). A failing phase keeps the time up to the
+  failure. Assembly units credit everything before `emit` to `read`. TU arena
+  creation, result merging and arena release fall between inputs and are only
+  in the process wall time. The first native input also pays the one-time
+  target table preparation (`codegen_prewarm_for_target`, about 20 ms of x86
+  metadata decode) inside its `codegen` phase; exclude it or add a warm-up
+  input when comparing per-input codegen times.
+- **Memory**, for the translation-unit arena only: `arena_peak_bytes` is its
+  cursor peak over the unit through the scoped `Arena.high_water` mark
+  (rewinds fold the discarded cursor into it), `arena_retained_bytes` the
+  bytes still allocated when the unit returned, and `arena_reserved_bytes` the
+  virtual reservation. Thread scratch arenas, shared tables and result-arena
+  copies are not attributed to an input; peaks are not RSS and must not be
+  summed into a process peak.
+- **Output.** `object_file_bytes` is the serialized object `-c` published
+  (zero otherwise). Section bytes group the object model's sections before
+  format serialization: `text`, `rodata`, `data`, `bss` and `tbss` (virtual
+  sizes), `tdata`, `initializer` (`.init_array`/`.fini_array`), `unwind`
+  (`.eh_frame`, `.pdata`, `.xdata`) and `debug` (DWARF/CodeView). Function
+  sizes are the defined function symbols' sizes, the same values the object
+  writer records, capped at `COMPILER_DRIVER_INPUT_FUNCTION_LIMIT` per input
+  with the remainder counted as omitted.
+- **Counters**: `CodegenStatistics` for the unit (functions, instructions,
+  values, code bytes, frames, fallback functions), the fallback-census record
+  count, lexed source bytes and preprocessed tokens.
+
+The file follows the tagged `NAME version=N key=value` record convention of
+`CODEGEN_FALLBACK_FUNCTION`: one record per line, space-separated fields in a
+fixed order, decimal numbers, strings as lowercase hex (`-` when empty), and
+messages and function names truncated to `COMPILER_DRIVER_METRICS_TEXT_LIMIT`
+bytes with their full length alongside. Version 1:
+
+```text
+CC_METRICS version schema=buster-cc-metrics inputs records ok rejected failed not_run prebuilt error exit_status action target allocator compile_jobs compilation_workers keep_going function_sizes wall_ns peak_rss_bytes
+CC_METRICS_INPUT version index status error errors warnings measured total_ns read_ns preprocess_ns parse_ns analysis_ns ir_ns codegen_ns object_ns emit_ns arena_peak_bytes arena_retained_bytes arena_reserved_bytes source_bytes preprocessed_tokens object_file_bytes text_bytes rodata_bytes data_bytes bss_bytes tdata_bytes tbss_bytes initializer_bytes unwind_bytes debug_bytes codegen_functions instructions values code_bytes stack_frame_bytes max_stack_frame_bytes fallback_functions fallback_records function_records function_records_omitted diagnostic_line diagnostic_column path_hex diagnostic_code_hex diagnostic_path_hex message_bytes message_hex
+CC_METRICS_FUNCTION version input ordinal code_bytes name_bytes name_hex
+```
+
+The header comes first, then each input followed by its functions. Only the
+`*_ns` fields and `peak_rss_bytes` vary between identical runs (plus
+`compile_jobs`/`compilation_workers` across worker counts). `wall_ns` runs
+from the end of argument parsing to just before the file is written; process
+start-up, argument parsing and teardown are outside it, so a harness keeps its
+own exec-to-exit clock. `peak_rss_bytes` is the process high water
+(`os_get_peak_resident_memory_size`: `ru_maxrss` on Linux and Apple, the peak
+working set on Windows, 0 when unavailable). Readers take the fields they
+know; later versions only append fields. An unwritable file fails the
+process like an unwritable `-o`. `compiler_driver_test_input_metrics` and
+`compiler_driver_test_input_metrics_lanes` cover the contract.
 
 The Clang-like `ide cc` driver accepts `-march=<model>` and
 `-mcpu=<model>` (or their separated forms), ordered target-feature overrides

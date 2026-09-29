@@ -2,6 +2,7 @@
 // artifact, link, runtime, and cross-mode checks. compiler_driver_test_pic_arguments
 // owns the configured external compiler command for the ELF PIC fixture.
 // compiler_driver_test_dwarf5_objects covers external DWARF contributions and links.
+// driver_metrics_test.c holds the per-input metrics / -fkeep-going fixtures.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
@@ -8357,6 +8358,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_constant_short_circuit_v
 #include <buster/tests/compiler/driver/driver_fast_test.c>
 #include <buster/tests/compiler/driver/preprocessed_input_test.c>
 #include <buster/tests/compiler/driver/archive_test.c>
+#include <buster/tests/compiler/driver/driver_metrics_test.c>
 
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_atomic_pair_contention(UnitTestArguments* arguments)
@@ -9771,6 +9773,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #endif
 
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_batches);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_input_metrics);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_input_metrics_lanes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
 
     TestArenaScope driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("prewarm"), false);

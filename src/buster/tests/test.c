@@ -232,8 +232,8 @@ TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* aren
         Arena* observed = slot ? (context ? context->arenas[slot - 1] : 0) : arena;
         if (observed && (!slot || observed != arena))
         {
-            result.marks[slot] = (TestArenaMark){.arena = observed, .start = observed->position, .previous_high_water = observed->test_high_water};
-            observed->test_high_water = observed->position;
+            result.marks[slot] = (TestArenaMark){.arena = observed, .start = observed->position, .previous_high_water = observed->high_water};
+            observed->high_water = observed->position;
         }
     }
     if (module)
@@ -269,7 +269,7 @@ void buster_test_arena_end(UnitTestArguments* arguments, TestArenaScope scope, b
         if (mark.arena)
         {
             ends[slot] = mark.arena->position;
-            peaks[slot] = BUSTER_MAX(mark.arena->test_high_water, ends[slot]);
+            peaks[slot] = BUSTER_MAX(mark.arena->high_water, ends[slot]);
             BUSTER_VALIDATE(ends[slot] >= mark.start);
         }
     }
@@ -329,7 +329,7 @@ void buster_test_arena_end(UnitTestArguments* arguments, TestArenaScope scope, b
         TestArenaMark mark = scope.marks[slot];
         if (mark.arena)
         {
-            mark.arena->test_high_water = BUSTER_MAX(mark.previous_high_water, peaks[slot]);
+            mark.arena->high_water = BUSTER_MAX(mark.previous_high_water, peaks[slot]);
         }
     }
 }
@@ -725,7 +725,7 @@ BUSTER_GLOBAL_LOCAL bool test_arena_self_test(void)
     arena_set_position(arena, inner.marks[0].start);
     memset(arena_allocate(arena, u8, 9), 0xa5, 9);
     buster_test_arena_end(&arguments.base, inner, true);
-    bool passed = arena->position == 67 && arena->test_high_water == 131144 && memcmp(live, "abc", 3) == 0;
+    bool passed = arena->position == 67 && arena->high_water == 131144 && memcmp(live, "abc", 3) == 0;
     u8* zeroed = arena_allocate_zeroed(arena, u8, 9);
     for (u32 index = 0; index < 9; index += 1)
     {
