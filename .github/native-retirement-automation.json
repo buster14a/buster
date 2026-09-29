@@ -1,12 +1,10 @@
 {
   "schema": "buster-native-retirement-automation-policy-v1",
   "repository": "buster14a/buster",
-  "enabled": false,
+  "enabled": true,
   "epoch": 1,
   "classes": [
-    "ordinary",
-    "bootstrap",
-    "policy"
+    "ordinary"
   ],
   "paused_pull_requests": []
 }
