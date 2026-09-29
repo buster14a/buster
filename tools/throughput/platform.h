@@ -56,6 +56,9 @@ typedef struct TpProcess
     uint64_t diagnostics[TP_DIAGNOSTICS];
     unsigned diagnostics_available;
     int exit_code, signal_number, timed_out, launch_error;
+    /* The caller's cancellation descriptor became readable while the child
+     * ran, so the process group was killed (TpProcessInputs.cancellation). */
+    int cancelled;
 } TpProcess;
 
 static inline int tp_mkdir(char const* path)
@@ -211,6 +214,7 @@ static inline TpProcess tp_process(char* const* args, char const* directory, cha
 #include <sys/wait.h>
 #include <unistd.h>
 #ifdef __linux__
+#include <poll.h>
 #include <linux/close_range.h>
 #include <linux/perf_event.h>
 #include <sched.h>
@@ -345,6 +349,11 @@ typedef struct TpProcessInputs
 {
     int executable, directory, log;
     char* const* environment;
+    /* Optional (>= 3): a readable or hung-up descriptor, such as the
+     * worker's SIGTERM self-pipe, kills the child's process group while it
+     * runs. The wait then polls a Linux pidfd, so exit is seen at once.
+     * Zero means none, which keeps positional initializers unchanged. */
+    int cancellation;
 } TpProcessInputs;
 
 static TpProcess tp_process_observe_inputs(char* const* args, char const* directory, char const* log_path,
@@ -369,7 +378,8 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
     if (inputs)
     {
         int descriptors[] = {inputs->executable, inputs->directory, inputs->log};
-        int valid = inputs->environment != NULL;
+        int valid = inputs->environment != NULL &&
+            (!inputs->cancellation || (inputs->cancellation >= 3 && fcntl(inputs->cancellation, F_GETFD) >= 0));
         for (unsigned i = 0; valid && i < 3; ++i)
         {
             int flags = descriptors[i] >= 3 ? fcntl(descriptors[i], F_GETFD) : -1;
@@ -380,7 +390,7 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
     }
     else
 #endif
-    if (!inputs) log = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (!inputs && log_path) log = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     int ok = log >= 0 && pipe(ready) == 0;
 #ifndef __linux__
     if (observation) { ok = 0; errno = ENOTSUP; }
@@ -530,6 +540,41 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
         {
             kill(-pid, SIGKILL);
         }
+#ifdef __linux__
+        /* With a cancellation descriptor, wait on the child's pidfd and that
+         * descriptor together; without pidfd support the child is killed
+         * rather than run uncancellable. The alarm still bounds the child. */
+        int cancellation = inputs && inputs->cancellation >= 3 && sent == 1 ? inputs->cancellation : -1;
+#ifdef SYS_pidfd_open
+        int child_fd = cancellation >= 0 ? (int)syscall(SYS_pidfd_open, pid, 0) : -1;
+#else
+        int child_fd = -1;
+#endif
+        if (cancellation >= 0 && child_fd < 0)
+        {
+            result.cancelled = 1;
+            kill(-pid, SIGKILL);
+        }
+        int watching = child_fd >= 0;
+        while (watching)
+        {
+            struct pollfd waits[2] = {{.fd = child_fd, .events = POLLIN}, {.fd = cancellation, .events = POLLIN}};
+            int ready_count = poll(waits, 2, -1);
+            if (ready_count < 0 && errno != EINTR)
+            {
+                kill(-pid, SIGKILL);
+                watching = 0;
+            }
+            else if (ready_count > 0 && waits[0].revents) watching = 0;
+            else if (ready_count > 0 && waits[1].revents)
+            {
+                result.cancelled = 1;
+                kill(-pid, SIGKILL);
+                watching = 0;
+            }
+        }
+        if (child_fd >= 0) close(child_fd);
+#endif
         int status = 0;
         struct rusage usage;
         memset(&usage, 0, sizeof(usage));

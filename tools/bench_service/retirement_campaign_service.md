@@ -1,14 +1,15 @@
 # Private campaign bind seams and the in-unit campaign driver
 
-`retirement_campaign_service.h` has two private entries that bind the fixed
-#1022 campaign to service-held executable descriptors. They share one
-verification tail: `bq_retirement_campaign_service_gate_matches` (A and both
-source manifests against the ready correctness gate),
+`retirement_campaign_service.h` binds the fixed #1022 campaign to
+service-held executable descriptors through a queue entry and the worker
+unit's store entries (an import and a bind). They share one verification
+tail: `bq_retirement_campaign_service_gate_matches` (A and both source
+manifests against the ready correctness gate),
 `bq_retirement_campaign_service_bind_verified` (the compiled profile's
 `campaign-budget-sha256=` pin, then `bq_retirement_campaign_bind_held`) and
-`bq_retirement_campaign_service_refuse` (a refusal leaves nothing bound or
-held and poisons both stages). Neither entry is called by the production
-worker, and the recipe stays blocked.
+`bq_retirement_campaign_service_refuse` (a refusal leaves nothing bound and
+poisons both stages). No entry is called by the production worker, and the
+recipe stays blocked.
 
 ## Queue entry
 
@@ -46,23 +47,26 @@ that recipe. The focused fixture checks a successful same-job, same-attempt
 durable A and held-binary bind, then refuses an unknown job, wrong token,
 wrong queue phase, and a changed preparation record.
 
-## Store entry (in the worker unit)
+## Store entries (in the worker unit)
 
-The worker unit never holds the queue or the lease, so
-`bq_retirement_campaign_service_bind_unit` authenticates from the per-attempt
-record store instead, under the MEASURING acknowledgement on the private
-phase channel:
+The worker unit never holds the queue or the lease, so it authenticates from
+the per-attempt record store instead, in two steps on the private phase
+channel. `bq_retirement_campaign_service_phase` is the unit's stand-in for the
+queue's active attempt: the channel belongs to this job and attempt and holds
+exactly the named acknowledgement, the SIGTERM self-pipe is quiet and the
+absolute deadline has not passed.
 
-1. The channel must belong to this job and attempt and hold the MEASURING
-   acknowledgement, the SIGTERM self-pipe must be quiet and the absolute
-   deadline unexpired (`bq_retirement_campaign_service_measuring`, the unit's
-   stand-in for the queue's active MEASURING attempt). This is checked again
-   just before the held bind.
-2. `bq_retirement_unit_prepare_pinned` re-imports A from the coordinator's
+`bq_retirement_campaign_service_import_unit` is the heavy import, under the
+SETTLING acknowledgement and before the untimed batches. The held pair and
+ready holder must be empty; the channel is checked before and after the
+import, and a refusal releases only what the call filled.
+
+1. `bq_retirement_unit_prepare_pinned` re-imports A from the coordinator's
    sealed export (exact closure, attempt seal, request digest), the toolchain
-   and the reference policy; the request must name the blocked retirement
-   recipe.
-3. The B -> D handoff: `bq_retirement_campaign_ready_import` runs the
+   and the reference policy. The request must name the blocked retirement
+   recipe. That check is defense in depth: the request record is bound to A,
+   so no fixture can build a store whose A imports under another recipe.
+2. The B -> D handoff: `bq_retirement_campaign_ready_import` runs the
    coordinator's replay (`bq_retirement_unit_replay_pinned`) over the sealed
    `retirement-ready/` record, which re-derives every field from the store
    (A, toolchain, reference policy, matched builds, binaries, the census
@@ -71,20 +75,41 @@ phase channel:
    requires the stored bytes to be exactly the record those facts format. The
    record is then reread by its content address and its fields parsed; job,
    attempt, A, template and inventory must be this attempt's.
-4. The shared gate match, then `bq_retirement_campaign_ready_gate`: the
-   correctness gate must be ready and carry the record's A, support and census
-   digests, both binaries, row counts, native target and population hash, and
-   exactly the record's reference rows with their oracle outputs.
-5. `bq_retirement_campaign_ready_held` holds both binaries again from the
+3. The shared gate match (A and both source manifests), then
+   `bq_retirement_campaign_ready_gate`: the correctness gate must be ready and
+   carry the record's A, support and census digests, both binaries, row
+   counts, native target and population hash, and exactly the record's
+   reference rows with their oracle outputs.
+4. `bq_retirement_campaign_ready_held` holds both binaries again from the
    record's build and binary record digests through the unit's own build
    import, and hands over only a pair whose digests and A are the record's.
-6. The entry derives the plan, its digest and the pre-sample context itself
-   (below) and refuses any caller plan, plan digest or context that differs.
-7. The shared tail binds the held descriptors.
 
-The production wrapper passes the compiled (blocked) profile and the installed
-driver, toolchain and broker paths, so it fails closed. The pinned seam takes
+`bq_retirement_campaign_service_bind_unit` is the cheap bind, under the
+MEASURING acknowledgement and after the untimed record stream is sealed. It
+rechecks the channel; that the held pair and record are this attempt's import
+(`bq_retirement_campaign_ready_holds`: A, binary digests and descriptor
+identities); that the record still stands at its content address with the
+imported bytes (`bq_retirement_campaign_ready_standing`); the gate join; and
+that the pre-sample binding time follows the MEASURING acknowledgement. It
+derives the plan, plan digest and pre-sample context itself (below), refuses
+any caller value that differs, binds through the shared tail and marks the
+binding with the record's digest (`unit_ready_sha256`). The driver's attach
+requires that mark. A refusal clears the binding and poisons both stages;
+the held pair and record stay the caller's.
+
+Both production wrappers pass the compiled (blocked) profile and the installed
+driver, toolchain and broker paths, so they fail closed. The pinned seams take
 a `BqRetirementCampaignUnitStore` for the fixture.
+
+`bq_retirement_campaign_service_timed_rows` gives lane E's composer its
+per-timed-row layout: each native-host timed row of the sealed gate in
+ascending order, its campaign batch-group ordinal (groups in ascending
+smallest-member order), its runtime flag and its six #619 slice dimensions
+(target, cpu, allocator, frontend_lowering, PIC, artifact_stage) as
+`TpRetirementTimedRow`. The values come from the pinned performance-row
+artifact, read through the installed census under its profile pin. Every
+declared row's identity is recomputed from its fields and must equal the gate
+row's sealed identity, so each value is one the gate authenticated.
 
 ## Plan and context
 
@@ -99,7 +124,11 @@ fails closed. The pair count must be even and within 60..254.
 `bq_retirement_unit_campaign_plan` fills the #619 plan from the pins and
 derives the exact-cell count from the sealed gate as `2R + U + 2B` (wall and
 peak memory per timed row, runtime per runtime-eligible timed row, the batch
-pair per object group).
+pair per object group). It requires `U > 0` and `B > 0`, as the validator's
+`_derive_statistical_family` does, and requires every object group's members
+to be the first inputs of both frozen contracts in ascending row (census)
+order (`bq_retirement_unit_campaign_members_first`), which lane E's composer
+relies on.
 
 `bq_retirement_unit_campaign_plan_digest` is candidate independent: it binds
 the schedule, the pins, every #508 row's identity, eligibility and reference
@@ -109,11 +138,14 @@ the subjects: the gate seal, A, both sources and binaries, the ready record
 digest, the budget, the positional digest of every frozen A/A and A/B command,
 the sealed untimed record stream and the host/transcript identity (job,
 attempt, boot, CPU, pre-sample binding time). The campaign freezes this
-pre-sample digest. `bq_retirement_unit_campaign_post_context` exists only for
-a completely collected campaign whose frozen context is that digest; it chains
-it to both stages' transcript shard chains, numeric digests and metrics
-totals. The post-sample digest is not the validator's `_execution_context`,
-which lane E's receipt composer must still bind.
+pre-sample digest. After A/A, `bq_retirement_unit_campaign_post_aa` chains it
+to the A/A transcript shard chain, numeric digest, metrics totals and the
+campaign's post-A/A identities; the fixture admission must present it.
+`bq_retirement_unit_campaign_post_context` exists only for a completely
+collected campaign whose frozen context is the pre-sample digest; it chains it
+to both stages' transcript shard chains, numeric digests and metrics totals.
+The post-sample digest is not the validator's `_execution_context`, which
+lane E's composer derives.
 
 ## In-unit driver
 
@@ -121,40 +153,76 @@ The driver steps must run in this order; any other call refuses and poisons
 the attempt:
 
 1. `bq_retirement_unit_campaign_begin`: after the build's PREPARING
-   acknowledgement, the SETTLING acknowledgement.
+   acknowledgement, the SETTLING acknowledgement. The store import runs next.
 2. `bq_retirement_unit_campaign_untimed`: the untimed production and
-   reproduction batches (`retirement_untimed.h`) on the unit's held binaries,
-   each group's shape the reviewed one, then the sealed untimed records.
+   reproduction batches (`retirement_untimed.h`) on the imported held pair,
+   each group's shape the reviewed one. After each production batch its
+   objects are linked into the service's code directory as
+   `code-<row>-<variant>.o`; after each reproduction the retained object and
+   the reproduction are observed (`tp_retirement_code_observe`) before any
+   scratch output is retired. The result carries one `TpRetirementCodeRow`
+   per untimed row, both variants, in ascending row order.
 3. `bq_retirement_unit_campaign_measuring`: the MEASURING acknowledgement.
-4. The store-based bind (above), then lane E's
-   `tp_retirement_compose_plan` over the frozen capacity, then
-   `bq_retirement_unit_campaign_attach`: the binding's job and attempt are
-   the channel's, its held pair is the one the untimed batches ran, every
-   untimed batch finished before the pre-sample binding time, the plan, plan
-   digest and context re-derived from the frozen snapshot equal the
-   campaign's, and the store plan reserves both stages' payload plus at least
-   the execution receipt within the store ceilings
+4. The store bind (above), then lane E's `tp_retirement_compose_plan` over
+   the frozen capacity, then `bq_retirement_unit_campaign_attach`, which takes
+   the imported `BqRetirementCampaignReady`: the binding must carry its mark,
+   its job and attempt are the channel's and the record's, its held pair is
+   the one the untimed batches ran, the pre-sample binding follows the
+   MEASURING acknowledgement and every untimed batch, the plan, plan digest
+   and context re-derived from the frozen snapshot equal the campaign's, lane
+   E's family counts (`TpRetirementFamilyCounts`, derived from the same layout
+   before timing) equal the plan's, and the store plan reserves both stages'
+   payload plus at least the execution receipt within the store ceilings
    (`bq_retirement_unit_campaign_store_planned`).
 5. `bq_retirement_unit_campaign_stage` (A/A): every cursor item runs its
    frozen command on the held descriptor of its stage and variant through
-   `bq_retirement_campaign_run`, with a fresh log each time; transcript and
-   metrics shards rotate onto service-supplied streams; then the metrics
-   writer, transcript and numeric export finish and the stage must be ready.
+   `bq_retirement_campaign_run`; transcript and metrics shards rotate onto
+   service-supplied streams; then the metrics writer, transcript and numeric
+   export finish, the stage must be ready and the post-A/A digest is formed.
 6. `bq_retirement_unit_campaign_admit`: production has no authority (no
    approved #426 A/A decision, no #1021 one-use capability), so it refuses and
    leaves the attempt awaiting one. Only the functional fixture build
    (`BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA`, rejected with
-   `BQ_SERVICE_INSTALLED`) enters A/B through the campaign's fixture stand-in.
+   `BQ_SERVICE_INSTALLED`, as is the campaign's own fixture macro) enters A/B
+   through the campaign's fixture stand-in, and only with this campaign's
+   plan, pre-sample and post-A/A digests.
 7. `bq_retirement_unit_campaign_freeze`: before the first candidate child, the
    held join, sealed gate, frozen plan and context, finished A/A evidence and
    untouched A/B stage are rechecked.
 8. `bq_retirement_unit_campaign_stage` (A/B).
-9. `bq_retirement_unit_campaign_finish`: the post-sample context, then the
-   MEASURED acknowledgement. A failed or incomplete campaign never sends it.
-   `bq_retirement_unit_campaign_result` then returns what lane E's composer
-   takes from the driver: job, attempt, boot, the pre-sample binding and A/B
-   completion times and the frozen #619 plan. The driver writes no execution
-   receipt; the composer writes the post-sample one.
+9. `bq_retirement_unit_campaign_ready`: the post-sample context; the driver is
+   READY and `bq_retirement_unit_campaign_result` returns what lane E's
+   composer takes from it: job, attempt, boot, the pre-sample binding and A/B
+   completion times, the frozen #619 plan, D's plan, pre-sample, post-A/A and
+   post-sample digests, the untimed record stream, the untimed code rows and
+   the per-stage log chains. The driver writes no execution receipt.
+10. `bq_retirement_unit_campaign_measured`: only after the caller confirms the
+    composed sealed result and the producer authority handoff, the MEASURED
+    acknowledgement. A failed or incomplete campaign never sends it.
+
+Every launch is refused when its timeout could outlive the absolute deadline
+(a frozen timeout is never shortened) and when the cancellation descriptor is
+readable; while a child runs, the process layer polls that descriptor with the
+child's pidfd and kills the process group when it becomes readable
+(`TpProcessInputs.cancellation`, `TpProcess.cancelled`).
+
+The first failure is retained (`bq_retirement_unit_campaign_failure`): the
+reason (refused, cancelled, deadline, channel, launch), the step and stage,
+whether a child was launched, the invocation's coordinates (group, row,
+variant, phase, round, pair, warm-up, untimed purpose and sequence), the
+measurement status, exit code, signal, timeout, cancellation and launch
+error, and the kept log's full size and digest. The unit cannot see a cgroup
+OOM kill directly: it shows as SIGKILL, and the supervisor's memory events are
+the authority.
+
+Every launch writes one scratch log, `unit-campaign-log-0000.log`. A
+successful launch's log digest and size join its stage's chain (0 untimed,
+1 A/A, 2 A/B) and the log is unlinked with the launch's scratch outputs,
+since thousands would exceed the store's entry cap. A failed launch keeps its
+log and outputs and stops the driver, so an attempt retains at most one log
+(`BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_PREFIX`, `_SUFFIX`, `_LOGS_MAX`), truncated
+to `BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_BYTES_MAX` (1 MiB, a storage bound, not a
+measurement value): lane E declares it as a capped retained group.
 
 The phase protocol has four phases, so admission and the A/B freeze are
 driver boundaries without their own acknowledgement.
@@ -163,41 +231,62 @@ driver boundaries without their own acknowledgement.
 
 `tools/throughput/retirement_unit_campaign_test.h` runs the whole driver with
 real fixture children and a forked supervisor stand-in on the campaign that
-`retirement_campaign_test.h` binds, plus one untimed singleton group, and
-refuses an untimed shape other than the review, swapped held descriptors, a
-corrupted MEASURING acknowledgement, a binding older than the untimed
-batches, a caller plan or context override, a missing or short result-store
-plan, an early freeze, cancellation,
-A/B without admission or without freeze, and a denied or stale admission.
+`retirement_campaign_test.h` binds, plus one untimed singleton group whose row
+is a cross-target code row, through READY and MEASURED. It checks the code
+facts, the log chains and the post-A/A digest, and refuses an untimed shape
+other than the review, swapped held descriptors, a wrong untimed output, an
+untimed child killed on cancellation, a launch that could outlive the
+deadline, a corrupted MEASURING acknowledgement, a binding older than the
+untimed batches, a caller plan or context override, an unmarked binding,
+other family counts, another held file with the same bytes, a missing or short
+result-store plan, an early freeze, cancellation before the first A/A launch
+(with its coordinates), A/B without admission or freeze, a denied, stale or
+wrong post-A/A admission, a freeze after an A/B launch and an invalid handoff.
+Its plan tests refuse `U = 0` and object-group members out of order or after
+a control input.
+
 `retirement_unit_campaign_tests.h` uses the real unit-oracle attempt and its
-ready record: the import, re-addressed mutations of the job, attempt, build
-and binary record digests, candidate binary, template, inventory, gate seal,
-reference command and descriptor numbers, a foreign token or job, the gate
-join, the held re-import, and a store-based bind that succeeds and each of its
-refusals. That bind's gate uses synthetic row facts and the #509 authority
-stand-in, and no timed child runs there. All fixture digests, pins and
-admissions are test data, never a verdict.
+ready record. It covers the ready import, the template and inventory compare,
+re-addressed mutations of the job, attempt, build and binary record digests,
+candidate binary, template, inventory, gate seal, reference command and
+descriptor numbers, a foreign token or job, the gate join, and the held
+re-import with a forged binary or A digest. Under SETTLING it checks the
+import and its refusals: each phase and channel state, cancellation, an
+expired deadline, a deadline that passes during the import, a live holder, a
+gate over other source manifests and the blocked production profile. Under
+MEASURING it checks the bind on that pair and its refusals: each phase and
+channel state, a late binding, a record of another job or token, changed
+record bytes, swapped descriptors, a changed held digest or A, another gate,
+the blocked profile, an unpinned profile, and a plan, context or untimed
+override. It also checks the timed-row layout (and refuses a short workspace,
+a changed gate identity and an unpinned profile), and runs the driver from
+SETTLING through the import to the first untimed launch of the imported held
+baseline. The census fixture's matched builds are text files, so that launch
+exits 125 and the driver keeps its coordinates, process facts and log. Its
+gate uses synthetic row facts and the #509 authority stand-in, and no timed
+child runs there. All fixture digests, pins and admissions are test data,
+never a verdict.
 
 ## Open interfaces
 
 - The ready record's `gate=admitted` seal is today only the test issuer's
-  digest of the attempt, A, population and oracle attempt. D joins the
-  correctness gate to the record field by field, but the record does not yet
-  bind `BqRetirementCorrectness.sealed_sha256`; the production #509 gate
-  issuer (lane B) should seal it, or provide a verifier D can call.
+  digest of the attempt, A, population and oracle attempt, and the fixtures
+  use `bq_retirement_unit_gate_fixture_admit`. D joins the correctness gate to
+  the record field by field, but the record does not yet bind
+  `BqRetirementCorrectness.sealed_sha256`. The production #509 gate issuer
+  (lane B, #1881) should seal it, or provide a verifier D can call; D then
+  requires `gate=` to equal the gate's seal and drops the fixture issuer.
 - The untimed batch commands have no frozen, authenticated contract in the
   gate yet; the driver checks them only against the reviewed shapes.
 - The frozen #426 pins and the admission capability (#1021) remain
   integration work.
-- Lane E's composer (#1879) also needs, and this lane does not produce: the
-  six #619 dimension values per timed row (the gate rows carry only the
-  configuration digest, so they must come from B's projection of #508's
-  rows), the per-row code facts in `TpRetirementCodeSide` form, and the
-  validator's plan-v3 execution-plan artifact digest. D's plan digest is its
-  own candidate-independent schedule digest, not that artifact, and D's
-  post-sample digest is not the validator's `_execution_context`.
+- Lane E: `TpRetirementCodeRow` has the layout of `TpRetirementComposeCode`,
+  `TpRetirementTimedRow` supplies `TpRetirementComposeRow` (its dimension
+  pointers can point into it) and `TpRetirementFamilyCounts` carries the two
+  `TpRetirementComposeBounds` family counts; E can adopt these shared types.
+  D does not produce the validator's plan-v3 execution-plan digest or its
+  partitions: D's plan digest is its own candidate-independent schedule
+  digest, and D's post-sample digest is not `_execution_context`.
 - The driver supplies streams in index order; the store must name transcript
   shards so they sort in that order. Stage metrics tags are `aa` and `ab`
-  (freeze refuses `untimed`). Successful per-launch scratch logs and outputs
-  are retired after each launch (thousands would exceed the store's entry
-  cap); a failed launch keeps them as evidence.
+  (freeze refuses `untimed`).

@@ -1,21 +1,31 @@
-/* #881-D store-based campaign bind and B -> D ready handoff fixtures.
+/* #881-D store-based campaign import, bind and B -> D ready handoff fixtures.
  * Included by the preparation test runner after retirement_unit_oracle_tests.h.
  *
  * The attempt is the real unit-oracle fixture (#1020 PR 3/4): prepare, the
  * fixture broker's matched builds, the census projection, the oracle
  * authority and reference producer, then the ready record written through the
- * test-only admitted gate. On that record this file checks the import (every
- * field re-derived by the coordinator replay), refusals of a mutated, forged,
- * re-addressed, foreign-job or foreign-token record and of a moved reference
- * descriptor, the join of a correctness gate to the record, the held
- * re-import from the record's build and binary digests, and the whole
- * store-based bind under a MEASURING acknowledgement: a bind that succeeds
- * with the plan and pre-sample context it derives itself, and each refusal
- * (wrong phase, other job or token, foreign ready digest, blocked profile,
- * unpinned campaign values, caller plan or context override, swapped held
- * descriptors). The correctness gate here is built from the projection with
- * synthetic row facts and the #509 batch authority stand-in; it is not a #509
- * admission, and no timed child runs. */
+ * test-only admitted gate. On that record this file checks the ready import
+ * (every field re-derived by the coordinator replay; the template and
+ * inventory compared with this attempt's policy), refusals of a mutated,
+ * forged, re-addressed, foreign-job or foreign-token record and of a moved
+ * reference descriptor, the join of a correctness gate to the record, and the
+ * held re-import from the record's build and binary digests. The heavy
+ * import runs under a SETTLING acknowledgement (bq_prep_campaign_imports:
+ * each phase and channel refusal, a cancellation, an expired deadline, a
+ * deadline that expires during the import, a live holder, a gate whose source
+ * manifests differ, the blocked production profile); the cheap bind runs
+ * under MEASURING on the imported pair (bq_prep_campaign_binds: the bind
+ * derives its own plan and pre-sample context and marks the binding with the
+ * record's digest; each refusal leaves the caller's held pair and record).
+ * bq_prep_campaign_timed_rows checks lane E's per-timed-row layout from the
+ * pinned performance rows.
+ * bq_prep_campaign_driver runs the in-unit driver from its SETTLING
+ * acknowledgement through the import to the first untimed launch of the
+ * imported held binary, which fails because the census fixture's matched
+ * builds are text files: the failure's coordinates and process facts are the
+ * retained evidence. The correctness gate here is built from the projection
+ * with synthetic row facts and the #509 batch authority stand-in; it is not a
+ * #509 admission, and no timed child runs. */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_CAMPAIGN_TESTS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_CAMPAIGN_TESTS_H
 
@@ -339,15 +349,30 @@ BUSTER_GLOBAL_LOCAL BqRetirementCampaignRequest bq_prep_campaign_request(BqPrepC
     return request;
 }
 
-/* A refused store bind leaves nothing held or bound and poisons both stages. */
-BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_refused(BqPrepCampaign const* campaign)
+/* A refused import leaves nothing held and no record. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_unheld(BqPrepCampaign const* campaign)
 {
     bool ok = !campaign->held.owned && campaign->held.descriptors[0] < 0 && campaign->held.descriptors[1] < 0 &&
-        !campaign->binding.campaign && !campaign->binding.held_binaries && !campaign->ready.owned &&
-        !campaign->ready.text && campaign->campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID &&
-        campaign->stages[0].samples.failed && campaign->stages[1].samples.failed &&
-        !campaign->stages[0].execution.sequence;
+        !campaign->ready.owned && !campaign->ready.text;
     return ok;
+}
+
+/* A refused bind leaves no binding and both stages poisoned; the imported
+ * held pair and record stay the caller's. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_campaign_refused(BqPrepCampaign const* campaign)
+{
+    bool ok = campaign->held.owned && campaign->ready.owned && campaign->ready.text &&
+        !campaign->binding.campaign && !campaign->binding.held_binaries && !campaign->binding.unit_ready_sha256[0] &&
+        campaign->campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID && campaign->stages[0].samples.failed &&
+        campaign->stages[1].samples.failed && !campaign->stages[0].execution.sequence;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_prep_campaign_drop(BqPrepCampaign* campaign)
+{
+    if (campaign->held.owned) bq_retirement_binaries_release(&campaign->held);
+    bq_retirement_campaign_ready_release(&campaign->ready);
+    campaign->held = (BqRetirementHeldBinaries){.descriptors = {-1, -1}};
 }
 
 typedef struct BqPrepCampaignAttempt
@@ -357,10 +382,33 @@ typedef struct BqPrepCampaignAttempt
     BqRetirementCampaignUnitStore unit;
     char profile[5120];
     char ready_sha256[SHA256_HEX_CAPACITY];
+    u64 import_ns;
 } BqPrepCampaignAttempt;
 
-/* The phase states the store bind must refuse before it reads anything. */
-BUSTER_GLOBAL_LOCAL void bq_prep_campaign_phase_refusals(BqPrepCampaignAttempt* context, BqPrepCampaign* campaign,
+/* A channel for this attempt (or another job or token) whose first `steps`
+ * phases are acknowledged; the peer answers exactly `steps` messages. */
+BUSTER_GLOBAL_LOCAL pid_t bq_prep_campaign_channel(BqPhaseChannel* phases, u64 job, u64 token, u32 steps)
+{
+    pid_t peer = bq_prep_campaign_peer(phases, job, token, steps);
+    bool exchanged = peer > 0;
+    for (u32 phase = 1; exchanged && phase <= steps; phase += 1) exchanged = bq_phase_exchange(phases, phase);
+    BQ_PREP_CHECK(exchanged);
+    return peer;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_prep_campaign_import(BqPrepCampaignAttempt* context, BqPrepCampaign* campaign,
+    BqPhaseChannel const* phases, int cancel, u64 deadline)
+{
+    BqPrepUnitAttempt const* attempt = &context->attempt->attempt;
+    BqError result = bq_retirement_campaign_service_import_unit_pinned(&context->unit, phases, cancel, deadline,
+        attempt->job.id, attempt->job.token, attempt->digest, context->ready_sha256, &campaign->gate, &campaign->held,
+        &campaign->ready);
+    return result;
+}
+
+/* The import under SETTLING: the phase and channel states it refuses before
+ * it reads anything, then the import itself and its refusals. */
+BUSTER_GLOBAL_LOCAL void bq_prep_campaign_imports(BqPrepCampaignAttempt* context, BqPrepCampaign* campaign,
     int cancel[2])
 {
     BqPrepUnitAttempt const* attempt = &context->attempt->attempt;
@@ -369,42 +417,69 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_phase_refusals(BqPrepCampaignAttempt* 
     {
         BqPhaseChannel phases;
         u64 channel_job = answers == 4 ? job + 1 : job, channel_token = answers == 5 ? token + 1 : token;
-        u32 steps = answers < 4 ? answers : 3;
-        pid_t peer = bq_prep_campaign_peer(&phases, channel_job, channel_token, steps);
-        bool exchanged = peer > 0;
-        for (u32 phase = 1; exchanged && phase <= steps; phase += 1) exchanged = bq_phase_exchange(&phases, phase);
-        BQ_PREP_CHECK(exchanged && bq_prep_campaign_stages(campaign, job, token, 7));
-        BqRetirementCampaignRequest request = bq_prep_campaign_request(campaign);
-        BqError result = bq_retirement_campaign_service_bind_unit_pinned(&context->unit, &phases, cancel[0], generous,
-            job, token, attempt->digest, context->ready_sha256, &(TpRetirementShard){1, 1,
-            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}, &request, &campaign->held,
-            &campaign->binding, &campaign->ready);
-        /* Only three acknowledged phases (MEASURING) of this job and attempt reach the store. */
-        bool reached = answers == 3;
-        BQ_PREP_CHECK(reached ? result != BQ_INVALID_TRANSITION : result == BQ_INVALID_TRANSITION);
-        if (!reached) BQ_PREP_CHECK(bq_prep_campaign_refused(campaign));
-        if (campaign->held.owned) bq_retirement_binaries_release(&campaign->held);
-        bq_retirement_campaign_ready_release(&campaign->ready);
+        pid_t peer = bq_prep_campaign_channel(&phases, channel_job, channel_token, answers < 4 ? answers : 2);
+        u64 started = bq_phase_clock();
+        BqError result = bq_prep_campaign_import(context, campaign, &phases, cancel[0], generous);
+        /* Only the SETTLING acknowledgement of this job and attempt imports. */
+        if (answers == 2)
+        {
+            context->import_ns = bq_phase_clock() - started;
+            BQ_PREP_CHECK(result == BQ_OK && campaign->held.owned && campaign->ready.owned &&
+                          !strcmp(campaign->ready.ready_sha256, context->ready_sha256) &&
+                          campaign->ready.job.id == job && campaign->ready.job.token == token &&
+                          bq_retirement_campaign_ready_holds(&campaign->ready, &campaign->held));
+            /* A live holder is never overwritten or released. */
+            BQ_PREP_CHECK(bq_prep_campaign_import(context, campaign, &phases, cancel[0], generous) ==
+                          BQ_INVALID_TRANSITION && campaign->held.owned && campaign->ready.owned &&
+                          bq_retirement_campaign_ready_holds(&campaign->ready, &campaign->held));
+        }
+        else BQ_PREP_CHECK(result == BQ_INVALID_TRANSITION && bq_prep_campaign_unheld(campaign));
+        bq_prep_campaign_drop(campaign);
         BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
     }
-    /* A readable cancellation pipe or an expired deadline also refuses. */
+    /* A readable cancellation pipe, an expired deadline, and a deadline that
+     * passes while the import runs (the SETTLING recheck after it). */
+    for (u32 trial = 0; trial < 3; trial += 1)
+    {
+        BqPhaseChannel phases;
+        pid_t peer = bq_prep_campaign_channel(&phases, job, token, 2);
+        char byte = 1;
+        if (!trial) BQ_PREP_CHECK(write(cancel[1], &byte, 1) == 1);
+        u64 span = context->import_ns / 8u ? context->import_ns / 8u : 1u;
+        u64 deadline = trial == 1 ? bq_phase_clock() : trial == 2 ? bq_phase_clock() + span : generous;
+        BQ_PREP_CHECK(bq_prep_campaign_import(context, campaign, &phases, cancel[0], deadline) ==
+                      BQ_INVALID_TRANSITION && bq_prep_campaign_unheld(campaign));
+        char drained[8];
+        if (!trial) BQ_PREP_CHECK(read(cancel[0], drained, sizeof(drained)) == 1);
+        BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
+    }
+    /* A gate sealed over other source manifests; the compiled blocked
+     * profile of the production wrapper. */
     for (u32 trial = 0; trial < 2; trial += 1)
     {
         BqPhaseChannel phases;
-        pid_t peer = bq_prep_campaign_peer(&phases, job, token, 3);
-        bool exchanged = peer > 0;
-        for (u32 phase = 1; exchanged && phase <= 3; phase += 1) exchanged = bq_phase_exchange(&phases, phase);
-        char byte = 1;
-        if (!trial) BQ_PREP_CHECK(write(cancel[1], &byte, 1) == 1);
-        BQ_PREP_CHECK(exchanged && bq_prep_campaign_stages(campaign, job, token, 7));
-        BqRetirementCampaignRequest request = bq_prep_campaign_request(campaign);
-        BQ_PREP_CHECK(bq_retirement_campaign_service_bind_unit_pinned(&context->unit, &phases, cancel[0],
-                      trial ? bq_phase_clock() : generous, job, token, attempt->digest, context->ready_sha256,
-                      &(TpRetirementShard){1, 1, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
-                      &request, &campaign->held, &campaign->binding, &campaign->ready) == BQ_INVALID_TRANSITION &&
-                      bq_prep_campaign_refused(campaign));
-        char drained[8];
-        if (!trial) BQ_PREP_CHECK(read(cancel[0], drained, sizeof(drained)) == 1);
+        pid_t peer = bq_prep_campaign_channel(&phases, job, token, 2);
+        char* source = campaign->gate.prepared.source_sha256[1];
+        char saved = source[0];
+        BqError result = BQ_OK;
+        if (!trial)
+        {
+            source[0] = saved == '0' ? '1' : '0';
+            bq_retirement_correctness_seal(&campaign->gate, campaign->gate.sealed_sha256);
+            result = bq_prep_campaign_import(context, campaign, &phases, cancel[0], generous);
+            source[0] = saved;
+            bq_retirement_correctness_seal(&campaign->gate, campaign->gate.sealed_sha256);
+            BQ_PREP_CHECK(result == BQ_SOURCE_MISMATCH);
+        }
+        else
+        {
+            result = bq_retirement_campaign_service_import_unit(attempt->store, context->fixture->workspaces_fd,
+                context->fixture->installed_fd, &phases, cancel[0], generous, job, token, attempt->digest,
+                context->ready_sha256, &campaign->gate, &campaign->held, &campaign->ready);
+            BQ_PREP_CHECK(result != BQ_OK);
+        }
+        BQ_PREP_CHECK(bq_prep_campaign_unheld(campaign) && bq_retirement_correctness_ready(&campaign->gate));
+        bq_prep_campaign_drop(campaign);
         BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
     }
 }
@@ -454,6 +529,16 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_ready_cases(BqPrepCampaignAttempt* con
     memset(malformed, 'Z', 64);
     malformed[64] = 0;
     BQ_PREP_CHECK(bq_retirement_campaign_ready_import(&context->unit, unit, malformed, &refused) == BQ_BAD_REQUEST);
+    /* The replay authenticates the record against the store; the template
+     * and inventory it names must also be this attempt's imported policy. */
+    for (u32 field = 0; field < 2; field += 1)
+    {
+        other = *unit;
+        char* digest = field ? other.policy.inventory_sha256 : other.policy.template_sha256;
+        digest[0] = digest[0] == '0' ? '1' : '0';
+        BQ_PREP_CHECK(bq_retirement_campaign_ready_import(&context->unit, &other, context->ready_sha256, &refused) ==
+                      BQ_CORRUPT && !refused.owned && !refused.text);
+    }
 
     /* Mutated fields, re-addressed so only a re-derivation can catch them:
      * another job or token, a build or binary record digest, the gate seal,
@@ -527,45 +612,162 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_ready_cases(BqPrepCampaignAttempt* con
                   !strcmp(held.verified.binary_sha256[1], ready.binary_sha256[1]));
     BQ_PREP_CHECK(bq_retirement_campaign_ready_held(&context->unit, unit, &ready, &held) == BQ_BAD_REQUEST && held.owned);
     bq_retirement_binaries_release(&held);
+    held = (BqRetirementHeldBinaries){.descriptors = {-1, -1}};
     BqRetirementCampaignReady forged = ready;
     forged.binary_record_sha256[0] = forged.binary_record_sha256[0] == '0' ? '1' : '0';
     BQ_PREP_CHECK(bq_retirement_campaign_ready_held(&context->unit, unit, &forged, &held) != BQ_OK && !held.owned);
+    /* The record's build is authentic, but a binary or A digest it names is
+     * not the one that build holds. */
+    for (u32 field = 0; field < 3; field += 1)
+    {
+        forged = ready;
+        char* digest = field < 2 ? forged.binary_sha256[field] : forged.preparation_sha256;
+        digest[0] = digest[0] == '0' ? '1' : '0';
+        BQ_PREP_CHECK(bq_retirement_campaign_ready_held(&context->unit, unit, &forged, &held) == BQ_SOURCE_MISMATCH &&
+                      !held.owned && held.descriptors[0] < 0 && held.descriptors[1] < 0);
+    }
     bq_retirement_campaign_ready_release(&ready);
+}
+
+/* Lane E's per-timed-row layout from the pinned performance rows: every
+ * timed row in ascending order with its campaign group, runtime flag and
+ * dimension values; a short workspace, a gate row whose identity is not the
+ * declared one, and a profile without the performance-row pin are refused. */
+BUSTER_GLOBAL_LOCAL void bq_prep_campaign_timed_rows(BqPrepCampaignAttempt* context, BqPrepCampaign* campaign)
+{
+    TpRetirementTimedRow* rows = calloc(BQ_PREP_CAMPAIGN_CAP, sizeof(*rows));
+    unsigned count = 0;
+    BQ_PREP_CHECK(rows && bq_retirement_campaign_service_timed_rows(&context->unit, &campaign->gate, rows,
+                  BQ_PREP_CAMPAIGN_CAP, &count) == BQ_OK && count == campaign->timed);
+    for (u32 dense = 0; rows && dense < count && dense < campaign->timed; dense += 1)
+    {
+        u32 row = campaign->row_ids[dense], group = UINT32_MAX;
+        for (u32 g = 0; g < campaign->groups; g += 1)
+            for (u32 k = campaign->offsets[g]; k < campaign->offsets[g + 1]; k += 1)
+                if (campaign->members[k] == dense) group = g;
+        u32 stage = campaign->rows[row].stage;
+        char const* stage_name = stage == BQ_RETIREMENT_STAGE_OBJECT ? "object" :
+            stage == BQ_RETIREMENT_STAGE_LINK ? "link" : "self-host-stage1";
+        BQ_PREP_CHECK(rows[dense].id == row && rows[dense].group == group &&
+                      rows[dense].runtime == (campaign->facts[row].runtime_eligible ? 1u : 0u) &&
+                      !strcmp(rows[dense].dimensions[5], stage_name) && !strcmp(rows[dense].dimensions[0],
+                      rows[0].dimensions[0]));
+        for (u32 dimension = 0; dimension < TP_RETIREMENT_TIMED_DIMENSIONS; dimension += 1)
+            BQ_PREP_CHECK(rows[dense].dimensions[dimension][0] != 0);
+    }
+    BQ_PREP_CHECK(rows && bq_retirement_campaign_service_timed_rows(&context->unit, &campaign->gate, rows, count - 1u,
+                  &count) == BQ_SOURCE_MISMATCH && !count);
+    char* identity = campaign->rows[campaign->row_ids[0]].identity_sha256;
+    char saved = identity[0];
+    identity[0] = saved == '0' ? '1' : '0';
+    bq_retirement_correctness_seal(&campaign->gate, campaign->gate.sealed_sha256);
+    BQ_PREP_CHECK(rows && bq_retirement_correctness_ready(&campaign->gate) &&
+                  bq_retirement_campaign_service_timed_rows(&context->unit, &campaign->gate, rows, BQ_PREP_CAMPAIGN_CAP,
+                  &count) == BQ_SOURCE_MISMATCH && !count);
+    identity[0] = saved;
+    bq_retirement_correctness_seal(&campaign->gate, campaign->gate.sealed_sha256);
+    char unpinned[5120];
+    memcpy(unpinned, context->profile, sizeof(unpinned));
+    char* line = strstr(unpinned, "performance-rows-sha256=");
+    char* end = line ? strchr(line, '\n') : NULL;
+    if (end) memmove(line, end + 1, strlen(end + 1) + 1);
+    BqRetirementCampaignUnitStore unit = context->unit;
+    unit.profile = string_from_pointer(unpinned);
+    BQ_PREP_CHECK(end && rows && bq_retirement_campaign_service_timed_rows(&unit, &campaign->gate, rows,
+                  BQ_PREP_CAMPAIGN_CAP, &count) == BQ_SOURCE_MISMATCH && !count);
+    BQ_PREP_CHECK(rows && bq_retirement_campaign_service_timed_rows(&context->unit, &campaign->gate, rows,
+                  BQ_PREP_CAMPAIGN_CAP, &count) == BQ_OK && count == campaign->timed);
+    free(rows);
+}
+
+/* The bind under MEASURING on an imported pair: the phase and channel
+ * states it refuses; each refusal keeps the caller's pair. */
+BUSTER_GLOBAL_LOCAL void bq_prep_campaign_bind_phases(BqPrepCampaignAttempt* context, BqPrepCampaign* campaign,
+    int cancel[2])
+{
+    BqPrepUnitAttempt const* attempt = &context->attempt->attempt;
+    u64 job = attempt->job.id, token = attempt->job.token, generous = bq_phase_clock() + 300000000000ull;
+    TpRetirementShard untimed = {1, 1, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    for (u32 trial = 0; trial < 8; trial += 1)
+    {
+        /* 0..3 acknowledged phases; MEASURING of another job or token; a
+         * readable cancellation pipe; an expired deadline. */
+        BqPhaseChannel phases;
+        u64 channel_job = trial == 4 ? job + 1 : job, channel_token = trial == 5 ? token + 1 : token;
+        pid_t peer = bq_prep_campaign_channel(&phases, channel_job, channel_token, trial < 4 ? trial : 3);
+        char byte = 1;
+        if (trial == 6) BQ_PREP_CHECK(write(cancel[1], &byte, 1) == 1);
+        BQ_PREP_CHECK(bq_prep_campaign_stages(campaign, job, token, 7));
+        BqRetirementCampaignRequest request = bq_prep_campaign_request(campaign);
+        BqError result = bq_retirement_campaign_service_bind_unit_pinned(&context->unit, &phases, cancel[0],
+            trial == 7 ? bq_phase_clock() : generous, job, token, &untimed, &request, &campaign->held,
+            &campaign->ready, &campaign->binding);
+        /* The MEASURING acknowledgement of this job and attempt reaches the
+         * plan derivation, which this record stream does not match. */
+        BQ_PREP_CHECK(trial == 3 ? result == BQ_RECIPE_MISMATCH : result == BQ_INVALID_TRANSITION);
+        BQ_PREP_CHECK(bq_prep_campaign_refused(campaign));
+        char drained[8];
+        if (trial == 6) BQ_PREP_CHECK(read(cancel[0], drained, sizeof(drained)) == 1);
+        BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
+    }
 }
 
 enum
 {
-    BQ_PREP_CAMPAIGN_BIND, BQ_PREP_CAMPAIGN_FOREIGN_TOKEN, BQ_PREP_CAMPAIGN_FOREIGN_READY,
-    BQ_PREP_CAMPAIGN_BLOCKED_PROFILE, BQ_PREP_CAMPAIGN_UNPINNED, BQ_PREP_CAMPAIGN_PLAN_OVERRIDE,
-    BQ_PREP_CAMPAIGN_CONTEXT_OVERRIDE, BQ_PREP_CAMPAIGN_OTHER_GATE, BQ_PREP_CAMPAIGN_UNTIMED_OVERRIDE,
+    BQ_PREP_CAMPAIGN_BIND, BQ_PREP_CAMPAIGN_LATE, BQ_PREP_CAMPAIGN_READY_JOB, BQ_PREP_CAMPAIGN_READY_TOKEN,
+    BQ_PREP_CAMPAIGN_MOVED, BQ_PREP_CAMPAIGN_SWAPPED, BQ_PREP_CAMPAIGN_HELD_DIGEST, BQ_PREP_CAMPAIGN_HELD_PREPARATION,
+    BQ_PREP_CAMPAIGN_OTHER_GATE, BQ_PREP_CAMPAIGN_BLOCKED_PROFILE, BQ_PREP_CAMPAIGN_UNPINNED,
+    BQ_PREP_CAMPAIGN_PLAN_OVERRIDE, BQ_PREP_CAMPAIGN_CONTEXT_OVERRIDE, BQ_PREP_CAMPAIGN_UNTIMED_OVERRIDE,
     BQ_PREP_CAMPAIGN_MODES
 };
 
-/* One store-based bind under a MEASURING acknowledgement. */
+/* One store-based bind under a MEASURING acknowledgement, on the imported
+ * pair or a changed copy of it. */
 BUSTER_GLOBAL_LOCAL BqError bq_prep_campaign_bind(BqPrepCampaignAttempt* context, BqPrepCampaign* campaign,
     u32 mode, int cancel)
 {
     BqPrepUnitAttempt const* attempt = &context->attempt->attempt;
     u64 job = attempt->job.id, token = attempt->job.token;
     BqPhaseChannel phases;
-    pid_t peer = bq_prep_campaign_peer(&phases, job, mode == BQ_PREP_CAMPAIGN_FOREIGN_TOKEN ? token + 1 : token, 3);
+    pid_t peer = bq_prep_campaign_peer(&phases, job, token, 3);
     bool exchanged = peer > 0;
-    for (u32 phase = 1; exchanged && phase <= 3; phase += 1) exchanged = bq_phase_exchange(&phases, phase);
+    for (u32 phase = 1; exchanged && phase <= 2; phase += 1) exchanged = bq_phase_exchange(&phases, phase);
+    BQ_PREP_CHECK(exchanged);
+    /* A pre-sample binding made before the MEASURING acknowledgement. */
+    bool staged = mode == BQ_PREP_CAMPAIGN_LATE && bq_prep_campaign_stages(campaign, job, token, 7);
+    BQ_PREP_CHECK(bq_phase_exchange(&phases, BQ_PHASE_MEASURING));
+    if (mode != BQ_PREP_CAMPAIGN_LATE) staged = bq_prep_campaign_stages(campaign, job, token, 7);
     TpRetirementShard untimed = {640, 4, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
     BqRetirementUnitCampaignPins pins = {0};
-    bool ready = exchanged && bq_prep_campaign_stages(campaign, job, token, 7) &&
-        bq_retirement_unit_campaign_pins(string_from_pointer(context->profile), &pins) &&
+    BQ_PREP_CHECK(staged && bq_retirement_unit_campaign_pins(string_from_pointer(context->profile), &pins) &&
         bq_retirement_unit_campaign_derive(&campaign->gate, &pins, context->ready_sha256, &untimed,
             &campaign->stages[0].samples, &campaign->stages[1].samples, campaign->commands[0], campaign->commands[1],
             2 * ((size_t)campaign->groups + campaign->runtime_count), &campaign->plan, campaign->plan_sha,
-            campaign->context_sha);
-    BQ_PREP_CHECK(ready);
+            campaign->context_sha));
     if (mode == BQ_PREP_CAMPAIGN_PLAN_OVERRIDE) campaign->plan.cell_members_per_scope += 1;
     if (mode == BQ_PREP_CAMPAIGN_CONTEXT_OVERRIDE) campaign->context_sha[0] = campaign->context_sha[0] == '0' ? '1' : '0';
     if (mode == BQ_PREP_CAMPAIGN_UNTIMED_OVERRIDE) untimed.records += 1;
-    char foreign[SHA256_HEX_CAPACITY];
-    memcpy(foreign, context->ready_sha256, sizeof(foreign));
-    if (mode == BQ_PREP_CAMPAIGN_FOREIGN_READY) foreign[1] = foreign[1] == '0' ? '1' : '0';
+    BqRetirementCampaignReady ready = campaign->ready;
+    BqRetirementHeldBinaries held = campaign->held;
+    if (mode == BQ_PREP_CAMPAIGN_READY_JOB) ready.job_id += 1;
+    if (mode == BQ_PREP_CAMPAIGN_READY_TOKEN) ready.attempt_token += 1;
+    /* The record's stored bytes differ from the imported text. */
+    char* moved = mode == BQ_PREP_CAMPAIGN_MOVED ? malloc((size_t)ready.length + 1u) : NULL;
+    if (moved)
+    {
+        memcpy(moved, ready.text, (size_t)ready.length + 1u);
+        moved[0] = moved[0] == 'B' ? 'C' : 'B';
+        ready.text = moved;
+    }
+    if (mode == BQ_PREP_CAMPAIGN_SWAPPED)
+    {
+        held.descriptors[0] = campaign->held.descriptors[1];
+        held.descriptors[1] = campaign->held.descriptors[0];
+    }
+    if (mode == BQ_PREP_CAMPAIGN_HELD_DIGEST)
+        held.verified.binary_sha256[1][0] = held.verified.binary_sha256[1][0] == '0' ? '1' : '0';
+    if (mode == BQ_PREP_CAMPAIGN_HELD_PREPARATION)
+        held.verified.preparation_sha256[0] = held.verified.preparation_sha256[0] == '0' ? '1' : '0';
     char unpinned[5120];
     BqRetirementCampaignUnitStore unit = context->unit;
     if (mode == BQ_PREP_CAMPAIGN_UNPINNED)
@@ -582,27 +784,36 @@ BUSTER_GLOBAL_LOCAL BqError bq_prep_campaign_bind(BqPrepCampaignAttempt* context
         campaign->gate.prepared.census_sha256[0] = saved == '0' ? '1' : '0';
         bq_retirement_correctness_seal(&campaign->gate, campaign->gate.sealed_sha256);
     }
+    /* The binding keeps the held pair it binds: only a refused copy is local. */
+    bool changed_held = mode == BQ_PREP_CAMPAIGN_SWAPPED || mode == BQ_PREP_CAMPAIGN_HELD_DIGEST ||
+        mode == BQ_PREP_CAMPAIGN_HELD_PREPARATION;
+    bool changed_ready = mode == BQ_PREP_CAMPAIGN_READY_JOB || mode == BQ_PREP_CAMPAIGN_READY_TOKEN ||
+        mode == BQ_PREP_CAMPAIGN_MOVED;
+    BqRetirementHeldBinaries const* bound_held = changed_held ? &held : &campaign->held;
+    BqRetirementCampaignReady const* bound_ready = changed_ready ? &ready : &campaign->ready;
     BqRetirementCampaignRequest request = bq_prep_campaign_request(campaign);
+    u64 deadline = bq_phase_clock() + 300000000000ull;
     BqError result = mode == BQ_PREP_CAMPAIGN_BLOCKED_PROFILE ?
         bq_retirement_campaign_service_bind_unit(attempt->store, context->fixture->workspaces_fd,
-            context->fixture->installed_fd, &phases, cancel, bq_phase_clock() + 300000000000ull, job, token,
-            attempt->digest, foreign, &untimed, &request, &campaign->held, &campaign->binding, &campaign->ready) :
-        bq_retirement_campaign_service_bind_unit_pinned(&unit, &phases, cancel, bq_phase_clock() + 300000000000ull,
-            job, token, attempt->digest, foreign, &untimed, &request, &campaign->held, &campaign->binding,
-            &campaign->ready);
+            context->fixture->installed_fd, &phases, cancel, deadline, job, token, &untimed, &request, bound_held,
+            bound_ready, &campaign->binding) :
+        bq_retirement_campaign_service_bind_unit_pinned(&unit, &phases, cancel, deadline, job, token, &untimed,
+            &request, bound_held, bound_ready, &campaign->binding);
     if (mode == BQ_PREP_CAMPAIGN_OTHER_GATE)
     {
         campaign->gate.prepared.census_sha256[0] = saved;
         bq_retirement_correctness_seal(&campaign->gate, campaign->gate.sealed_sha256);
     }
+    free(moved);
     BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL void bq_prep_campaign_binds(BqPrepCampaignAttempt* context, BqPrepCampaign* campaign, int cancel)
 {
-    static BqError const expected[BQ_PREP_CAMPAIGN_MODES] = {BQ_OK, BQ_INVALID_TRANSITION, BQ_WORKSPACE_MISMATCH,
-        BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_SOURCE_MISMATCH,
+    static BqError const expected[BQ_PREP_CAMPAIGN_MODES] = {BQ_OK, BQ_INVALID_TRANSITION, BQ_INVALID_TRANSITION,
+        BQ_INVALID_TRANSITION, BQ_WORKSPACE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH, BQ_SOURCE_MISMATCH,
+        BQ_SOURCE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH, BQ_RECIPE_MISMATCH,
         BQ_RECIPE_MISMATCH};
     for (u32 mode = 0; mode < BQ_PREP_CAMPAIGN_MODES; mode += 1)
     {
@@ -611,17 +822,18 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_binds(BqPrepCampaignAttempt* context, 
         BQ_PREP_CHECK(result == expected[mode]);
         if (mode != BQ_PREP_CAMPAIGN_BIND)
         {
-            BQ_PREP_CHECK(bq_prep_campaign_refused(campaign));
+            BQ_PREP_CHECK(bq_prep_campaign_refused(campaign) &&
+                          bq_retirement_campaign_ready_holds(&campaign->ready, &campaign->held));
             continue;
         }
         /* The launchable binding holds the record's binaries at the frozen
-         * plan and pre-sample context this entry derived. */
+         * plan and pre-sample context this entry derived, marked with the
+         * record's digest. */
         TpRetirementCampaign const* frozen = &campaign->campaign;
         BQ_PREP_CHECK(result == BQ_OK && campaign->binding.campaign == &campaign->campaign &&
                       campaign->binding.held_binaries == &campaign->held && campaign->held.owned &&
                       campaign->ready.owned && !strcmp(campaign->ready.ready_sha256, context->ready_sha256) &&
-                      !strcmp(campaign->held.verified.binary_sha256[0], campaign->ready.binary_sha256[0]) &&
-                      !strcmp(campaign->held.verified.binary_sha256[1], campaign->ready.binary_sha256[1]) &&
+                      !strcmp(campaign->binding.unit_ready_sha256, context->ready_sha256) &&
                       campaign->binding.job_id == context->attempt->attempt.job.id &&
                       campaign->binding.attempt_token == context->attempt->attempt.job.token &&
                       frozen->phase == TP_RETIREMENT_CAMPAIGN_AA && frozen->groups == campaign->groups &&
@@ -644,9 +856,95 @@ BUSTER_GLOBAL_LOCAL void bq_prep_campaign_binds(BqPrepCampaignAttempt* context, 
                       request.identity_count, request.review, campaign->budget_sha, request.plan_sha256,
                       request.context_sha256) && !campaign->binding.campaign &&
                       campaign->campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID);
-        bq_retirement_binaries_release(&campaign->held);
-        bq_retirement_campaign_ready_release(&campaign->ready);
     }
+}
+
+/* SETTLING through the first untimed launch: the driver acknowledges
+ * SETTLING, the import runs under it and holds the record's pair, and the
+ * untimed production batch launches the held baseline. The fixture's matched
+ * builds are text files, so the child cannot exec (exit 125): the driver
+ * stops with the launch's coordinates and process facts and keeps its log. */
+BUSTER_GLOBAL_LOCAL void bq_prep_campaign_driver(BqPrepCampaignAttempt* context, BqPrepCampaign* campaign, int cancel)
+{
+    BqPrepUnitAttempt const* attempt = &context->attempt->attempt;
+    u64 job = attempt->job.id, token = attempt->job.token;
+    char root[] = "/tmp/bq-retirement-unit-campaign-XXXXXX";
+    bool made = mkdtemp(root) != NULL;
+    int work = made ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    bool ok = work >= 3 && mkdirat(work, "logs", 0700) == 0 && mkdirat(work, "code", 0700) == 0;
+    int logs = ok ? openat(work, "logs", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int code_directory = ok ? openat(work, "code", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    BQ_PREP_CHECK(ok && logs >= 3 && code_directory >= 3);
+    /* The peer answers PREPARING (the unit's build) and the driver's SETTLING. */
+    BqPhaseChannel phases;
+    pid_t peer = bq_prep_campaign_peer(&phases, job, token, 2);
+    BQ_PREP_CHECK(peer > 0 && bq_phase_exchange(&phases, BQ_PHASE_PREPARING));
+    BqRetirementUnitCampaign driver = {0};
+    u64 deadline = bq_phase_clock() + 300000000000ull;
+    ok = work >= 3 && logs >= 3 && code_directory >= 3 &&
+        bq_retirement_unit_campaign_begin(&driver, &phases, cancel, deadline, work, logs) &&
+        phases.sequence == BQ_PHASE_SETTLING &&
+        bq_prep_campaign_import(context, campaign, &phases, cancel, deadline) == BQ_OK;
+    BQ_PREP_CHECK(ok && driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_SETTLING);
+    /* One untimed singleton group on the imported pair. */
+    char label[129], digests[2][65];
+    char* arguments[2][3];
+    char* leaves[2] = {"untimed-0.o", "untimed-1.o"};
+    TpRetirementUntimedBatch batches[4];
+    for (u32 variant = 0; variant < 2; variant += 1)
+    {
+        arguments[variant][0] = variant ? "candidate-ide" : "base-ide";
+        arguments[variant][1] = leaves[variant];
+        arguments[variant][2] = NULL;
+        TpRetirementMeasuredCommand command = {.unit = 0, .kind = 0, .variant = variant, .arguments = arguments[variant],
+            .argument_count = 2, .environment = campaign->environment, .environment_count = 1, .directory = root,
+            .artifact = leaves[variant], .timeout_seconds = 2, .command_sha256 = digests[variant],
+            .output_sha256 = campaign->batch_output};
+        BQ_PREP_CHECK(tp_retirement_command_hash(&command, digests[variant]));
+        for (u32 purpose = 0; purpose < 2; purpose += 1)
+            batches[variant * 2 + purpose] = (TpRetirementUntimedBatch){command, 0, variant, purpose,
+                TP_RETIREMENT_GROUP_SINGLETON};
+    }
+    unsigned inputs[1] = {1}, kinds[1] = {TP_RETIREMENT_GROUP_SINGLETON};
+    unsigned stages[1] = {TP_RETIREMENT_BUDGET_STAGE_LINK}, rows[1] = {campaign->runtime[0]};
+    TpRetirementCampaignReview review = {&campaign->budget, campaign->group_stages, inputs, kinds, stages,
+        campaign->groups, 1};
+    TpRetirementCodeRow codes[2];
+    memset(codes, 0, sizeof(codes));
+    BqRetirementUnitCampaignCode code = {rows, codes, 2, code_directory};
+    BqRetirementUnitCampaignStreams none = {0};
+    FILE* records = tmpfile();
+    unsigned char reproduced[2];
+    TpRetirementUntimed untimed;
+    ok = ok && records && bq_retirement_campaign_job_label(label, job) &&
+        tp_retirement_untimed_init(&untimed, records, NULL, &campaign->budget, 1, reproduced, label, token,
+            "boot-fixture", tp_first_allowed_cpu(), tp_process_monotonic_ns(), UINT64_MAX - 1, 0);
+    BQ_PREP_CHECK(ok);
+    bool ran = ok && bq_retirement_unit_campaign_untimed(&driver, &untimed, batches, 4, &campaign->held, &review, &none,
+                                                         &code);
+    BqRetirementUnitCampaignFailure failure = bq_retirement_unit_campaign_failure(&driver);
+    struct stat kept;
+    if (ok && failure.exit_code != 125)
+        fprintf(stderr, "RETIREMENT_PREP campaign driver stop %u status %d exit %d signal %d error %d\n", failure.reason,
+                failure.status, failure.exit_code, failure.signal_number, failure.launch_error);
+    BQ_PREP_CHECK(ok && !ran && driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED && untimed.failed &&
+                  failure.reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_LAUNCH && failure.launched &&
+                  failure.step == BQ_RETIREMENT_UNIT_CAMPAIGN_SETTLING && !failure.stage && !failure.group &&
+                  !failure.variant && failure.purpose == TP_RETIREMENT_UNTIMED_PRODUCTION && !failure.sequence &&
+                  failure.exit_code == 125 && !failure.signal_number && !failure.timed_out && !failure.cancelled &&
+                  failure.at_ns && !driver.launches[0] && !driver.code_count &&
+                  fstatat(logs, BQ_RETIREMENT_UNIT_CAMPAIGN_LOG, &kept, AT_SYMLINK_NOFOLLOW) == 0 &&
+                  kept.st_size == (off_t)failure.log_bytes && tp_retirement_digest(failure.log_sha256));
+    /* Nothing further runs on a failed driver. */
+    BQ_PREP_CHECK(!bq_retirement_unit_campaign_measuring(&driver) && phases.sequence == BQ_PHASE_SETTLING &&
+                  bq_retirement_unit_campaign_failure(&driver).reason == BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_LAUNCH);
+    if (records) fclose(records);
+    bq_prep_campaign_drop(campaign);
+    BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
+    int descriptors[] = {code_directory, logs, work};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(descriptors); index += 1)
+        if (descriptors[index] >= 0) BQ_PREP_CHECK(close(descriptors[index]) == 0);
+    if (made) bq_prep_test_cleanup(root);
 }
 
 BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_campaign(void)
@@ -688,9 +986,22 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_campaign(void)
     }
     if (ok)
     {
-        bq_prep_campaign_phase_refusals(context, campaign, cancel);
+        bq_prep_campaign_imports(context, campaign, cancel);
         bq_prep_campaign_ready_cases(context, campaign, &oracle, &admitted);
-        bq_prep_campaign_binds(context, campaign, cancel[0]);
+        bq_prep_campaign_timed_rows(context, campaign);
+        /* One import under SETTLING, then every bind on that pair. */
+        BqPhaseChannel phases;
+        pid_t peer = bq_prep_campaign_channel(&phases, success->attempt.job.id, success->attempt.job.token, 2);
+        BQ_PREP_CHECK(bq_prep_campaign_import(context, campaign, &phases, cancel[0],
+                                              bq_phase_clock() + 300000000000ull) == BQ_OK);
+        BQ_PREP_CHECK(bq_prep_test_phase_peer_join(&phases, peer));
+        if (campaign->held.owned && campaign->ready.owned)
+        {
+            bq_prep_campaign_bind_phases(context, campaign, cancel);
+            bq_prep_campaign_binds(context, campaign, cancel[0]);
+        }
+        bq_prep_campaign_drop(campaign);
+        bq_prep_campaign_driver(context, campaign, cancel[0]);
     }
     if (campaign) bq_prep_campaign_release(campaign);
     if (oracle.owned) BQ_PREP_CHECK(bq_retirement_unit_oracle_release(&oracle));

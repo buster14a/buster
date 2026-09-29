@@ -36,6 +36,10 @@ typedef struct BqRetirementCampaignBinding
     TpRetirementExecutable held_executables[2];
     uint64_t job_id, attempt_token;
     char sealed_sha256[65];
+    /* Set only by the store-based unit bind (retirement_campaign_service.h):
+     * the ready record digest it authenticated. The in-unit driver attaches
+     * only a binding that carries it. */
+    char unit_ready_sha256[65];
 } BqRetirementCampaignBinding;
 
 /* (A1) The pinned native-host timed target, x86_64-unknown-linux-gnu: the

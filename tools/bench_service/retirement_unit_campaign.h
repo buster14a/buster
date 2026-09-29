@@ -10,21 +10,37 @@
  * reach A/B; only the functional fixture build compiles the stand-in.
  *
  * Entry points, in the only order the driver accepts:
- *   bq_retirement_unit_campaign_begin      SETTLING acknowledgement
+ *   bq_retirement_unit_campaign_begin      SETTLING acknowledgement; the heavy
+ *                                          store-based import runs next
  *   bq_retirement_unit_campaign_untimed    untimed production and
  *                                          reproduction batches
- *                                          (retirement_untimed.h)
+ *                                          (retirement_untimed.h) on the
+ *                                          imported held pair; each untimed
+ *                                          row's code facts are observed
+ *                                          before any output is retired
  *   bq_retirement_unit_campaign_measuring  MEASURING acknowledgement; the
- *                                          store-based bind needs it
- *   bq_retirement_unit_campaign_attach     take the bound campaign, re-derive
- *                                          and compare its plan and context,
- *                                          require the planned result store
+ *                                          cheap store-based bind needs it
+ *   bq_retirement_unit_campaign_attach     take the store-bound campaign for
+ *                                          its ready record, re-derive and
+ *                                          compare its plan and context, and
+ *                                          require lane E's family counts and
+ *                                          result-store plan
  *   bq_retirement_unit_campaign_stage      A/A (then, after freeze, A/B): the
  *                                          exact held descriptors in cursor
- *                                          order, shards, metrics, export
+ *                                          order, shards, metrics, export;
+ *                                          after A/A the post-A/A binding
  *   bq_retirement_unit_campaign_admit      A/A admission (fixture only)
  *   bq_retirement_unit_campaign_freeze     A/B launch freeze
- *   bq_retirement_unit_campaign_finish     post-sample context, MEASURED
+ *   bq_retirement_unit_campaign_ready      post-sample context; the result is
+ *                                          ready for lane E
+ *   bq_retirement_unit_campaign_measured   MEASURED, after the caller confirms
+ *                                          composition and authority handoff
+ *
+ * Every launch is refused when it could outlive the absolute deadline, and
+ * its child is killed when the cancellation descriptor becomes readable
+ * (TpProcessInputs.cancellation). The first failure is retained with its
+ * coordinates and process facts (bq_retirement_unit_campaign_failure); each
+ * successful launch's log joins a per-stage chain before it is retired.
  *
  * Plan and context: bq_retirement_unit_campaign_pins reads the frozen #426
  * values (seed, pairs, resamples), the family's bootstrap member count and
@@ -42,11 +58,14 @@
  * pre-sample digest to both stages' transcript shards and numeric digests.
  *
  * Map: BqRetirementUnitCampaignPins, BqRetirementUnitCampaignFacts,
- * bq_retirement_unit_campaign_derive, BqRetirementUnitCampaignStreams,
+ * bq_retirement_unit_campaign_derive, bq_retirement_unit_campaign_post_aa,
+ * BqRetirementCampaignReady, BqRetirementUnitCampaignFailure,
+ * BqRetirementUnitCampaignStreams, BqRetirementUnitCampaignCode,
  * BqRetirementUnitCampaign, bq_retirement_unit_campaign_live,
- * bq_retirement_unit_campaign_launch_log, bq_retirement_unit_campaign_retire,
+ * bq_retirement_unit_campaign_launchable, bq_retirement_unit_campaign_code_step,
+ * bq_retirement_unit_campaign_log_chain, bq_retirement_unit_campaign_retire,
  * bq_retirement_unit_campaign_store_planned (lane E's pre-timing store plan),
- * bq_retirement_unit_campaign_result (what lane E's composer consumes).
+ * bq_retirement_unit_campaign_result (what lanes E and F consume).
  *
  * Nothing calls this from bq_worker_unit; the recipe stays blocked.
  */
@@ -81,9 +100,20 @@
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_PRE_DOMAIN "bq-retirement-unit-campaign-pre-sample-v1"
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_POST_DOMAIN "bq-retirement-unit-campaign-post-sample-v1"
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_SHARDS_DOMAIN "bq-retirement-unit-campaign-shards-v1"
-/* One scratch log per launch, unlinked after a successful launch and kept as
- * failure evidence otherwise. Index 0 is untimed, 1 A/A, 2 A/B. */
-#define BQ_RETIREMENT_UNIT_CAMPAIGN_LOGS {"unit-campaign-untimed.log", "unit-campaign-aa.log", "unit-campaign-ab.log"}
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA_DOMAIN "bq-retirement-unit-campaign-post-aa-v1"
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_LOGS_DOMAIN "bq-retirement-unit-campaign-logs-v1"
+/* Every launch writes one scratch log, `<prefix>0000<suffix>` in the log
+ * directory: its digest joins its stage's chain and it is unlinked after a
+ * successful launch. A failed launch keeps it as evidence and the driver
+ * stops, so an attempt retains at most one log (lane E declares the group
+ * with these values): its full digest and size are in the failure record and
+ * it is truncated to the byte cap, a storage bound chosen here, not a
+ * measurement value. */
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_PREFIX "unit-campaign-log-"
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_SUFFIX ".log"
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_LOG BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_PREFIX "0000" BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_SUFFIX
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_LOGS_MAX 1u
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_BYTES_MAX (UINT64_C(1) << 20)
 
 typedef struct BqRetirementUnitCampaignPins
 {
@@ -192,15 +222,42 @@ static inline int bq_retirement_unit_campaign_shape(BqRetirementCorrectness cons
     return ok;
 }
 
+/* Lane E's composer reads an object group's member metrics in its batches'
+ * input order: in both frozen contracts the members are the first inputs, in
+ * ascending row (census) order. */
+static inline int bq_retirement_unit_campaign_members_first(BqRetirementCorrectness const* gate)
+{
+    int ok = gate && (!gate->batch_group_count || gate->batch_groups);
+    for (uint32_t g = 0; ok && g < gate->batch_group_count; g += 1)
+        for (unsigned side = 0; ok && side < 2; ++side)
+        {
+            TpRetirementBatchContract const* contract = &gate->batch_groups[g].contract[side];
+            unsigned members = 0;
+            for (unsigned k = 0; ok && k < contract->input_count; ++k)
+                if (contract->inputs[k].member)
+                {
+                    ok = members == k && (!k || contract->inputs[k].row > contract->inputs[k - 1].row);
+                    members += 1;
+                }
+            ok = ok && members;
+        }
+    return ok;
+}
+
 /* The #619 plan: the pinned seed, pairs, resamples and bootstrap members, and
- * the exact-cell count derived from the gate (never supplied). */
+ * the exact-cell count derived from the gate (never supplied). As the
+ * validator's _derive_statistical_family requires, every variable metric has
+ * cells: runtime needs a runtime-eligible timed row (U > 0) and the batch
+ * metric pair an object batch group (B > 0). Every object group keeps its
+ * members first (bq_retirement_unit_campaign_members_first). */
 static inline int bq_retirement_unit_campaign_plan(BqRetirementCorrectness const* gate,
     BqRetirementUnitCampaignPins const* pins, TpRetirementPlan* plan)
 {
     uint32_t timed = 0, runtime = 0, groups = 0;
     int ok = plan && pins && pins->seed && bq_retirement_unit_campaign_shape(gate, &timed, &runtime, &groups);
     uint64_t cells = ok ? 2u * (uint64_t)timed + runtime + 2u * (uint64_t)gate->batch_group_count : 0;
-    ok = ok && cells && cells <= TP_RETIREMENT_MAX_CELL_MEMBERS_PER_SCOPE;
+    ok = ok && runtime && gate->batch_group_count && bq_retirement_unit_campaign_members_first(gate) &&
+        cells <= TP_RETIREMENT_MAX_CELL_MEMBERS_PER_SCOPE;
     if (plan)
         *plan = ok ? (TpRetirementPlan){.seed = pins->seed, .version = TP_RETIREMENT_STATISTICS_VERSION,
             .bootstrap_members_per_scope = pins->bootstrap_members, .cell_members_per_scope = (unsigned)cells,
@@ -476,6 +533,68 @@ static inline int bq_retirement_unit_campaign_post_context(TpRetirementCampaign 
     return ok;
 }
 
+/* The post-A/A binding digest: the frozen pre-sample context chained to the
+ * finished A/A stage (its transcript shard chain, numeric and shard
+ * descriptors and metrics totals). It exists only while the campaign awaits
+ * A/A admission with a ready A/A stage; the admission must name it. */
+static inline int bq_retirement_unit_campaign_post_aa(TpRetirementCampaign const* campaign, char const* pre_context,
+    char const shard_chain[65], char digest[65])
+{
+    TpRetirementSamples const* samples = campaign ? campaign->samples[0] : NULL;
+    int ok = campaign && samples && digest && pre_context && shard_chain && tp_retirement_digest(pre_context) &&
+        tp_retirement_digest(shard_chain) && campaign->phase == TP_RETIREMENT_CAMPAIGN_AWAIT_AA &&
+        !strcmp(campaign->context_sha256, pre_context) && tp_retirement_campaign_stage_ready(campaign, 0);
+    Sha256 hash;
+    sha256_init(&hash);
+    if (ok)
+    {
+        static char const domain[] = BQ_RETIREMENT_UNIT_CAMPAIGN_POST_AA_DOMAIN;
+        sha256_add(&hash, domain, sizeof(domain) - 1);
+        bq_retirement_unit_campaign_text(&hash, "pre-sample", pre_context);
+        bq_retirement_unit_campaign_text(&hash, "plan", campaign->plan_sha256);
+        bq_retirement_unit_campaign_text(&hash, "transcript-shards", shard_chain);
+        bq_retirement_unit_campaign_number(&hash, "invocations", samples->transcript->total_records);
+        bq_retirement_unit_campaign_number(&hash, "completed-at", samples->transcript->completed_at_ns);
+        bq_retirement_unit_campaign_text(&hash, "raw", samples->raw_sha256);
+        bq_retirement_unit_campaign_text(&hash, "row-shards", samples->descriptors_sha256[0]);
+        bq_retirement_unit_campaign_text(&hash, "batch-shards", samples->descriptors_sha256[1]);
+        bq_retirement_unit_campaign_number(&hash, "samples", samples->exported);
+        bq_retirement_unit_campaign_number(&hash, "metrics-artifacts", samples->metrics ? samples->metrics->artifacts : 0);
+        bq_retirement_unit_campaign_number(&hash, "metrics-bytes", samples->metrics ? samples->metrics->total_bytes : 0);
+        sha256_finish_hex(&hash, digest);
+    }
+    else if (digest) digest[0] = 0;
+    return ok;
+}
+
+/* The imported BQ-RETIREMENT-READY-V1 record (lane B's step 10): the
+ * attempt it belongs to, its verified bytes and the fields D binds. The
+ * store-based import in retirement_campaign_service.h fills it; the driver's
+ * attach requires an owned one. Zero-initialize; release on every path. */
+typedef struct BqRetirementCampaignReady
+{
+    BqJob job;
+    char* text;
+    u64 job_id, attempt_token;
+    u32 length, rows, object_rows, native_target, observed_rows, owned;
+    char ready_sha256[SHA256_HEX_CAPACITY], preparation_sha256[SHA256_HEX_CAPACITY];
+    char binary_record_sha256[SHA256_HEX_CAPACITY], build_record_sha256[SHA256_HEX_CAPACITY];
+    char binary_sha256[2][SHA256_HEX_CAPACITY];
+    char support_sha256[SHA256_HEX_CAPACITY], census_sha256[SHA256_HEX_CAPACITY];
+    char population_sha256[SHA256_HEX_CAPACITY], template_sha256[SHA256_HEX_CAPACITY];
+    char inventory_sha256[SHA256_HEX_CAPACITY], oracle_attempt_sha256[SHA256_HEX_CAPACITY];
+    char gate_sha256[SHA256_HEX_CAPACITY];
+} BqRetirementCampaignReady;
+
+static inline void bq_retirement_campaign_ready_release(BqRetirementCampaignReady* ready)
+{
+    if (ready)
+    {
+        free(ready->text);
+        *ready = (BqRetirementCampaignReady){0};
+    }
+}
+
 typedef enum BqRetirementUnitCampaignStep
 {
     BQ_RETIREMENT_UNIT_CAMPAIGN_NEW,
@@ -487,14 +606,49 @@ typedef enum BqRetirementUnitCampaignStep
     BQ_RETIREMENT_UNIT_CAMPAIGN_ADMITTED,
     BQ_RETIREMENT_UNIT_CAMPAIGN_FROZEN,
     BQ_RETIREMENT_UNIT_CAMPAIGN_AB,
+    BQ_RETIREMENT_UNIT_CAMPAIGN_READY,
     BQ_RETIREMENT_UNIT_CAMPAIGN_FINISHED,
     BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED
 } BqRetirementUnitCampaignStep;
 
+/* Why the driver stopped. REFUSED: a step or its inputs were refused (order,
+ * plan, binding, admission, store plan). CANCELLED and DEADLINE stop before a
+ * launch; CHANNEL is a failed phase exchange; LAUNCH is a launched child that
+ * failed or whose output, metrics or record was refused (its process facts
+ * say which). */
+typedef enum BqRetirementUnitCampaignStop
+{
+    BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_NONE,
+    BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_REFUSED,
+    BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_CANCELLED,
+    BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_DEADLINE,
+    BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_CHANNEL,
+    BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_LAUNCH
+} BqRetirementUnitCampaignStop;
+
+/* The first failure, retained for lanes E and F: the step it stopped, the
+ * stage (0 untimed, 1 A/A, 2 A/B, TP_RETIREMENT_NONE outside a stage),
+ * whether a child was launched, the invocation's coordinates (NONE or -1 where
+ * they do not apply; purpose is the untimed batch's), and the launched
+ * child's measurement status, exit code, signal, timeout and cancellation.
+ * The unit cannot see a cgroup OOM kill directly: it shows as SIGKILL, and
+ * the supervisor's memory events are the authority. The failed launch's log
+ * (BQ_RETIREMENT_UNIT_CAMPAIGN_LOG; log_bytes and log_sha256 are its full
+ * size and digest before the cap) and scratch outputs are kept in place. */
+typedef struct BqRetirementUnitCampaignFailure
+{
+    unsigned reason, step, stage, launched;
+    unsigned kind, group, row, variant, phase, purpose;
+    int round, pair, warmup, status, exit_code, signal_number, timed_out, cancelled, launch_error;
+    uint64_t sequence, at_ns, log_bytes;
+    char log_sha256[65];
+} BqRetirementUnitCampaignFailure;
+
 /* Service-created, empty streams one stage consumes, in order: spare
  * transcript shards for rotation, spare metrics shards, and one stream per
  * numeric sample shard (capacity.sample_shards_per_stage). The caller owns
- * every stream and its durable no-replace publication (#1023). */
+ * every stream and its durable no-replace publication (#1023); transcript
+ * shard paths must sort in index order for lane E's composer. */
 typedef struct BqRetirementUnitCampaignStreams
 {
     FILE* const* transcripts;
@@ -503,23 +657,41 @@ typedef struct BqRetirementUnitCampaignStreams
     unsigned transcript_count, metrics_count, sample_count;
 } BqRetirementUnitCampaignStreams;
 
-/* Zero-initialize. The phase channel, the untimed runner, the held binaries
- * and the binding are borrowed and must outlive the driver. */
+/* Where the untimed code facts go: code_directory (service-owned, private,
+ * on the work directory's file system) retains each production object as
+ * `code-<row>-<variant>.o`; rows maps each untimed singleton group to its
+ * row (object groups name their rows in their contracts); codes receives
+ * one entry per untimed row, both variants observed, in ascending row order. */
+typedef struct BqRetirementUnitCampaignCode
+{
+    unsigned const* rows;
+    TpRetirementCodeRow* codes;
+    unsigned capacity;
+    int code_directory;
+} BqRetirementUnitCampaignCode;
+
+/* Zero-initialize. The phase channel, the untimed runner, the held binaries,
+ * the ready record, the code workspace and the binding are borrowed and must
+ * outlive the driver. */
 typedef struct BqRetirementUnitCampaign
 {
     BqPhaseChannel* phases;
     BqRetirementCampaignBinding const* binding;
     TpRetirementUntimed* untimed;
+    TpRetirementCodeRow* codes;
     TpRetirementExecutable untimed_executables[2];
     TpRetirementPlan plan;
+    BqRetirementUnitCampaignFailure failure;
     Sha256 shard_hash[TP_RETIREMENT_CAMPAIGN_STAGES];
+    Sha256 log_hash[3];
     TpRetirementShard untimed_records;
     TpRetirementShardFile untimed_metrics;
     char held_sha256[2][65], held_identity_sha256[2][65];
-    char plan_sha256[65], context_sha256[65], post_context_sha256[65];
+    char plan_sha256[65], context_sha256[65], post_aa_sha256[65], post_context_sha256[65];
     char shard_chain_sha256[TP_RETIREMENT_CAMPAIGN_STAGES][65];
+    char log_chain_sha256[3][65];
     uint64_t deadline_ns, launches[3];
-    unsigned step, transcript_shards[TP_RETIREMENT_CAMPAIGN_STAGES], metrics_shards[3];
+    unsigned step, code_count, transcript_shards[TP_RETIREMENT_CAMPAIGN_STAGES], metrics_shards[3];
     int cancellation_fd, work_directory, log_directory;
 } BqRetirementUnitCampaign;
 
@@ -535,10 +707,35 @@ static inline int bq_retirement_unit_campaign_live(BqPhaseChannel const* phases,
     return ok;
 }
 
+/* Record the first failure only; later refusals keep it. */
+static inline void bq_retirement_unit_campaign_record(BqRetirementUnitCampaign* driver,
+    BqRetirementUnitCampaignFailure const* failure)
+{
+    if (driver && failure && !driver->failure.reason)
+    {
+        driver->failure = *failure;
+        driver->failure.step = driver->step;
+        driver->failure.at_ns = bq_phase_clock();
+    }
+}
+
+static inline BqRetirementUnitCampaignFailure bq_retirement_unit_campaign_stop(unsigned reason, unsigned stage)
+{
+    BqRetirementUnitCampaignFailure failure = {.reason = reason, .stage = stage, .kind = TP_RETIREMENT_NONE,
+        .group = TP_RETIREMENT_NONE, .row = TP_RETIREMENT_NONE, .variant = TP_RETIREMENT_NONE,
+        .phase = TP_RETIREMENT_NONE, .purpose = TP_RETIREMENT_NONE, .round = -1, .pair = -1, .warmup = -1,
+        .status = -1, .exit_code = -1};
+    return failure;
+}
+
 static inline void bq_retirement_unit_campaign_fail(BqRetirementUnitCampaign* driver)
 {
     if (driver)
     {
+        BqRetirementUnitCampaignFailure refused = bq_retirement_unit_campaign_stop(BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_REFUSED,
+            TP_RETIREMENT_NONE);
+        if (driver->phases && driver->phases->failed) refused.reason = BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_CHANNEL;
+        bq_retirement_unit_campaign_record(driver, &refused);
         if (driver->binding && driver->binding->campaign) tp_retirement_campaign_poison(driver->binding->campaign);
         if (driver->untimed && !driver->untimed->finished)
         {
@@ -549,22 +746,85 @@ static inline void bq_retirement_unit_campaign_fail(BqRetirementUnitCampaign* dr
     }
 }
 
-/* A fresh, empty read-write log for one launch. */
-static inline int bq_retirement_unit_campaign_launch_log(BqRetirementUnitCampaign const* driver, unsigned index)
+/* Before a launch of `timeout_seconds`: not cancelled, the channel intact and
+ * the child able to finish before the absolute deadline (a launch is never
+ * shortened, since its timeout is part of the frozen command). A refusal is
+ * recorded with the coordinates the caller filled in. */
+static inline int bq_retirement_unit_campaign_launchable(BqRetirementUnitCampaign* driver, unsigned timeout_seconds,
+    BqRetirementUnitCampaignFailure* coordinates)
 {
-    static char const* const names[] = BQ_RETIREMENT_UNIT_CAMPAIGN_LOGS;
-    int log = driver && index < BUSTER_ARRAY_LENGTH(names) ?
-        openat(driver->log_directory, names[index], O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    struct pollfd wait = {.fd = driver->cancellation_fd, .events = POLLIN};
+    int readable = driver->cancellation_fd >= 3 ? poll(&wait, 1, 0) : -1;
+    uint64_t now = bq_phase_clock(), span = (uint64_t)timeout_seconds * UINT64_C(1000000000);
+    int ok = readable == 0 && !driver->phases->failed && now && timeout_seconds &&
+        now < driver->deadline_ns && span <= driver->deadline_ns - now;
+    if (!ok)
+    {
+        coordinates->reason = readable != 0 ? BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_CANCELLED :
+            driver->phases->failed ? BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_CHANNEL : BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_DEADLINE;
+        bq_retirement_unit_campaign_record(driver, coordinates);
+    }
+    return ok;
+}
+
+/* A failed launch: its measurement status and process facts, and its kept
+ * log's full size and digest before the log is capped. PLAN_INVALID means
+ * the launch boundary refused before any child started. */
+static inline void bq_retirement_unit_campaign_launch_failed(BqRetirementUnitCampaign* driver,
+    BqRetirementUnitCampaignFailure* coordinates, TpRetirementMeasurementResult const* result, int log)
+{
+    if (tp_retirement_file_hash(log, coordinates->log_sha256, &coordinates->log_bytes) &&
+        coordinates->log_bytes > BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_BYTES_MAX &&
+        ftruncate(log, (off_t)BQ_RETIREMENT_UNIT_CAMPAIGN_LOG_BYTES_MAX) != 0)
+        coordinates->log_sha256[0] = 0;
+    coordinates->reason = BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_LAUNCH;
+    coordinates->launched = result->status != TP_RETIREMENT_MEASUREMENT_PLAN_INVALID;
+    coordinates->status = (int)result->status;
+    coordinates->exit_code = result->process.exit_code;
+    coordinates->signal_number = result->process.signal_number;
+    coordinates->timed_out = result->process.timed_out;
+    coordinates->cancelled = result->process.cancelled;
+    coordinates->launch_error = result->process.launch_error;
+    bq_retirement_unit_campaign_record(driver, coordinates);
+}
+
+/* A fresh, empty read-write log for one launch. */
+static inline int bq_retirement_unit_campaign_launch_log(BqRetirementUnitCampaign const* driver)
+{
+    int log = driver ? openat(driver->log_directory, BQ_RETIREMENT_UNIT_CAMPAIGN_LOG,
+                              O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
     return log;
+}
+
+/* A successful launch's log joins its stage's chain (digest and size) before
+ * the scratch log is retired. */
+static inline int bq_retirement_unit_campaign_log_chain(BqRetirementUnitCampaign* driver, int log, unsigned index)
+{
+    char digest[65] = {0};
+    uint64_t bytes = 0;
+    int ok = index < 3 && tp_retirement_file_hash(log, digest, &bytes);
+    if (ok)
+    {
+        bq_retirement_unit_campaign_number(&driver->log_hash[index], "log", driver->launches[index]);
+        bq_retirement_unit_campaign_number(&driver->log_hash[index], "bytes", bytes);
+        bq_retirement_unit_campaign_text(&driver->log_hash[index], "sha256", digest);
+    }
+    return ok;
+}
+
+static inline void bq_retirement_unit_campaign_log_seal(BqRetirementUnitCampaign* driver, unsigned index)
+{
+    Sha256 copy = driver->log_hash[index];
+    bq_retirement_unit_campaign_number(&copy, "logs", driver->launches[index]);
+    sha256_finish_hex(&copy, driver->log_chain_sha256[index]);
 }
 
 /* Retire a successful launch's scratch outputs and its log; a failed launch
  * keeps both as evidence. */
 static inline int bq_retirement_unit_campaign_retire(BqRetirementUnitCampaign const* driver,
-    TpRetirementMeasuredCommand const* command, unsigned index)
+    TpRetirementMeasuredCommand const* command)
 {
-    static char const* const names[] = BQ_RETIREMENT_UNIT_CAMPAIGN_LOGS;
-    int ok = index < BUSTER_ARRAY_LENGTH(names) && unlinkat(driver->log_directory, names[index], 0) == 0;
+    int ok = unlinkat(driver->log_directory, BQ_RETIREMENT_UNIT_CAMPAIGN_LOG, 0) == 0;
     if (command->batch)
     {
         ok = unlinkat(driver->work_directory, command->batch->metrics, 0) == 0 && ok;
@@ -572,7 +832,7 @@ static inline int bq_retirement_unit_campaign_retire(BqRetirementUnitCampaign co
             if (command->batch->inputs[i].artifact)
                 ok = unlinkat(driver->work_directory, command->batch->inputs[i].artifact, 0) == 0 && ok;
     }
-    else if (!command->kind) ok = unlinkat(driver->work_directory, command->artifact, 0) == 0 && ok;
+    else if (!command->kind && command->artifact) ok = unlinkat(driver->work_directory, command->artifact, 0) == 0 && ok;
     return ok;
 }
 
@@ -594,7 +854,9 @@ static inline int bq_retirement_unit_campaign_metrics_ready(BqRetirementUnitCamp
     return ok;
 }
 
-/* SETTLING: the unit's build already holds the PREPARING acknowledgement. */
+/* SETTLING: the unit's build already holds the PREPARING acknowledgement.
+ * The heavy store-based import (retirement_campaign_service.h) belongs in
+ * this phase, before the untimed batches. */
 static inline int bq_retirement_unit_campaign_begin(BqRetirementUnitCampaign* driver, BqPhaseChannel* phases,
     int cancellation_fd, uint64_t deadline_ns, int work_directory, int log_directory)
 {
@@ -608,9 +870,17 @@ static inline int bq_retirement_unit_campaign_begin(BqRetirementUnitCampaign* dr
         driver->deadline_ns = deadline_ns;
         driver->work_directory = work_directory;
         driver->log_directory = log_directory;
+        for (unsigned index = 0; index < 3; ++index)
+        {
+            static char const domain[] = BQ_RETIREMENT_UNIT_CAMPAIGN_LOGS_DOMAIN;
+            sha256_init(&driver->log_hash[index]);
+            sha256_add(&driver->log_hash[index], domain, sizeof(domain) - 1);
+            bq_retirement_unit_campaign_number(&driver->log_hash[index], "stage", index);
+        }
         ok = bq_phase_exchange_until(phases, BQ_PHASE_SETTLING, deadline_ns);
     }
-    if (driver) driver->step = ok ? BQ_RETIREMENT_UNIT_CAMPAIGN_SETTLING : BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED;
+    if (ok) driver->step = BQ_RETIREMENT_UNIT_CAMPAIGN_SETTLING;
+    else bq_retirement_unit_campaign_fail(driver);
     return ok;
 }
 
@@ -633,20 +903,144 @@ static inline int bq_retirement_unit_campaign_executables(BqRetirementHeldBinari
     return ok;
 }
 
+/* One untimed artifact: its output leaf and the row whose code it is. */
+static inline int bq_retirement_unit_campaign_artifact(TpRetirementUntimedBatch const* batch,
+    BqRetirementUnitCampaignCode const* code, unsigned index, char const** leaf, unsigned* row)
+{
+    TpRetirementBatchContract const* contract = batch->command.batch;
+    int ok = contract ? index < contract->input_count && contract->inputs[index].member &&
+        contract->inputs[index].artifact : !index && batch->command.artifact;
+    *leaf = ok ? (contract ? contract->inputs[index].artifact : batch->command.artifact) : NULL;
+    *row = ok ? (contract ? contract->inputs[index].row : code->rows[batch->group]) : TP_RETIREMENT_NONE;
+    return ok;
+}
+
+static inline int bq_retirement_unit_campaign_code_name(char name[48], unsigned row, unsigned variant)
+{
+    int length = snprintf(name, 48, "code-%u-%u.o", row, variant);
+    return length > 0 && length < 48;
+}
+
+/* After a production batch, keep each object as the row's frozen artifact
+ * in the code directory (a no-replace link, then the scratch name goes);
+ * after its reproduction, parse the frozen artifact and require the
+ * reproduction to be byte-identical (tp_retirement_code_observe). */
+static inline int bq_retirement_unit_campaign_code_step(BqRetirementUnitCampaign* driver,
+    BqRetirementUnitCampaignCode const* code, TpRetirementUntimedBatch const* batch)
+{
+    unsigned count = batch->command.batch ? batch->command.batch->input_count : 1;
+    int ok = 1;
+    for (unsigned index = 0; ok && index < count; ++index)
+    {
+        char const* leaf = NULL;
+        unsigned row = TP_RETIREMENT_NONE;
+        char name[48];
+        if (!bq_retirement_unit_campaign_artifact(batch, code, index, &leaf, &row)) continue;
+        ok = row != TP_RETIREMENT_NONE && bq_retirement_unit_campaign_code_name(name, row, batch->variant);
+        if (ok && batch->purpose == TP_RETIREMENT_UNTIMED_PRODUCTION)
+            ok = linkat(driver->work_directory, leaf, code->code_directory, name, 0) == 0 &&
+                unlinkat(driver->work_directory, leaf, 0) == 0;
+        else if (ok)
+        {
+            unsigned entry = 0;
+            while (entry < driver->code_count && driver->codes[entry].row != row) ++entry;
+            ok = entry < code->capacity;
+            if (ok && entry == driver->code_count)
+            {
+                driver->codes[entry] = (TpRetirementCodeRow){.row = row};
+                driver->code_count += 1;
+            }
+            int frozen = ok ? openat(code->code_directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+            int reproduction = ok ? openat(driver->work_directory, leaf, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+            TpRetirementCodeSide* side = ok ? &driver->codes[entry].sides[batch->variant] : NULL;
+            ok = ok && frozen >= 3 && reproduction >= 3 && !side->artifact_sha256[0] &&
+                tp_retirement_code_observe(frozen, reproduction, side);
+            if (frozen >= 0 && close(frozen) != 0) ok = 0;
+            if (reproduction >= 0 && close(reproduction) != 0) ok = 0;
+        }
+    }
+    return ok;
+}
+
+/* A production batch's objects already moved to the code directory, so only
+ * its log and metrics remain to retire; a reproduction retires everything. */
+static inline int bq_retirement_unit_campaign_untimed_retire(BqRetirementUnitCampaign const* driver,
+    TpRetirementUntimedBatch const* batch)
+{
+    TpRetirementMeasuredCommand retired = batch->command;
+    TpRetirementBatchContract kept;
+    TpRetirementBatchInput* left = NULL;
+    int ok = 1;
+    if (batch->purpose == TP_RETIREMENT_UNTIMED_PRODUCTION)
+    {
+        retired.artifact = NULL;
+        if (retired.batch)
+        {
+            kept = *retired.batch;
+            left = (TpRetirementBatchInput*)malloc((size_t)kept.input_count * sizeof(*left));
+            ok = left != NULL;
+            for (unsigned k = 0; ok && k < kept.input_count; ++k)
+            {
+                left[k] = kept.inputs[k];
+                if (left[k].member) left[k].artifact = NULL;
+            }
+            kept.inputs = left;
+            retired.batch = &kept;
+        }
+    }
+    ok = ok && bq_retirement_unit_campaign_retire(driver, &retired);
+    free(left);
+    return ok;
+}
+
+/* Every untimed row observed on both variants, then ascending row order. */
+static inline int bq_retirement_unit_campaign_codes_sealed(BqRetirementUnitCampaign* driver)
+{
+    int ok = driver->code_count != 0;
+    for (unsigned entry = 0; ok && entry < driver->code_count; ++entry)
+        ok = driver->codes[entry].sides[0].artifact_sha256[0] && driver->codes[entry].sides[1].artifact_sha256[0];
+    for (unsigned entry = 1; ok && entry < driver->code_count; ++entry)
+    {
+        TpRetirementCodeRow moving = driver->codes[entry];
+        unsigned at = entry;
+        while (at && driver->codes[at - 1].row > moving.row)
+        {
+            driver->codes[at] = driver->codes[at - 1];
+            --at;
+        }
+        driver->codes[at] = moving;
+    }
+    for (unsigned entry = 1; ok && entry < driver->code_count; ++entry)
+        ok = driver->codes[entry - 1].row < driver->codes[entry].row;
+    return ok;
+}
+
 /* Untimed code-artifact batches, outside timing and before MEASURING: each
- * batch in (group, variant, purpose) order on the held binary of its
- * variant, its group shape the reviewed one. The runner rejects an order or
- * window violation and finish requires every reproduction. */
+ * group's production then reproduction batch per variant, in (group,
+ * variant, purpose) order, on the held binary of its variant (the pair the
+ * store-based import holds), its group shape the reviewed one. Each untimed
+ * row's code side is observed from the retained production object and the
+ * reproduction before any scratch output is retired. The runner rejects an
+ * order or window violation and finish requires every reproduction. */
 static inline int bq_retirement_unit_campaign_untimed(BqRetirementUnitCampaign* driver, TpRetirementUntimed* untimed,
     TpRetirementUntimedBatch const* batches, unsigned count, BqRetirementHeldBinaries const* held,
-    TpRetirementCampaignReview const* review, BqRetirementUnitCampaignStreams const* streams)
+    TpRetirementCampaignReview const* review, BqRetirementUnitCampaignStreams const* streams,
+    BqRetirementUnitCampaignCode const* code)
 {
+    unsigned char* produced = untimed && untimed->groups && untimed->groups <= TP_RETIREMENT_MAX_CELLS ?
+        (unsigned char*)calloc((size_t)untimed->groups * 2, 1) : NULL;
     int ok = driver && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_SETTLING && untimed && !untimed->failed &&
-        !untimed->finished && !untimed->records && batches && review && streams &&
-        review->untimed_groups == untimed->groups && count >= 2u * untimed->groups &&
-        count <= 4u * untimed->groups && review->untimed_inputs && review->untimed_kinds &&
+        !untimed->finished && !untimed->records && batches && review && streams && code && code->rows &&
+        code->codes && code->capacity && code->code_directory >= 3 && produced &&
+        review->untimed_groups == untimed->groups && count == 4u * untimed->groups &&
+        review->untimed_inputs && review->untimed_kinds &&
         bq_retirement_unit_campaign_executables(held, driver->untimed_executables);
     if (driver) driver->untimed = untimed;
+    if (ok)
+    {
+        driver->codes = code->codes;
+        driver->code_count = 0;
+    }
     for (unsigned side = 0; ok && side < 2; ++side)
     {
         memcpy(driver->held_sha256[side], held->verified.binary_sha256[side], 65);
@@ -656,22 +1050,40 @@ static inline int bq_retirement_unit_campaign_untimed(BqRetirementUnitCampaign* 
     {
         TpRetirementUntimedBatch const* batch = &batches[i];
         unsigned inputs_count = batch->command.batch ? batch->command.batch->input_count : 1;
-        ok = batch->group < untimed->groups && batch->variant < 2 &&
+        BqRetirementUnitCampaignFailure coordinates = bq_retirement_unit_campaign_stop(
+            BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_REFUSED, 0);
+        coordinates.group = batch->group;
+        coordinates.variant = batch->variant;
+        coordinates.purpose = batch->purpose;
+        coordinates.sequence = i;
+        ok = batch->group < untimed->groups && batch->variant < 2 && batch->purpose < 2 &&
             batch->group_kind == review->untimed_kinds[batch->group] &&
             inputs_count == review->untimed_inputs[batch->group] &&
-            bq_retirement_unit_campaign_live(driver->phases, driver->cancellation_fd, driver->deadline_ns) &&
+            (batch->purpose == TP_RETIREMENT_UNTIMED_PRODUCTION || produced[batch->group * 2 + batch->variant]);
+        if (!ok) bq_retirement_unit_campaign_record(driver, &coordinates);
+        ok = ok && bq_retirement_unit_campaign_launchable(driver, batch->command.timeout_seconds, &coordinates) &&
             bq_retirement_unit_campaign_metrics_ready(driver, untimed->metrics, streams->metrics,
                 streams->metrics_count, 0);
-        int log = ok ? bq_retirement_unit_campaign_launch_log(driver, 0) : -1;
+        int log = ok ? bq_retirement_unit_campaign_launch_log(driver) : -1;
         TpProcessInputs inputs = {driver->untimed_executables[batch->variant].descriptor, driver->work_directory, log,
-            batch->command.environment};
-        TpRetirementMeasurementResult result;
-        ok = ok && log >= 3 && tp_retirement_untimed_run(untimed, batch, &driver->untimed_executables[batch->variant],
+            batch->command.environment, driver->cancellation_fd};
+        TpRetirementMeasurementResult result = {.status = TP_RETIREMENT_MEASUREMENT_PLAN_INVALID,
+            .process = {.exit_code = -1}};
+        int launched = ok && log >= 3;
+        ok = launched && tp_retirement_untimed_run(untimed, batch, &driver->untimed_executables[batch->variant],
             &inputs, driver->work_directory, &result);
+        if (launched && !ok) bq_retirement_unit_campaign_launch_failed(driver, &coordinates, &result, log);
+        ok = ok && bq_retirement_unit_campaign_code_step(driver, code, batch) &&
+            bq_retirement_unit_campaign_log_chain(driver, log, 0);
         if (log >= 0 && close(log) != 0) ok = 0;
-        if (ok) ok = bq_retirement_unit_campaign_retire(driver, &batch->command, 0);
-        if (ok) driver->launches[0] += 1;
+        ok = ok && bq_retirement_unit_campaign_untimed_retire(driver, batch);
+        if (ok)
+        {
+            if (batch->purpose == TP_RETIREMENT_UNTIMED_PRODUCTION) produced[batch->group * 2 + batch->variant] = 1;
+            driver->launches[0] += 1;
+        }
     }
+    free(produced);
     ok = ok && tp_retirement_untimed_finish(untimed, &driver->untimed_records);
     if (ok && untimed->metrics)
     {
@@ -679,7 +1091,12 @@ static inline int bq_retirement_unit_campaign_untimed(BqRetirementUnitCampaign* 
             tp_retirement_metrics_shards_finish(untimed->metrics, &driver->untimed_metrics);
         if (ok) driver->metrics_shards[0] += 1;
     }
-    if (ok) driver->step = BQ_RETIREMENT_UNIT_CAMPAIGN_UNTIMED;
+    ok = ok && bq_retirement_unit_campaign_codes_sealed(driver);
+    if (ok)
+    {
+        bq_retirement_unit_campaign_log_seal(driver, 0);
+        driver->step = BQ_RETIREMENT_UNIT_CAMPAIGN_UNTIMED;
+    }
     else bq_retirement_unit_campaign_fail(driver);
     return ok;
 }
@@ -718,37 +1135,46 @@ static inline int bq_retirement_unit_campaign_store_planned(TpRetirementCampaign
 }
 
 /* Take the campaign the store-based bind froze under this MEASURING
- * acknowledgement. Its held binaries must be the ones the untimed batches
- * ran, every untimed batch must have finished before its pre-sample binding,
- * its plan, plan digest and context must equal the ones re-derived here from
- * the pins, the ready record and the frozen snapshot, and the result store
- * must be planned for its frozen capacity. */
+ * acknowledgement. The binding must carry the store bind's mark for exactly
+ * this owned ready record of this job and attempt; its held binaries must be
+ * the ones the untimed batches ran; its pre-sample binding must follow the
+ * MEASURING acknowledgement and every untimed batch; its plan, plan digest
+ * and context must equal the ones re-derived here from the pins, the ready
+ * record and the frozen snapshot; lane E's family counts (derived from the
+ * same frozen layout before timing) must equal the plan's; and the result
+ * store must be planned for the frozen capacity. */
 static inline int bq_retirement_unit_campaign_attach(BqRetirementUnitCampaign* driver,
-    BqRetirementCampaignBinding const* binding, BqRetirementUnitCampaignPins const* pins, char const* ready_sha256,
-    TpRetirementCampaignStorePlan const* store_plan)
+    BqRetirementCampaignBinding const* binding, BqRetirementCampaignReady const* ready,
+    BqRetirementUnitCampaignPins const* pins, TpRetirementCampaignStorePlan const* store_plan,
+    TpRetirementFamilyCounts const* family)
 {
     TpRetirementCampaign const* campaign = binding ? binding->campaign : NULL;
     BqRetirementHeldBinaries const* held = binding ? binding->held_binaries : NULL;
     TpRetirementPlan plan = {0};
     char plan_sha256[65] = {0}, commands[65] = {0}, context[65] = {0};
-    int ok = driver && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_MEASURING && campaign && held && pins &&
-        driver->phases->sequence == BQ_PHASE_MEASURING && binding->job_id == driver->phases->job &&
-        binding->attempt_token == driver->phases->attempt && campaign->phase == TP_RETIREMENT_CAMPAIGN_AA &&
-        bq_retirement_campaign_held_matches(binding) && !campaign->samples[0]->transcript->execution->sequence &&
-        driver->untimed->last_end < campaign->bound_at_ns &&
+    int ok = driver && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_MEASURING && campaign && held && pins && ready &&
+        family && ready->owned && driver->phases->sequence == BQ_PHASE_MEASURING &&
+        ready->job_id == driver->phases->job && ready->attempt_token == driver->phases->attempt &&
+        binding->job_id == driver->phases->job && binding->attempt_token == driver->phases->attempt &&
+        tp_retirement_digest(ready->ready_sha256) && !strcmp(binding->unit_ready_sha256, ready->ready_sha256) &&
+        campaign->phase == TP_RETIREMENT_CAMPAIGN_AA && bq_retirement_campaign_held_matches(binding) &&
+        !campaign->samples[0]->transcript->execution->sequence && driver->untimed->last_end < campaign->bound_at_ns &&
+        campaign->bound_at_ns > driver->phases->last_time &&
         bq_retirement_unit_campaign_store_planned(campaign, store_plan) &&
         bq_retirement_unit_campaign_live(driver->phases, driver->cancellation_fd, driver->deadline_ns);
     for (unsigned side = 0; ok && side < 2; ++side)
         ok = !strcmp(held->verified.binary_sha256[side], driver->held_sha256[side]) &&
             !strcmp(held->verified.binary_identity_sha256[side], driver->held_identity_sha256[side]);
     ok = ok && bq_retirement_unit_campaign_plan(binding->gate, pins, &plan) &&
-        !memcmp(&plan, &campaign->plan, sizeof(plan)) &&
+        !memcmp(&plan, &campaign->plan, sizeof(plan)) && family->bootstrap_members == plan.bootstrap_members_per_scope &&
+        family->cell_members == plan.cell_members_per_scope &&
         bq_retirement_unit_campaign_plan_digest(binding->gate, &plan, plan_sha256) &&
         !strcmp(plan_sha256, campaign->plan_sha256) && !strcmp(pins->budget_sha256, campaign->budget_sha256) &&
         bq_retirement_unit_campaign_commands_frozen(campaign, commands);
-    BqRetirementUnitCampaignFacts facts = {plan_sha256, ready_sha256, pins ? pins->budget_sha256 : NULL, commands,
-        driver ? &driver->untimed_records : NULL, campaign ? campaign->job : NULL, campaign ? campaign->boot : NULL,
-        campaign ? campaign->attempt : 0, campaign ? campaign->bound_at_ns : 0, campaign ? campaign->cpu : -1};
+    BqRetirementUnitCampaignFacts facts = {plan_sha256, ready ? ready->ready_sha256 : NULL,
+        pins ? pins->budget_sha256 : NULL, commands, driver ? &driver->untimed_records : NULL,
+        campaign ? campaign->job : NULL, campaign ? campaign->boot : NULL, campaign ? campaign->attempt : 0,
+        campaign ? campaign->bound_at_ns : 0, campaign ? campaign->cpu : -1};
     ok = ok && bq_retirement_unit_campaign_pre_context(binding->gate, &facts, context) &&
         !strcmp(context, campaign->context_sha256);
     if (ok)
@@ -785,9 +1211,12 @@ static inline void bq_retirement_unit_campaign_chain(BqRetirementUnitCampaign* d
 /* One whole stage: A/A after attach, A/B after freeze. Every cursor item runs
  * its frozen command on the held descriptor of its stage and variant (the
  * baseline for both A/A labels) through bq_retirement_campaign_run, which
- * rechecks the sealed gate and held join before each launch. Then the metrics
- * writer, the transcript and the numeric export finish, and the stage must be
- * ready. There is no retry: any failure poisons the attempt. */
+ * rechecks the sealed gate and held join before each launch; the child is
+ * killed if the cancellation descriptor becomes readable while it runs, and
+ * no launch starts that could outlive the deadline. Then the metrics writer,
+ * the transcript and the numeric export finish, and the stage must be ready.
+ * After A/A the post-A/A binding digest is formed. There is no retry: any
+ * failure is recorded and poisons the attempt. */
 static inline int bq_retirement_unit_campaign_stage(BqRetirementUnitCampaign* driver,
     TpRetirementMeasuredCommand const* commands, size_t command_count, BqRetirementUnitCampaignStreams const* streams)
 {
@@ -804,7 +1233,21 @@ static inline int bq_retirement_unit_campaign_stage(BqRetirementUnitCampaign* dr
     TpRetirementInvocation invocation;
     while (ok && tp_retirement_execution_peek(execution, &invocation) == TP_RETIREMENT_NEXT_READY)
     {
-        ok = bq_retirement_unit_campaign_live(driver->phases, driver->cancellation_fd, driver->deadline_ns) &&
+        BqRetirementUnitCampaignFailure coordinates = bq_retirement_unit_campaign_stop(
+            BQ_RETIREMENT_UNIT_CAMPAIGN_STOP_REFUSED, 1 + stage);
+        coordinates.sequence = invocation.sequence;
+        coordinates.kind = invocation.kind;
+        coordinates.group = invocation.group;
+        coordinates.row = invocation.row;
+        coordinates.variant = invocation.variant;
+        coordinates.phase = invocation.phase;
+        coordinates.round = invocation.round;
+        coordinates.pair = invocation.pair;
+        coordinates.warmup = invocation.warmup;
+        size_t index = ((size_t)(invocation.kind ? campaign->groups + invocation.dense : invocation.group)) *
+            TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT + invocation.variant;
+        TpRetirementMeasuredCommand const* command = index < command_count ? &commands[index] : NULL;
+        ok = command && bq_retirement_unit_campaign_launchable(driver, command->timeout_seconds, &coordinates) &&
             bq_retirement_unit_campaign_metrics_ready(driver, samples->metrics, streams->metrics, streams->metrics_count,
                 1 + stage);
         if (ok && samples->transcript->records == TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS)
@@ -815,17 +1258,17 @@ static inline int bq_retirement_unit_campaign_stage(BqRetirementUnitCampaign* dr
                 tp_retirement_campaign_rotate(campaign, streams->transcripts[used], &completed);
             if (ok) bq_retirement_unit_campaign_chain(driver, stage, &completed);
         }
-        size_t index = ((size_t)(invocation.kind ? campaign->groups + invocation.dense : invocation.group)) *
-            TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_UNIT + invocation.variant;
-        TpRetirementMeasuredCommand const* command = index < command_count ? &commands[index] : NULL;
-        ok = ok && command;
-        int log = ok ? bq_retirement_unit_campaign_launch_log(driver, 1 + stage) : -1;
+        int log = ok ? bq_retirement_unit_campaign_launch_log(driver) : -1;
         TpProcessInputs inputs = {binding->held_executables[stage && invocation.variant].descriptor,
-            driver->work_directory, log, command ? command->environment : NULL};
-        TpRetirementMeasurementResult result;
-        ok = ok && log >= 3 && bq_retirement_campaign_run(binding, command, &inputs, driver->work_directory, &result);
+            driver->work_directory, log, command ? command->environment : NULL, driver->cancellation_fd};
+        TpRetirementMeasurementResult result = {.status = TP_RETIREMENT_MEASUREMENT_PLAN_INVALID,
+            .process = {.exit_code = -1}};
+        int launched = ok && log >= 3;
+        ok = launched && bq_retirement_campaign_run(binding, command, &inputs, driver->work_directory, &result);
+        if (launched && !ok) bq_retirement_unit_campaign_launch_failed(driver, &coordinates, &result, log);
+        ok = ok && bq_retirement_unit_campaign_log_chain(driver, log, 1 + stage);
         if (log >= 0 && close(log) != 0) ok = 0;
-        if (ok) ok = bq_retirement_unit_campaign_retire(driver, command, 1 + stage);
+        if (ok) ok = bq_retirement_unit_campaign_retire(driver, command);
         if (ok) driver->launches[1 + stage] += 1;
     }
     ok = ok && tp_retirement_execution_complete(execution);
@@ -850,19 +1293,23 @@ static inline int bq_retirement_unit_campaign_stage(BqRetirementUnitCampaign* dr
     {
         Sha256 copy = driver->shard_hash[stage];
         sha256_finish_hex(&copy, driver->shard_chain_sha256[stage]);
-        driver->step = stage ? BQ_RETIREMENT_UNIT_CAMPAIGN_AB : BQ_RETIREMENT_UNIT_CAMPAIGN_AA;
+        bq_retirement_unit_campaign_log_seal(driver, 1 + stage);
+        ok = stage || bq_retirement_unit_campaign_post_aa(campaign, driver->context_sha256,
+            driver->shard_chain_sha256[0], driver->post_aa_sha256);
     }
+    if (ok) driver->step = stage ? BQ_RETIREMENT_UNIT_CAMPAIGN_AB : BQ_RETIREMENT_UNIT_CAMPAIGN_AA;
     else bq_retirement_unit_campaign_fail(driver);
     return ok;
 }
 
 /* The A/A admission the service must present: the #426 decision bound to
- * this job's frozen plan and pre-sample context, delivered as #1021's one-use
- * capability. */
+ * this job's frozen plan, pre-sample context and post-A/A binding, delivered
+ * as #1021's one-use capability. */
 typedef struct BqRetirementUnitCampaignAdmission
 {
     char const* plan_sha256;
     char const* context_sha256;
+    char const* post_aa_sha256;
     char const* receipt_sha256;
     int admitted;
 } BqRetirementUnitCampaignAdmission;
@@ -879,9 +1326,10 @@ static inline int bq_retirement_unit_campaign_admit(BqRetirementUnitCampaign* dr
         campaign->phase == TP_RETIREMENT_CAMPAIGN_AWAIT_AA &&
         bq_retirement_unit_campaign_live(driver->phases, driver->cancellation_fd, driver->deadline_ns);
 #if defined(BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA)
-    ok = ok && admission->plan_sha256 && admission->context_sha256 &&
+    ok = ok && admission->plan_sha256 && admission->context_sha256 && admission->post_aa_sha256 &&
         !strcmp(admission->plan_sha256, driver->plan_sha256) &&
         !strcmp(admission->context_sha256, driver->context_sha256) &&
+        !strcmp(admission->post_aa_sha256, driver->post_aa_sha256) &&
         tp_retirement_campaign_admit_aa_fixture(campaign, admission->admitted, admission->plan_sha256,
             admission->context_sha256, admission->receipt_sha256);
     if (ok) driver->step = BQ_RETIREMENT_UNIT_CAMPAIGN_ADMITTED;
@@ -915,17 +1363,17 @@ static inline int bq_retirement_unit_campaign_freeze(BqRetirementUnitCampaign* d
     return ok;
 }
 
-/* The post-sample context, then MEASURED. A failed or incomplete campaign
- * never sends MEASURED, which the supervisor requires for success. */
-static inline int bq_retirement_unit_campaign_finish(BqRetirementUnitCampaign* driver)
+/* READY: the collected campaign's post-sample context. The result is then
+ * available for lane E's composition and the producer authority handoff;
+ * MEASURED is not sent yet. */
+static inline int bq_retirement_unit_campaign_ready(BqRetirementUnitCampaign* driver)
 {
     TpRetirementCampaign const* campaign = driver && driver->binding ? driver->binding->campaign : NULL;
     int ok = driver && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_AB && campaign &&
         bq_retirement_unit_campaign_post_context(campaign, driver->context_sha256,
             (char const (*)[65])driver->shard_chain_sha256, driver->post_context_sha256) &&
-        bq_retirement_unit_campaign_live(driver->phases, driver->cancellation_fd, driver->deadline_ns) &&
-        bq_phase_exchange_until(driver->phases, BQ_PHASE_MEASURED, driver->deadline_ns);
-    if (ok) driver->step = BQ_RETIREMENT_UNIT_CAMPAIGN_FINISHED;
+        bq_retirement_unit_campaign_live(driver->phases, driver->cancellation_fd, driver->deadline_ns);
+    if (ok) driver->step = BQ_RETIREMENT_UNIT_CAMPAIGN_READY;
     else
     {
         if (driver) driver->post_context_sha256[0] = 0;
@@ -934,24 +1382,54 @@ static inline int bq_retirement_unit_campaign_finish(BqRetirementUnitCampaign* d
     return ok;
 }
 
-/* What lane E's composer takes from a finished driver: the campaign's job,
- * attempt and boot, its pre-sample binding and A/B completion times, the
- * frozen #619 plan, and D's plan and context digests. The composer writes the
- * post-sample execution receipt itself; the driver writes no receipt. */
+/* The caller's confirmation that lane E composed the sealed result and the
+ * producer authority was handed off, both for this campaign. */
+typedef struct BqRetirementUnitCampaignHandoff
+{
+    char const* sealed_result_sha256;
+    char const* authority_sha256;
+} BqRetirementUnitCampaignHandoff;
+
+/* MEASURED, only after READY and the caller's composition and authority
+ * confirmation. A failed or incomplete campaign never sends it, which the
+ * supervisor requires for success. */
+static inline int bq_retirement_unit_campaign_measured(BqRetirementUnitCampaign* driver,
+    BqRetirementUnitCampaignHandoff const* handoff)
+{
+    int ok = driver && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_READY && handoff &&
+        tp_retirement_digest(handoff->sealed_result_sha256) && tp_retirement_digest(handoff->authority_sha256) &&
+        bq_retirement_unit_campaign_live(driver->phases, driver->cancellation_fd, driver->deadline_ns) &&
+        bq_phase_exchange_until(driver->phases, BQ_PHASE_MEASURED, driver->deadline_ns);
+    if (ok) driver->step = BQ_RETIREMENT_UNIT_CAMPAIGN_FINISHED;
+    else bq_retirement_unit_campaign_fail(driver);
+    return ok;
+}
+
+/* What lane E's composer (and F's replay) takes from a READY or finished
+ * driver: the campaign's job, attempt and boot, its pre-sample binding and
+ * A/B completion times, the frozen #619 plan, D's plan, pre-sample, post-A/A
+ * and post-sample digests, the untimed record stream, the untimed rows' code
+ * facts, and the per-stage log chains (0 untimed, 1 A/A, 2 A/B). The driver
+ * writes no receipt: the composer writes the post-sample one. */
 typedef struct BqRetirementUnitCampaignResult
 {
     TpRetirementPlan plan;
+    TpRetirementShard untimed_records;
+    TpRetirementCodeRow const* codes;
     char const* job;
     char const* boot;
-    uint64_t attempt, bound_at_ns, completed_at_ns;
-    char plan_sha256[65], context_sha256[65], post_context_sha256[65];
+    uint64_t attempt, bound_at_ns, completed_at_ns, launches[3];
+    unsigned code_count;
+    char plan_sha256[65], context_sha256[65], post_aa_sha256[65], post_context_sha256[65];
+    char log_chain_sha256[3][65];
 } BqRetirementUnitCampaignResult;
 
 static inline int bq_retirement_unit_campaign_result(BqRetirementUnitCampaign const* driver,
     BqRetirementUnitCampaignResult* result)
 {
     TpRetirementCampaign const* campaign = driver && driver->binding ? driver->binding->campaign : NULL;
-    int ok = driver && result && campaign && driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_FINISHED &&
+    int ok = driver && result && campaign && (driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_READY ||
+        driver->step == BQ_RETIREMENT_UNIT_CAMPAIGN_FINISHED) &&
         campaign->phase == TP_RETIREMENT_CAMPAIGN_COLLECTED && campaign->samples[1]->transcript->finished;
     if (result)
     {
@@ -959,17 +1437,30 @@ static inline int bq_retirement_unit_campaign_result(BqRetirementUnitCampaign co
         if (ok)
         {
             result->plan = campaign->plan;
+            result->untimed_records = driver->untimed_records;
+            result->codes = driver->codes;
+            result->code_count = driver->code_count;
             result->job = campaign->job;
             result->boot = campaign->boot;
             result->attempt = campaign->attempt;
             result->bound_at_ns = campaign->bound_at_ns;
             result->completed_at_ns = campaign->samples[1]->transcript->completed_at_ns;
+            memcpy(result->launches, driver->launches, sizeof(result->launches));
             memcpy(result->plan_sha256, driver->plan_sha256, 65);
             memcpy(result->context_sha256, driver->context_sha256, 65);
+            memcpy(result->post_aa_sha256, driver->post_aa_sha256, 65);
             memcpy(result->post_context_sha256, driver->post_context_sha256, 65);
+            memcpy(result->log_chain_sha256, driver->log_chain_sha256, sizeof(result->log_chain_sha256));
         }
     }
     return ok;
+}
+
+/* The retained failure of any driver: reason NONE while nothing failed. */
+static inline BqRetirementUnitCampaignFailure bq_retirement_unit_campaign_failure(BqRetirementUnitCampaign const* driver)
+{
+    BqRetirementUnitCampaignFailure failure = driver ? driver->failure : (BqRetirementUnitCampaignFailure){0};
+    return failure;
 }
 #endif
 #endif

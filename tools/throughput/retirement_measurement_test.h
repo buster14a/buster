@@ -318,7 +318,7 @@ static void test_retirement_untimed_fixture(char const* root, int cwd, int other
         run.purpose = step % 2;
         run.command.variant = run.variant;
         int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-        TpProcessInputs inputs = {binary, cwd, log, environment};
+        TpProcessInputs inputs = {binary, cwd, log, environment, 0};
         uint64_t records_before = untimed.records;
         CHECK(log >= 3 && tp_retirement_untimed_run(&untimed, &run, executable, &inputs, cwd, &result) &&
               result.status == TP_RETIREMENT_MEASUREMENT_COMPLETE && !strcmp(result.output_sha256, output_digest) &&
@@ -365,7 +365,7 @@ static void test_retirement_untimed_fixture(char const* root, int cwd, int other
         unbounded.contract.metrics_bytes_max = TEST_BATCH_METRICS_BYTES;
         run.command.batch = failure == 2 ? &unbounded.contract : &batch.contract;
         int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-        TpProcessInputs inputs = {binary, cwd, log, environment};
+        TpProcessInputs inputs = {binary, cwd, log, environment, 0};
         int ok = log >= 3 && tp_retirement_untimed_run(&untimed, &run, executable, &inputs, cwd, &result);
         if (failure == 0)
         {
@@ -575,7 +575,7 @@ static void test_retirement_measurement(char const* executable_path, char const*
             test_retirement_measurement_command_file(root, "retirement-measured-command-runtime.json", &command);
         int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
         CHECK(log >= 3);
-        TpProcessInputs inputs = {binary, cwd, log, environment};
+        TpProcessInputs inputs = {binary, cwd, log, environment, 0};
         TpRetirementMeasurementResult result;
         ok = tp_retirement_measurement_run(&test.samples, &command, &executable, &inputs, cwd, &result);
         CHECK(ok);
@@ -621,7 +621,7 @@ static void test_retirement_measurement(char const* executable_path, char const*
     CHECK(tp_retirement_command_hash(&command, command_digest));
     int sparse_log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     CHECK(sparse_log >= 3);
-    TpProcessInputs sparse_inputs = {binary, cwd, sparse_log, environment};
+    TpProcessInputs sparse_inputs = {binary, cwd, sparse_log, environment, 0};
     TpRetirementMeasurementResult sparse_result;
     CHECK(!tp_retirement_measurement_run(&test.samples, &command, &executable, &sparse_inputs, cwd,
                                          &sparse_result) && sparse_result.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID);
@@ -685,7 +685,7 @@ static void test_retirement_measurement(char const* executable_path, char const*
         if (failure == 9) CHECK(chmod(executable_copy, 0700) == 0);
         int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
         CHECK(log >= 3);
-        TpProcessInputs inputs = {binary, cwd, log, environment};
+        TpProcessInputs inputs = {binary, cwd, log, environment, 0};
         if (failure == 10) CHECK(write(log, "stale", 5) == 5);
         if (failure == 11) inputs.environment = NULL;
         if (failure == 12) CHECK(fcntl(log, F_SETFD, 0) == 0);
@@ -837,7 +837,7 @@ static void test_retirement_measurement(char const* executable_path, char const*
             batch_command.unit = invocation.group;
             batch_command.variant = invocation.variant;
             int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-            TpProcessInputs inputs = {binary, cwd, log, environment};
+            TpProcessInputs inputs = {binary, cwd, log, environment, 0};
             TpRetirementMeasurementResult result;
             uint64_t offset = metrics_shards.bytes;
             run_ok = log >= 3 && tp_retirement_measurement_run(&test.samples, &batch_command, &executable, &inputs,

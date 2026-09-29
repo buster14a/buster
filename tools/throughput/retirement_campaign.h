@@ -23,6 +23,11 @@
 #define BUSTER_THROUGHPUT_RETIREMENT_CAMPAIGN_H
 #include "retirement_untimed.h"
 
+/* The installed service never compiles the A/A admission stand-in. */
+#if defined(BQ_SERVICE_INSTALLED) && defined(TP_RETIREMENT_CAMPAIGN_FIXTURE_AA)
+#error "the installed service must not define TP_RETIREMENT_CAMPAIGN_FIXTURE_AA"
+#endif
+
 #ifdef __linux__
 #include "retirement_store.h"
 #define TP_RETIREMENT_CAMPAIGN_STAGES 2u
@@ -136,6 +141,39 @@ typedef struct TpRetirementCampaignReview
     unsigned const* untimed_stages;
     unsigned group_count, untimed_groups;
 } TpRetirementCampaignReview;
+
+/* Shared with lane E's composer (retirement_compose.h), which can adopt these
+ * in place of its own copies. The statistical family's two #619 per-scope
+ * counts, derived from the frozen layout before any timing
+ * (TpRetirementComposeBounds carries the same two numbers). */
+typedef struct TpRetirementFamilyCounts
+{
+    unsigned bootstrap_members, cell_members;
+} TpRetirementFamilyCounts;
+
+/* One code-observed row and its two variants' facts (the composer's
+ * TpRetirementComposeCode layout). */
+typedef struct TpRetirementCodeRow
+{
+    unsigned row;
+    TpRetirementCodeSide sides[2];
+} TpRetirementCodeRow;
+
+/* The six #619 slice dimensions in the validator's STATISTICAL_DIMENSIONS
+ * order (target, cpu, allocator, frontend_lowering, PIC, artifact_stage);
+ * each value is a printable string of at most 64 bytes. */
+#define TP_RETIREMENT_TIMED_DIMENSIONS 6u
+#define TP_RETIREMENT_TIMED_DIMENSION_BYTES 64u
+
+/* One native-host timed row for the composer's layout
+ * (TpRetirementComposeRow): its population row id, its campaign batch-group
+ * ordinal (groups in ascending smallest-member order), whether it is
+ * runtime-eligible, and its identity's frozen dimension values. */
+typedef struct TpRetirementTimedRow
+{
+    unsigned id, group, runtime;
+    char dimensions[TP_RETIREMENT_TIMED_DIMENSIONS][TP_RETIREMENT_TIMED_DIMENSION_BYTES + 1];
+} TpRetirementTimedRow;
 
 typedef struct TpRetirementCampaign
 {
