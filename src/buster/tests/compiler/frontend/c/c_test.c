@@ -1929,6 +1929,55 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_scope_function_declaration_file_
     return result;
 }
 
+// A lexer diagnostic outlives the storage its rows grow in: that is a scratch
+// arena rewound when lexing ends or, for a file whose worst case does not fit
+// scratch (about 2.6 MB), a dedicated arena destroyed then. The formatted
+// "invalid character byte" message was written there too, so it dangled once
+// the rows were copied out; on a large file the driver's rendering faulted.
+// Clobber the scratch the lexer used and require the message to be in the
+// result arena with its exact text and location.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lex_diagnostic_message_lifetime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 paddings[] = {0, (u64)3 * 1024 * 1024};
+    String8 tail = S8("*/\nint y = 3 ` 4;\n");
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(paddings); index += 1)
+    {
+        Arena* arena = arena_create((ArenaCreation){0});
+        if (BUSTER_REQUIRE(arguments, arena != 0))
+        {
+            u64 length = 2 + paddings[index] + tail.length;
+            char8* text = arena_allocate(arena, char8, length);
+            text[0] = '/';
+            text[1] = '*';
+            memset(text + 2, 'x', paddings[index]);
+            memcpy(text + 2 + paddings[index], tail.pointer, tail.length);
+            CLexResult lex = c_lex(arena, (String8){.pointer = text, .length = length});
+            Arena* conflicts[] = {arena};
+            TemporalArena scratch = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            u64 clobber = BUSTER_MB(1);
+            memset(arena_allocate(scratch.arena, u8, clobber), 0xA5, clobber);
+            scratch_end(scratch);
+            if (BUSTER_REQUIRE(arguments, lex.diagnostic_count == 1))
+            {
+                CDiagnostic diagnostic = lex.diagnostics[0];
+                u8 const* start = (u8 const*)arena;
+                u8 const* end = start + arena->position;
+                bool retained = (u8 const*)diagnostic.message.pointer >= start && (u8 const*)diagnostic.message.pointer + diagnostic.message.length <= end;
+                BUSTER_TEST(arguments, retained);
+                if (retained)
+                {
+                    BUSTER_STRING_TEST(arguments, diagnostic.message, S8("invalid character byte 96 in C source"));
+                }
+                BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_INVALID_CHARACTER);
+                BUSTER_TEST(arguments, diagnostic.location.line == 2 && diagnostic.location.column == 11);
+            }
+            arena_destroy(arena, 1);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lexer_rewind_zeroed(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -26094,6 +26143,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration);
     BUSTER_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration_file_scope_name);
     BUSTER_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
+    BUSTER_TEST_FIXTURE(arguments, c_test_lex_diagnostic_message_lifetime);
     BUSTER_TEST_FIXTURE(arguments, c_test_scope_interval_index);
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
