@@ -15,6 +15,18 @@ from unittest import mock
 import retirement_export_replay as replay
 
 
+def c_define(root, relative, name):
+    """Evaluate one integer #define made only of digits and operators."""
+    text = (Path(root) / relative).read_text(encoding="utf-8")
+    match = re.search(rf"^#define {name} (.+)$", text, re.MULTILINE)
+    if match is None:
+        raise AssertionError(f"{relative} lacks #define {name}")
+    expression = re.sub(r"(?<=[0-9])(ull|u)\b", "", match.group(1)).replace("UINT64_C", "")
+    if not re.fullmatch(r"[0-9 ()*+<]+", expression):
+        raise AssertionError(f"{name} is not a plain integer expression: {expression}")
+    return eval(expression)  # noqa: S307 - digits and operators only
+
+
 class ExportReplayTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="retirement-export-replay-")
@@ -273,56 +285,111 @@ class ExportReplayTest(unittest.TestCase):
 
     def test_export_limits_match_their_c_definitions(self):
         root = Path(replay.__file__).resolve().parents[2]
-
-        def define(relative, name):
-            text = (root / relative).read_text(encoding="utf-8")
-            match = re.search(rf"^#define {name} (.+)$", text, re.MULTILINE)
-            self.assertIsNotNone(match, name)
-            expression = re.sub(r"(?<=[0-9])(ull|u)\b", "", match.group(1))
-            expression = expression.replace("UINT64_C", "")
-            self.assertRegex(expression, r"^[0-9 ()*+]+$")
-            return eval(expression)  # noqa: S307 - digits and operators only
-
         worker = "tools/bench_service/worker_linux.h"
-        entries = define(worker, "BQ_WORKER_BUNDLE_ENTRY_CAP")
-        path = define("tools/bench_service/queue.h", "BQ_PATH_CAP")
+        entries = c_define(root, worker, "BQ_WORKER_BUNDLE_ENTRY_CAP")
+        path = c_define(root, "tools/bench_service/queue.h", "BQ_PATH_CAP")
         self.assertEqual(entries, replay.ENTRY_CAP)
         self.assertEqual(path, replay.PATH_CAP)
-        self.assertEqual(define(worker, "BQ_WORKER_BUNDLE_FILE_CAP"), replay.FILE_CAP)
-        payload = define(worker, "BQ_WORKER_RETIREMENT_BUNDLE_TOTAL_CAP")
+        self.assertEqual(c_define(root, worker, "BQ_WORKER_BUNDLE_FILE_CAP"), replay.FILE_CAP)
+        payload = c_define(root, worker, "BQ_WORKER_RETIREMENT_BUNDLE_TOTAL_CAP")
         self.assertEqual(payload, replay.RESULT_FILE_CAP)
-        self.assertEqual(define("tools/throughput/retirement_store.h", "TP_RETIREMENT_STORE_TOTAL_BYTES"),
+        self.assertEqual(c_define(root, worker, "BQ_WORKER_BUNDLE_CAP"), replay.BUNDLE_INDEX_CAP)
+        self.assertEqual(c_define(root, "tools/bench_service/export.c", "BQ_EXPORT_CONTROL_RESERVE"),
+                         replay.EXPORT_CONTROL_RESERVE)
+        self.assertEqual(c_define(root, "tools/throughput/retirement_store.h", "TP_RETIREMENT_STORE_TOTAL_BYTES"),
                          replay.RESULT_FILE_CAP)
-        self.assertEqual(define("tools/throughput/retirement_execution.h", "TP_RETIREMENT_RECEIPT_BYTES"),
+        self.assertEqual(c_define(root, "tools/throughput/retirement_execution.h", "TP_RETIREMENT_RECEIPT_BYTES"),
                          replay.STORE_RECEIPT_BYTES)
+        self.assertEqual(c_define(root, "tools/throughput/retirement_samples.h", "TP_RETIREMENT_CODE_RECORD_BYTES_MAX"),
+                         replay.CODE_RECORD_BYTES_MAX)
         # BQ_EXPORT_RETIREMENT_TOTAL_CAP in export.c.
-        self.assertEqual(payload + define(worker, "BQ_WORKER_BUNDLE_CAP") + 2 * 32768 +
+        self.assertEqual(payload + replay.BUNDLE_INDEX_CAP + replay.EXPORT_CONTROL_RESERVE +
                          entries * (replay.ENTRY_HEADER_BYTES + path), replay.ARCHIVE_CAP)
-        self.assertEqual(define("tools/bench_service/export.c", "BQ_EXPORT_RECEIPT_CAP"), replay.RECEIPT_BYTES)
+        self.assertEqual(c_define(root, "tools/bench_service/export.c", "BQ_EXPORT_RECEIPT_CAP"), replay.RECEIPT_BYTES)
 
-    def test_a1_ledger_counts_metrics_shards_and_untimed_records(self):
+    def test_service_job_label_matches_the_c_format(self):
+        root = Path(replay.__file__).resolve().parents[2]
+        text = (root / "tools/bench_service/retirement_campaign_binding.h").read_text(encoding="utf-8")
+        match = re.search(r"bq_retirement_campaign_job_label\(char output\[129\], uint64_t job_id\)\s*\{"
+                          r"[^}]*snprintf\(output, 129, \"([^\"]*)\" PRIu64", text)
+        self.assertIsNotNone(match, "bq_retirement_campaign_job_label no longer formats job-<id>")
+        self.assertEqual(match.group(1).replace("%", "{}"), replay.SERVICE_JOB_LABEL)
+        self.assertEqual(replay.SERVICE_JOB_LABEL.format(42), "job-42")
+
+    def test_composer_constants_match_the_composer_source(self):
+        root = Path(replay.__file__).resolve().parents[2]
+        source = root / "tools/bench_service/retirement_compose.c"
+        if not source.is_file():
+            self.skipTest("the #1879 composer is not in this tree yet; its bounds are mirrored from 975b467")
+        pairs = {"TP_COMPOSE_RATIO_LINE_BYTES": replay.COMPOSE_RATIO_LINE_BYTES,
+                 "TP_COMPOSE_MEMBER_LINE_BYTES": replay.COMPOSE_MEMBER_LINE_BYTES,
+                 "TP_COMPOSE_SERIES_HEADER_BYTES": replay.COMPOSE_SERIES_HEADER_BYTES,
+                 "TP_COMPOSE_SERIES_END_BYTES": replay.COMPOSE_SERIES_END_BYTES,
+                 "TP_COMPOSE_REPLAY_MEMBER_BYTES": replay.COMPOSE_REPLAY_MEMBER_BYTES,
+                 "TP_COMPOSE_REPLAY_FIXED_BYTES": replay.COMPOSE_REPLAY_FIXED_BYTES,
+                 "TP_COMPOSE_MANIFEST_FIXED_BYTES": replay.COMPOSE_MANIFEST_FIXED_BYTES,
+                 "TP_COMPOSE_MANIFEST_SHARD_BYTES": replay.COMPOSE_MANIFEST_SHARD_BYTES,
+                 "TP_COMPOSE_BUNDLE_BYTES": replay.COMPOSE_BUNDLE_BYTES,
+                 "TP_COMPOSE_SEAL_FIXED_BYTES": replay.COMPOSE_SEAL_FIXED_BYTES,
+                 "TP_COMPOSE_SEAL_ENTRY_BYTES": replay.COMPOSE_SEAL_ENTRY_BYTES}
+        for name, value in pairs.items():
+            self.assertEqual(c_define(root, "tools/bench_service/retirement_compose.c", name), value, name)
+        header = "tools/bench_service/retirement_compose.h"
+        self.assertEqual(c_define(root, header, "TP_RETIREMENT_COMPOSE_FIXED_OUTPUTS"), replay.COMPOSE_FIXED_OUTPUTS)
+        self.assertEqual(c_define(root, header, "TP_RETIREMENT_COMPOSE_BOOTSTRAP_MEMBERS"),
+                         replay.COMPOSE_BOOTSTRAP_MEMBERS)
+        self.assertEqual(c_define(root, header, "TP_RETIREMENT_COMPOSE_CELL_MEMBERS"), replay.COMPOSE_CELL_MEMBERS)
+
+    def test_composer_bounds_mirror_the_composer_refusals(self):
+        """The layouts of retirement_compose_tests.c's test_budget_and_settle."""
+        large = {"pairs_per_round": 254, "timed_rows": 4000, "runtime_rows": 1, "object_groups": 1}
+        refused = replay.composer_bounds(large, 1, 1)
+        self.assertTrue(any("#1880" in reason for reason in refused["refusals"]))
+        small = dict(large, pairs_per_round=60, timed_rows=2)
+        bounds = replay.composer_bounds(small, 1, 1)
+        self.assertEqual(bounds["refusals"], [])
+        self.assertEqual(bounds["files"], 2 + replay.COMPOSE_FIXED_OUTPUTS)
+        self.assertEqual(bounds["outputs"]["sealed_result"],
+                         replay.COMPOSE_SEAL_FIXED_BYTES + (1 + replay.ENTRY_CAP) * replay.COMPOSE_SEAL_ENTRY_BYTES)
+        no_runtime = replay.composer_bounds(dict(small, runtime_rows=0), 1, 1)
+        self.assertTrue(any("no cell" in reason for reason in no_runtime["refusals"]))
+
+    def test_a1_ledger_counts_composer_outputs_and_refuses_until_1880(self):
         root = Path(replay.__file__).resolve().parents[2]
         report = replay.a1_capacity_report(root, require_committed=False)
         scenarios = report["scenarios"]
+        prior = report["prior_closure_entries_minimum"]
+        self.assertEqual(prior, 40)
+        self.assertEqual(report["code_rows_upper_bound"], 78914)
         self.assertTrue(scenarios)
         for name, ledger in scenarios.items():
             with self.subTest(name=name):
+                composer = ledger["composer"]
                 self.assertFalse(ledger["export_binds_before_store"])
-                self.assertTrue(ledger["per_file_fits"])
                 self.assertEqual(ledger["largest_file_bytes"]["metrics_shard"], replay.FILE_CAP)
                 self.assertLessEqual(ledger["largest_file_bytes"]["untimed_record_file"], replay.FILE_CAP)
                 self.assertEqual(ledger["untimed_record_files"], 1)
-                self.assertEqual(ledger["entries_left_for_composer_and_directories"],
-                                 replay.ENTRY_CAP - replay.WORKER_CONTROL_ENTRIES - ledger["owned_files"])
+                # Every composer output is counted: manifests, code records,
+                # adapter input and output, bundle, receipt and seal.
+                self.assertEqual(set(composer["outputs"]), {
+                    "result_input_manifests", "code_records", "adapter_input", "adapter_output",
+                    "result_bundle", "execution_receipt", "sealed_result"})
+                self.assertEqual(ledger["entries_left_for_projections_logs_and_directories"],
+                                 replay.ENTRY_CAP - replay.WORKER_CONTROL_ENTRIES - prior - ledger["owned_files"])
+                # The single-file adapter input exceeds 64 MiB at A1 scale.
+                self.assertGreater(composer["outputs"]["adapter_input"], replay.FILE_CAP)
+                self.assertFalse(ledger["per_file_fits"])
+                self.assertFalse(ledger["fits"])
+                self.assertTrue(any("#1880" in reason for reason in ledger["refusals"]))
                 self.assertTrue(ledger["model_only"])
-        self.assertTrue(all(ledger["fits"] for name, ledger in scenarios.items() if name.startswith("pairs-60/")))
-        rejected = [name for name, ledger in scenarios.items() if not ledger["fits"]]
-        self.assertTrue(rejected)
-        self.assertTrue(all("/per-input-16384/" in name and name.startswith("pairs-254/") for name in rejected))
+        projected = {name: ledger["projection_if_adapter_input_sharded"]["would_fit"]
+                     for name, ledger in scenarios.items()}
+        # Only a projection: with #1880's sharding, every runtime-bearing
+        # scenario but 254 pairs at 16 KiB would fit; runtime-0 never does.
+        self.assertEqual({name for name, value in projected.items() if value},
+                         {name for name in scenarios if name.endswith("runtime-2")} -
+                         {"pairs-254/per-input-16384/runtime-2"})
         self.assertEqual(report["six_copy_ceiling"]["logical_six_copy_file_bytes"], 824805176192)
-        worst = scenarios["pairs-254/per-input-8192/runtime-0"]
-        self.assertGreater(worst["entries_left_for_composer_and_directories"], 0)
-        self.assertGreater(worst["bytes_left_for_composer_and_controls"], 8 * 1024 * 1024)
 
     def test_ledger_rejects_oversized_untimed_record_file(self):
         root = Path(replay.__file__).resolve().parents[2]
@@ -330,9 +397,10 @@ class ExportReplayTest(unittest.TestCase):
         import retirement_capacity as capacity
         limits = capacity.source_limits(root)
         model = capacity.build_report(root, require_committed=False)["scenarios"][
-            "pairs-60/per-input-4096/runtime-0"]
+            "pairs-60/per-input-4096/runtime-2"]
         huge = dict(model, untimed_batches=replay.FILE_CAP // limits["untimed_record_bytes_max"] + 1)
-        ledger = replay.a1_export_ledger(huge, limits)
+        ledger = replay.a1_export_ledger(huge, limits, 1, replay.prior_closure_entries())
+        self.assertGreater(ledger["largest_file_bytes"]["untimed_record_file"], replay.FILE_CAP)
         self.assertFalse(ledger["per_file_fits"])
         self.assertFalse(ledger["fits"])
 

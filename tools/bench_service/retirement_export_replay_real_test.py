@@ -9,12 +9,15 @@ the two-shard execution receipt, and the two-shard numeric sample manifest.
 The tests reorder, drop, truncate, forge or substitute those bytes and require
 the production readers (native_retirement_performance_binding.py,
 native_retirement_result_input.py) and this lane's publication path to reject
-them. A final test carries real output through the offline test publication,
-separate retrieval and unpack format up to the production binding validator.
-It stops there by design: no composer-produced binding record exists yet
-(retirement_export_replay.COMPOSER_BINDING_PATH). Nothing here is a full
+them. The last tests carry real output through the CLI's offline test
+publication, separate retrieval and unpack format. With the real binding
+validator the chain stops there, because no composer-produced binding record
+exists yet (retirement_export_replay.COMPOSER_BINDING_PATH); with a validator
+test double the CLI's authenticated_attempt_join accepts the genuine receipt
+and refuses a wrong attempt or a forged receipt. Nothing here is a full
 service bundle, a performance result or #512 evidence.
 """
+import copy
 import hashlib
 import json
 import os
@@ -32,6 +35,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
 import retirement_export_replay as replay  # noqa: E402
 import native_retirement_performance_binding as binding  # noqa: E402
+import native_retirement_performance_binding_test as binding_tests  # noqa: E402
 import native_retirement_result_input as result_input  # noqa: E402
 
 ROOT = None
@@ -223,9 +227,47 @@ class RealThroughputOutputTests(unittest.TestCase):
     def receipt(self):
         return json.loads((self.root / RECEIPT).read_bytes())
 
+    @staticmethod
+    def receipt_schedule():
+        """The production seeded schedule the self-test's receipt follows.
+
+        tools/throughput/tests.c's test_retirement_shards runs 272 singleton
+        compiler groups, no runtime rows, seed 1, two rounds of 60 pairs and
+        two warmups (66,368 invocations); _execution_schedule derives the same
+        order from 272 link rows through _batch_groups.
+        """
+        template = binding_tests.BindingTests._series_join_fixture()[0][0]
+        rows = []
+        for index in range(272):
+            row = copy.deepcopy(template)
+            row["row"] = index
+            row["identity"]["fixture"] = f"tests/receipt-{index}.c"
+            row["identity"]["artifact_stage"] = "link"
+            row["metrics"]["generated_runtime"] = False
+            rows.append(row)
+        return binding._execution_schedule(rows, {"seed": 1, "rounds": 2, "pairs_per_round": 60,
+                                                  "warmups_per_variant": 2})
+
+    def first_schedule_deviation(self, shards, total):
+        """Walk the transcript as _check_execution_transcript does: every
+        record's schedule keys must equal the frozen seeded schedule's."""
+        expected = iter(self.receipt_schedule())
+        records = binding._execution_trace_records(self.root, shards, total)
+        try:
+            for index, value in enumerate(records):
+                frozen = next(expected)
+                if any(type(value[key]) is not type(identity) or value[key] != identity
+                       for key, identity in frozen.items()):
+                    return index
+        finally:
+            records.close()
+        return None
+
     def test_missing_duplicate_or_reordered_transcript_shards_are_rejected(self):
         receipt = self.receipt()
         shards, total = receipt["shards"], receipt["invocations"]
+        self.assertEqual(sum(1 for _ in self.receipt_schedule()), total)
+        self.assertIsNone(self.first_schedule_deviation(shards, total))
         with self.assertRaisesRegex(ValueError, "omits required invocations"):
             list(binding._execution_trace_records(self.root, shards[:1], total))
         with self.assertRaisesRegex(ValueError, "duplicate shard paths"):
@@ -234,21 +276,16 @@ class RealThroughputOutputTests(unittest.TestCase):
         swapped = [dict(shards[0], path=shards[1]["path"]), dict(shards[1], path=shards[0]["path"])]
         with self.assertRaisesRegex(ValueError, "byte count|truncated|extra invocations"):
             list(binding._execution_trace_records(self.root, swapped, total))
-        # Whole descriptors reordered: every byte authenticates, but the first
-        # observation is not sequence 0. _check_execution_transcript compares
-        # each record's `sequence` (first) with the frozen seeded schedule.
-        records = binding._execution_trace_records(self.root, [shards[1], shards[0]], total)
-        try:
-            self.assertNotEqual(next(records)["sequence"], 0)
-        finally:
-            records.close()
+        # Whole descriptors reordered: every byte authenticates, but the very
+        # first observation already deviates from the frozen schedule.
+        self.assertEqual(self.first_schedule_deviation([shards[1], shards[0]], total), 0)
 
     # -- numeric sample shards -----------------------------------------------------
 
     def sample_root(self):
         source = self.root / SAMPLES
         if not (source / "retirement-samples.manifest.json").is_file():
-            self.skipTest("boundary sample manifest is missing")
+            raise AssertionError(f"{source} lacks the self-test's boundary sample manifest")
         target = self.work / SAMPLES
         shutil.copytree(source, target)
         return target
@@ -273,28 +310,37 @@ class RealThroughputOutputTests(unittest.TestCase):
         manifest.write_bytes(_canonical_line(value))
         return value
 
+    @staticmethod
+    def sealed_descriptor(root, receipt):
+        """The sealed-bundle manifest descriptor an honest composer writes."""
+        return {"identity": "rows-0", **_descriptor(root, "retirement-samples.manifest.json"),
+                "start_record": 0, "records": receipt["records"], "input_bytes": receipt["input_bytes"]}
+
     def test_reordered_or_missing_sample_shards_are_rejected(self):
         root = self.sample_root()
         receipt, seen = self.stream_samples(root)
-        planned = 131160
-        self.assertEqual((receipt["records"], seen), (planned, planned))
+        planned = [{"identity": "rows-0", "path": "retirement-samples.manifest.json",
+                    "start_record": 0, "records": 131160}]
+        self.assertEqual((receipt["records"], seen), (131160, 131160))
+        # The pre-sample partition plan joins the intact population.
+        joined = binding._result_manifest_descriptors([self.sealed_descriptor(root, receipt)], planned)
+        self.assertEqual(joined[0]["records"], 131160)
         shards = json.loads((root / "retirement-samples.manifest.json").read_bytes())["shards"]
         # #615 streams shards in identity order, so a permuted list is the
         # same population; reordering means relabelling which bytes come first.
         self.rewrite_manifest(root, [shards[1], shards[0]])
-        self.assertEqual(self.stream_samples(root)[1], planned)
+        self.assertEqual(self.stream_samples(root)[1], 131160)
         relabelled = [dict(shards[1], identity=shards[0]["identity"]),
                       dict(shards[0], identity=shards[1]["identity"])]
         self.rewrite_manifest(root, relabelled)
         with self.assertRaisesRegex(ValueError, "not disjoint contiguous partitions"):
             self.stream_samples(root)
-        # Dropping the last shard leaves a self-consistent manifest; the
-        # sealed-bundle join (_check_workflow_evidence) requires the planned
-        # record count, so the short population cannot be sealed.
+        # Dropping the last shard leaves a self-consistent #615 manifest; the
+        # sealed-bundle join against the frozen partition plan refuses it.
         self.rewrite_manifest(root, shards[:1])
-        receipt, seen = self.stream_samples(root)
-        self.assertNotEqual(receipt["records"], planned)
-        self.assertNotEqual(seen, planned)
+        short, _seen = self.stream_samples(root)
+        with self.assertRaisesRegex(ValueError, "differs from the pre-sample partition plan"):
+            binding._result_manifest_descriptors([self.sealed_descriptor(root, short)], planned)
         self.rewrite_manifest(root, shards)
         (root / shards[1]["path"]).unlink()
         with self.assertRaises(ValueError):
@@ -302,10 +348,10 @@ class RealThroughputOutputTests(unittest.TestCase):
 
     # -- forged self-consistent bundle ---------------------------------------------
 
-    def evidence_chain(self, receipt_bytes):
+    def evidence_chain(self, receipt_bytes, name="result"):
         """record -> sealed result -> result bundle -> execution receipt, each
         descriptor matching its own bytes (a self-consistent bundle)."""
-        root = self.work / "result"
+        root = self.work / name
         root.mkdir(exist_ok=True)
         (root / "execution-receipt.json").write_bytes(receipt_bytes)
         bundle = {"execution_receipt": _descriptor(root, "execution-receipt.json")}
@@ -360,43 +406,53 @@ class RealThroughputOutputTests(unittest.TestCase):
                        (self.root / RECEIPT).read_bytes()).hexdigest()]
         result = subprocess.run(command, capture_output=True, text=True, check=False)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("independently supplied digest", result.stderr)
+        self.assertIn("export receipt differs from the independently supplied digest", result.stderr)
         self.assertEqual(list(publication.iterdir()), [])
 
     # -- real bytes through publication, retrieval and unpack ---------------------
 
-    def test_real_output_reaches_the_production_binding_validator(self):
-        """Publish, retrieve in a separate consumer and unpack real output.
+    def run_chain(self, receipt_bytes, attempt=2, validator=None, name="chain"):
+        """Publish real output, then retrieve and replay it in a separate
+        consumer process, entirely through the CLI's main().
 
-        The chain must stop at the production binding validator: these real
-        artifacts carry no composer-produced binding record, so no replay may
-        be reported. This is the hook E's composer fills.
+        The native `bench_service unpack-export` cannot run on these bytes:
+        it requires a receipt the service itself sealed for a finalized
+        service result (request, principal and profile digests) and the
+        worker's full-result binding over its manifest and bundle index, and
+        the blocked retirement recipe cannot finalize a service result here.
+        UNPACKER is the stand-in. ``validator`` optionally replaces the
+        production binding validator's path (a test double); by default the
+        real validator runs.
         """
-        names = [TIMED_EXECUTION, TIMED_SHARD, UNTIMED_RECORDS, UNTIMED_SHARD, RECEIPT,
+        names = [TIMED_EXECUTION, TIMED_SHARD, UNTIMED_RECORDS, UNTIMED_SHARD,
                  "retirement-shard-0.jsonl", "retirement-shard-1.jsonl"]
-        staged = self.evidence_chain((self.root / RECEIPT).read_bytes())
-        for name in names:
-            shutil.copyfile(self.root / name, staged / name)
+        staged = self.evidence_chain(receipt_bytes, name + "-staged")
+        for item in names:
+            shutil.copyfile(self.root / item, staged / item)
         staged_names = sorted(path.name for path in staged.iterdir())
-        archive = self.work / "download.bqexport"
-        export_sha = _write_archive(archive, staged, staged_names, 1, 2, "a" * 64)
-        unpacker = self.work / "reviewed-unpacker"
+        archive = self.work / f"{name}.bqexport"
+        export_sha = _write_archive(archive, staged, staged_names, 1, attempt, "a" * 64)
+        unpacker = self.work / f"{name}-unpacker"
         unpacker.write_text(f"#!{sys.executable}\n{UNPACKER}")
         unpacker.chmod(stat.S_IRWXU)
-        publication = self.work / "publication"
+        publication = self.work / f"{name}-publication"
         publication.mkdir(mode=0o700)
         identities = ["--bench-service", str(unpacker), "--repository-root", str(REPOSITORY),
-                      "--binding", "binding.json", "--job", "1", "--attempt", "2",
+                      "--binding", "binding.json", "--job", "1", "--attempt", str(attempt),
                       "--full-result-sha256", "a" * 64, "--export-receipt-sha256", export_sha,
                       "--trusted-execution-receipt-sha256",
                       hashlib.sha256((self.root / RECEIPT).read_bytes()).hexdigest()]
-        command = [sys.executable, str(Path(replay.__file__).resolve())]
+        launcher = ("import sys; sys.path.insert(0, sys.argv[1]); import retirement_export_replay as r; "
+                    "sys.argv = sys.argv[2:]; r.binding.__file__ = sys.argv.pop(1) or r.binding.__file__; "
+                    "sys.exit(r.main())")
+        command = [sys.executable, "-c", launcher, str(HERE), str(Path(replay.__file__).resolve()),
+                   str(validator or "")]
         first = subprocess.run(command + [str(archive), "--publish-only", "--test-publication",
                                           str(publication)] + identities,
                                capture_output=True, text=True, check=True)
-        published = publication / "retirement-1-2.bqexport"
+        published = publication / f"retirement-1-{attempt}.bqexport"
         self.assertEqual(json.loads(first.stdout)["test_publication"], str(published))
-        consumer = self.work / "consumer"
+        consumer = self.work / f"{name}-consumer"
         retrieval = consumer / "retrieval"
         retrieval.mkdir(parents=True, mode=0o700)
         second = subprocess.run(command + [str(published), str(consumer / "result"), "--consume-published",
@@ -404,12 +460,45 @@ class RealThroughputOutputTests(unittest.TestCase):
                                 cwd=consumer, env={"PATH": os.environ.get("PATH", ""), "LANG": "C"},
                                 capture_output=True, text=True, check=False)
         self.assertEqual((retrieval / published.name).read_bytes(), archive.read_bytes())
-        for name in staged_names:
-            self.assertEqual((consumer / "result" / name).read_bytes(), (staged / name).read_bytes())
-        self.assertNotEqual(second.returncode, 0)
-        self.assertIn("retirement export replay failed", second.stderr)
-        self.assertNotIn("verified-without-admission", second.stdout)
+        for item in staged_names:
+            self.assertEqual((consumer / "result" / item).read_bytes(), (staged / item).read_bytes())
         self.assertIn('"retrieved_export"', second.stdout)
+        return second
+
+    def test_real_output_stops_at_the_production_binding_validator(self):
+        """No composer-produced binding exists yet (COMPOSER_BINDING_PATH), so
+        the real validator must refuse the record and no replay may be
+        reported."""
+        second = self.run_chain((self.root / RECEIPT).read_bytes())
+        self.assertEqual(second.returncode, 1)
+        self.assertRegex(second.stderr, r"retirement export replay failed: Command .*"
+                                        r"native_retirement_performance_binding\.py.* returned non-zero exit status")
+        self.assertNotIn("verified-without-admission", second.stdout)
+
+    def write_validator_double(self):
+        """Stands in for the binding validator only, never for the join."""
+        path = self.work / "validator-double.py"
+        proof = {"proof": "independent-evidence-and-receipts-checked", "rows_recomputed": True,
+                 "support_checked": True, "execution_checked": True, "bundle_checked": True,
+                 "git_checked": True, "required_rows": 0}
+        path.write_text(f"import json\nprint(json.dumps({proof!r}))\n")
+        return path
+
+    def test_cli_joins_the_real_receipt_to_the_exported_attempt(self):
+        """Past the validator, the CLI's authenticated_attempt_join decides."""
+        validator = self.write_validator_double()
+        genuine = (self.root / RECEIPT).read_bytes()
+        joined = self.run_chain(genuine, validator=validator, name="joined")
+        self.assertEqual(joined.returncode, 0, joined.stderr)
+        self.assertEqual(json.loads(joined.stdout.splitlines()[-1])["replay"], "verified-without-admission")
+        wrong_attempt = self.run_chain(genuine, attempt=3, validator=validator, name="wrong-attempt")
+        self.assertEqual(wrong_attempt.returncode, 1)
+        self.assertIn("service execution receipt does not identify the exported job and attempt",
+                      wrong_attempt.stderr)
+        forged = _canonical_line(dict(json.loads(genuine), attempt=3))
+        forged_run = self.run_chain(forged, attempt=3, validator=validator, name="forged")
+        self.assertEqual(forged_run.returncode, 1)
+        self.assertIn("execution_receipt bytes do not match the independently trusted digest", forged_run.stderr)
 
 
 if __name__ == "__main__":

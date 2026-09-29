@@ -84,10 +84,12 @@ BUSTER_GLOBAL_LOCAL void bq_test_export_socket(BqQueue* queue, char const* queue
 
 /* #1024: the chunk-index cache must never outlive the spool it verified.
  * With the cache warm, a self-consistent rewrite (chunk bytes and their index
- * digest changed together, so the per-chunk check alone would pass) must force
- * a full index check against the receipt and fail. A byte-identical spool on a
- * new inode must also be rechecked in full before the cache is reused. The
- * named spool is restored to the caller's `spool` inode before returning. */
+ * digest changed together, so the per-chunk check alone would pass) must
+ * fail, both when its metadata change forces a full check and, forced here,
+ * when metadata is unchanged and the cached page digest must catch it. A
+ * byte-identical spool on a new inode must be rechecked in full before the
+ * cache is reused. The named spool is restored to the caller's `spool` inode
+ * before returning. */
 BUSTER_GLOBAL_LOCAL void bq_test_export_cached_spool(BqQueue* queue, int spool, char const* sealed,
                                                      BqPacket const* request, u64 total)
 {
@@ -108,12 +110,24 @@ BUSTER_GLOBAL_LOCAL void bq_test_export_cached_spool(BqQueue* queue, int spool, 
         bq_digest(forged, count, forged_index);
         BQ_CHECK(pwrite(spool, forged, count, BQ_EXPORT_DATA_OFFSET) == (ssize_t)count &&
                  pwrite(spool, forged_index, 64, BQ_EXPORT_RECEIPT_CAP) == 64 && fchmod(spool, 0400) == 0);
-        checks = bq_export_index_full_checks;
-        BQ_CHECK(bq_transport_dispatch(queue, request->bytes, request->size, &response) == BQ_EXPORT_CORRUPT &&
-                 bq_export_index_full_checks == checks + 1);
+        /* Whatever the filesystem's timestamp granularity, the rewrite fails. */
+        BQ_CHECK(bq_transport_dispatch(queue, request->bytes, request->size, &response) == BQ_EXPORT_CORRUPT);
         BQ_CHECK(pwrite(spool, original, count, BQ_EXPORT_DATA_OFFSET) == (ssize_t)count &&
                  pwrite(spool, original_index, 64, BQ_EXPORT_RECEIPT_CAP) == 64 && fchmod(spool, 0400) == 0 &&
                  bq_transport_dispatch(queue, request->bytes, request->size, &response) == BQ_OK);
+        /* Deterministically take the cached path: pretend the rewrite left
+         * every inode timestamp unchanged. The rehashed index page catches it
+         * without a full check. */
+        BQ_CHECK(pwrite(spool, forged, count, BQ_EXPORT_DATA_OFFSET) == (ssize_t)count &&
+                 pwrite(spool, forged_index, 64, BQ_EXPORT_RECEIPT_CAP) == 64 && fchmod(spool, 0400) == 0 &&
+                 fstat(spool, &bq_export_index_cache.identity) == 0 && bq_export_index_cache.valid);
+        checks = bq_export_index_full_checks;
+        BQ_CHECK(bq_transport_dispatch(queue, request->bytes, request->size, &response) == BQ_EXPORT_CORRUPT &&
+                 bq_export_index_full_checks == checks && !bq_export_index_cache.valid);
+        BQ_CHECK(pwrite(spool, original, count, BQ_EXPORT_DATA_OFFSET) == (ssize_t)count &&
+                 pwrite(spool, original_index, 64, BQ_EXPORT_RECEIPT_CAP) == 64 && fchmod(spool, 0400) == 0 &&
+                 bq_transport_dispatch(queue, request->bytes, request->size, &response) == BQ_OK &&
+                 bq_export_index_full_checks == checks + 1);
     }
     /* Replace the name with a byte-identical copy on a new inode. */
     struct stat info = {0};

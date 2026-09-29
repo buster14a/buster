@@ -156,8 +156,13 @@ that contract lands the operator names it with `--binding`, and
 with its output directory, drives real A1 output (metrics shards, untimed
 batches, the two-shard execution receipt and numeric samples) through these
 readers and the publication path, including reordered, missing, truncated and
-forged inputs; it stops at the production binding validator because no
-composer-produced binding exists yet. A failed, interrupted or
+forged inputs. With the real binding validator the CLI chain stops there,
+because no composer-produced binding exists yet. With a validator test double,
+the CLI's `authenticated_attempt_join` accepts the genuine receipt and refuses
+a wrong attempt or a forged receipt. The archive and the unpacker in that test
+are Python stand-ins. The native `unpack-export` needs a receipt the service
+itself sealed for a finalized service result, and the worker's full-result
+binding; the blocked retirement recipe cannot finalize such a result. A failed, interrupted or
 invalid exported attempt can be unpacked and retained but exits before the
 performance replay. A verified replay reports
 `verified-without-admission`; it cannot admit the recipe or invent a performance
@@ -191,11 +196,14 @@ remove only that uncommitted pending artifact before retrying. A corrupt sealed
 receipt is never replaced automatically.
 
 The sealed file contains a durable receipt, a digest-bound chunk index, and
-original archive bytes. The first read verifies the complete index digest;
-subsequent reads reuse that check only while the exact receipt, inode, size,
-owner, mode and nanosecond timestamps remain unchanged. Every chunk checks
-its own indexed digest and the opened/named inode before replying. A service
-restart verifies the complete index again. The client independently
+original archive bytes. The first read verifies the complete index digest
+and keeps one SHA-256 per 64 KiB index page in memory. Subsequent reads reuse
+that check only while the exact receipt, inode, size, owner, mode and
+nanosecond timestamps remain unchanged, and even then reread the cursor's
+whole index page and require its verified page digest, so a rewrite that
+leaves the timestamps unchanged still fails. Every chunk checks its own
+indexed digest and the opened/named inode before replying. A service restart
+verifies the complete index again. The client independently
 hashes the complete archive. A modified snapshot or partial transfer cannot
 be reported as success. An identical retry, including after daemon restart,
 returns the same receipt and bytes. No cursor, queue event or journal record is
@@ -291,22 +299,43 @@ and byte reservation; `tp_retirement_store_plan` enforces the resulting
 owned-file and owned-byte budget, shards plus controls, at publication.
 
 **Export-side ledger.** `python3 tools/bench_service/retirement_export_replay.py
-a1-capacity` (function `a1_export_ledger`) maps every scenario of that model
-onto the export and worker limits. It adds the store-owned execution receipt
-and the worker's three control entries (manifest, `BQ-BUNDLE-V1` index,
-outcome), checks each file kind against the 64 MiB per-file cap, and reports
-what is left for the composer's closure (binding record, plans, manifests,
-support files, binaries, logs) and every directory. With the declaration's
-two runtime stage singletons:
+a1-capacity` (functions `a1_export_ledger`, `composer_bounds`) maps every
+scenario of that model onto the export and worker limits. It adds:
+- the lane-E composer's outputs, mirroring `tp_retirement_compose_bounds`
+  (#1879): the #615 result-input manifests, the code-record set (at most
+  78,914 rows × 649 bytes), the #619 adapter input (series) and output
+  (replay), the result bundle, the execution receipt and the sealed-result
+  record;
+- the prior sealed-closure files (at least 40, derived from the validator's
+  `_all_artifacts` plus `contract.source` and the execution plan; census
+  projections add more);
+- the worker's three control entries (manifest, `BQ-BUNDLE-V1` index,
+  outcome).
 
-| Pairs | Per-input metrics bound | Owned files | Entries left for composer and directories | Owned bytes | Bytes left for composer and controls | Verdict |
-|---:|---:|---:|---:|---:|---:|---|
-| 60 | 4 KiB | 462 | 3,631 | 15,434,270,016 | 122,004,683,456 | fits |
-| 60 | 8 KiB | 902 | 3,191 | 30,130,324,800 | 107,308,628,672 | fits |
-| 60 | 16 KiB | 1,778 | 2,315 | 59,522,434,368 | 77,916,519,104 | fits |
-| 254 | 4 KiB | 1,804 | 2,289 | 60,776,089,696 | 76,662,863,776 | fits |
-| 254 | 8 KiB | 3,524 | 569 | 118,496,266,336 | 18,942,687,136 | fits |
-| 254 | 16 KiB | 6,964 | -2,871 | 233,936,619,616 | -96,497,666,144 | rejected |
+It checks each file kind against the 64 MiB per-file cap and reports what is
+left for census projections, retained logs and every directory. The family's
+aggregate and slice members are taken at the #619 cap of 80, which can only
+enlarge the adapter bounds. With the declaration's two runtime stage
+singletons:
+
+| Pairs | Per-input metrics bound | Owned files | Entries left | Owned bytes | Bytes left | Adapter input | Verdict |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 60 | 4 KiB | 469 | 3,584 | 15,907,812,202 | 121,531,141,270 | 406,664,536 | refused (#1880) |
+| 60 | 8 KiB | 909 | 3,144 | 30,603,866,986 | 106,835,086,486 | 406,664,536 | refused (#1880) |
+| 60 | 16 KiB | 1,785 | 2,268 | 59,995,976,554 | 77,442,976,918 | 406,664,536 | refused (#1880) |
+| 254 | 4 KiB | 1,811 | 2,242 | 62,553,418,890 | 74,885,534,582 | 1,710,443,864 | refused (#1880) |
+| 254 | 8 KiB | 3,531 | 522 | 120,273,595,530 | 17,165,357,942 | 1,710,443,864 | refused (#1880) |
+| 254 | 16 KiB | 6,971 | -2,918 | 235,713,948,810 | -98,274,995,338 | 1,710,443,864 | refused (#1880, entries, bytes) |
+
+**No A1 scenario fits today.** The composer writes the #619 adapter input as
+one file of about `8 × cells × 2P` 32-byte ratio lines. At A1 scale that is
+far above the 64 MiB per-file cap, and `tp_retirement_compose_bounds` refuses
+the family before timing. #1880 tracks sharding it; neither cap may be raised.
+The ledger also prints a review-only projection: with #1880's 64 MiB shards
+(7 at 60 pairs, 26 at 254 pairs), every two-runtime scenario except 254 pairs
+at 16 KiB would fit. A scenario with no runtime-eligible row is refused
+anyway, because generated runtime would have no #619 cell. The projection
+never turns a refused scenario into a fitting one.
 
 A full metrics or transcript shard is exactly 67,108,864 bytes, the per-file
 cap; the worker and `bq_export_inventory` reject only a larger file, and
@@ -315,18 +344,17 @@ is at most 3,520 × 747 = 2,629,440 bytes and a numeric shard at most
 131,072 × 330 = 43,253,760 bytes. The export envelope never binds before the
 store: the 128 GiB store ceiling plus a 208-byte header and path for all 4,096
 entries is 137,439,805,440 bytes, below the 137,448,259,584-byte archive cap.
-The composer's inventory is still unknown. At 254 pairs and an 8 KiB
-per-input bound only 569 entries and about 17.6 GiB remain for the whole
-composer closure and every directory, so a real composer layout must be
-checked against this ledger before that bound is pinned.
+At 254 pairs and an 8 KiB per-input bound only 522 entries and about 16.0 GiB
+remain for census projections, logs and every directory. A real layout must
+be checked against this ledger before that bound is pinned.
 
 At maximum capacity, reserve six independent copies: retained service result,
 sealed service spool (including its chunk index), gateway download, immutable
 test publication, fresh retrieval and extracted clean replay. The
 128 GiB indexed-payload ceiling yields **824,805,176,192 logical file/transport
 bytes** when both file and archive fields reach their respective ceilings.
-The ledger also reports each scenario's payload-only six-copy floor, before
-composer files and controls: 711,114,763,392 bytes at 254 pairs and 8 KiB.
+The ledger also reports each scenario's owned-file six-copy floor, before the
+prior closure, logs and controls: 721,778,744,380 bytes at 254 pairs and 8 KiB.
 These are simultaneous upper bounds, not measured storage requirements or
 proof that any producer can fill both ceilings. They exclude directory
 metadata, filesystem allocation, validator temporary space and any separate

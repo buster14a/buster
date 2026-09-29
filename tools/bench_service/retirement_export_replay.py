@@ -52,6 +52,10 @@ ENTRY_HEADER_BYTES = 16
 WORKER_CONTROL_ENTRIES = 3
 # The store-owned execution receipt at TP_RETIREMENT_RECEIPT_BYTES.
 STORE_RECEIPT_BYTES = 1024 * 1024
+# BQ_WORKER_BUNDLE_CAP (the 8 MiB bundle index) and the two 32 KiB control
+# reservations in export.c's BQ_EXPORT_RETIREMENT_TOTAL_CAP.
+BUNDLE_INDEX_CAP = 8 * 1024 * 1024
+EXPORT_CONTROL_RESERVE = 2 * 32768
 # export.c reserves a full 64-byte digest index up to the recipe's archive cap.
 SPOOL_INDEX_BYTES = ((ARCHIVE_CAP + CHUNK - 1) // CHUNK) * 64
 RECIPE = b"native-retirement-performance-v1"
@@ -115,40 +119,158 @@ def capacity_ledger(receipt):
     return copy_ledger(archive_bytes, file_bytes)
 
 
-def a1_export_ledger(model, limits):
+# tp_retirement_compose_bounds (#1879, tools/bench_service/retirement_compose.c)
+# byte bounds of the composer's outputs. The unit test re-reads each from the
+# composer source when that branch is reachable.
+COMPOSE_RATIO_LINE_BYTES = 32
+COMPOSE_MEMBER_LINE_BYTES = 256
+COMPOSE_SERIES_HEADER_BYTES = 256
+COMPOSE_SERIES_END_BYTES = 4
+COMPOSE_REPLAY_MEMBER_BYTES = 1024
+COMPOSE_REPLAY_FIXED_BYTES = 256
+COMPOSE_MANIFEST_FIXED_BYTES = 256
+COMPOSE_MANIFEST_SHARD_BYTES = 384
+COMPOSE_BUNDLE_BYTES = 16384
+COMPOSE_SEAL_FIXED_BYTES = 2048
+COMPOSE_SEAL_ENTRY_BYTES = 512
+COMPOSE_DIMENSIONS = 6
+COMPOSE_BOOTSTRAP_MEMBERS = 80
+COMPOSE_CELL_MEMBERS = 300000
+COMPOSE_PARTITIONS = 3
+# Code records, series (adapter input), replay output, bundle, execution
+# receipt and sealed-result record, besides the result-input manifests.
+COMPOSE_FIXED_OUTPUTS = 6
+# TP_RETIREMENT_CODE_RECORD_BYTES_MAX (tools/throughput/retirement_samples.h).
+CODE_RECORD_BYTES_MAX = 649
+SAMPLE_PARTITION_RECORDS = 16777216
+SAMPLE_SHARD_RECORDS = 131072
+ROUNDS = 2
+# The issue that must shard the #619 adapter input before any A1 campaign fits.
+ADAPTER_INPUT_ISSUE = "#1880"
+
+
+def prior_closure_entries():
+    """The fewest pre-existing sealed-closure files a binding carries.
+
+    Derived from the production validator's ``_all_artifacts`` over a minimal
+    record (one requested-work item), less its two outer phases, plus
+    ``contract.source`` and ``workflow.execution_plan``, as the composer's
+    ``prior`` list is built. Census projection artifacts add to this.
+    """
+    item = {"path": "x", "bytes": 1, "sha256": "0" * 64}
+    record = {
+        "support": {"files": [item] * len(binding.SUPPORT_FILE_ROLES), "validator": {"source": item}},
+        "requested_work": {"items": [{"artifact": item}]},
+        "subjects": {name: {"source_snapshot": item, "binary": item, "build_receipt": item}
+                     for name in ("baseline", "candidate")},
+        "producer": {"toolchain": {"compiler_binary": item, "resource_directory": item},
+                     "build": {"configuration": item, "flags": item}},
+        "measurement": {"harness_binary": item, "statistics_implementation": item},
+        "execution": {"service": {"recipe": item}, "profile": {"descriptor": item},
+                      "host": {"qualification_receipt": item, "aa_admission_receipt": item},
+                      "lease": {"receipt": item}},
+        "provenance": {name: item for name in ("relation_receipt", "replay_receipt", "replay_bundle",
+                                               "census_receipt", "strict_receipt")},
+        "workflow": {"phases": {name: item for name in binding.WORKFLOW_PHASES},
+                     "records": {name: item for name in ("admission", "oracle", "result_input_plan")}},
+    }
+    names = [name for name, _artifact in binding._all_artifacts(record)
+             if name not in ("workflow.phases.sealed_result", "workflow.phases.independent_replay")]
+    return len(names) + 2
+
+
+def composer_bounds(model, code_rows, prior_entries, bootstrap_members=COMPOSE_BOOTSTRAP_MEMBERS):
+    """Mirror tp_retirement_compose_bounds for one A1 campaign scenario.
+
+    The family's cells are the timed rows (wall time and peak memory), the
+    runtime rows and the object groups (the batch pair). The aggregate and
+    slice members depend on the rows' dimension values, which the capacity
+    model does not carry, so they are taken at the #619 cap
+    (``bootstrap_members``); that only enlarges the series and replay
+    bounds. Returns every output's bytes, the files, the total and the
+    reasons the composer would refuse the scenario before timing.
+    """
+    per_unit = ROUNDS * model["pairs_per_round"]
+    rows, runtime, objects = model["timed_rows"], model["runtime_rows"], model["object_groups"]
+    refusals = []
+    manifests = manifest_count = 0
+    for records in (rows * per_unit, objects * per_unit):
+        partitions = -(-records // SAMPLE_PARTITION_RECORDS)
+        manifest_count += partitions
+        manifests += partitions * COMPOSE_MANIFEST_FIXED_BYTES + \
+            -(-records // SAMPLE_SHARD_RECORDS) * COMPOSE_MANIFEST_SHARD_BYTES
+    if manifest_count > COMPOSE_PARTITIONS:
+        refusals.append("result-input partitions exceed the #615 bound")
+    cells = [rows, rows, runtime, objects, objects]
+    if not all(cells):
+        refusals.append("a #619 metric has no cell (no runtime-eligible row)")
+    if sum(cells) > COMPOSE_CELL_MEMBERS:
+        refusals.append("statistical family exceeds the #619 cell-member cap")
+    members = bootstrap_members + sum(cells)
+    lines = (COMPOSE_DIMENSIONS + 2) * sum(cells) * per_unit
+    outputs = {
+        "result_input_manifests": manifests,
+        "code_records": code_rows * CODE_RECORD_BYTES_MAX,
+        "adapter_input": COMPOSE_SERIES_HEADER_BYTES +
+            members * (COMPOSE_MEMBER_LINE_BYTES + COMPOSE_SERIES_END_BYTES) + lines * COMPOSE_RATIO_LINE_BYTES,
+        "adapter_output": COMPOSE_REPLAY_FIXED_BYTES + members * COMPOSE_REPLAY_MEMBER_BYTES,
+        "result_bundle": COMPOSE_BUNDLE_BYTES,
+        "execution_receipt": STORE_RECEIPT_BYTES,
+        "sealed_result": COMPOSE_SEAL_FIXED_BYTES + (prior_entries + ENTRY_CAP) * COMPOSE_SEAL_ENTRY_BYTES,
+    }
+    if outputs["adapter_input"] > FILE_CAP:
+        refusals.append(f"single-file #619 adapter input exceeds the 64 MiB per-file cap ({ADAPTER_INPUT_ISSUE})")
+    if any(value > FILE_CAP for name, value in outputs.items() if name != "adapter_input"):
+        refusals.append("a composer output exceeds the 64 MiB per-file cap")
+    return {"outputs": outputs, "files": manifest_count + COMPOSE_FIXED_OUTPUTS,
+            "total_bytes": sum(outputs.values()), "family_members_upper_bound": members,
+            "refusals": refusals}
+
+
+def a1_export_ledger(model, limits, code_rows, prior_entries):
     """Map one A1 campaign scenario onto the export and worker limits.
 
     ``model`` is a scenario of tools/throughput/retirement_capacity.py's
     ``campaign_model`` and ``limits`` its ``source_limits``: shard files per
     stage (transcript, numeric, 64 MiB metrics shards), untimed metrics shards
-    and the single untimed batch-record file. This adds the store-owned
-    execution receipt and the worker's three control entries, checks every
-    file kind against the per-file cap, and reports the entries and bytes left
-    for the composer's closure (binding, plans, manifests, support files,
-    binaries, logs) and directories. Those remain unknown until E's composer
-    fixes its layout, so this is a model with explicit headroom, not an
-    inventory. It never counts executed work or transferred bytes.
+    and the single untimed batch-record file. This adds the composer's
+    outputs (``composer_bounds``: result-input manifests, code records,
+    adapter input and output, result bundle, execution receipt and sealed
+    record), the prior sealed-closure files (``prior_entries``) and the
+    worker's three control entries. It checks every file kind against the
+    per-file cap and reports the entries and bytes left for census
+    projections, retained logs and directories. It is a model, not an
+    inventory, and never counts executed work or transferred bytes.
     """
-    untimed_record_bytes = model["untimed_batches"] * limits["untimed_record_bytes_max"]
+    composer = composer_bounds(model, code_rows, prior_entries)
     largest = {
         "metrics_shard": limits["metrics_shard_bytes"],
         "transcript_shard": limits["transcript_bytes_per_shard"],
         "numeric_shard": limits["sample_records_per_shard"] * max(
             limits["sample_record_bytes_max"], limits["batch_record_bytes_max"]),
-        "untimed_record_file": untimed_record_bytes,
-        "execution_receipt": STORE_RECEIPT_BYTES,
+        "untimed_record_file": model["untimed_batches"] * limits["untimed_record_bytes_max"],
+        **composer["outputs"],
     }
-    owned_files = model["payload_files"] + 1
-    owned_bytes = model["payload_bytes_upper_bound"] + STORE_RECEIPT_BYTES
-    entries_left = ENTRY_CAP - WORKER_CONTROL_ENTRIES - owned_files
+    owned_files = model["payload_files"] + composer["files"]
+    owned_bytes = model["payload_bytes_upper_bound"] + composer["total_bytes"]
+    entries_left = ENTRY_CAP - WORKER_CONTROL_ENTRIES - prior_entries - owned_files
     bytes_left = RESULT_FILE_CAP - owned_bytes
-    # Every entry, including those left to the composer, costs at most one
-    # header and a full-length path in the archive.
+    # Every entry costs at most one header and a full-length path.
     header_bound = ENTRY_CAP * (ENTRY_HEADER_BYTES + PATH_CAP)
     per_file_fits = all(value <= FILE_CAP for value in largest.values())
-    fits = bool(model["fits"]) and per_file_fits and entries_left >= 0 and bytes_left >= 0
+    refusals = list(composer["refusals"])
+    if not model["fits"]:
+        refusals.append("campaign store model rejects the scenario")
+    if entries_left < 0:
+        refusals.append("entries exceed the 4,096-entry bundle")
+    if bytes_left < 0:
+        refusals.append("bytes exceed the 128 GiB store")
     payload_archive = owned_bytes + (owned_files + WORKER_CONTROL_ENTRIES) * (
         ENTRY_HEADER_BYTES + PATH_CAP)
+    # What #1880's proposed 64 MiB sharding of the adapter input would need.
+    # A projection for review only: it never makes this scenario fit.
+    adapter_shards = -(-composer["outputs"]["adapter_input"] // FILE_CAP)
+    other_refusals = [reason for reason in refusals if ADAPTER_INPUT_ISSUE not in reason]
     return {
         "pairs_per_round": model["pairs_per_round"],
         "per_input_metrics_bound_bytes": model["per_input_metrics_bound_bytes"],
@@ -156,19 +278,29 @@ def a1_export_ledger(model, limits):
         "metrics_shards_both_stages": 2 * model["metrics_shards_per_stage_upper_bound"],
         "untimed_metrics_shards": model["untimed_metrics_shards_upper_bound"],
         "untimed_record_files": model["untimed_record_files"],
+        "composer": composer,
+        "prior_closure_entries": prior_entries,
         "largest_file_bytes": largest,
         "per_file_cap": FILE_CAP,
         "per_file_fits": per_file_fits,
         "owned_files": owned_files,
         "owned_bytes_upper_bound": owned_bytes,
         "worker_control_entries": WORKER_CONTROL_ENTRIES,
-        "entries_left_for_composer_and_directories": entries_left,
-        "bytes_left_for_composer_and_controls": bytes_left,
+        "entries_left_for_projections_logs_and_directories": entries_left,
+        "bytes_left_for_prior_closure_logs_and_controls": bytes_left,
         "archive_bytes_at_full_store": RESULT_FILE_CAP + header_bound,
         "archive_cap": ARCHIVE_CAP,
         "export_binds_before_store": RESULT_FILE_CAP + header_bound > ARCHIVE_CAP,
         "payload_only_copies": copy_ledger(payload_archive, owned_bytes),
-        "fits": fits,
+        "refusals": refusals,
+        "fits": not refusals and per_file_fits,
+        "projection_if_adapter_input_sharded": {
+            "issue": ADAPTER_INPUT_ISSUE,
+            "adapter_input_shards": adapter_shards,
+            "entries_left": entries_left - (adapter_shards - 1),
+            "other_refusals": other_refusals,
+            "would_fit": not other_refusals and entries_left - (adapter_shards - 1) >= 0,
+        },
         "model_only": True,
     }
 
@@ -417,10 +549,18 @@ def a1_capacity_report(root, require_committed=True, performance_rows=None):
     import retirement_capacity as capacity
     report = capacity.build_report(Path(root), require_committed=require_committed,
                                    performance_rows=performance_rows)
+    stages = report["population"]["stage_rows"]
+    # Code-observed rows on every target are at most every declared object
+    # identity plus the counted stage singletons, timed and untimed.
+    code_rows = stages["declared_object_identities"] + sum(stages["timed_singletons_by_stage"].values()) + \
+        sum(stages["untimed_singletons_by_stage"].values())
+    prior_entries = prior_closure_entries()
     return {
-        "schema": "buster-native-retirement-export-capacity-v1",
+        "schema": "buster-native-retirement-export-capacity-v2",
         "source": report["source"],
-        "scenarios": {name: a1_export_ledger(model, report["policy_limits"])
+        "code_rows_upper_bound": code_rows,
+        "prior_closure_entries_minimum": prior_entries,
+        "scenarios": {name: a1_export_ledger(model, report["policy_limits"], code_rows, prior_entries)
                       for name, model in report["scenarios"].items()},
         "six_copy_ceiling": copy_ledger(ARCHIVE_CAP, RESULT_FILE_CAP),
         "capacity_is_arithmetic_only": True,
