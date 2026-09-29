@@ -1,0 +1,34 @@
+{
+  "baseline": "ade6ac4b6ecb21f30b61b656439bac476c145e2f",
+  "causes": [
+    "exact outer invocation terminal before observations settled",
+    "missing live stage(s): base-generate,base-build,candidate-generate,candidate-build,throughput",
+    "missing frozen inventory: base-build,candidate-build"
+  ],
+  "identity": {
+    "attempt": 2,
+    "boot_id": "1cc2d1ab-0b0a-4c2a-be2a-8f24df24dc1c",
+    "cgroup_root_device": 30,
+    "cgroup_root_inode": 8247,
+    "instance_sha256": "909936fc751f743caf02a957565b69e8edf1ff9fbfc2e222f66e4ff03e997c34",
+    "job": 1,
+    "outer_cgroup": "/buster.slice/buster-bench.slice/buster-bench-1-2.service",
+    "outer_cgroup_device": 30,
+    "outer_cgroup_inode": 10259,
+    "outer_invocation": "a2fda0b9798f453c86bd413be58ebac6",
+    "outer_unit": "buster-bench-1-2.service",
+    "request_sha256": "75b3b42de4e563365f0078e5e431c8db92e54c1e0b5694b69b3b9f5481e48461",
+    "slice_device": 30,
+    "slice_inode": 10080,
+    "worker_sha256": "2a80a8efa85e7e25b243489394943423626b028d53d356c5f579d3c3cd799168"
+  },
+  "inventories": {},
+  "inventory_before_throughput": false,
+  "job": 1,
+  "request_sha256": "75b3b42de4e563365f0078e5e431c8db92e54c1e0b5694b69b3b9f5481e48461",
+  "stages": {},
+  "structural_capture_complete": false,
+  "subject": "11616f3a099461b95286aba00d46c188a3a139e1",
+  "timing_causes": [],
+  "verdict": "OBSERVATION_INCONCLUSIVE"
+}

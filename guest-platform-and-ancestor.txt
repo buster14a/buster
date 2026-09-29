@@ -1,0 +1,31 @@
+Linux 51b847b7d64e 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+systemd 255 (255.4-1ubuntu8.17)
++PAM +AUDIT +SELINUX +APPARMOR +IMA +SMACK +SECCOMP +GCRYPT -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD +LIBCRYPTSETUP +LIBFDISK +PCRE2 -PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD -BPF_FRAMEWORK -XKBCOMMON +UTMP +SYSVINIT default-hierarchy=unified
+1cc2d1ab-0b0a-4c2a-be2a-8f24df24dc1c
+0::/init.scope
+410 148 0:49 / / rw,relatime - overlay overlay rw,lowerdir=/var/lib/docker/overlay2/l/PINYFEGYTYGJ52ZE6W3TTMSQU4:/var/lib/docker/overlay2/l/FKYZCNACNZIXUTLNXCCN55THI3:/var/lib/docker/overlay2/l/57ENQN6K3EWDZVP4K76SUH7USW,upperdir=/var/lib/docker/overlay2/85544e8b43f002e133a8eba05b9c95c7e42efa06dde479e097eb07cb61db615e/diff,workdir=/var/lib/docker/overlay2/85544e8b43f002e133a8eba05b9c95c7e42efa06dde479e097eb07cb61db615e/work,nouserxattr
+412 410 0:58 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw
+413 410 0:59 / /dev rw,nosuid - tmpfs tmpfs rw,size=65536k,mode=755,inode64
+414 413 0:60 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,gid=5,mode=620,ptmxmode=666
+415 410 0:61 / /sys rw,nosuid,nodev,noexec,relatime - sysfs sysfs rw
+416 415 0:30 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw,nsdelegate,memory_recursiveprot
+417 413 0:56 / /dev/mqueue rw,nosuid,nodev,noexec,relatime - mqueue mqueue rw
+418 413 0:62 / /dev/shm rw,nosuid,nodev,noexec,relatime - tmpfs shm rw,size=65536k,inode64
+419 410 0:63 / /tmp rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,inode64
+420 410 0:64 / /run rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,mode=755,inode64
+421 420 0:65 / /run/lock rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,inode64
+422 410 8:1 /var/lib/docker/containers/51b847b7d64eac3014e318db240e453a635a7552a1665ff4a7bc63bedb245310/resolv.conf /etc/resolv.conf rw,relatime - ext4 /dev/root rw,discard,journal_async_commit,nobarrier,errors=remount-ro,commit=30,data=writeback
+423 410 8:1 /var/lib/docker/containers/51b847b7d64eac3014e318db240e453a635a7552a1665ff4a7bc63bedb245310/hostname /etc/hostname rw,relatime - ext4 /dev/root rw,discard,journal_async_commit,nobarrier,errors=remount-ro,commit=30,data=writeback
+424 410 8:1 /var/lib/docker/containers/51b847b7d64eac3014e318db240e453a635a7552a1665ff4a7bc63bedb245310/hosts /etc/hosts rw,relatime - ext4 /dev/root rw,discard,journal_async_commit,nobarrier,errors=remount-ro,commit=30,data=writeback
+99 412 0:51 / /proc/sys/fs/binfmt_misc rw,relatime - autofs systemd-1 rw,fd=31,pgrp=1,timeout=0,minproto=5,maxproto=5,direct,pipe_ino=30789
+406 415 0:8 / /sys/kernel/debug rw,nosuid,nodev,noexec,relatime - debugfs debugfs rw
+100 413 0:52 / /dev/hugepages rw,nosuid,nodev,relatime - hugetlbfs hugetlbfs rw,pagesize=2M
+101 415 0:13 / /sys/kernel/tracing rw,nosuid,nodev,noexec,relatime - tracefs tracefs rw
+392 415 0:36 / /sys/fs/fuse/connections rw,nosuid,nodev,noexec,relatime - fusectl fusectl rw
+393 415 0:20 / /sys/kernel/config rw,nosuid,nodev,noexec,relatime - configfs configfs rw
+394 99 0:37 / /proc/sys/fs/binfmt_misc rw,nosuid,nodev,noexec,relatime - binfmt_misc binfmt_misc rw
+cgroup.controllers=cpuset cpu io memory hugetlb pids rdma misc dmem
+cpuset.cpus.effective=0-3
+memory.max=max
+memory.swap.max=max
+pids.max=19151

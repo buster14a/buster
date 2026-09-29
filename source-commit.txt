@@ -1,0 +1,16 @@
+commit 11616f3a099461b95286aba00d46c188a3a139e1
+tree 759897b820383d077a0410fd505fb943fc560d0d
+parent f4d85ee9b0b15a5b2e44cc756ac25fd7d0ee420d
+author Claude <noreply@anthropic.com> 1790713309 +0000
+committer Claude <noreply@anthropic.com> 1790713309 +0000
+gpgsig -----BEGIN SSH SIGNATURE-----
+ U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrLzsfFISF4by8Q+FKz27YpkK1USsBB+m
+ amu1QkJnbDsAAAADZ2l0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQGd7uLWP
+ M51aD9rNLnqaB8VH4nTbt9cJOLHw+ksKBKK85mg1RxmC4Qn3Ieg2CZTNgghKdRi8szNqhtknel80
+ ogA=
+ -----END SSH SIGNATURE-----
+
+    Regenerate the source-size baseline after folding #1888, #1879 and #1889
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_01Q9M4GYYanQp5yVnRShjmby

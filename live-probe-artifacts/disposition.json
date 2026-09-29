@@ -1,0 +1,5 @@
+{
+  "disposition": "LIVE_PROBE_INCONCLUSIVE",
+  "reason": "outer service is not active",
+  "valid": false
+}

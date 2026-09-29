@@ -1,0 +1,6 @@
+read-only probe of durable file predicates after failed attempt; separate root context
+request=0 paths=1 state=0
+private-root=1 workspace=1 results=1 result=1 queue=1
+worker-record=1 lease-held=0 base-manifest=0 candidate-manifest=0
+installed-service=1 build=1 throughput=1
+installed-static-gate=1

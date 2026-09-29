@@ -1,0 +1,10 @@
+PASS namespace-root-before-init-scope
+PASS excluded-cpu
+PASS ancestor-memory-budget
+PASS namespace-pids-budget
+PASS missing-nonroot-controller
+PASS unlimited-memory
+PASS namespace-root-not-in-ancestry
+PASS nonprivate-host-root
+PASS path-traversal
+ANCESTOR_PREFLIGHT_SELF_TEST_PASS cases=9
