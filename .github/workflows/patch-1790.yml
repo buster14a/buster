@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   patch:
-    if: ${{ !contains(github.event.head_commit.message, '[1790 patched]') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -19,33 +18,16 @@ jobs:
         with:
           ref: ${{ github.ref_name }}
           fetch-depth: 1
-          persist-credentials: true
+          persist-credentials: false
 
-      - name: Apply candidate patch
+      - name: Apply candidate and compute reviewed identities
         shell: bash
         run: |
           set -euo pipefail
           python3 .github/scripts/fix_patch_1790.py
           python3 .github/scripts/patch_1790.py
-
-      - name: Run focused workflow regressions
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 tools/ci_native_observation_test.py -v
-          python3 tools/matrix_shard_test.py -v
-          python3 tests/action_pins_test.py -v
-          python3 tools/check_action_pins.py
-          python3 tests/ci_tools_test.py -v
+          python3 .github/scripts/compute_1790_policy_identity.py
+          python3 tests/ci_tools_test.py WorkflowPolicyTests.test_all_six_platforms_and_commands_remain -v
           git diff --check
-
-      - name: Publish candidate commit
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add .github tools docs
-          git diff --cached --check
-          git commit -m 'ci: contain desktop artifact resolution failures (#1790) [1790 patched]'
-          git push origin HEAD:${GITHUB_REF_NAME}
+          printf 'Identity-only run complete; refusing publication before trusted-reader bootstrap.\n'
+          exit 1
