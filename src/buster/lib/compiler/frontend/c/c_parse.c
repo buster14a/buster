@@ -369,6 +369,10 @@ struct CParseValidationCapacities
 // also admits an `else`.
 #define C_PARSE_LOOP_HEADER_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(WHILE) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH))
 
+// The statement keywords whose parenthesized header is one controlling
+// expression; `for` is apart because its header opens a loop scope of its own.
+#define C_PARSE_CONTROLLING_EXPRESSION_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH))
+
 // The position index and token census classify the same contiguous sidecar in
 // the same tiles. Keeping the tile width here makes a later tile consumer
 // share the census' 2,048-token working set instead of inventing another pass
@@ -8538,6 +8542,19 @@ BUSTER_C_INTERNAL bool c_parse_aggregate_definition_at(CPreprocessResult preproc
     return false;
 }
 
+// Whether a type already carries the aggregate definition whose body opens at
+// `open`, so a definition reached a second time does not define two types.
+BUSTER_C_INTERNAL bool c_parse_aggregate_definition_registered(CParseResult const* result, u32 open)
+{
+    bool registered = false;
+    for (u32 type_index = c_parse_definition_scan_start(result, open + 1); type_index < result->type_count && !registered; type_index += 1)
+    {
+        C_DEFINITION_INDEX_COUNT(result->definition_index, scan_row_count, 1);
+        registered = result->types[type_index].definition_start == open + 1;
+    }
+    return registered;
+}
+
 typedef struct CCleanupAttributeInfo CCleanupAttributeInfo;
 struct CCleanupAttributeInfo
 {
@@ -16323,6 +16340,37 @@ BUSTER_C_INTERNAL void c_parse_bind_statement_expression_body(CTypeParseMachine*
     }
 }
 
+// Declares in `scope` the enumeration constants a block-scope type parse
+// appended from `member_start` on: the specifiers of a local declaration, or
+// an enum a controlling expression defines.
+BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CScopeId scope, u32 declaration_index, u32 member_start)
+{
+    for (u32 member_index = member_start; member_index < result->enum_member_count; member_index += 1)
+    {
+        CEnumMember* member = &result->enum_members[member_index];
+        CEntityId entity = {
+            .value = result->entity_count,
+        };
+        BUSTER_VALIDATE(result->entity_count < result->entity_capacity);
+        result->entities[result->entity_count++] = (CEntity){
+            .name = member->name,
+            .location = member->location,
+            .type = member->type,
+            .scope = scope,
+            .next_in_scope = C_ENTITY_ID_INVALID,
+            .declaration_index = declaration_index,
+            .declaration_token_plus_one = member->token_index + 1,
+            .enum_member_plus_one = member_index + 1,
+            .kind = C_ENTITY_ENUMERATOR,
+            .is_definition = true,
+            .constant_is_negative = member->is_negative,
+            .constant_value = member->value,
+        };
+        c_parse_scope_add_entity(result, scope, entity, member->symbol);
+        member->is_published = true;
+    }
+}
+
 BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
                                                     CScopeId scope, u32 declaration_index, u32 start, u32 end)
 {
@@ -16497,30 +16545,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
     }
     CCleanupAttributeInfo declaration_cleanup = {0};
     c_parse_cleanup_attribute_scan(preprocess, start, declarator_start, true, &declaration_cleanup);
-    for (u32 member_index = enum_member_start; member_index < result->enum_member_count; member_index += 1)
-    {
-        CEnumMember* member = &result->enum_members[member_index];
-        CEntityId entity = {
-            .value = result->entity_count,
-        };
-        BUSTER_VALIDATE(result->entity_count < result->entity_capacity);
-        result->entities[result->entity_count++] = (CEntity){
-            .name = member->name,
-            .location = member->location,
-            .type = member->type,
-            .scope = scope,
-            .next_in_scope = C_ENTITY_ID_INVALID,
-            .declaration_index = declaration_index,
-            .declaration_token_plus_one = member->token_index + 1,
-            .enum_member_plus_one = member_index + 1,
-            .kind = C_ENTITY_ENUMERATOR,
-            .is_definition = true,
-            .constant_is_negative = member->is_negative,
-            .constant_value = member->value,
-        };
-        c_parse_scope_add_entity(result, scope, entity, member->symbol);
-        member->is_published = true;
-    }
+    c_parse_publish_enum_members(result, scope, declaration_index, enum_member_start);
     u32 segment_start = declarator_start;
     while (segment_start < end)
     {
@@ -17548,6 +17573,23 @@ BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 st
     return UINT32_MAX;
 }
 
+// Whether the controlling expression [start, end) defines a tag. A definition
+// is the only thing such an expression declares, and each one has a body, so
+// a header without a `{` -- nearly all of them -- costs one shape compare a
+// token and nothing else.
+BUSTER_C_INTERNAL bool c_parse_controlling_expression_defines_tag(CTokenShape const* token_shapes, CPreprocessResult preprocess, u32 start, u32 end)
+{
+    bool defines = false;
+    for (u32 index = start; index < end && !defines; index += 1)
+    {
+        u32 close = 0;
+        defines = c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, index)) == C_PUNCTUATOR_LEFT_BRACE &&
+                  ((index > start && c_parse_aggregate_definition_at(preprocess, index - 1, end, &close)) ||
+                   (index > start + 1 && c_parse_aggregate_definition_at(preprocess, index - 2, end, &close)));
+    }
+    return defines;
+}
+
 // The block-statement walk of one brace-delimited range: `scope` is the scope
 // the range sits directly in, `body_start` and `body_token_count` bound its
 // tokens. It is separate from c_parse_bind_function_body because a GNU
@@ -17569,11 +17611,16 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
     // The binding-array undo mark standing when each scope of the stack
     // opened; closing one restores every binding it shadowed.
     u32* scope_binding_mark = arena_allocate(temporary.arena, u32, body_token_count + 1);
+    // Where the controlling expression of a statement scope ends: a tag
+    // defined before that token, outside any inner block, is declared in the
+    // statement's scope. Zero for every other scope.
+    u32* scope_header_end = arena_allocate(temporary.arena, u32, body_token_count + 1);
     u8* statement_suffix = arena_allocate(temporary.arena, u8, body_token_count + 1);
     u32 scope_count = 1;
     scope_stack[0] = scope;
     scope_end_stack[0] = UINT32_MAX;
     scope_binding_mark[0] = result->binding_undo_count;
+    scope_header_end[0] = 0;
     CScopeId entry_binding_scope = result->binding_scope;
     result->binding_scope = scope;
     u32 body_end = body_start + body_token_count;
@@ -17669,6 +17716,76 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
             statement_start = false;
             continue;
         }
+        // C17 6.8.4p3 and 6.8.5p5 make a selection or iteration statement a
+        // block, so a tag its controlling expression defines, with that
+        // definition's enumeration constants, is in scope through the rest of
+        // the expression and every substatement -- the else branch and the
+        // switch body included -- and ends with the statement:
+        // `if (sizeof(enum { Q = 8 })) v = Q;` reads 8, and a `Q` after it the
+        // outer one again. Only a header that defines a tag opens that scope,
+        // which is charged to the header's `(` in the scope capacity
+        // (c_analyze_semantics_core). `for`
+        // opens its loop scope below and records its header the same way.
+        if (shape == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_CONTROLLING_EXPRESSION_KEYWORDS) &&
+            index + 1 < body_end && c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, index + 1)) == C_PUNCTUATOR_LEFT_PARENTHESIS)
+        {
+            u32 header_close = c_parse_matching_delimiter(preprocess, index + 1, body_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            u32 statement_end = header_close < body_end && c_parse_controlling_expression_defines_tag(token_shapes, preprocess, index + 2, header_close)
+                                    ? c_parse_statement_end(preprocess, index, body_end, statement_suffix, body_token_count + 1)
+                                    : UINT32_MAX;
+            if (statement_end != UINT32_MAX)
+            {
+                CScopeId statement_scope = {
+                    .value = result->scope_count,
+                };
+                BUSTER_VALIDATE(result->scope_count < result->scope_capacity);
+                result->scopes[result->scope_count++] = (CScope){
+                    .parent = scope_stack[scope_count - 1],
+                    .first_entity = C_ENTITY_ID_INVALID,
+                    .last_entity = C_ENTITY_ID_INVALID,
+                    .token_start = index + 2,
+                    .token_end = statement_end,
+                };
+                scope_binding_mark[scope_count] = result->binding_undo_count;
+                scope_stack[scope_count] = statement_scope;
+                scope_end_stack[scope_count] = statement_end;
+                scope_header_end[scope_count] = header_close;
+                scope_count += 1;
+                result->binding_scope = statement_scope;
+            }
+        }
+        // A tag defined directly in the controlling expression of the
+        // innermost scope is declared there as soon as the walk reaches it,
+        // so a use earlier in the expression still binds the outer name. The
+        // later c_parse_bind_expression_aggregates pass finds it registered.
+        // An enum body holds only enumerators and the constant expressions
+        // the type parse has just evaluated, so it is stepped over rather than
+        // read as uses. A struct or union body is walked as before, which binds
+        // the names in its member bounds for the lowering's layout.
+        u32 aggregate_close = 0;
+        if (shape == C_TOKEN_IDENTIFIER && index < scope_header_end[scope_count - 1] &&
+            c_parse_aggregate_definition_at(preprocess, index, body_end, &aggregate_close))
+        {
+            CScopeId statement_scope = scope_stack[scope_count - 1];
+            u32 aggregate_open = preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER ? index + 2 : index + 1;
+            bool enumeration = c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_ENUM);
+            if (!c_parse_aggregate_definition_registered(result, aggregate_open))
+            {
+                u32 enum_member_start = result->enum_member_count;
+                u32 declarator_start = 0;
+                c_parse_scalar_type_in_scope(machine, result, preprocess, statement_scope, index, aggregate_close + 1, &declarator_start);
+                if (enumeration)
+                {
+                    c_parse_publish_enum_members(result, statement_scope, declaration_index, enum_member_start);
+                }
+            }
+            if (enumeration)
+            {
+                index = aggregate_close + 1;
+                statement_start = false;
+                continue;
+            }
+        }
         if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
         {
             CScopeId parent = scope_stack[scope_count - 1];
@@ -17684,6 +17801,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                 .token_end = UINT32_MAX,
             };
             scope_binding_mark[scope_count] = result->binding_undo_count;
+            scope_header_end[scope_count] = 0;
             scope_stack[scope_count++] = child;
             scope_end_stack[scope_count - 1] = UINT32_MAX;
             result->binding_scope = child;
@@ -17778,6 +17896,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                     scope_binding_mark[scope_count] = result->binding_undo_count;
                     scope_stack[scope_count] = loop_scope;
                     scope_end_stack[scope_count] = loop_end;
+                    scope_header_end[scope_count] = header_close;
                     scope_count += 1;
                     result->binding_scope = loop_scope;
                     if (index + 2 < first_separator &&
@@ -18161,13 +18280,7 @@ BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* mac
         {
             open += 1;
         }
-        bool defined = false;
-        for (u32 type_index = c_parse_definition_scan_start(result, open + 1); type_index < result->type_count && !defined; type_index += 1)
-        {
-            C_DEFINITION_INDEX_COUNT(result->definition_index, scan_row_count, 1);
-            defined = result->types[type_index].definition_start == open + 1;
-        }
-        if (defined)
+        if (c_parse_aggregate_definition_registered(result, open))
         {
             index = close;
             continue;
@@ -24504,7 +24617,10 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     // function need not bring a `(` of its own -- `typedef void H(int);
     // H a, b, c;` declares three, at file or block scope -- but every function
     // row occupies a declaration slot, so the declaration capacity bounds them.
-    result.scope_capacity = open_brace_count + for_count + result.declaration_capacity + 1;
+    // An `if`, `while` or `switch` header that defines a tag opens a statement
+    // scope as well (c_parse_bind_block_statements); each such header has its
+    // own `(`, which pays for it.
+    result.scope_capacity = open_brace_count + for_count + result.declaration_capacity + open_parenthesis_count + 1;
     result.identifier_use_capacity = identifier_count + 1;
     result.identifier_use_by_token_capacity = token_count + 1;
     result.deferred_static_assert_capacity = token_count + 1;
