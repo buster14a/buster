@@ -2,8 +2,10 @@ name: 9700X benchmark service dispatch
 
 # This workflow deliberately does not check out repository content. The runner
 # may invoke only the operator-installed, hash-verified gateway. Keep the
-# repository variable disabled until the ruleset and protected environment in
-# GITHUB_ADMISSION.md have been applied by an administrator.
+# repository variable disabled until the ruleset, main-only environment and
+# runner group in GITHUB_ADMISSION.md have been verified by an administrator.
+# Only davidgmbb (user 39247043) may reach the self-hosted runner; there is no
+# manual environment approval. The authorize and submit job gates enforce it.
 # It is stricter than checkout's credential policy because no checkout step
 # exists; keep the repository-wide static policy marker: persist-credentials: false
 on:
@@ -31,8 +33,77 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Fail closed unless GitHub's own record of this exact run attempt names
+  # davidgmbb by login and numeric ID as both actor and triggering actor of a
+  # workflow_dispatch on main. Context values reach the script only via env.
+  authorize:
+    if: ${{ github.ref == 'refs/heads/main' && vars.BENCH_SERVICE_DISPATCH_ENABLED == 'true' && github.event_name == 'workflow_dispatch' && github.actor == 'davidgmbb' && github.actor_id == '39247043' && github.triggering_actor == 'davidgmbb' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+    timeout-minutes: 5
+    outputs:
+      attempt: ${{ steps.verify.outputs.attempt }}
+    steps:
+      - name: Verify the requester of this run attempt
+        id: verify
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_RUN_ID: ${{ github.run_id }}
+          BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$BQ_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          [[ "$BQ_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$BQ_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          record="$RUNNER_TEMP/run-attempt.json"
+          # The token header is read from stdin, never placed on a command line.
+          printf 'Authorization: Bearer %s\n' "$GH_TOKEN" |
+            curl --fail --silent --show-error --proto '=https' --max-time 30 --retry 3 \
+              --header @- --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' --output "$record" \
+              "https://api.github.com/repos/$BQ_REPOSITORY/actions/runs/$BQ_RUN_ID/attempts/$BQ_RUN_ATTEMPT"
+          python3 - "$record" "$BQ_RUN_ID" "$BQ_RUN_ATTEMPT" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              run = json.load(source)
+          run_id, run_attempt = int(sys.argv[2]), int(sys.argv[3])
+          maintainer = {"login": "davidgmbb", "id": 39247043}
+
+
+          def identity(key):
+              actor = run.get(key)
+              if not isinstance(actor, dict) or type(actor.get("id")) is not int:
+                  return None
+              return {"login": actor.get("login"), "id": actor.get("id")}
+
+
+          failures = [name for name, holds in (
+              ("run id", type(run.get("id")) is int and run.get("id") == run_id),
+              ("event", run.get("event") == "workflow_dispatch"),
+              ("head branch", run.get("head_branch") == "main"),
+              ("actor", identity("actor") == maintainer),
+              ("triggering actor", identity("triggering_actor") == maintainer),
+              ("run attempt", type(run.get("run_attempt")) is int and
+               run.get("run_attempt") == run_attempt),
+          ) if not holds]
+          if failures:
+              sys.exit("BENCH_DISPATCH_UNAUTHORIZED " + ", ".join(failures))
+          PY
+          printf 'attempt=%s\n' "$BQ_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+  # "Re-run failed jobs" and single-job re-runs reuse the outputs of jobs that
+  # succeeded in an earlier attempt, so an old authorize result must not
+  # release a later attempt that anyone re-runs. submit therefore requires
+  # authorize to have run and passed in this same attempt; a maintainer
+  # re-run must use "Re-run all jobs".
   submit:
-    if: ${{ github.ref == 'refs/heads/main' && vars.BENCH_SERVICE_DISPATCH_ENABLED == 'true' }}
+    needs: authorize
+    if: ${{ github.ref == 'refs/heads/main' && vars.BENCH_SERVICE_DISPATCH_ENABLED == 'true' && github.event_name == 'workflow_dispatch' && github.actor == 'davidgmbb' && github.actor_id == '39247043' && github.triggering_actor == 'davidgmbb' && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) }}
     environment: benchmark-9700x
     runs-on:
       group: buster-9700x-service-dispatch

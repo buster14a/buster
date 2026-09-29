@@ -11,7 +11,9 @@
 // A descriptor marked table_audit runs only
 // on the canonical tree per platform (BUSTER_TEST_TABLE_AUDITS, default
 // on) — reserve that flag for results that are a pure function of the
-// generated tables and repository source.
+// generated tables and repository source. `ide test --module=a,b` narrows a
+// run to named descriptors (test_module_selection_resolve); library_tests
+// marks the others deselected in its working copy of the table.
 
 #include <buster/tests/test.h>
 
@@ -192,6 +194,9 @@ struct TestDescriptor
     // same carve-out clang_analyze already has. Off means "some other tree in
     // this matrix runs it", never "nobody does".
     bool table_audit;
+    // Set only in library_tests' working copy of the table, for a module a
+    // `--module=` selection leaves out. Zero runs the descriptor.
+    bool deselected;
 };
 
 // Table audits run unless the superbuild explicitly says another tree owns
@@ -201,6 +206,11 @@ BUSTER_GLOBAL_LOCAL bool buster_test_table_audits_enabled(void)
 {
     String8 value = os_get_environment_variable(S8("BUSTER_TEST_TABLE_AUDITS"));
     return !value.length || !string_equal(value, S8("0"));
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_test_descriptor_runs(TestDescriptor descriptor)
+{
+    return !descriptor.deselected && (!descriptor.table_audit || buster_test_table_audits_enabled());
 }
 
 BUSTER_GLOBAL_LOCAL bool test_fixture_timing_selected(String8 selection, String8 module)
@@ -595,6 +605,62 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == TEST_ID_COUNT);
+
+typedef struct TestModuleSelection TestModuleSelection;
+struct TestModuleSelection
+{
+    u64 invalid_count;
+    bool selected[TEST_ID_COUNT];
+};
+
+// Each comma-separated name must equal a descriptor name registered for this
+// target. An unknown or empty name is invalid rather than ignored, so a typo
+// can never turn into a vacuous pass.
+BUSTER_GLOBAL_LOCAL TestModuleSelection test_module_selection_resolve(String8 list, bool report)
+{
+    TestModuleSelection result = {0};
+    u64 start = 0;
+    for (u64 index = 0; index <= list.length; index += 1)
+    {
+        if (index == list.length || list.pointer[index] == ',')
+        {
+            String8 name = string_slice(list, start, index);
+            u64 id = 0;
+            while (id < TEST_ID_COUNT && !string_equal(test_descriptors[id].name, name))
+            {
+                id += 1;
+            }
+            if (id < TEST_ID_COUNT)
+            {
+                result.selected[id] = true;
+            }
+            else
+            {
+                result.invalid_count += 1;
+                if (report)
+                {
+                    string_print(S8("test: unknown module: '{S8}'\n"), name);
+                }
+            }
+            start = index + 1;
+        }
+    }
+    return result;
+}
+
+bool buster_test_module_selection_check(String8 selection)
+{
+    bool result = !test_module_selection_resolve(selection, true).invalid_count;
+    if (!result)
+    {
+        string_print(S8("test: modules registered for this target:\n"));
+        for (u64 id = 0; id < TEST_ID_COUNT; id += 1)
+        {
+            string_print(S8("  {S8}\n"), test_descriptors[id].name);
+        }
+    }
+    return result;
+}
 
 typedef struct TestParallelRecord TestParallelRecord;
 struct TestParallelRecord
@@ -1107,7 +1173,17 @@ bool batch_test_succeeded(BatchTestResult test)
 
 bool batch_test_report(UnitTestArguments* arguments, BatchTestResult test)
 {
-    arguments->show(arguments, S8("[{u64}/{u64}] Unit tests\n"), test.succeeded_unit_test_count, test.unit_test_count);
+    // A selected run states its share of the suite so it cannot be mistaken
+    // for a full one; a full run keeps the unannotated line.
+    if (test.registered_module_count)
+    {
+        arguments->show(arguments, S8("[{u64}/{u64}] Unit tests ({u64} of {u64} modules selected)\n"), test.succeeded_unit_test_count,
+                        test.unit_test_count, test.selected_module_count, test.registered_module_count);
+    }
+    else
+    {
+        arguments->show(arguments, S8("[{u64}/{u64}] Unit tests\n"), test.succeeded_unit_test_count, test.unit_test_count);
+    }
     arguments->show(arguments, S8("[{u64}/{u64}] Module tests\n"), test.succeeded_module_test_count, test.module_test_count);
     arguments->show(arguments, S8("[{u64}/{u64}] External tests\n"), test.succeeded_external_test_count, test.external_test_count);
     return batch_test_succeeded(test);
@@ -1143,10 +1219,11 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_descriptors(UnitTestArgument
         TestDescriptor descriptor = descriptors[i];
         BatchTestResult result_before_descriptor = result;
 
-        // Another tree in this matrix owns the whole-table audits. Skip
-        // without a timing row so the module's per-runner timing series stays
-        // a series of real runs rather than one salted with zeroes.
-        if (descriptor.table_audit && !buster_test_table_audits_enabled()) continue;
+        // A module selection left this descriptor out, or another tree in
+        // this matrix owns the whole-table audits. Skip without a timing row
+        // so the module's per-runner timing series stays a series of real
+        // runs rather than one salted with zeroes.
+        if (!buster_test_descriptor_runs(descriptor)) continue;
 
         // A descriptor that can create an artifact must not enter its body
         // until the root has been created and probed. Otherwise a setup
@@ -1200,29 +1277,42 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
                                                                           bool timing_enabled, u64* timing_record_count)
 {
     BatchTestResult result = {0};
-    u64 eligible_count = 0;
+    // The table places the initial lane's group, whichever of its members
+    // run, so a module selection cannot move a module across the gang.
+    u64 group_start = descriptor_count;
+    u64 group_end = 0;
     for (u64 index = 0; index < descriptor_count; index += 1)
     {
-        eligible_count += descriptors[index].parallel_kind != TEST_DESCRIPTOR_PARALLEL_NONE &&
-                          (!descriptors[index].table_audit || buster_test_table_audits_enabled());
+        if (descriptors[index].parallel_kind != TEST_DESCRIPTOR_PARALLEL_NONE)
+        {
+            group_start = BUSTER_MIN(group_start, index);
+            group_end = index + 1;
+        }
     }
-    if (!eligible_count)
+    if (group_start == descriptor_count)
     {
         return buster_test_run_descriptors(arguments, descriptors, descriptor_count, timing_enabled, timing_record_count, 0);
     }
 
     u64 arena_position = arguments->arena->position;
-    u64* eligible_indices = arena_allocate(arguments->arena, u64, eligible_count);
+    u64* eligible_indices = arena_allocate(arguments->arena, u64, group_end - group_start);
     TestParallelRecord* records = arena_allocate(arguments->arena, TestParallelRecord, descriptor_count);
     memset(records, 0, sizeof(*records) * descriptor_count);
-    u64 eligible_index = 0;
-    for (u64 index = 0; index < descriptor_count; index += 1)
+    u64 eligible_count = 0;
+    bool group_or_suffix_runs = false;
+    for (u64 index = group_start; index < descriptor_count; index += 1)
     {
-        if (descriptors[index].parallel_kind != TEST_DESCRIPTOR_PARALLEL_NONE &&
-            (!descriptors[index].table_audit || buster_test_table_audits_enabled()))
+        bool runs = buster_test_descriptor_runs(descriptors[index]);
+        if (index < group_end)
         {
-            eligible_indices[eligible_index++] = index;
+            // The initial lane is one contiguous, side-effect-free group.
+            BUSTER_CHECK(descriptors[index].parallel_kind != TEST_DESCRIPTOR_PARALLEL_NONE);
+            if (runs)
+            {
+                eligible_indices[eligible_count++] = index;
+            }
         }
+        group_or_suffix_runs = group_or_suffix_runs || runs;
     }
 
     TestParallelState state = {
@@ -1233,15 +1323,11 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
         .memory_report = arguments->memory_report,
     };
 
-    // The initial lane is one contiguous, side-effect-free group. Run the
-    // serial prefix first and suffix after replay so thread-count-sensitive
-    // modules (notably os_tests) never overlap the gang.
-    u64 first_eligible = eligible_indices[0];
-    u64 last_eligible = eligible_indices[eligible_count - 1];
-    BUSTER_CHECK(last_eligible - first_eligible + 1 == eligible_count);
-    if (first_eligible)
+    // Run the serial prefix first and suffix after replay so
+    // thread-count-sensitive modules (notably os_tests) never overlap the gang.
+    if (group_start)
     {
-        BatchTestResult prefix = buster_test_run_descriptors(arguments, descriptors, first_eligible, timing_enabled, timing_record_count, 0);
+        BatchTestResult prefix = buster_test_run_descriptors(arguments, descriptors, group_start, timing_enabled, timing_record_count, 0);
         result.succeeded_unit_test_count += prefix.succeeded_unit_test_count;
         result.unit_test_count += prefix.unit_test_count;
         result.succeeded_module_test_count += prefix.succeeded_module_test_count;
@@ -1255,23 +1341,31 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
         }
     }
 
-    compiler_prewarm();
-    // The lanes below query arbitrary forms, so every form is prepared here
-    // rather than on first touch; the compiler itself never needs this walk.
-    buster_x86_metadata_prewarm_all_forms();
-    // The metadata and machine suites exercise x86 emission on every host,
-    // including AArch64 CI. Prepare the exact-plan tables before their lanes.
-    machine_x86_64_exact_prewarm();
-    // Every lane in the gang below is an aarch64 suite, and each one queries
-    // canonical form validity per encode and per decode.
-    buster_aarch64_prewarm();
-    buster_aarch64_semantics_prewarm();
-    u64 requested_lanes = buster_test_worker_count(eligible_count);
-    lane_run(BUSTER_MIN(requested_lanes, eligible_count), &test_parallel_lane, &state);
-
-    for (u64 index = first_eligible; index <= last_eligible; index += 1)
+    // Group and suffix modules start from these tables in a full run, so
+    // they do in a selected run too, even one that runs none of the group.
+    if (group_or_suffix_runs)
     {
-        TestParallelRecord* record = &records[index];
+        compiler_prewarm();
+        // The lanes below query arbitrary forms, so every form is prepared here
+        // rather than on first touch; the compiler itself never needs this walk.
+        buster_x86_metadata_prewarm_all_forms();
+        // The metadata and machine suites exercise x86 emission on every host,
+        // including AArch64 CI. Prepare the exact-plan tables before their lanes.
+        machine_x86_64_exact_prewarm();
+        // Every lane in the gang below is an aarch64 suite, and each one queries
+        // canonical form validity per encode and per decode.
+        buster_aarch64_prewarm();
+        buster_aarch64_semantics_prewarm();
+    }
+    if (eligible_count)
+    {
+        u64 requested_lanes = buster_test_worker_count(eligible_count);
+        lane_run(BUSTER_MIN(requested_lanes, eligible_count), &test_parallel_lane, &state);
+    }
+
+    for (u64 work_index = 0; work_index < eligible_count; work_index += 1)
+    {
+        TestParallelRecord* record = &records[eligible_indices[work_index]];
         BUSTER_CHECK(record->completed);
         consume_unit_tests(&result, record->timing.result);
         if (record->output_length)
@@ -1286,10 +1380,10 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
         BUSTER_CHECK(arena_destroy(record->output_arena, 1));
     }
 
-    if (last_eligible + 1 < descriptor_count)
+    if (group_end < descriptor_count)
     {
-        BatchTestResult suffix = buster_test_run_descriptors(arguments, descriptors + last_eligible + 1, descriptor_count - last_eligible - 1,
-                                                             timing_enabled, timing_record_count, last_eligible + 1);
+        BatchTestResult suffix = buster_test_run_descriptors(arguments, descriptors + group_end, descriptor_count - group_end,
+                                                             timing_enabled, timing_record_count, group_end);
         result.succeeded_unit_test_count += suffix.succeeded_unit_test_count;
         result.unit_test_count += suffix.unit_test_count;
         result.succeeded_module_test_count += suffix.succeeded_module_test_count;
@@ -1299,6 +1393,49 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
     }
     arena_set_position(arguments->arena, arena_position);
     return result;
+}
+
+// Harness regression for `--module=`: names match exactly, every bad entry is
+// counted rather than skipped, and a deselected descriptor neither runs nor
+// reports a timing row while later rows keep their table index.
+BUSTER_GLOBAL_LOCAL bool test_module_selection_self_test(void)
+{
+    TestModuleSelection pair = test_module_selection_resolve(S8("object_tests,ir_tests,object_tests"), false);
+    u64 selected_count = 0;
+    for (u64 id = 0; id < TEST_ID_COUNT; id += 1)
+    {
+        selected_count += pair.selected[id];
+    }
+    bool passed = !pair.invalid_count && selected_count == 2 && pair.selected[TEST_ID_OBJECT] && pair.selected[TEST_ID_IR];
+    String8 invalid[] = {S8(""), S8("object_tests,"), S8(",object_tests"), S8("object_tests,,ir_tests"), S8("Object_tests"), S8("object_test"),
+                         S8("object_tests ")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        passed = passed && test_module_selection_resolve(invalid[index], false).invalid_count == 1;
+    }
+
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
+    Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
+    BUSTER_CHECK(arena != 0 && output != 0);
+    TestParallelArguments arguments = {
+        .base = {.arena = arena, .show = &test_parallel_show},
+        .output_arena = output,
+    };
+    TestDescriptor descriptors[] = {
+        {.name = S8("self_test_first"), .function = &test_timing_self_test_pass},
+        {.name = S8("self_test_deselected"), .function = &test_timing_self_test_fail, .deselected = true},
+        {.name = S8("self_test_last"), .function = &test_timing_self_test_pass},
+    };
+    u64 timing_record_count = 0;
+    BatchTestResult batch = buster_test_run_descriptors(&arguments.base, descriptors, BUSTER_ARRAY_LENGTH(descriptors), true, &timing_record_count, 0);
+    String8 text = {(char8*)arena_buffer_start(output), arena_buffer_size(output)};
+    passed = passed && timing_record_count == 2 && batch.module_test_count == 2 && batch.succeeded_module_test_count == 2 && batch.unit_test_count == 4 &&
+             batch.succeeded_unit_test_count == 4;
+    passed = passed && string_first_sequence(text, S8("module=self_test_deselected")) == BUSTER_STRING_NO_MATCH;
+    passed = passed && string_first_sequence(text, S8("TEST_MODULE_TIMING index=2 module=self_test_last ")) != BUSTER_STRING_NO_MATCH;
+    passed = arena_destroy(arena, 1) && passed;
+    passed = arena_destroy(output, 1) && passed;
+    return passed;
 }
 
 BUSTER_GLOBAL_LOCAL UnitTestResult buster_test_temporary_root_failure_body(UnitTestArguments* arguments)
@@ -1396,6 +1533,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     BUSTER_VALIDATE(test_arena_self_test());
     BUSTER_VALIDATE(test_require_self_test());
     BUSTER_CHECK(test_fixture_timing_self_test());
+    BUSTER_CHECK(test_module_selection_self_test());
 
     bool timing_enabled = program_state != 0 && program_flag_get(PROGRAM_FLAG_VERBOSE);
     arguments->memory_report = program_state != 0 && (timing_enabled || program_flag_get(PROGRAM_FLAG_CI));
@@ -1404,17 +1542,50 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
         BUSTER_CHECK(test_timing_self_test(arguments));
     }
 
-    u64 timing_record_count = 0;
-    result = buster_test_run_parallel_descriptors(arguments, test_descriptors, BUSTER_ARRAY_LENGTH(test_descriptors), timing_enabled, &timing_record_count);
-    // Every descriptor that ran must have reported a timing row. Audits this
-    // tree does not own report nothing at all rather than a zero row, so they
-    // come out of the expected count instead of out of the invariant.
-    u64 expected_timing_records = 0;
-    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(test_descriptors); index += 1)
+    // A module selection marks the modules it leaves out in a working copy,
+    // so the registration table stays whole for later runs in this process.
+    TestDescriptor descriptors[TEST_ID_COUNT];
+    memcpy(descriptors, test_descriptors, sizeof(descriptors));
+    bool selection_valid = true;
+    u64 selected_module_count = 0;
+    if (arguments->module_selection.length)
     {
-        expected_timing_records += !test_descriptors[index].table_audit || buster_test_table_audits_enabled();
+        // `ide test` rejects an invalid list, naming each bad entry, before
+        // this point. For any other caller it runs nothing and fails.
+        TestModuleSelection selection = test_module_selection_resolve(arguments->module_selection, false);
+        selection_valid = !selection.invalid_count;
+        for (u64 id = 0; id < TEST_ID_COUNT; id += 1)
+        {
+            descriptors[id].deselected = !selection_valid || !selection.selected[id];
+            // A module named explicitly runs even where another tree owns
+            // its table audit, rather than passing with nothing run.
+            descriptors[id].table_audit = descriptors[id].table_audit && !selection.selected[id];
+            selected_module_count += !descriptors[id].deselected;
+        }
+        if (!selection_valid)
+        {
+            arguments->show(arguments, S8("test: invalid module selection: '{S8}'\n"), arguments->module_selection);
+        }
+    }
+
+    u64 timing_record_count = 0;
+    result = buster_test_run_parallel_descriptors(arguments, descriptors, TEST_ID_COUNT, timing_enabled, &timing_record_count);
+    // Every descriptor that ran must have reported a timing row. Audits this
+    // tree does not own and modules a selection left out report nothing at
+    // all rather than a zero row, so they come out of the expected count
+    // instead of out of the invariant.
+    u64 expected_timing_records = 0;
+    for (u64 index = 0; index < TEST_ID_COUNT; index += 1)
+    {
+        expected_timing_records += buster_test_descriptor_runs(descriptors[index]);
     }
     BUSTER_CHECK(!timing_enabled || buster_test_temporary_root_failed || timing_record_count == expected_timing_records);
+    if (arguments->module_selection.length)
+    {
+        result.selected_module_count = selected_module_count;
+        result.registered_module_count = TEST_ID_COUNT;
+        result.unit_test_count += !selection_valid;
+    }
 
     bool temporary_root_succeeded = true;
     if (buster_test_temporary_root.length)
