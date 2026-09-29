@@ -54,6 +54,8 @@
 //   c_ir_scalar_type .. c_ir_add_qualified_type   C type -> IrType mapping
 //                                                 and derived-type interning
 //   c_ir_function_signature                       signatures and ABI limits
+//   c_ir_field_symbols, c_ir_field_named          member names compared by
+//                                                 interned symbol
 //   CIntegerIrBuilder                             per-module lowering state
 //   c_ir_label_metadata_*                         label provenance needed by
 //                                                 computed goto
@@ -742,6 +744,7 @@ struct CIrArrayTypeSlot
 
 typedef struct CIrPointerTypeCache CIrPointerTypeCache;
 typedef struct CIrInitializerSlotCache CIrInitializerSlotCache;
+typedef struct CIrFieldSymbolCache CIrFieldSymbolCache;
 struct CIrPointerTypeCache
 {
     IrTypeId* by_element;
@@ -2613,6 +2616,9 @@ struct CIntegerIrBuilder
     // (c_ir_initializer_slot_table); shared by the constant builder and
     // every function builder of one lowering, null in the test hooks.
     CIrInitializerSlotCache* slot_cache;
+    // The interned symbol of every IrField name a member access has compared
+    // (c_ir_field_symbols); shared like slot_cache, null in the test hooks.
+    CIrFieldSymbolCache* field_symbols;
     CIrOverAlignedArrayName* over_aligned_array_name;
     u32* prepared_call_indices;
     // The prepared calls whose `token_index` is a given body token, as an
@@ -8166,6 +8172,101 @@ BUSTER_C_INTERNAL bool c_ir_type_queued(const IrTypeId* queued, u32 count, IrTyp
     return found;
 }
 
+// The member search below names a field by the member token's interned
+// symbol. IrField stays free of frontend ids (AGENTS.md), so the symbols live
+// here, in lowering: one row per struct or union IrTypeId, filled field by
+// field on the first compare that reads it, by a read-only probe of the
+// preprocess symbol table. A field row holds 0 until it has been probed, the
+// field's symbol after, and C_IR_FIELD_SYMBOL_NONE for a name the table never
+// interned, which no interned token spells. An empty name is never probed or
+// stored: it is an anonymous member, or a field of an aggregate whose layout
+// the mapping rounds have not reached yet, whose name, once written, is
+// always its member's. Each row remembers the fields array it was built for,
+// so a type whose rows are replaced starts a fresh row. The search used to
+// compare every candidate's spelling -- 2,28 M string_equal calls on a
+// stage-1 self-host compile, 18% of lowering's (#1594).
+#define C_IR_FIELD_SYMBOL_NONE UINT32_MAX
+
+typedef struct CIrFieldSymbolRow CIrFieldSymbolRow;
+struct CIrFieldSymbolRow
+{
+    const IrField* fields;
+    u32* symbols;
+    u32 field_count;
+};
+
+// Indexed by IrTypeId and sized, as CIrInitializerSlotCache is, to the
+// program's type capacity, which ir_program_add_type never grows.
+struct CIrFieldSymbolCache
+{
+    Arena* arena;
+    const CSymbolTable* symbols;
+    CIrFieldSymbolRow** rows;
+    u32 capacity;
+};
+
+// The symbol row of `type`, or null when the search must compare spellings:
+// a builder without a cache (the test hooks), a type that is not a row of the
+// program's table, or one without fields.
+BUSTER_C_INTERNAL u32* c_ir_field_symbols(CIntegerIrBuilder* builder, const IrType* type)
+{
+    u32* result = 0;
+    CIrFieldSymbolCache* cache = builder->field_symbols;
+    if (cache && cache->symbols && type->field_count)
+    {
+        IrTypeTable* types = &builder->program->types;
+        if (!cache->rows)
+        {
+            cache->capacity = types->capacity;
+            cache->rows = arena_allocate(cache->arena, CIrFieldSymbolRow*, cache->capacity ? cache->capacity : 1);
+            memset(cache->rows, 0, sizeof(*cache->rows) * cache->capacity);
+        }
+        u32 index = type->id.value;
+        if (index < cache->capacity && index < types->count && types->types + index == type)
+        {
+            CIrFieldSymbolRow* row = cache->rows[index];
+            if (!row || row->fields != type->fields || row->field_count != type->field_count)
+            {
+                row = arena_allocate(cache->arena, CIrFieldSymbolRow, 1);
+                row->fields = type->fields;
+                row->field_count = type->field_count;
+                row->symbols = arena_allocate(cache->arena, u32, type->field_count);
+                memset(row->symbols, 0, sizeof(*row->symbols) * type->field_count);
+                cache->rows[index] = row;
+            }
+            result = row->symbols;
+        }
+    }
+    return result;
+}
+
+// Whether `field` is the member a token names. An interned token compares its
+// symbol against the field's (probing the field once); a symbol-less token --
+// pasted, synthesized or test-built -- or a type without a row compares the
+// spelling. Within one table equal symbols are equal spellings, so both arms
+// answer alike.
+BUSTER_C_INTERNAL bool c_ir_field_named(CIntegerIrBuilder* builder, u32* field_symbols, const IrField* field, u32 field_index, u32 member_symbol,
+                                        String8 member_spelling)
+{
+    bool result = false;
+    if (field_symbols && member_symbol)
+    {
+        u32 field_symbol = field_symbols[field_index];
+        if (!field_symbol && field->name.length)
+        {
+            field_symbol = c_symbol_find(builder->field_symbols->symbols, field->name);
+            field_symbol = field_symbol ? field_symbol : C_IR_FIELD_SYMBOL_NONE;
+            field_symbols[field_index] = field_symbol;
+        }
+        result = field_symbol == member_symbol;
+    }
+    else
+    {
+        result = string_equal(field->name, member_spelling);
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_recover_place_from_value(CIntegerIrBuilder* builder, IrValueId value);
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* builder, IrValueId operand, CToken access, CToken member)
@@ -8282,6 +8383,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* 
     work_parents[0] = UINT32_MAX;
     work_parent_fields[0] = UINT32_MAX;
     work_depths[0] = 0;
+    String8 member_spelling = c_token_spelling(builder->preprocess.spelling_base, member);
     while (work_index < work_count && !ambiguous)
     {
         IrType* candidate = ir_type_from_id(&builder->program->types, work_types[work_index]);
@@ -8295,10 +8397,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* 
         {
             break;
         }
+        u32* candidate_symbols = member.symbol ? c_ir_field_symbols(builder, candidate) : 0;
         for (u32 index = 0; index < candidate->field_count; index += 1)
         {
             IrField* candidate_field = &candidate->fields[index];
-            if (string_equal(candidate_field->name, c_token_spelling(builder->preprocess.spelling_base, member)))
+            if (c_ir_field_named(builder, candidate_symbols, candidate_field, index, member.symbol, member_spelling))
             {
                 if (found_node == UINT32_MAX)
                 {
@@ -8355,7 +8458,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* 
     if (found_node == UINT32_MAX)
     {
         builder->failure_message = string_format(builder->arena, S8("type '{S8}' has no member named '{S8}' ({u32} fields available)"), aggregate_type->name,
-                                                 c_token_spelling(builder->preprocess.spelling_base, member), aggregate_type->field_count);
+                                                 member_spelling, aggregate_type->field_count);
         scratch_end(field_search);
         return IR_VALUE_ID_INVALID;
     }
@@ -49482,9 +49585,14 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     CIrInitializerSlotCache slot_cache = {
         .arena = arena,
     };
+    CIrFieldSymbolCache field_symbols = {
+        .arena = arena,
+        .symbols = preprocess.symbols,
+    };
     CIntegerIrBuilder constant_builder = {
         .arena = arena,
         .slot_cache = &slot_cache,
+        .field_symbols = &field_symbols,
         .over_aligned_array_name = &over_aligned_array_name,
         .scratch_arena = temporary_arena,
         .temporary_arena = temporary_arena,
@@ -51589,6 +51697,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             .location_cursor = {.memo_offset = UINT32_MAX},
             .arena = arena,
             .slot_cache = &slot_cache,
+            .field_symbols = &field_symbols,
             .over_aligned_array_name = &over_aligned_array_name,
             .scratch_arena = lowering_arena,
             .temporary_arena = temporary_arena,
