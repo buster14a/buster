@@ -3,14 +3,20 @@
 
 recover() owns eligibility and the single PR rerun request. watch() makes one
 bounded pass over live merge-group checks; the workflow invokes it on completion
-events and a recovery schedule. Only trusted default-branch code mutates runs.
+events and a recovery schedule. Within that pass, the step-deadline policy
+(step_deadline_candidates, still_overdue, stop_overdue_steps) independently
+stops the desktop Release lanes' workflow-tool step when it stays in progress
+beyond its budget; see "Merge-group workflow-tool step deadline" in
+docs/ci-cancellation-recovery.md. Only trusted default-branch code mutates runs.
 """
 
+import datetime
 import html
 import json
 import os
 from pathlib import Path
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -38,6 +44,26 @@ REQUIRED_WORKFLOW_PATHS = {
 # check suite. A check with the same name and an unrelated marker is ignored.
 RECONCILED_CHECK_MARKERS = {"Main integration admission": "buster-merge-queue-admission-v1:"}
 ACTIVE_RUN_STATUSES = frozenset(("queued", "pending", "waiting", "requested", "in_progress"))
+# #1866: run 36571009755 left this step in progress for over 30 minutes past
+# its 5-minute timeout. Budgets mirror the step's ci.yml timeout-minutes for
+# each exact desktop Release job name; test_merge_queue_fail_fast.py rejects
+# drift. The grace covers runner reporting and cancellation latency. Elapsed
+# time starts at GitHub's step start, never at run creation or queue time.
+WORKFLOW_TOOLS_STEP = "Workflow tool regression tests"
+WORKFLOW_TOOLS_BUDGET_SECONDS = {
+    "Linux x86-64 release": 2 * 60,
+    "Linux AArch64 release": 2 * 60,
+    "macOS x86-64 release": 5 * 60,
+    "macOS AArch64 release": 5 * 60,
+    "Windows x86-64 release": 5 * 60,
+    "Windows AArch64 release": 5 * 60,
+}
+STEP_DEADLINE_GRACE_SECONDS = 10 * 60
+# Passes keep no state, so normal cancellation gets this long, inside the pass
+# that requested it, to stop the same overdue step before force-cancel. It must
+# leave room for the reads within the watcher job's five-minute timeout.
+FORCE_CANCEL_GRACE_SECONDS = 2 * 60
+STEP_DEADLINE_POLL_SECONDS = 20
 
 
 class SkipRecovery(Exception):
@@ -81,15 +107,19 @@ class GitHub:
             raise SkipRecovery("Pagination limit reached; inspect manually.")
         return result
 
-    def cancel(self, run_id):
+    def cancel(self, run_id, endpoint="cancel"):
         try:
-            self.request("actions/runs/" + str(run_id) + "/cancel", method="POST")
+            self.request("actions/runs/" + str(run_id) + "/" + endpoint, method="POST")
             cancelled = True
         except urllib.error.HTTPError as error:
             if error.code != 409:
                 raise
             cancelled = False
         return cancelled
+
+    def force_cancel(self, run_id):
+        # GitHub documents force-cancel only for runs not responding to cancel.
+        return self.cancel(run_id, "force-cancel")
 
 
 def check_run(run, event_run, repository):
@@ -258,7 +288,189 @@ def live_group_heads(api):
     return heads
 
 
-def watch_head(api, repository, head_sha, live_refs, original=None):
+def github_time(value):
+    """Return epoch seconds for an ISO 8601 timestamp with an explicit offset."""
+    seconds = None
+    if isinstance(value, str) and "T" in value:
+        text = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            parsed = datetime.datetime.fromisoformat(text)
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed.tzinfo is not None:
+            seconds = parsed.timestamp()
+    return seconds
+
+
+def utc_text(seconds):
+    return datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def positive_id(value):
+    # bool is an int subclass; GitHub job IDs and step numbers never are.
+    return type(value) is int and value > 0
+
+
+def step_deadline_candidates(run, jobs, now):
+    """Split this attempt's in-progress workflow-tool steps into overdue and refused.
+
+    Only an active run qualifies. Queued, waiting and completed jobs or steps
+    are never candidates. A step whose job identity, completion metadata or
+    start timestamps disagree with the exact attempt is refused rather than
+    guessed, as is a job ID listed twice; its job start must not follow its
+    step start.
+    """
+    overdue = []
+    refused = []
+    job_ids = [job.get("id") for job in jobs]
+    if run.get("status") not in ACTIVE_RUN_STATUSES or run.get("conclusion") is not None:
+        # A finished run's stale step metadata is never cancellation authority.
+        jobs = []
+    for job in jobs:
+        budget = WORKFLOW_TOOLS_BUDGET_SECONDS.get(job.get("name"))
+        steps = job.get("steps")
+        if budget is None or job.get("status") != "in_progress" or not isinstance(steps, list):
+            continue
+        matches = [step for step in steps
+                   if isinstance(step, dict) and step.get("name") == WORKFLOW_TOOLS_STEP]
+        active = [step for step in matches if step.get("status") == "in_progress"]
+        if not active:
+            continue
+        step = active[0]
+        record = {
+            "run_id": run.get("id"), "run_attempt": run.get("run_attempt"),
+            "head_sha": run.get("head_sha"), "job_id": job.get("id"),
+            "job_name": job.get("name"), "step_number": step.get("number"),
+            "step_name": WORKFLOW_TOOLS_STEP, "started_at": step.get("started_at"),
+            "budget_seconds": budget,
+        }
+        started = github_time(step.get("started_at"))
+        job_started = github_time(job.get("started_at"))
+        if (len(matches) != 1 or not positive_id(job.get("id")) or
+                job_ids.count(job.get("id")) != 1 or not positive_id(step.get("number")) or
+                job.get("run_id") != run.get("id") or
+                job.get("run_attempt") != run.get("run_attempt") or
+                job.get("head_sha") != run.get("head_sha") or
+                job.get("conclusion") is not None or step.get("conclusion") is not None or
+                job.get("completed_at") is not None or step.get("completed_at") is not None):
+            refused.append(dict(record, reason="job or step identity does not match this attempt"))
+        elif started is None or job_started is None or started < job_started:
+            refused.append(dict(record, reason="malformed job or step start timestamp"))
+        else:
+            deadline = started + budget + STEP_DEADLINE_GRACE_SECONDS
+            if now > deadline:
+                overdue.append(dict(record, deadline=deadline, elapsed_seconds=int(now - started)))
+    return overdue, refused
+
+
+def deadline_identity(record):
+    return tuple(str(record[key]) for key in (
+        "run_id", "run_attempt", "head_sha", "job_id", "step_number", "started_at"))
+
+
+def deadline_line(action, record):
+    text = ("STEP_DEADLINE_V1 action=" + action + " run=" + str(record["run_id"]) +
+            " attempt=" + str(record["run_attempt"]) + " head=" + str(record["head_sha"]) +
+            " job=" + str(record["job_id"]) + " job_name=" + json.dumps(record["job_name"]) +
+            " step=" + str(record["step_number"]) +
+            " step_name=" + json.dumps(record["step_name"]) +
+            " started_at=" + json.dumps(record["started_at"]) +
+            " budget_seconds=" + str(record["budget_seconds"]) +
+            " grace_seconds=" + str(STEP_DEADLINE_GRACE_SECONDS))
+    if "deadline" in record:
+        text += (" deadline=" + utc_text(record["deadline"]) +
+                 " elapsed_seconds=" + str(record["elapsed_seconds"]))
+    if "reason" in record:
+        text += " reason=" + json.dumps(record["reason"])
+    return text
+
+
+def note(log, line):
+    print(line, flush=True)
+    log.append(line)
+
+
+def still_overdue(api, repository, live_refs, original, expected, clock):
+    """Re-read the exact attempt and return the expected steps that remain overdue."""
+    head_sha = original["head_sha"]
+    run_path = "actions/runs/" + str(original["id"])
+    if live_group_heads(api).get(head_sha) != live_refs.get(head_sha):
+        raise SkipRecovery("Queue ref changed before step-deadline cancellation.")
+    latest = latest_group_runs(api, head_sha).get(WORKFLOW_PATH)
+    if latest is None or latest.get("id") != original["id"]:
+        raise SkipRecovery("Buster CI merge-group run was replaced before step-deadline cancellation.")
+    check_watch_run(latest, original, repository)
+    # Jobs of this attempt only, never whichever attempt is now latest.
+    jobs = api.all(run_path + "/attempts/" + str(original["run_attempt"]) + "/jobs", "jobs")
+    # The single run read follows the paginated reads, immediately before mutation.
+    run = api.request(run_path)
+    check_watch_run(run, original, repository)
+    expected_ids = {deadline_identity(record) for record in expected}
+    overdue, _refused = step_deadline_candidates(run, jobs, clock())
+    return [record for record in overdue if deadline_identity(record) in expected_ids]
+
+
+def stop_overdue_steps(api, repository, live_refs, run, overdue, cancel_requested, clock,
+                       sleep_fn, log):
+    """Normal-cancel, wait for, then force-cancel revalidated overdue steps in one pass.
+
+    Passes keep no state, so the bounded force-cancel grace elapses inside the
+    pass that requested normal cancellation, or saw fail-fast request it. Each
+    mutation follows a fresh still_overdue() read of the exact attempt, and its
+    evidence is flushed before the POST. A changed identity is recorded rather
+    than raised, so a fail-fast result from the same pass survives.
+    """
+    disposition = None
+    stuck = []
+    try:
+        stuck = still_overdue(api, repository, live_refs, run, overdue, clock)
+        if not stuck:
+            # Without a prior fail-fast cancel, the step progressed on its own.
+            disposition = "step-stopped" if cancel_requested else "refused-progressed"
+            for record in overdue:
+                note(log, deadline_line(disposition, record))
+        elif not cancel_requested:
+            # An uncertain POST still leaves the exact identity in the log and
+            # summary. Transport errors are never retried.
+            for record in stuck:
+                note(log, deadline_line("cancel-requesting", record))
+            cancel_requested = api.cancel(run["id"])
+        if stuck:
+            disposition = "cancel-requested" if cancel_requested else "run-already-finished"
+            for record in stuck:
+                note(log, deadline_line(disposition, record))
+        waited = 0
+        while stuck and cancel_requested and waited < FORCE_CANCEL_GRACE_SECONDS:
+            sleep_fn(STEP_DEADLINE_POLL_SECONDS)
+            waited += STEP_DEADLINE_POLL_SECONDS
+            current = still_overdue(api, repository, live_refs, run, stuck, clock)
+            if not current:
+                disposition = "step-stopped"
+                for record in stuck:
+                    note(log, deadline_line(disposition, record))
+            stuck = current
+        if stuck and cancel_requested:
+            # The loop's final still_overdue() read immediately precedes this.
+            for record in stuck:
+                note(log, deadline_line("force-cancel-requesting", record))
+            forced = api.force_cancel(run["id"])
+            disposition = "force-cancel-requested" if forced else "run-already-finished"
+            for record in stuck:
+                note(log, deadline_line(disposition, record))
+    except SkipRecovery as changed:
+        disposition = "refused-changed"
+        for record in stuck or overdue:
+            note(log, deadline_line(disposition, dict(record, reason=str(changed))))
+    return ("Step deadline " + disposition + " for Buster CI run " + str(run["id"]) +
+            " attempt " + str(run["run_attempt"]) + ": " +
+            ", ".join(record["job_name"] + " job " + str(record["job_id"])
+                      for record in overdue) + ".")
+
+
+def watch_head(api, repository, head_sha, live_refs, original=None, clock=time.time,
+               sleep_fn=time.sleep, log=None):
+    log = [] if log is None else log
     if head_sha not in live_refs:
         raise SkipRecovery("Merge-group head is no longer a live queue ref.")
     names = required_checks(api, repository)
@@ -280,6 +492,10 @@ def watch_head(api, repository, head_sha, live_refs, original=None):
                 failed.append(job.get("name", "unnamed"))
         elif conclusion is not None:
             raise ValueError("Incomplete CI job already has a conclusion.")
+    # Discovery only reads; stop_overdue_steps() revalidates before mutating.
+    overdue, refused = step_deadline_candidates(run, jobs, clock())
+    for record in refused:
+        note(log, deadline_line("refused", record))
     checks = required_check_results(api, head_sha, runs, names)
     bad = sorted(name for name, check in checks.items()
                  if check.get("status") == "completed" and check.get("conclusion") != "success")
@@ -309,16 +525,29 @@ def watch_head(api, repository, head_sha, live_refs, original=None):
         reason = ", ".join(sorted(set(failed + bad)))
         if not reason:
             reason = "Buster CI conclusion " + str(run.get("conclusion"))
-        return ("Merge-group fail-fast observed " + reason + "; requested cancellation of " +
-                str(len(cancelled)) + " exact-head run(s): " +
-                ", ".join(str(run_id) for run_id in cancelled))
+        message = ("Merge-group fail-fast observed " + reason + "; requested cancellation of " +
+                   str(len(cancelled)) + " exact-head run(s): " +
+                   ", ".join(str(run_id) for run_id in cancelled))
+        if overdue:
+            # Fail-fast's normal cancel may not stop a hung step; escalate it
+            # here so a later pass is not left with the same stuck run.
+            message += " " + stop_overdue_steps(api, repository, live_refs, run, overdue,
+                                                run["id"] in cancelled, clock, sleep_fn, log)
+        return message
     if names.issubset(checks) and all(checks[name].get("status") == "completed" and
                                      checks[name].get("conclusion") == "success" for name in names):
         return "All required merge-group checks completed successfully; no cancellation requested."
+    if overdue:
+        # The cancelled jobs' completion event or the next sweep then runs
+        # fail-fast for the rest of the exact-head group.
+        return stop_overdue_steps(api, repository, live_refs, run, overdue, False, clock,
+                                  sleep_fn, log)
     return "Required checks remain pending; the next event or sweep will recheck."
 
 
-def watch(api, event, event_name="workflow_run"):
+def watch(api, event, event_name="workflow_run", clock=time.time, sleep_fn=time.sleep,
+          log=None):
+    log = [] if log is None else log
     repository = event["repository"]
     refs = live_group_heads(api)
     if event_name == "workflow_run":
@@ -331,20 +560,22 @@ def watch(api, event, event_name="workflow_run"):
                                      for p in REQUIRED_WORKFLOW_PATHS.values())}):
             raise SkipRecovery("Watcher accepts only required merge-group workflow deliveries.")
         expected = original if workflow_file(original["path"]) == WORKFLOW_PATH else None
-        return watch_head(api, repository, original["head_sha"], refs, expected)
+        return watch_head(api, repository, original["head_sha"], refs, expected, clock,
+                          sleep_fn, log)
     if event_name not in ("schedule", "workflow_dispatch"):
         raise SkipRecovery("Watcher accepts only completion, dispatch or sweep events.")
     messages = []
     for head in refs:
         try:
-            messages.append(head + ": " + watch_head(api, repository, head, refs))
+            messages.append(head + ": " + watch_head(api, repository, head, refs, None, clock,
+                                                     sleep_fn, log))
         except SkipRecovery as skipped:
             messages.append(head + ": " + str(skipped))
     return "\n".join(messages) if messages else "No live merge groups."
 
 
 def lifecycle_summary(title, message, event, repository, handler_sha, handler_id,
-                      handler_attempt):
+                      handler_attempt, records=()):
     def code(value):
         return "<code>" + html.escape(str(value)) + "</code>"
 
@@ -366,7 +597,9 @@ def lifecycle_summary(title, message, event, repository, handler_sha, handler_id
             "Trusted handler: [run " + str(handler_id) + " attempt " +
             str(handler_attempt) + "](" + handler_url + ") on default-branch " +
             code(handler_sha) + ".\n\n" +
-            "Decision: " + html.escape(message) + "\n")
+            "Decision: " + html.escape(message) + "\n" +
+            "".join(("\nController records:\n\n" if index == 0 else "") +
+                    "- " + code(line) + "\n" for index, line in enumerate(records)))
 
 
 def main():
@@ -375,9 +608,13 @@ def main():
     if event["repository"]["full_name"] != os.environ["GITHUB_REPOSITORY"]:
         raise ValueError("Event repository mismatch")
     mode = sys.argv[1] if len(sys.argv) > 1 else "recover"
+    # Records of mutations already requested survive a later controller error.
+    records = []
+    title = "CI lifecycle controller error"
+    message = "The controller raised an error; the job log has the traceback."
     try:
         if mode == "watch":
-            message = watch(api, event, os.environ["GITHUB_EVENT_NAME"])
+            message = watch(api, event, os.environ["GITHUB_EVENT_NAME"], log=records)
             title = "Merge-group CI fail-fast"
         elif mode == "recover":
             message = recover(api, event)
@@ -387,12 +624,13 @@ def main():
     except SkipRecovery as skipped:
         message = "No action: " + str(skipped)
         title = "CI lifecycle controller"
-    print(message)
-    with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
-        summary.write(lifecycle_summary(
-            title, message, event, os.environ["GITHUB_REPOSITORY"],
-            os.environ["GITHUB_SHA"], os.environ["GITHUB_RUN_ID"],
-            os.environ["GITHUB_RUN_ATTEMPT"]))
+    finally:
+        print(message)
+        with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
+            summary.write(lifecycle_summary(
+                title, message, event, os.environ["GITHUB_REPOSITORY"],
+                os.environ["GITHUB_SHA"], os.environ["GITHUB_RUN_ID"],
+                os.environ["GITHUB_RUN_ATTEMPT"], records))
 
 
 if __name__ == "__main__":
