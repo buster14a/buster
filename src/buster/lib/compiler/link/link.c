@@ -7107,6 +7107,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
     {
         result.error = LINK_ERROR_FILE_WRITE;
+        result.symbol = options.output_path;
     }
     return result;
 }
