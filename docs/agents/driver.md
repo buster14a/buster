@@ -427,6 +427,12 @@ ET_DYN at base zero. Its orientation comment is the contract; in short:
   `DT_SONAME` from `-Wl,-soname,NAME`, and records symbol versions like the
   fixed-address writer. `.rodata`, the initializer arrays, `.dynamic` and
   `.got` sit under `PT_GNU_RELRO`; `PT_GNU_STACK` is not executable.
+- A shared object that calls `atexit`/`at_quick_exit` gets
+  `link_elf_libc_shared_runtime_object` instead of the executable's stubs: a
+  hidden `__dso_handle` of its own, stubs that pass it to `__cxa_atexit`, and
+  a priority-0 `.fini_array` entry calling `__cxa_finalize(&__dso_handle)`
+  after the library's destructors, as `crtbeginS.o` does. `dlclose` then runs
+  the library's handlers instead of `exit` calling unmapped code (#1709).
 - Thread-local storage in a PIE is relaxed to local-exec as in a fixed-address
   executable. In a shared object general-dynamic keeps its `__tls_get_addr`
   call with a `DTPMOD64`/`DTPOFF64` pair, initial-exec gets `TPOFF64` and
@@ -436,7 +442,8 @@ ET_DYN at base zero. Its orientation comment is the contract; in short:
 a Buster library loaded by `dlopen` and linked by Buster (fixed-address and
 PIE) and by the host toolchain (PIE and `-no-pie`, whose copy relocations the
 library must follow), calls and data in both directions, the lifecycle order
-of initializers and handlers, a randomized PIE base, a CPython extension when
+of initializers and handlers, a library's `atexit` handler across `dlclose`
+and `exit`, a randomized PIE base, a CPython extension when
 `python3` and its headers exist, and the `-fPIC` refusal. AArch64 ELF, PE DLLs
 and Mach-O dylibs have no writer yet.
 

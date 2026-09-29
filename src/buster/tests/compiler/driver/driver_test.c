@@ -7407,7 +7407,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_image_header(Arena* arena, String8
 // host toolchain's GNU ld -- as a PIE, whose imported data then reaches the
 // library through copy relocations, and as a fixed-address executable --
 // with calls and data crossing the boundary in both directions and the
-// library's initializers and TLS working; Buster's PIE runs at a
+// library's initializers, TLS and atexit handlers working; Buster's PIE runs at a
 // randomized base; a CPython extension imports; and an object compiled for
 // a fixed address is refused with the reason.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_images(UnitTestArguments* arguments)
@@ -7745,6 +7745,62 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
     else
     {
         BUSTER_TEST(arguments, false);
+    }
+
+    // A handler a library registers with atexit belongs to that library
+    // (issue #1709): dlclose runs it after the library's own destructors,
+    // and an exit that never closed the library runs it once, before them,
+    // which is what a gcc-built library does in both cases.
+    String8 atexit_library_source = S8(
+        "int puts(const char*);\n"
+        "int atexit(void (*)(void));\n"
+        "static void library_handler(void) { puts(\"library handler\"); }\n"
+        "__attribute__((destructor)) static void library_destructor(void) { puts(\"library destructor\"); }\n"
+        "int register_handler(void) { return atexit(library_handler); }\n"
+    );
+    String8 atexit_main_source = S8(
+        "#include <dlfcn.h>\n"
+        "int puts(const char*);\n"
+        "int main(int argc, char** argv)\n"
+        "{\n"
+        "    void* library = argc > 1 ? dlopen(argv[1], RTLD_NOW) : 0;\n"
+        "    int (*register_handler)(void) = library ? (int (*)(void))dlsym(library, \"register_handler\") : 0;\n"
+        "    int failed = !register_handler || register_handler() != 0;\n"
+        "    if (!failed && argc == 2)\n"
+        "    {\n"
+        "        failed = dlclose(library) != 0;\n"
+        "        puts(\"closed\");\n"
+        "    }\n"
+        "    return failed;\n"
+        "}\n"
+    );
+    String8 atexit_library_path = string_format_z(arena, S8("{S8}/basic_c_elf_atexit_library.c"), directory);
+    BUSTER_TEST(arguments, file_write(atexit_library_path, BUSTER_SLICE_TO_BYTE_SLICE(atexit_library_source)));
+    String8 atexit_main_path = string_format_z(arena, S8("{S8}/basic_c_elf_atexit_main.c"), directory);
+    BUSTER_TEST(arguments, file_write(atexit_main_path, BUSTER_SLICE_TO_BYTE_SLICE(atexit_main_source)));
+    String8 atexit_library = string_format_z(arena, S8("{S8}/libatexitprobe.so"), directory);
+    String8 atexit_library_command[] = {S8("-g0"), S8("-shared"), S8("-o"), atexit_library, atexit_library_path};
+    CompilerDriverResult atexit_built = compiler_driver_execute_invocation(
+        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(atexit_library_command)));
+    BUSTER_TEST(arguments, atexit_built.error == COMPILER_DRIVER_ERROR_NONE);
+    String8 atexit_main = string_format_z(arena, S8("{S8}/atexit-dlopen"), directory);
+    String8 atexit_main_command[] = {S8("-g0"), S8("-pie"), S8("-o"), atexit_main, atexit_main_path, S8("-ldl")};
+    CompilerDriverResult atexit_linked = atexit_built.error == COMPILER_DRIVER_ERROR_NONE
+                                             ? compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(
+                                                                                             arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(atexit_main_command)))
+                                             : atexit_built;
+    BUSTER_TEST(arguments, atexit_linked.error == COMPILER_DRIVER_ERROR_NONE);
+    for (u32 keep_open = 0; atexit_linked.error == COMPILER_DRIVER_ERROR_NONE && keep_open < 2; keep_open += 1)
+    {
+        String8 run[] = {atexit_main, atexit_library, S8("keep")};
+        String8 output = {0};
+        bool ran = compiler_driver_test_image_run(arguments, arena, run, 2 + keep_open, directory, &output);
+        BUSTER_TEST(arguments, ran);
+        if (ran)
+        {
+            BUSTER_STRING_TEST(arguments, output,
+                               keep_open ? S8("library handler\nlibrary destructor\n") : S8("library destructor\nlibrary handler\nclosed\n"));
+        }
     }
 
     // An object compiled for a fixed address reads imported data with a
