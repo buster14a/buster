@@ -5793,6 +5793,34 @@ BUSTER_C_INTERNAL String8 c_parse_constant_expression_syntax_error(CTypeParseMac
     return message;
 }
 
+BUSTER_C_SHARED String8 c_parse_static_assert_diagnostic_message(Arena* arena, CPreprocessResult preprocess,
+                                                                  CDeclaration declaration, CDiagnosticKind kind)
+{
+    u32 expression_start = 0;
+    u32 expression_end = 0;
+    bool has_expression = c_parse_static_assert_expression_range(preprocess, declaration, &expression_start, &expression_end);
+    if (kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT)
+    {
+        String8 expression = has_expression ? c_parse_token_range_text(arena, preprocess, expression_start, expression_end) : (String8){0};
+        return expression.length
+                   ? string_format(arena, S8("static assertion expression is not an integer constant expression: {S8}"), expression)
+                   : S8("static assertion expression is not an integer constant expression");
+    }
+
+    u32 declaration_end = declaration.token_start <= preprocess.token_count &&
+                                  declaration.token_count <= preprocess.token_count - declaration.token_start
+                              ? declaration.token_start + declaration.token_count
+                              : preprocess.token_count;
+    String8 message = {0};
+    if (has_expression && expression_end + 1 < declaration_end &&
+        c_token_is_punctuator(&preprocess.tokens[expression_end], C_PUNCTUATOR_COMMA) &&
+        preprocess.tokens[expression_end + 1].kind == C_TOKEN_STRING_LITERAL)
+    {
+        message = c_token_spelling(preprocess.spelling_base, preprocess.tokens[expression_end + 1]);
+    }
+    return message.length ? string_format(arena, S8("static assertion failed: {S8}"), message) : S8("static assertion failed");
+}
+
 BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                      CDeclaration declaration, CScopeId scope)
 {
@@ -22817,15 +22845,16 @@ BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* m
         if (!value.valid)
         {
             c_parse_diagnostic(result, assertion.location, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
-                               S8("static assertion expression is not an integer constant expression"));
+                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration,
+                                                                        C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT));
         }
         else if (value.is_float || !c_parse_constant_truth(value))
         {
             c_parse_diagnostic(result, assertion.location, C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
-                               S8("static assertion expression is not a true integer constant expression"));
+                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration,
+                                                                        C_DIAGNOSTIC_STATIC_ASSERT_FAILED));
         }
     }
-    BUSTER_UNUSED(arena);
 }
 
 BUSTER_C_INTERNAL void c_parse_validate_bit_field_widths(CTypeParseMachine* machine, Arena* arena, CParseResult* result,

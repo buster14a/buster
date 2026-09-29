@@ -242,7 +242,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
             "    char value;\n"
             "    _Static_assert(sizeof value == 2, \"false\");\n"
             "    return 0;\n"
-            "}\n"), false, S8("static assertion expression is not a true integer constant expression")},
+            "}\n"), false, S8("static assertion failed: \"false\"")},
     };
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)

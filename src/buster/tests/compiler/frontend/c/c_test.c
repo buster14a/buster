@@ -5004,6 +5004,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_false(UnitTestArgument
     if (deferred_assert_false_ir.diagnostic_count == 1)
     {
         BUSTER_TEST(arguments, deferred_assert_false_ir.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED);
+        BUSTER_STRING_TEST(arguments, deferred_assert_false_ir.diagnostics[0].message,
+                           S8("static assertion failed: \"false inferred array size\""));
     }
     TemporalArena static_assert_type_temporary = scratch_begin(0, 0);
     String8 invalid_static_assert_sources[] = {
@@ -5069,6 +5071,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_false(UnitTestArgument
     if (narrowing_false_ir.diagnostic_count == 1)
     {
         BUSTER_TEST(arguments, narrowing_false_ir.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED);
+        BUSTER_STRING_TEST(arguments, narrowing_false_ir.diagnostics[0].message,
+                           S8("static assertion failed: \"narrowing cast becomes zero\""));
     }
     scratch_end(static_assert_type_temporary);
     scratch_end(deferred_assert_false_temporary);
@@ -5100,6 +5104,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_nonconstant(UnitTestAr
     if (deferred_assert_nonconstant_ir.diagnostic_count == 1)
     {
         BUSTER_TEST(arguments, deferred_assert_nonconstant_ir.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT);
+        BUSTER_STRING_TEST(arguments, deferred_assert_nonconstant_ir.diagnostics[0].message,
+                           S8("static assertion expression is not an integer constant expression: sizeof(nonconstant_assert_array) == nonconstant_assert_value()"));
     }
     scratch_end(deferred_assert_nonconstant_temporary);
     return result;
@@ -5109,8 +5115,64 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_nonconstant(UnitTestAr
 // The quote once stopped at the first `,` or `)` at any depth (#1573), so a
 // parenthesized operand or a call printed truncated and unbalanced. Tokens
 // keep their source adjacency; a comment, line break or macro boundary reads
-// as one space. A `_Generic` assertion is deferred and its diagnostic, which
-// quotes nothing, is pinned unchanged.
+// as one space. Deferred assertions use the same source quote after semantic
+// evaluation resolves their controlling expression.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_messages(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 message;
+    } cases[] = {
+        {S8("enum { FILE_ENUM_FALSE = 0 }; _Static_assert(FILE_ENUM_FALSE, \"enum message\");\n"),
+         S8("static assertion failed: \"enum message\"")},
+        {S8("int local_enum_assert(void) { enum { LOCAL_ENUM_FALSE = 0 }; _Static_assert(LOCAL_ENUM_FALSE, \"local enum message\"); return 0; }\n"),
+         S8("static assertion failed: \"local enum message\"")},
+        {S8("_Static_assert(_Generic(0, int: 0, default: 1), \"generic message\");\n"),
+         S8("static assertion failed: \"generic message\"")},
+        {S8("struct OffsetMessage { char first; int second; }; _Static_assert(__builtin_offsetof(struct OffsetMessage, second) == 0, \"offsetof message\");\n"),
+         S8("static assertion failed: \"offsetof message\"")},
+        {S8("int local_sizeof_assert(void) { char value; _Static_assert(sizeof value == 2, \"sizeof local message\"); return 0; }\n"),
+         S8("static assertion failed: \"sizeof local message\"")},
+        {S8("_Static_assert(_Generic(0, int: 0, default: 1));\n"), S8("static assertion failed")},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 path = 0; path < 2; path += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                                                    (CPreprocessOptions){
+                                                        .target = target_native,
+                                                        .data_layout = target_data_layout(target_native),
+                                                    });
+            CIRLowerResult diagnostics = {0};
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+            if (path == 0)
+            {
+                CParseResult parsed = c_parse(temporary.arena, tokens);
+                BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+                diagnostics = c_lower_to_ir(temporary.arena, S8("deferred-static-assert-message.c"), tokens, parsed, target_native);
+            }
+            else
+            {
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+                diagnostics = c_analyze(temporary.arena, S8("deferred-static-assert-message.c"), tokens, syntax, target_native);
+            }
+            BUSTER_TEST_RAW(arguments, diagnostics.diagnostic_count == 1, cases[case_index].source);
+            if (diagnostics.diagnostic_count == 1)
+            {
+                BUSTER_TEST(arguments, diagnostics.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED);
+                BUSTER_STRING_TEST(arguments, diagnostics.diagnostics[0].message, cases[case_index].message);
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_nonconstant_quote(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5136,7 +5198,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_nonconstant_quote(UnitTe
         {S8("#define NEGATIVE -1\nint pair(int, int);\n_Static_assert(pair(-NEGATIVE, 2), \"macro\");\n"),
          S8("static assertion expression is not an integer constant expression: pair(- - 1 , 2)")},
         {S8("int pair(int, int);\n_Static_assert(_Generic(0, int: pair(1, 2), default: 0), \"generic\");\n"),
-         S8("static assertion expression is not an integer constant expression")},
+         S8("static assertion expression is not an integer constant expression: _Generic(0, int: pair(1, 2), default: 0)")},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {
@@ -26024,6 +26086,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_false);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_nonconstant);
+
+    BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_messages);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_static_assert_nonconstant_quote);
 

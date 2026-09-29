@@ -38153,11 +38153,26 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 u32 expression_start = 0;
                 u32 expression_end = 0;
                 CIrConstantValue assertion = {0};
-                if (!c_ir_static_assert_expression_range(builder, index, assertion_end + 1, &expression_start, &expression_end) ||
-                    !c_ir_constant_evaluate(builder, expression_start, expression_end, &assertion) ||
-                    assertion.kind != C_IR_CONSTANT_INTEGER || !c_ir_constant_truth(builder, &assertion))
+                bool expression_valid =
+                    c_ir_static_assert_expression_range(builder, index, assertion_end + 1, &expression_start, &expression_end);
+                bool constant = expression_valid && c_ir_constant_evaluate(builder, expression_start, expression_end, &assertion);
+                CDeclaration assertion_declaration = {
+                    .token_start = index,
+                    .token_count = assertion_end + 1 - index,
+                    .location = c_ir_token_location(builder, first),
+                };
+                if (!expression_valid || !constant)
                 {
-                    builder->failure_message = S8("static assertion expression is not a true integer constant expression");
+                    builder->failure_message = c_parse_static_assert_diagnostic_message(
+                        builder->arena, builder->preprocess, assertion_declaration, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT);
+                    builder->failure_kind_plus_one = C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT + 1;
+                    return false;
+                }
+                if (assertion.kind != C_IR_CONSTANT_INTEGER || !c_ir_constant_truth(builder, &assertion))
+                {
+                    builder->failure_message = c_parse_static_assert_diagnostic_message(
+                        builder->arena, builder->preprocess, assertion_declaration, C_DIAGNOSTIC_STATIC_ASSERT_FAILED);
+                    builder->failure_kind_plus_one = C_DIAGNOSTIC_STATIC_ASSERT_FAILED + 1;
                     return false;
                 }
                 index = assertion_end + 1;
@@ -50442,7 +50457,8 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 continue;
             }
             result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
-                .message = S8("static assertion expression is not an integer constant expression"),
+                .message = c_parse_static_assert_diagnostic_message(arena, preprocess, declaration,
+                                                                    C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT),
                 .location = declaration.location,
                 .kind = C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
             };
@@ -50454,7 +50470,8 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 continue;
             }
             result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
-                .message = S8("static assertion expression is not a true integer constant expression"),
+                .message = c_parse_static_assert_diagnostic_message(arena, preprocess, declaration,
+                                                                    C_DIAGNOSTIC_STATIC_ASSERT_FAILED),
                 .location = declaration.location,
                 .kind = C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
             };
