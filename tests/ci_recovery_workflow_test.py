@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Workflow selection and attribution checks kept outside the frozen corpus."""
+
+import importlib.util
+from pathlib import Path
+import re
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location(
+    "recovery", ROOT / ".github/scripts/recover-ci.py")
+recovery = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(recovery)
+
+
+class LifecycleWorkflowTests(unittest.TestCase):
+    def test_filtered_handlers_and_source_change_tests(self):
+        workflows = ROOT / ".github/workflows"
+        recover = (workflows / "ci-recovery.yml").read_text()
+        watch = (workflows / "ci-merge-group-watch.yml").read_text()
+        regressions = (workflows / "ci-recovery-tests.yml").read_text()
+
+        # Each upstream delivery creates at most one handler check. Ordinary
+        # PR starts and main completions do not create handler workflows.
+        self.assertIn("types: [completed]", recover)
+        self.assertIn("branches-ignore:\n      - main\n      - 'gh-readonly-queue/main/**'", recover)
+        self.assertEqual(re.findall(r"^  ([\w-]+):$", recover.split("\njobs:\n", 1)[1], re.M),
+                         ["recover"])
+        self.assertIn("types: [in_progress]", watch)
+        self.assertIn("branches:\n      - 'gh-readonly-queue/main/**'", watch)
+        self.assertEqual(re.findall(r"^  ([\w-]+):$", watch.split("\njobs:\n", 1)[1], re.M),
+                         ["watch-merge-group"])
+        for workflow in (recover, watch):
+            self.assertIn("group: ci-recovery-${{ github.event.workflow_run.id }}", workflow)
+            self.assertIn("ref: ${{ github.sha }}", workflow)
+            self.assertIn("github.event.workflow_run.head_repository.full_name == github.repository", workflow)
+            self.assertIn("run-name:", workflow)
+            self.assertNotIn("\n  test:\n", workflow)
+        self.assertNotIn("workflow_run:", regressions)
+        self.assertIn("persist-credentials: false", regressions)
+        for path in ("ci-recovery.yml", "ci-merge-group-watch.yml", "ci-recovery-tests.yml"):
+            self.assertEqual(regressions.count("'.github/workflows/" + path + "'"), 2)
+        for path in (".github/scripts/recover-ci.py", ".github/scripts/test_merge_queue_fail_fast.py",
+                     "tests/ci_recovery_test.py", "tests/ci_recovery_workflow_test.py"):
+            self.assertEqual(regressions.count("'" + path + "'"), 2)
+
+    def test_summary_distinguishes_upstream_and_trusted_handler(self):
+        event = {
+            "action": "completed",
+            "workflow_run": {
+                "id": 123, "run_attempt": 1, "event": "pull_request",
+                "head_branch": "fix/<retained>", "head_sha": "a" * 40,
+            },
+        }
+        summary = recovery.lifecycle_summary(
+            "Buster CI lifecycle no action", "No action: failed job <test>", event,
+            "buster14a/buster", "b" * 40, 234, 2)
+        self.assertIn("/actions/runs/123/attempts/1", summary)
+        self.assertIn("/actions/runs/234/attempts/2", summary)
+        self.assertIn("<code>fix/&lt;retained&gt;</code>", summary)
+        self.assertIn("<code>" + "a" * 40 + "</code>", summary)
+        self.assertIn("<code>" + "b" * 40 + "</code>", summary)
+        self.assertIn("No action: failed job &lt;test&gt;", summary)
+
+
+if __name__ == "__main__":
+    unittest.main()

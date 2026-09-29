@@ -9,6 +9,7 @@ on:
       - '.github/scripts/recover-ci.py'
       - '.github/scripts/test_merge_queue_fail_fast.py'
       - 'tests/ci_recovery_test.py'
+      - 'tests/ci_recovery_workflow_test.py'
   push:
     branches: [main]
     paths:
@@ -18,6 +19,7 @@ on:
       - '.github/scripts/recover-ci.py'
       - '.github/scripts/test_merge_queue_fail_fast.py'
       - 'tests/ci_recovery_test.py'
+      - 'tests/ci_recovery_workflow_test.py'
 
 permissions: {}
 
@@ -39,4 +41,5 @@ jobs:
       - name: Test CI lifecycle decisions without network access
         run: |
           python3 tests/ci_recovery_test.py
+          python3 tests/ci_recovery_workflow_test.py
           python3 .github/scripts/test_merge_queue_fail_fast.py
