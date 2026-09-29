@@ -1,0 +1,24 @@
+name: Expression memo layout research
+on:
+  push:
+    branches: [codex/1909-memo-layout-research]
+permissions:
+  contents: read
+jobs:
+  census:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Fixed-budget current-source census and prototype
+        run: python3 tools/investigations/1909-memo-layout/run.py
+      - name: Preserve every completed or failed observation
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: memo-layout-${{ github.run_id }}-${{ github.run_attempt }}
+          path: memo-evidence
+          retention-days: 30
