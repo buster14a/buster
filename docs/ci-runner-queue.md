@@ -8,7 +8,8 @@ policy stays in `tools/merge_queue_admission.py::QUEUE` and
 
 ## Method
 
-`tools/github_ci_time.py` is the only collector; it runs from an operator
+`tools/github_ci_time.py` is the only collector (tests: `tools/github_ci_time_test.py`,
+kept outside the support-pinned `tests/ci_tools_test.py`); it runs from an operator
 machine or container, never as a runner-held polling job.
 
 ```sh
