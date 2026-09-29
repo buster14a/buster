@@ -204,7 +204,8 @@ jobs:
       # Archives are content-addressed and re-verified against the pinned
       # sha256 before use, so a cache entry can only skip the download.
       - name: Restore pinned SDK archives
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: sdk_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/native-retirement-sdk-archives
           key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
@@ -216,6 +217,12 @@ jobs:
           python3 trusted/tools/native_retirement_external.py prepare \
             --manifest "$GITHUB_WORKSPACE/integration/docs/native-retirement-dependencies-v1.json" \
             --source-root "$GITHUB_WORKSPACE/integration"
+      - name: Save pinned SDK archives
+        if: ${{ steps.sdk_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Reconstruct exact generated state and record evidence
         id: evidence
         run: |
@@ -345,7 +352,8 @@ jobs:
       # Archives are content-addressed and re-verified against the pinned
       # sha256 before use, so a cache entry can only skip the download.
       - name: Restore pinned SDK archives
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: sdk_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/native-retirement-sdk-archives
           key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
@@ -366,6 +374,12 @@ jobs:
           actual=$(sha256sum "$RUNNER_TEMP/native-retirement/evidence.json" | cut -d' ' -f1)
           test "$actual" = '${{ needs.prepare.outputs.evidence_sha256 }}'
           test "$(git -C integration write-tree)" = '${{ needs.prepare.outputs.final_tree }}'
+      - name: Save pinned SDK archives
+        if: ${{ steps.sdk_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Prove the candidate authority accepts the trusted final state
         working-directory: integration
         run: |
@@ -493,7 +507,8 @@ jobs:
       # Archives are content-addressed and re-verified against the pinned
       # sha256 before use, so a cache entry can only skip the download.
       - name: Restore pinned SDK archives
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: sdk_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/native-retirement-sdk-archives
           key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
@@ -514,6 +529,12 @@ jobs:
           actual=$(sha256sum "$RUNNER_TEMP/native-retirement/evidence.json" | cut -d' ' -f1)
           test "$actual" = '${{ needs.prepare.outputs.evidence_sha256 }}'
           test "$(git -C integration write-tree)" = '${{ needs.prepare.outputs.final_tree }}'
+      - name: Save pinned SDK archives
+        if: ${{ steps.sdk_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('integration/docs/native-retirement-sdks-v1.json') }}
       - name: Reauthorize immediately before the only mutation
         id: authorization
         shell: bash

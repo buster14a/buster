@@ -190,7 +190,8 @@ jobs:
       # Archives are content-addressed and re-verified against the pinned
       # sha256 before use, so a cache entry can only skip the download.
       - name: Restore pinned SDK archives
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: sdk_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/native-retirement-sdk-archives
           key: native-retirement-sdk-archives-v1-${{ hashFiles('candidate/docs/native-retirement-sdks-v1.json') }}
@@ -198,6 +199,12 @@ jobs:
         run: >-
           python3 "$GITHUB_WORKSPACE/trusted/tools/native_retirement_sdks.py" --source-root "$(pwd)"
           --cache-directory "$RUNNER_TEMP/native-retirement-sdk-archives"
+      - name: Save pinned SDK archives
+        if: ${{ steps.sdk_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/native-retirement-sdk-archives
+          key: native-retirement-sdk-archives-v1-${{ hashFiles('candidate/docs/native-retirement-sdks-v1.json') }}
       - name: Prepare the pinned external closure
         run: >-
           python3 "$GITHUB_WORKSPACE/trusted/tools/native_retirement_external.py" prepare
