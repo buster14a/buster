@@ -144,7 +144,7 @@ class RulesTests(unittest.TestCase):
     def test_desired_ruleset(self):
         gate.validate_ruleset(self.ruleset())
         self.assertEqual(self.ruleset()["bypass_actors"], gate.BYPASS_ACTORS)
-        self.assertEqual(gate.QUEUE["max_entries_to_build"], 20)
+        self.assertEqual(gate.QUEUE["max_entries_to_build"], 4)
         self.assertEqual(self.ruleset()["rules"][-1]["parameters"], gate.QUEUE)
 
     def test_readonly_omission_is_not_an_administrator_audit(self):
@@ -208,7 +208,7 @@ class RulesTests(unittest.TestCase):
             elif change == "scope":
                 data["conditions"]["ref_name"]["include"] = ["~ALL"]
             else:
-                data["rules"][-1]["parameters"]["max_entries_to_build"] = 2
+                data["rules"][-1]["parameters"]["max_entries_to_build"] = 20
             with self.subTest(change=change), self.assertRaises(gate.AdmissionError):
                 gate.validate_ruleset(data, read_only_response=True)
 
@@ -224,12 +224,13 @@ class RulesTests(unittest.TestCase):
                 with self.assertRaises(gate.AdmissionError):
                     gate.validate_ruleset(data)
 
-    def test_build_concurrency_is_exactly_twenty(self):
-        for value in (1, 2, 4, 5, 6, 7, 10, 19, 21):
+    def test_build_concurrency_is_exactly_four(self):
+        # 20 is the former live limit (#1805); it must fail closed, not linger as an accepted range.
+        for value in (1, 2, 3, 5, 6, 7, 10, 19, 20, 21):
             data = self.ruleset()
             data["rules"][-1]["parameters"]["max_entries_to_build"] = value
             with self.subTest(value=value), self.assertRaisesRegex(
-                    gate.AdmissionError, f"max_entries_to_build: expected 20, got {value}"):
+                    gate.AdmissionError, f"max_entries_to_build: expected 4, got {value}"):
                 gate.validate_ruleset(data)
 
     def test_merge_batches_rewrites_or_headgreen_are_rejected(self):
@@ -502,7 +503,7 @@ class OrchestrationTests(unittest.TestCase):
 
     def test_ruleset_change_during_ci_rejects_admission(self):
         for change, reason in (("enforcement", "must be active"),
-                               ("build concurrency", "max_entries_to_build: expected 20, got 1")):
+                               ("build concurrency", "max_entries_to_build: expected 4, got 1")):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
                 event = Path(temporary) / "event.json"
                 event.write_text("{}")
