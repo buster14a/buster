@@ -247,10 +247,15 @@ before constructing any child and waits for four ordered acknowledgements:
 preparing, settling, measuring, and measurement finished. The supervisor also binds
 the absolute monotonic execution deadline to its lease response and the
 recipient's acknowledgement. It rejects a missing, expired, or altered deadline;
-the unit checks it again after resuming from `SIGSTOP`, then reopens the lease
-pathname and verifies that the held lock still names the same inode before
-executing the installed recipe. A missing or replaced lease, or a deadline
-that expires during the pause, prevents recipe exec. The forked unit-entry
+the unit checks it again after resuming from `SIGSTOP`, then verifies that the
+held lease still has the lease pathname and holds the lock before executing
+the installed recipe. The outer unit has that pathname in `InaccessiblePaths`,
+so the check goes through the held descriptor rather than the path:
+`/proc/self/fd/<n>` must name exactly the lease pathname (a rename away or a
+replacement over it does not), and a fresh description reopened through it
+must conflict with the lock that the held one still holds. A missing, renamed
+or replaced lease, or a deadline that expires during the pause, prevents
+recipe exec. The forked unit-entry
 fixture counts zero attempted execs on those cases as well as malformed lease
 responses; it uses the admitted smoke entry, not a timed retirement campaign.
 The still-blocked retirement path receives that deadline as
