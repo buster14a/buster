@@ -153,6 +153,11 @@ def evaluate(lengths, edges, candidate_sources):
     for source in candidate_sources:
         edge = edge_by_source[source]
         delta = baseline[edge["target"]] - baseline[source + 1]
+        # Forward targets move with this instruction's deleted bytes, exactly
+        # cancelling the next-IP change. Backward/self targets do not move;
+        # prospective shortening therefore makes delta less negative.
+        if edge["target"] <= source:
+            delta += lengths[source] - 2
         one_shot_flags.append(-128 <= delta <= 127)
     one_shot = layout(lengths, candidates, one_shot_flags)
     one_shot_bad = violations(one_shot, lengths, edges, candidates, one_shot_flags)
@@ -214,9 +219,48 @@ def evaluate(lengths, edges, candidate_sources):
     return result
 
 
-def model_function(function, section, rows, symbols, relocs):
+def prepare_section_indexes(instructions, symbols, relocations):
+    """Build each section's address indexes once, outside the function loop."""
+    symbols_by_section = collections.defaultdict(list)
+    for symbol in symbols:
+        symbols_by_section[symbol["section"]].append(symbol)
+    section_ids = set(instructions) | set(symbols_by_section) | set(relocations)
+    indexes = {}
+    for section_id in section_ids:
+        rows = instructions.get(section_id, [])
+        section_symbols = sorted(symbols_by_section[section_id], key=lambda symbol: symbol["value"])
+        section_relocs = sorted(relocations.get(section_id, []), key=lambda relocation: relocation["offset"])
+        indexes[section_id] = {
+            "rows": rows,
+            "row_offsets": [row["offset"] for row in rows],
+            "symbols": section_symbols,
+            "symbol_values": [symbol["value"] for symbol in section_symbols],
+            "relocations": section_relocs,
+            "relocation_offsets": [relocation["offset"] for relocation in section_relocs],
+        }
+    return indexes
+
+
+def overlapping_function_bodies(bodies):
+    """Mark the same nonidentical overlapping extents as the pairwise scan."""
+    overlapping = set()
+    current_section, maximum_end, maximum_body = None, None, None
+    for key in sorted(bodies):
+        section, start, size = key
+        if section != current_section:
+            current_section, maximum_end, maximum_body = section, start + size, key
+        else:
+            if start < maximum_end:
+                overlapping.add(maximum_body)
+                overlapping.add(key)
+            if start + size > maximum_end:
+                maximum_end, maximum_body = start + size, key
+    return overlapping
+
+
+def model_function(function, section, section_index):
     start, end = function["value"], function["value"] + function["size"]
-    offsets = [row["offset"] for row in rows]
+    rows, offsets = section_index["rows"], section_index["row_offsets"]
     begin = bisect.bisect_left(offsets, start)
     finish = bisect.bisect_left(offsets, end)
     body = rows[begin:finish]
@@ -227,9 +271,13 @@ def model_function(function, section, rows, symbols, relocs):
     if any(boundaries[i + 1] - boundaries[i] != length for i, length in enumerate(lengths)):
         raise ValueError("function has an undecoded gap or overlapping fragments")
     boundary_indices = {point: i for i, point in enumerate(boundaries)}
-    function_symbols = [s for s in symbols if s["section"] == section["index"] and start <= s["value"] <= end]
+    symbol_begin = bisect.bisect_left(section_index["symbol_values"], start)
+    symbol_end = bisect.bisect_right(section_index["symbol_values"], end)
+    function_symbols = section_index["symbols"][symbol_begin:symbol_end]
     symbol_points = {s["value"] for s in function_symbols}
-    function_relocs = [r for r in relocs if start <= r["offset"] < end]
+    reloc_begin = bisect.bisect_left(section_index["relocation_offsets"], start)
+    reloc_end = bisect.bisect_left(section_index["relocation_offsets"], end)
+    function_relocs = section_index["relocations"][reloc_begin:reloc_end]
     reloc_points = {r["offset"] for r in function_relocs}
     candidate_sources, edges = [], []
     excluded = collections.Counter()
@@ -299,6 +347,7 @@ def main():
     for path in args.objects:
         data, sections, symbols, relocations = read_elf(path)
         instructions, command = disassemble(path, sections, args.objdump)
+        section_indexes = prepare_section_indexes(instructions, symbols, relocations)
         bodies = collections.defaultdict(list)
         skipped = []
         for symbol in symbols:
@@ -308,16 +357,17 @@ def main():
                 else:
                     bodies[(symbol["section"], symbol["value"], symbol["size"])].append(symbol)
         functions = []
+        overlapping = overlapping_function_bodies(bodies)
         for key, aliases in sorted(bodies.items()):
             representative = min(aliases, key=lambda symbol: symbol["name"])
-            if any(other != key and other[0] == key[0] and other[1] < key[1] + key[2] and key[1] < other[1] + other[2] for other in bodies):
+            if key in overlapping:
                 skipped.append({"name": representative["name"], "reason": "overlapping nonidentical function symbol extents"})
                 continue
             if any(symbol["name"] in args.exclude_symbol for symbol in aliases):
                 skipped.append({"name": representative["name"], "reason": "caller excluded symbol"})
                 continue
             try:
-                function = model_function(representative, sections[key[0]], instructions[key[0]], symbols, relocations[key[0]])
+                function = model_function(representative, sections[key[0]], section_indexes[key[0]])
                 function["aliases"] = [s["name"] for s in aliases]
                 function["object"] = str(path)
                 functions.append(function)
@@ -334,6 +384,7 @@ def main():
               "objdump_version": subprocess.run([args.objdump, "--version"], capture_output=True, text=True, check=True).stdout.splitlines()[0],
               "source_checked_no_inline_asm": args.proven_no_inline_asm,
               "model": "function-relative lengths; fixed noncandidate bytes and fixed emitted padding; exact intra-function unrelocated branches",
+              "one_shot_rule": "original layout with prospective own shortening; backward/self delta adds near_length-2; forward delta unchanged",
               "limits": ["No object rewrite or relocation resolution performed",
                          "No alignment directives recovered or reapplied; unity census is frozen-padding sensitivity only",
                          "No claim that debug ranges, unwind offsets, RIP-relative fields, section boundaries or external references are valid after rewriting",

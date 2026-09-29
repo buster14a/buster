@@ -40,7 +40,7 @@ for index, source in enumerate(sources):
 (output / 'fixture-source-identities.json').write_text(json.dumps([
     {'source': source, 'sha256': hashlib.sha256((production / source).read_bytes()).hexdigest(), 'inline_asm_marker': False} for source in sources], indent=2) + '\n')
 run([sys.executable, str(diagnostic / 'layout_census.py'), '--revision', revision, '--output', str(output / 'fixtures.json'), '--proven-no-inline-asm', *fixture_objects], 'fixture-census')
-run(['build/Release/ide', 'cc', '-target', 'x86_64-unknown-linux-gnu', '-Isrc', '-Ibuild/generated', '-DBUSTER_UNITY_BUILD=1', '-DBUSTER_INCLUDE_TESTS=0', '-g0', '-v', '-fregister-allocator=fast', '-fno-machine-fallback', '-fverify-codegen', '-c', 'src/buster/apps/ide/ide.c', '-o', str(output / 'unity.o')], 'unity-compile')
+run(['build/Release/ide', 'cc', '-target', 'x86_64-unknown-linux-gnu', '-march=native', '-Isrc', '-Ibuild/generated', '-DBUSTER_UNITY_BUILD=1', '-DBUSTER_INCLUDE_TESTS=0', '-g0', '-v', '-fregister-allocator=fast', '-fno-machine-fallback', '-fverify-codegen', '-c', 'src/buster/apps/ide/ide.c', '-o', str(output / 'unity.o')], 'unity-compile')
 run([sys.executable, str(diagnostic / 'layout_census.py'), '--revision', revision, '--output', str(output / 'unity.json'), str(output / 'unity.o')], 'unity-census')
 for name in ('fixtures', 'unity'):
     report = json.loads((output / (name + '.json')).read_text())
