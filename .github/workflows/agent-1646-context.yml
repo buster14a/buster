@@ -17,6 +17,30 @@ jobs:
         with:
           ref: codex/1646-static-assert-message
 
+      - name: Repair the widened token bound
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path('src/buster/lib/compiler/frontend/c/c_parse.c')
+          text = path.read_text(encoding='utf-8')
+          old = '    u32 declaration_end = declaration.token_start <= preprocess.token_count && declaration.token_count <= preprocess.token_count - declaration.token_start\n'
+          new = '    u64 declaration_end = declaration.token_start <= preprocess.token_count && declaration.token_count <= preprocess.token_count - declaration.token_start\n'
+          if old in text:
+              text = text.replace(old, new, 1)
+              path.write_text(text, encoding='utf-8')
+          elif new not in text:
+              raise SystemExit('declaration-end declaration not found')
+          PY
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/buster/lib/compiler/frontend/c/c_parse.c
+          if ! git diff --cached --quiet; then
+            git commit -m 'c: widen deferred assertion token bound'
+            git push origin HEAD:codex/1646-static-assert-message
+          fi
+
       - name: Install compiler test prerequisites
         shell: bash
         run: |
