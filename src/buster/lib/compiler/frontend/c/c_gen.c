@@ -2151,16 +2151,21 @@ struct CIrFunctionNameIndex
 {
     CIrFunctionNameResolution* groups;
     CIrFunctionNameCandidate* candidates;
+    // Spelling-keyed chains, holding only the groups whose name the table
+    // had not interned when the index was built (a parse without a symbol
+    // table). Every other group is reached through its symbol alone.
     u32* buckets;
     // Group index per interned symbol id, UINT32_MAX where no function
-    // declaration carries that name.  A callee token already carries its
-    // symbol, so the common lookup is one load instead of a spelling hash, a
-    // modulo and a string compare per call site (the hash alone measured
-    // 0,3% of a stage-1 self-compile).  Symbols at or past `symbol_limit`
-    // -- interned after the index was built -- and uninterned tokens keep
-    // the spelling path; both name the same declaration because one
-    // spelling is one symbol.
+    // declaration carries that name. The preprocessor established each
+    // name's identity once; the declaration's entity and every callee token
+    // carry that id, so neither building the index nor resolving a call
+    // hashes a spelling again. A spelling without a carried id (a builtin's
+    // link name, a synthesized token) asks the table read-only for the id it
+    // already has. One spelling is one symbol, so a name interned before the
+    // index was built is never also in the spelling chains, and one interned
+    // at or after `symbol_limit` names no function declaration.
     u32* symbol_groups;
+    CSymbolTable const* symbols;
     u32 symbol_limit;
     u32 group_count;
     u32 candidate_count;
@@ -12907,42 +12912,58 @@ BUSTER_C_INTERNAL u64 c_ir_function_name_hash(String8 name)
     return buster_hash_64(name.pointer ? (u8*)name.pointer : (u8*)"", name.length);
 }
 
-BUSTER_C_INTERNAL CIrFunctionNameResolution* c_ir_function_name_resolution(CIntegerIrBuilder* builder, String8 name)
+// The symbol key of a function name: the id its token or entity carries, or
+// else the id the table already holds for the spelling. Zero when the name
+// was not interned before the index was built; only the spelling chains can
+// hold such a name.
+BUSTER_C_INTERNAL u32 c_ir_function_name_key(CIrFunctionNameIndex const* index, u32 symbol, String8 name)
 {
-    CIrFunctionNameIndex* index = builder->function_names;
-    if (index && index->bucket_count)
+    u32 key = symbol;
+    if (!key && index->symbols)
     {
-        u32 bucket = (u32)(c_ir_function_name_hash(name) % index->bucket_count);
-        for (u32 group_index = index->buckets[bucket]; group_index != UINT32_MAX; group_index = index->groups[group_index].next_in_bucket)
-        {
-            CIrFunctionNameResolution* group = index->groups + group_index;
-            if (string_equal(group->name, name))
-            {
-                return group;
-            }
-        }
+        key = c_symbol_find(index->symbols, name);
     }
-
-    return 0;
+    return key < index->symbol_limit ? key : 0;
 }
 
-// The symbol-keyed form of the lookup above: an interned callee token resolves
-// through one load, an uninterned one through the spelling.
+BUSTER_C_INTERNAL u32 c_ir_function_name_spelling_group(CIrFunctionNameIndex const* index, String8 name)
+{
+    u32 result = UINT32_MAX;
+    if (index->bucket_count)
+    {
+        u32 bucket = (u32)(c_ir_function_name_hash(name) % index->bucket_count);
+        for (u32 group_index = index->buckets[bucket]; group_index != UINT32_MAX && result == UINT32_MAX;
+             group_index = index->groups[group_index].next_in_bucket)
+        {
+            result = string_equal(index->groups[group_index].name, name) ? group_index : UINT32_MAX;
+        }
+    }
+    return result;
+}
+
+// `symbol` is the id the name's token carries, 0 when it carries none.
 BUSTER_C_INTERNAL CIrFunctionNameResolution* c_ir_function_name_resolution_symbol(CIntegerIrBuilder* builder, u32 symbol, String8 name)
 {
     CIrFunctionNameIndex* index = builder->function_names;
-    CIrFunctionNameResolution* result;
-    if (index && symbol && symbol < index->symbol_limit)
+    CIrFunctionNameResolution* result = 0;
+    if (index)
     {
-        u32 group_index = index->symbol_groups[symbol];
+        u32 key = c_ir_function_name_key(index, symbol, name);
+        u32 group_index = key ? index->symbol_groups[key] : c_ir_function_name_spelling_group(index, name);
         result = group_index != UINT32_MAX ? index->groups + group_index : 0;
-    }
-    else
-    {
-        result = c_ir_function_name_resolution(builder, name);
     }
 
     return result;
+}
+
+BUSTER_C_INTERNAL CIrFunctionNameResolution* c_ir_function_name_resolution(CIntegerIrBuilder* builder, String8 name)
+{
+    return c_ir_function_name_resolution_symbol(builder, 0, name);
+}
+
+BUSTER_C_INTERNAL CIrFunctionNameResolution* c_ir_function_name_resolution_token(CIntegerIrBuilder* builder, CToken token)
+{
+    return c_ir_function_name_resolution_symbol(builder, token.symbol, c_token_spelling(builder->preprocess.spelling_base, token));
 }
 
 BUSTER_C_INTERNAL bool c_ir_build_function_name_index(Arena* arena, CParseResult* parse, CIrFunctionNameIndex* index)
@@ -12956,6 +12977,7 @@ BUSTER_C_INTERNAL bool c_ir_build_function_name_index(Arena* arena, CParseResult
         .groups = arena_allocate(arena, CIrFunctionNameResolution, capacity),
         .candidates = arena_allocate(arena, CIrFunctionNameCandidate, capacity),
         .buckets = arena_allocate(arena, u32, capacity),
+        .symbols = parse->symbols,
         .capacity = capacity,
         .bucket_count = capacity,
     };
@@ -12963,10 +12985,10 @@ BUSTER_C_INTERNAL bool c_ir_build_function_name_index(Arena* arena, CParseResult
     {
         index->buckets[bucket] = UINT32_MAX;
     }
-    // Sized to the table as it stands: every declaration name below was
-    // interned by the preprocessor's token pass, so the interning at each
-    // one is an identity hit and never grows the table past this limit.
-    u32 symbol_limit = parse->symbols ? parse->symbols->count : 0;
+    // Every id the table holds now, the last one included: every function
+    // declaration's name was interned before lowering began, by the token
+    // pass or when semantic analysis created its entity.
+    u32 symbol_limit = parse->symbols ? parse->symbols->count + 1 : 0;
     index->symbol_groups = arena_allocate(arena, u32, symbol_limit ? symbol_limit : 1);
     index->symbol_limit = symbol_limit;
     for (u32 symbol = 0; symbol < symbol_limit; symbol += 1)
@@ -12980,12 +13002,14 @@ BUSTER_C_INTERNAL bool c_ir_build_function_name_index(Arena* arena, CParseResult
         {
             continue;
         }
-        u32 bucket = (u32)(c_ir_function_name_hash(declaration.name) % index->bucket_count);
-        u32 group_index = index->buckets[bucket];
-        while (group_index != UINT32_MAX && !string_equal(index->groups[group_index].name, declaration.name))
-        {
-            group_index = index->groups[group_index].next_in_bucket;
-        }
+        // The entity carries the name's interned id, so the grouping key is
+        // read, not recomputed from the spelling.
+        u32 entity_symbol = declaration.entity.value < parse->entity_count ? parse->entities[declaration.entity.value].symbol : 0;
+#if !BUSTER_OPTIMIZE
+        BUSTER_CHECK(!entity_symbol || !parse->symbols || c_symbol_find(parse->symbols, declaration.name) == entity_symbol);
+#endif
+        u32 key = c_ir_function_name_key(index, entity_symbol, declaration.name);
+        u32 group_index = key ? index->symbol_groups[key] : c_ir_function_name_spelling_group(index, declaration.name);
         if (group_index == UINT32_MAX)
         {
             if (index->group_count >= index->capacity)
@@ -12998,18 +13022,22 @@ BUSTER_C_INTERNAL bool c_ir_build_function_name_index(Arena* arena, CParseResult
                 .declaration_index = declaration_index,
                 .first_candidate = UINT32_MAX,
                 .last_candidate = UINT32_MAX,
-                .next_in_bucket = index->buckets[bucket],
+                .next_in_bucket = UINT32_MAX,
                 .found = true,
                 .unique = true,
             };
-            index->buckets[bucket] = group_index;
+            if (key)
+            {
+                index->symbol_groups[key] = group_index;
+            }
+            else
+            {
+                u32 bucket = (u32)(c_ir_function_name_hash(declaration.name) % index->bucket_count);
+                index->groups[group_index].next_in_bucket = index->buckets[bucket];
+                index->buckets[bucket] = group_index;
+            }
         }
         CIrFunctionNameResolution* group = index->groups + group_index;
-        u32 name_symbol = c_parse_name_symbol(parse, declaration.name);
-        if (name_symbol && name_symbol < index->symbol_limit)
-        {
-            index->symbol_groups[name_symbol] = group_index;
-        }
         bool duplicate_entity = false;
         bool declaration_prototyped =
             declaration.type.value < parse->type_count && !parse->types[declaration.type.value].is_unprototyped;
@@ -13071,6 +13099,12 @@ BUSTER_C_INTERNAL bool c_ir_build_function_name_index(Arena* arena, CParseResult
 BUSTER_C_INTERNAL u32 c_ir_find_function(CIntegerIrBuilder* builder, String8 name)
 {
     CIrFunctionNameResolution* resolution = c_ir_function_name_resolution(builder, name);
+    return resolution ? resolution->declaration_index : UINT32_MAX;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_find_function_token(CIntegerIrBuilder* builder, CToken token)
+{
+    CIrFunctionNameResolution* resolution = c_ir_function_name_resolution_token(builder, token);
     return resolution ? resolution->declaration_index : UINT32_MAX;
 }
 
@@ -18595,7 +18629,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
              !builtin_va_start && !builtin_va_copy && !builtin_va_end && !builtin_va_arg && !builtin_generic && builtin_atomic == C_IR_ATOMIC_BUILTIN_COUNT &&
              !builtin_math_link_name.length && builtin_memory == C_IR_MEMORY_BUILTIN_COUNT && builtin_unary == IR_UNARY_COUNT &&
              builtin_simd == C_IR_SIMD_BUILTIN_NONE && builtin_sse2_immediate_shift == C_IR_SSE2_IMMEDIATE_SHIFT_NONE && !indirect &&
-             !c_ir_function_name_resolution(builder, c_token_spelling(builder->preprocess.spelling_base, token))) ||
+             !c_ir_function_name_resolution_token(builder, token)) ||
             (!indirect && c_ir_prepared_control_expression_contains(builder, index)) || c_ir_prepared_call_find(builder, callee_start))
         {
             continue;
@@ -21359,7 +21393,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 // knowable here, and saying so beats reporting that the call
                 // could not be prepared.
                 String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
-                CIrFunctionNameResolution* resolution = c_ir_function_name_resolution(builder, name);
+                CIrFunctionNameResolution* resolution = c_ir_function_name_resolution_token(builder, token);
                 if (!builder->failure_message.length && resolution && resolution->unique && builder->signatures[resolution->declaration_index].valid)
                 {
                     builder->failure_message =
@@ -26651,7 +26685,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
         }
         else
         {
-            u32 declaration_index = c_ir_find_function(builder, c_token_spelling(builder->preprocess.spelling_base, token));
+            u32 declaration_index = c_ir_find_function_token(builder, token);
             if (declaration_index != UINT32_MAX && builder->signatures)
             {
                 type = builder->signatures[declaration_index].return_type;
@@ -26692,7 +26726,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     {
         // A bare function name resolves to its function type so a call applied
         // through parentheses, e.g. `(name)(...)`, still reaches the return type.
-        u32 declaration_index = c_ir_find_function(builder, c_token_spelling(builder->preprocess.spelling_base, token));
+        u32 declaration_index = c_ir_find_function_token(builder, token);
         if (declaration_index != UINT32_MAX && builder->declaration_functions && builder->declaration_functions[declaration_index])
         {
             type = builder->declaration_functions[declaration_index]->canonical_type;
@@ -29285,7 +29319,7 @@ c_ir_expression_core_loop:
                 else if (entity.value < builder->parse.entity_count &&
                          (builder->parse.entities[entity.value].kind == C_ENTITY_FUNCTION || c_ir_entity_has_function_type(builder, entity)))
                 {
-                    value = c_ir_emit_function_pointer(builder, token, c_ir_find_function(builder, c_token_spelling(builder->preprocess.spelling_base, token)));
+                    value = c_ir_emit_function_pointer(builder, token, c_ir_find_function_token(builder, token));
                 }
             }
             if (value.value != IR_ID_UNDERLYING_INVALID && value_place.value != IR_ID_UNDERLYING_INVALID && index + 1 < end &&
@@ -32142,7 +32176,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
             }
             else
             {
-                u32 declaration_index = c_ir_find_function(builder, c_token_spelling(builder->preprocess.spelling_base, token));
+                u32 declaration_index = c_ir_find_function_token(builder, token);
                 if (declaration_index != UINT32_MAX && builder->signatures)
                 {
                     candidate = builder->signatures[declaration_index].return_type;
@@ -32277,7 +32311,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
             }
             else
             {
-                u32 declaration_index = c_ir_find_function(builder, c_token_spelling(builder->preprocess.spelling_base, token));
+                u32 declaration_index = c_ir_find_function_token(builder, token);
                 if (declaration_index != UINT32_MAX && builder->declaration_functions && builder->declaration_functions[declaration_index])
                 {
                     candidate = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->declaration_functions[declaration_index]->canonical_type);
@@ -42145,7 +42179,7 @@ BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIr
             CEntityId scoped = c_parse_lookup_entity_token(&builder->parse, builder->preprocess.spelling_base, scope, &builder->preprocess.tokens[start]);
             if (scoped.value == C_ID_UNDERLYING_INVALID)
             {
-                scoped = c_parse_lookup_entity_at(&builder->parse, builder->preprocess, scope, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]), start);
+                scoped = c_parse_lookup_entity_at_token(&builder->parse, builder->preprocess, scope, start);
             }
             if (scoped.value < builder->parse.entity_count && builder->parse.entities[scoped.value].kind == C_ENTITY_OBJECT)
             {
@@ -50068,22 +50102,22 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 {
                     continue;
                 }
-                // The layout runs in bits, which is what the System V rule for
-                // bit-fields is written in: a bit-field takes the next
+                // Members are placed by c_record_layout_place, under the
+                // target's record-layout rule (CRecordLayoutRule): the System
+                // V rule on Itanium targets, where a bit-field takes the next
                 // available bits and only moves on to the next storage unit of
-                // its declared type when it would otherwise straddle one. A
-                // per-declared-type unit model instead started a fresh unit
-                // whenever the declared type changed, so
-                // `struct { int a:3; unsigned char b:1; }` measured 8 bytes
-                // where every other C compiler on the target measures 4.
-                u64 bit_position = 0;
-                u32 alignment = 1;
+                // its declared type when it would otherwise straddle one; the
+                // AAPCS64 variant; and the Microsoft rule, where a change of
+                // declared type size does start a fresh unit. The sizeof
+                // folding in c_parse.c places members through the same call,
+                // so a folded size cannot contradict the object it sizes; the
+                // two agreeing is not evidence the rule is the target's, which
+                // is what record_layout_tests checks (#1439).
+                //
                 // `__attribute__((packed))` on the definition and `#pragma
                 // pack(N)` around it ask the same question: the ceiling a
                 // member's alignment is clamped to. Packed is that ceiling at
-                // one byte. c_parse_type_layout folds sizeof through the same
-                // two inputs, and the two must agree or a folded size
-                // contradicts the object it sizes.
+                // one byte.
                 CAggregateAttributes aggregate_attributes = c_parse_aggregate_attributes(&parse, (CTypeId){.value = type_index});
                 u32 pack_alignment = c_type->definition_start < preprocess.token_count
                                          ? c_preprocess_pack_alignment(&preprocess, c_type->definition_start)
@@ -50092,7 +50126,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 {
                     pack_alignment = 1;
                 }
-                bool packed_fields = false;
+                CRecordLayoutCursor record = c_record_layout_begin(target, c_type->kind == C_TYPE_UNION, pack_alignment);
                 bool fields_resolved = true;
                 // One report per aggregate, whatever the definition got wrong:
                 // the diagnostic budget allows one diagnostic per type, and the
@@ -50154,7 +50188,6 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                     {
                         field_alignment = BUSTER_MIN(field_alignment, pack_alignment);
                     }
-                    packed_fields |= packed_field;
                     // A rejected specifier still hands back the alignment the
                     // member can be laid out with, so the definition finishes
                     // and the program hears about the attribute it wrote
@@ -50215,122 +50248,28 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                         definition_rejection_member = field_index;
                         definition_rejection_kind = C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH;
                     }
-                    u64 offset = 0;
-                    u32 bit_offset = 0;
-                    if (member->is_bit_field)
+                    if (member->is_bit_field && (!field_type->layout.size || member_bit_width > field_type->layout.size * 8))
                     {
-                        u64 unit_bits = field_type->layout.size * 8;
-                        u64 alignment_bits = (u64)field_alignment * 8;
-                        if (!unit_bits || member_bit_width > unit_bits)
-                        {
-                            fields_resolved = false;
-                            break;
-                        }
-                        // An unnamed bit-field's declared type does not raise
-                        // the aggregate's alignment; a named one's does, and
-                        // neither does a GNU `aligned` on an unnamed one.
-                        if (member->name.length)
-                        {
-                            alignment = BUSTER_MAX(alignment, field_alignment);
-                        }
-                        // GNU `aligned(N)` on a bit-field starts it at the next
-                        // multiple of N bytes -- unconditionally, not only when
-                        // it would straddle its storage unit there, and against
-                        // the operand rather than the alignment the declared
-                        // type raises it to. `unsigned a : 20; unsigned b : 5
-                        // __attribute__((aligned(1)));` puts b at bit 24 where
-                        // the straddle rule alone puts it at 20, so this is the
-                        // one request that moves a bit-field *down*. Measured
-                        // against clang and gcc 2026-08-30; the sizeof folding
-                        // in c_parse.c spells the same rule.
-                        if (c_type->kind != C_TYPE_UNION && field_alignment_request)
-                        {
-                            u64 request_bits = (u64)field_alignment_request * 8;
-                            u64 request_remainder = bit_position % request_bits;
-                            if (request_remainder)
-                            {
-                                bit_position += request_bits - request_remainder;
-                            }
-                        }
-                        if (c_type->kind == C_TYPE_UNION)
-                        {
-                            if (member_bit_width)
-                            {
-                                // Every union member starts at bit zero, so the
-                                // size candidate is the bits this one occupies
-                                // rather than its declared type's width: a
-                                // packed `union { char c; int b : 5; }` is one
-                                // byte under Clang and GCC. The rounding to the
-                                // aggregate's alignment below is what gives the
-                                // unpacked spelling its declared type's size
-                                // back, so one arm answers both.
-                                bit_position = BUSTER_MAX(bit_position, (u64)member_bit_width);
-                            }
-                        }
-                        else if (!member_bit_width)
-                        {
-                            // A zero-width bit-field places nothing and only
-                            // moves the next member to its type's boundary.
-                            // Packing does not move it: GCC and Clang keep
-                            // aligning it to the declared type even inside a
-                            // packed aggregate.
-                            u64 zero_width_bits = (u64)natural_alignment * 8;
-                            u64 remainder = zero_width_bits ? bit_position % zero_width_bits : 0;
-                            if (remainder)
-                            {
-                                bit_position += zero_width_bits - remainder;
-                            }
-                            offset = bit_position / 8;
-                        }
-                        else if (packed_field)
-                        {
-                            // A packed bit-field takes the next bit and has no
-                            // storage unit to straddle. The unit it is read
-                            // through is chosen once the aggregate's size is
-                            // known, below; the byte-granular pair recorded
-                            // here carries the absolute bit position until
-                            // then.
-                            offset = bit_position / 8;
-                            bit_offset = (u32)(bit_position - offset * 8);
-                            bit_position += member_bit_width;
-                        }
-                        else
-                        {
-                            if (bit_position % alignment_bits + member_bit_width > unit_bits)
-                            {
-                                u64 remainder = bit_position % alignment_bits;
-                                if (remainder)
-                                {
-                                    bit_position += alignment_bits - remainder;
-                                }
-                            }
-                            // The field is read as a whole storage unit of its
-                            // declared type, so the offset names the unit that
-                            // contains it and bit_offset the position inside.
-                            offset = bit_position / unit_bits * field_type->layout.size;
-                            bit_offset = (u32)(bit_position - offset * 8);
-                            bit_position += member_bit_width;
-                        }
+                        fields_resolved = false;
+                        break;
                     }
-                    else
-                    {
-                        alignment = BUSTER_MAX(alignment, field_alignment);
-                        if (c_type->kind == C_TYPE_STRUCT)
-                        {
-                            u64 alignment_bits = (u64)field_alignment * 8;
-                            u64 remainder = bit_position % alignment_bits;
-                            if (remainder)
-                            {
-                                bit_position += alignment_bits - remainder;
-                            }
-                            offset = bit_position / 8;
-                            bit_position += field_type->layout.size * 8;
-                        }
-                        else
-                        {
-                            bit_position = BUSTER_MAX(bit_position, field_type->layout.size * 8);
-                        }
-                    }
+                    CRecordLayoutPlacement placement = c_record_layout_place(&record, (CRecordLayoutMember){
+                                                                                          .size = field_type->layout.size,
+                                                                                          .natural_alignment = natural_alignment,
+                                                                                          .alignment = field_alignment,
+                                                                                          .alignment_request = field_alignment_request,
+                                                                                          .bit_width = member_bit_width,
+                                                                                          .is_bit_field = member->is_bit_field,
+                                                                                          .is_named = member->name.length != 0,
+                                                                                          .is_packed = packed_field,
+                                                                                      });
+                    // A bit-field is read as a whole storage unit of its
+                    // declared type, so the offset names that unit and
+                    // bit_offset the position inside it. A field placed at the
+                    // next bit has its unit fitted below, once the size is
+                    // known.
+                    u64 offset = placement.unit_offset;
+                    u32 bit_offset = member->is_bit_field ? (u32)(placement.bit_position - offset * 8) : 0;
                     aggregate_type->fields[field_index] = (IrField){
                         .name = member->name,
                         .source = c_ir_source_range(member->location, member->name.length),
@@ -50347,6 +50286,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 }
                 // The definition's own `aligned(N)` raises the aggregate above
                 // what its members ask for, and the size rounds up to it.
+                u32 alignment = record.alignment;
                 String8 aggregate_rejection = {0};
                 CIrAlignmentStatus aggregate_status = c_ir_alignment_evaluate(&constant_builder, aggregate_attributes.alignment_start,
                                                                               aggregate_attributes.alignment_count, alignment, &alignment, 0, &aggregate_rejection);
@@ -50370,13 +50310,10 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                         .kind = definition_rejection_kind,
                     };
                 }
-                u64 size = (bit_position + 7) / 8;
-                u64 remainder = size % alignment;
-                if (remainder)
-                {
-                    size += alignment - remainder;
-                }
-                // Packing can leave a bit-field's storage unit hanging off the
+                u64 size = c_record_layout_size(&record, alignment);
+                // Packing -- the attribute, or `#pragma pack` of any value,
+                // under which an Itanium bit-field takes the next bit (#1318)
+                // -- can leave a bit-field's storage unit hanging off the
                 // end of the aggregate -- `struct __attribute__((packed)) { int
                 // a : 3; int : 0; int b : 3; }` is five bytes with `b` in the
                 // fifth -- and a read-modify-write through that unit would
@@ -50388,7 +50325,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 // is three bytes, so `b` is read through the byte at offset
                 // one. A field whose bits cross every unit that fits takes the
                 // bytes they occupy instead, which is more than one access.
-                for (u32 field_index = 0; packed_fields && field_index < c_type->member_count; field_index += 1)
+                for (u32 field_index = 0; record.needs_unit_fitting && field_index < c_type->member_count; field_index += 1)
                 {
                     IrField* field = aggregate_type->fields + field_index;
                     IrType* field_type = ir_type_from_id(&program->types, field->type);
