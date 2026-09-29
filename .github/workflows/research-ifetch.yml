@@ -2,25 +2,55 @@ name: Instruction delivery research (branch only)
 on:
   push:
     branches: [codex/1438-ifetch-census]
-    paths: ['tools/ifetch_census.c', '.github/workflows/research-ifetch.yml']
+    paths: ['.github/workflows/research-ifetch.yml']
 permissions:
   contents: read
 jobs:
   census:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
       - name: Build research driver
         run: clang -std=c11 -Wall -Wextra -Wpedantic -Werror tools/ifetch_census.c -o /tmp/ifetch-census
-      - name: Baseline and population census (not performance admission)
-        run: /tmp/ifetch-census
+      - name: Baseline, noinline, and cold-noinline (not performance admission)
+        run: /tmp/ifetch-census outline
+      - name: Exact output comparisons and focused contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > evidence/validation.log 2>&1
+          set -x
+          for variant in N C; do
+            for name in tiny basic headers unity semantic invalid rollback; do
+              for suffix in stdout stderr status metrics; do
+                cmp "evidence/A-$name.$suffix" "evidence/$variant-$name.$suffix"
+              done
+              if test -f "evidence/A-$name.o"; then
+                cmp "evidence/A-$name.o" "evidence/$variant-$name.o"
+              else
+                test ! -f "evidence/$variant-$name.o"
+              fi
+            done
+          done
+          for variant in A N C; do
+            "evidence/ide-$variant" test --module=c_frontend_tests,compiler_diagnostic_tests --ci=1 > "evidence/tests-$variant.log" 2>&1
+          done
+      - name: Same-source same-root producer rebuild control
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/ifetch-build build --config Release -t ide > evidence/build-A2.log 2>&1
+          cp build/Release/ide evidence/ide-A2
+          sha256sum evidence/ide-A evidence/ide-A2 > evidence/rebuild.sha256
+          cmp evidence/ide-A evidence/ide-A2
+          git diff --exit-code -- src/buster > evidence/restored-after-rebuild.diff
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: ifetch-census-${{ github.sha }}
+          name: ifetch-outline-${{ github.sha }}
           path: evidence
           retention-days: 30
           if-no-files-found: error
