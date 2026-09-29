@@ -23,15 +23,17 @@ jobs:
           set -euo pipefail
           python3 <<'PY'
           from pathlib import Path
+          import re
           path = Path('src/buster/lib/compiler/frontend/c/c_parse.c')
           text = path.read_text(encoding='utf-8')
-          old = '    u32 declaration_end = declaration.token_start <= preprocess.token_count && declaration.token_count <= preprocess.token_count - declaration.token_start\n'
-          new = '    u64 declaration_end = declaration.token_start <= preprocess.token_count && declaration.token_count <= preprocess.token_count - declaration.token_start\n'
-          if old in text:
-              text = text.replace(old, new, 1)
-              path.write_text(text, encoding='utf-8')
-          elif new not in text:
-              raise SystemExit('declaration-end declaration not found')
+          pattern = r'(BUSTER_C_SHARED String8 c_parse_static_assert_diagnostic_message\b.*?\n\{.*?\n\s*)u32(\s+declaration_end\s*=)'
+          updated, count = re.subn(pattern, r'\1u64\2', text, count=1, flags=re.S)
+          if count == 0 and re.search(r'BUSTER_C_SHARED String8 c_parse_static_assert_diagnostic_message\b.*?\n\{.*?\n\s*u64\s+declaration_end\s*=', text, flags=re.S):
+              updated = text
+              count = 1
+          if count != 1:
+              raise SystemExit(f'expected one declaration-end type match, found {count}')
+          path.write_text(updated, encoding='utf-8')
           PY
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
