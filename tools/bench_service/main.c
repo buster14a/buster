@@ -18,9 +18,10 @@
  * reference producer, #1020 PR 3) is linked here, so the oracle adapter
  * accepts only live tokens this unit's reference producer issued. The
  * correctness gate runs the installed #509 required checks
- * (retirement_check_runner.c) but refuses without a pinned authority and row
- * evidence, which has no producer yet, so the ready record (#1020 PR 4) has
- * no issued gate to write for; this unit must never define
+ * (retirement_check_runner.c) and the pinned row plan
+ * (retirement_row_plan.c, retirement_row_producer.c) but refuses while the
+ * profile pins neither authority, so the ready record (#1020 PR 4) has no
+ * issued gate to write for; this unit must never define
  * BQ_RETIREMENT_CORRECTNESS_TEST_ONLY. bq_worker_unit still calls none of the
  * worker-unit B steps: the recipe gates reject the job first. */
 #include "retirement_correctness.c"
@@ -32,6 +33,8 @@
 #include "retirement_reference_producer.c"
 #include "retirement_reference_template.c"
 #include "retirement_check_runner.c"
+#include "retirement_row_plan.c"
+#include "retirement_row_producer.c"
 #include "retirement_unit.c"
 #endif
 #include "worker_linux.c"

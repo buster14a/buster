@@ -10,10 +10,9 @@
  * binaries the child actually ran against, how the child ended and its
  * output. The unit never reaches the queue or the lease.
  *
- * BqRetirementRowEvidence is the interface of the per-row half of step 9,
- * which has no production producer yet: the pinned row-plan authority and its
- * runner are future work (see RETIREMENT_PREPARATION.md). Without row
- * evidence the gate refuses.
+ * BqRetirementRowEvidence is what the per-row half of step 9 hands the
+ * correctness gate; retirement_row_plan.c joins it from the pinned row-plan
+ * authority and the producer's observation (retirement_row_producer.c).
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_CHECK_RUNNER_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_CHECK_RUNNER_H
@@ -30,6 +29,12 @@
 #define BQ_RETIREMENT_CHECK_OUTPUT_CAP (1024u * 1024u)
 #define BQ_RETIREMENT_CHECK_LOG_CAP (16u * 1024u * 1024u)
 #define BQ_RETIREMENT_CHECK_RUN_CAP 1024u
+
+/* The lowest Landlock ABI the child sandbox accepts: ABI 6 is the first that
+ * also scopes signals and abstract unix sockets to the child's domain, so
+ * every rule the sandbox states is enforced. An older kernel is refused
+ * (BQ_CONFIGURATION_MISMATCH), never run with fewer rules. */
+#define BQ_RETIREMENT_SANDBOX_MIN_ABI 6u
 
 /* Everything one run borrows. evidence is the attempt's new check evidence
  * directory (the runner creates check-output-<i>, check-log-<i>,
@@ -89,7 +94,7 @@ BUSTER_F_DECL bool bq_retirement_check_receipts_hash(BqRetirementRequiredCheck c
  * aa_second_commands_sha256 is the sealed second A/A label aggregate and
  * plan_sha256 the digest of the row-plan authority that derived all of it.
  * Every pointer is borrowed; groups must stay in place until the gate that
- * froze them is released. No production code produces this yet. */
+ * froze them is released. bq_retirement_row_evidence_join builds it. */
 typedef struct BqRetirementRowEvidence
 {
     BqRetirementTrustedRow const* rows;

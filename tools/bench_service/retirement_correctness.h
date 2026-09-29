@@ -15,6 +15,12 @@
 
 #define BQ_RETIREMENT_CORRECTNESS_ROWS_CAP 100000u
 #define BQ_RETIREMENT_CORRECTNESS_CHECKS_CAP 256u
+/* The A/A second-command commitment's domain, shared by the row plan that
+ * derives BqRetirementPrepared.aa_second_commands_sha256 and the campaign
+ * binding that checks it. v3: one entry per timed batch group in dense
+ * order, keyed by its smallest member row (v2 had one entry per timed row,
+ * each a singleton; v1 covered every compiler-eligible row). */
+#define BQ_RETIREMENT_AA_SECOND_COMMANDS_DOMAIN "bq-retirement-aa-second-commands-v3"
 
 typedef enum BqRetirementCheckKind
 {
@@ -87,8 +93,13 @@ typedef struct BqRetirementCheckResult
 /* Observations are from the service-owned launcher and artifact reader.
  * Command digests include exact argv, cwd and environment; runtime output is
  * checked against an independent oracle, never against a candidate value.
- * diagnostic_sha256 is the compiler diagnostic digest; a batch control row's
- * facts carry it with the control's exit status (and object when it compiles). */
+ * diagnostic_sha256 is the compiler's diagnostic digest from its metrics
+ * record (never a digest of stderr); a batch control row's facts carry it
+ * with the control's exit status (and object when it compiles).
+ * semantic_pass is compile acceptance: the compile exited 0, every metrics
+ * input compiled (or, linking an executable, was prebuilt) and the artifact
+ * passed the per-target reader. It is not a per-row #509 semantic proof;
+ * the required checks' receipts carry that. */
 typedef struct BqRetirementObservedSide
 {
     char compiler_command_sha256[65], artifact_sha256[65], code_sha256[65], diagnostic_sha256[65];

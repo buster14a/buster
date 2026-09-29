@@ -10,7 +10,9 @@
  * in-unit runner with real children (pass with a normalized child, failing
  * exit, per-check timeout, an unrequested SIGKILL counted as OOM, wrong
  * output, a lingering descendant, one escaped with setsid, a tool changed
- * after import, a held binary modified and restored, cancellation, job
+ * after import, a held binary's metadata changed and restored, a write to a
+ * held binary and a check that reads the reference oracle's output or
+ * another check's evidence (both denied by the sandbox), cancellation, job
  * deadline, planted evidence) and the correctness half of the issuer
  * (bq_retirement_unit_gate_admit), which must refuse receipts from another
  * job or token, a swapped binary and a missing check.
@@ -61,12 +63,13 @@ typedef struct BqCheckTestSpec
 
 /* A passing check that also proves the child's normalized state: umask
  * 0077, the work directory as cwd, and no descriptor beyond stdio and the
- * held ones its arguments name. */
+ * held ones its arguments name. The descriptors are probed by number with
+ * stat, which the sandbox allows, since it denies listing /proc/self/fd. */
 BUSTER_GLOBAL_LOCAL char const bq_check_test_passing[] =
     "test -r \"$1\" && test -d \"$2\" && : > marker && test -f \"$WORK/marker\" && test \"$(umask)\" = 0077 && "
-    "allowed=\" 0 1 2 ${1##*/} ${2##*/} ${3##*/} ${4##*/} ${5##*/} ${WORK##*/} \" && "
-    "for f in /proc/self/fd/*; do n=${f##*/}; case \"$allowed\" in *\" $n \"*) ;; *) if [ -e \"$f\" ]; then "
-    "echo \"leaked $n\" >&2; exit 9; fi ;; esac; done && printf '%s ok\\n' \"$0\"";
+    "allowed=\" 0 1 2 ${1##*/} ${2##*/} ${3##*/} ${4##*/} ${5##*/} ${WORK##*/} \" && n=0 && "
+    "while [ $n -lt 256 ]; do case \"$allowed\" in *\" $n \"*) ;; *) if [ -e /proc/self/fd/$n ]; then "
+    "echo \"leaked $n\" >&2; exit 9; fi ;; esac; n=$((n + 1)); done && printf '%s ok\\n' \"$0\"";
 
 /* The twelve checks for a projection with native target native: census, a
  * native semantic lane on the native target, the other five #509 hosts
@@ -461,7 +464,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_check_test_import_variant(BqCheckTestFixture* fix
 BUSTER_GLOBAL_LOCAL BqRetirementCheckRun bq_check_test_run_for(BqCheckTestFixture* fixture,
     BqRetirementRequiredChecks const* checks, BqRetirementHeldBinaries const* held, int evidence, int work)
 {
-    BqRetirementCheckRun run = {checks, held, fixture->projection.prepared.source_sha256,
+    BqRetirementCheckRun run = {checks, held,
+                                (char const (*)[SHA256_HEX_CAPACITY])fixture->projection.prepared.source_sha256,
                                 {fixture->sources[0], fixture->sources[1]}, work, evidence, fixture->cancel[0],
                                 bq_retirement_build_clock_ns() + 120ull * 1000000000ull};
     return run;
@@ -728,6 +732,7 @@ BUSTER_GLOBAL_LOCAL void bq_check_test_runs(BqCheckTestFixture* fixture)
     struct stat tool_info = {0};
     int work = -1;
     BqRetirementCheckResult observed[BQ_CHECK_TEST_CHECKS] = {0};
+    struct stat info = {0};
     int appender = stat(tool, &tool_info) == 0 && chmod(tool, 0700) == 0 ?
                    open(tool, O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW) : -1;
     BQ_PREP_CHECK(appender >= 0 && write(appender, "x", 1) == 1 && close(appender) == 0 && chmod(tool, 0500) == 0 &&
@@ -743,14 +748,15 @@ BUSTER_GLOBAL_LOCAL void bq_check_test_runs(BqCheckTestFixture* fixture)
     /* Failing children: a failing exit, the check's own wall bound, an
      * unrequested SIGKILL (counted as OOM), wrong output, a descendant left
      * in the group, one that escapes with setsid (reparented to the runner,
-     * the subreaper, and swept), and a same-user modify-and-restore of a held
-     * binary, whose bytes match again but whose file changed. */
+     * the subreaper, and swept), and a same-user change and restore of a held
+     * binary's mode: the sandbox denies the write between them (the bytes
+     * stay the pinned ones), and the file's changed ctime still fails the
+     * check. */
     static u32 const failing_index[] = {0, 1, 7, 8, 9, 10, 11};
     static char const* const failing[] = {"exit 3", "exec sleep 30", "kill -KILL $$", "printf 'other\\n'",
         "sleep 5 & printf '%s ok\\n' \"$0\"",
         "setsid sleep 30 < /dev/null > /dev/null 2>&1 & sleep 1; printf '%s ok\\n' \"$0\"",
-        ("chmod u+w \"$1\" && cat \"$1\" > \"$WORK/copy\" && printf x >> \"$1\" && cat \"$WORK/copy\" > \"$1\" && "
-         "chmod 0500 \"$1\" && printf '%s ok\\n' \"$0\"")};
+        ("chmod u+w \"$1\" && { printf x >> \"$1\" 2> /dev/null; chmod 0500 \"$1\"; } && printf '%s ok\\n' \"$0\"")};
     BqCheckTestSpec specs[BQ_CHECK_TEST_CHECKS];
     memcpy(specs, fixture->specs, sizeof(specs));
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(failing); index += 1)
@@ -775,10 +781,51 @@ BUSTER_GLOBAL_LOCAL void bq_check_test_runs(BqCheckTestFixture* fixture)
     BQ_PREP_CHECK(observed[9].exit_code == 0 && observed[9].failures == 1);
     BQ_PREP_CHECK(observed[10].exit_code == 0 && observed[10].failures == 1 && bq_check_test_no_children() &&
                   bq_retirement_check_descendants_absent());
+    char unchanged[SHA256_HEX_CAPACITY] = {0};
     BQ_PREP_CHECK(bq_retirement_check_run(&run, 11, observed + 11) == BQ_SOURCE_MISMATCH &&
-                  bq_check_test_no_children());
+                  bq_check_test_no_children() &&
+                  bq_retirement_oracle_file_hash(fixture->held.descriptors[1], BQ_RETIREMENT_CHECK_TOOL_BYTES_CAP, true,
+                                                 unchanged) &&
+                  !strcmp(unchanged, fixture->projection.prepared.binary_sha256[1]));
     /* The same check twice into one attempt: its names already exist. */
     BQ_PREP_CHECK(bq_retirement_check_run(&run, 0, observed) == BQ_WORKSPACE_MISMATCH);
+    if (work >= 0) close(work);
+    if (evidence >= 0) close(evidence);
+    BQ_PREP_CHECK(bq_retirement_required_checks_release(&broken));
+
+    /* The sandbox: a check that tries to read the reference oracle's output
+     * beside its work directory, another check's evidence and another
+     * check's work directory, and to plant a file beside its own, is denied
+     * each time. It prints "denied", so its receipt does not match. */
+    char attack[768];
+    u32 numbered = fixture->directories;
+    snprintf(attack, sizeof(attack), "for p in ../reference-oracle/out %s/evidence-%u/check-output-0000 "
+             "../check-work-0000/marker; do if cat \"$p\" > /dev/null 2>&1; then printf 'read %%s\\n' \"$p\"; fi; "
+             "done; if (: > ../planted) 2> /dev/null; then printf 'planted\\n'; fi; printf 'denied\\n'",
+             fixture->workspaces, numbered);
+    memcpy(specs, fixture->specs, sizeof(specs));
+    specs[1].script = attack;
+    int oracle = -1, secret = -1;
+    BQ_PREP_CHECK(bq_check_test_directory(fixture, "evidence", &evidence) &&
+                  bq_check_test_directory(fixture, "work", &work) && mkdirat(work, "reference-oracle", 0700) == 0);
+    oracle = openat(work, "reference-oracle", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    secret = oracle >= 0 ? openat(oracle, "out", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600) : -1;
+    BQ_PREP_CHECK(secret >= 0 && write(secret, "check-1 ok\n", 11) == 11 && close(secret) == 0 &&
+                  bq_check_test_import_variant(fixture, specs, BQ_CHECK_TEST_CHECKS, 0, &fixture->preparation,
+                                               &fixture->projection, &broken) == BQ_OK);
+    if (oracle >= 0) close(oracle);
+    run = bq_check_test_run_for(fixture, &broken, &fixture->held, evidence, work);
+    char denied[SHA256_HEX_CAPACITY] = {0}, captured[SHA256_HEX_CAPACITY] = {0};
+    bq_digest("denied\n", 7, (char8*)denied);
+    BQ_PREP_CHECK(broken.owned && bq_retirement_check_run(&run, 0, observed) == BQ_OK && !observed[0].failures &&
+                  bq_retirement_check_run(&run, 1, observed + 1) == BQ_OK && observed[1].exit_code == 0 &&
+                  observed[1].failures == 1 &&
+                  strcmp(observed[1].receipt_sha256, broken.checks[1].receipt_sha256) &&
+                  bq_retirement_check_hash_file(evidence, "check-output-0001", BQ_RETIREMENT_CHECK_OUTPUT_CAP,
+                                                captured) &&
+                  !strcmp(captured, denied) &&
+                  fstatat(work, "planted", &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT &&
+                  bq_check_test_no_children());
     if (work >= 0) close(work);
     if (evidence >= 0) close(evidence);
     BQ_PREP_CHECK(bq_retirement_required_checks_release(&broken));
@@ -802,7 +849,6 @@ BUSTER_GLOBAL_LOCAL void bq_check_test_runs(BqCheckTestFixture* fixture)
     u64 generous = run.deadline_ns;
     run.deadline_ns = bq_retirement_build_clock_ns();
     BQ_PREP_CHECK(bq_retirement_check_run(&run, 0, observed) == BQ_WORKER_TIMEOUT);
-    struct stat info = {0};
     run.deadline_ns = bq_retirement_build_clock_ns() + 1500000000ull;
     BQ_PREP_CHECK(bq_retirement_check_run(&run, 0, observed) == BQ_WORKER_TIMEOUT && bq_check_test_no_children() &&
                   fstatat(evidence, "check-receipt-0000", &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT);

@@ -374,9 +374,9 @@ units).
 
 After `bq_retirement_unit_build`, the unit runs design steps 6 to 8 in
 `retirement_unit.c`. Step 9, the correctness gate, runs the installed #509
-required checks in the unit and issues the gate, but still refuses in
-production because no row-plan authority produces the per-row half
-([step 9](#step-9-509-receipts-and-the-gate-issuer-1020)). Step 10, the ready
+required checks and the pinned row plan in the unit and issues the gate, but
+still refuses in production because the blocked profile pins neither
+authority ([step 9](#step-9-509-receipts-and-the-gate-issuer-1020)). Step 10, the ready
 record, and the coordinator replay are described in the
 [next section](#ready-record-and-coordinator-replay-1020).
 
@@ -634,7 +634,10 @@ in a bounded child, with these limits:
 - It runs under the check's `RLIMIT_AS` with no core dumps.
 - Its working directory is a new `retirement-work/check-work-<i>`.
 - It inherits only the held binaries, both source roots, the tools and that
-  directory; a fixture check lists `/proc/self/fd` to prove it.
+  directory; a fixture check probes `/proc/self/fd/<n>` for every number
+  below 256 to prove it.
+- It runs in the child sandbox described below, the one the row steps use.
+  The run record names the Landlock ABI it enforced (`sandbox-abi=`).
 - It runs under the check's wall bound, the job's absolute deadline and the
   cancellation self-pipe.
 - A hosted check starts no child: its output is the held hosted record.
@@ -642,12 +645,65 @@ in a bounded child, with these limits:
 stdout is the check's summary, bounded to 1 MiB and compared with the
 pinned digest. stderr is its log, bounded to 16 MiB.
 
+**The child sandbox.** `bq_retirement_sandbox` builds it and
+`bq_retirement_sandbox_enter` applies it just before exec, after
+`PR_SET_NO_NEW_PRIVS`. What it covers:
+
+- **Kernel.** It requires Landlock ABI 6 (`BQ_RETIREMENT_SANDBOX_MIN_ABI`),
+  the first ABI with the signal and abstract-socket scopes. An older kernel,
+  or one without Landlock, fails every non-hosted check and every row step
+  with `BQ_CONFIGURATION_MISMATCH`; it never runs with fewer rules. The
+  hosted runners have ABI 7.
+- **Files (Landlock).** The child may read and execute `/usr`, `/lib*`,
+  `/bin` and `/sbin`; read `/etc` and A's two source roots; execute and read
+  the held binaries (a check's tools too); use `/dev/null`; read the zero
+  and random devices; and use its own new work directory freely. Opening,
+  listing, creating, renaming, linking, removing and truncating anything
+  else is denied. That includes `retirement-checks/` (this process writes
+  every capture file), the reference oracle's outputs, the row evidence,
+  other checks' and steps' directories, `/proc` and `/sys`.
+- **Sockets (Landlock and seccomp).** Landlock denies TCP bind and connect
+  and scopes abstract unix sockets and signals to the child's domain. It
+  does not govern `connect()` to a path-named unix socket, and the child
+  runs as the service user, whose UID is all the broker's and the service's
+  control sockets check. So a seccomp filter refuses (`EPERM`) `socket`,
+  `socketpair`, `connect`, `bind`, `listen`, `accept`, `accept4`, `sendto`,
+  `sendmsg`, `sendmmsg` and the three io_uring calls, which could issue those
+  operations without the system calls. It kills the child on another
+  architecture and on an x32 call. No check or row step needs a socket: they
+  compile and run programs over files.
+- **Not covered.** Landlock governs no metadata at any ABI. The child can
+  `stat` a path it knows, and can `chmod`, `chown`, `utimes` or change the
+  xattrs of any file the service user owns, for example `chmod 000` an
+  evidence or oracle directory. That is denial of service, not forgery: the
+  child still cannot write those files. The gate notices a changed mode only
+  where it checks one: the sealed check evidence (exact directory and file
+  modes), the held binaries and tools (`fstat` identity around every child)
+  and A's roots (the rescan requires read-only entries). Anywhere else, such
+  as the reference oracle's outputs, the change shows up as a later failed
+  read, which is a refusal. Without `/proc` and `/sys`, libc's
+  `get_nprocs()` probably falls back to the affinity count, so a program
+  sees a different CPU count than it would unconfined. Both sides see the
+  same count (unverified).
+
+The fixtures attack it:
+
+- A check tries to read the oracle's output, another check's output and
+  another check's work directory, and to plant a file beside its own. It is
+  denied each time, prints `denied`, and its receipt does not match.
+- A check copies a probe out of A's candidate root and runs it to connect
+  to a listening unix socket beside its work directory. The probe is denied,
+  prints `denied`, and the receipt does not match.
+- With the ABI capped at 5 (`bq_retirement_sandbox_abi_ceiling`, a
+  test-only seam), a check is refused with `BQ_CONFIGURATION_MISMATCH`.
+
 Before the child the runner requires that this process has no child at
 all, rehashes both held binaries and every tool, and `fstat`s the binaries,
 tools and hosted record. After the child it requires each of those to be the
 same file with the same device, inode, size, mtime and ctime, and the
-binaries to rehash to the same digests; a same-user modify-and-restore
-therefore fails with `BQ_SOURCE_MISMATCH` even when the bytes match again.
+binaries to rehash to the same digests. The sandbox denies writing a held
+binary, and a same-user mode change and restore (which Landlock does not
+govern) still fails with `BQ_SOURCE_MISMATCH`.
 The sources in the receipt are the digests the caller's scan produced. It
 then writes four files into the attempt's new `retirement-checks/`:
 `check-output-<i>`, `check-log-<i>`, `check-receipt-<i>` and a
@@ -685,18 +741,173 @@ that left any fails. A per-check cgroup v2 leaf, which would also let OOM be
 read from `memory.events`, needs the worker unit's delegated cgroup and is
 not implemented; OOM is still inferred from an unrequested SIGKILL.
 
+### The row-plan authority
+
+The per-row half of step 9 has its own installed authority.
+`bq_retirement_row_plan_import` (in `retirement_row_plan.c`) reads
+`recipes/native-retirement-performance-v1.row-plan`, whose SHA-256 must equal
+the compiled profile's `row-plan-sha256=` pin. The candidate never names a
+row command. The blocked profile carries no pin, so the import returns
+`BQ_RECIPE_MISMATCH` before it reads any file. The file is canonical
+LF-terminated text:
+
+```
+BQ-RETIREMENT-ROW-PLAN-V1
+support=<sha256>
+census=<sha256>
+population=<sha256>
+native-target=<id>
+cpu=<cpu-model-sha256> <logical-cpu>
+templates=<t>
+template=<i> <compile|batch|runtime> <timeout-s> <memory-MiB>
+argv=<a>
+arg=<argument>
+environment=<e>
+env=<NAME=value>
+rows=<n>
+row=<i> <-|batch|template> <-|template> <-|fixture>
+groups=<g>
+group=<g> <template> <allocator> <metrics-leaf> <metrics-bytes-max> <exit-status> <inputs>
+input=<row|-> <member> <status> <error> <-|object-leaf> <fixture>
+```
+
+- **Joined facts.** `support`, `census`, `population` and `native-target`
+  must be the sealed projection's, and `rows` its exact row count, one `row=`
+  per row in order.
+- **Templates.** Fields may hold any number of the tokens `{{binary}}`,
+  `{{source:0}}`, `{{source:1}}`, `{{work}}`, `{{fixture}}`, `{{output}}`,
+  `{{metrics}}`, `{{inputs}}` and `{{label}}`, as the kind allows. A compile
+  template must use `{{fixture}}`, `{{output}}` and `{{metrics}}`; a batch
+  template `{{inputs}}` and `{{metrics}}`. `argv[0]` is exactly `{{binary}}`,
+  or `./{{output}}` (the artifact of the row's compile step) for a runtime
+  template. Environment entries are strictly ascending.
+- **Rows.** A timed object row (compiler eligible, native target, object
+  stage) must be compiled in a batch group. Any other compiler-eligible row,
+  including every cross-target row, has a compile template, so it yields
+  compile-only and code facts and is never timed. A native, ineligible object
+  row is either untouched or a batch control. A row with a native
+  generated-runtime obligation, and only such a row, has a runtime template.
+- **Groups.** Each group lists its inputs as the A1 contract freezes them:
+  members first in ascending row order, then status-checked controls, each
+  with its pinned status and error, and an object leaf exactly when it must
+  compile. Each member and row-naming control names its row's own fixture,
+  and every batch row is claimed by exactly one input. The skeleton must be a
+  valid batch contract, and groups are ordered by their smallest member.
+
+From the plan the importer derives, for the attempt:
+
+- every command digest, by resolving the templates in the canonical child
+  layout (the side's held binary at descriptor 3 or 4, A's base and
+  candidate roots at 5 and 6, the step's work directory at 7, which is also
+  the working directory) and hashing argv, cwd and environment exactly as
+  the campaign's measured commands are hashed;
+- each group's batch key (its template digest and allocator), which every
+  member and control carries, and each control's `batch_control` mark;
+- each group's per-side batch command, which becomes every member's and
+  control's compiler command, and its response-file leaf;
+- the second A/A label aggregate (`{{label}}` as `2`), in the campaign's
+  order under lane D's domain;
+- the projection's rows completed with all of the above; their population
+  seal must still hold.
+
+### The row producer
+
+`bq_retirement_row_produce` (in `retirement_row_producer.c`) runs only on an
+x86-64 Linux host (`BQ_RETIREMENT_ROW_HOST_NATIVE`), since it executes the
+native target's (x86_64-linux) programs itself. On any other host it refuses
+with `BQ_CONFIGURATION_MISMATCH` before any step, and the fixture's step
+cases are skipped there with that reason reported. It runs the plan
+on the plan's CPU alone (`sched_setaffinity`, restored afterwards). It
+records the affinity and the model of that CPU as `/proc/cpuinfo` names it
+(`model name`; on AArch64 the `CPU implementer`, `variant`, `part` and
+`revision` lines; else `unknown`). It rehashes both held binaries once before
+the first step and once after the last. Every step runs as a check does: no
+other child first, `bq_retirement_build_child`'s normalized child with the
+step's `RLIMIT_AS` and bounds, the job deadline and cancellation, and the
+subreaper sweep. Each binary's `fstat` identity (device, inode, size, mode,
+links, owner, mtime and ctime) must be unchanged around every step, so a
+modify-and-restore during a step fails it with `BQ_SOURCE_MISMATCH`.
+
+**Isolation.** Each step runs candidate-derived code: the candidate binary
+compiling, and the program it generated running. Before exec the step
+enters the child sandbox described under the runner, with its side's held
+binary as the one executable. Its limits apply unchanged: no metadata
+control, and a refusal below Landlock ABI 6. The producer checks the ABI
+before the first step and records it in the evidence (`sandbox-abi=`), and
+the join refuses an observation below ABI 6. The fixtures:
+
+- A generated program reads the reference oracle's output and plants a
+  file beside its step. It is denied, prints `denied`, and the row is
+  refused.
+- A generated program connects to a listening unix socket beside its step.
+  It is denied and prints `denied`, and the row is refused.
+- With the ABI capped at 5, the producer refuses before any step.
+
+The steps still run as the service user: the broker's separate candidate
+UID is not used here (see remaining work below).
+
+For each side it runs:
+
+- each batch group once, in a new `retirement-work/group-work-<g>-<side>`
+  with the response file written there. The compiler's metrics records must
+  authenticate (`tp_retirement_metrics_check`) against the contract made of
+  the plan's pinned statuses, errors, exit status and bound with the
+  observed diagnostics and objects, or the producer returns
+  `BQ_RECIPE_MISMATCH`. Members' and controls' facts come from their inputs.
+  Every object is frozen `0400` and read with the service's own artifact
+  check (`bq_retirement_artifact_target`, `bq_retirement_artifact_read`) as an
+  x86_64-linux relocatable, which also yields its code section;
+- each per-row compile in a new `retirement-work/row-work-<row>-<side>`. The
+  artifact is frozen (`0500` for an executable) and read with the same check
+  for the row's own target and stage: the target's format and machine, a
+  relocatable at the object stage and an executable otherwise. The metrics
+  are checked as a batch's are: schema, record and status counts, the
+  process's exit status, the stage's action (`object`, or `link` for link and
+  self-host) and the row's fixture as the first input. The diagnostic is
+  that input's compiler diagnostic digest (never a digest of stderr), and
+  the fallback count is summed over all inputs. Link and self-host templates
+  must pass the metrics flag (`{{metrics}}` is required in every compile
+  template); without a record the fallback count is `UINT32_MAX` and the gate
+  refuses. A row with a runtime template then runs its artifact there, with
+  stdout and stderr on one writer, as the oracle captured its output; that
+  digest is the runtime output the gate compares with the independent
+  oracle.
+
+`semantic_pass` is compile acceptance, not a per-row #509 semantic proof,
+which the required checks' receipts carry. It holds when the compile exited
+0 with no capture failure, every metrics input compiled (or, linking an
+executable, was a `prebuilt` input), and the artifact passed the per-target
+check.
+
+The observation is `BqRetirementRowObserved`, with a canonical form,
+`BQ-RETIREMENT-ROW-EVIDENCE-V1`. `bq_retirement_row_observed_parse` accepts
+only bytes that format back to themselves, for this plan and attempt.
+`bq_retirement_row_evidence_join` requires the observation to name this
+plan, attempt and population, to have run on the plan's CPU alone with the
+plan's model, and to record a sandbox of at least Landlock ABI 6
+(`sandbox-abi=`; `BQ_CONFIGURATION_MISMATCH` otherwise). It then builds the
+`BqRetirementRowEvidence` the correctness gate admits: the plan's completed
+rows, the observed facts, and frozen batch groups from the plan's skeleton
+with the observed diagnostics and objects. Whether each fact matches its
+derived command, oracle, status and object is the gate's to judge.
+
 ### The issuer
 
-`bq_retirement_unit_gate` imports the authority for the attempt and requires
-row evidence and that the unit has no child process. It then creates a new
-`retirement-checks/` (mode 02700), with its directory entry made durable,
-holds and scans A's two materialized roots, and runs every check in
-authority order. The first failing check stops the gate with
-`BQ_RECIPE_MISMATCH`; its receipt stays in the unsealed directory. After the
-last check it rescans both roots with `bq_retirement_scan` (a change is
-`BQ_SOURCE_MISMATCH`), requires the evidence to close exactly, computes the
-ordered digest of every check's run record and log, and requires again that
-no descendant is left (`BQ_CLEANUP_FAILED`).
+`bq_retirement_unit_gate` imports both authorities for the attempt and
+requires that the unit has no child process. It then creates new
+`retirement-checks/` and `retirement-rows/` (mode 02700), with their
+directory entries made durable, holds and scans A's two materialized roots,
+and runs every check in authority order. The first failing check stops the
+gate with `BQ_RECIPE_MISMATCH`; its receipt stays in the unsealed directory.
+It then runs the row producer, writes the canonical row evidence as
+`retirement-rows/row-evidence` (`O_EXCL`, `0400`, fsynced), parses those bytes
+back and joins them with the plan, so the gate admits exactly what it
+persisted. Before the first row step it closes, digests and seals
+`retirement-checks/` (`0500`), and after the rows it requires the sealed
+evidence to be unchanged. After the rows it rescans both roots with `bq_retirement_scan` (a
+change is `BQ_SOURCE_MISMATCH`), requires the check evidence to close
+exactly, computes the ordered digest of every check's run record and log,
+and requires again that no descendant is left (`BQ_CLEANUP_FAILED`).
 
 `bq_retirement_unit_gate_admit` then drives the correctness gate:
 
@@ -729,7 +940,9 @@ objects. Its seal binds these facts:
 - the authority digest and check count;
 - the ordered receipt aggregate;
 - the ordered digest of the run records and logs;
-- the row-plan digest;
+- the row-plan authority's digest;
+- the persisted row evidence's digest, which also binds its CPU
+  provenance;
 - the correctness gate's own seal, which covers every check result, row
   fact, frozen batch group, the batch authority and the authority digest.
 
@@ -737,31 +950,32 @@ The correctness seal cannot also cover the unit seal, which is computed
 over it; the unit seal and the ready record's `gate=admitted` line cover the
 correctness seal instead.
 
-The issuer then seals `retirement-checks/` to `0500`.
+The issuer then seals `retirement-checks/` and `retirement-rows/` to `0500`.
+The issued gate owns the frozen batch groups its correctness gate points
+into.
 
 The gate refuses receipts from another job or token, a swapped or changed
-binary, a missing check, and changed row evidence.
+binary, a missing check, a forged or foreign row plan, an observation of
+another plan or attempt, a row missing or added, a command, CPU, batch-key
+or control-status mismatch, and changed row evidence.
 
-**Remaining work.** The per-row half has no production producer:
-`BqRetirementRowEvidence` is its interface. The per-row half means:
-
-- independently derived compiler and runtime argv, cwd and environment for
-  each row, with CPU provenance;
-- batch keys and controls;
-- observed artifacts, codes and diagnostics;
-- the frozen batch contracts.
-
-A pinned row-plan authority and its runner must supply these. Until then the
-public entry passes no row evidence and refuses before `retirement-checks/`
-exists or any child starts. The blocked profile, which has no pin, refuses
-first.
+**Remaining work.** The blocked profile pins neither authority, so the
+public entry refuses before either directory exists or any child starts.
+Integration must install and pin a reviewed row plan for the real corpus;
+the fixture plan and stand-in compilers prove mechanics only. The row steps
+and the required checks share one sandbox (Landlock plus a seccomp socket
+filter) but still run as the service user. Running them as the broker's separate
+candidate UID, in a unit that cannot read the service's workspace at all,
+needs per-step broker stages (a follow-up on #1021) and is not done. A
+per-step cgroup v2 leaf is still missing.
 
 ## Ready record and coordinator replay (#1020)
 
 `bq_retirement_unit_ready` is design step 10. It first requires a gate that
 step 9 issued for exactly this attempt, with a seal that verifies against
 the live facts, and a profile whose `required-checks-sha256=` pin still
-equals the gate's and the correctness gate's authority digest. Otherwise it
+equals the gate's and the correctness gate's authority digest and whose
+`row-plan-sha256=` pin still equals the gate's row plan. Otherwise it
 returns `BQ_RECIPE_MISMATCH` before it examines any object or touches the
 attempt; the public entry uses the compiled blocked profile, so it always
 refuses. It then requires every one of these, or
@@ -779,8 +993,9 @@ returns `BQ_BAD_REQUEST`:
 - The gate's receipt aggregate still matches its required checks.
 
 It then requires the sealed `retirement-checks/` to hold exactly those
-receipts, with run records and logs whose ordered digest is the gate's
-(`BQ_SOURCE_MISMATCH` otherwise).
+receipts, with run records and logs whose ordered digest is the gate's, and
+the sealed `retirement-rows/` to hold exactly the row evidence the gate
+admitted (`BQ_SOURCE_MISMATCH` otherwise).
 
 `BqRetirementUnitGate.issuer` is only a marker, not a capability: any
 in-process caller can set it. Admission rests on the seal verifier and, on
@@ -854,7 +1069,7 @@ SHA-256 values and the output name. Then come the step 9 lines:
 | `checks` | the number of required checks |
 | `check-receipts` | the ordered aggregate of their same-attempt receipt digests |
 | `check-evidence` | the ordered digest of their run records and logs |
-| `row-plan` | the row-plan digest the row evidence carried |
+| `row-plan` | the pinned row-plan authority's SHA-256 |
 | `correctness` | the correctness gate's seal |
 
 The last line is `gate=admitted <seal>`.
@@ -872,8 +1087,7 @@ order:
    `ready-<digest>` as a single-link, owner-read-only regular file. It
    requires that file's SHA-256 to be the digest.
 3. It reads only these from the record: the two build record digests, the
-   row-plan digest, the correctness seal, the gate seal, and each observed
-   row's descriptor numbers and command digest.
+   gate seal, and each observed row's descriptor numbers and command digest.
    Observed lines must be consecutive and in index order, with canonical
    decimal fields bounded by their separators. With the build digests it
    re-imports the matched builds, holds both binaries and reruns the census
@@ -901,7 +1115,13 @@ order:
    this attempt produces. Each run record must name that receipt and the
    digests its output and log files rehash to. It recomputes the ordered
    digest of the run records and logs.
-8. It verifies the gate seal against the re-derived facts, formats the
+8. It re-imports the row-plan authority from its pin, requires
+   `retirement-rows/` to be sealed `0500` and to hold exactly `row-evidence`,
+   parses it (canonical only), joins it with the plan and reruns the
+   correctness gate over it and the passing results the receipts prove. That
+   gives the row-plan digest, the correctness seal and the row evidence's
+   digest.
+9. It verifies the gate seal against the re-derived facts, formats the
    record those facts give and requires the stored record to equal it byte
    for byte.
 
@@ -911,24 +1131,32 @@ leaves only `ready-partial-<id>` in an unsealed directory, and a crash after
 the link leaves two links; both fail the replay, and the unit refuses to
 write into the leftover directory. The public wrapper uses the compiled
 profile, so the blocked profile fails closed, and a profile without the
-required-checks pin fails the authority import.
+required-checks or row-plan pin fails its authority import.
 
-The replay cannot re-derive four values from anything but the record and the
+The replay cannot re-derive two values from anything but the record and the
 receipt:
 
 - the runtime command's descriptor numbers, which it rebinds through the
   command digest and the attempt digest;
-- the reference receipt's observed build command;
-- the row-plan digest;
-- the correctness seal.
+- the reference receipt's observed build command.
 
-The row plan and the correctness seal stay unverified until the row-plan
-authority exists. Only the record digest from the authenticated channel
-anchors those values. The check receipts, by contrast, are re-derived from
-the pinned authority, so another job's or token's receipt, a swapped binary
-or a missing check fails the replay. The fixture shows the limit: a record
-whose row descriptor, command digest, observation chain, oracle attempt and
-gate seal are all changed together still replays.
+Only the record digest from the authenticated channel anchors those values.
+The check receipts and the row plan, by contrast, are re-derived from the
+pinned authorities, and the correctness seal is recomputed from the
+persisted row evidence. So another job's or token's receipt, a swapped
+binary, a missing check, a row-evidence byte that the gate rejects, and a
+changed `row-plan=` or `correctness=` value each fail the replay.
+
+The row observations themselves (artifacts, codes, diagnostics, runtime
+outputs, CPU provenance) are not re-observed. Like the descriptor numbers,
+they are anchored only by the authenticated record digest and the unit's
+honesty. The fixture shows both limits:
+
+- A record whose row descriptor, command digest, observation chain, oracle
+  attempt and gate seal are all changed together still replays.
+- Row evidence rewritten consistently still replays: one compile's artifact
+  digest changed, the correctness gate rerun over it, and the gate seal and
+  record recomputed under a new record digest.
 
 ## Capacity derivation
 

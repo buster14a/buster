@@ -41,10 +41,9 @@ typedef struct BqRetirementCampaignBinding
 /* (A1) The pinned native-host timed target, x86_64-unknown-linux-gnu: the
  * gate's one-based index in the validator's TARGETS order. */
 #define BQ_RETIREMENT_NATIVE_TIMED_TARGET 11u
-/* The A/A second-command commitment's domain. v3: one entry per timed batch
- * group in dense order, keyed by its smallest member row (v2 had one entry per
- * timed row, each a singleton; v1 covered every compiler-eligible row). */
-#define BQ_RETIREMENT_AA_SECOND_COMMANDS_DOMAIN "bq-retirement-aa-second-commands-v3"
+/* BQ_RETIREMENT_AA_SECOND_COMMANDS_DOMAIN, the A/A second-command
+ * commitment's domain, lives in retirement_correctness.h, shared with the
+ * row plan (lane B) that derives the commitment. */
 
 /* The timed projection's size, recomputed from the sealed gate rows. */
 static inline uint32_t bq_retirement_campaign_timed_rows(BqRetirementCorrectness const* gate)

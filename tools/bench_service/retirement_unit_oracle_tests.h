@@ -17,11 +17,13 @@
  * host compiler and fixture broker prove mechanics, not trusted Clang
  * provenance or the broker's identity split. PR 4 (bq_prep_test_unit_ready)
  * then shows the production gate refusing, installs a pinned #509
- * required-check authority (retirement_check_runner_tests.h), issues the gate
- * through its profile seam with fixture row evidence (no production row-plan
- * producer exists), writes the ready record, replays it and tampers with each
- * bound field, the directories, the exported reference files and the check
- * receipts.
+ * required-check authority (retirement_check_runner_tests.h) and a pinned
+ * row plan (retirement_row_plan_tests.h), issues the gate through its profile
+ * seam with an honest synthetic observation of that plan (the fixture's
+ * matched binaries are not compilers, so the producer itself is exercised by
+ * the row-plan fixture), writes the ready record, replays it and tampers with
+ * each bound field, the directories, the exported reference files, the check
+ * receipts and the persisted row evidence.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_ORACLE_TESTS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_UNIT_ORACLE_TESTS_H
@@ -716,8 +718,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
     u64 generous = bq_phase_clock() + 300ull * 1000000000ull;
 
     /* The installed #509 authority for this projection, pinned beside the
-     * fixture's other pins, and the row evidence an honest row plan would
-     * derive (no production producer exists for it). */
+     * fixture's other pins; the row plan follows below. */
     u32 eligible = 0;
     for (u32 row = 0; row < projection->prepared.rows; row += 1) eligible += projection->rows[row].compiler_eligible;
     BqCheckTestSpec specs[BQ_CHECK_TEST_CHECKS];
@@ -728,22 +729,43 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
                   strlen(fixture->profile) + strlen(pin) < sizeof(fixture->profile));
     if (strlen(fixture->profile) + strlen(pin) < sizeof(fixture->profile)) strcat(fixture->profile, pin);
     String8 profile = string_from_pointer(fixture->profile);
-    BqCheckTestEvidence evidence = {0};
-    BQ_PREP_CHECK(bq_check_test_evidence(projection, &evidence) && evidence.evidence.group_count == 1);
 
     /* Design step 9 in production: the blocked profile has no required-checks
-     * pin and no row evidence exists, so the gate refuses before
-     * retirement-checks/ exists or any child starts, as it does for a profile
-     * without the pin; step 10 then writes and seals nothing. */
+     * pin and no row-plan pin, so the gate refuses before retirement-checks/
+     * or retirement-rows/ exists or any child starts, as it does for a
+     * profile with only one of them; step 10 then writes and seals nothing. */
     BqRetirementUnitGate gate = {0};
     BQ_PREP_CHECK(bq_retirement_unit_gate(unit, &success->built, projection, oracle, workspaces, installed,
                   cancellation_fd, generous, &gate) == BQ_RECIPE_MISMATCH && !gate.owned && !gate.issuer);
     BQ_PREP_CHECK(bq_retirement_unit_gate_pinned(unit, &success->built, projection, oracle, workspaces, installed,
                   profile, NULL, cancellation_fd, generous, &gate) == BQ_RECIPE_MISMATCH && !gate.owned);
+    /* The pinned row plan for this projection (bq_row_test_plan's layout) and
+     * the observation an honest producer would make of it: the fixture's
+     * matched binaries are not compilers, so the gate takes this observation
+     * through its test seam instead of running the producer. */
+    u32 cpu = 0;
+    char cpu_model[SHA256_HEX_CAPACITY] = {0}, row_pin[128] = {0};
+    char* plan_text = malloc(BQ_ROW_TEST_PLAN_CAP);
+    u32 plan_length = plan_text && bq_row_test_cpu(&cpu, cpu_model) ?
+                      bq_row_test_plan(plan_text, BQ_ROW_TEST_PLAN_CAP, projection, cpu_model, cpu, 0) : 0;
+    BQ_PREP_CHECK(plan_length && bq_row_test_install(fixture->recipes, plan_text, plan_length, row_pin) &&
+                  strlen(fixture->profile) + strlen(row_pin) < sizeof(fixture->profile));
+    char checks_only[4096];
+    memcpy(checks_only, fixture->profile, sizeof(checks_only));
+    if (strlen(fixture->profile) + strlen(row_pin) < sizeof(fixture->profile)) strcat(fixture->profile, row_pin);
+    profile = string_from_pointer(fixture->profile);
+    BqRetirementRowPlan row_plan = {0};
+    BqRetirementRowObserved observed = {0};
+    BQ_PREP_CHECK(bq_retirement_row_plan_import_profile(installed, profile, &unit->job, projection, &row_plan) == BQ_OK &&
+                  row_plan.group_count == 1 && bq_row_test_observe(&row_plan, &observed));
     BQ_PREP_CHECK(bq_retirement_unit_gate_pinned(unit, &success->built, projection, oracle, workspaces, installed,
-                  string_from_pointer(fixture->base_profile), &evidence.evidence, cancellation_fd, generous, &gate) ==
+                  string_from_pointer(checks_only), &observed, cancellation_fd, generous, &gate) ==
+                  BQ_RECIPE_MISMATCH && !gate.owned);
+    BQ_PREP_CHECK(bq_retirement_unit_gate_pinned(unit, &success->built, projection, oracle, workspaces, installed,
+                  string_from_pointer(fixture->base_profile), &observed, cancellation_fd, generous, &gate) ==
                   BQ_RECIPE_MISMATCH && !gate.owned &&
                   fstatat(attempt, BQ_RETIREMENT_UNIT_CHECKS_DIRECTORY, &info, AT_SYMLINK_NOFOLLOW) != 0 &&
+                  errno == ENOENT && fstatat(attempt, BQ_RETIREMENT_ROWS_DIRECTORY, &info, AT_SYMLINK_NOFOLLOW) != 0 &&
                   errno == ENOENT && bq_prep_test_live_children() == 0);
     BqRetirementUnitGate forged = {.issuer = BQ_RETIREMENT_UNIT_GATE_ISSUED};
     memset(forged.seal_sha256, 'a', 64);
@@ -755,13 +777,16 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
                       errno == ENOENT && fstatat(attempt, reference_path, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
                       (info.st_mode & 0777) == 0700);
 
-    /* A check that passes but leaves a file in A's candidate root (the root
-     * itself read-only again): only the rescan after the last check sees it,
-     * and the gate is not issued. The failed attempt's evidence and work
-     * directories are then removed so the honest gate can run. */
+    /* A check that makes A's candidate root writable and tries to leave a
+     * file in it: the sandbox denies the file (sources are read only), so the
+     * check prints "denied" instead of its pinned output, the root is
+     * read-only again and the gate is not issued. The rescan after the last
+     * check and row stays as a second line. The failed attempt's evidence
+     * and work directories are then removed so the honest gate can run. */
     BqCheckTestSpec planting[BQ_CHECK_TEST_CHECKS];
     memcpy(planting, specs, sizeof(planting));
-    planting[0].script = "chmod u+w \"$4\" && : > \"$4/planted\" && chmod u-w \"$4\" && printf '%s ok\\n' \"$0\"";
+    planting[0].script = "chmod u+w \"$4\" && { if (: > \"$4/planted\") 2> /dev/null; then printf '%s ok\\n' \"$0\"; "
+                         "else printf 'denied\\n'; fi; chmod u-w \"$4\"; }";
     char planting_profile[4096], planting_pin[256] = {0}, attempt_name[64] = {0}, doomed[320];
     memcpy(planting_profile, fixture->profile, sizeof(planting_profile));
     char* pin_line = strstr(planting_profile, "required-checks-sha256=");
@@ -769,61 +794,90 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
     BQ_PREP_CHECK(pin_line && bq_check_test_install(fixture->recipes, &unit->preparation, projection, planting,
                                                     BQ_CHECK_TEST_CHECKS, 0, planting_pin, sizeof(planting_pin)) &&
                   strlen(planting_profile) + strlen(planting_pin) < sizeof(planting_profile));
-    if (strlen(planting_profile) + strlen(planting_pin) < sizeof(planting_profile))
+    if (strlen(planting_profile) + strlen(planting_pin) + strlen(row_pin) < sizeof(planting_profile))
+    {
         strcat(planting_profile, planting_pin);
+        strcat(planting_profile, row_pin);
+    }
     BQ_PREP_CHECK(bq_retirement_unit_gate_pinned(unit, &success->built, projection, oracle, workspaces, installed,
-                  string_from_pointer(planting_profile), &evidence.evidence, cancellation_fd, generous, &gate) ==
-                  BQ_SOURCE_MISMATCH && !gate.owned && bq_prep_test_live_children() == 0);
+                  string_from_pointer(planting_profile), &observed, cancellation_fd, generous, &gate) ==
+                  BQ_RECIPE_MISMATCH && !gate.owned && bq_prep_test_live_children() == 0);
     BQ_PREP_CHECK(bq_workspace_name(attempt_name, unit->job.id, unit->job.token));
     snprintf(doomed, sizeof(doomed), "%s/%s/candidate/source", fixture->workspaces, attempt_name);
     int candidate = open(doomed, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    BQ_PREP_CHECK(candidate >= 0 && fstat(candidate, &info) == 0 && fchmod(candidate, info.st_mode | 0200) == 0 &&
-                  unlinkat(candidate, "planted", 0) == 0 && fchmod(candidate, info.st_mode & 07777) == 0);
+    BQ_PREP_CHECK(candidate >= 0 && fstat(candidate, &info) == 0 && (info.st_mode & 0222) == 0 &&
+                  fstatat(candidate, "planted", &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT);
     if (candidate >= 0) close(candidate);
     snprintf(doomed, sizeof(doomed), "%s/%s/" BQ_RETIREMENT_UNIT_CHECKS_DIRECTORY, fixture->workspaces, attempt_name);
+    char planted_output[SHA256_HEX_CAPACITY] = {0}, planted_denied[SHA256_HEX_CAPACITY] = {0};
+    bq_digest("denied\n", 7, (char8*)planted_denied);
+    int planted_checks = open(doomed, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(planted_checks >= 0 &&
+                  bq_retirement_check_hash_file(planted_checks, "check-output-0000", BQ_RETIREMENT_CHECK_OUTPUT_CAP,
+                                                planted_output) &&
+                  !strcmp(planted_output, planted_denied));
+    if (planted_checks >= 0) close(planted_checks);
     bq_prep_test_cleanup(doomed);
+    /* Only what the failed attempt created: the first check stopped it. */
+    snprintf(doomed, sizeof(doomed), "%s/%s/" BQ_RETIREMENT_ROWS_DIRECTORY, fixture->workspaces, attempt_name);
+    if (lstat(doomed, &info) == 0) bq_prep_test_cleanup(doomed);
     for (u32 index = 0; index < BQ_CHECK_TEST_CHECKS; index += 1)
     {
         snprintf(doomed, sizeof(doomed), "%s/%s/" BQ_RETIREMENT_BUILD_WORK_DIRECTORY "/check-work-%04u",
                  fixture->workspaces, attempt_name, index);
-        bq_prep_test_cleanup(doomed);
+        if (lstat(doomed, &info) == 0) bq_prep_test_cleanup(doomed);
     }
     char again_pin[256] = {0};
     BQ_PREP_CHECK(bq_check_test_install(fixture->recipes, &unit->preparation, projection, specs, BQ_CHECK_TEST_CHECKS,
                                         0, again_pin, sizeof(again_pin)) && strstr(fixture->profile, again_pin));
 
-    /* The issuer on the pinned authority: every required check runs in the
+    /* The issuer on the pinned authorities: every required check runs in the
      * unit against the held binaries and passes with this attempt's
-     * receipt; the correctness gate joins them with the row evidence and
-     * carries the #509 batch authority; retirement-checks/ is sealed. */
+     * receipt; the row evidence is persisted canonically and joined with the
+     * row plan; the correctness gate admits both and carries the #509 batch
+     * authority; retirement-checks/ and retirement-rows/ are sealed. */
     BqError issued = bq_retirement_unit_gate_pinned(unit, &success->built, projection, oracle, workspaces, installed,
-                                                    profile, &evidence.evidence, cancellation_fd, generous, &gate);
+                                                    profile, &observed, cancellation_fd, generous, &gate);
     if (issued != BQ_OK) fprintf(stderr, "RETIREMENT_PREP unit gate returned %d\n", (int)issued);
     BQ_PREP_CHECK(issued == BQ_OK && gate.owned &&
                   gate.issuer == BQ_RETIREMENT_UNIT_GATE_ISSUED && gate.correctness.batch_authority == 1 &&
                   bq_retirement_correctness_ready(&gate.correctness) && gate.check_count == BQ_CHECK_TEST_CHECKS &&
                   fstatat(attempt, BQ_RETIREMENT_UNIT_CHECKS_DIRECTORY, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
-                  (info.st_mode & 07777) == BQ_RETIREMENT_EXPORT_MODE && bq_prep_test_live_children() == 0);
+                  (info.st_mode & 07777) == BQ_RETIREMENT_EXPORT_MODE && bq_prep_test_live_children() == 0 &&
+                  fstatat(attempt, BQ_RETIREMENT_ROWS_DIRECTORY, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+                  (info.st_mode & 07777) == BQ_RETIREMENT_EXPORT_MODE &&
+                  !strcmp(gate.plan_sha256, row_plan.authority_sha256) &&
+                  !strcmp(gate.correctness.prepared.aa_second_commands_sha256, row_plan.aa_second_commands_sha256) &&
+                  gate.correctness.batch_group_count == 1);
     /* One gate per attempt. */
     BqRetirementUnitGate second = {0};
     BQ_PREP_CHECK(bq_retirement_unit_gate_pinned(unit, &success->built, projection, oracle, workspaces, installed,
-                  profile, &evidence.evidence, cancellation_fd, generous, &second) == BQ_WORKSPACE_MISMATCH &&
+                  profile, &observed, cancellation_fd, generous, &second) == BQ_WORKSPACE_MISMATCH &&
                   !second.owned);
     /* The compiled blocked profile pins no authority, so the public writer
      * refuses even this issued gate; so does a profile pinning another
      * authority. */
-    char other_pin[4096];
+    char other_pin[4096], other_plan[4096];
     memcpy(other_pin, fixture->profile, sizeof(other_pin));
+    memcpy(other_plan, fixture->profile, sizeof(other_plan));
     bq_prep_test_flip_pin(other_pin, "required-checks-sha256=");
+    bq_prep_test_flip_pin(other_plan, "row-plan-sha256=");
     BQ_PREP_CHECK(bq_retirement_unit_ready(unit, &success->built, projection, oracle, &gate, workspaces, refused) ==
                   BQ_RECIPE_MISMATCH && !refused[0] &&
                   bq_retirement_unit_ready_pinned(unit, &success->built, projection, oracle, &gate, workspaces,
                       string_from_pointer(other_pin), refused) == BQ_RECIPE_MISMATCH &&
+                  bq_retirement_unit_ready_pinned(unit, &success->built, projection, oracle, &gate, workspaces,
+                      string_from_pointer(other_plan), refused) == BQ_RECIPE_MISMATCH &&
                   fstatat(attempt, BQ_RETIREMENT_UNIT_READY_DIRECTORY, &info, AT_SYMLINK_NOFOLLOW) != 0);
     /* The seal binds this attempt's facts: a changed seal, a cleared batch
      * authority or a changed row is refused. */
     forged = gate;
     forged.seal_sha256[0] = forged.seal_sha256[0] == '0' ? '1' : '0';
+    BQ_PREP_CHECK(bq_retirement_unit_ready_pinned(unit, &success->built, projection, oracle, &forged, workspaces,
+                  profile, refused) == BQ_RECIPE_MISMATCH);
+    /* The seal binds the persisted row evidence's digest. */
+    forged = gate;
+    forged.row_evidence_sha256[0] = forged.row_evidence_sha256[0] == '0' ? '1' : '0';
     BQ_PREP_CHECK(bq_retirement_unit_ready_pinned(unit, &success->built, projection, oracle, &forged, workspaces,
                   profile, refused) == BQ_RECIPE_MISMATCH);
     gate.correctness.batch_authority = 0;
@@ -863,6 +917,24 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
                   bq_retirement_unit_ready_pinned(unit, &success->built, projection, oracle, &gate, workspaces, profile,
                       refused) == BQ_SOURCE_MISMATCH && !refused[0] &&
                   bq_prep_test_reference_replace(checks, "check-run-0003", receipt, run_size, 0400));
+
+    /* Row evidence changed after the gate (its canonical bytes, one digit)
+     * is not the evidence the gate admitted. */
+    int rows_directory = openat(attempt, BQ_RETIREMENT_ROWS_DIRECTORY, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    u32 rows_size = 0;
+    char* rows_saved = malloc(BQ_ROW_TEST_PLAN_CAP);
+    char* rows_changed = malloc(BQ_ROW_TEST_PLAN_CAP);
+    rows_size = rows_directory >= 0 && rows_saved && rows_changed ?
+                bq_prep_test_read_at(rows_directory, BQ_RETIREMENT_ROW_EVIDENCE_NAME, rows_saved, BQ_ROW_TEST_PLAN_CAP) : 0;
+    if (rows_size) memcpy(rows_changed, rows_saved, rows_size + 1u);
+    char* flip = rows_size ? strstr(rows_changed, "\nside=") : NULL;
+    if (flip) flip[6] = flip[6] == '0' ? '1' : '0';
+    BQ_PREP_CHECK(flip && bq_prep_test_reference_replace(rows_directory, BQ_RETIREMENT_ROW_EVIDENCE_NAME, rows_changed,
+                                                          rows_size, 0400) &&
+                  bq_retirement_unit_ready_pinned(unit, &success->built, projection, oracle, &gate, workspaces, profile,
+                      refused) == BQ_SOURCE_MISMATCH && !refused[0] &&
+                  bq_prep_test_reference_replace(rows_directory, BQ_RETIREMENT_ROW_EVIDENCE_NAME, rows_saved, rows_size,
+                                                 0400));
 
     /* A reference output changed between the oracle and the writer fails
      * the authority comparison before retirement-ready/ exists, so the
@@ -929,8 +1001,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
      * header field or row value the replay recomputes fails the final
      * comparison (BQ_CORRUPT); a build digest fails its re-import; a
      * descriptor number or command digest fails the rebuilt command
-     * (BQ_SOURCE_MISMATCH); the gate seal, and the row plan and correctness
-     * seal it binds (which only the record carries), fail its verifier. */
+     * (BQ_SOURCE_MISMATCH); the gate seal fails its verifier. The row plan
+     * and the correctness seal are recomputed (from the pinned plan and the
+     * persisted row evidence), so a changed value fails the comparison. */
     static BqPrepReadyTamper const tampers[] = {
         {"job=", 0, BQ_CORRUPT}, {"attempt=", 0, BQ_CORRUPT}, {"attempt-identity=", 0, BQ_CORRUPT},
         {"request=", 0, BQ_CORRUPT}, {"preparation=", 0, BQ_CORRUPT}, {"binaries=", 0, BQ_CORRUPT},
@@ -944,8 +1017,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
         {"observed=", 6, BQ_CORRUPT}, {"observed=", 7, BQ_CORRUPT}, {"observed=", 8, BQ_CORRUPT},
         {"observed=", 9, BQ_SOURCE_MISMATCH}, {"observed=", 10, BQ_CORRUPT}, {"checks-authority=", 0, BQ_CORRUPT},
         {"checks=", 0, BQ_CORRUPT}, {"check-receipts=", 0, BQ_CORRUPT}, {"check-evidence=", 0, BQ_CORRUPT},
-        {"row-plan=", 0, BQ_RECIPE_MISMATCH},
-        {"correctness=", 0, BQ_RECIPE_MISMATCH}, {"gate=", 0, BQ_CORRUPT}, {"gate=", 1, BQ_RECIPE_MISMATCH},
+        {"row-plan=", 0, BQ_CORRUPT},
+        {"correctness=", 0, BQ_CORRUPT}, {"gate=", 0, BQ_CORRUPT}, {"gate=", 1, BQ_RECIPE_MISMATCH},
         /* Special cases: key NULL, field selects it. */
         {NULL, 0, BQ_CORRUPT}, {NULL, 1, BQ_CORRUPT}, {NULL, 2, BQ_CORRUPT}, {NULL, 3, BQ_SOURCE_MISMATCH},
         {NULL, 4, BQ_SOURCE_MISMATCH}};
@@ -995,9 +1068,10 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
     /* A consistent forgery: row 0's binary descriptor moved, and its
      * command, the observation chain, the oracle attempt and the gate seal
      * all recomputed with the unit's own functions. The replay accepts it:
-     * the descriptor rebinding, the row plan and the correctness seal are
-     * anchored only by the authenticated record digest, while the check
-     * receipts are re-derived from the pinned authority. */
+     * the descriptor rebinding is anchored only by the authenticated record
+     * digest, while the check receipts, the row plan and the correctness
+     * seal are re-derived from the pinned authorities and persisted
+     * evidence. */
     int forged_descriptors[2u * BQ_PREP_ORACLE_REFERENCES];
     memcpy(forged_descriptors, oracle->descriptors, sizeof(forged_descriptors));
     forged_descriptors[0] += forged_descriptors[0] + 1 == forged_descriptors[1] ? 2 : 1;
@@ -1016,7 +1090,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
         .build_record_sha256 = success->built.build_record_sha256,
         .template_sha256 = unit->policy.template_sha256, .inventory_sha256 = unit->policy.inventory_sha256,
         .checks_authority_sha256 = gate.authority_sha256, .receipts_sha256 = gate.receipts_sha256,
-        .evidence_sha256 = gate.evidence_sha256, .plan_sha256 = gate.plan_sha256, .correctness_sha256 = gate.correctness.sealed_sha256,
+        .evidence_sha256 = gate.evidence_sha256, .plan_sha256 = gate.plan_sha256,
+        .row_evidence_sha256 = gate.row_evidence_sha256, .correctness_sha256 = gate.correctness.sealed_sha256,
         .check_count = gate.check_count};
     u32 forged_length = 0;
     BQ_PREP_CHECK(copy.rows && bq_retirement_unit_reference_observe(reference, unit, forged_descriptors,
@@ -1032,6 +1107,63 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
     free(copy.rows);
     BQ_PREP_CHECK(bq_prep_test_ready_install(attempt, digest, original, length) &&
                   bq_prep_test_replay(fixture, success, digest) == BQ_OK);
+
+    /* A consistent row-evidence forgery: one per-row compile's artifact
+     * digest changed in the persisted evidence, the correctness gate rerun
+     * over it, and the gate seal and the record recomputed with the unit's
+     * own functions under a new record digest. The replay accepts it: it
+     * re-derives the row plan and recomputes the correctness seal, but the
+     * row observations themselves are anchored only by the authenticated
+     * record digest. */
+    BqRetirementRowObserved forged_rows = {0};
+    BqRetirementRowJoined forged_joined = {0};
+    BqRetirementRequiredChecks forged_checks = {.hosted = -1};
+    BqRetirementUnitGate forged_gate = {0};
+    BqRetirementCheckResult* passing = calloc(BQ_CHECK_TEST_CHECKS, sizeof(*passing));
+    char* forged_text = NULL;
+    u32 forged_rows_length = 0, forged_row = UINT32_MAX;
+    for (u32 row = 0; forged_row == UINT32_MAX && row < row_plan.row_count; row += 1)
+        if (row_plan.rows[row].compile < BQ_RETIREMENT_ROW_PLAN_BATCH) forged_row = row;
+    bool forged_ok = passing && forged_row != UINT32_MAX &&
+                     bq_retirement_row_observed_parse((u8 const*)rows_saved, rows_size, &row_plan, &forged_rows) ==
+                     BQ_OK;
+    if (forged_ok)
+    {
+        char* first = forged_rows.facts[forged_row].side[0].artifact_sha256;
+        first[0] = first[0] == '0' ? '1' : '0';
+    }
+    forged_ok = forged_ok && bq_retirement_row_observed_format(&forged_rows, &forged_text, &forged_rows_length) &&
+                bq_prep_test_reference_replace(rows_directory, BQ_RETIREMENT_ROW_EVIDENCE_NAME, forged_text,
+                                               forged_rows_length, 0400) &&
+                bq_retirement_row_evidence_join(&row_plan, projection, &forged_rows, &forged_joined) == BQ_OK &&
+                bq_retirement_required_checks_import_profile(installed, profile, &unit->job, &unit->preparation,
+                                                             projection, &forged_checks) == BQ_OK;
+    if (forged_ok) bq_row_test_passing(&forged_checks, passing);
+    forged_ok = forged_ok && bq_retirement_unit_gate_admit(projection, &forged_checks, passing,
+                                                           &forged_joined.evidence, &forged_gate) == BQ_OK;
+    if (forged_ok)
+    {
+        memcpy(forged_gate.evidence_sha256, gate.evidence_sha256, SHA256_HEX_CAPACITY);
+        bq_digest(forged_text, forged_rows_length, (char8*)forged_gate.row_evidence_sha256);
+    }
+    BqRetirementUnitReadyFacts row_facts = bq_retirement_unit_facts(unit, &success->built, projection, oracle,
+                                                                    &forged_gate);
+    u32 row_forged_length = 0;
+    BQ_PREP_CHECK(forged_ok && strcmp(forged_gate.correctness.sealed_sha256, gate.correctness.sealed_sha256) &&
+                  bq_retirement_unit_gate_seal(&row_facts, row_facts.gate_sha256) &&
+                  bq_retirement_unit_ready_format(&row_facts, bytes, sizeof(bytes), &row_forged_length) &&
+                  bq_prep_test_ready_install(attempt, digest, bytes, row_forged_length) &&
+                  bq_prep_test_replay(fixture, success, digest) == BQ_OK);
+    BQ_PREP_CHECK(bq_prep_test_reference_replace(rows_directory, BQ_RETIREMENT_ROW_EVIDENCE_NAME, rows_saved, rows_size,
+                                                 0400) &&
+                  bq_prep_test_ready_install(attempt, digest, original, length) &&
+                  bq_prep_test_replay(fixture, success, digest) == BQ_OK);
+    bq_retirement_unit_gate_release(&forged_gate);
+    bq_retirement_row_joined_release(&forged_joined);
+    bq_retirement_row_observed_release(&forged_rows);
+    bq_retirement_required_checks_release(&forged_checks);
+    free(forged_text);
+    free(passing);
 
     /* A crash between the temporary and the link leaves only the temporary
      * in an unsealed directory; one after the link, two links. Both fail,
@@ -1114,6 +1246,33 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
                                                      0400) &&
                       bq_prep_test_replay(fixture, success, digest) == BQ_OK);
     }
+    /* The persisted row evidence: an unsealed directory, a changed digit of
+     * row 0's command (the rerun correctness gate refuses the row), a
+     * missing row line (it no longer parses) and a missing file. */
+    BQ_PREP_CHECK(rows_directory >= 0 && fchmod(rows_directory, 0700) == 0 &&
+                  bq_prep_test_replay(fixture, success, digest) == BQ_SOURCE_MISMATCH &&
+                  fchmod(rows_directory, BQ_RETIREMENT_EXPORT_MODE) == 0);
+    char* row_line = rows_size ? strstr(rows_changed, "\nfact=1 ") : NULL;
+    char* row_end = row_line ? strstr(row_line + 1, "\nfact=2 ") : NULL;
+    BqError const row_expected[] = {BQ_RECIPE_MISMATCH, BQ_CORRUPT, BQ_SOURCE_MISMATCH};
+    for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(row_expected); variant += 1)
+    {
+        u32 size = rows_size;
+        if (variant == 1 && row_line && row_end)
+        {
+            memmove(row_line, row_end, (size_t)(rows_changed + rows_size - row_end) + 1u);
+            size = rows_size - (u32)(row_end - row_line);
+        }
+        BQ_PREP_CHECK(rows_size && bq_prep_test_reference_replace(rows_directory, BQ_RETIREMENT_ROW_EVIDENCE_NAME,
+                                                                  variant == 2 ? NULL : rows_changed, size, 0400));
+        BqError replayed = bq_prep_test_replay(fixture, success, digest);
+        if (replayed != row_expected[variant])
+            fprintf(stderr, "RETIREMENT_PREP row evidence replay case %u returned %d\n", variant, (int)replayed);
+        BQ_PREP_CHECK(replayed == row_expected[variant]);
+        BQ_PREP_CHECK(bq_prep_test_reference_replace(rows_directory, BQ_RETIREMENT_ROW_EVIDENCE_NAME, rows_saved,
+                                                     rows_size, 0400) &&
+                      bq_prep_test_replay(fixture, success, digest) == BQ_OK);
+    }
     /* The replay under a profile without the authority pin fails closed. */
     char unpinned[4096];
     memcpy(unpinned, fixture->profile, sizeof(unpinned));
@@ -1127,7 +1286,12 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_unit_ready(BqPrepOracleFixture* fixture, B
     if (reference >= 0) close(reference);
     if (ready >= 0) close(ready);
     BQ_PREP_CHECK(bq_retirement_unit_gate_release(&gate) && !gate.owned);
-    bq_check_test_evidence_release(&evidence);
+    free(rows_saved);
+    free(rows_changed);
+    free(plan_text);
+    if (rows_directory >= 0) close(rows_directory);
+    bq_retirement_row_observed_release(&observed);
+    bq_retirement_row_plan_release(&row_plan);
     BQ_PREP_CHECK(bq_prep_test_open_descriptors() == descriptors && bq_prep_test_live_children() == 0);
 }
 
