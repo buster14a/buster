@@ -38,5 +38,13 @@ ordinary failures and retain native fail-fast/watcher behavior.
 '''
 if text.count(old) != 1:
     raise SystemExit('documentation fallback seam not found exactly once')
-patch.write_text(text.replace(old, new, 1), encoding='utf-8')
+text = text.replace(old, new, 1)
+
+old = '            and "lacks unique completion proof" in error\n'
+new = '            and "concluded \'skipped\'; success required" in error\n'
+if text.count(old) != 1:
+    raise SystemExit('aggregate diagnostic assertion seam not found exactly once')
+text = text.replace(old, new, 1)
+
+patch.write_text(text, encoding='utf-8')
 Path(__file__).unlink()
