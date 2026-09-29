@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Temporary, isolated #1162 validation transport. Never install on a protected host.
 set -Eeuo pipefail
-subject=6a59bc4fc7e8ddf1bf5420e2f0ce3aca648a0a70
-subject_tree=fcd89098f5905e51023fd4ffee9c29ae737eaf6d
-subject_build_blob=a016a487b745357883a5cd76c9c2712485c01d7c
+subject=11616f3a099461b95286aba00d46c188a3a139e1
+subject_tree=759897b820383d077a0410fd505fb943fc560d0d
+subject_build_blob=1f9b3ab8350dbe4c8a2f24e288a72ecf7b949359
 baseline=ade6ac4b6ecb21f30b61b656439bac476c145e2f
 evidence="${RUNNER_TEMP:?}/issue1162-exact-slice-evidence"
 source_root="$RUNNER_TEMP/issue1162-source"
@@ -179,7 +179,7 @@ for path in files:
 manifest = ("\n".join(lines) + "\n").encode()
 expected = {
     "ade6ac4b6ecb21f30b61b656439bac476c145e2f": (375, 42585, "ebf4a4b4e5943dc60dd9fd9d175af643fbe0d0eee72e70e245c688aaabcb3007"),
-    "6a59bc4fc7e8ddf1bf5420e2f0ce3aca648a0a70": (377, 42835, "656e2d91af0ee66e1662efe4de0e361bf757d797ff7dc94d939e670e1bfcba63"),
+    "11616f3a099461b95286aba00d46c188a3a139e1": (379, 43099, "2e1709f08d3e34388faa437c8e358ccc5b24a1614302744302c4995aaf24f700"),
 }[rev]
 actual = (len(files), len(manifest), hashlib.sha256(manifest).hexdigest())
 print("SOURCE_CLOSURE", rev, "files", actual[0], "bytes", actual[1], "sha256", actual[2], flush=True)
@@ -761,6 +761,393 @@ PWATCH
   fi
   sudo docker exec "$guest" tar -C /root -czf - p-strace >"$evidence/p-strace.tgz" 2>"$evidence/p-strace-tar.log" || true
   echo "BQ_P_REPRO_DONE job=$job"
+  exit 0
+fi
+if [[ "${BQ_K_REPRO:-}" == 1 ]]; then
+  # Scratch #881 lane C (#1878) keeper and isolation checks on the exact subject:
+  #  (a) the lease keeper lives inside the real outer unit and stops with it;
+  #  (b) a stage cannot reach results/.lease-return (mount + connect), and a
+  #      buster-bench peer inside buster-bench.slice is refused by the keeper;
+  #  (c) a restarted service reclaims the lease from the keeper before TERM,
+  #      including the production /proc/<pid>/cgroup peer check;
+  #  (d) broker v2 (184-byte) frames for start, TERM and KILL on smoke units.
+  # Never a qualification result; retained diagnostics only.
+  sudo docker exec "$guest" install -d -m 0700 /root/k-out /root/k-strace
+  sudo docker exec -i "$guest" tee /root/k-watch.py >/dev/null <<'KWATCH'
+import errno, json, os, re, stat, subprocess, sys, time
+job = int(sys.argv[1]); budget = float(sys.argv[2])
+SLICE = "/sys/fs/cgroup/buster.slice/buster-bench.slice"
+RET = "/var/lib/buster-bench/workspaces/results/.lease-return"
+LEASE = "/var/lib/buster-bench/lease/host.lock"
+STAGES = ("base-generate", "base-build", "candidate-generate", "candidate-build", "throughput")
+deadline = time.monotonic() + budget
+def emit(line):
+    print("%d %s" % (time.time_ns(), line), flush=True)
+def procs(cg):
+    try:
+        return [int(x) for x in open(cg + "/cgroup.procs").read().split()]
+    except OSError:
+        return []
+def status(pid):
+    return dict(l.split(":\t", 1) for l in open(f"/proc/{pid}/status").read().splitlines() if ":\t" in l)
+def show(unit, *props):
+    args = ["systemctl", "show", unit] + ["-p" + p for p in props]
+    return dict(l.split("=", 1) for l in subprocess.run(args, capture_output=True, text=True).stdout.splitlines() if "=" in l)
+pat = re.compile(r"buster-bench-%d-([0-9]+)\.service$" % job)
+attempt = None
+while attempt is None and time.monotonic() < deadline:
+    try:
+        for name in os.listdir(SLICE):
+            m = pat.match(name)
+            if m:
+                attempt = int(m.group(1))
+    except FileNotFoundError:
+        pass
+    if attempt is None:
+        time.sleep(0.01)
+if attempt is None:
+    emit("K_A_FAIL outer unit never appeared"); sys.exit(2)
+outer = f"buster-bench-{job}-{attempt}.service"
+cg = f"{SLICE}/{outer}"
+sock = f"{RET}/{job}-{attempt}"
+print(f"K_VAR attempt={attempt}", flush=True)
+while time.monotonic() < deadline:
+    try:
+        if stat.S_ISSOCK(os.lstat(sock).st_mode):
+            break
+    except FileNotFoundError:
+        pass
+    time.sleep(0.005)
+else:
+    emit(f"K_A_FAIL keeper socket {sock} never appeared"); sys.exit(2)
+lease_st = os.stat(LEASE)
+def unix_inodes(pid):
+    found = set()
+    try:
+        for line in open(f"/proc/{pid}/net/unix").read().splitlines()[1:]:
+            f = line.split()
+            if len(f) >= 8 and f[7] == sock and int(f[3], 16) & 0x10000:
+                found.add(int(f[6]))
+    except OSError:
+        pass
+    return found
+keeper, rows = None, []
+for _ in range(500):
+    rows = []
+    for pid in procs(cg):
+        try:
+            fds = {}
+            for fd in os.listdir(f"/proc/{pid}/fd"):
+                try:
+                    fds[fd] = os.readlink(f"/proc/{pid}/fd/{fd}")
+                except OSError:
+                    pass
+            inodes = unix_inodes(pid)
+            lease_fds = []
+            for fd in fds:
+                try:
+                    s = os.stat(f"/proc/{pid}/fd/{fd}")
+                    if (s.st_dev, s.st_ino) == (lease_st.st_dev, lease_st.st_ino):
+                        lease_fds.append(int(fd))
+                except OSError:
+                    pass
+            st = status(pid)
+            row = {"pid": pid, "ppid": int(st["PPid"]), "uid": st["Uid"].split()[0], "gid": st["Gid"].split()[0],
+                   "exe": os.readlink(f"/proc/{pid}/exe"),
+                   "cmdline": open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\0", b" ").decode(errors="replace").strip(),
+                   "cgroup": open(f"/proc/{pid}/cgroup").read().strip(),
+                   "listening_keeper_socket": any(v == f"socket:[{i}]" for v in fds.values() for i in inodes),
+                   "lease_fds": sorted(lease_fds), "no_new_privs": st.get("NoNewPrivs"), "seccomp": st.get("Seccomp")}
+            rows.append(row)
+            if row["listening_keeper_socket"]:
+                keeper = row
+        except (OSError, KeyError, ValueError):
+            continue
+    if keeper:
+        break
+    time.sleep(0.01)
+props = show(outer, "MainPID", "ControlGroup", "InvocationID", "ActiveState", "RuntimeMaxUSec", "InaccessiblePaths")
+sock_st = os.lstat(sock)
+dir_st = os.lstat(RET)
+dev = "%02x:%02x:%d" % (os.major(lease_st.st_dev), os.minor(lease_st.st_dev), lease_st.st_ino)
+locks = [l for l in open("/proc/locks").read().splitlines() if dev in l]
+record = {"outer": outer, "properties": props, "processes": rows, "keeper": keeper, "socket": sock,
+          "socket_mode": oct(stat.S_IMODE(sock_st.st_mode)), "socket_uid": sock_st.st_uid,
+          "directory_mode": oct(stat.S_IMODE(dir_st.st_mode)), "directory_uid": dir_st.st_uid,
+          "lease_locks": locks}
+json.dump(record, open("/root/k-out/a-keeper.json", "w"), indent=2, sort_keys=True)
+if keeper:
+    print(f"K_VAR keeper={keeper['pid']}", flush=True)
+    emit(f"K_A_KEEPER_IN_OUTER unit={outer} keeper_pid={keeper['pid']} keeper_ppid={keeper['ppid']} "
+         f"outer_main_pid={props.get('MainPID')} keeper_exe={keeper['exe']} keeper_cgroup={keeper['cgroup']} "
+         f"outer_cgroup={props.get('ControlGroup')} keeper_lease_fds={keeper['lease_fds']} "
+         f"uid={keeper['uid']} gid={keeper['gid']} socket_mode={record['socket_mode']} "
+         f"dir_mode={record['directory_mode']} lease_locks={len(locks)} outer_processes={len(rows)}")
+else:
+    emit(f"K_A_FAIL no process in {cg} listens on {sock}; processes={json.dumps(rows)}")
+# (b1) every stage that becomes live: its mount namespace, as its own uid and
+# as the service uid, must not reach the keeper directory or connect.
+probe = r'''
+import errno, os, socket, stat, sys
+d, s = sys.argv[1], sys.argv[2]
+r = {"uid": os.getuid(), "gid": os.getgid()}
+try:
+    st = os.stat(d); r["dir"] = "mode=%o,uid=%d" % (stat.S_IMODE(st.st_mode), st.st_uid)
+except OSError as e:
+    r["dir"] = errno.errorcode[e.errno]
+try:
+    r["list"] = "ok:%d" % len(os.listdir(d))
+except OSError as e:
+    r["list"] = errno.errorcode[e.errno]
+try:
+    os.lstat(s); r["socket"] = "visible"
+except OSError as e:
+    r["socket"] = errno.errorcode[e.errno]
+c = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+try:
+    c.connect(s); r["connect"] = "CONNECTED"
+except OSError as e:
+    r["connect"] = errno.errorcode[e.errno]
+c.close()
+print(" ".join("%s=%s" % kv for kv in r.items()))
+'''
+probed = {}
+b1_deadline = min(deadline, time.monotonic() + 600)
+while not probed and time.monotonic() < b1_deadline:
+    for stage in STAGES:
+        if stage in probed:
+            continue
+        unit = f"buster-bench-{job}-{attempt}-{stage}.service"
+        members = procs(f"{SLICE}/{unit}")
+        if not members:
+            continue
+        pid = members[0]
+        try:
+            st = status(pid)
+            uid, gid = st["Uid"].split()[0], st["Gid"].split()[0]
+            mountinfo = [l for l in open(f"/proc/{pid}/mountinfo").read().splitlines() if ".lease-return" in l]
+        except (OSError, KeyError):
+            continue
+        results = []
+        for label, u, g in (("stage-uid", uid, gid), ("service-uid", "65000", "65000")):
+            p = subprocess.run(["nsenter", "-t", str(pid), "-m", "-n", "--", "setpriv", f"--reuid={u}", f"--regid={g}",
+                                "--clear-groups", "python3", "-c", probe, RET, sock], capture_output=True, text=True, timeout=20)
+            results.append(f"{label}[{p.stdout.strip() or p.stderr.strip()[:200]}]")
+        props = show(unit, "InaccessiblePaths", "User", "MainPID")
+        alive = os.path.exists(f"/proc/{pid}")
+        probed[stage] = {"pid": pid, "uid": uid, "results": results, "mountinfo": mountinfo, "properties": props, "alive_after": alive}
+        emit(f"K_B1_STAGE_ISOLATION unit={unit} pid={pid} uid={uid} alive_after={alive} "
+             f"lease_return_mounts={len(mountinfo)} inaccessible_prop_has_lease_return="
+             f"{RET in props.get('InaccessiblePaths', '')} {' '.join(results)}")
+    time.sleep(0.02)
+json.dump(probed, open("/root/k-out/b1-stages.json", "w"), indent=2, sort_keys=True)
+# Control: the same probe in the root mount namespace as the service uid reaches the socket.
+p = subprocess.run(["setpriv", "--reuid=65000", "--regid=65000", "--clear-groups", "python3", "-c", probe, RET, sock],
+                   capture_output=True, text=True, timeout=20)
+emit(f"K_B1_CONTROL_ROOT_NAMESPACE service-uid[{p.stdout.strip() or p.stderr.strip()[:200]}]")
+if not probed:
+    emit("K_B1_FAIL no live stage process was probed")
+KWATCH
+  sudo docker exec -i "$guest" tee /root/k-peer.py >/dev/null <<'KPEER'
+import array, os, socket, struct, sys, time
+job, attempt = int(sys.argv[1]), int(sys.argv[2])
+path = f"/var/lib/buster-bench/workspaces/results/.lease-return/{job}-{attempt}"
+# BqWorkerLeaseMessage: magic[32] lease_path[193] preparation[65] pad u64 job,
+# attempt, device, inode, deadline, u32 phase (RECLAIM_REQUEST = 4), pad: 344 bytes.
+message = struct.pack("<32s193s65s6x5QI4x", b"BQ-LEASE-HANDOFF-V2", b"/var/lib/buster-bench/lease/host.lock",
+                      b"", job, attempt, 0, 0, 0, 4)
+assert len(message) == 344
+cgroup = open("/proc/self/cgroup").read().strip()
+s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+s.settimeout(8)
+result = {"uid": os.getuid(), "gid": os.getgid(), "cgroup": cgroup}
+try:
+    s.connect(path); result["connect"] = "ok"
+    result["sent"] = s.send(message)
+    fds = array.array("i")
+    data, ancillary, flags, _ = s.recvmsg(4096, socket.CMSG_SPACE(4 * fds.itemsize))
+    received = []
+    for level, kind, payload in ancillary:
+        if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+            received.extend(struct.unpack("%di" % (len(payload) // 4), payload[:len(payload) - len(payload) % 4]))
+    for fd in received:
+        os.close(fd)  # never acknowledge; closing a duplicate does not unlock
+    result["recv_bytes"] = len(data); result["fds"] = len(received)
+except OSError as e:
+    result["error"] = repr(e)
+print("K_B2_SLICE_PEER " + " ".join("%s=%s" % kv for kv in result.items()), flush=True)
+KPEER
+  sudo docker exec -i "$guest" tee /root/k-locks.py >/dev/null <<'KLOCKS'
+import os, sys, time
+st = os.stat("/var/lib/buster-bench/lease/host.lock")
+dev = "%02x:%02x:%d" % (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino)
+out = open("/root/k-out/locks.log", "w", buffering=1)
+stop = "/root/k-out/locks.stop"
+previous, samples, gaps = None, 0, 0
+end = time.monotonic() + float(sys.argv[1])
+while time.monotonic() < end and not os.path.exists(stop):
+    lines = tuple(sorted(l.split(":", 1)[1].strip() for l in open("/proc/locks").read().splitlines() if dev in l))
+    samples += 1
+    if lines != previous:
+        if not lines:
+            gaps += 1
+        out.write("%d %d %s\n" % (time.time_ns(), time.monotonic_ns(), " | ".join(lines) or "NO-LEASE-LOCK"))
+        previous = lines
+    time.sleep(0.001)
+out.write("SUMMARY samples=%d unlocked_transitions=%d\n" % (samples, gaps))
+KLOCKS
+  sudo docker exec -i "$guest" tee /root/k-stopper.py >/dev/null <<'KSTOP'
+import os, signal, subprocess, sys, time
+# Catch the restarted service's first process, stop it, attach strace -f,
+# then continue it, so the recovery's own system calls are recorded.
+cg = "/sys/fs/cgroup/system.slice/buster-bench.service/cgroup.procs"
+old = set(sys.argv[1:])
+log = open("/root/k-out/stopper.log", "w", buffering=1)
+end = time.monotonic() + 60
+while time.monotonic() < end:
+    if not os.path.exists("/root/k-out/start-marker"):
+        time.sleep(0.001)
+        continue
+    try:
+        pids = [p for p in open(cg).read().split() if p not in old]
+    except OSError:
+        pids = []
+    if pids:
+        pid = int(pids[0])
+        try:
+            os.kill(pid, signal.SIGSTOP)
+        except ProcessLookupError:
+            log.write("%d gone-before-stop pid=%d\n" % (time.time_ns(), pid)); old.add(str(pid)); continue
+        log.write("%d stopped pid=%d exe=%s\n" % (time.time_ns(), pid, os.readlink(f"/proc/{pid}/exe")))
+        tracer = subprocess.Popen(["strace", "-f", "-tt", "-T", "-yy", "-s", "256", "-o", "/root/k-strace/coordinator",
+                                   "-p", str(pid)], stdout=log, stderr=log)
+        time.sleep(0.5)
+        os.kill(pid, signal.SIGCONT)
+        log.write("%d continued pid=%d\n" % (time.time_ns(), pid))
+        tracer.wait()
+        log.write("%d strace-exit=%s\n" % (time.time_ns(), tracer.returncode))
+        break
+    time.sleep(0.0002)
+else:
+    log.write("%d no new service process\n" % time.time_ns())
+KSTOP
+  kstate() {
+    local tag=$1
+    sudo docker exec "$guest" systemctl list-units --all --no-pager 'buster-bench*' >"$evidence/k-units-$tag.txt" 2>&1 || true
+    sudo docker exec "$guest" sh -c 'for u in $(systemctl list-units --all --plain --no-legend "buster-bench*" | awk "{print \$1}"); do systemctl show "$u" -p Id -p ActiveState -p SubState -p Result -p MainPID -p InvocationID -p ControlGroup -p RuntimeMaxUSec -p InaccessiblePaths; echo; done' >"$evidence/k-unit-show-$tag.txt" 2>&1 || true
+    sudo docker exec "$guest" sh -c 'ls -la /var/lib/buster-bench/workspaces/results/.lease-return /var/lib/buster-bench/workspaces/results; cat /proc/locks' >"$evidence/k-state-$tag.txt" 2>&1 || true
+    sudo docker exec "$guest" journalctl --no-pager -b -o short-precise >"$evidence/k-journal-$tag.txt" 2>&1 || true
+  }
+  BQ=/usr/local/libexec/buster-bench-service
+  BROKER=/usr/local/libexec/buster-bench-systemd-broker
+  sudo docker exec "$guest" python3 /root/k-watch.py "$job" 900 2>&1 | tee "$evidence/k-watch.txt" || true
+  attempt="$(sed -nE 's/^K_VAR attempt=([0-9]+)$/\1/p' "$evidence/k-watch.txt" | head -1)"
+  keeper="$(sed -nE 's/^K_VAR keeper=([0-9]+)$/\1/p' "$evidence/k-watch.txt" | head -1)"
+  echo "K_REPRO job=$job attempt=${attempt:-none} keeper=${keeper:-none}"
+  if [[ -n "$keeper" ]]; then
+    sudo docker exec -d "$guest" strace -f -tt -T -yy -s 256 -o /root/k-strace/keeper -p "$keeper"
+    sleep 1
+  fi
+  if [[ -n "$attempt" ]]; then
+    # (b2) a buster-bench peer inside buster-bench.slice, reaching the socket
+    # directly (no InaccessiblePaths), sends a well-formed reclaim request.
+    sudo docker exec "$guest" systemd-run --quiet --wait --collect --pipe --unit="k-slice-peer-$job" \
+      --slice=buster-bench.slice --uid=buster-bench --gid=buster-bench \
+      python3 /root/k-peer.py "$job" "$attempt" 2>&1 | tee "$evidence/k-slice-peer.txt" || true
+    sudo docker exec "$guest" sh -c "test -S /var/lib/buster-bench/workspaces/results/.lease-return/$job-$attempt && echo K_B2_KEEPER_STILL_SERVING=yes || echo K_B2_KEEPER_STILL_SERVING=no" | tee -a "$evidence/k-slice-peer.txt" || true
+    kstate before-restart
+    # (c) the service loses its reference without cleanup (SIGKILL to MainPID),
+    # then restarts while the outer unit and its keeper are alive.
+    oldpids="$(sudo docker exec "$guest" cat /sys/fs/cgroup/system.slice/buster-bench.service/cgroup.procs | tr '\n' ' ')"
+    sudo docker exec "$guest" rm -f /root/k-out/locks.stop
+    sudo docker exec -d "$guest" python3 /root/k-locks.py 240
+    sudo docker exec -d "$guest" python3 /root/k-stopper.py $oldpids
+    sleep 1
+    echo "K_C_KILL_SERVICE $(date +%s%N) old_pids=$oldpids"
+    sudo docker exec "$guest" systemctl kill --kill-whom=main --signal=SIGKILL buster-bench.service || true
+    for _ in $(seq 1 100); do
+      state="$(sudo docker exec "$guest" systemctl is-active buster-bench.service || true)"
+      if [[ "$state" != active && "$state" != deactivating ]]; then break; fi
+      sleep 0.1
+    done
+    echo "K_C_SERVICE_DOWN $(date +%s%N) state=$state"
+    sudo docker exec "$guest" sh -c "systemctl is-active buster-bench-$job-$attempt.service; ls -la /var/lib/buster-bench/workspaces/results/.lease-return; test -d /proc/$keeper && echo keeper-alive || echo keeper-gone" | tee "$evidence/k-after-kill.txt" || true
+    sudo docker exec "$guest" touch /root/k-out/start-marker
+    sudo docker exec "$guest" systemctl start --no-block buster-bench.service
+    echo "K_C_SERVICE_START $(date +%s%N)"
+    for _ in $(seq 1 90); do
+      sudo docker exec "$guest" runuser -u buster-bench -- $BQ gateway result "$job" >"$evidence/k-gateway-after-restart.txt" 2>&1 || true
+      if grep -q 'phase=finished' "$evidence/k-gateway-after-restart.txt"; then break; fi
+      sleep 1
+    done
+    cat "$evidence/k-gateway-after-restart.txt"
+    sudo docker exec "$guest" sh -c "systemctl show -p ActiveState -p Result buster-bench-$job-$attempt.service; test -d /proc/$keeper && echo K_A_KEEPER_STOPPED=no || echo K_A_KEEPER_STOPPED=yes; test -e /var/lib/buster-bench/workspaces/results/.lease-return/$job-$attempt && echo K_A_SOCKET_REMOVED=no || echo K_A_SOCKET_REMOVED=yes" | tee "$evidence/k-after-recovery.txt" || true
+    newpid="$(sudo docker exec "$guest" systemctl show -p MainPID --value buster-bench.service || true)"
+    sudo docker exec "$guest" sh -c "ls -l /proc/$newpid/fd 2>&1 | grep host.lock; cat /proc/locks" | tee -a "$evidence/k-after-recovery.txt" || true
+    sudo docker exec "$guest" touch /root/k-out/locks.stop
+    sudo docker exec "$guest" pkill -INT -x strace || true
+    sleep 2
+    kstate after-recovery
+    # (d) a second job: explicit v2 TERM on a live stage, then KILL on the outer unit.
+    key2="issue1162-${GITHUB_RUN_ID}-k2"
+    sudo docker exec "$guest" runuser -u buster-bench -- $BQ gateway submit "$key2" "$baseline" "$subject" | tee "$evidence/k-submit2.txt" || true
+    job2="$(sed -nE 's/^job=([0-9]+) .*/\1/p' "$evidence/k-submit2.txt" | head -1)"
+    if [[ -n "$job2" ]]; then
+      sudo docker exec -i "$guest" python3 - "$job2" <<'KWAIT2' | tee "$evidence/k-job2-wait.txt" || true
+import os, re, sys, time
+job = sys.argv[1]; SLICE = "/sys/fs/cgroup/buster.slice/buster-bench.slice"
+end = time.monotonic() + 600
+while time.monotonic() < end:
+    names = os.listdir(SLICE) if os.path.isdir(SLICE) else []
+    stage = [n for n in names if re.fullmatch(r"buster-bench-%s-[0-9]+-(base|candidate)-(generate|build)\.service" % job, n)
+             and open(f"{SLICE}/{n}/cgroup.procs").read().split()]
+    if stage:
+        outer = re.sub(r"-(base|candidate)-(generate|build)\.service$", ".service", stage[0])
+        print(f"K_VAR stage={stage[0]}\nK_VAR outer={outer}", flush=True); break
+    time.sleep(0.02)
+KWAIT2
+      stage2="$(sed -nE 's/^K_VAR stage=(.+)$/\1/p' "$evidence/k-job2-wait.txt" | head -1)"
+      outer2="$(sed -nE 's/^K_VAR outer=(.+)$/\1/p' "$evidence/k-job2-wait.txt" | head -1)"
+      if [[ -n "$stage2" ]]; then
+        set +e
+        sudo docker exec "$guest" runuser -u buster-bench -g buster-bench -- $BROKER signal "$stage2" TERM >"$evidence/k-d-term.txt" 2>&1
+        term_status=$?
+        sudo docker exec "$guest" runuser -u buster-bench -g buster-bench -- $BROKER signal "$outer2" KILL >"$evidence/k-d-kill.txt" 2>&1
+        kill_status=$?
+        set -e
+        echo "K_D_BROKER_TERM unit=$stage2 exit=$term_status" | tee -a "$evidence/k-d-term.txt"
+        echo "K_D_BROKER_KILL unit=$outer2 exit=$kill_status" | tee -a "$evidence/k-d-kill.txt"
+        cat "$evidence/k-d-term.txt" "$evidence/k-d-kill.txt"
+        sleep 2
+        sudo docker exec "$guest" systemctl show -p ActiveState -p Result "$stage2" "$outer2" | tee -a "$evidence/k-d-kill.txt" || true
+        for _ in $(seq 1 120); do
+          sudo docker exec "$guest" runuser -u buster-bench -- $BQ gateway result "$job2" >"$evidence/k-gateway-job2.txt" 2>&1 || true
+          if grep -q 'phase=finished' "$evidence/k-gateway-job2.txt"; then break; fi
+          sleep 1
+        done
+        cat "$evidence/k-gateway-job2.txt"
+      fi
+    fi
+    kstate final
+  fi
+  sudo docker exec "$guest" tar -C /root -czf - k-out k-strace >"$evidence/k-artifacts.tgz" 2>"$evidence/k-artifacts-tar.log" || true
+  sudo docker exec "$guest" journalctl --no-pager -b -o json -u 'buster-bench-systemd-broker@*.service' >"$evidence/k-broker-journal.jsonl" 2>/dev/null || true
+  python3 - "$evidence/k-broker-journal.jsonl" <<'KFRAMES' | tee "$evidence/k-broker-frames.txt" || true
+import json, re, sys
+rows = []
+for line in open(sys.argv[1]):
+    try:
+        m = json.loads(line).get("MESSAGE", "")
+    except ValueError:
+        continue
+    if isinstance(m, str) and "BQ-BROKER-DIAG-V1 REQUEST" in m:
+        f = dict(re.findall(r"(\w+)=(-?\d+)", m))
+        rows.append((f.get("recv"), f.get("operation"), f.get("stage"), f.get("job"), f.get("attempt"), f.get("command_valid")))
+for r in rows:
+    print("K_D_FRAME recv=%s operation=%s stage=%s job=%s attempt=%s command_valid=%s" % r)
+print("K_D_FRAMES total=%d recv184=%d other=%d" % (len(rows), sum(r[0] == "184" for r in rows), sum(r[0] != "184" for r in rows)))
+KFRAMES
+  echo "BQ_K_REPRO_DONE job=$job"
   exit 0
 fi
 observer_valid=false

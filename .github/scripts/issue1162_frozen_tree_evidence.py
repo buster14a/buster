@@ -23,10 +23,13 @@ PRODUCER_TREE = "2b26253cd1849a8bb50687ede056f3f9d764837b"
 PRODUCER_BUILD_BLOB = "1ea24b90629a2c771c3d0e7d3d517b042ddb4c35"
 PRODUCER_REVIEW = "https://github.com/buster14a/buster/pull/1481#issuecomment-5847791034"
 COMPOSITE_REVIEW = "https://github.com/buster14a/buster/pull/1482#issuecomment-5847817058"
-INTEGRATED_HEAD = "d0c8ce2c452623b79190da18a428842aab19ad7d"
-INTEGRATED_TREE = "5c479a7a741dd07f8a9fa8fc6ff3eac4df28635d"
-INTEGRATED_BUILD_BLOB = "a016a487b745357883a5cd76c9c2712485c01d7c"
-INTEGRATED_REVIEW = "https://github.com/buster14a/buster/pull/1739"
+INTEGRATED_HEAD = "11616f3a099461b95286aba00d46c188a3a139e1"
+INTEGRATED_TREE = "759897b820383d077a0410fd505fb943fc560d0d"
+INTEGRATED_BUILD_BLOB = "1f9b3ab8350dbe4c8a2f24e288a72ecf7b949359"
+# build.c blob 1f9b3ab8 changes bench_service_recipe_add and process_run_spawn
+# relative to a016a487 (#1739). No admitted review covers it yet, so the
+# integrated review stays pending and verification fails closed.
+INTEGRATED_REVIEW = ""
 WORKSPACES = "/var/lib/buster-bench/workspaces"
 STAGES = ("base-generate", "base-build", "candidate-generate", "candidate-build", "throughput")
 BUILD_STAGES = ("base-build", "candidate-build")
@@ -776,10 +779,14 @@ def self_test(source_commit: str = "2" * 40, source_tree: str = "3" * 40,
                                     build_blob, workspace)
         positive = run()
         expected_review = PRODUCER_REVIEW if build_blob == PRODUCER_BUILD_BLOB else INTEGRATED_REVIEW
-        assert positive["verdict"] == "OFFLINE_EVIDENCE_RECONCILED" and \
-            positive["provenance"]["selected_source_order_review"] == expected_review and \
+        # A pending review must fail closed with exactly that one cause.
+        reconciled = "OFFLINE_EVIDENCE_RECONCILED" if expected_review else "OFFLINE_EVIDENCE_INCOMPLETE"
+        pending = [] if expected_review else ["independent producer graph review pending"]
+        assert positive["verdict"] == reconciled and positive["causes"] == pending and \
+            positive["components"]["publication_ordering"]["passed"] == bool(expected_review) and \
+            positive["provenance"]["selected_source_order_review"] == (expected_review or None) and \
             positive["provenance"]["reviewed_producer_build_blob"] == PRODUCER_BUILD_BLOB and \
-            positive["components"]["publication_ordering"]["source_review"] == expected_review
+            positive["components"]["publication_ordering"]["source_review"] == (expected_review or None)
         checks += 1
         assert len(positive.get("stage_evidence", {})) == 2 and all(
             positive["components"]["stages"][stage]["source_scan_before_throughput"]
@@ -817,7 +824,7 @@ def self_test(source_commit: str = "2" * 40, source_tree: str = "3" * 40,
             timely["inventories"][stage]["artifact_sha256"] = hashlib.sha256(content).hexdigest()
         observation_path.write_text(json.dumps(timely, sort_keys=True, indent=2) + "\n")
         timely_result = run()
-        assert timely_result["verdict"] == "OFFLINE_EVIDENCE_RECONCILED" and \
+        assert timely_result["verdict"] == reconciled and timely_result["causes"] == pending and \
             timely_result["independent_inventory_before_throughput"] and \
             timely_result["original_observation_verdict"] == "OBSERVATION_PASS" and \
             timely_result["components"]["independent_timing_consistency"]
